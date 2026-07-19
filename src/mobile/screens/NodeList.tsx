@@ -13,6 +13,7 @@ import {
   listNodes,
   listProviders,
 } from "../api";
+import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 import { groupByHarness } from "../../lib/groups";
@@ -40,8 +41,10 @@ function statusMeta(status: NodeStatus): { hex: string; label: string } {
 
 // Issue #328 — the badge and the provider picker both consume the live
 // `listProviders()` payload directly (no fallback list). Before the fetch
-// resolves, `providers` is `[]` and every badge renders the deterministic
-// fallback `'?' / '#555'` (see `NodeRow`'s `meta?.color ?? '#555'` lookup).
+// resolves, `providers` is `[]` and every badge falls back to a neutral
+// `#555` chip with the `ProviderIcon` gray-dot fallback (no brand mark).
+// Once the fetch resolves, the chip's background tracks `meta.color` so
+// it can't drift from the row label / status bar.
 
 export default function NodeList({
   onOpenNode,
@@ -426,25 +429,20 @@ export function NodeRow({
       className="card"
       style={needsInput ? { borderColor: "rgba(255, 152, 0, 0.4)" } : undefined}
     >
-      <div
-        data-testid="node-avatar"
+      <ProviderIcon
+        // `backgroundColor` drives the chip from the live `meta.color`
+        // (issue #328). When the fetch hasn't resolved, `ProviderIcon`
+        // falls back to its unknown-provider gray (`'#555'`). Icon size
+        // `h-4 w-4` keeps the full-bleed brand marks visually balanced
+        // with the sparse monochrome glyphs at the established mobile
+        // rhythm (16px icon inside the 34×34 chip).
+        providerId={node.provider}
+        withBackground
+        backgroundColor={providerMeta?.color}
+        chipTestId="node-avatar"
         title={providerLabel}
-        style={{
-          width: 34,
-          height: 34,
-          borderRadius: 8,
-          background: providerMeta?.color ?? "#555",
-          color: "#fff",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 14,
-          fontWeight: 700,
-          flexShrink: 0,
-        }}
-      >
-        {providerMeta?.icon ?? "?"}
-      </div>
+        className="h-4 w-4"
+      />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
@@ -543,23 +541,14 @@ function ProviderPicker({
               className="card"
               style={{ background: "var(--surface-2)" }}
             >
-              <div
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 8,
-                  background: native.color,
-                  color: "#fff",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 14,
-                  fontWeight: 700,
-                  flexShrink: 0,
-                }}
-              >
-                {native.icon}
-              </div>
+              <ProviderIcon
+                providerId={native.id}
+                withBackground
+                backgroundColor={native.color}
+                chipTestId={`picker-avatar-${native.id}`}
+                title={native.label}
+                className="h-4 w-4"
+              />
               <span style={{ flex: 1, fontSize: 15, color: "var(--text)" }}>{native.label}</span>
               <span style={{ fontSize: 9, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>harness</span>
             </button>
@@ -572,23 +561,15 @@ function ProviderPicker({
                 className="card"
                 style={{ background: "var(--surface-2)", marginLeft: 18 }}
               >
-                <div
-                  style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: 6,
-                    background: child.color,
-                    color: "#fff",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 12,
-                    fontWeight: 700,
-                    flexShrink: 0,
-                  }}
-                >
-                  {child.icon}
-                </div>
+                <ProviderIcon
+                  providerId={child.id}
+                  withBackground
+                  chipSize={28}
+                  backgroundColor={child.color}
+                  chipTestId={`picker-avatar-${child.id}`}
+                  title={child.label}
+                  className="h-3.5 w-3.5"
+                />
                 <span style={{ fontSize: 14, color: "var(--text)" }}>{child.label}</span>
               </button>
             ))}

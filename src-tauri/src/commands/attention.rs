@@ -11,7 +11,7 @@
 //! (issue #132) — this module is now a thin routing layer that builds an
 //! `AppSessionLifecycleSink` and adds the autoclear arm on top.
 
-use crate::agent::session_lifecycle::{AppSessionLifecycleSink, SessionLifecycleSink};
+use crate::agent::session_lifecycle::AppSessionLifecycleSink;
 use crate::db;
 use crate::models::{AgentNode, SessionStatus};
 use tauri::{command, AppHandle};
@@ -68,7 +68,10 @@ fn status_is_awaiting(node: &AgentNode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::session_lifecycle::SessionLifecycleSink as _;
+    // Named import so the `impl SessionLifecycleSink for FakeLifecycleSink`
+    // below resolves the trait by name (the `as _` form only brings the
+    // trait's methods into scope, not the trait identifier itself).
+    use crate::agent::session_lifecycle::SessionLifecycleSink;
     use rusqlite::Connection;
     use std::cell::RefCell;
 

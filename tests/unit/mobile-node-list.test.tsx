@@ -305,35 +305,45 @@ describe("NodeList", () => {
   });
 
   it("NodeRow badge consumes the live listProviders() payload (issue #328)", async () => {
-    // The badge's color/icon come from the live ProviderInfo for the node's
-    // provider id (the same lookup that drives the row label). A regression
-    // that re-introduces a hard-coded map — `PROVIDER_CHIP_COLORS`,
-    // `providerIcon`/`providerColor`, the deleted `FALLBACK_PROVIDERS`, or a
-    // stale cache — would either fail the color match or land on the
-    // fallback `'?' / '#555'`. The fallback case is also pinned below
-    // (unknown provider id → deterministic grey).
+    // The badge's color comes from the live ProviderInfo for the node's
+    // provider id (the same lookup that drives the row label). The brand
+    // mark comes from `ProviderIcon`'s `INLINE_ICONS` / `COLORED_IMAGES`
+    // lookup keyed on `providerId`. A regression that re-introduces a
+    // hard-coded map — `PROVIDER_CHIP_COLORS`, `providerIcon`/
+    // `providerColor`, the deleted `FALLBACK_PROVIDERS`, or a stale
+    // cache — would either fail the color match or drop the brand mark
+    // in favour of the gray-dot fallback. The fallback case is also
+    // pinned below (unknown provider id → deterministic grey chip with
+    // no brand mark).
     mockApi(
       [
         // Known provider id — must hit the live row, so the chip is the
-        // distinctive `#abcdef` color and the "Z" glyph.
-        { ...makeNode(1, "running"), provider: "liveprovider" },
+        // distinctive `#10b981` color and renders the brand mark.
+        // (`agy` is the backend adapter id from `UiMeta::id`; the live
+        // list mirrors it on `ProviderInfo.id`. `ProviderIcon`'s
+        // `INLINE_ICONS` / `COLORED_IMAGES` maps are keyed off the
+        // adapter id, not the human label, so a regression that drifted
+        // to the label would miss every map and fall through to the
+        // gray-dot fallback — exactly the regression this test pins.)
+        { ...makeNode(1, "running"), provider: "agy" },
         // Unknown provider id (e.g. a since-removed harness profile) —
-        // the chip must render the deterministic fallback `'?' / '#555'`
-        // rather than crashing or showing a stale brand color.
+        // the chip must render the deterministic fallback `'#555'` with
+        // no brand mark rather than crashing or showing a stale brand
+        // color.
         { ...makeNode(2, "running"), provider: "ghost-provider" },
       ],
       {
         providers: [
           {
-            id: "liveprovider",
-            label: "Live Provider",
-            color: "#abcdef",
-            icon: "Z",
+            id: "agy",
+            label: "Antigravity CLI",
+            color: "#10b981",
+            icon: "G",
             resumable: false,
-            harness_id: "liveprovider",
+            harness_id: "agy",
             provider_id: null,
             is_proxied: false,
-            group_key: "liveprovider",
+            group_key: "agy",
           },
         ],
       },
@@ -350,31 +360,37 @@ describe("NodeList", () => {
     );
 
     // Wait for both the node list AND the live listProviders() payload —
-    // the badge only picks up `meta.color`/`meta.icon` after the fetch
-    // resolves, so polling just `node-1` would race the badge's first
-    // render (and trip the `'?' / '#555'` fallback path accidentally).
+    // the badge only picks up `meta.color` after the fetch resolves, so
+    // polling just `node-1` would race the badge's first render (and
+    // trip the `'#555'` fallback path accidentally).
     await waitFor(() => {
-      expect(screen.getByTestId("node-1").textContent).toContain("Live Provider");
+      expect(screen.getByTestId("node-1").textContent).toContain("Antigravity CLI");
     });
 
     // Live row: chip background is the live hex (jsdom normalises hex → rgb())
-    // and the glyph is the live single-char icon.
+    // and the brand mark is rendered as an <img> (Antigravity is in
+    // `COLORED_IMAGES` because its colour is baked into the PNG).
     const liveAvatar = screen.getByTestId("node-1").querySelector(
       '[data-testid="node-avatar"]',
     ) as HTMLElement;
     expect(liveAvatar).toBeTruthy();
-    expect(liveAvatar.style.background).toBe(hexToRgbString("#abcdef"));
-    expect(liveAvatar.textContent).toBe("Z");
+    expect(liveAvatar.style.background).toBe(hexToRgbString("#10b981"));
+    // Brand mark is restored — `<img>` for the PNG-backed providers,
+    // `<svg>` for the inline-icon providers. Antigravity is in the
+    // PNG camp, so `<img>`. A regression that drops back to the
+    // single-char letter (the pre-fix state) would render neither.
+    expect(liveAvatar.querySelector("img, svg")).toBeTruthy();
 
     // Unknown row: chip is the deterministic fallback. Pulling from the same
     // avatar selector (rather than `firstElementChild.textContent`) keeps
-    // the assertion robust to a future wrapper element.
+    // the assertion robust to a future wrapper element. No brand mark
+    // — the inner element is `ProviderIcon`'s gray-dot fallback `<span>`.
     const ghostAvatar = screen.getByTestId("node-2").querySelector(
       '[data-testid="node-avatar"]',
     ) as HTMLElement;
     expect(ghostAvatar).toBeTruthy();
     expect(ghostAvatar.style.background).toBe(hexToRgbString("#555"));
-    expect(ghostAvatar.textContent).toBe("?");
+    expect(ghostAvatar.querySelector("img, svg")).toBeNull();
   });
 });
 

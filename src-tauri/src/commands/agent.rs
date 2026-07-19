@@ -7,7 +7,7 @@
 
 use crate::agent::process::PROCESS_REGISTRY;
 use crate::agent::provider::{Platform, ProviderInfo};
-use crate::agent::session_lifecycle::{self, SessionLifecycleSink};
+use crate::agent::session_lifecycle::{self, SessionLifecycleSink as _};
 use crate::agent::spawn::SpawnOptions;
 use crate::db;
 use crate::models::SessionStatus;
@@ -1101,7 +1101,12 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     let mut resumed: Vec<i64> = Vec::new();
 
     for node in &nodes {
-        let cli_id = match &node.cli_session_id {
+        // `cli_session_id` is re-extracted later (line ~1129) when the
+        // function actually needs it for the resume arg, so this `match`
+        // only exists to early-exit when the node has no captured id.
+        // The bound value is intentionally unused — prefix with `_` so
+        // the compiler doesn't flag a pre-existing dead-store warning.
+        let _cli_id = match &node.cli_session_id {
             Some(id) if !id.is_empty() => id.clone(),
             _ => {
                 tracing::warn!("auto_resume_agent_nodes: node {} has no cli_session_id, skipping", node.id);
@@ -1325,10 +1330,14 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
         })
         .await?;
     if should_signal {
-        let _ = app.emit(
-        "attention-cleared",
-        crate::agent::session_lifecycle::AttentionClearedPayload { session_id },
-    );
+        // Route through the SessionLifecycle sink so all `attention-cleared`
+        // emits pass through one owner — matches the invariant in
+        // `session_lifecycle.rs` that no caller emits lifecycle events
+        // directly. (`on_attention_cleared` would also write `Running`
+        // status, which `write_to_agent` intentionally doesn't — user
+        // input doesn't by itself mark the node as no longer awaiting.)
+        let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
+        sink.emit_attention_cleared(session_id);
     }
     Ok(())
 }
