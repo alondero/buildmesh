@@ -9,7 +9,7 @@ use tauri::command;
 /// id isn't here — a **Generic Model Provider** (custom endpoint) — is
 /// configurable but has no usage endpoint, so it renders an explicit "usage not
 /// tracked" state instead.
-const FETCHABLE: [&str; 6] = ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter"];
+const FETCHABLE: [&str; 7] = ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok"];
 
 /// Map a self-authenticating **native** provider account to the harness whose
 /// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
@@ -21,6 +21,7 @@ fn native_harness_for(account_id: &str) -> Option<&'static str> {
         "anthropic" => Some("anthropic"),
         "codex" => Some("codex"),
         "agy" => Some("agy"),
+        "grok" => Some("grok"),
         _ => None,
     }
 }
@@ -237,6 +238,7 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
                 .as_deref()
                 .unwrap_or(""),
         ),
+        "grok" => usage::grok_usage(),
         other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
     };
 
@@ -364,7 +366,7 @@ mod tests {
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter"] {
+        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.
