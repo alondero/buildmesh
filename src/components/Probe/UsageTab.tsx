@@ -16,7 +16,12 @@
  *   - The tab joins each meter to its account by id and renders one
  *     `<UsagePanel>` per pair. Meters whose account no longer exists
  *     (e.g. a custom provider was removed) are silently dropped — the
- *     tab never renders a bare meter without a name.
+ *     tab never renders a bare meter without a name. Meters whose
+ *     account is `enabled = false` are also dropped: the probe is the
+ *     glanceable Usage surface and the user contract is "if a provider
+ *     isn't enabled I don't want to see its meter here". The Settings-
+ *     side AccountCard still keeps the disabled card with the enable
+ *     toggle so the user can flip it back on.
  *   - `useProviderListInvalidation` re-fetches when the Rust backend
  *     emits `provider-list-changed` on upsert/remove so a toggled or
  *     removed provider's meter updates without a manual Refresh click.
@@ -218,14 +223,15 @@ export function UsageTab() {
     );
   }
 
-  // Join meter → account by id. Accounts may have been removed since
-  // the meter was fetched (custom provider deleted); those rows are
-  // silently dropped (issue #601: a bare meter without a name is
-  // meaningless on a glance surface).
+  // Join meter → account by id. Orphan meters (account deleted) and
+  // disabled providers are dropped — see the data-flow comment above
+  // for the rationale (glanceable surface; re-enable lives in Settings).
   const rows = meters
     ? meters
         .map(meter => ({ meter, account: accounts.find(a => a.id === meter.provider) }))
-        .filter((row): row is { meter: ProviderMeters; account: ProviderAccount } => row.account != null)
+        .filter((row): row is { meter: ProviderMeters; account: ProviderAccount } =>
+          row.account != null && row.account.enabled
+        )
     : [];
 
   // CLAUDE.md "user.click swallows async onClick rejections": `loadMeters`
