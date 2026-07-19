@@ -105,6 +105,19 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     expect(screen.queryByText('Antigravity')).toBeNull();
   });
 
+  it('hides the meter for a disabled account', async () => {
+    const accounts: ProviderAccount[] = [
+      { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
+      { id: 'minimax', name: 'MiniMax', enabled: false, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
+    ];
+    mockBackend({ accounts });
+    render(<UsageTab />);
+    await screen.findByText('Anthropic / Claude');
+    expect(screen.queryByText('MiniMax')).toBeNull();
+    expect(screen.queryByText('Disabled')).toBeNull();
+    expect(screen.getByText('1 provider tracked')).toBeTruthy();
+  });
+
   it('forces a refresh when the Refresh button is clicked', async () => {
     const calls = mockBackend();
     const user = userEvent.setup();
