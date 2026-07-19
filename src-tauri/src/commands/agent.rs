@@ -7,7 +7,7 @@
 
 use crate::agent::process::PROCESS_REGISTRY;
 use crate::agent::provider::{Platform, ProviderInfo};
-use crate::agent::session_lifecycle::{self, AttentionClearedPayload, SessionLifecycleSink};
+use crate::agent::session_lifecycle::{self, SessionLifecycleSink};
 use crate::agent::spawn::SpawnOptions;
 use crate::db;
 use crate::models::SessionStatus;
@@ -1327,7 +1327,7 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
     if should_signal {
         let _ = app.emit(
         "attention-cleared",
-        AttentionClearedPayload { session_id },
+        crate::agent::session_lifecycle::AttentionClearedPayload { session_id },
     );
     }
     Ok(())
