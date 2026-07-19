@@ -15,6 +15,76 @@ use tauri::{command, AppHandle, Emitter};
 use ts_rs::TS;
 
 // ---------------------------------------------------------------------------
+// Wire types — Tauri event payloads (issue #161)
+// ---------------------------------------------------------------------------
+
+/// Payload of the `node-created` Tauri event. Emitted by [`create_issue_node`]
+/// after the `pending` row is committed, by the autopilot spawn path, and by
+/// the HTTP-based E2E test server (`commands::test::handle_inject_test_output`'s
+/// sibling). The frontend `agentNodeStore` refetches the node list on receipt
+/// (issue #490 renamed this from `session-created`).
+///
+/// The wire key is `id` (single-field payload — issue #490 chose brevity over
+/// parallelism with the `node_*` events).
+///
+/// Generated to `src/types/generated/NodeCreatedPayload.ts`; the TS half is
+/// imported by `src/stores/agentNodeStore.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeCreatedPayload.ts")]
+pub struct NodeCreatedPayload {
+    #[ts(as = "i32")]
+    pub id: i64,
+}
+
+/// Payload of the `node-spawn-completed` Tauri event. Emitted by
+/// `start_node_background` when stage-2 (slow work, registers the process
+/// with `PROCESS_REGISTRY`) finishes successfully. The frontend flips the
+/// node from `pending` to `running`.
+///
+/// Generated to `src/types/generated/NodeSpawnCompletedPayload.ts`; the TS
+/// half is imported by `src/stores/agentNodeStore.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeSpawnCompletedPayload.ts")]
+pub struct NodeSpawnCompletedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+}
+
+/// Payload of the `node-spawn-failed` Tauri event. Emitted by
+/// `start_node_background` when stage-2 fails (e.g. the PTY could not be
+/// opened, the agent CLI rejected its argv). The backend has already
+/// updated the DB to `Error` before emitting, so the listener mirrors it.
+///
+/// Generated to `src/types/generated/NodeSpawnFailedPayload.ts`; the TS half
+/// is imported by `src/stores/agentNodeStore.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeSpawnFailedPayload.ts")]
+pub struct NodeSpawnFailedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub error: String,
+}
+
+/// Payload of the `autopilot-finishing` Tauri event. Emitted by
+/// [`trigger_finish`] when the user manually enrolls a node in the wrap-up
+/// state machine (the header ✓ button) — the autopilot pipeline then takes
+/// over with the same evaluation/correction loop automated spawns get.
+///
+/// Generated to `src/types/generated/AutopilotFinishingPayload.ts`; the TS
+/// half is imported by `src/stores/agentNodeStore.ts`. `issue` is `None`
+/// for hand-spawned nodes that have no originating GitHub issue — preserved
+/// as a nullable wire field so the existing JSON shape (`"issue": null`) is
+/// backwards-compatible with already-deployed listeners.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AutopilotFinishingPayload.ts")]
+pub struct AutopilotFinishingPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "Option<i32>")]
+    pub issue: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
 // Provider listing
 // ---------------------------------------------------------------------------
 
@@ -536,7 +606,7 @@ pub fn create_issue_node(
     // node's row id.
     let _ = app.emit(
         "node-created",
-        serde_json::json!({ "id": node.id }),
+        NodeCreatedPayload { id: node.id },
     );
 
     tracing::info!(
@@ -587,7 +657,10 @@ pub fn trigger_finish(app: AppHandle, node_id: i64) -> Result<(), String> {
     crate::autopilot::pipeline::clear_attention_after_injection(node_id, &app);
     let _ = app.emit(
         "autopilot-finishing",
-        serde_json::json!({ "node_id": node_id, "issue": node.source_issue }),
+        AutopilotFinishingPayload {
+            node_id,
+            issue: node.source_issue,
+        },
     );
     tracing::info!("trigger_finish: injected wrap-up prompt into node {}", node_id);
     Ok(())
@@ -786,7 +859,10 @@ pub fn create_pr_node(
         head_repo_clone_url,
     )?;
     // Mirrors `create_issue_node` — see that block for the rationale.
-    let _ = app.emit("node-created", serde_json::json!({ "id": draft.node.id }));
+    let _ = app.emit(
+        "node-created",
+        NodeCreatedPayload { id: draft.node.id },
+    );
     Ok(draft)
 }
 
@@ -898,7 +974,7 @@ pub fn start_node_background(
             Ok(()) => {
                 let _ = app.emit(
                     "node-spawn-completed",
-                    serde_json::json!({ "node_id": node_id }),
+                    NodeSpawnCompletedPayload { node_id },
                 );
                 tracing::info!("start_node_background: node {} ready", node_id);
             }
@@ -915,7 +991,10 @@ pub fn start_node_background(
                 let _ = session_lifecycle::on_error(&sink, node_id);
                 let _ = app.emit(
                     "node-spawn-failed",
-                    serde_json::json!({ "node_id": node_id, "error": e }),
+                    NodeSpawnFailedPayload {
+                        node_id,
+                        error: e.to_string(),
+                    },
                 );
             }
         }
@@ -988,11 +1067,29 @@ pub async fn spawn_handover_agent(
     Ok(node)
 }
 
-/// Auto-resume all suspended nodes that have a stored CLI session ID.
-/// Called by the frontend on startup after event listeners are ready.
+/// Auto-resume all suspended nodes that have a stored CLI session ID,
+/// plus any suspended nodes whose stored PR URL can serve as a fallback
+/// resume anchor (issue #37). Called by the frontend on startup after
+/// event listeners are ready.
+///
+/// Resume priority per node (the first hit wins):
+/// 1. `cli_session_id` is set → use `--resume <id>` (existing path).
+/// 2. `cli_session_id` is missing/empty AND `pr_url` is set → fetch the
+///    PR via the GitHub API, hydrate the node row with PR-spawn metadata
+///    (`source_pr`, `branch` = `head_ref`, `source_pr_pinned_sha`,
+///    `head_repo_owner`/`head_repo_clone_url`), and spawn fresh — the
+///    existing `source_pr`-aware worktree-adoption branch in
+///    `spawn_agent_inner` takes over from there.
+/// 3. Neither → mark `Idle` and move on (the original behaviour).
 #[command]
 pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String> {
-    let nodes = db::list_suspended_nodes().map_err(|e| e.to_string())?;
+    // Combine both work lists up front: nodes with session IDs take the
+    // fast path; nodes with only a PR URL take the slower GitHub-fetch path.
+    // Dedup by id is unnecessary because the two queries' predicates are
+    // mutually exclusive (`cli_session_id IS NOT NULL` vs `IS NULL`).
+    let mut nodes = db::list_suspended_nodes().map_err(|e| e.to_string())?;
+    let pr_fallback = db::list_suspended_nodes_with_pr_url().map_err(|e| e.to_string())?;
+    nodes.extend(pr_fallback);
 
     if nodes.is_empty() {
         tracing::info!("auto_resume_agent_nodes: no suspended nodes to resume");
@@ -1023,10 +1120,50 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
             continue;
         }
 
+        // Path 1 (existing): `--resume` with the captured session id.
+        // Path 2 (issue #37 fallback): no session id, but the agent opened
+        // a PR during the session — hydrate the node from the PR and spawn
+        // fresh. The fresh spawn inherits the PR's branch as the worktree
+        // base via the existing `source_pr`-aware worktree-adoption path.
+        let resume_arg = match &node.cli_session_id {
+            Some(id) if !id.is_empty() => Some(id.clone()),
+            _ => {
+                if node.pr_url.is_some() {
+                    // Best-effort: a failure here (no auth, API error,
+                    // private repo, etc.) just means we fall through to
+                    // "skip this node" — the user can still re-spawn by
+                    // hand and the captured URL stays on the row for
+                    // them to copy.
+                    match hydrate_node_for_pr_url_fallback(node).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                "auto_resume_agent_nodes: hydrated node {} from pr_url fallback",
+                                node.id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "auto_resume_agent_nodes: PR-URL fallback failed for node {}: {} — marking Idle",
+                                node.id,
+                                e
+                            );
+                            db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
+                            continue;
+                        }
+                    }
+                } else {
+                    tracing::warn!("auto_resume_agent_nodes: node {} has neither cli_session_id nor pr_url, skipping", node.id);
+                    db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
+                    continue;
+                }
+                None
+            }
+        };
+
         match crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
             session_id: node.id,
             provider,
-            resume: Some(cli_id),
+            resume: resume_arg,
             rows: 24,
             cols: 80,
             prefill: None,
@@ -1051,6 +1188,108 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     }
 
     Ok(resumed)
+}
+
+/// Issue #37 — turn a suspended node with a captured `pr_url` into the
+/// shape a fresh PR-spawn expects. Resolves the stored URL into
+/// `(owner, repo, pr_number)`, fetches the PR via the GitHub API, and
+/// writes the resulting `head_ref` + head SHA + fork metadata onto the
+/// node row (`db::hydrate_agent_node_from_pr`). After this the node looks
+/// identical to a `#420`-spawned one and `spawn_agent_inner`'s
+/// `source_pr.is_some()` branch cuts the worktree off the PR's branch.
+///
+/// The GitHub call is synchronous and bounded by `HTTP_REQUEST_TIMEOUT`
+/// (the same timeout `GitHubClient::list_pull_requests` already
+/// enforces), so a hung network can't park the resume loop indefinitely.
+/// A failure here is non-fatal — the calling loop in
+/// `auto_resume_agent_nodes` converts it into a clean "skip + mark Idle"
+/// branch and logs.
+async fn hydrate_node_for_pr_url_fallback(
+    node: &crate::models::AgentNode,
+) -> Result<(), String> {
+    let url = node
+        .pr_url
+        .as_deref()
+        .ok_or_else(|| "node has no pr_url (defensive)".to_string())?;
+    let components = crate::agent::pr_url_detector::parse_pr_components(url)
+        .ok_or_else(|| format!("pr_url is not a parseable GitHub PR URL: {url}"))?;
+
+    // Fetch the PR list and find the one matching the captured number.
+    // `list_pull_requests` returns the full PullRequest shape (head_ref,
+    // head_sha, head_repo_owner, head_repo_clone_url) — exactly what
+    // `hydrate_agent_node_from_pr` needs. Synchronous; the future-facing
+    // migration path is documented as a follow-up.
+    let owner = components.owner.clone();
+    let repo = components.repo.clone();
+    let number = components.number;
+    let client = crate::services::github::GitHubClient::new().map_err(|e| e.to_string())?;
+    let prs = tokio::task::spawn_blocking(move || {
+        client.list_pull_requests(&owner, &repo, "all")
+    })
+    .await
+    .map_err(|e| format!("GitHub lookup task failed: {e}"))?
+    .map_err(|e| format!("GitHub API error: {e}"))?;
+
+    let pr = prs
+        .into_iter()
+        .find(|p| p.number == number)
+        .ok_or_else(|| {
+            format!(
+                "PR #{}/{}#{} not found via GitHub API (closed? deleted? no access?)",
+                components.owner, components.repo, number
+            )
+        })?;
+
+    if pr.head_ref.is_empty() {
+        return Err(format!(
+            "PR #{}/{}#{} has no head_ref in the API response",
+            components.owner, components.repo, components.number
+        ));
+    }
+
+    // Fork detection: `head_repo_owner` differs from the destination repo's
+    // owner. The GitHub API doesn't tell us the destination owner directly
+    // in this response (the `base.repo.owner.login` field would, but the
+    // `list_pull_requests` projection doesn't carry it), so we conservatively
+    // store the head's owner when it differs from the parsed URL's owner.
+    // The spawn-time `if head_repo_owner.is_some()` branch treats `Some` as
+    // "fork" and runs `fork_remote_alias`; a same-repo PR (where head owner
+    // == destination owner) clears the column by writing NULL.
+    let head_repo_owner = if pr.head_repo_owner.is_empty()
+        || pr.head_repo_owner == components.owner
+    {
+        None
+    } else {
+        Some(pr.head_repo_owner.as_str())
+    };
+    let head_repo_clone_url = if head_repo_owner.is_some() && !pr.head_repo_clone_url.is_empty() {
+        Some(pr.head_repo_clone_url.as_str())
+    } else {
+        None
+    };
+
+    // The `source_pr_pinned_sha` column is the drift-check anchor
+    // (`spawn_agent_inner` reads `refs/remotes/origin/<head_ref>` and
+    // warns if it doesn't match). Writing an empty string would make
+    // every spawn emit a `pr_sha_drift` warning — empty head SHA from
+    // the API is best treated as "we don't have the pin", which means
+    // storing NULL (the column's default). The drift-check path branches
+    // on `Some(_)` so NULL = "skip the comparison" rather than fail.
+    let head_sha: Option<&str> = if pr.head_sha.is_empty() {
+        None
+    } else {
+        Some(pr.head_sha.as_str())
+    };
+
+    db::hydrate_agent_node_from_pr(
+        node.id,
+        components.number,
+        &pr.head_ref,
+        head_sha,
+        head_repo_owner,
+        head_repo_clone_url,
+    )
+    .map_err(|e| format!("hydrate_agent_node_from_pr failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,7 +1324,10 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
         })
         .await?;
     if should_signal {
-        let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
+        let _ = app.emit(
+        "attention-cleared",
+        crate::commands::attention::AttentionClearedPayload { session_id },
+    );
     }
     Ok(())
 }

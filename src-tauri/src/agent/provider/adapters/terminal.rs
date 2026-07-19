@@ -28,7 +28,12 @@ impl AgentProvider for TerminalAdapter {
         UiMeta {
             label: "Terminal".into(),
             color: "#9ca3af".into(),
-            icon: "terminal-prompt".into(),
+            // Single-printable-char contract (issue #328): the mobile badge
+            // renders `icon` as the chip glyph directly from the live
+            // `listProviders()` payload, so a multi-char string would overflow
+            // the 34×34 chip. Sister adapters (`A`, `G`, `O`, `X`) all
+            // honour the same convention.
+            icon: "T".into(),
         }
     }
 
@@ -179,17 +184,17 @@ mod tests {
         assert!(platforms.contains(&Platform::Linux));
     }
 
-    /// Pin the id and UI metadata. The `icon: "terminal-prompt"` string
-    /// is not currently rendered by the frontend (which keys off the
-    /// provider id via `INLINE_ICONS`), but pinning the contract here
-    /// makes a future renderer that does key on the icon char safe.
+    /// Pin the id and UI metadata. `icon: "T"` follows the single-printable-char
+    /// contract every adapter honours (issue #328) — the mobile NodeRow badge
+    /// renders `icon` directly as the chip glyph, so a multi-char string
+    /// would overflow the chip.
     #[test]
     fn terminal_id_and_ui_metadata() {
         assert_eq!(TERMINAL.id(), "terminal");
         let ui = TERMINAL.ui();
         assert_eq!(ui.label, "Terminal");
         assert_eq!(ui.color, "#9ca3af");
-        assert_eq!(ui.icon, "terminal-prompt");
+        assert_eq!(ui.icon, "T");
     }
 
     // ----- WSL login-shell path (issue #548) -----

@@ -32,12 +32,71 @@
 //! evaluation a lost turn never delivered for any quiet piloted node.
 
 use once_cell::sync::Lazy;
+use serde::Serialize;
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+use ts_rs::TS;
 
 use super::evaluator::{self, Classification};
+
+// ---------------------------------------------------------------------------
+// Wire types — Tauri event payloads (issue #161)
+// ---------------------------------------------------------------------------
+
+/// Payload of the `autopilot-blocked` Tauri event. Emitted when the evaluator
+/// classifies the agent's recent PTY tail as BLOCKED (the agent has asked
+/// the user a question, or it's stalled needing human input). The frontend
+/// surfaces it as a toast pointing the user at the node.
+///
+/// Generated to `src/types/generated/AutopilotBlockedPayload.ts`; the TS half
+/// is imported by `src/App.tsx`. `issue` is `0` for hand-spawned autopilot
+/// nodes that have no originating GitHub issue.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AutopilotBlockedPayload.ts")]
+pub struct AutopilotBlockedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "i32")]
+    pub issue: i64,
+}
+
+/// Payload of the `autopilot-pr-created` Tauri event. Emitted after the
+/// wrap-up verification (#485) is green — the worktree is clean, the branch
+/// pushed, an open PR exists. The frontend marks the node's autopilot pill
+/// as `completed` AND refetches the node list (status flips to `Completed`).
+///
+/// Generated to `src/types/generated/AutopilotPrCreatedPayload.ts`; the TS
+/// half is imported by `src/App.tsx` and `src/stores/agentNodeStore.ts`.
+/// `pr_url` is `None` when the mesh's `autopilot_action_on_success` policy
+/// is `none` (no PR was opened).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AutopilotPrCreatedPayload.ts")]
+pub struct AutopilotPrCreatedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "i32")]
+    pub issue: i64,
+    pub pr_url: Option<String>,
+}
+
+/// Payload of the `autopilot-finish-failed` Tauri event. Emitted after 3
+/// failed wrap-up verification attempts (issue #485 self-correction loop
+/// exhausted) — the node is marked `Error` and the user gets an error toast
+/// with the reason list.
+///
+/// Generated to `src/types/generated/AutopilotFinishFailedPayload.ts`; the
+/// TS half is imported by `src/App.tsx`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AutopilotFinishFailedPayload.ts")]
+pub struct AutopilotFinishFailedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "i32")]
+    pub issue: i64,
+    pub reasons: Vec<String>,
+}
 use super::finish;
 use crate::db;
 use crate::db::AutopilotRunState::{self as S, *};
@@ -542,7 +601,10 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                             clear_attention_after_injection(node_id, app);
                             let _ = app.emit(
                                 "autopilot-finishing",
-                                serde_json::json!({ "node_id": node_id, "issue": issue_number }),
+                                crate::commands::agent::AutopilotFinishingPayload {
+                                    node_id,
+                                    issue: Some(issue_number),
+                                },
                             );
                             tracing::info!(
                                 "autopilot pipeline({}): task classified COMPLETED — injected wrap-up prompt (attempt 1)",
@@ -562,7 +624,10 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                     // (PRD story 14) the frontend surfaces as a toast.
                     let _ = app.emit(
                         "autopilot-blocked",
-                        serde_json::json!({ "node_id": node_id, "issue": issue_number }),
+                        AutopilotBlockedPayload {
+                            node_id,
+                            issue: issue_number,
+                        },
                     );
                     tracing::info!(
                         "autopilot pipeline({}): agent classified BLOCKED — human input requested",
@@ -613,11 +678,11 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                     let _ = crate::agent::session_lifecycle::on_error(&sink, node_id);
                     let _ = app.emit(
                         "autopilot-finish-failed",
-                        serde_json::json!({
-                            "node_id": node_id,
-                            "issue": issue_number,
-                            "reasons": reasons,
-                        }),
+                        AutopilotFinishFailedPayload {
+                            node_id,
+                            issue: issue_number,
+                            reasons: reasons.clone(),
+                        },
                     );
                     evaluator::unregister(node_id);
                     tracing::warn!(
@@ -654,11 +719,11 @@ fn complete_finishing_run(
     let _ = crate::agent::session_lifecycle::on_completed(&sink, node_id);
     let _ = app.emit(
         "autopilot-pr-created",
-        serde_json::json!({
-            "node_id": node_id,
-            "issue": issue_number,
-            "pr_url": observed.pr_url,
-        }),
+        AutopilotPrCreatedPayload {
+            node_id,
+            issue: issue_number,
+            pr_url: observed.pr_url.clone(),
+        },
     );
     evaluator::unregister(node_id);
     tracing::info!(
@@ -931,6 +996,10 @@ mod tests {
             head_repo_owner: None,
             head_repo_clone_url: None,
             source_pr_pinned_sha: None,
+            // Issue #37 — explicit fixtures must enumerate the new column;
+            // `AgentNode::default()` would let this stay implicit, but this
+            // fixture is one of the pre-`Default` helpers that pre-dates #457.
+            pr_url: None,
             position: 0,
             created_at: chrono::Utc::now(),
         };

@@ -16,6 +16,11 @@ use crate::db;
 use crate::models::{AgentNode, SessionStatus};
 use tauri::{command, AppHandle};
 
+// Wire-type structs (AttentionNeededPayload, AttentionClearedPayload,
+// ResumeFailedPayload) live in `crate::agent::session_lifecycle` — the
+// lifecycle module owns the emit, so the payload definitions stay there
+// too (issue #161 + #132).
+
 /// Mark a node as awaiting user input and notify the frontend. One of the two
 /// independent reactions to a Node Turn; see [`crate::node_turn::publish`].
 /// Idempotent — re-marking an already-awaiting node is a no-op write + re-emit.
@@ -154,7 +159,11 @@ mod tests {
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
-                source_pr_pinned_sha TEXT
+                source_pr_pinned_sha TEXT,
+                -- Issue #37 — the new column `AGENT_NODE_COLUMNS` reads at index
+                -- 18. The fixture's CREATE must include it or `map_agent_node_row`
+                -- errors on the missing column for every read.
+                pr_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (id, mesh_id, name, path, status)

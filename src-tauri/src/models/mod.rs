@@ -59,6 +59,9 @@ pub enum Provider {
     Agy,
     OpenCode,
     Codex,
+    /// xAI's Grok Build CLI — interactive TUI-based coding agent.
+    /// See `agent::provider::adapters::grok`.
+    Grok,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -73,6 +76,7 @@ impl Provider {
             Provider::Agy,
             Provider::OpenCode,
             Provider::Codex,
+            Provider::Grok,
             Provider::Terminal,
         ]
     }
@@ -93,6 +97,7 @@ impl Provider {
             "agy" => Provider::Agy,
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
+            "grok" => Provider::Grok,
             "terminal" => Provider::Terminal,
             // "minimax" / "kimi" are no longer first-class executors: they're
             // Claude Code with a swapped backend, configured as harness profiles
@@ -119,6 +124,7 @@ impl Provider {
             Provider::Agy => &adapters::AGY,
             Provider::OpenCode => &adapters::OPENCODE,
             Provider::Codex => &adapters::CODEX,
+            Provider::Grok => &adapters::GROK,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -131,6 +137,7 @@ impl std::fmt::Display for Provider {
             Provider::Agy => write!(f, "agy"),
             Provider::OpenCode => write!(f, "opencode"),
             Provider::Codex => write!(f, "codex"),
+            Provider::Grok => write!(f, "grok"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }
@@ -440,6 +447,21 @@ pub struct AgentNode {
     /// failing — same fail-open semantics as the `pr_head_unfetchable`
     /// fallback introduced in #420.
     pub source_pr_pinned_sha: Option<String>,
+    /// GitHub PR URL the agent opened during this session (issue #37).
+    /// Captured from PTY output by `agent::pr_url_detector` when the agent
+    /// prints a `github.com/<owner>/<repo>/pull/<n>` URL (typically from
+    /// `gh pr create`). Distinct from `source_pr` (the PR that *spawned*
+    /// this node): a hand-spawned or issue-spawned node that the agent
+    /// later opens a PR for gets its `pr_url` populated as it works.
+    /// Surfaced as a clickable chip in `GridNodeHeader` and used as a
+    /// fallback resume anchor by `auto_resume_agent_nodes` when
+    /// `cli_session_id` is missing or stale — the PR's branch + head SHA
+    /// carry enough context for a fresh `--resume` to find prior work.
+    /// `None` until the agent emits a matching URL; never overwritten
+    /// once set (first PR wins; a later re-PR into a different URL on
+    /// the same node is treated as "the same work, new home", which is
+    /// the user-recoverable case, not a silent overwrite).
+    pub pr_url: Option<String>,
     #[ts(as = "i32")]
     pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,
@@ -872,6 +894,9 @@ mod tests {
         assert_eq!(n.head_repo_owner, None);
         assert_eq!(n.head_repo_clone_url, None);
         assert_eq!(n.source_pr_pinned_sha, None);
+        // Issue #37 — default `pr_url` is `None` until the agent emits a
+        // matching `github.com/<owner>/<repo>/pull/<n>` URL on the PTY.
+        assert_eq!(n.pr_url, None);
         assert_eq!(n.position, 0);
         // DateTime<Utc>::default() == UNIX epoch — not "now", but a
         // well-defined placeholder that won't accidentally match a real row.

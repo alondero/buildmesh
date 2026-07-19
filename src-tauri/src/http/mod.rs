@@ -27,6 +27,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
+use serde::Serialize;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -36,6 +37,26 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use ts_rs::TS;
+
+/// Wire type — payload of the `serialize-terminal-request` Tauri event (issue
+/// #161). The backend asks the frontend to serialise a live terminal so its
+/// scrollback can be embedded into a coordinator WS payload; the reply rides
+/// back over a `request_id`-keyed oneshot channel, NOT this event, so the
+/// `request_id` is opaque to the listener (it's an idempotency token, not a
+/// payload pointer).
+///
+/// Generated to `src/types/generated/SerializeTerminalRequestPayload.ts`; the
+/// TS half is imported by `src/components/Terminal/TerminalRegistry.ts`. The
+/// field key is `node_id` (not `session_id`) to match the internal node-id
+/// vocabulary — the wire contract here is local to the webview (coordinator
+/// / mobile WS use the `attention-needed` channel, not this one).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "SerializeTerminalRequestPayload.ts")]
+pub struct SerializeTerminalRequestPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub request_id: String,
+}
 
 // --- App handle for emitting Tauri events from HTTP handlers ---
 
@@ -140,10 +161,10 @@ pub(crate) async fn request_terminal_snapshot(
 
     let _ = app.emit(
         "serialize-terminal-request",
-        serde_json::json!({
-            "node_id": node_id,
-            "request_id": request_id,
-        }),
+        SerializeTerminalRequestPayload {
+            node_id,
+            request_id: request_id.clone(),
+        },
     );
 
     match tokio::time::timeout(std::time::Duration::from_millis(500), rx).await {

@@ -27,6 +27,9 @@ mod warm_pool_tests;
 #[cfg(test)]
 mod agent_node_tests;
 
+#[cfg(test)]
+mod pr_url_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -98,7 +101,19 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 27;
+//
+// v28 — Agent node PR URL capture (issue #37): add the nullable
+// `agent_nodes.pr_url TEXT` column. Captured by `agent::pr_url_detector`
+// from PTY output when the agent opens a PR via `gh pr create` (or any
+// tool that echoes a `github.com/<owner>/<repo>/pull/<n>` URL). Used as
+// a fallback resume anchor by `auto_resume_agent_nodes` when the
+// `cli_session_id` is missing or stale — the PR's branch + head SHA
+// carry enough context for a fresh `--resume` to find prior work.
+// No data migration needed (nullable column, `None` for every pre-v28
+// row); the additive `ensure_*` safety net re-runs the ALTER on every
+// init so a build that bumps `SCHEMA_VERSION` without yet containing
+// the inline CREATE still picks up the column on next launch.
+const SCHEMA_VERSION: i32 = 28;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -175,7 +190,13 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             source_pr INTEGER,
             head_repo_owner TEXT,
             head_repo_clone_url TEXT,
-            source_pr_pinned_sha TEXT
+            source_pr_pinned_sha TEXT,
+            -- Issue #37 — GitHub PR URL the agent opened during this session.
+            -- Captured from PTY output by `agent::pr_url_detector` when the
+            -- agent prints a `github.com/<owner>/<repo>/pull/<n>` URL.
+            -- Nullable: pre-v28 rows read back as NULL and the detector
+            -- never overwrites a value once set (first PR wins).
+            pr_url TEXT
         );
 
         CREATE TABLE IF NOT EXISTS pending_worktree_removals (
@@ -272,6 +293,12 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_pr(&conn)?;
     ensure_agent_node_source_pr_fork_meta(&conn)?;
     ensure_agent_node_source_pr_pinned_sha(&conn)?;
+    // v28 — issue #37. Nullable; pre-v28 rows read back as `None` so no
+    // backfill is needed. `ensure_*` re-runs the ALTER on every init so
+    // a build that bumps `SCHEMA_VERSION` without yet containing the inline
+    // CREATE picks the column up on next launch — same additive pattern
+    // as `source_pr_pinned_sha` (#444).
+    ensure_agent_node_pr_url(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
 ensure_mesh_sandbox(&conn)?;
@@ -599,6 +626,19 @@ pub(crate) fn ensure_agent_node_source_pr_fork_meta(conn: &Connection) -> SqlRes
 pub(crate) fn ensure_agent_node_source_pr_pinned_sha(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "agent_nodes", "source_pr_pinned_sha", "TEXT")? {
         tracing::warn!("ensure_agent_node_source_pr_pinned_sha: added missing source_pr_pinned_sha column");
+    }
+    Ok(())
+}
+
+/// Safety net (v28, issue #37): ensure the `pr_url` column exists on
+/// `agent_nodes`. Holds the GitHub PR URL the agent opened during this
+/// session, captured by `agent::pr_url_detector` from PTY output. Nullable —
+/// every pre-v28 row reads back as `None` and the detector only writes
+/// non-NULL values, so no backfill is needed. Additive; `WHERE pr_url IS
+/// NOT NULL` consumers must always be written to tolerate the absent case.
+pub(crate) fn ensure_agent_node_pr_url(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "agent_nodes", "pr_url", "TEXT")? {
+        tracing::warn!("ensure_agent_node_pr_url: added missing pr_url column");
     }
     Ok(())
 }
@@ -1939,7 +1979,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, pr_url";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -1962,8 +2002,8 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         // source_pr is at index 14. Read as Option: the safety net adds the
         // column nullable for pre-v15 DBs, and rusqlite's typed read errors
         // the row on NULL otherwise. (v16 added head_repo_owner +
-        // head_repo_clone_url at 15/16, and source_pr_pinned_sha at 17 —
-        // see AGENT_NODE_COLUMNS.)
+        // head_repo_clone_url at 15/16, source_pr_pinned_sha at 17, and v28
+        // added pr_url at 18 — see AGENT_NODE_COLUMNS.)
         source_pr: row.get(14)?,
         head_repo_owner: row.get(15)?,
         head_repo_clone_url: row.get(16)?,
@@ -1972,6 +2012,10 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         // reads back as `None`, and the drift-check path treats `None` as
         // "skip the comparison" rather than failing.
         source_pr_pinned_sha: row.get(17)?,
+        // pr_url is at index 18 (issue #37). Nullable: pre-v28 rows read
+        // back as `None` (the safety net adds the column nullable); rows
+        // that the agent never opened a PR for stay `None`.
+        pr_url: row.get(18)?,
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -2023,18 +2067,19 @@ pub fn list_coordinator_node_rows_inner(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        // map_agent_node_row reads positional indices 0..17, which match the
+        // map_agent_node_row reads positional indices 0..18, which match the
         // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 18 and 19 (v16 added head_repo_owner +
-        // head_repo_clone_url at 15/16, and source_pr_pinned_sha at 17).
+        // status_changed_at follow at 19 and 20 (v16 added head_repo_owner +
+        // head_repo_clone_url at 15/16, source_pr_pinned_sha at 17, and v28
+        // added pr_url at 18).
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(18)?;
+        let mesh_name: String = row.get(19)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(19)?;
+        let status_changed_at: Option<String> = row.get(20)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -2775,6 +2820,36 @@ pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     Ok(())
 }
 
+/// Record the GitHub PR URL the agent opened during this session
+/// (issue #37). Called from `agent::pr_url_detector` after it parses a
+/// `github.com/<owner>/<repo>/pull/<n>` URL out of the node's PTY output.
+/// First-write-wins: the `WHERE pr_url IS NULL` guard means a later PR
+/// re-opened by the same agent doesn't silently overwrite the original
+/// link (the user-recoverable case is "the original PR was closed and a
+/// new one opened", which the frontend can surface explicitly rather
+/// than auto-mutate). `None` writes a NULL — only the caller decides
+/// whether to call; the detector always passes `Some(url)`.
+pub fn set_agent_node_pr_url(id: i64, url: Option<&str>) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    set_agent_node_pr_url_inner(&db, id, url)
+}
+
+/// Lock-free `_inner` so the SQL-semantics tests in `db::pr_url_tests`
+/// can drive an in-memory fixture without taking the global DB mutex
+/// (which other test files share — taking it from a single-threaded
+/// fixture would deadlock the rest of the suite).
+pub(crate) fn set_agent_node_pr_url_inner(
+    conn: &Connection,
+    id: i64,
+    url: Option<&str>,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_nodes SET pr_url = ?1 WHERE id = ?2 AND pr_url IS NULL",
+        params![url, id],
+    )?;
+    Ok(())
+}
+
 /// Flip any nodes that cannot be running on startup to `suspended`.
 ///
 /// Covers three states that all mean "we expected this node to be live but
@@ -2807,6 +2882,88 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
     )?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
+}
+
+/// Issue #37 — suspended nodes the resume-by-URL fallback should pick up.
+/// Filter: `status = 'suspended'` AND `cli_session_id IS NULL` AND
+/// `pr_url IS NOT NULL`. The first clause excludes everything the existing
+/// `list_suspended_nodes` already covers (those resume via the captured
+/// session id); the second clause targets the stale-session-id case; the
+/// third is the actual fallback anchor — without a stored PR URL we have
+/// nothing to look up on GitHub.
+///
+/// Returns the full `AgentNode` row so callers can read `mesh_id`, `path`,
+/// and the existing `branch`/`use_worktree` columns to drive the spawn.
+pub fn list_suspended_nodes_with_pr_url() -> SqlResult<Vec<AgentNode>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        &format!(
+            "SELECT {} FROM agent_nodes WHERE status = 'suspended' \
+             AND cli_session_id IS NULL AND pr_url IS NOT NULL",
+            AGENT_NODE_COLUMNS
+        )
+    )?;
+    let rows = stmt.query_map([], map_agent_node_row)?;
+    rows.collect()
+}
+
+/// Issue #37 — populate the PR-spawn metadata columns on an existing
+/// suspended node so the existing `source_pr`-aware worktree-adoption
+/// path in `spawn_agent_inner` can take over the fresh spawn. Idempotent
+/// at the SQL layer (last-write-wins; called once per resume-by-URL
+/// fallback). Clears the stale `Suspended` status back to `Idle` so the
+/// node's grid pill reflects "ready to spawn" rather than the crash-time
+/// "waiting on session" marker.
+///
+/// The columns written mirror the wire shape issue #420 stores for
+/// PR-spawned nodes (`source_pr`, `branch` = `head_ref`,
+/// `head_repo_owner`, `head_repo_clone_url`, `source_pr_pinned_sha`) —
+/// see `commands::agent::create_pr_node_impl` for the upstream call site
+/// this hydrates against.
+pub fn hydrate_agent_node_from_pr(
+    id: i64,
+    pr_number: i64,
+    head_ref: &str,
+    head_sha: Option<&str>,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    hydrate_agent_node_from_pr_inner(
+        &db,
+        id,
+        pr_number,
+        head_ref,
+        head_sha,
+        head_repo_owner,
+        head_repo_clone_url,
+    )
+}
+
+/// Lock-free `_inner` so `db::pr_url_tests` can drive the SQL semantics
+/// against an in-memory fixture without taking the global DB mutex.
+pub(crate) fn hydrate_agent_node_from_pr_inner(
+    conn: &Connection,
+    id: i64,
+    pr_number: i64,
+    head_ref: &str,
+    head_sha: Option<&str>,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_nodes \
+            SET source_pr = ?2, \
+                branch = ?3, \
+                source_pr_pinned_sha = ?4, \
+                head_repo_owner = ?5, \
+                head_repo_clone_url = ?6, \
+                status = 'idle', \
+                status_changed_at = datetime('now') \
+          WHERE id = ?1",
+        params![id, pr_number, head_ref, head_sha, head_repo_owner, head_repo_clone_url],
+    )?;
+    Ok(())
 }
 
 // --- Pending worktree removal queue ---

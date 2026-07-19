@@ -793,7 +793,7 @@ pub fn provision_for_spawn(mut ctx: SpawnContext) -> Result<ProvisionOutcome, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::test_helpers::{commit_file, init_repo_with_commit, TestDir};
+    use crate::env::test_helpers::{commit_file, init_repo_with_commit, repo_with_drifted_head, TestDir};
     use crate::models::{AgentNode, EnvType, SessionStatus};
     use crate::services::warm_pool::ClaimedWarmEntry;
     use std::fs;
@@ -840,6 +840,10 @@ mod tests {
             head_repo_owner: None,
             head_repo_clone_url: None,
             source_pr_pinned_sha: None,
+            // Issue #37 — explicit fixture (pre-`Default` helper) must
+            // enumerate the new column. None is the safe default; the
+            // provision path doesn't read `pr_url` directly.
+            pr_url: None,
             position: 0,
             created_at: chrono::Utc::now(),
         }
@@ -961,6 +965,43 @@ mod tests {
         }
         assert!(host_path.exists(), "cold create must materialise the worktree");
         assert_eq!(fs::read_to_string(host_path.join("f.txt")).unwrap(), "v1\n");
+    }
+
+    /// `provision_for_spawn`'s `Created` branch must thread `SpawnContext.base_ref`
+    /// through to `create_git_worktree(.., base_ref)` → `add_worktree_impl(..,
+    /// base_ref)` → `git worktree add <path> <sha>`. The orchestrator pins the
+    /// `worktree_base_ref` derivation (`agent/spawn.rs:1452`); the primitive
+    /// tests (`git/worktree/mod.rs:1072+`) pin `create_git_worktree` end-to-end;
+    /// this test pins the seam in BETWEEN — a regression guard so the orchestrator
+    /// and the primitive can't drift on which ref the worktree is cut from.
+    /// Issue #248 / #230.
+    #[test]
+    fn provision_for_spawn_cold_created_uses_spawn_context_base_ref_not_local_head() {
+        let td = TestDir::new("prov_base_ref_cold");
+        let parent = td.path();
+        let (_repo, origin_oid) = repo_with_drifted_head(parent);
+
+        let node = empty_node(parent, Some("prov-cf"));
+        let host_path = parent.join(".claude").join("worktrees").join("prov-cf");
+        let host_path_str = host_path.to_string_lossy().to_string();
+        let mut ctx = make_ctx(node, SpawnSource::Issue, host_path_str.clone(), None);
+        // Override the default `base_ref: "HEAD"` (from `make_ctx`) so we
+        // exercise the symbolic-ref path: `origin/main` must be the input,
+        // NOT the local drift that `repo.head()` resolves to.
+        ctx.base_ref = "origin/main".to_string();
+
+        let outcome = provision_for_spawn(ctx).expect("cold create must succeed");
+        match outcome {
+            ProvisionOutcome::Created { host_path: p, .. } => assert_eq!(p, host_path_str),
+            other => panic!("expected Created, got {:?}", other),
+        }
+
+        let wt_repo = git2::Repository::open(&host_path).unwrap();
+        let wt_oid = wt_repo.head().unwrap().peel_to_commit().unwrap().id();
+        assert_eq!(
+            wt_oid, origin_oid,
+            "SpawnContext.base_ref must reach git worktree add — local-drift HEAD would be a base_ref regression"
+        );
     }
 
     // ── Adopted (Issue / PR) ──────────────────────────────────────────────────

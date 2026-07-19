@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import type { ProviderErrorPayload } from './types/generated/ProviderErrorPayload';
+import type { ResumeFailedPayload } from './types/generated/ResumeFailedPayload';
+import type { WorktreeCleanupFailedPayload } from './types/generated/WorktreeCleanupFailedPayload';
+import type { MeshSyncWarningPayload } from './types/generated/MeshSyncWarningPayload';
+import type { AutopilotBlockedPayload } from './types/generated/AutopilotBlockedPayload';
+import type { AutopilotPrCreatedPayload } from './types/generated/AutopilotPrCreatedPayload';
+import type { AutopilotFinishFailedPayload } from './types/generated/AutopilotFinishFailedPayload';
+import type { AutopilotSubmittedPayload } from './types/generated/AutopilotSubmittedPayload';
+import type { AutopilotNodeClosedPayload } from './types/generated/AutopilotNodeClosedPayload';
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
@@ -16,6 +25,7 @@ import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { arrowTargetIndex } from './lib/gridTraversal';
 import { toggleGridMaximize } from './lib/gridShortcuts';
+import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
 import { isMac } from './lib/platform';
 import { getGridRows } from './hooks/useGridLayout';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
@@ -102,6 +112,15 @@ function App() {
       { key: 'CommandOrControl+Alt+ArrowRight', action: 'arrow-right' },
       { key: 'CommandOrControl+Alt+ArrowUp', action: 'arrow-up' },
       { key: 'CommandOrControl+Alt+ArrowDown', action: 'arrow-down' },
+      // Cycle to the next agent node with `status === 'awaiting_input'`
+      // (issue #64). Registered as a Tauri global shortcut (not a window
+      // keydown listener) so the binding fires while an xterm terminal has
+      // focus — the typical state when the user notices a node waiting for
+      // input and wants to jump to it without clicking. The cycle logic
+      // (next-after-current + wrap, scoped to the active node's mesh) lives
+      // in src/lib/awaitingInputShortcuts.ts as a pure store mutator so it
+      // can be unit-tested without standing up the plugin.
+      { key: 'CommandOrControl+Period', action: 'jump-to-next-awaiting' },
       gridToggleShortcut,
     ];
     const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
@@ -231,6 +250,20 @@ function App() {
         return;
       }
 
+      if (action === 'jump-to-next-awaiting') {
+        // Issue #64 — Ctrl/Cmd+. cycles to the next agent node whose
+        // `status === 'awaiting_input'` in the active node's mesh, wrapping
+        // at the end. No focus guard: the user is most likely focused on an
+        // xterm prompt (the reason they're noticing the agent needs input),
+        // and `isTextInputFocused` carves out the xterm-helper-textarea so
+        // this fires from a terminal prompt — exactly what we want. No
+        // cooldown either: rapid presses are a legitimate "skip through"
+        // gesture, and the cycle is purely synchronous so there's no IPC
+        // round-trip to rate-limit.
+        jumpToNextAwaitingNode();
+        return;
+      }
+
       if (!isArrowAction(action)) return;
       // Defensive focus guard (matches the Alt+G handler above). The binding
       // is Ctrl/Cmd+Alt+Arrow, which has no readline collision, but if the
@@ -321,7 +354,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<{ provider: string; message: string }>('provider-error', (event) => {
+    const unlisten = listen<ProviderErrorPayload>('provider-error', (event) => {
       addToast(event.payload.provider, event.payload.message, 'error');
     });
     return () => { unlisten.then((fn) => fn()); };
@@ -362,7 +395,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<{ node_id: number; error: string }>('resume-failed', (event) => {
+    const unlisten = listen<ResumeFailedPayload>('resume-failed', (event) => {
       addToast('Resume', `Node ${event.payload.node_id}: ${event.payload.error}`, 'warning');
     });
     return () => { unlisten.then((fn) => fn()); };
@@ -371,7 +404,7 @@ function App() {
   // The node closes instantly; if its worktree directory couldn't be removed in
   // the background, warn here. It stays queued and is retried on next launch.
   useEffect(() => {
-    const unlisten = listen<{ node_name: string; worktree_path: string; error: string }>(
+    const unlisten = listen<WorktreeCleanupFailedPayload>(
       'worktree-cleanup-failed',
       (event) => {
         addToast(
@@ -394,13 +427,7 @@ function App() {
   // provider label differs — so the user gets a consistent visual
   // treatment for any non-blocking runtime issue.
   useEffect(() => {
-    const unlisten = listen<{
-      node_id: number;
-      mesh_path: string;
-      outcome: 'diverged' | 'fetch_failed' | 'repo_unusable' | 'pr_head_unfetchable' | 'pr_sha_drift';
-      new_commits?: number;
-      message: string;
-    }>('mesh-sync-warning', (event) => {
+    const unlisten = listen<MeshSyncWarningPayload>('mesh-sync-warning', (event) => {
       addToast('Sync', event.payload.message, 'warning');
     });
     return () => { unlisten.then((fn) => fn()); };
@@ -411,7 +438,7 @@ function App() {
   // node list refetch keeps status badges (Completed / Error) in step with
   // the backend's direct DB writes, which emit no dedicated status event.
   useEffect(() => {
-    const unlistenBlocked = listen<{ node_id: number; issue: number }>(
+    const unlistenBlocked = listen<AutopilotBlockedPayload>(
       'autopilot-blocked',
       (event) => {
         addToast(
@@ -421,7 +448,7 @@ function App() {
         );
       },
     );
-    const unlistenPr = listen<{ node_id: number; issue: number; pr_url: string | null }>(
+    const unlistenPr = listen<AutopilotPrCreatedPayload>(
       'autopilot-pr-created',
       (event) => {
         addToast(
@@ -434,7 +461,7 @@ function App() {
         void useAgentNodeStore.getState().fetchAgentNodes();
       },
     );
-    const unlistenFailed = listen<{ node_id: number; issue: number; reasons: string[] }>(
+    const unlistenFailed = listen<AutopilotFinishFailedPayload>(
       'autopilot-finish-failed',
       (event) => {
         addToast(
@@ -448,7 +475,7 @@ function App() {
     // Launch watcher pressed Enter — the agent has actually started the
     // task (the prefill alone only stages it). No refetch needed: nothing
     // about the node row changed.
-    const unlistenSubmitted = listen<{ node_id: number; issue: number }>(
+    const unlistenSubmitted = listen<AutopilotSubmittedPayload>(
       'autopilot-submitted',
       (event) => {
         addToast(
@@ -461,7 +488,7 @@ function App() {
     // Merged-PR sweep archived a finished node (the store refetches the
     // node list on this same event; here we just tell the user why a card
     // vanished from the grid).
-    const unlistenClosed = listen<{ node_id: number; pr_number: number }>(
+    const unlistenClosed = listen<AutopilotNodeClosedPayload>(
       'autopilot-node-closed',
       (event) => {
         addToast(

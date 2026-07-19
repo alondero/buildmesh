@@ -47,6 +47,7 @@ describe('shortcutCatalog', () => {
     expect(actions.has('arrow-right')).toBe(true);
     expect(actions.has('arrow-up')).toBe(true);
     expect(actions.has('arrow-down')).toBe(true);
+    expect(actions.has('jump-to-next-awaiting')).toBe(true);
   });
 
   it('surfaces terminal-zoom shortcuts (issue #667) wired in Terminal.tsx', () => {
@@ -100,6 +101,7 @@ describe('shortcutCatalog', () => {
       'arrow-right',
       'arrow-up',
       'close-modal',
+      'jump-to-next-awaiting',
       'new-agent',
       'open-cheatsheet',
       'toggle-maximize-grid',

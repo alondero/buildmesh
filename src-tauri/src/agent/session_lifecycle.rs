@@ -89,7 +89,9 @@
 
 use crate::db;
 use crate::models::SessionStatus;
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use ts_rs::TS;
 
 /// Terminal statuses a recovery/error write must never resurrect (issue
 /// #654). Used by `on_resume_failed` and `on_error` — both write `Error`
@@ -98,6 +100,62 @@ use tauri::{AppHandle, Emitter};
 /// can never be brought back to life by a racing orchestrator.
 pub(crate) const FORBIDDEN_TERMINAL: &[SessionStatus] =
     &[SessionStatus::Error, SessionStatus::Archived];
+
+// ---------------------------------------------------------------------------
+// Wire types — Tauri event payloads (issue #161)
+// ---------------------------------------------------------------------------
+//
+// These structs are the source of truth for the three lifecycle event
+// payloads; ts-rs generates matching `*.ts` files into
+// `src/types/generated/` at `cargo test` time. The frontend imports the
+// generated types from `src/stores/agentNodeStore.ts` and `src/App.tsx`
+// — see the CLAUDE.md "Shared Rust↔TS types" rule. The lifecycle module
+// owns these because it owns the *emit*; the Tauri commands in
+// `commands/attention.rs` and `commands/agent.rs` route through the
+// lifecycle, so the struct definitions stay here too.
+//
+// Naming follows the issue #490 wire convention: `session_id` (not
+// `node_id`) for attention events because the existing agent hooks
+// already use that key (CONTEXT.md ambiguity #1).
+
+/// Payload of the `attention-needed` Tauri event. Emitted by
+/// [`AppSessionLifecycleSink::emit_attention_needed`] when a Node Turn
+/// lands; the frontend flips the node status to `awaiting_input`.
+///
+/// Generated to `src/types/generated/AttentionNeededPayload.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AttentionNeededPayload.ts")]
+pub struct AttentionNeededPayload {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+}
+
+/// Payload of the `attention-cleared` Tauri event. Emitted by
+/// [`AppSessionLifecycleSink::emit_attention_cleared`] when a Node Turn
+/// resolves (the user typed, the autoclear safety net observed a
+/// resumed burst, the coordinator drove a prompt, …).
+///
+/// Generated to `src/types/generated/AttentionClearedPayload.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AttentionClearedPayload.ts")]
+pub struct AttentionClearedPayload {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+}
+
+/// Payload of the `resume-failed` Tauri event. Emitted by
+/// [`AppSessionLifecycleSink::emit_resume_failed`] when a `--resume`
+/// attempt fails (PTY reader early-exit heuristic, `auto_resume_agent_nodes`
+/// `spawn_agent_inner` failure). The frontend renders it as a toast.
+///
+/// Generated to `src/types/generated/ResumeFailedPayload.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "ResumeFailedPayload.ts")]
+pub struct ResumeFailedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub error: String,
+}
 
 // ---------------------------------------------------------------------------
 // Trait
@@ -174,22 +232,22 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
     fn emit_attention_needed(&self, node_id: i64) {
         let _ = self
             .app
-            .emit("attention-needed", serde_json::json!({ "session_id": node_id }));
+            .emit("attention-needed", AttentionNeededPayload { session_id: node_id });
     }
 
     fn emit_attention_cleared(&self, node_id: i64) {
         let _ = self
             .app
-            .emit("attention-cleared", serde_json::json!({ "node_id": node_id }));
+            .emit("attention-cleared", AttentionClearedPayload { session_id: node_id });
     }
 
     fn emit_resume_failed(&self, node_id: i64, reason: &str) {
         let _ = self.app.emit(
             "resume-failed",
-            serde_json::json!({
-                "node_id": node_id,
-                "error": reason,
-            }),
+            ResumeFailedPayload {
+                node_id,
+                error: reason.to_string(),
+            },
         );
     }
 }

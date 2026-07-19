@@ -102,6 +102,9 @@ pub async fn create(
         return;
     }
 
-    let _ = app.emit("node-created", serde_json::json!({ "id": node_id }));
+    let _ = app.emit(
+        "node-created",
+        crate::commands::agent::NodeCreatedPayload { id: node_id },
+    );
     let _ = request::write_json(lines, "200 OK", &body).await;
 }

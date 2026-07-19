@@ -232,13 +232,11 @@ describe("NodeList", () => {
   });
 
   it("renders the live backend-derived providers in the spawn picker (issue #815)", async () => {
-    // The live list deliberately OMITS two FALLBACK_PROVIDERS rows
-    // (`agy`, `opencode`) and INCLUDES a Proxied account row that the
-    // fallback never has (`claude:minimax-prod`). If the picker rendered
-    // FALLBACK_PROVIDERS we'd see `agy`/`opencode` rows and no
-    // `claude:minimax-prod` row — both of which this assertion catches.
-    // (`claude` itself appears in both lists; it's kept so the test still
-    // exercises the harness-header native row.)
+    // The live list INCLUDES a Proxied account row the old hard-coded
+    // fallback never had (`claude:minimax-prod`). If the picker rendered a
+    // static fallback list the Proxied row would be missing entirely — this
+    // assertion catches that regression. (`claude` itself appears in the live
+    // list too, so the test still exercises the harness-header native row.)
     mockApi([], {
       providers: [
         {
@@ -253,10 +251,16 @@ describe("NodeList", () => {
           group_key: "claude",
         },
         {
+          // Proxied rows carry the executor harness's color/icon
+          // (`provider_info_for_pairing` in commands/agent.rs attributes
+          // them to the executor adapter, not the proxied provider) — so a
+          // `claude:minimax-prod` row reads as Claude-blue + "A", not
+          // MiniMax-purple + "M". Matches the picker chip's existing
+          // styling.
           id: "claude:minimax-prod",
           label: "MiniMax Pro Account",
-          color: "#6366f1",
-          icon: "M",
+          color: "#1d7cfc",
+          icon: "A",
           resumable: false,
           harness_id: "claude",
           provider_id: "minimax-prod",
@@ -289,7 +293,7 @@ describe("NodeList", () => {
     });
 
     // The Proxied row's live label is what the user sees — not the
-    // raw id, not "Antigravity CLI" / "OpenCode" from FALLBACK_PROVIDERS.
+    // raw id.
     const proxiedRow = await screen.findByTestId("provider-claude:minimax-prod");
     expect(proxiedRow.textContent).toContain("MiniMax Pro Account");
 
@@ -299,10 +303,83 @@ describe("NodeList", () => {
     // Harness grouping (issue #575): native + Proxied share a bucket.
     expect(screen.getByTestId("spawn-group-claude")).toBeTruthy();
   });
+
+  it("NodeRow badge consumes the live listProviders() payload (issue #328)", async () => {
+    // The badge's color/icon come from the live ProviderInfo for the node's
+    // provider id (the same lookup that drives the row label). A regression
+    // that re-introduces a hard-coded map — `PROVIDER_CHIP_COLORS`,
+    // `providerIcon`/`providerColor`, the deleted `FALLBACK_PROVIDERS`, or a
+    // stale cache — would either fail the color match or land on the
+    // fallback `'?' / '#555'`. The fallback case is also pinned below
+    // (unknown provider id → deterministic grey).
+    mockApi(
+      [
+        // Known provider id — must hit the live row, so the chip is the
+        // distinctive `#abcdef` color and the "Z" glyph.
+        { ...makeNode(1, "running"), provider: "liveprovider" },
+        // Unknown provider id (e.g. a since-removed harness profile) —
+        // the chip must render the deterministic fallback `'?' / '#555'`
+        // rather than crashing or showing a stale brand color.
+        { ...makeNode(2, "running"), provider: "ghost-provider" },
+      ],
+      {
+        providers: [
+          {
+            id: "liveprovider",
+            label: "Live Provider",
+            color: "#abcdef",
+            icon: "Z",
+            resumable: false,
+            harness_id: "liveprovider",
+            provider_id: null,
+            is_proxied: false,
+            group_key: "liveprovider",
+          },
+        ],
+      },
+    );
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    // Wait for both the node list AND the live listProviders() payload —
+    // the badge only picks up `meta.color`/`meta.icon` after the fetch
+    // resolves, so polling just `node-1` would race the badge's first
+    // render (and trip the `'?' / '#555'` fallback path accidentally).
+    await waitFor(() => {
+      expect(screen.getByTestId("node-1").textContent).toContain("Live Provider");
+    });
+
+    // Live row: chip background is the live hex (jsdom normalises hex → rgb())
+    // and the glyph is the live single-char icon.
+    const liveAvatar = screen.getByTestId("node-1").querySelector(
+      '[data-testid="node-avatar"]',
+    ) as HTMLElement;
+    expect(liveAvatar).toBeTruthy();
+    expect(liveAvatar.style.background).toBe(hexToRgbString("#abcdef"));
+    expect(liveAvatar.textContent).toBe("Z");
+
+    // Unknown row: chip is the deterministic fallback. Pulling from the same
+    // avatar selector (rather than `firstElementChild.textContent`) keeps
+    // the assertion robust to a future wrapper element.
+    const ghostAvatar = screen.getByTestId("node-2").querySelector(
+      '[data-testid="node-avatar"]',
+    ) as HTMLElement;
+    expect(ghostAvatar).toBeTruthy();
+    expect(ghostAvatar.style.background).toBe(hexToRgbString("#555"));
+    expect(ghostAvatar.textContent).toBe("?");
+  });
 });
 
 // The 3px status rail is the last direct child of a NodeRow button
-// (NodeList.tsx:484-492) — avatar, inner text block, rail. Pull the
+// (NodeList.tsx:486-494) — avatar, inner text block, rail. Pull the
 // inline `background` style off it so a regression that re-hardcodes
 // STATUS_META's colours fails the assertion.
 function railHex(row: HTMLElement): string {
