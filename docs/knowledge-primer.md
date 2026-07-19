@@ -127,7 +127,7 @@ Claude Code ends its turn when it launches background work (`run_in_background` 
 ## Agent Node Management
 
 ### Agent Node ID Capture
-The PTY reader thread sniffs `session-id:` or `session_id:` from agent output and auto-saves it to the DB for `--resume` support. Don't replicate this — it's backend-only.
+Session IDs are **assigned, not captured**, for providers we control (Anthropic, OpenCode): the orchestrator mints a UUID up front, writes it to `agent_nodes.cli_session_id` *before* launch, and passes it to the CLI via `--session-id <uuid>` (`agent/spawn.rs`, `SessionIdMode::Assign`; ADR 0024). The PTY reader thread's `session-id:` / `session_id:` sniff (`session_capture.rs`) now runs **only** for *self-assigning* providers (Codex, Antigravity) where we don't control the ID — gated by `reader_should_capture_session_id` so there is exactly one writer per spawn (issue #651). Don't replicate either path — both are backend-only. `CLAUDE_CODE_SESSION_ID` is deliberately **not** used: Claude Code sets its `CLAUDE_CODE_*` vars *downward* into its own subprocesses, so a parent that spawns `claude` can't read it, and for Claude we already know the ID (we assigned it). See ADR 0024.
 
 ### Turn Counting and Node Naming
 `session_naming.rs` captures PTY output and auto-names agent nodes via LLM summarisation (slug-based, e.g. `fix-auth-flow`). Buffering is gated: `on_output` only starts collecting after the first `on_turn` (first idle-prompt webhook) fires, so the Claude Code startup chrome — banner, "Bypass Permissions" warning, plugin/skill listing — is discarded before it can reach the LLM. The rename runs async one turn later, against clean post-startup content.
