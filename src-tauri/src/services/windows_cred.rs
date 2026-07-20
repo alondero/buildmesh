@@ -39,6 +39,7 @@ extern "system" {
         flags: u32,
         cred: *mut *mut CredentialW,
     ) -> i32;
+    #[allow(dead_code)] // used by `persist_token_response` in services::opencode_oauth (issue #956 follow-up)
     fn CredWriteW(cred: *const CredentialW, flags: u32) -> i32;
     fn CredDeleteW(target: *const u16, typ: u32, flags: u32) -> i32;
     fn CredFree(buf: *mut core::ffi::c_void);
@@ -58,6 +59,7 @@ const CRED_TYPE_GENERIC: u32 = 1;
 /// sees the credential. The other two values are `CRED_PERSIST_SESSION` (lost
 /// at logoff, never what an OAuth token wants) and `CRED_PERSIST_ENTERPRISE`
 /// (roams across domain-joined machines, requires policy we don't ship).
+#[allow(dead_code)] // used by `persist_token_response` in services::opencode_oauth (issue #956 follow-up)
 const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
 /// `CredDeleteW` follows up a FALSE return with this LAST_ERROR when the
 /// target wasn't present. We collapse it to `Ok(())` inside `delete` so
@@ -105,6 +107,7 @@ pub(crate) fn read(target: &str) -> Result<Vec<u8>, UsageError> {
 /// detail view shows the same string as the target column; clearing it leaves
 /// the row visually anonymous and breaks management in `control /name
 /// Microsoft.CredentialManager`.
+#[allow(dead_code)] // used by `persist_token_response` in services::opencode_oauth (issue #956 follow-up)
 pub(crate) fn write(target: &str, blob: &[u8]) -> Result<(), UsageError> {
     let mut target_wide: Vec<u16> = std::ffi::OsStr::new(target)
         .encode_wide()
