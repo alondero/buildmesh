@@ -1039,17 +1039,22 @@ fn parse_opencode_billing_response(
 ) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
     let resp: OpenCodeBillingResp =
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+    // A real window carries both `label` and `usedPercent` — a missing
+    // `usedPercent` is the "shape failure" the degradation chain (#957
+    // sub-spec point 4) routes to the SQLite fallback. We filter rather
+    // than error out so a single malformed entry doesn't poison the whole
+    // reply; if nothing survives the filter, the empty-windows detail below
+    // surfaces to the user.
     let windows: Vec<UsageWindow> = resp
         .windows
         .into_iter()
-        .map(|w| UsageWindow {
-            // Defensive default — a window without a `label` is rare but
-            // possible; the 5-hour label matches the most common "partial
-            // reply" case so the row still renders meaningfully. A future
-            // refactor can tighten this if the upstream shape stabilises.
-            label: w.label.unwrap_or_else(|| "5-hour".to_string()),
-            used_percent: w.used_percent,
-            resets_at: w.resets_at,
+        .filter_map(|w| match (w.label, w.used_percent) {
+            (Some(label), Some(used_percent)) => Some(UsageWindow {
+                label,
+                used_percent: Some(used_percent),
+                resets_at: w.resets_at,
+            }),
+            _ => None,
         })
         .collect();
     let detail = if windows.is_empty() {
@@ -1085,9 +1090,9 @@ fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
     // Live path first — reads the Buildmesh-owned OAuth credential (#956) and
     // POSTs `billing.get` to SolidStart. The `Result::ok` collapse means any
     // error (NoCredential, Shape, transport) is treated identically: fall
-    // through to the SQLite path. The `error.is_none()` check on the returned
-    // ProviderUsage catches HTTP-level failures (401, 5xx, shape mismatch)
-    // so the same fall-through applies even when the credential was read OK.
+    // through to the SQLite path. The returned ProviderUsage carries an
+    // `error` for HTTP-level failures (401, 5xx, shape mismatch) which
+    // `choose_opencode_usage` checks below.
     let live = read_opencode_console_credential().ok().map(|(token, workspace_id)| {
         fetch_usage(
             "opencode",
@@ -1100,12 +1105,6 @@ fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
             parse_opencode_billing_response,
         )
     });
-
-    if let Some(ref usage) = live {
-        if usage.error.is_none() {
-            return usage.clone();
-        }
-    }
 
     // Offline SQLite fallback (#953). Same auth.json gate as before — a user
     // mid-OAuth (live path failed but auth.json present) still gets real
@@ -1126,11 +1125,8 @@ fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
         },
         Err(e) => unavailable("opencode", format!("Failed to query opencode.db: {}", e)),
     };
-    // Final assembly — if a live fetch was attempted AND failed (its `error`
-    // was set), the SQLite result is returned but we should preserve the
-    // live failure reason in `detail` so the user can see something useful
-    // happened. This is the only place `live` is referenced after the
-    // initial early-return.
+    // Pure assembly pins the degradation contract: live wins when it returns
+    // a usable envelope, anything else falls through to SQLite.
     choose_opencode_usage(live.as_ref(), sqlite)
 }
 
@@ -2218,6 +2214,42 @@ mod tests {
         // mysteriously empty meter. Mirrors the `parse_agy_models_empty_reports_detail`
         // contract so the Usage tab copy stays consistent across providers.
         let json = r#"{"windows": []}"#;
+        let (windows, detail) = parse_opencode_billing_response(json).unwrap();
+        assert!(windows.is_empty());
+        assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
+    }
+
+    #[test]
+    fn parse_opencode_billing_response_filters_malformed_windows() {
+        // Per the stricter shape contract (issue #957 sub-spec point 4), a
+        // window missing `usedPercent` is a shape failure — it MUST NOT
+        // render as a "5-hour: (no data)" row, which is the silent-blank
+        // gauge the spec sought to prevent. Such windows are filtered out
+        // and any surviving valid windows still parse.
+        let json = r#"{
+            "windows": [
+                {"label": "5-hour", "usedPercent": 25.0, "resetsAt": "2026-07-20T22:00:00Z"},
+                {"label": "no-data-window"},
+                {"usedPercent": 50.0, "resetsAt": "2026-07-22T00:00:00Z"},
+                {}
+            ]
+        }"#;
+        let (windows, detail) = parse_opencode_billing_response(json).unwrap();
+        assert_eq!(windows.len(), 1, "only the fully-formed window survives");
+        assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[0].used_percent, Some(25.0));
+        assert_eq!(detail, None);
+    }
+
+    #[test]
+    fn parse_opencode_billing_response_all_windows_malformed_reports_detail() {
+        // Edge case: every window is malformed. The parser succeeds (the
+        // shape is well-formed), the empty-filtered result surfaces the
+        // "no active quotas" detail. The SQLite fallback is NOT triggered
+        // here because the shape contract is satisfied — empty + detail is
+        // a valid "no quotas configured" reply, distinct from "shape
+        // failure" (which would be `{"foo":"bar"}`).
+        let json = r#"{"windows": [{"label": "junk"}, {"usedPercent": null}]}"#;
         let (windows, detail) = parse_opencode_billing_response(json).unwrap();
         assert!(windows.is_empty());
         assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
