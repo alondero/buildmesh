@@ -729,6 +729,7 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "agy",       name: "Google / Antigravity",  self_auth: true  },
     BuiltInProviderAccount { id: "grok",      name: "xAI / Grok",           self_auth: true  },
     BuiltInProviderAccount { id: "kimi",      name: "Moonshot / Kimi Code", self_auth: true  },
+    BuiltInProviderAccount { id: "opencode",  name: "OpenCode",             self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
 ];
@@ -930,7 +931,7 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
                 ),
                 _ => (None, ModelTiers::default()),
             };
-            // Self-auth built-ins (anthropic/codex/agy/grok/kimi) ship enabled —
+            // Self-auth built-ins (anthropic/codex/agy/grok/kimi/opencode) ship enabled —
             // the user has nothing to configure (their login lives in the
             // harness's own config dir, e.g. `~/.kimi/config.toml`). The
             // pre-#918 "kimi is opt-in" special case is gone: that flag existed
@@ -2397,9 +2398,9 @@ mod tests {
     #[test]
     fn default_provider_accounts_cover_the_builtin_providers() {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "kimi", "minimax", "openrouter"]);
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "kimi", "opencode", "minimax", "openrouter"]);
         // MiniMax + OpenRouter are the pay-as-you-go, Claude-compatible
-        // exemplars; the self-auth built-ins (anthropic/codex/agy/grok/kimi) are
+        // exemplars; the self-auth built-ins (anthropic/codex/agy/grok/kimi/opencode) are
         // plans and not Claude-compatible. Kimi Code (wayfinder #918) moved
         // from the Claude-compatible bucket to self-auth — Kimi Code's CLI
         // handles its own auth via `~/.kimi/config.toml`.
@@ -2412,6 +2413,7 @@ mod tests {
         assert!(!by_id("agy").claude_compatible);
         assert!(!by_id("grok").claude_compatible);
         assert!(!by_id("kimi").claude_compatible);
+        assert!(!by_id("opencode").claude_compatible);
         // MiniMax ships the cwrap launcher's base URL + per-tier map so a key is all
         // the user needs to add. OpenRouter ships its API base URL + empty
         // per-tier map so the user picks provider/model per slot. Kimi Code is
@@ -2431,6 +2433,7 @@ mod tests {
         assert!(by_id("agy").enabled);
         assert!(by_id("grok").enabled);
         assert!(by_id("kimi").enabled);
+        assert!(by_id("opencode").enabled);
         assert!(by_id("openrouter").enabled);
     }
 
@@ -2469,12 +2472,12 @@ mod tests {
             custom_account("deepseek"),
         ];
         let merged = merge_provider_accounts(defaults, stored);
-        // Seven built-ins (anthropic/codex/agy/grok/minimax/kimi/openrouter), no
+        // Eight built-ins (anthropic/codex/agy/grok/opencode/minimax/kimi/openrouter), no
         // duplicate minimax, plus the custom one.
         assert_eq!(merged.iter().filter(|a| a.id == "minimax").count(), 1);
         assert!(!merged.iter().find(|a| a.id == "minimax").unwrap().enabled);
         assert!(merged.iter().any(|a| a.id == "deepseek"));
-        assert_eq!(merged.len(), 8);
+        assert_eq!(merged.len(), 9);
     }
 
     #[test]
