@@ -450,4 +450,91 @@ mod tests {
         crate::db::set_lan_exposure_enabled_inner(&conn, false).unwrap();
         assert!(!crate::db::lan_exposure_enabled_inner(&conn).unwrap());
     }
+
+    /// Issue #37 retirement — vestigial-column compat + wire-shape pin.
+    ///
+    /// A user DB created at v28 carries a `pr_url TEXT` column on
+    /// `agent_nodes` that the captured-PR feature used to write. The
+    /// retirement strategy is "drop the field, keep the column vestigial"
+    /// (no destructive migration; the `agent_nodes.pr_url` column is left
+    /// physically on disk and ignored), so a v28-shaped DB must remain
+    /// queryable through the post-retirement `AgentNode` projection —
+    /// AND the `AgentNode` wire shape must omit `pr_url`, so historical
+    /// false-positive URLs cannot leak back to the frontend over IPC.
+    ///
+    /// Before the retirement, this test fails on the wire-shape assertion
+    /// (`AgentNode` still serializes `pr_url: null`). After the retirement,
+    /// it pins both invariants:
+    ///   - The JOIN through `list_coordinator_node_rows_inner` reads the
+    ///     row successfully even though the on-disk table carries a column
+    ///     not in the projection.
+    ///   - Serializing the returned `AgentNode` does NOT include a
+    ///     `pr_url` key.
+    #[test]
+    fn legacy_v28_pr_url_column_is_ignored_by_agent_node_wire_shape() {
+        let conn = Connection::open_in_memory().unwrap();
+        // v28-shaped schema. The `agent_nodes` table carries the legacy
+        // `pr_url TEXT` column that the captured-PR feature used to write.
+        // The projection's read code (which omits `pr_url`) must still
+        // succeed: the SELECT lists the projection's columns by name, so
+        // a table carrying an extra column simply isn't queried for it.
+        conn.execute_batch(
+            "
+            CREATE TABLE meshes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL REFERENCES meshes(id),
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                env TEXT NOT NULL DEFAULT 'windows',
+                provider TEXT NOT NULL DEFAULT 'anthropic',
+                status TEXT NOT NULL DEFAULT 'idle',
+                cli_session_id TEXT,
+                worktree_name TEXT,
+                use_worktree INTEGER NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                source_issue INTEGER,
+                source_pr INTEGER,
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT,
+                source_pr_pinned_sha TEXT,
+                status_changed_at TEXT,
+                pr_url TEXT
+            );
+            INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/m');
+            -- Pre-existing row carrying a legacy captured URL — exactly the
+            -- false-positive pattern the user reported. The assertion below
+            -- proves this value cannot leak across the wire boundary.
+            INSERT INTO agent_nodes (mesh_id, name, path, status, pr_url)
+                VALUES (1, 'legacy', '/m/n', 'idle',
+                        'https://github.com/other-org/other-repo/pull/9999');
+            ",
+        )
+        .unwrap();
+
+        let rows = crate::db::list_coordinator_node_rows_inner(&conn).unwrap();
+        assert_eq!(rows.len(), 1, "v28-shaped DB must yield exactly one row");
+        let (node, mesh_name, _status_changed_at) = rows.into_iter().next().unwrap();
+
+        assert_eq!(mesh_name, "m", "JOIN-read mesh name must survive");
+        assert_eq!(node.name, "legacy", "row must read under post-retirement projection");
+        assert_eq!(node.id, 1, "id column must read");
+
+        // The wire shape must omit `pr_url`, even though the underlying row
+        // carries one. This is the regression pin: a future PR that
+        // re-adds `pr_url` to `AgentNode` (and re-introduces the false-
+        // positive chip) trips this assertion.
+        let value = serde_json::to_value(&node).unwrap();
+        assert!(
+            value.get("pr_url").is_none(),
+            "AgentNode wire shape must not expose pr_url (got: {value})"
+        );
+    }
 }

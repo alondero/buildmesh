@@ -52,8 +52,8 @@ impl From<rusqlite::Error> for AgentNodeError {
 ///
 /// `source_pr` and `source_pr_pinned_sha` are **structurally** rejected here
 /// (asserted at function entry) so a future caller that mistakenly passes
-/// `Some(_)` for either — an importer, a resume-by-URL path, a migration
-/// script — fails loudly at the boundary rather than silently writing a
+/// `Some(_)` for either — an importer, a migration script — fails loudly
+/// at the boundary rather than silently writing a
 /// `source_pr` onto a node that didn't actually come from a PR. The PR-spawn
 /// entry point is [`create_with_source_pr_fork`], which is the only function
 /// that should ever pass `Some(_)` for these fields. Pinning test lives in
@@ -817,8 +817,8 @@ mod tests {
     // `create_pending` are the only entry points non-PR spawns go through
     // (issue-spawn, handover, generic mobile spawn, Tauri hand-spawn);
     // `spawn_agent_inner` uses `node.source_pr.is_some()` to decide whether
-    // to take the worktree-adoption path. A future caller — resume-by-URL
-    // (#37), an importer, a migration script — could silently write a
+    // to take the worktree-adoption path. A future caller — an importer,
+    // a migration script — could silently write a
     // `source_pr` onto a node that didn't actually come from a PR, and the
     // user would see a confusing "could not fetch PR head ref" warning on
     // a node spawned from a regular issue.
@@ -982,8 +982,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "source_pr=Some(_)")]
     fn create_rejects_source_pr_some() {
-        // A future caller — resume-by-URL, importer, migration script —
-        // tries to set `source_pr` on a node that didn't actually come
+        // A future caller — importer, migration script — tries to set
+        // `source_pr` on a node that didn't actually come
         // from a PR. The wrapper must refuse at the boundary rather than
         // silently persist it. The assertion fires before any DB call, so
         // we don't even need `ensure_db_init()` here — a missing DB is the

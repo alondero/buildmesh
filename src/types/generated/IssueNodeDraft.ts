@@ -48,8 +48,8 @@ provider: string, status: SessionStatus, cli_session_id: string | null, worktree
  * issue-spawned and hand-spawned nodes. When set, `spawn_agent_inner`
  * fetches `origin/<head_ref>` and uses it as the worktree's `base_ref`
  * instead of the mesh's `base_ref` (relates to #36 worktree adoption).
- * Mirrors the `source_issue` field so the same resume-by-URL plumbing
- * (issue #37) can target both spawn sources.
+ * Mirrors the `source_issue` field so the same plumbing can target
+ * both spawn sources.
  */
 source_pr: number | null, 
 /**
@@ -81,21 +81,4 @@ head_repo_clone_url: string | null,
  * failing — same fail-open semantics as the `pr_head_unfetchable`
  * fallback introduced in #420.
  */
-source_pr_pinned_sha: string | null, 
-/**
- * GitHub PR URL the agent opened during this session (issue #37).
- * Captured from PTY output by `agent::pr_url_detector` when the agent
- * prints a `github.com/<owner>/<repo>/pull/<n>` URL (typically from
- * `gh pr create`). Distinct from `source_pr` (the PR that *spawned*
- * this node): a hand-spawned or issue-spawned node that the agent
- * later opens a PR for gets its `pr_url` populated as it works.
- * Surfaced as a clickable chip in `GridNodeHeader` and used as a
- * fallback resume anchor by `auto_resume_agent_nodes` when
- * `cli_session_id` is missing or stale — the PR's branch + head SHA
- * carry enough context for a fresh `--resume` to find prior work.
- * `None` until the agent emits a matching URL; never overwritten
- * once set (first PR wins; a later re-PR into a different URL on
- * the same node is treated as "the same work, new home", which is
- * the user-recoverable case, not a silent overwrite).
- */
-pr_url: string | null, position: number, created_at: string, };
+source_pr_pinned_sha: string | null, position: number, created_at: string, };
