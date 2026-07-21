@@ -11,6 +11,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+// `tracing` is the codebase-wide diagnostic log channel (`warm_pool`,
+// `agent_node`, `autopilot` all use `tracing::warn!` for non-fatal side
+// channels); `eprintln!` would surface to the user's terminal instead.
+use tracing;
 // Credential Manager surface — Windows-only. Re-exported at the top so the
 // existing `windows_cred::read(...)` call sites below stay unchanged after
 // the inline module was extracted to `services::windows_cred` for #956.
@@ -784,6 +788,10 @@ struct GrokVal {
 }
 
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)] // fields are populated by serde during JSON deserialization
+                    // but the grok billing parser (parse_grok_response_*) doesn't
+                    // surface them yet — kept in the struct so a future ticket
+                    // can render "resets <end>" without re-parsing the response.
 struct GrokPeriod {
     #[serde(rename = "type")]
     period_type: Option<String>,
@@ -976,17 +984,17 @@ fn calculate_opencode_windows_impl(conn: &rusqlite::Connection) -> Result<Vec<Us
     Ok(vec![
         UsageWindow {
             label: "5-hour".to_string(),
-            used_percent: Some(pct_5h.min(100.0).max(0.0)),
+            used_percent: Some(pct_5h.clamp(0.0, 100.0)),
             resets_at: None,
         },
         UsageWindow {
             label: "Weekly".to_string(),
-            used_percent: Some(pct_weekly.min(100.0).max(0.0)),
+            used_percent: Some(pct_weekly.clamp(0.0, 100.0)),
             resets_at: None,
         },
         UsageWindow {
             label: "Monthly".to_string(),
-            used_percent: Some(pct_monthly.min(100.0).max(0.0)),
+            used_percent: Some(pct_monthly.clamp(0.0, 100.0)),
             resets_at: None,
         },
     ])
@@ -1101,6 +1109,35 @@ fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
     let opencode_dir = home.join(".local").join("share").join("opencode");
     let auth_path = opencode_dir.join("auth.json");
     let db_path = opencode_dir.join("opencode.db");
+
+    // Refresh seam (issue #970): if the cached credential is expired OR the
+    // cached live-fetch result is older than REFRESH_TTL, mint a fresh
+    // bearer via `opencode_oauth::try_refresh()` BEFORE the `_server
+    // billing.get` HTTP call so a near-expiry token doesn't 401 the fetch.
+    //
+    // Failure mode: any refresh error (no refresh_token in blob, network
+    // down, server shape change) is logged and the seam continues — the
+    // existing live path still runs and will surface a 401 the user can
+    // act on, and the SQLite fallback (#953) below catches the worst case.
+    //
+    // Success path: the new bundle is persisted inside `try_refresh`; the
+    // cache invalidation here guarantees the next [`get_cached_usage`] can't
+    // return an envelope minted with the old (now-stale) bearer.
+    if let Ok(cred) = read_opencode_console_credential_full() {
+        let cached_age = {
+            let guard = USAGE_CACHE.lock().unwrap();
+            guard
+                .get("opencode")
+                .map(|(instant, _)| instant.elapsed())
+        };
+        let now_unix = chrono::Utc::now().timestamp();
+        if opencode_needs_refresh(&cred, cached_age, now_unix) {
+            match crate::services::opencode_oauth::try_refresh() {
+                Ok(_) => invalidate_provider_cache("opencode"),
+                Err(e) => tracing::warn!("opencode refresh failed: {e}"),
+            }
+        }
+    }
 
     // Live path first — reads the Buildmesh-owned OAuth credential (#956) and
     // POSTs `billing.get` to SolidStart. The `Result::ok` collapse means any
@@ -1237,35 +1274,17 @@ fn read_agy_token() -> Result<String, UsageError> {
     ))
 }
 
-/// Reads the Buildmesh-owned OpenCode Console credential from the OS
-/// credential store. Windows-only for now (mirrors the agy precedent —
-/// macOS Keychain / Linux Secret Service is explicitly out of scope for #956
-/// and belongs to a future ticket). On non-Windows the live path simply
-/// reports `NoCredential` and the SQLite fallback (#953) runs.
-///
-/// The DTO + parser live in [`crate::services::opencode_oauth`] — extracted
-/// out of `usage` for #956 so the OAuth dance and the live fetcher don't
-/// share a private helper one of them silently drifts from.
-#[cfg(windows)]
-fn read_opencode_console_credential() -> Result<(String, String), UsageError> {
-    crate::services::opencode_oauth::parse_opencode_console_credential(&windows_cred::read(
-        OPENCODE_CONSOLE_CRED_TARGET,
-    )?)
-}
-
-#[cfg(not(windows))]
-fn read_opencode_console_credential() -> Result<(String, String), UsageError> {
-    Err(UsageError::NoCredential(
-        "OpenCode Console usage is only available on Windows".to_string(),
-    ))
-}
+/// (The narrow `read_opencode_console_credential` helper that previously
+/// lived here was retired when the live fetch moved to
+/// [`opencode_live_request_parts`] for issue #972; the full-DTO sibling
+/// below covers both the refresh seam (#970) and the live fetch.)
 
 /// Reads the Buildmesh-owned OpenCode Console credential as the full DTO so
 /// callers can consume the optional `server_id` (issue #972) — and so the
-/// upcoming refresh seam (#970) can re-use the same read path to inspect
-/// `refresh_token` + `expires_at`. Keeps the narrow tuple-returning
-/// [`read_opencode_console_credential`] for call sites that only need the
-/// live RPC fields.
+/// refresh seam (#970) can re-use the same read path to inspect
+/// `refresh_token` + `expires_at`. The full DTO is now the only read
+/// path: the previous narrow tuple-returning helper was retired when the
+/// live fetch moved to [`opencode_live_request_parts`] for #972.
 #[cfg(windows)]
 fn read_opencode_console_credential_full() -> Result<OpenCodeConsoleCred, UsageError> {
     crate::services::opencode_oauth::parse_opencode_console_full_credential(&windows_cred::read(
@@ -1278,6 +1297,32 @@ fn read_opencode_console_credential_full() -> Result<OpenCodeConsoleCred, UsageE
     Err(UsageError::NoCredential(
         "OpenCode Console usage is only available on Windows".to_string(),
     ))
+}
+
+/// Refresh-seam gate (issue #970): pure function deciding whether
+/// `opencode_usage_impl` should call `try_refresh()` before its live `_server
+/// billing.get` HTTP fetch. True when EITHER:
+///
+///   1. The credential's `expires_at` is in the past — a 401 is imminent,
+///      so mint a new bearer proactively. Delegates to
+///      `opencode_oauth::cred_is_expired`, which treats missing/malformed
+///      `expires_at` as `false` so the live fetch still gets a chance.
+///   2. The cached live-fetch result is older than
+///      `opencode_oauth::REFRESH_TTL` — the credential was fresh at fetch
+///      time but is plausibly near expiry by now (defense-in-depth against
+///      the credential blob's `expires_at` drifting from the server's view).
+///
+/// Pure (no I/O) so the seam is unit-testable without a Windows Credential
+/// Manager fixture. Extracted from `opencode_usage_impl` for that reason —
+/// the seam itself is mostly I/O orchestration around this decision.
+fn opencode_needs_refresh(
+    cred: &OpenCodeConsoleCred,
+    cached_age: Option<Duration>,
+    now_unix: i64,
+) -> bool {
+    use crate::services::opencode_oauth;
+    opencode_oauth::cred_is_expired(cred, now_unix)
+        || cached_age.is_some_and(|age| age > opencode_oauth::REFRESH_TTL)
 }
 
 /// Resolves the value the live `_server billing.get` probe should send in
@@ -1563,6 +1608,17 @@ pub fn set_cached_usage(provider: &str, usage: ProviderUsage) {
 pub fn invalidate_cache() {
     let mut guard = USAGE_CACHE.lock().unwrap();
     guard.clear();
+}
+
+/// Targeted single-provider cache invalidation (issue #970). The refresh
+/// seam in `opencode_usage_impl` calls this on a successful `try_refresh()`
+/// so the next [`get_cached_usage`] call cannot return a stale envelope
+/// minted before the bearer was rotated. Distinct from [`invalidate_cache`]
+/// (which clears every provider) so a refresh on one provider doesn't force
+/// re-fetching unrelated providers on the next usage-panel poll.
+pub fn invalidate_provider_cache(provider: &str) {
+    let mut guard = USAGE_CACHE.lock().unwrap();
+    guard.remove(provider);
 }
 
 #[cfg(test)]
@@ -2514,5 +2570,89 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    // ── Refresh seam gate (issue #970) ──────────────────────────────────
+    //
+    // The seam in `opencode_usage_impl` runs `try_refresh()` before the live
+    // `_server billing.get` HTTP call when EITHER:
+    //   - the cached credential's `expires_at` is in the past, OR
+    //   - the cached live-fetch result is older than REFRESH_TTL (the credential
+    //     was fresh at fetch time but is plausibly near expiry by now).
+    //
+    // These tests pin both halves of the gate without needing to mock
+    // Windows Credential Manager — `opencode_needs_refresh` is a pure
+    // function over the inputs we already have.
+
+    #[test]
+    fn opencode_needs_refresh_when_credential_is_expired() {
+        // The primary trigger: `expires_at` is in the past → MUST refresh
+        // regardless of cache age. A credential that's already past expiry
+        // is going to 401 the next live fetch, so we mint a new bearer
+        // proactively.
+        let cred = OpenCodeConsoleCred {
+            expires_at: Some("2020-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        assert!(opencode_needs_refresh(&cred, None, 1_700_000_000));
+        assert!(opencode_needs_refresh(&cred, Some(Duration::from_secs(0)), 1_700_000_000));
+    }
+
+    #[test]
+    fn opencode_needs_refresh_when_cache_is_stale_but_credential_claims_fresh() {
+        // The belt-and-braces trigger: `expires_at` claims the token is
+        // still valid, but the cached live fetch is older than REFRESH_TL.
+        // Token might have been near expiry at fetch time and now IS
+        // expired; refreshing proactively avoids the 401 round-trip.
+        let cred = OpenCodeConsoleCred {
+            expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        let now = 1_700_000_000;
+        assert!(
+            opencode_needs_refresh(&cred, Some(Duration::from_secs(301)), now),
+            "cache older than REFRESH_TL must trigger refresh"
+        );
+        assert!(
+            !opencode_needs_refresh(&cred, Some(Duration::from_secs(299)), now),
+            "cache within REFRESH_TL must NOT trigger refresh"
+        );
+    }
+
+    #[test]
+    fn opencode_needs_refresh_no_op_when_fresh_and_no_cache() {
+        // Two ways to skip the refresh: a fresh credential with no cached
+        // fetch yet (first call to opencode_usage_impl this process), AND
+        // a fresh credential with a recent cached fetch. Both must NOT
+        // trigger refresh so we don't burn a /auth/device/token round-trip
+        // on every usage panel poll.
+        let cred = OpenCodeConsoleCred {
+            expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        assert!(!opencode_needs_refresh(&cred, None, 1_700_000_000));
+        assert!(!opencode_needs_refresh(&cred, Some(Duration::from_secs(0)), 1_700_000_000));
+        assert!(!opencode_needs_refresh(&cred, Some(Duration::from_secs(300)), 1_700_000_000));
+    }
+
+    #[test]
+    fn opencode_needs_refresh_handles_missing_or_malformed_expires_at() {
+        // A credential without `expires_at` (legacy or pre-#956 blob) is
+        // treated as "unknown" by `cred_is_expired` (returns false) so the
+        // cache-age half of the gate is the only refresh trigger. Same for
+        // a malformed timestamp — we don't want a parsing error to fire a
+        // refresh that we then can't use.
+        let missing = OpenCodeConsoleCred::default();
+        let malformed = OpenCodeConsoleCred {
+            expires_at: Some("not a date".to_string()),
+            ..Default::default()
+        };
+        let now = 1_700_000_000;
+        // Missing expires_at + no cache → no refresh (let the live fetch try).
+        assert!(!opencode_needs_refresh(&missing, None, now));
+        // Missing expires_at + stale cache → refresh (cache age wins).
+        assert!(opencode_needs_refresh(&missing, Some(Duration::from_secs(600)), now));
+        // Malformed expires_at + no cache → no refresh.
+        assert!(!opencode_needs_refresh(&malformed, None, now));
     }
 }
