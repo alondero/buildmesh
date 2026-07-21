@@ -80,6 +80,21 @@ describe('shortcutCatalog', () => {
     expect(toggle?.macKey).toBe('⌘+G');
   });
 
+  it('surfaces the view-mode cycle (ticket #987) with the Alt/⌥-carrying binding', () => {
+    // Ctrl+Alt+G / Cmd+Alt+G — the keyboard peer to the ViewModeSwitcher. The
+    // extra Alt/⌥ modifier is what keeps it clear of Alt+G / ⌘+G (the Single
+    // solo toggle), so pin the labels here against a regression that drops the
+    // modifier and re-collides the two grid bindings.
+    const cycle = SHORTCUT_CATALOG.find(s => s.action === 'cycle-grid-modes');
+    expect(cycle).toBeDefined();
+    expect(cycle?.group).toBe('grid');
+    expect(cycle?.winKey).toBe('Ctrl+Alt+G');
+    expect(cycle?.macKey).toBe('⌘+⌥+G');
+    // Deliberately not a splash entry — the splash is the pre-spawn empty-state
+    // hint, where there are no nodes to cycle Mesh/Pinned/All over.
+    expect(cycle?.splash).toBeUndefined();
+  });
+
   it('does not advertise the obsolete Ctrl+Alt+D shortcut the README once phantom-documented', () => {
     // The keyboard-shortcut-conventions memory notes: "drift here has
     // shipped at least once (Ctrl+Alt+D was phantom-documented)".

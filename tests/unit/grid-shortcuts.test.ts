@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { toggleGridMaximize } from '../../src/lib/gridShortcuts';
+import { toggleGridMaximize, cycleGridMode } from '../../src/lib/gridShortcuts';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
@@ -99,5 +99,51 @@ describe('toggleGridMaximize (#668 Alt+G / Cmd+G; View Modes wayfinder #982)', (
     toggleGridMaximize();
     toggleGridMaximize();
     expect(useAgentNodeStore.getState().activeNodeId).toBe(NODE.id);
+  });
+});
+
+describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
+  beforeEach(() => {
+    // The cycle is a pure store rotation — it never reads the node arrays, so
+    // agentNodes stays empty. Only the UI store's mode state matters.
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+  });
+
+  it('advances Mesh → Pinned → All → Mesh in switcher order', () => {
+    cycleGridMode();
+    expect(useUIStore.getState().viewMode).toBe('pinned');
+    cycleGridMode();
+    expect(useUIStore.getState().viewMode).toBe('all');
+    cycleGridMode();
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+  });
+
+  it('re-enters the cycle at lastNonSingleMode when currently in Single', () => {
+    // From a solo view, the first Ctrl+Alt+G lands you back where you were
+    // (the mode Single was entered from), not skipping past it — so it does
+    // not double up with the *next* mode on the very first press.
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'pinned' });
+    cycleGridMode();
+    expect(useUIStore.getState().viewMode).toBe('pinned');
+    // The subsequent press advances from there.
+    cycleGridMode();
+    expect(useUIStore.getState().viewMode).toBe('all');
+  });
+
+  it('records each grid mode it lands on as the Single restore target', () => {
+    // Every non-single mode set updates lastNonSingleMode (uiStore.setViewMode),
+    // so a later Alt+G solo/exit returns to wherever the cycle left the user.
+    cycleGridMode(); // mesh → pinned
+    expect(useUIStore.getState().lastNonSingleMode).toBe('pinned');
+    cycleGridMode(); // pinned → all
+    expect(useUIStore.getState().lastNonSingleMode).toBe('all');
+  });
+
+  it('never lands on Single — the solo toggle owns that gesture (Alt+G)', () => {
+    for (let i = 0; i < 6; i++) {
+      cycleGridMode();
+      expect(useUIStore.getState().viewMode).not.toBe('single');
+    }
   });
 });

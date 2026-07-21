@@ -1,5 +1,6 @@
 import { useAgentNodeStore } from '../stores/agentNodeStore';
 import { useUIStore } from '../stores/uiStore';
+import type { NonSingleViewMode } from '../stores/uiStore';
 
 /**
  * Toggle the on-screen agent-node grid between grid view and Single mode
@@ -33,4 +34,32 @@ export function toggleGridMaximize(): void {
   const activeNode = useAgentNodeStore.getState().getActiveNode();
   if (!activeNode) return;
   ui.setViewMode('single');
+}
+
+// The grid View Modes `cycleGridMode` rotates through, in ViewModeSwitcher
+// order (ticket #987). 'single' is deliberately excluded — it's Alt+G's solo
+// toggle (`toggleGridMaximize`), a separate gesture — so this stays a pure
+// grid-mode rotation.
+const GRID_MODE_CYCLE: readonly NonSingleViewMode[] = ['mesh', 'pinned', 'all'];
+
+/**
+ * Rotate the canvas through the grid View Modes: Mesh → Pinned → All → Mesh
+ * (ticket #987). Bound to Ctrl+Alt+G / Cmd+Alt+G in App.tsx — a keyboard peer
+ * to the mouse-only `ViewModeSwitcher`, kept distinct from Alt+G's Single solo
+ * toggle (`toggleGridMaximize`).
+ *
+ * From 'single' (Alt+G's territory), re-enter the cycle at the mode Single was
+ * opened from (`lastNonSingleMode`) rather than skipping past it — so the first
+ * press out of a solo view lands you back where you were, and the next
+ * advances. Pure store-mutator (like `toggleGridMaximize`), so App.tsx owns the
+ * platform binding, focus guard, and cooldown.
+ */
+export function cycleGridMode(): void {
+  const ui = useUIStore.getState();
+  if (ui.viewMode === 'single') {
+    ui.setViewMode(ui.lastNonSingleMode);
+    return;
+  }
+  const idx = GRID_MODE_CYCLE.indexOf(ui.viewMode);
+  ui.setViewMode(GRID_MODE_CYCLE[(idx + 1) % GRID_MODE_CYCLE.length]);
 }

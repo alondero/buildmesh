@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { getGridRows, equalSizes } from '../../src/hooks/useGridLayout';
-import { arrowTargetIndex } from '../../src/lib/gridTraversal';
+import { arrowTargetIndex, traversalTargetId } from '../../src/lib/gridTraversal';
 
 describe('getGridRows', () => {
   const cases: Array<[number, number[]]> = [
@@ -155,5 +155,52 @@ describe('arrowTargetIndex', () => {
   it('returns the same index for an empty layout', () => {
     expect(arrowTargetIndex(0, 'right', [])).toBe(0);
     expect(arrowTargetIndex(5, 'down', [])).toBe(5);
+  });
+});
+
+describe('traversalTargetId (#987 — arrow traversal over the visible ViewMode node set)', () => {
+  // The helper takes whatever ordered node set the caller scoped (Mesh, Pinned,
+  // or All) and returns the id an arrow press moves to. It is deliberately
+  // agnostic to mesh_id — the fixtures below span two meshes to prove a Pinned
+  // or All grid traverses across meshes, which the old mesh-only filter could
+  // not do.
+  const nodes = [
+    { id: 10 }, // index 0 — mesh A
+    { id: 11 }, // index 1 — mesh A
+    { id: 20 }, // index 2 — mesh B
+    { id: 21 }, // index 3 — mesh B
+  ]; // 4 nodes → rows [2, 2]
+
+  it('moves right within the row', () => {
+    expect(traversalTargetId(nodes, 10, 'right')).toBe(11);
+  });
+
+  it('moves down across a mesh boundary (cross-mesh Pinned/All grid)', () => {
+    // index 0 (mesh A) → index 2 (mesh B) — the payoff of scoping over the
+    // visible set instead of the active node's mesh.
+    expect(traversalTargetId(nodes, 10, 'down')).toBe(20);
+    expect(traversalTargetId(nodes, 11, 'down')).toBe(21);
+  });
+
+  it('returns null at a vertical edge (no-op press keeps focus put)', () => {
+    // Top row can't go up; bottom row can't go down.
+    expect(traversalTargetId(nodes, 10, 'up')).toBeNull();
+    expect(traversalTargetId(nodes, 20, 'down')).toBeNull();
+  });
+
+  it('returns null when the active node is not in the visible set', () => {
+    // e.g. the active node is in a different mesh than the Mesh-scoped grid, or
+    // is unpinned while Pinned is showing — leave focus alone rather than jump.
+    expect(traversalTargetId(nodes, 999, 'right')).toBeNull();
+  });
+
+  it('returns null for a single-node grid (every arrow is a dead end)', () => {
+    for (const dir of ['left', 'right', 'up', 'down'] as const) {
+      expect(traversalTargetId([{ id: 7 }], 7, dir)).toBeNull();
+    }
+  });
+
+  it('returns null for an empty visible set', () => {
+    expect(traversalTargetId([], 7, 'right')).toBeNull();
   });
 });
