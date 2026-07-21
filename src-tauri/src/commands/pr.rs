@@ -235,6 +235,67 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>,
     }).collect())
 }
 
+/// Add or remove a label on a mesh's GitHub issue (issue #979).
+///
+/// Backs the Issues Probe's trigger-label toggle — a click on the green
+/// `✓ buildmesh:run` chip removes the label (with confirm prompt), a
+/// click on the neutral `+ buildmesh:run` slot adds it. The UI does the
+/// optimistic update + rollback itself; the backend just needs to be a
+/// thin pass-through to GitHub's `POST`/`DELETE /repos/{o}/{r}/issues/{n}/labels`
+/// endpoints.
+///
+/// `action` is `"add"` or `"remove"` — kept as a string rather than an
+/// enum so the wire shape mirrors the simplest possible JS call site
+/// (`setIssueLabel(meshId, issueNumber, label, "add")`). Anything other
+/// than `"remove"` is treated as add; this collapses typos to the safer
+/// idempotent direction (add returns 200 for an already-present label,
+/// so a misclick that re-applies is a no-op).
+///
+/// Errors are surfaced verbatim: `LabelNotFound` from the client becomes
+/// the string `"Label \`buildmesh:run\` doesn't exist on the repo — create
+/// it on GitHub first"` (via the `Display` impl), which the frontend toasts
+/// directly. The frontend reverts its optimistic toggle on any error.
+#[command]
+pub async fn set_issue_label(
+    mesh_id: i64,
+    issue_number: i64,
+    label: String,
+    action: String,
+) -> Result<(), String> {
+    crate::commands::run_blocking("set_issue_label", move || {
+        set_issue_label_blocking(mesh_id, issue_number, label, action)
+    })
+    .await
+}
+
+/// Sync core for [`set_issue_label`]. See [`get_repo_issues_blocking`] for
+/// the split rationale (Tauri `#[command(async)]` wraps a sync core via
+/// `spawn_blocking` — issue #762).
+pub(crate) fn set_issue_label_blocking(
+    mesh_id: i64,
+    issue_number: i64,
+    label: String,
+    action: String,
+) -> Result<(), String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let (owner, repo) = resolve_github_owner_repo(&mesh)?;
+
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+
+    // Collapse anything that isn't an explicit "remove" to add — see the
+    // doc comment on `set_issue_label` for the rationale. The match is
+    // case-insensitive (defensive) so `"Add"`/`"ADD"` work too.
+    if action.eq_ignore_ascii_case("remove") {
+        client
+            .remove_issue_label(&owner, &repo, issue_number, &label)
+            .map_err(|e| e.to_string())
+    } else {
+        client
+            .add_issue_label(&owner, &repo, issue_number, &label)
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Get pull requests for a mesh, filtered by `state` (`"open"` or `"closed"`).
 /// Mirrors [`get_repo_issues`]: degrades to an empty list (with a `warn!`) when
 /// the mesh has no GitHub origin, so the panel renders an empty state rather

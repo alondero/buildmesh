@@ -528,6 +528,18 @@ export type { GitHubIssue };
 export const getRepoIssues = (meshId: number) =>
   _invoke<GitHubIssue[]>('get_repo_issues', { meshId });
 
+/** Add or remove a label on a mesh's GitHub issue (issue #979).
+ *  Errors from a missing-repo-label 422 surface as a typed
+ *  `GitHubError::LabelNotFound` message — see `commands::pr::set_issue_label`
+ *  for the full contract. */
+export const setIssueLabel = (
+  meshId: number,
+  issueNumber: number,
+  label: string,
+  action: 'add' | 'remove',
+): Promise<void> =>
+  _invoke<void>('set_issue_label', { meshId, issueNumber, label, action });
+
 // GitHub Pull Requests — `GitHubPullRequest` / `PrMergeability` are generated
 // from the Rust structs (src-tauri/src/commands/pr.rs) into
 // src/types/generated/; see top import. Re-exported here so the PR probe tab

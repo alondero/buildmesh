@@ -46,6 +46,10 @@ const MESH: Mesh = {
   created_at: '2026-01-01',
   scratchpad: '',
   sandbox: false,
+  // Issue #979 — autopilot trigger label drives the new toggle badge.
+  // Real meshes default to `buildmesh:run`; the test uses the same value
+  // so the badge renders and the toggle IPC is verifiable end-to-end.
+  autopilot_trigger_label: 'buildmesh:run',
 };
 
 const ISSUES: GitHubIssue[] = [
@@ -108,6 +112,12 @@ function mockBackend(opts: { issues?: GitHubIssue[]; providers?: typeof PROVIDER
       case 'create_issue_node':
         return Promise.resolve(DRAFT);
       case 'start_node_background':
+        return Promise.resolve(undefined);
+      // Issue #979 — trigger-label toggle. Default to success; tests
+      // that want a failing path override via mockImplementation /
+      // mockRejectedValueOnce. The `args` are logged to the IPC record
+      // so tests can assert the action ('add'/'remove') + label passed.
+      case 'set_issue_label':
         return Promise.resolve(undefined);
       default:
         return Promise.resolve({});
@@ -764,5 +774,286 @@ describe('GitIssuesTab (#378)', () => {
     expect(fallback.className).not.toMatch(/text-accent-cyan/);
     expect(fallback.className).not.toMatch(/cursor-pointer/);
     expect(fallback.className).toMatch(/cursor-default/);
+  });
+
+  // ----- Trigger-label toggle (issue #979) ---------------------------
+  // The Issues Probe surfaces the mesh's configured autopilot trigger
+  // label as a click-to-toggle badge under the Spawn button:
+  //   - green check (✓ buildmesh:run) when the issue carries the label,
+  //   - neutral plus (+ buildmesh:run) when it doesn't.
+  // Clicking the badge adds/removes the label on GitHub with optimistic
+  // UI + rollback on failure (see the locked design decisions #1-#5 in
+  // map #979). Tests below pin the visible states, the IPC contract,
+  // the confirm-on-remove gate, and the error-revert path.
+  // -------------------------------------------------------------------
+
+  it('renders the trigger-label badge in the present state when the issue already carries the label', async () => {
+    // Issue #101 has `buildmesh:run` in its labels. The badge must
+    // render with data-trigger-label="remove" (because clicking it will
+    // trigger the remove action) and the green check glyph.
+    mockBackend({
+      issues: [
+        {
+          number: 101,
+          title: 'Tagged for autopilot',
+          body: 'body',
+          url: 'https://github.com/acme/demo/issues/101',
+          state: 'open',
+          labels: ['buildmesh:run'],
+          blocked_by: [],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const badge = await screen.findByLabelText(
+      'Remove buildmesh:run label from issue #101',
+    );
+    expect(badge).toBeTruthy();
+    // The data-trigger-label attribute encodes the next action — `remove`
+    // means the label IS present (the click will remove it). Pin the
+    // attribute so a future refactor that flips the action vs state
+    // surfaces here rather than at the IPC seam.
+    expect(badge.getAttribute('data-trigger-label')).toBe('remove');
+    // The label name must be visible text so the user knows which label
+    // they're toggling — the default `buildmesh:run` plus the ✓ check.
+    expect(badge.textContent).toContain('buildmesh:run');
+  });
+
+  it('renders the trigger-label badge in the absent state when the issue does not carry the label', async () => {
+    // Issue #101 has NO `buildmesh:run` label. The badge renders with
+    // data-trigger-label="add" (next action is add) and the neutral + glyph.
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const badge = await screen.findByLabelText(
+      'Add buildmesh:run label to issue #101',
+    );
+    expect(badge).toBeTruthy();
+    expect(badge.getAttribute('data-trigger-label')).toBe('add');
+    expect(badge.textContent).toContain('+');
+    expect(badge.textContent).toContain('buildmesh:run');
+  });
+
+  it('does not render the badge when the mesh has no trigger label configured', async () => {
+    // Decision #5: the badge renders only when `autopilot_trigger_label`
+    // is non-empty. A mesh with `null` (or any other falsy value) shows
+    // no badge — there's no label to toggle toward.
+    useMeshStore.setState({
+      meshesById: new Map([[MESH.id, { ...MESH, autopilot_trigger_label: null }]]),
+      selectedMeshId: MESH.id,
+    });
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    await screen.findByText('Fix the wobble');
+    expect(
+      screen.queryByLabelText(/Add buildmesh:run label/),
+    ).toBeNull();
+    expect(
+      screen.queryByLabelText(/Remove buildmesh:run label/),
+    ).toBeNull();
+  });
+
+  it('clicks the absent badge → calls set_issue_label with action=add (no confirm)', async () => {
+    // Add is idempotent on GitHub, so no confirm prompt — the click
+    // flows straight into the IPC.
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const badge = await screen.findByLabelText(
+      'Add buildmesh:run label to issue #101',
+    );
+    await userEvent.click(badge);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('set_issue_label', {
+        meshId: 42,
+        issueNumber: 101,
+        label: 'buildmesh:run',
+        action: 'add',
+      });
+    });
+  });
+
+  it('flips the badge to the present state after a successful add', async () => {
+    // Regression guard for the optimistic UI contract (decision #3):
+    // after the IPC resolves, the badge moves from `data-trigger-label="add"`
+    // to `data-trigger-label="remove"` (because clicking it next will
+    // trigger the remove action). The previous test asserts only the IPC
+    // shape — this one pins the visible flip so a future refactor that
+    // forgets to update the optimistic override on success surfaces here.
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    // Initially absent — clicking it will fire action=add.
+    const badge = await screen.findByLabelText(
+      'Add buildmesh:run label to issue #101',
+    );
+    await userEvent.click(badge);
+
+    // After the IPC resolves, the optimistic override sticks until the
+    // next list refresh. The same row now reads as "Remove buildmesh:run
+    // label" because the next click would remove the (optimistically
+    // applied) label.
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Remove buildmesh:run label from issue #101'),
+      ).toBeTruthy();
+    });
+  });
+
+  it('clicks the present badge + confirms → calls set_issue_label with action=remove', async () => {
+    // The window.confirm prompt is the destructive-action gate. We
+    // stub it to accept here so the click flows into the IPC.
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mockBackend({
+      issues: [
+        {
+          number: 101,
+          title: 'Tagged',
+          body: 'body',
+          url: 'https://github.com/acme/demo/issues/101',
+          state: 'open',
+          labels: ['buildmesh:run'],
+          blocked_by: [],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const badge = await screen.findByLabelText(
+      'Remove buildmesh:run label from issue #101',
+    );
+    await userEvent.click(badge);
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('set_issue_label', {
+        meshId: 42,
+        issueNumber: 101,
+        label: 'buildmesh:run',
+        action: 'remove',
+      });
+    });
+    confirmSpy.mockRestore();
+  });
+
+  it('cancels the confirm on remove → no IPC, no state change', async () => {
+    // The destructive-action gate's whole point: a click that the user
+    // didn't mean must not reach the network. Verify the IPC is silent
+    // and the badge stays in the present state.
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    mockBackend({
+      issues: [
+        {
+          number: 101,
+          title: 'Tagged',
+          body: 'body',
+          url: 'https://github.com/acme/demo/issues/101',
+          state: 'open',
+          labels: ['buildmesh:run'],
+          blocked_by: [],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const badge = await screen.findByLabelText(
+      'Remove buildmesh:run label from issue #101',
+    );
+    await userEvent.click(badge);
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(invoke).not.toHaveBeenCalledWith('set_issue_label', expect.anything());
+    // The badge is still in the present state — no flip happened.
+    expect(
+      screen.queryByLabelText('Remove buildmesh:run label from issue #101'),
+    ).toBeTruthy();
+    confirmSpy.mockRestore();
+  });
+
+  it('reverts + surfaces the error inline when set_issue_label rejects', async () => {
+    // The optimistic flip on click is followed by an IPC failure (the
+    // backend surfaces the 422 → LabelNotFound message verbatim). The
+    // badge must revert to its pre-click state and the error message
+    // must render inline below the badge with `data-trigger-label-error`.
+    // Regression guard for decision #3 (optimistic UI with rollback) and
+    // decision #4 (the toast message is the backend's exact wording).
+    const errorMessage =
+      'Label `buildmesh:run` doesn\'t exist on the repo — create it on GitHub first';
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'set_issue_label') return Promise.reject(new Error(errorMessage));
+      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      return Promise.resolve({});
+    });
+    render(<GitIssuesTab />);
+
+    // Initially: issue 102 carries no buildmesh:run label, so the badge
+    // is in the absent state with action=add.
+    const addBadge = await screen.findByLabelText(
+      'Add buildmesh:run label to issue #102',
+    );
+    await userEvent.click(addBadge);
+
+    // IPC rejects → the optimistic flip reverts → badge returns to
+    // absent (Add buildmesh:run label ...).
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Add buildmesh:run label to issue #102'),
+      ).toBeTruthy();
+    });
+
+    // The error message surfaces inline below the badge.
+    const errorEl = screen.getByText(errorMessage);
+    expect(errorEl).toBeTruthy();
+    expect(errorEl.getAttribute('data-trigger-label-error')).not.toBeNull();
+  });
+
+  it('disables the badge while a toggle is in flight to block double-clicks', async () => {
+    // While the IPC is pending, the badge must be disabled so a second
+    // click can't race the in-flight write. The guard mirrors the
+    // spawn-button's `disabled={spawning !== null}` pattern.
+    let resolveSet!: (v: void) => void;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'set_issue_label') return new Promise<void>((res) => { resolveSet = res; });
+      return Promise.resolve({});
+    });
+    render(<GitIssuesTab />);
+
+    const badge = await screen.findByLabelText(
+      'Add buildmesh:run label to issue #101',
+    ) as HTMLButtonElement;
+    expect(badge.disabled).toBe(false, 'badge starts enabled');
+    await userEvent.click(badge);
+
+    // Re-query: the same label is reused after the optimistic flip
+    // (which moves the badge to data-trigger-label="remove"), but we
+    // only care about the disabled state of the toggle button on this
+    // row. The data-pending attribute is the test seam — pin it AND
+    // the disabled attribute so a future refactor that drops one is
+    // caught.
+    const pendingBadge = await waitFor(() => {
+      const el = document.querySelector(
+        '[data-trigger-label][data-pending="true"]',
+      ) as HTMLButtonElement | null;
+      if (!el) throw new Error('badge not yet marked pending');
+      return el;
+    });
+    expect(pendingBadge.disabled).toBe(true);
+
+    // Resolve the in-flight IPC; the badge clears its pending state.
+    resolveSet();
+    await waitFor(() => {
+      const el = document.querySelector(
+        '[data-trigger-label][data-pending="true"]',
+      );
+      expect(el).toBeNull();
+    });
   });
 });

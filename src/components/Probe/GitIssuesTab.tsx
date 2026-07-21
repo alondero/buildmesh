@@ -57,6 +57,7 @@ import { useState, useMemo, useCallback } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   getRepoIssues,
+  setIssueLabel,
   createIssueNode,
   startNodeBackground,
   listProviders,
@@ -119,6 +120,18 @@ export function GitIssuesTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawning, setSpawning] = useState<number | null>(null);
+  // Issue #979 — trigger-label toggle state. Three pieces:
+  //   1. `pendingToggle`: issue numbers with an in-flight `set_issue_label`
+  //      IPC. Used to disable the badge so a second click can't race.
+  //   2. `optimisticLabels`: per-issue label list override applied while
+  //      the toggle is in flight. Cleared on success/revert; the source
+  //      of truth (`issues[i].labels`) shows through after.
+  //   3. `toggleError`: per-issue error message surfaced inline below
+  //      the badge when the IPC rejects. Auto-cleared after
+  //      `TOGGLE_ERROR_TTL_MS` so a transient failure doesn't linger.
+  const [pendingToggle, setPendingToggle] = useState<Set<number>>(() => new Set());
+  const [optimisticLabels, setOptimisticLabels] = useState<Map<number, string[]>>(() => new Map());
+  const [toggleError, setToggleError] = useState<Map<number, string>>(() => new Map());
   // Bump to force the load effect to re-run on a manual Refresh click
   // (issue #813 — Git Issues/PRs/Archive previously had no manual
   // refresh button). Mirrors the pattern `GitPullRequestsTab` already
@@ -280,6 +293,118 @@ export function GitIssuesTab() {
     }
   };
 
+  // Trigger-label toggle handler (issue #979). The Issues Probe shows a
+  // green check / neutral slot below the Spawn button for the mesh's
+  // configured autopilot trigger label; clicking it adds or removes
+  // the label on GitHub. The flow mirrors the optimistic-UI pattern
+  // (decision #3 in the locked design):
+  //
+  //   1. Confirm on remove (it's destructive-ish); add is idempotent.
+  //   2. Flip the issue's labels in `optimisticLabels` so the badge
+  //      re-renders without waiting for the IPC.
+  //   3. Call `setIssueLabel`. On success, clear pending — the next
+  //      `getRepoIssues` refresh will pick up the real state.
+  //   4. On error, drop the optimistic override (the source-of-truth
+  //      labels show through again) and surface the error message
+  //      inline below the badge. Auto-clear the error after
+  //      `TOGGLE_ERROR_TTL_MS` so a transient failure doesn't linger.
+  //
+  // The IPC error string is the backend's `Display` impl, which for
+  // a 422 → `LabelNotFound` reads "Label `X` doesn't exist on the repo
+  // — create it on GitHub first" — exactly the remediation message
+  // we want the user to see.
+  const TOGGLE_ERROR_TTL_MS = 6000;
+
+  const handleToggleLabel = async (issue: GitHubIssue, triggerLabel: string, action: 'add' | 'remove') => {
+    if (activeMeshId === null) return;
+    if (pendingToggle.has(issue.number)) return;
+
+    // Remove is destructive-ish — the user has to opt in. Add is
+    // idempotent on GitHub so it's a free action.
+    if (action === 'remove') {
+      const ok = window.confirm(`Remove the "${triggerLabel}" label from issue #${issue.number}?`);
+      if (!ok) return;
+    }
+
+    // Optimistic flip — write the override BEFORE the IPC so the badge
+    // re-renders instantly. Source-of-truth `issue.labels` is untouched
+    // so a revert is a single state-clear.
+    const originalLabels = issue.labels;
+    const nextLabels = action === 'add'
+      ? (originalLabels.includes(triggerLabel) ? originalLabels : [...originalLabels, triggerLabel])
+      : originalLabels.filter((l) => l !== triggerLabel);
+
+    setPendingToggle((prev) => {
+      const next = new Set(prev);
+      next.add(issue.number);
+      return next;
+    });
+    setOptimisticLabels((prev) => {
+      const next = new Map(prev);
+      next.set(issue.number, nextLabels);
+      return next;
+    });
+    setToggleError((prev) => {
+      if (!prev.has(issue.number)) return prev;
+      const next = new Map(prev);
+      next.delete(issue.number);
+      return next;
+    });
+
+    try {
+      await setIssueLabel(activeMeshId, issue.number, triggerLabel, action);
+      // Success: the optimistic override stays until the next list
+      // refresh overwrites it. We DO NOT mutate `issues` directly —
+      // the source of truth is GitHub, refreshed by `getRepoIssues`.
+      // The override is the rendered source until that lands.
+    } catch (e) {
+      // Revert: drop the override so `issue.labels` shows through again.
+      setOptimisticLabels((prev) => {
+        if (!prev.has(issue.number)) return prev;
+        const next = new Map(prev);
+        next.delete(issue.number);
+        return next;
+      });
+      // Surface the backend's error message inline. The backend's
+      // `Display` impl produces the human-readable string the user
+      // needs (e.g. "Label `buildmesh:run` doesn't exist on the repo
+      // — create it on GitHub first" for a 422, or
+      // "GitHub API error (403): ..." for missing triage access).
+      const message = e instanceof Error ? e.message : String(e);
+      setToggleError((prev) => {
+        const next = new Map(prev);
+        next.set(issue.number, message);
+        return next;
+      });
+      // Auto-clear the error after TTL so the row doesn't carry a
+      // stale failure string after the user has moved on.
+      window.setTimeout(() => {
+        setToggleError((prev) => {
+          if (!prev.has(issue.number)) return prev;
+          const next = new Map(prev);
+          next.delete(issue.number);
+          return next;
+        });
+      }, TOGGLE_ERROR_TTL_MS);
+    } finally {
+      setPendingToggle((prev) => {
+        if (!prev.has(issue.number)) return prev;
+        const next = new Set(prev);
+        next.delete(issue.number);
+        return next;
+      });
+    }
+  };
+
+  // Active mesh's autopilot trigger label — the badge renders whenever
+  // this is non-empty. Per the locked design (decision #5), this is
+  // independent of whether autopilot itself is enabled: pre-staging
+  // labels is useful even when autopilot is off.
+  const triggerLabel = useMeshStore((s) => {
+    if (activeMeshId === null) return null;
+    return s.meshesById.get(activeMeshId)?.autopilot_trigger_label ?? null;
+  });
+
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar mirrors the PRs tab. `SafeLink` falls back to an
@@ -408,6 +533,96 @@ export function GitIssuesTab() {
                               Blocked by #{firstBlocker}
                             </span>
                           </button>
+                        );
+                      })()}
+                      {(() => {
+                        // Trigger-label toggle (issue #979). Sits in the
+                        // same right-column flex slot as the blocked-by
+                        // flag, so the two stack vertically and the visual
+                        // pattern reads as "warnings/affordances under
+                        // the Spawn button". Renders whenever the active
+                        // mesh has a non-empty `autopilot_trigger_label`
+                        // — decision #5: independent of autopilot enabled.
+                        if (!triggerLabel) return null;
+                        // Source of truth: optimistic override during a
+                        // pending toggle, else the loaded issue's labels.
+                        // `optimisticLabels` is cleared on revert, so an
+                        // error path naturally falls back to `issue.labels`.
+                        const effectiveLabels = optimisticLabels.get(issue.number) ?? issue.labels;
+                        const present = effectiveLabels.includes(triggerLabel);
+                        const isPending = pendingToggle.has(issue.number);
+                        const errorMsg = toggleError.get(issue.number);
+                        return (
+                          <div
+                            data-trigger-label-row
+                            className="mt-1 flex flex-col items-end"
+                          >
+                            <button
+                              data-trigger-label={present ? 'remove' : 'add'}
+                              data-trigger-label-name={triggerLabel}
+                              data-pending={isPending ? 'true' : 'false'}
+                              type="button"
+                              title={
+                                present
+                                  ? `Remove ${triggerLabel} label`
+                                  : `Add ${triggerLabel} label`
+                              }
+                              aria-label={
+                                present
+                                  ? `Remove ${triggerLabel} label from issue #${issue.number}`
+                                  : `Add ${triggerLabel} label to issue #${issue.number}`
+                              }
+                              disabled={isPending}
+                              onMouseDown={e => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                void handleToggleLabel(
+                                  issue,
+                                  triggerLabel,
+                                  present ? 'remove' : 'add',
+                                );
+                              }}
+                              className={
+                                present
+                                  ? 'inline-flex items-center gap-1 text-status-success hover:text-status-success/80 transition-colors disabled:opacity-60'
+                                  : 'inline-flex items-center gap-1 text-fg-muted hover:text-fg transition-colors disabled:opacity-60'
+                              }
+                            >
+                              <svg
+                                width="12"
+                                height="12"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                {present ? (
+                                  <polyline points="20 6 9 17 4 12" />
+                                ) : (
+                                  <>
+                                    <line x1="12" y1="5" x2="12" y2="19" />
+                                    <line x1="5" y1="12" x2="19" y2="12" />
+                                  </>
+                                )}
+                              </svg>
+                              <span className="text-2xs font-medium leading-none">
+                                {present ? '✓' : '+'} {triggerLabel}
+                              </span>
+                            </button>
+                            {errorMsg && (
+                              <span
+                                data-trigger-label-error
+                                className="mt-0.5 text-2xs text-status-error leading-tight max-w-[180px] text-right"
+                                title={errorMsg}
+                              >
+                                {errorMsg}
+                              </span>
+                            )}
+                          </div>
                         );
                       })()}
                     </div>
