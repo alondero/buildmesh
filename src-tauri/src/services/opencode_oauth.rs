@@ -595,11 +595,11 @@ pub(crate) const REFRESH_TTL: Duration = Duration::from_secs(300);
 /// JSON shape of the credential blob written by the device-flow dance.
 /// `access_token` is the live RPC bearer; `workspace_id` is the `wrk_<id>`
 /// passed to the `_server billing.get` body; `refresh_token` + `expires_at`
-/// drive the lazy refresh; `server_id` is the SolidStart deployment id
-/// (`c83b78a6…`) — currently hard-coded in
-/// `services::usage::opencode_usage_impl` at the `X-Server-Id` header, but
-/// persisted here so a future multi-deployment scenario can read it from
-/// the blob rather than re-emitting a binary string.
+/// drive the lazy refresh; `server_id` is the SolidStart deployment id the
+/// OAuth device-flow exchange returns and is consumed by
+/// `services::usage::opencode_usage_impl` at the `X-Server-Id` header
+/// (issue #972) — with a documented legacy default (`OPENCODE_SERVER_ID`)
+/// for blobs written before this field was added by #956.
 ///
 /// All fields are `Option<String>` so a partially-written blob (e.g. before
 /// workspace discovery completes) still round-trips — the higher-level
