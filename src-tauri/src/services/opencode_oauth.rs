@@ -33,7 +33,6 @@ use std::time::Duration;
 /// Captured from the opencode-cli binary's outbound traffic (issue #956
 /// research). Hostname only; paths are constants at the call sites so a
 /// future deployment-migration can rewrite them in one place.
-#[allow(dead_code)] // awaiting IPC wire for start_device_flow / try_refresh (issue #956 follow-up)
 pub(crate) const OPENCODE_CONSOLE_HOST: &str = "https://console.opencode.ai";
 
 /// RFC 8628 Device Authorization Grant: client id pinned to `opencode-cli`
@@ -41,12 +40,10 @@ pub(crate) const OPENCODE_CONSOLE_HOST: &str = "https://console.opencode.ai";
 /// the same host (verified 2026-07-20 against the live OpenCode Go
 /// deployment). Other client ids would issue tokens for a different
 /// audience and the SolidStart `_server billing.get` RPC would 401.
-#[allow(dead_code)] // awaiting IPC wire for start_device_flow / try_refresh (issue #956 follow-up)
 pub(crate) const OPENCODE_OAUTH_CLIENT_ID: &str = "opencode-cli";
 
 /// Device-flow paths. Re-exported via the `device_flow::*` constants below
 /// so a redirect or staging-host split doesn't scatter literal strings.
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
 pub(crate) mod device_flow {
     pub(crate) const CODE_PATH: &str = "/auth/device/code";
     pub(crate) const TOKEN_PATH: &str = "/auth/device/token";
@@ -57,7 +54,6 @@ pub(crate) mod device_flow {
 /// dance has its own failure modes (network, server error, polling terminal
 /// states like `access_denied` / `expired_token`) that deserve their own
 /// diagnostics. Serializes to `String` at the IPC boundary.
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
 #[derive(Debug)]
 pub(crate) enum OAuthError {
     /// The user took too long at `verification_uri_complete` and the
@@ -106,7 +102,6 @@ impl std::error::Error for OAuthError {}
 /// open the browser; `device_code` is the long-form secret the React UI
 /// never sees — it stays in Rust and is exchanged for a token via the
 /// polling loop. `expires_in` + `interval` bound the polling loop.
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
 #[derive(Debug, Clone)]
 pub(crate) struct DeviceCode {
     /// Long-form secret the user does NOT see. Drives the polling loop.
@@ -124,7 +119,6 @@ pub(crate) struct DeviceCode {
     pub interval: Duration,
 }
 
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
 #[derive(Deserialize)]
 struct DeviceCodeResp {
     device_code: String,
@@ -137,7 +131,7 @@ struct DeviceCodeResp {
 /// Parses the OpenCode Console `POST /auth/device/code` body. The host
 /// returns 200 with this shape on success and 4xx with a shape-mismatch
 /// payload on bad client-id; the caller checks status BEFORE this parse.
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2). Used by unit tests.
+#[allow(dead_code)] // Used by unit tests in this module only.
 pub(crate) fn parse_device_code_response(body: &str) -> Result<DeviceCode, OAuthError> {
     let resp: DeviceCodeResp = serde_json::from_str(body)
         .map_err(|e| OAuthError::Shape(format!("/auth/device/code body: {e}")))?;
@@ -163,7 +157,6 @@ pub(crate) fn parse_device_code_response(body: &str) -> Result<DeviceCode, OAuth
 /// the long-lived refresh token + short-lived access token + workspace
 /// binding + server id (the SolidStart deployment id captured into the
 /// `X-Server-Id` header on the live usage probe).
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
 #[derive(Debug, Clone)]
 pub(crate) struct TokenResponse {
     pub access_token: String,
@@ -173,7 +166,6 @@ pub(crate) struct TokenResponse {
     pub server_id: String,
 }
 
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
 #[derive(Deserialize)]
 struct TokenResp {
     access_token: String,
@@ -188,7 +180,7 @@ struct TokenResp {
 /// (`authorization_pending` → keep polling, `slow_down` → bump interval,
 /// `access_denied` / `expired_token` → terminal) — `parse_token_response`
 /// only sees the success branch.
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2). Used by unit tests.
+#[allow(dead_code)] // Used by unit tests in this module only.
 pub(crate) fn parse_token_response(body: &str) -> Result<TokenResponse, OAuthError> {
     let resp: TokenResp = serde_json::from_str(body)
         .map_err(|e| OAuthError::Shape(format!("/auth/device/token body: {e}")))?;
@@ -220,7 +212,6 @@ pub(crate) fn parse_token_response(body: &str) -> Result<TokenResponse, OAuthErr
 ///
 /// Wraps `reqwest::blocking::Client` in a 15s timeout to bound the
 /// network round-trip; matches the cadence `start_device_flow` uses.
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
 pub(crate) fn fetch_workspaces(
     access_token: &str,
 ) -> Result<Vec<OpenCodeWorkspace>, OAuthError> {
@@ -372,9 +363,6 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
 /// it to the Windows Credential Manager. Used by both the device-flow
 /// dance (after `poll_for_token` returns a token) and the refresh seam
 /// (after `try_refresh` issues a new bundle).
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2). The chain
-                     // to windows_cred::write inherits the same allow; the underlying
-                     // primitive is intentionally not used until the dance is live.
 #[cfg(windows)]
 pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthError> {
     use crate::services::windows_cred;
@@ -417,14 +405,73 @@ pub(crate) struct OpenCodeWorkspace {
     pub name: String,
 }
 
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
+/// Wire shape returned to React by `commands::opencode_oauth::start_device_flow_console`.
+/// Carries enough of the RFC 8628 `DeviceCode` for the Settings UI to render the
+/// user-facing `user_code`, open the browser, and own the polling loop locally:
+/// `device_code` is the long-form polling secret React holds in component state;
+/// `verification_uri_complete` is the URL passed to `openUrl()`; `interval_secs` +
+/// `expires_in_secs` bound the React-side `setInterval` loop. Duration collapses
+/// to u32 secs at the IPC seam — the React `setInterval` API only accepts ms.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "OpenCodeDeviceFlowStart.ts")]
+pub(crate) struct OpenCodeDeviceFlowStart {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri_complete: String,
+    pub interval_secs: u32,
+    pub expires_in_secs: u32,
+}
+
+/// Wire shape for the token bundle that survives `POST /auth/device/token`.
+/// Consumed by both `OpenCodeDeviceCodeStatus::Success` (polling completion) and
+/// `commands::opencode_oauth::persist_opencode_tokens` (input — re-persist after
+/// refresh, or for the React-owned dance that exchanges `device_code` itself).
+///
+/// `expires_in_secs` is the wall-clock expiry the React-side state machine
+/// stores as `accessTokenExpiresAtMs = now + expires_in_secs*1000`; `workspace_id`
+/// is the `wrk_<id>` the live `_server billing.get` POST needs; `server_id` is the
+/// SolidStart deployment id captured into the `X-Server-Id` header (still hard-coded
+/// in `services::usage::opencode_usage_impl` today, but persisted here for #972).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "OpenCodeTokenResponse.ts")]
+pub(crate) struct OpenCodeTokenResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in_secs: u32,
+    pub workspace_id: String,
+    pub server_id: String,
+}
+
+/// Tagged enum returned by `commands::opencode_oauth::poll_opencode_device_token`
+/// one tick at a time. Internally-tagged (`#[serde(tag = "kind")]`) so React
+/// switches on `status.kind` without parsing error strings — issue #969 hard
+/// requirement. `Pending` / `SlowDown { new_interval_secs }` keep polling;
+/// `Success { token }` is the terminal happy path (followed by React calling
+/// `persist_opencode_tokens` + `list_opencode_workspaces`); `CodeExpired` /
+/// `AccessDenied` / `Error { message }` are terminal errors that flip the UI to
+/// `error`.
+///
+/// Struct variants are required: `serde`'s `#[serde(tag = "…")]` (a.k.a.
+/// internally-tagged) rejects tuple variants because it needs a place to put the
+/// discriminator. Plan-agent validation caught this on the first draft.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "OpenCodeDeviceCodeStatus.ts")]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum OpenCodeDeviceCodeStatus {
+    Pending,
+    SlowDown { new_interval_secs: u32 },
+    Success { token: OpenCodeTokenResponse },
+    CodeExpired,
+    AccessDenied,
+    Error { message: String },
+}
+
 #[derive(Deserialize)]
 struct OrgListResp {
     #[serde(default)]
     orgs: Vec<OrgEntry>,
 }
 
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
 #[derive(Deserialize)]
 struct OrgEntry {
     id: String,
@@ -459,7 +506,7 @@ pub(crate) fn parse_workspaces_response(body: &str) -> Result<Vec<OpenCodeWorksp
 /// owns its timeout + connection pool. Knowledge-primer anti-pattern line 64
 /// (`blocking network in async runtime`) applies — callers wrap this in
 /// `commands::run_blocking` when invoked from `#[command]`.
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
+#[allow(dead_code)] // Client half is dropped at the IPC seam; DeviceCode half consumed via OpenCodeDeviceFlowStart.
 pub(crate) fn start_device_flow() -> Result<(DeviceCode, Client), OAuthError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
@@ -495,7 +542,7 @@ pub(crate) fn start_device_flow() -> Result<(DeviceCode, Client), OAuthError> {
 /// `sleep_until(deadline)` between requests; per RFC 8628 §3.5
 /// `slow_down` increments `interval` by at least 5 seconds and we honor
 /// that as soon as the server asks.
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
+#[allow(dead_code)] // superseded by `poll_for_token_once` (stateless IPC seam); kept for the loop's test coverage.
 pub(crate) fn poll_for_token(
     client: &Client,
     device_code: &str,
@@ -576,6 +623,100 @@ pub(crate) fn poll_for_token(
     }
 }
 
+/// Stateless one-shot poll for `commands::opencode_oauth::poll_opencode_device_token`.
+/// React owns the `(device_code, current_interval_secs, expires_in_secs,
+/// started_at_ms)` quadruple in component state and asks Rust to advance the
+/// dance by one HTTP round-trip; the IPC returns a tagged
+/// [`OpenCodeDeviceCodeStatus`] React switches on via `status.kind`.
+///
+/// Stateless-server design (per the wayfinder-map memory `buildmesh-gh956`):
+/// the alternative — Rust owns the in-flight state — would require a per-mesh
+/// background task, cleanup-on-timeout, and a way to cancel from React when
+/// the user closes the modal. React-as-owner is simpler; Rust-as-pure-poll is
+/// the right grain.
+///
+/// `now_ms` is computed via `SystemTime::now()` inside the function; callers
+/// that need deterministic clocking for tests should pass `started_at_ms` and
+/// set `expires_in_secs` short enough that the expiry gate fires. The
+/// `current_interval_secs` argument is held for symmetry with `poll_for_token`
+/// and to pin a future pre-emptive backoff — it's not consumed today.
+#[allow(dead_code)] // Consumed by `commands::opencode_oauth::poll_opencode_device_token` — wired in #969.
+pub(crate) fn poll_for_token_once(
+    device_code: &str,
+    current_interval_secs: u32,
+    expires_in_secs: u32,
+    started_at_ms: i64,
+) -> Result<OpenCodeDeviceCodeStatus, OAuthError> {
+    let _ = current_interval_secs; // pin for future pre-emptive backoff hook
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(i64::MAX);
+    if now_ms.saturating_sub(started_at_ms) >= (expires_in_secs as i64).saturating_mul(1000) {
+        return Ok(OpenCodeDeviceCodeStatus::CodeExpired);
+    }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| OAuthError::Transport(format!("poll-once client: {e}")))?;
+    let response = client
+        .post(format!("{OPENCODE_CONSOLE_HOST}{}", device_flow::TOKEN_PATH))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+            ),
+            ("client_id", OPENCODE_OAUTH_CLIENT_ID.to_string()),
+            ("device_code", device_code.to_string()),
+        ])
+        .send()
+        .map_err(|e| OAuthError::Transport(format!("/auth/device/token send: {e}")))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| OAuthError::Transport(format!("/auth/device/token body: {e}")))?;
+    if status.is_success() {
+        let token = parse_token_response(&body)?;
+        return Ok(OpenCodeDeviceCodeStatus::Success {
+            token: OpenCodeTokenResponse {
+                access_token: token.access_token,
+                refresh_token: token.refresh_token,
+                expires_in_secs: token.expires_in.as_secs() as u32,
+                workspace_id: token.workspace_id,
+                server_id: token.server_id,
+            },
+        });
+    }
+    // RFC 8628 §3.5: error responses are 400 + JSON {"error": "..."}.
+    // We don't fail on 400 alone — we route on the `error` field.
+    if status.as_u16() == 400 {
+        if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&body) {
+            let err_code = err_json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            return Ok(match err_code {
+                "authorization_pending" => OpenCodeDeviceCodeStatus::Pending,
+                "slow_down" => OpenCodeDeviceCodeStatus::SlowDown {
+                    new_interval_secs: current_interval_secs.saturating_add(5),
+                },
+                "access_denied" => OpenCodeDeviceCodeStatus::AccessDenied,
+                "expired_token" => OpenCodeDeviceCodeStatus::CodeExpired,
+                other => OpenCodeDeviceCodeStatus::Error {
+                    message: format!("/auth/device/token unknown error code: {other}"),
+                },
+            });
+        }
+    }
+    // Anything outside the documented RFC 8628 polling protocol is a contract
+    // change — surface as Error, not Shape, so the React state machine has one
+    // terminal branch for "you can't recover by polling more".
+    Ok(OpenCodeDeviceCodeStatus::Error {
+        message: format!("/auth/device/token HTTP {status}: {body}"),
+    })
+}
+
 /// Windows Credential Manager target the Buildmesh-owned OpenCode OAuth dance
 /// writes its token blob under. Mirrors the agy `provider:subcontext` shape
 /// (`gemini:antigravity`). Single source of truth — both
@@ -633,6 +774,49 @@ pub(crate) fn parse_opencode_console_full_credential(
 ) -> Result<OpenCodeConsoleCred, UsageError> {
     let text = std::str::from_utf8(blob).map_err(|e| UsageError::Shape(e.to_string()))?;
     serde_json::from_str(text).map_err(|e| UsageError::Shape(e.to_string()))
+}
+
+/// Reads the Windows Credential Manager blob at [`OPENCODE_CONSOLE_CRED_TARGET`]
+/// and parses it into the full DTO. Consumed by
+/// `commands::opencode_oauth::list_opencode_workspaces` (issue #969) which
+/// re-reads the access_token before calling [`fetch_workspaces`], keeping the
+/// IPC signature argument-free.
+///
+/// Returns:
+/// - `Ok(None)` — credential not present (`ERROR_NOT_FOUND` on Windows; also
+///   `Ok(None)` on non-Windows per the locked #956 agy-style decision)
+/// - `Ok(Some(cred))` — blob present and parsed
+/// - `Err(String)` — non-recoverable Windows failure (rare, e.g. credential
+///   store corruption). The IPC layer surfaces this to React as a toast.
+///
+/// Distinct from `parse_opencode_console_credential` (which requires
+/// `access_token` + `workspace_id` and collapses missing fields to
+/// `UsageError::NoCredential`); that path stays in `services::usage` where
+/// the live fetcher needs the load-bearing subset only.
+#[cfg(windows)]
+pub(crate) fn read_opencode_console_full_credential()
+    -> Result<Option<OpenCodeConsoleCred>, String>
+{
+    use crate::services::windows_cred;
+    match windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET) {
+        Ok(blob) => parse_opencode_console_full_credential(&blob)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        Err(crate::services::usage::UsageError::NoCredential(_)) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn read_opencode_console_full_credential()
+    -> Result<Option<OpenCodeConsoleCred>, String>
+{
+    // Per the locked #956 design, non-Windows mirrors the agy precedent at
+    // `services::usage::read_agy_token` — the dance's credential sink
+    // doesn't exist on this platform, so the workspace picker has nothing to
+    // read. `Ok(None)` lets the IPC layer render the Settings `signedOut`
+    // branch without an error toast.
+    Ok(None)
 }
 
 /// Parses the OpenCode Console credential blob into `(access_token,

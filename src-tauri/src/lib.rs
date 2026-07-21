@@ -563,8 +563,14 @@ pub fn run() {
             // Usage
             commands::usage::get_provider_meters,
             commands::usage::set_minimax_api_key,
-            // OpenCode OAuth (issue #956) — sign-out seam; device-flow
-            // start/poll commands land here too in the follow-up PRs.
+            // OpenCode OAuth (issue #956 + #969). Device Flow + workspace
+            // enumeration + token persistence seams the React Settings UI
+            // (`OpenCodeAccountCard`) drives. Stateless-server design —
+            // React owns the polling state; each call is one round-trip.
+            commands::opencode_oauth::start_device_flow_console,
+            commands::opencode_oauth::poll_opencode_device_token,
+            commands::opencode_oauth::list_opencode_workspaces,
+            commands::opencode_oauth::persist_opencode_tokens,
             commands::opencode_oauth::revoke_opencode_console,
         ])
         .build(tauri::generate_context!())
