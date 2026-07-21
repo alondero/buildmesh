@@ -422,6 +422,15 @@ pub struct AgentNode {
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
     pub worktree_name: Option<String>,   // git worktree name (same as name for claude-backed providers)
     pub use_worktree: bool,  // true = commands run in worktree, false = repo root
+    /// Whether the user has pinned this node for the Pinned Grid view
+    /// (wayfinder #982). Persisted so a pinned node survives app restarts
+    /// and stays in the user's focus set across sessions. Independent of
+    /// `status` — a pinned node can be `running`, `idle`, `awaiting_input`,
+    /// etc.; the view switcher reads `is_pinned` to render the Pinned Grid,
+    /// not to filter by lifecycle state. Default is `false` (the column has
+    /// a `NOT NULL DEFAULT 0`, so a node inserted before the column existed
+    /// reads back as unpinned).
+    pub is_pinned: bool,
     #[ts(as = "Option<i32>")]
     pub source_issue: Option<i64>,       // GitHub issue number that triggered this node
     /// GitHub PR number that triggered this node (issue #420). `None` for

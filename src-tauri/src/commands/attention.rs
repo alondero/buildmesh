@@ -158,6 +158,7 @@ mod tests {
                 source_issue INTEGER,
                 source_pr INTEGER,
                 use_worktree INTEGER NOT NULL DEFAULT 1,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
                 position INTEGER NOT NULL DEFAULT 0,
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
                 head_repo_owner TEXT,

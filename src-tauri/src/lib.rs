@@ -397,6 +397,13 @@ pub fn run() {
             commands::agent_node::rename_agent_node,
             commands::agent_node::update_agent_node_positions,
             commands::agent_node::regenerate_agent_node,
+            // Node Pinning (wayfinder #982 / ticket #984): the persisted
+            // backing storage for the Pinned Grid view mode (#986). The UI
+            // affordance (#985) calls these to flip / set a node's
+            // `is_pinned` flag, and the view switcher (#983) reads it back
+            // through `list_agent_nodes`.
+            commands::agent_node::set_node_pinned,
+            commands::agent_node::toggle_node_pinned,
             // Mesh (renamed from `*_project` to `*_mesh`).
             commands::mesh::add_mesh,
             commands::mesh::pick_mesh_folder,

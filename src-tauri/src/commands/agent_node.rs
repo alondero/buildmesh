@@ -172,6 +172,42 @@ pub async fn rename_agent_node(
     Ok(())
 }
 
+/// Set an agent node's `is_pinned` flag explicitly (wayfinder #982 /
+/// ticket #984). Used by the UI affordance (ticket #985) when the user
+/// wants a known-good state (e.g. "Pin this node" in a context menu) —
+/// distinguishes from `toggle_node_pinned`, which flips whatever the
+/// current value is. Returns the post-write `AgentNode` so the frontend
+/// store can patch the local entry directly without a follow-up
+/// `get_agent_node_by_id` round-trip. Surfaces "node not found" as an
+/// error string rather than silently no-op'ing — matches the
+/// `set_agent_node_provider` and `update_mesh_layout` zero-rows contract.
+#[command]
+pub async fn set_node_pinned(
+    node_id: i64,
+    pinned: bool,
+) -> Result<AgentNode, String> {
+    let updated = db::set_agent_node_pinned(node_id, pinned)
+        .map_err(|e| e.to_string())?;
+    if updated == 0 {
+        return Err(format!("set_node_pinned: node {node_id} not found"));
+    }
+    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+}
+
+/// Flip an agent node's `is_pinned` flag and return the new state
+/// (wayfinder #982 / ticket #984). The single-action shape the UI's
+/// click-to-pin button uses — the user doesn't need to know the current
+/// pinned value, just "toggle". Returns the post-write `AgentNode` so the
+/// frontend store can patch the local entry; surfaces "node not found" as
+/// an error string (same contract as `set_node_pinned`).
+#[command]
+pub async fn toggle_node_pinned(node_id: i64) -> Result<AgentNode, String> {
+    db::toggle_agent_node_pinned(node_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("toggle_node_pinned: node {node_id} not found"))?;
+    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+}
+
 /// Swap an agent node's Model Provider (issue #774 / #775). The
 /// worktree, branch, name, position, and all other state are preserved;
 /// the new agent resumes from the existing `cli_session_id` when both

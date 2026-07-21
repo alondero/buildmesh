@@ -473,11 +473,15 @@ mod tests {
     #[test]
     fn legacy_v28_pr_url_column_is_ignored_by_agent_node_wire_shape() {
         let conn = Connection::open_in_memory().unwrap();
-        // v28-shaped schema. The `agent_nodes` table carries the legacy
-        // `pr_url TEXT` column that the captured-PR feature used to write.
-        // The projection's read code (which omits `pr_url`) must still
-        // succeed: the SELECT lists the projection's columns by name, so
-        // a table carrying an extra column simply isn't queried for it.
+        // v28-shaped schema, post-v29 safety-net (so the AGENT_NODE_COLUMNS
+        // projection has the columns it references). A real v28 DB upgrades
+        // to v29 via `ensure_agent_node_is_pinned` on next launch; this
+        // fixture mirrors the migrated shape directly. The legacy
+        // `pr_url TEXT` column that the captured-PR feature used to write
+        // is still present. The projection's read code (which omits
+        // `pr_url`) must still succeed: the SELECT lists the projection's
+        // columns by name, so a table carrying an extra column simply
+        // isn't queried for it.
         conn.execute_batch(
             "
             CREATE TABLE meshes (
@@ -498,6 +502,7 @@ mod tests {
                 cli_session_id TEXT,
                 worktree_name TEXT,
                 use_worktree INTEGER NOT NULL DEFAULT 1,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
                 position INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 source_issue INTEGER,
@@ -536,5 +541,222 @@ mod tests {
             value.get("pr_url").is_none(),
             "AgentNode wire shape must not expose pr_url (got: {value})"
         );
+    }
+
+    /// v28→v29: `ensure_agent_node_is_pinned` must add the new `is_pinned`
+    /// column to a v28-shape `agent_nodes` table, and a second call must be
+    /// a no-op (idempotent). Same safety-net shape as
+    /// `ensure_agent_node_source_pr_pinned_sha` (#444) — the v15→v16 test
+    /// above is the structural twin.
+    #[test]
+    fn ensure_agent_node_is_pinned_adds_column_idempotently() {
+        let conn = Connection::open_in_memory().unwrap();
+        // v28-shape agent_nodes: everything except the new `is_pinned`
+        // column. Mirrors the inline CREATE in db::init up to v28.
+        conn.execute_batch(
+            "
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                env TEXT NOT NULL DEFAULT 'windows',
+                provider TEXT NOT NULL DEFAULT 'anthropic',
+                status TEXT NOT NULL DEFAULT 'idle',
+                cli_session_id TEXT,
+                worktree_name TEXT,
+                use_worktree INTEGER NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                source_issue INTEGER,
+                source_pr INTEGER,
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT,
+                source_pr_pinned_sha TEXT
+            );
+            -- Pre-existing v28 row that the safety net must not break. It
+            -- reads back as `is_pinned = false` via the ALTER-added default,
+            -- and the user can opt-in row-by-row from the UI (#985).
+            INSERT INTO agent_nodes (mesh_id, name, path, created_at)
+                VALUES (1, 'preexisting', '/p', '2020-01-01T00:00:00Z');
+            ",
+        )
+        .unwrap();
+
+        // Precondition: column does not exist yet.
+        let has_before: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(!has_before, "PRECONDITION: is_pinned must not exist in v28 schema");
+
+        // Act — first call adds the column.
+        crate::db::ensure_agent_node_is_pinned(&conn).unwrap();
+
+        // Assert: column now exists and is NOT NULL with default 0.
+        let has_after: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(has_after, "is_pinned column must exist after safety-net call");
+
+        let notnull: i64 = conn.query_row(
+            "SELECT \"notnull\" FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(notnull, 1, "is_pinned must be NOT NULL — pinning is a known boolean state");
+
+        let default_value: Option<String> = conn.query_row(
+            "SELECT \"dflt_value\" FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(default_value.as_deref(), Some("0"),
+            "is_pinned default must be 0 so pre-v29 rows read back as unpinned");
+
+        // Pre-existing v28 row survives and reads back as unpinned.
+        let pinned_existing: i64 = conn.query_row(
+            "SELECT is_pinned FROM agent_nodes WHERE name = 'preexisting'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(pinned_existing, 0, "v28 row must default to is_pinned = 0");
+
+        // A new row can be pinned explicitly via the column writer (ticket
+        // #985's UI affordance wires through `set_agent_node_pinned`).
+        conn.execute(
+            "INSERT INTO agent_nodes (mesh_id, name, path, is_pinned, created_at)
+             VALUES (1, 'pinned', '/p2', 1, '2020-01-02T00:00:00Z')",
+            [],
+        ).unwrap();
+        let pinned: i64 = conn.query_row(
+            "SELECT is_pinned FROM agent_nodes WHERE name = 'pinned'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(pinned, 1, "explicit is_pinned = 1 must persist");
+
+        // Idempotent: a second call must not error (the column already
+        // exists) and must not corrupt existing data.
+        crate::db::ensure_agent_node_is_pinned(&conn).unwrap();
+        let pinned_after: i64 = conn.query_row(
+            "SELECT is_pinned FROM agent_nodes WHERE name = 'pinned'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(pinned_after, 1, "second safety-net call must not flip existing data");
+    }
+
+    /// `set_agent_node_pinned` must (a) flip the column, (b) round-trip
+    /// through `get_agent_node_by_id_inner`, (c) be idempotent on a no-op
+    /// write, and (d) report zero rows for an unknown node id so the
+    /// `#[command]` wrapper can surface "node not found".
+    #[test]
+    fn set_agent_node_pinned_round_trips_and_reports_unknown_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                env TEXT NOT NULL DEFAULT 'windows',
+                provider TEXT NOT NULL DEFAULT 'anthropic',
+                status TEXT NOT NULL DEFAULT 'idle',
+                cli_session_id TEXT,
+                worktree_name TEXT,
+                use_worktree INTEGER NOT NULL DEFAULT 1,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                source_issue INTEGER,
+                source_pr INTEGER,
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT,
+                source_pr_pinned_sha TEXT
+            );
+            INSERT INTO agent_nodes (mesh_id, name, path, created_at)
+                VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
+            ",
+        ).unwrap();
+        let id: i64 = conn.query_row(
+            "SELECT id FROM agent_nodes WHERE name = 'n'", [], |row| row.get(0),
+        ).unwrap();
+
+        // Pin → returns 1, node reads back as pinned.
+        let updated = crate::db::set_agent_node_pinned_inner(&conn, id, true).unwrap();
+        assert_eq!(updated, 1, "set_agent_node_pinned must report 1 row updated");
+        let node = crate::db::get_agent_node_by_id_inner(&conn, id).unwrap();
+        assert!(node.is_pinned, "post-write is_pinned must be true");
+
+        // Unpin → returns 1, node reads back as unpinned.
+        let updated = crate::db::set_agent_node_pinned_inner(&conn, id, false).unwrap();
+        assert_eq!(updated, 1, "unpin must also report 1 row updated");
+        let node = crate::db::get_agent_node_by_id_inner(&conn, id).unwrap();
+        assert!(!node.is_pinned, "post-write is_pinned must be false");
+
+        // Idempotent: re-pinning with the same value still succeeds.
+        let updated = crate::db::set_agent_node_pinned_inner(&conn, id, false).unwrap();
+        assert_eq!(updated, 1, "idempotent no-op write must still report 1 row");
+
+        // Unknown id → 0 rows. The `#[command]` wrapper surfaces this as
+        // an error string rather than silently no-op'ing.
+        let updated = crate::db::set_agent_node_pinned_inner(&conn, 99999, true).unwrap();
+        assert_eq!(updated, 0, "unknown id must report zero rows updated");
+    }
+
+    /// `toggle_agent_node_pinned` must (a) flip the column and return the
+    /// new value, (b) toggle a second time back to the original, and
+    /// (c) report `None` for an unknown id so the `#[command]` wrapper can
+    /// surface "node not found" without faking a flipped boolean.
+    #[test]
+    fn toggle_agent_node_pinned_flips_and_reports_unknown_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                env TEXT NOT NULL DEFAULT 'windows',
+                provider TEXT NOT NULL DEFAULT 'anthropic',
+                status TEXT NOT NULL DEFAULT 'idle',
+                cli_session_id TEXT,
+                worktree_name TEXT,
+                use_worktree INTEGER NOT NULL DEFAULT 1,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                source_issue INTEGER,
+                source_pr INTEGER,
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT,
+                source_pr_pinned_sha TEXT
+            );
+            INSERT INTO agent_nodes (mesh_id, name, path, created_at)
+                VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
+            ",
+        ).unwrap();
+        let id: i64 = conn.query_row(
+            "SELECT id FROM agent_nodes WHERE name = 'n'", [], |row| row.get(0),
+        ).unwrap();
+
+        // First toggle: 0 → 1, returns Some(true).
+        let after_first = crate::db::toggle_agent_node_pinned_inner(&conn, id).unwrap();
+        assert_eq!(after_first, Some(true), "first toggle must flip to true");
+        let node = crate::db::get_agent_node_by_id_inner(&conn, id).unwrap();
+        assert!(node.is_pinned, "post-toggle row must read as pinned");
+
+        // Second toggle: 1 → 0, returns Some(false).
+        let after_second = crate::db::toggle_agent_node_pinned_inner(&conn, id).unwrap();
+        assert_eq!(after_second, Some(false), "second toggle must flip back to false");
+        let node = crate::db::get_agent_node_by_id_inner(&conn, id).unwrap();
+        assert!(!node.is_pinned, "post-second-toggle row must read as unpinned");
+
+        // Unknown id → None. The `#[command]` wrapper surfaces this as
+        // an error string rather than fabricating a flip.
+        let after_unknown = crate::db::toggle_agent_node_pinned_inner(&conn, 99999).unwrap();
+        assert_eq!(after_unknown, None, "unknown id must return None, not Some(false)");
     }
 }

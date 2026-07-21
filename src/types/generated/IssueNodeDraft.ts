@@ -42,7 +42,18 @@ branch: string, env: EnvType,
  * string is treated as "anthropic" by the resolver, so `Default` is a
  * behaviour-preserving stub.
  */
-provider: string, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, use_worktree: boolean, source_issue: number | null, 
+provider: string, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, use_worktree: boolean, 
+/**
+ * Whether the user has pinned this node for the Pinned Grid view
+ * (wayfinder #982). Persisted so a pinned node survives app restarts
+ * and stays in the user's focus set across sessions. Independent of
+ * `status` — a pinned node can be `running`, `idle`, `awaiting_input`,
+ * etc.; the view switcher reads `is_pinned` to render the Pinned Grid,
+ * not to filter by lifecycle state. Default is `false` (the column has
+ * a `NOT NULL DEFAULT 0`, so a node inserted before the column existed
+ * reads back as unpinned).
+ */
+is_pinned: boolean, source_issue: number | null, 
 /**
  * GitHub PR number that triggered this node (issue #420). `None` for
  * issue-spawned and hand-spawned nodes. When set, `spawn_agent_inner`
