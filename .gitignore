@@ -52,6 +52,10 @@ test-results/
 # into the worktree to coordinate with subagents). Never intended to ship.
 /real_diff.txt
 /.claude/real_diff.txt
+# Stray diff snapshots dropped in the worktree root by some session tooling
+# (e.g. `.tmp-github-diff.txt`, `.tmp-test-diff.txt`). Ephemeral and never
+# intended to ship.
+.tmp-*.txt
 
 # Claude worktrees and local settings (local only)
 .claude/worktrees/

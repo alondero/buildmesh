@@ -17,6 +17,15 @@ pub enum GitHubError {
     NoToken,
     Http(reqwest::Error),
     Api(u16, String),
+    /// `POST /repos/{o}/{r}/issues/{n}/labels` rejected the label because
+    /// it doesn't exist on the repo (GitHub returns 422 with
+    /// `{"message":"Label does not exist"}` in that case). The string is
+    /// the label name as the caller passed it so the UI can render a
+    /// precise remediation toast ("Label `buildmesh:run` doesn't exist
+    /// on the repo — create it on GitHub first."). The endpoint is
+    /// POST-only — DELETE on `/labels/{name}` returns 404 for a missing
+    /// label, which collapses to a no-op success there.
+    LabelNotFound(String),
 }
 
 impl std::fmt::Display for GitHubError {
@@ -25,6 +34,7 @@ impl std::fmt::Display for GitHubError {
             GitHubError::NoToken => write!(f, "No GitHub token found. Set GITHUB_TOKEN env var or authenticate with `gh auth login`."),
             GitHubError::Http(e) => write!(f, "HTTP error: {}", e),
             GitHubError::Api(status, msg) => write!(f, "GitHub API error ({}): {}", status, msg),
+            GitHubError::LabelNotFound(label) => write!(f, "Label `{}` doesn't exist on the repo — create it on GitHub first", label),
         }
     }
 }
@@ -1084,6 +1094,157 @@ impl GitHubClient {
         }
 
         Ok(format!("Merged (squash) via {} — {}", result.sha, result.message))
+    }
+
+    /// Percent-encode a label name for safe inclusion in a URL path component.
+    /// GitHub label names can contain `:`, `/`, spaces (rare), and other
+    /// characters that are not safe in a path segment. Per RFC 3986, the
+    /// unreserved set is `A-Z a-z 0-9 - _ . ~`; everything else must be
+    /// percent-encoded. We keep the encoder inline (no `urlencoding` crate
+    /// dependency) so the file's "no extra deps for trivial work" ethos
+    /// holds — the call sites are one DELETE path and one POST body.
+    fn percent_encode_path_component(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for b in s.bytes() {
+            // RFC 3986 unreserved: ALPHA / DIGIT / "-" / "_" / "." / "~"
+            let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+            if unreserved {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+        out
+    }
+
+    /// Add a label to an issue. Idempotent: GitHub returns 200 with the
+    /// updated label list when the label is already present, and 422 when
+    /// the label doesn't exist on the repo (mapped to
+    /// [`GitHubError::LabelNotFound`] so the UI can toast "create the
+    /// label on GitHub first"). Backs the Issues Probe's trigger-label
+    /// toggle (issue #979). Uses the default read-side timeout (30s) —
+    /// label writes are fast and a 422 mapping is more useful than a
+    /// long-tail retry window.
+    ///
+    /// Wire shape: `POST /repos/{o}/{r}/issues/{n}/labels` with a
+    /// `{"labels":[name]}` body. The endpoint accepts multiple labels in
+    /// one call but we send a single-element array to keep the contract
+    /// 1:1 with the toggle UI.
+    pub fn add_issue_label(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: i64,
+        label: &str,
+    ) -> Result<(), GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{}/labels",
+            owner, repo, issue_number
+        );
+
+        #[derive(Serialize)]
+        struct AddLabels<'a> {
+            labels: Vec<&'a str>,
+        }
+
+        let resp = self.client
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&AddLabels { labels: vec![label] })
+            .send()?;
+
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        Self::classify_add_label_response(status, &body, label)
+    }
+
+    /// Classify a `POST /repos/{o}/{r}/issues/{n}/labels` response into
+    /// either `Ok(())`, [`GitHubError::LabelNotFound`], or a generic
+    /// [`GitHubError::Api`]. Extracted so the 422 → `LabelNotFound`
+    /// mapping is unit-testable without standing up an HTTP server — the
+    /// mapping is the load-bearing piece of the Issues Probe's error
+    /// UX (issue #979 decision #4 / ticket #980 acceptance "422 from
+    /// GitHub (label doesn't exist on repo) → toast: 'Label `X` doesn't
+    /// exist on the repo — create it on GitHub first.'").
+    ///
+    /// Rules:
+    /// - 422 with a body containing `"Label does not exist"` →
+    ///   `LabelNotFound` (the documented GitHub error shape for this case).
+    /// - 422 with an empty body → `LabelNotFound` (defensive: a partial /
+    ///   truncated response that GitHub nonetheless classifies as 422 most
+    ///   plausibly came from the same code path, and treating it as
+    ///   `Api(422, "")` would surface a useless empty error message in
+    ///   the toast).
+    /// - 422 with a different body → `Api(422, body)` (preserves the raw
+    ///   text for diagnostics on the rare other-422 path).
+    /// - Any other non-success → `Api(status, body)`.
+    /// - Success → `Ok(())`.
+    fn classify_add_label_response(
+        status: reqwest::StatusCode,
+        body: &str,
+        label: &str,
+    ) -> Result<(), GitHubError> {
+        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            if body.contains("Label does not exist") || body.is_empty() {
+                return Err(GitHubError::LabelNotFound(label.to_string()));
+            }
+            return Err(GitHubError::Api(status.as_u16(), body.to_string()));
+        }
+        if !status.is_success() {
+            return Err(GitHubError::Api(status.as_u16(), body.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Remove a label from an issue. Idempotent on a missing label: GitHub
+    /// returns 404 for "label not on this issue", which we collapse to
+    /// `Ok(())` so the toggle can be retried freely without surfacing a
+    /// stale "label wasn't there" error. The endpoint is
+    /// `DELETE /repos/{o}/{r}/issues/{n}/labels/{name}` and the label
+    /// name goes in the URL path, so we percent-encode it for safety
+    /// (labels commonly contain `:`, `/`, etc.).
+    ///
+    /// Backs the Issues Probe's trigger-label toggle (issue #979).
+    pub fn remove_issue_label(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: i64,
+        label: &str,
+    ) -> Result<(), GitHubError> {
+        let encoded = Self::percent_encode_path_component(label);
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{}/labels/{}",
+            owner, repo, issue_number, encoded
+        );
+
+        let resp = self.client
+            .delete(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        // 404 covers two cases — label not on this issue, OR label
+        // doesn't exist on the repo at all. Both are "label isn't
+        // present, which is the state the caller wanted" → idempotent
+        // success.
+        if status == reqwest::StatusCode::NOT_FOUND {
+            let _ = resp.bytes();
+            return Ok(());
+        }
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+
+        // 204 No Content is the documented success body. Drain either way
+        // so the connection can be reused.
+        let _ = resp.bytes();
+        Ok(())
     }
 }
 
@@ -2187,5 +2348,293 @@ This issue is related to #481 in a narrative sense.
         // where the floor_char_boundary snaps the index, but for a body
         // this size the Blocked-by section sits inside the floored region.
         let _ = parse_blocked_by(&body);
+    }
+
+    // -----------------------------------------------------------------------
+    // Label add/remove + 422 → LabelNotFound mapping (issue #979)
+    //
+    // The Issues Probe's trigger-label toggle drives two new methods:
+    // `add_issue_label` (POST) and `remove_issue_label` (DELETE). The load-
+    // bearing pieces that need pinning are:
+    //
+    //   1. The `percent_encode_path_component` helper — labels commonly
+    //      contain `:`, `/`, and spaces (`buildmesh:run`, `area/auth`),
+    //      and the DELETE endpoint embeds the label in the URL path.
+    //      A regression here surfaces as a 404 from GitHub even when
+    //      the label IS on the issue.
+    //   2. The 422 → `LabelNotFound` mapping on POST — that's the only
+    //      422 path the endpoint documents, and the UI toast depends on
+    //      the typed error to render a precise remediation message.
+    //   3. The 404 → `Ok(())` collapse on DELETE — makes the toggle
+    //      idempotent on a missing label, so a retry doesn't surface
+    //      a stale "label wasn't there" error.
+    //
+    // We test (1) + (2) + (3) inline. The full live HTTP round-trip is
+    // covered by the `#[ignore]`-gated `integration_*_label_live` tests
+    // at the bottom — mirrors the file's existing
+    // `integration_find_open_pr_for_branch_live` opt-in pattern.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn percent_encode_path_component_passes_through_unreserved_chars() {
+        // The RFC 3986 unreserved set (`A-Z a-z 0-9 - _ . ~`) is passed
+        // through verbatim — no `%XX` escapes. Pins the "don't over-encode"
+        // half of the helper so a future refactor that switches to
+        // blanket encoding doesn't generate noise like `b%75g` for `bug`.
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("bug"),
+            "bug",
+            "ASCII letters must pass through verbatim"
+        );
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("buildmesh.run"),
+            "buildmesh.run",
+            "`.` is unreserved"
+        );
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("a-b_c~d"),
+            "a-b_c~d",
+            "all unreserved punctuation passes through"
+        );
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("v1.2.3-rc4"),
+            "v1.2.3-rc4",
+            "version-shaped labels pass through verbatim"
+        );
+    }
+
+    #[test]
+    fn percent_encode_path_component_encodes_unsafe_chars() {
+        // Labels commonly contain characters that are unsafe in a URL
+        // path segment — `:` (the `namespace:name` shape), `/` (path-like
+        // labels), spaces (rare but allowed), and `?`/`#`/`&` (which
+        // would change the URL's query/fragment/separator meaning).
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("buildmesh:run"),
+            "buildmesh%3Arun",
+            "`:` in a label name must percent-encode to %3A"
+        );
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("area/auth"),
+            "area%2Fauth",
+            "`/` in a label name must percent-encode to %2F"
+        );
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("needs review"),
+            "needs%20review",
+            "spaces must encode to %20 (NOT `+`, which is form-encoded)"
+        );
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("a&b"),
+            "a%26b",
+            "`&` must encode — it would otherwise be parsed as a query separator"
+        );
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("a?b#c"),
+            "a%3Fb%23c",
+            "`?` and `#` must encode — they would otherwise change the URL shape"
+        );
+    }
+
+    #[test]
+    fn percent_encode_path_component_handles_empty_and_unicode() {
+        // Empty input round-trips to empty (a label name can't actually be
+        // empty per GitHub, but the helper stays total). Multi-byte UTF-8
+        // is encoded byte-by-byte — each byte of the emoji's UTF-8
+        // representation gets its own `%XX`. The helper is bytes-in/bytes-
+        // out and intentionally doesn't try to be Unicode-aware.
+        assert_eq!(GitHubClient::percent_encode_path_component(""), "");
+        assert_eq!(
+            GitHubClient::percent_encode_path_component("🐛"),
+            "%F0%9F%90%9B",
+            "emoji encodes byte-by-byte per UTF-8"
+        );
+    }
+
+    #[test]
+    fn git_hub_error_label_not_found_display_includes_label_name() {
+        // The Display impl is what the frontend toast surfaces when
+        // POST returns 422 for a label that doesn't exist on the repo.
+        // The label name must appear verbatim so the user can fix it
+        // by creating the label on GitHub.
+        let err = GitHubError::LabelNotFound("buildmesh:run".to_string());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("buildmesh:run"),
+            "Display must surface the requested label name; got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("Label") && msg.contains("repo"),
+            "Display must include the remediation hint; got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn git_hub_error_label_not_found_is_a_distinct_variant() {
+        // Pins that `LabelNotFound` is its own variant and not collapsed
+        // into `Api(422, ...)` — the frontend distinguishes them so it
+        // can show "create the label on GitHub first" vs the generic
+        // 422 wall. Match on the variant directly to guard against a
+        // future refactor that re-merges them.
+        let err = GitHubError::LabelNotFound("foo".to_string());
+        match err {
+            GitHubError::LabelNotFound(name) => assert_eq!(name, "foo"),
+            other => panic!("LabelNotFound must remain a distinct variant; got {:?}", other),
+        }
+    }
+
+    // ----- classify_add_label_response (issue #979) -----------------------
+    //
+    // The 422 → `LabelNotFound` mapping is the load-bearing piece of the
+    // Issues Probe's error UX: a precise "Label `X` doesn't exist on the
+    // repo — create it on GitHub first" toast versus the generic 422 wall.
+    // Extracted from `add_issue_label` so the mapping is unit-testable
+    // without standing up an HTTP server. Each branch is exercised here
+    // so a future refactor that drops the magic-string check (or flips
+    // the empty-body fallback) surfaces as a test failure rather than a
+    // confusing user-facing toast.
+
+    #[test]
+    fn classify_add_label_response_422_with_label_does_not_exist_maps_to_label_not_found() {
+        // The canonical GitHub response for this case carries
+        // `"Label does not exist"` as the top-level `message` field. The
+        // classifier must surface it as `LabelNotFound`, NOT as a generic
+        // `Api(422, ...)`.
+        let body = r#"{"message":"Label does not exist","errors":[{"resource":"Label","code":"not_found","field":"name"}],"documentation_url":"https://docs.github.com/rest/issues/labels#add-labels-to-an-issue"}"#;
+        // Sanity: the canonical body actually contains the magic string.
+        assert!(body.contains("Label does not exist"));
+
+        let result = GitHubClient::classify_add_label_response(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            body,
+            "buildmesh:run",
+        );
+        match result {
+            Err(GitHubError::LabelNotFound(name)) => assert_eq!(name, "buildmesh:run"),
+            other => panic!("422 with 'Label does not exist' must map to LabelNotFound; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_add_label_response_422_with_different_body_collapses_to_api() {
+        // The documented 422 is the "Label does not exist" case. A 422
+        // with a different body is some other validation failure —
+        // preserve the raw text via `Api(422, body)` so diagnostics
+        // aren't lost. Don't over-classify to LabelNotFound.
+        let body = r#"{"message":"Validation Failed","errors":[{"resource":"Issue","code":"missing","field":"title"}]}"#;
+        // Sanity: this body MUST NOT contain the magic string — that's
+        // the contract the classifier depends on.
+        assert!(!body.contains("Label does not exist"));
+
+        let result = GitHubClient::classify_add_label_response(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            body,
+            "buildmesh:run",
+        );
+        match result {
+            Err(GitHubError::Api(status, msg)) => {
+                assert_eq!(status, 422);
+                assert_eq!(msg, body, "raw body must be preserved for non-magic 422s");
+            }
+            other => panic!("422 without magic string must map to Api, not LabelNotFound; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_add_label_response_422_with_empty_body_maps_to_label_not_found() {
+        // Defensive: a partial / truncated response that GitHub
+        // nonetheless classifies as 422 is most plausibly the same code
+        // path. Surface it as LabelNotFound so the toast stays precise
+        // (an empty `Api(422, "")` message would be useless to the user).
+        let result = GitHubClient::classify_add_label_response(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "",
+            "buildmesh:run",
+        );
+        match result {
+            Err(GitHubError::LabelNotFound(name)) => assert_eq!(name, "buildmesh:run"),
+            other => panic!("empty-body 422 must collapse to LabelNotFound; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_add_label_response_403_collapses_to_api() {
+        // Permission errors (Write or Triage required) come back as 403,
+        // not 422. They must NOT map to LabelNotFound — the toast text
+        // for LabelNotFound is wrong ("create the label first" isn't
+        // actionable when the actual issue is missing triage access).
+        let result = GitHubClient::classify_add_label_response(
+            reqwest::StatusCode::FORBIDDEN,
+            "Resource not accessible by integration",
+            "buildmesh:run",
+        );
+        match result {
+            Err(GitHubError::Api(403, msg)) => assert!(msg.contains("Resource not accessible")),
+            other => panic!("403 must map to Api(403, ...), not LabelNotFound; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_add_label_response_success_returns_ok() {
+        // 200 / 201 with any body (including empty) → Ok(()). We don't
+        // parse the success body — just need to confirm the classifier
+        // doesn't accidentally treat it as an error.
+        for status in [
+            reqwest::StatusCode::OK,
+            reqwest::StatusCode::CREATED,
+        ] {
+            let result = GitHubClient::classify_add_label_response(
+                status,
+                r#"[{"id":1,"name":"buildmesh:run"}]"#,
+                "buildmesh:run",
+            );
+            assert!(result.is_ok(), "status {} must succeed; got {:?}", status, result);
+        }
+        // Empty body on success is also fine.
+        let result = GitHubClient::classify_add_label_response(
+            reqwest::StatusCode::OK,
+            "",
+            "buildmesh:run",
+        );
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Live API round-trips — opt-in only, gated behind `--ignored`. Mirrors
+    // the existing `integration_find_open_pr_for_branch_live` pattern: a
+    // real `GITHUB_TOKEN` / `gh auth login` is required, and the test
+    // only runs against a fixture repo where the caller has triage access.
+    // Run with: `cargo test -- --ignored add_issue_label_live`.
+    //
+    // We don't pull in `wiremock` or a similar dependency just for these
+    // two calls; the URL-encoding logic + the 422/404 mapping are pinned
+    // by the unit tests above, and the live tests cover the wire shape.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[ignore]
+    fn integration_add_issue_label_live() {
+        let client = GitHubClient::new().expect("GITHUB_TOKEN must be set");
+        // Apply + immediately remove so the fixture issue ends in its
+        // starting state — no permanent side effect from a re-run.
+        client
+            .add_issue_label("alondero", "buildmesh", 1, "buildmesh:run")
+            .expect("add must succeed for an existing label");
+        client
+            .remove_issue_label("alondero", "buildmesh", 1, "buildmesh:run")
+            .expect("remove must succeed for an applied label");
+    }
+
+    #[test]
+    #[ignore]
+    fn integration_remove_issue_label_idempotent_on_missing_label() {
+        // Confirms the 404 → Ok(()) collapse on a label that was never
+        // applied. Requires a real fixture issue + token.
+        let client = GitHubClient::new().expect("GITHUB_TOKEN must be set");
+        client
+            .remove_issue_label("alondero", "buildmesh", 1, "definitely-not-on-this-issue-xyz")
+            .expect("removing a missing label must collapse to Ok(())");
     }
 }

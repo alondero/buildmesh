@@ -536,6 +536,9 @@ pub fn run() {
             commands::pr::create_pr_for_mesh,
             commands::agent::create_pr_node,
             commands::pr::get_repo_issues,
+            // Issue label toggle (issue #979) — backs the Issues Probe's
+            // click-to-add/remove affordance on the autopilot trigger label.
+            commands::pr::set_issue_label,
             commands::pr::get_open_pr_for_node,
             commands::pr::get_repo_pulls,
             commands::pr::get_pr_mergeability,
