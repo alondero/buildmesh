@@ -1,4 +1,49 @@
 import { create } from 'zustand';
+import { useMeshStore } from './meshStore';
+
+// The four canvas View Modes (wayfinder #982 — tickets #983 state model,
+// #986 rendering). 'single' solos the active node (it subsumes the old
+// `maximizedNodeId`), 'mesh' scopes to the sidebar-selected mesh, 'pinned'
+// is a cross-mesh filter over `AgentNode.is_pinned`, and 'all' shows every
+// node. Kept as a string-literal union (not a generated wire enum) because
+// it's a pure UI concern — no backend serialises it.
+export type ViewMode = 'single' | 'mesh' | 'pinned' | 'all';
+
+// The grid modes 'single' can be entered from — `exitSingleMode()` returns
+// here. 'single' itself is never a valid return target.
+export type NonSingleViewMode = Exclude<ViewMode, 'single'>;
+
+const VIEW_MODE_STORAGE_KEY = 'buildmesh.view-mode';
+const VIEW_MODES: readonly ViewMode[] = ['single', 'mesh', 'pinned', 'all'];
+
+// Boot value for `viewMode`: the persisted mode if it's present and valid,
+// else derived from the current mesh selection exactly as the pre-view-modes
+// canvas filter behaved (mesh selected → 'mesh', else 'all'). The
+// localStorage read is lazy-init at store creation and wrapped in try/catch
+// (unavailable in test envs / private mode), following the `src/lib/theme.ts`
+// convention. Only the mode is persisted — the single-mode target is not
+// (it falls back to the active node).
+function loadViewMode(selectedMeshId: number | null): ViewMode {
+  try {
+    const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+    if (stored !== null && (VIEW_MODES as readonly string[]).includes(stored)) {
+      return stored as ViewMode;
+    }
+  } catch {
+    // Fall through to the selection-derived default.
+  }
+  return selectedMeshId === null ? 'all' : 'mesh';
+}
+
+// Write-on-change persistence, try/catch-wrapped like the read above — a
+// storage failure must never block the mode switch itself.
+function persistViewMode(mode: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
+  } catch {
+    // localStorage unavailable — in-memory state still flips.
+  }
+}
 
 // Tabs the Probe Panel can show. Kept as a string-literal union (not a
 // generated wire enum) because it's a pure UI concern — no backend serialises
@@ -79,83 +124,105 @@ interface UIState {
   dragTargetNodeId: number | null;
   setDragTargetNodeId: (nodeId: number | null) => void;
 
-  // Node maximized to fill the whole grid area (#65), or null for the normal
-  // grid. Double-clicking a node header toggles this; Escape clears it.
-  maximizedNodeId: number | null;
-  toggleMaximizedNode: (nodeId: number) => void;
-  clearMaximizedNode: () => void;
-  // Plain setter — used by the sidebar `onSelect` to retarget the solo view
-  // to whichever node was clicked without touching the toggle/exit semantics
-  // of `toggleMaximizedNode` (self-clicks must no-op, not exit). Idempotent:
-  // mirrors `setDragTargetNodeId` (line 132-136) so a same-value call does
-  // not fire a subscriber notification and re-trigger the auto-clear effect.
-  setMaximizedNode: (nodeId: number | null) => void;
+  // The active canvas View Mode (wayfinder #982 / ticket #983). Persisted
+  // in localStorage (`buildmesh.view-mode`); sidebar mesh selection syncs
+  // it via the subscription at the bottom of this module. What each mode
+  // renders is decided in `src/lib/viewModes.ts` and `AgentNodeView` (#986).
+  viewMode: ViewMode;
+  // The grid mode 'single' was most recently entered from — the Escape /
+  // restore path (`exitSingleMode`) returns here. Remembered by
+  // `setViewMode` whenever a non-single mode is set.
+  lastNonSingleMode: NonSingleViewMode;
+  // Switch the canvas View Mode. Idempotent: a same-mode call is a no-op
+  // (no subscriber notification, no storage write) so the meshStore sync
+  // subscription can fire freely.
+  setViewMode: (mode: ViewMode) => void;
+  // Leave 'single' for the grid mode it was entered from. No-op when the
+  // current mode isn't 'single'.
+  exitSingleMode: () => void;
 }
 
-export const useUIStore = create<UIState>((set, get) => ({
-  probeOpen: false,
-  probeTab: 'files',
-  activeDiffFile: null,
+export const useUIStore = create<UIState>((set, get) => {
+  const initialViewMode = loadViewMode(useMeshStore.getState().selectedMeshId);
+  return {
+    probeOpen: false,
+    probeTab: 'files',
+    activeDiffFile: null,
 
-  toggleProbe: () => {
-    set({ probeOpen: !get().probeOpen });
-  },
+    toggleProbe: () => {
+      set({ probeOpen: !get().probeOpen });
+    },
 
-  setProbeTab: (tab: ProbeTab) => {
-    // Pure tab switch. The Center Workspace Diff Overlay (issue #379) is
-    // independent of the active tab — it floats over the terminal grid — so
-    // switching tabs no longer clears `activeDiffFile`. The overlay closes
-    // only via `closeDiff` (Esc / "Back to Terminals") or its own auto-close
-    // when the focused node / selected mesh changes.
-    set({ probeTab: tab });
-  },
+    setProbeTab: (tab: ProbeTab) => {
+      // Pure tab switch. The Center Workspace Diff Overlay (issue #379) is
+      // independent of the active tab — it floats over the terminal grid — so
+      // switching tabs no longer clears `activeDiffFile`. The overlay closes
+      // only via `closeDiff` (Esc / "Back to Terminals") or its own auto-close
+      // when the focused node or selected mesh changes.
+      set({ probeTab: tab });
+    },
 
-  openDiff: (ctx: DiffContext) => {
-    // Open the Center Workspace Diff Overlay on `ctx.filePath`. The Probe
-    // stays on whatever tab it was on (so the user can keep clicking files in
-    // Project Files / Agent Changes to switch the diff), but we make sure the
-    // panel is visible — the overlay and the interactive file list are meant
-    // to be used together (issue #379).
-    set({ activeDiffFile: ctx, probeOpen: true });
-  },
+    openDiff: (ctx: DiffContext) => {
+      // Open the Center Workspace Diff Overlay on `ctx.filePath`. The Probe
+      // stays on whatever tab it was on (so the user can keep clicking files in
+      // Project Files / Agent Changes to switch the diff), but we make sure the
+      // panel is visible — the overlay and the interactive file list are meant
+      // to be used together (issue #379).
+      set({ activeDiffFile: ctx, probeOpen: true });
+    },
 
-  closeDiff: () => {
-    set({ activeDiffFile: null });
-  },
+    closeDiff: () => {
+      set({ activeDiffFile: null });
+    },
 
-  // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
-  // probeOpen = true`. Call sites stay one-liners; the activity-bar owns
-  // the "click active tab to collapse" UX. The probe tabs (#376, #377,
-  // #378) all open via this action. Does not touch `activeDiffFile`: the
-  // diff overlay (#379) is independent of the active tab.
-  openProbeTab: (tab) => {
-    get().setProbeTab(tab);
-    set({ probeOpen: true });
-  },
+    // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
+    // probeOpen = true`. Call sites stay one-liners; the activity-bar owns
+    // the "click active tab to collapse" UX. The probe tabs (#376, #377,
+    // #378) all open via this action. Does not touch `activeDiffFile`: the
+    // diff overlay (#379) is independent of the active tab.
+    openProbeTab: (tab) => {
+      get().setProbeTab(tab);
+      set({ probeOpen: true });
+    },
 
-  dragTargetNodeId: null,
+    dragTargetNodeId: null,
 
-  setDragTargetNodeId: (nodeId: number | null) => {
-    if (get().dragTargetNodeId !== nodeId) {
-      set({ dragTargetNodeId: nodeId });
-    }
-  },
+    setDragTargetNodeId: (nodeId: number | null) => {
+      if (get().dragTargetNodeId !== nodeId) {
+        set({ dragTargetNodeId: nodeId });
+      }
+    },
 
-  maximizedNodeId: null,
+    viewMode: initialViewMode,
+    // A boot straight into 'single' has no prior grid mode to remember —
+    // 'all' is the neutral return target (matches the no-mesh-selected boot).
+    lastNonSingleMode: initialViewMode === 'single' ? 'all' : initialViewMode,
 
-  toggleMaximizedNode: (nodeId: number) => {
-    set({ maximizedNodeId: get().maximizedNodeId === nodeId ? null : nodeId });
-  },
+    setViewMode: (mode) => {
+      const { viewMode } = get();
+      if (viewMode === mode) return;
+      set({
+        viewMode: mode,
+        lastNonSingleMode: mode === 'single' ? get().lastNonSingleMode : mode,
+      });
+      persistViewMode(mode);
+    },
 
-  clearMaximizedNode: () => {
-    if (get().maximizedNodeId !== null) {
-      set({ maximizedNodeId: null });
-    }
-  },
+    exitSingleMode: () => {
+      get().setViewMode(get().lastNonSingleMode);
+    },
+  };
+});
 
-  setMaximizedNode: (nodeId) => {
-    if (get().maximizedNodeId !== nodeId) {
-      set({ maximizedNodeId: nodeId });
-    }
-  },
-}));
+// Sidebar sync — "one filter, two controls" (wayfinder #982 / ticket #983,
+// re-click-deselect → 'all' per ticket #986). Selecting a mesh in the
+// sidebar switches the canvas to Mesh Grid for that mesh; clearing the
+// selection switches to All Nodes. Pinned mode never writes selectedMeshId,
+// but a sidebar mesh click always means "show me this mesh", so the sync
+// applies in whatever mode the canvas is in. zustand notifies subscribers
+// on every `set` — even same-value ones — so the prevState comparison
+// filters no-op selectMesh calls before they can touch the view mode.
+useMeshStore.subscribe((state, prevState) => {
+  if (state.selectedMeshId === prevState.selectedMeshId) return;
+  useUIStore.getState().setViewMode(state.selectedMeshId === null ? 'all' : 'mesh');
+});

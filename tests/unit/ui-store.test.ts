@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
+import { useMeshStore } from '../../src/stores/meshStore';
 
 // A representative single-file diff context (issue #379). The overlay needs
 // the path + root to fetch, the node/mesh to label and auto-close, and the
@@ -21,70 +22,138 @@ describe('useUIStore', () => {
     });
   });
 
-  describe('maximizedNode (#65)', () => {
+  describe('View Modes (wayfinder #982 / #983)', () => {
     beforeEach(() => {
-      useUIStore.setState({ maximizedNodeId: null });
+      localStorage.removeItem('buildmesh.view-mode');
+      // meshStore FIRST: the uiStore mesh-subscription fires synchronously
+      // on a selectedMeshId change and would otherwise clobber the viewMode
+      // set below. uiStore's own setState is the final authority.
+      useMeshStore.setState({ selectedMeshId: null });
+      useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
     });
 
-    it('toggles a node into maximized state', () => {
-      useUIStore.getState().toggleMaximizedNode(7);
-      expect(useUIStore.getState().maximizedNodeId).toBe(7);
+    it('switches the active mode with setViewMode', () => {
+      useUIStore.getState().setViewMode('pinned');
+      expect(useUIStore.getState().viewMode).toBe('pinned');
     });
 
-    it('toggling the same node again restores the grid', () => {
-      useUIStore.getState().toggleMaximizedNode(7);
-      useUIStore.getState().toggleMaximizedNode(7);
-      expect(useUIStore.getState().maximizedNodeId).toBe(null);
+    it('remembers the last non-single mode as modes change', () => {
+      useUIStore.getState().setViewMode('mesh');
+      expect(useUIStore.getState().lastNonSingleMode).toBe('mesh');
+      useUIStore.getState().setViewMode('pinned');
+      expect(useUIStore.getState().lastNonSingleMode).toBe('pinned');
     });
 
-    it('toggling a different node switches the solo target', () => {
-      useUIStore.getState().toggleMaximizedNode(7);
-      useUIStore.getState().toggleMaximizedNode(9);
-      expect(useUIStore.getState().maximizedNodeId).toBe(9);
+    it('entering Single preserves the mode it was entered from', () => {
+      useUIStore.getState().setViewMode('mesh');
+      useUIStore.getState().setViewMode('single');
+      expect(useUIStore.getState().viewMode).toBe('single');
+      expect(useUIStore.getState().lastNonSingleMode).toBe('mesh');
     });
 
-    it('clearMaximizedNode exits maximize (Escape path)', () => {
-      useUIStore.getState().toggleMaximizedNode(7);
-      useUIStore.getState().clearMaximizedNode();
-      expect(useUIStore.getState().maximizedNodeId).toBe(null);
+    it('exitSingleMode returns to the mode Single was entered from (Escape path)', () => {
+      useUIStore.getState().setViewMode('pinned');
+      useUIStore.getState().setViewMode('single');
+      useUIStore.getState().exitSingleMode();
+      expect(useUIStore.getState().viewMode).toBe('pinned');
     });
 
-    // Issue: sidebar click while a node is maximised should retarget the
-    // solo view, not exit it. The existing `toggleMaximizedNode` would
-    // exit on a self-click and is unsuitable for that wiring — we need a
-    // plain setter with idempotency semantics that mirror `setDragTargetNodeId`
-    // (line 132-136). The tests below pin that contract.
-    describe('setMaximizedNode', () => {
-      it('sets the value when currently null', () => {
-        useUIStore.setState({ maximizedNodeId: null });
-        useUIStore.getState().setMaximizedNode(7);
-        expect(useUIStore.getState().maximizedNodeId).toBe(7);
+    it('exitSingleMode is a no-op outside Single', () => {
+      useUIStore.getState().setViewMode('mesh');
+      useUIStore.getState().exitSingleMode();
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+    });
+
+    it('setViewMode is idempotent — no subscriber notification on a same-mode call', () => {
+      // The meshStore sync subscription fires on every sidebar selection
+      // change; without this guard a re-select of the same mesh would
+      // re-notify every uiStore subscriber and re-render the canvas.
+      useUIStore.setState({ viewMode: 'mesh' });
+      let notifyCount = 0;
+      const unsub = useUIStore.subscribe(() => { notifyCount += 1; });
+      useUIStore.getState().setViewMode('mesh');
+      unsub();
+      expect(notifyCount).toBe(0);
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+    });
+
+    it('persists the mode to localStorage on change', () => {
+      useUIStore.getState().setViewMode('pinned');
+      expect(localStorage.getItem('buildmesh.view-mode')).toBe('pinned');
+    });
+
+    it('does not touch localStorage on a same-mode no-op', () => {
+      useUIStore.setState({ viewMode: 'all' });
+      localStorage.removeItem('buildmesh.view-mode');
+      useUIStore.getState().setViewMode('all');
+      expect(localStorage.getItem('buildmesh.view-mode')).toBeNull();
+    });
+
+    describe('sidebar sync (one filter, two controls)', () => {
+      it('selecting a mesh switches the canvas to Mesh Grid', () => {
+        useMeshStore.getState().selectMesh(7);
+        expect(useUIStore.getState().viewMode).toBe('mesh');
       });
 
-      it('switches the solo target to a different id', () => {
-        useUIStore.setState({ maximizedNodeId: 7 });
-        useUIStore.getState().setMaximizedNode(9);
-        expect(useUIStore.getState().maximizedNodeId).toBe(9);
+      it('clearing the selection (re-click deselect) switches to All Nodes', () => {
+        useMeshStore.getState().selectMesh(7);
+        expect(useUIStore.getState().viewMode).toBe('mesh');
+        useMeshStore.getState().selectMesh(null);
+        expect(useUIStore.getState().viewMode).toBe('all');
       });
 
-      it('is idempotent on the same id — no spurious subscriber notification', () => {
-        // The idempotency guard mirrors `setDragTargetNodeId` and prevents
-        // a self-click on the already-maximised node from re-firing the
-        // auto-clear effect downstream.
-        useUIStore.setState({ maximizedNodeId: 7 });
-        let notifyCount = 0;
-        const unsub = useUIStore.subscribe(() => { notifyCount += 1; });
-        useUIStore.getState().setMaximizedNode(7);
-        useUIStore.getState().setMaximizedNode(7);
-        unsub();
-        expect(notifyCount).toBe(0);
-        expect(useUIStore.getState().maximizedNodeId).toBe(7);
+      it('a mesh selection switches modes even out of Single', () => {
+        // A sidebar mesh click always means "show me this mesh" (#983) —
+        // Single offers no resistance.
+        useUIStore.getState().setViewMode('single');
+        useMeshStore.getState().selectMesh(7);
+        expect(useUIStore.getState().viewMode).toBe('mesh');
       });
 
-      it('clears maximise when called with null', () => {
-        useUIStore.setState({ maximizedNodeId: 7 });
-        useUIStore.getState().setMaximizedNode(null);
-        expect(useUIStore.getState().maximizedNodeId).toBe(null);
+      it('a same-value selectMesh does not clobber the current mode', () => {
+        // zustand notifies subscribers on every `set`, even unchanged ones —
+        // the subscription's prevState comparison is what keeps a no-op
+        // selectMesh(null) from yanking the user out of Pinned.
+        useUIStore.setState({ viewMode: 'pinned' });
+        useMeshStore.getState().selectMesh(null);
+        expect(useUIStore.getState().viewMode).toBe('pinned');
+      });
+    });
+
+    describe('boot derivation (ticket #983)', () => {
+      // loadViewMode runs once at store-module creation, so these tests
+      // re-import the store on a fresh module registry with localStorage
+      // pre-seeded. The statically-imported store above is unaffected.
+      it('boots into a valid persisted mode', async () => {
+        localStorage.setItem('buildmesh.view-mode', 'pinned');
+        vi.resetModules();
+        const fresh = await import('../../src/stores/uiStore');
+        expect(fresh.useUIStore.getState().viewMode).toBe('pinned');
+        expect(fresh.useUIStore.getState().lastNonSingleMode).toBe('pinned');
+      });
+
+      it('a boot straight into Single remembers no grid mode — return target is all', async () => {
+        localStorage.setItem('buildmesh.view-mode', 'single');
+        vi.resetModules();
+        const fresh = await import('../../src/stores/uiStore');
+        expect(fresh.useUIStore.getState().viewMode).toBe('single');
+        expect(fresh.useUIStore.getState().lastNonSingleMode).toBe('all');
+      });
+
+      it('an invalid persisted value derives from the mesh selection (null → all)', async () => {
+        localStorage.setItem('buildmesh.view-mode', 'bogus');
+        vi.resetModules();
+        const fresh = await import('../../src/stores/uiStore');
+        expect(fresh.useUIStore.getState().viewMode).toBe('all');
+      });
+
+      it('an absent persisted value derives from the mesh selection (mesh selected → mesh)', async () => {
+        localStorage.removeItem('buildmesh.view-mode');
+        vi.resetModules();
+        const freshMesh = await import('../../src/stores/meshStore');
+        freshMesh.useMeshStore.setState({ selectedMeshId: 7 });
+        const fresh = await import('../../src/stores/uiStore');
+        expect(fresh.useUIStore.getState().viewMode).toBe('mesh');
       });
     });
   });

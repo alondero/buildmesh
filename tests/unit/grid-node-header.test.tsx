@@ -48,9 +48,10 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 // missing / not a directory) are exercised in src-tauri's own tests;
 // here we just assert wiring: the click resolves the path through
 // `getNodeGitPath` and hands it to the IPC layer.
-const { openInFileManagerMock, triggerFinishMock } = vi.hoisted(() => ({
+const { openInFileManagerMock, triggerFinishMock, toggleNodePinnedMock } = vi.hoisted(() => ({
   openInFileManagerMock: vi.fn().mockResolvedValue(undefined),
   triggerFinishMock: vi.fn().mockResolvedValue(undefined),
+  toggleNodePinnedMock: vi.fn(),
 }));
 vi.mock('../../src/lib/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/lib/tauri')>();
@@ -58,6 +59,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
     ...actual,
     openInFileManager: openInFileManagerMock,
     triggerFinish: triggerFinishMock,
+    toggleNodePinned: toggleNodePinnedMock,
   };
 });
 
@@ -78,6 +80,7 @@ const NODE: AgentNode = {
   created_at: new Date(0).toISOString(),
   scratchpad: '',
   sandbox: false,
+  is_pinned: false,
 };
 
 const MESH: Mesh = {
@@ -189,36 +192,39 @@ describe('GridNodeHeader worktree/root pill', () => {
   });
 });
 
-describe('GridNodeHeader maximize (#65)', () => {
+describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ maximizedNodeId: null });
+    // Single subsumes the old per-node maximize: "this header is the solo
+    // view's" is now "the canvas is in Single mode". Baseline is a grid mode.
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
     summaryMock.mockReturnValue(null);
     prMock.mockReturnValue(null);
   });
 
-  it('double-clicking the header maximizes this node', () => {
+  it('double-clicking the header enters Single on this node', () => {
     const { container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
     // The header root carries the double-click handler.
     fireEvent.doubleClick(container.firstChild as Element);
-    expect(useUIStore.getState().maximizedNodeId).toBe(NODE.id);
+    expect(useUIStore.getState().viewMode).toBe('single');
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(NODE.id);
   });
 
-  it('double-clicking again restores the grid', () => {
+  it('double-clicking again restores the grid mode Single came from', () => {
     const { container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
     fireEvent.doubleClick(container.firstChild as Element);
     fireEvent.doubleClick(container.firstChild as Element);
-    expect(useUIStore.getState().maximizedNodeId).toBe(null);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
   });
 
-  it('the explicit button toggles maximize and flips its label', () => {
+  it('the explicit button toggles Single and flips its label', () => {
     const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
     fireEvent.click(getByLabelText('Maximize agent node'));
-    expect(useUIStore.getState().maximizedNodeId).toBe(NODE.id);
-    // Once maximized, the same control offers "restore".
+    expect(useUIStore.getState().viewMode).toBe('single');
+    // Once soloed, the same control offers "restore".
     fireEvent.click(getByLabelText('Restore grid layout'));
-    expect(useUIStore.getState().maximizedNodeId).toBe(null);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
   });
 
   // Issue #668 — Alt+G (Win/Linux) / Cmd+G (macOS) is the keyboard
@@ -237,8 +243,8 @@ describe('GridNodeHeader maximize (#65)', () => {
     expect(title).toBe(expected);
   });
 
-  it('mentions the shortcut in the restore tooltip when the node is maximized', () => {
-    useUIStore.setState({ maximizedNodeId: NODE.id });
+  it('mentions the shortcut in the restore tooltip when the node is soloed', () => {
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
     const { container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
     const title = (container.firstChild as Element).getAttribute('title') ?? '';
     const isMac = navigator.platform.toUpperCase().includes('MAC');
@@ -260,14 +266,71 @@ describe('GridNodeHeader maximize (#65)', () => {
     expect(title.toLowerCase()).toContain('maximize');
   });
 
-  it('the restore button tooltip mentions the shortcut when maximized', () => {
-    useUIStore.setState({ maximizedNodeId: NODE.id });
+  it('the restore button tooltip mentions the shortcut when soloed', () => {
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
     const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
     const button = getByLabelText('Restore grid layout');
     const title = button.getAttribute('title') ?? '';
     const isMac = navigator.platform.toUpperCase().includes('MAC');
     expect(title).toMatch(isMac ? /⌘\+G/ : /Alt\+G/);
     expect(title.toLowerCase()).toContain('restore');
+  });
+});
+
+describe('GridNodeHeader pin toggle (wayfinder #982 / #985)', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue(null);
+    toggleNodePinnedMock.mockReset();
+  });
+
+  it('renders an unpressed "Pin node" toggle when the node is unpinned', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const button = getByLabelText('Pin node');
+    expect(button.getAttribute('aria-pressed')).toBe('false');
+    expect(button.getAttribute('title')).toBe('Pin node');
+  });
+
+  it('renders a pressed "Unpin node" toggle when the node is pinned', () => {
+    const pinned = { ...NODE, is_pinned: true };
+    useAgentNodeStore.setState({ agentNodes: [pinned] });
+    const { getByLabelText } = render(<GridNodeHeader node={pinned} onBuildRun={() => {}} />);
+    const button = getByLabelText('Unpin node');
+    expect(button.getAttribute('aria-pressed')).toBe('true');
+    expect(button.getAttribute('title')).toBe('Unpin node');
+  });
+
+  it('sits immediately before the maximize button in DOM order (#985)', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const all = Array.from(document.querySelectorAll('button'));
+    const pinIndex = all.indexOf(getByLabelText('Pin node'));
+    const maxIndex = all.indexOf(getByLabelText('Maximize agent node'));
+    expect(pinIndex).toBeGreaterThanOrEqual(0);
+    expect(maxIndex).toBe(pinIndex + 1);
+  });
+
+  it('invokes the shared store action, which calls toggle_node_pinned and patches the store', async () => {
+    toggleNodePinnedMock.mockResolvedValueOnce({ ...NODE, is_pinned: true });
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    fireEvent.click(getByLabelText('Pin node'));
+    expect(toggleNodePinnedMock).toHaveBeenCalledWith(NODE.id);
+    // The store's optimistic patch lands without waiting for the IPC.
+    const { waitFor } = await import('@testing-library/react');
+    await waitFor(() => {
+      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === NODE.id)?.is_pinned).toBe(true);
+    });
+  });
+
+  it('shares the inline action surface (bg-bg-base/60 + border, 7×7) with the maximise/close trio', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const cls = getByLabelText('Pin node').className;
+    expect(cls).toMatch(/\bh-7\b/);
+    expect(cls).toMatch(/\bw-7\b/);
+    expect(cls).toContain('bg-bg-base/60');
+    expect(cls).toContain('border-border-default');
   });
 });
 
@@ -284,7 +347,7 @@ describe('GridNodeHeader close + expand controls (icon visibility)', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ maximizedNodeId: null });
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
     summaryMock.mockReturnValue(null);
     prMock.mockReturnValue(null);
   });
@@ -477,7 +540,7 @@ describe('GridNodeHeader reveal-in-explorer action', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ maximizedNodeId: null });
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
     summaryMock.mockReturnValue(null);
     prMock.mockReturnValue(null);
     openInFileManagerMock.mockReset();

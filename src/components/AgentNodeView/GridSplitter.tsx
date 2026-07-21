@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
+import { useUIStore } from '../../stores/uiStore';
 import { useGridLayoutStore, resolveLayout } from '../../stores/gridLayoutStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { NodeCard } from './NodeCard';
@@ -33,16 +34,27 @@ interface GridSplitterProps {
   onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
   buildRunOpen: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
   setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null) => void;
+  // Pinned Grid mode disables card drag-reorder (wayfinder #982 / #986 —
+  // custom pinned ordering is map fog). Defaults to draggable so Mesh/All
+  // keep today's behaviour.
+  draggable?: boolean;
 }
 
 type DragAxis = 'col' | 'row';
 
-export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: GridSplitterProps) {
+export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen, draggable = true }: GridSplitterProps) {
   const rowCounts = getGridRows(nodes.length);
   const rows = rowCounts.length;
   const rowKey = rowCounts.join(',');
 
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
+  // Layout persistence is mesh-scoped: only Mesh Grid mode saves/restores
+  // under the selected mesh's key (wayfinder #982 / #986). All Nodes and
+  // Pinned render cross-mesh sets whose arrangement must not pollute any
+  // single mesh's saved layout — they get session-local equal splits, the
+  // same behaviour 'all' already had via a null selection.
+  const viewMode = useUIStore(state => state.viewMode);
+  const layoutMeshId = viewMode === 'mesh' ? selectedMeshId : null;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 1000, height: 600 });
@@ -51,28 +63,28 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
   // resizes its own row. Heights stay one-per-row. Initialise from the per-mesh
   // store, shape-validated against the current layout (falls back to equal).
   const [colWidths, setColWidths] = useState<number[][]>(
-    () => resolveLayout(useGridLayoutStore.getState().byMesh[selectedMeshId!], rowCounts).colWidths,
+    () => resolveLayout(useGridLayoutStore.getState().byMesh[layoutMeshId!], rowCounts).colWidths,
   );
   const [rowHeights, setRowHeights] = useState<number[]>(
-    () => resolveLayout(useGridLayoutStore.getState().byMesh[selectedMeshId!], rowCounts).rowHeights,
+    () => resolveLayout(useGridLayoutStore.getState().byMesh[layoutMeshId!], rowCounts).rowHeights,
   );
 
   const colWidthsRef = useRef(colWidths);
   const rowHeightsRef = useRef(rowHeights);
-  const selectedMeshIdRef = useRef(selectedMeshId);
+  const layoutMeshIdRef = useRef(layoutMeshId);
   colWidthsRef.current = colWidths;
   rowHeightsRef.current = rowHeights;
-  selectedMeshIdRef.current = selectedMeshId;
+  layoutMeshIdRef.current = layoutMeshId;
 
   // Re-load when the active mesh OR the grid shape changes. Reading via
   // getState() (not a subscription) keeps the mouse-up persist below from
   // retriggering this effect into a loop.
   useEffect(() => {
-    const l = resolveLayout(useGridLayoutStore.getState().byMesh[selectedMeshId!], getGridRows(nodes.length));
+    const l = resolveLayout(useGridLayoutStore.getState().byMesh[layoutMeshId!], getGridRows(nodes.length));
     setColWidths(l.colWidths);
     setRowHeights(l.rowHeights);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedMeshId, rowKey]);
+  }, [layoutMeshId, rowKey]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -106,7 +118,7 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
    * the col and row drag hooks via their shared onEnd helper.
    */
   const persistAndFit = () => {
-    const meshId = selectedMeshIdRef.current;
+    const meshId = layoutMeshIdRef.current;
     if (meshId != null) {
       useGridLayoutStore.getState().setLayout(meshId, {
         colWidths: colWidthsRef.current,
@@ -238,6 +250,7 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
                       onBuildRun={onBuildRun}
                       buildRunOpen={buildRunOpen}
                       setBuildRunOpen={setBuildRunOpen}
+                      draggable={draggable}
                     />
                     {colIdx < rowCount - 1 && (
                       <div

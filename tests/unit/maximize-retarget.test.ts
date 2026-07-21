@@ -1,12 +1,15 @@
 /**
- * Issue: clicking a sidebar NodeItem while a node is maximised should
- * retarget the solo view to the clicked node (not exit maximise, not stick
- * on the previous node). This file pins the store-level contract that the
- * click handler in `src/components/Sidebar/MeshItem.tsx` must produce.
+ * Issue: clicking a sidebar NodeItem while a node is soloed should
+ * retarget the solo view to the clicked node (not exit the solo view, not
+ * stick on the previous node). Migrated to View Modes in wayfinder #982
+ * (#983): Single mode renders the active node, so the retarget is now
+ * just `setActiveNode` — and the handler must NOT call `selectMesh` while
+ * in Single, or the uiStore mesh-sync would break the user out of the
+ * solo view. This file pins the store-level contract that the click
+ * handler in `src/components/Sidebar/MeshItem.tsx` must produce.
  *
  * Patterned on `tests/unit/grid-shortcuts.test.ts` — real Zustand stores,
- * imperative calls, no React render. The auto-clear race in
- * `AgentNodeView.tsx:202-208` is exercised visually by `/verify-ui`.
+ * imperative calls, no React render.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useUIStore } from '../../src/stores/uiStore';
@@ -37,6 +40,7 @@ const nodeA: AgentNode = {
   worktree_name: null,
   source_issue: null,
   archived: false,
+  is_pinned: false,
 };
 
 const nodeB: AgentNode = {
@@ -84,21 +88,16 @@ const mesh20: Mesh = { ...mesh10, id: 20, name: 'mesh-20', path: '/repo/c', posi
  */
 function clickSidebarNode(node: AgentNode): void {
   useAgentNodeStore.getState().setActiveNode(node.id);
-  useMeshStore.getState().selectMesh(node.mesh_id);
-  const currentMaximized = useUIStore.getState().maximizedNodeId;
-  if (currentMaximized !== null && currentMaximized !== node.id) {
-    useUIStore.getState().setMaximizedNode(node.id);
+  if (useUIStore.getState().viewMode !== 'single') {
+    useMeshStore.getState().selectMesh(node.mesh_id);
   }
 }
 
-describe('sidebar click while maximised', () => {
+describe('sidebar click and View Modes (wayfinder #982)', () => {
   beforeEach(() => {
-    // Reset all three stores to a known baseline.
-    useUIStore.setState({ maximizedNodeId: null });
-    useAgentNodeStore.setState({
-      agentNodes: [nodeA, nodeB, nodeC],
-      activeNodeId: null,
-    });
+    // Reset all three stores to a known baseline. meshStore goes FIRST:
+    // the uiStore mesh-subscription fires synchronously on a
+    // selectedMeshId change and would clobber a viewMode set before it.
     useMeshStore.setState({
       meshes: [mesh10, mesh20],
       meshesById: new Map([[10, mesh10], [20, mesh20]]),
@@ -106,69 +105,74 @@ describe('sidebar click while maximised', () => {
       loading: false,
       error: null,
     });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
+    useAgentNodeStore.setState({
+      agentNodes: [nodeA, nodeB, nodeC],
+      activeNodeId: null,
+    });
   });
 
-  it('same-mesh retarget: clicking B while A is maximised flips maximise to B', () => {
-    // Given: A is maximised, mesh 10 is selected, no active node yet.
-    useUIStore.setState({ maximizedNodeId: nodeA.id });
+  it('same-mesh retarget: clicking B while A is soloed keeps Single and retargets to B', () => {
+    // Given: Single mode (entered from Mesh Grid), mesh 10 selected, A active.
     useMeshStore.setState({ selectedMeshId: mesh10.id });
-    useAgentNodeStore.setState({ activeNodeId: null });
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
+    useAgentNodeStore.setState({ activeNodeId: nodeA.id });
 
     // When: user clicks B (same mesh).
     clickSidebarNode(nodeB);
 
-    // Then: maximise follows the click to B; mesh stays on 10; activeNode moves.
-    expect(useUIStore.getState().maximizedNodeId).toBe(nodeB.id);
-    expect(useMeshStore.getState().selectedMeshId).toBe(mesh10.id);
+    // Then: Single survives and follows the click to B — Single renders the
+    // active node, so setActiveNode IS the retarget. The sidebar mesh
+    // selection is untouched (Single never writes it).
+    expect(useUIStore.getState().viewMode).toBe('single');
     expect(useAgentNodeStore.getState().activeNodeId).toBe(nodeB.id);
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh10.id);
   });
 
-  it('cross-mesh retarget: clicking C (different mesh) keeps maximise ON', () => {
-    // The pre-fix bug: cross-mesh click would *exit* maximise because
-    // the auto-clear effect saw `selectedMeshId` flipped but
-    // `maximizedNodeId` still on the now-filtered-out A. This test pins
-    // that the click handler leaves `maximizedNodeId` on the new node so
-    // the auto-clear predicate (`maximizedNodeId != null && maximizedNode
-    // == null`) is false on the next render.
-    useUIStore.setState({ maximizedNodeId: nodeA.id });
+  it('cross-mesh retarget: clicking C (different mesh) keeps Single AND keeps the selection', () => {
+    // The View Modes contract (#983): Single shows the active node
+    // regardless of mesh scope — a cross-mesh sidebar click retargets the
+    // solo view without breaking out of it. The handler must skip
+    // selectMesh in Single, or the uiStore mesh-sync would flip the canvas
+    // to Mesh Grid (and move the sidebar selection away from the mesh the
+    // user was browsing).
     useMeshStore.setState({ selectedMeshId: mesh10.id });
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
     useAgentNodeStore.setState({ activeNodeId: nodeA.id });
 
     clickSidebarNode(nodeC);
 
-    expect(useUIStore.getState().maximizedNodeId).toBe(nodeC.id);
-    expect(useMeshStore.getState().selectedMeshId).toBe(mesh20.id);
+    expect(useUIStore.getState().viewMode).toBe('single');
     expect(useAgentNodeStore.getState().activeNodeId).toBe(nodeC.id);
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh10.id);
   });
 
-  it('self-click on the maximised node is a no-op for maximise', () => {
-    // Per user decision: clicking the already-maximised node should NOT
-    // toggle off maximise (matches the visual — the user is already
-    // looking at it; avoid accidental exits). The store-level
-    // idempotency guard in `setMaximizedNode` is the second line of
-    // defence; the click handler also short-circuits before calling it.
-    useUIStore.setState({ maximizedNodeId: nodeA.id });
+  it('self-click on the soloed node is a no-op', () => {
+    // Clicking the already-soloed node must not exit Single (matches the
+    // visual — the user is already looking at it; avoid accidental exits).
     useMeshStore.setState({ selectedMeshId: mesh10.id });
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
     useAgentNodeStore.setState({ activeNodeId: nodeA.id });
 
     clickSidebarNode(nodeA);
 
-    expect(useUIStore.getState().maximizedNodeId).toBe(nodeA.id);
-    expect(useMeshStore.getState().selectedMeshId).toBe(mesh10.id);
+    expect(useUIStore.getState().viewMode).toBe('single');
     expect(useAgentNodeStore.getState().activeNodeId).toBe(nodeA.id);
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh10.id);
   });
 
-  it('click while nothing is maximised leaves maximise null (current behaviour)', () => {
-    // Regression guard: the new wiring must not flip an empty maximise
-    // state — preserve the pre-fix "click selects, nothing else".
-    useUIStore.setState({ maximizedNodeId: null });
+  it('click from a grid mode selects the mesh and flips the canvas to Mesh Grid', () => {
+    // The non-Single path preserves today's behaviour: the click selects
+    // the node's mesh, and the uiStore mesh-sync subscription (one filter,
+    // two controls) flips the canvas to Mesh Grid.
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
     useMeshStore.setState({ selectedMeshId: null });
     useAgentNodeStore.setState({ activeNodeId: null });
 
     clickSidebarNode(nodeB);
 
-    expect(useUIStore.getState().maximizedNodeId).toBe(null);
-    expect(useMeshStore.getState().selectedMeshId).toBe(mesh10.id);
     expect(useAgentNodeStore.getState().activeNodeId).toBe(nodeB.id);
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh10.id);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
   });
 });

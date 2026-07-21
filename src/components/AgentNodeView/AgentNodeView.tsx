@@ -10,6 +10,7 @@ import { terminalManager } from '../Terminal/Terminal';
 import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
+import { scopeNodesForMode, resolveSingleNode } from '../../lib/viewModes';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { NodeCard, type BuildRunState } from './NodeCard';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
@@ -23,9 +24,11 @@ interface ResizablePanesProps {
   onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
   buildRunOpen: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
   setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null) => void;
+  // Pinned Grid mode disables card drag-reorder (wayfinder #982 / #986).
+  draggable?: boolean;
 }
 
-function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: ResizablePanesProps) {
+function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen, draggable = true }: ResizablePanesProps) {
   const [widths, setWidths] = useState(() => equalSizes(nodes.length));
   // `idxRef` records which separator the user clicked, since the shared
   // `useResizable` hook fires `handleMouseDown` without knowing which divider
@@ -105,6 +108,7 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
                 onBuildRun={onBuildRun}
                 buildRunOpen={buildRunOpen}
                 setBuildRunOpen={setBuildRunOpen}
+                draggable={draggable}
               />
             </div>
             {isMultiPane && idx < nodes.length - 1 && (
@@ -117,6 +121,109 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
           </Fragment>
         );
       })}
+    </div>
+  );
+}
+
+/// Empty state for Mesh Grid / All Nodes / Single when the scope has no
+/// nodes — the original "Add Mesh" splash. The shortcut rows source from
+/// SHORTCUT_CATALOG (issue #748) so catalog edits propagate here.
+function NoNodesSplash() {
+  return (
+    <div className="flex-1 flex items-center justify-center text-text-muted">
+      <div className="text-center max-w-sm">
+        <p className="text-xl mb-2 text-text-primary font-sans font-semibold">Buildmesh</p>
+        <p className="text-sm text-text-secondary mb-6 font-sans">Orchestrate AI agents across your meshes. Add a mesh pointing at a Git repository, then spawn agents to work in parallel.</p>
+        <button
+          onClick={() => useMeshStore.getState().addMesh()}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          Add Mesh
+        </button>
+        <div className="mt-8 text-xs text-text-muted font-mono space-y-1">
+          {/* Issue #748: the splash now sources its rows from
+              SHORTCUT_CATALOG (entries flagged `splash: true`) instead
+              of hand-coding five inline strings. A future catalog edit
+              (e.g. renaming `?` to `Ctrl+/`) now propagates here
+              automatically — the previous hand-coded version would
+              silently drift.
+
+              Modifier prefix follows the platform convention used
+              elsewhere (Terminal.tsx context menu, README): ⌘ on macOS,
+              Ctrl on Windows/Linux. The arrow glyphs (←/→/↑/↓) read
+              identically across platforms and match the key names
+              bound by Tauri's global-shortcut plugin.
+
+              Issue #668 — Alt+G (Win/Linux) / ⌘+G (macOS) is the new
+              maximize/restore toggle. Listed here so users discover it
+              before they ever open a mesh. */}
+          {SHORTCUT_CATALOG.filter(e => e.splash).map(entry => (
+            <p key={entry.action}>
+              <kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">
+                {shortcutLabel(entry)}
+              </kbd>
+              {' '}{entry.description}
+            </p>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/// Empty state for Pinned Grid mode with 0 pinned nodes (wayfinder #982 /
+/// ticket #986). Mirrors the splash's structure (centered, max-w-sm,
+/// heading + body + accent-cyan CTA) but the call to action is "View All
+/// Nodes" — the natural next step when nothing is pinned yet. Pin afford-
+/// ances live in the node header and the sidebar node context menu (#985).
+export function PinnedEmptyState() {
+  const setViewMode = useUIStore(state => state.setViewMode);
+  return (
+    <div className="flex-1 flex items-center justify-center text-text-muted">
+      <div className="text-center max-w-sm">
+        <svg
+          className="mx-auto mb-4 w-8 h-8 text-text-muted"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M12 17v5" />
+          <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+        </svg>
+        <p className="text-xl mb-2 text-text-primary font-sans font-semibold">No pinned nodes</p>
+        <p className="text-sm text-text-secondary mb-6 font-sans">
+          Pin agents from any mesh to keep them in reach here. Use the pin button in a node's header, or right-click a node in the sidebar.
+        </p>
+        <button
+          onClick={() => {
+            // All Nodes ⟺ no mesh selected (one filter, two controls) —
+            // clearing the selection flips the mode via the uiStore
+            // mesh-subscription. With nothing selected, set it directly.
+            const { selectedMeshId, selectMesh } = useMeshStore.getState();
+            if (selectedMeshId !== null) {
+              selectMesh(null);
+            } else {
+              setViewMode('all');
+            }
+          }}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect width="7" height="9" x="3" y="3" rx="1" />
+            <rect width="7" height="5" x="14" y="3" rx="1" />
+            <rect width="7" height="9" x="14" y="12" rx="1" />
+            <rect width="7" height="5" x="3" y="16" rx="1" />
+          </svg>
+          View All Nodes
+        </button>
+      </div>
     </div>
   );
 }
@@ -138,26 +245,36 @@ export function AgentNodeView() {
     [agentNodes, activeNodeId],
   );
 
-  const maximizedNodeId = useUIStore(state => state.maximizedNodeId);
-  const clearMaximizedNode = useUIStore(state => state.clearMaximizedNode);
+  // View Modes (wayfinder #982): 'single' solos the active node (it subsumes
+  // the old maximizedNodeId); the grid modes derive their visible set from
+  // the pure helpers in src/lib/viewModes.ts so keyboard traversal (#987)
+  // reads the same definition.
+  const viewMode = useUIStore(state => state.viewMode);
+  const lastNonSingleMode = useUIStore(state => state.lastNonSingleMode);
+  const exitSingleMode = useUIStore(state => state.exitSingleMode);
   const probeOpen = useUIStore(state => state.probeOpen);
   const activeDiffFile = useUIStore(state => state.activeDiffFile);
   const [openBuildRun, setOpenBuildRun] = useState<BuildRunState>(null);
 
-  const filteredNodes = useMemo(() => {
-    if (selectedMeshId === null) {
-      return agentNodes;
-    }
-    return agentNodes.filter(s => s.mesh_id === selectedMeshId);
-  }, [agentNodes, selectedMeshId]);
+  // The ordered nodes the active grid mode renders. 'single' is not a grid
+  // mode — it renders `singleNode` below instead, so its list stays empty.
+  const visibleNodes = useMemo(
+    () => (viewMode === 'single'
+      ? []
+      : scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId)),
+    [viewMode, agentNodes, selectedMeshId, activeNodeId],
+  );
 
-  // The node to solo, if maximize is active AND that node is visible in the
-  // current mesh filter. Deriving it (rather than trusting maximizedNodeId
-  // blindly) means a node that's closed or filtered out simply falls back to
-  // the grid — the auto-clear effect below then tidies the stale id.
-  const maximizedNode = useMemo(
-    () => (maximizedNodeId == null ? null : filteredNodes.find(n => n.id === maximizedNodeId) ?? null),
-    [maximizedNodeId, filteredNodes],
+  // The node Single mode solos: the active node regardless of mesh scope
+  // (explicit focus wins — cross-mesh by nature, like Pinned), else the
+  // first node of the scope single was entered from, else any node. Unlike
+  // the old maximize derivation there is NO visibility check against a mesh
+  // filter and no auto-clear effect — ticket #983 deleted both.
+  const singleNode = useMemo(
+    () => (viewMode !== 'single'
+      ? null
+      : resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId)),
+    [viewMode, agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId],
   );
 
   useEffect(() => {
@@ -169,12 +286,17 @@ export function AgentNodeView() {
   // cli_session_id is set after spawn — re-watch so the watcher picks up the newly created worktree
   }, [activeNode?.id, activeNode?.cli_session_id]);
 
-  // Auto-select first node when switching to a mesh that doesn't include the active node
+  // Grid-mode invariant (ticket #986): the active node is always one of the
+  // visible nodes — switching mesh, or unpinning the active node in Pinned
+  // mode, auto-selects the first visible node so focus/highlight/watch never
+  // strand on an off-grid node. Single mode is exempt: it derives FROM the
+  // active node rather than constraining it.
   useEffect(() => {
-    if (filteredNodes.length > 0 && activeNode && !filteredNodes.find(s => s.id === activeNode.id)) {
-      setActiveNode(filteredNodes[0].id);
+    if (viewMode === 'single') return;
+    if (visibleNodes.length > 0 && activeNode && !visibleNodes.find(s => s.id === activeNode.id)) {
+      setActiveNode(visibleNodes[0].id);
     }
-  }, [selectedMeshId, filteredNodes, activeNode, setActiveNode]);
+  }, [viewMode, visibleNodes, activeNode, setActiveNode]);
 
   // Fit terminal when active node changes (e.g. container might have resized)
   useEffect(() => {
@@ -184,40 +306,33 @@ export function AgentNodeView() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNode?.id]);
 
-  // Escape exits maximize. Only bound while something is maximized so we don't
+  // Escape exits Single mode. Only bound while single is active so we don't
   // intercept Escape (e.g. agent CLIs read it) during normal grid use. While
-  // the Center Diff Overlay (#379) is open it sits on top of the maximized
+  // the Center Diff Overlay (#379) is open it sits on top of the solo
   // terminal and owns Escape — without this guard, Escape would close the
-  // overlay AND un-maximize in one press. When the overlay closes, this effect
-  // re-runs (activeDiffFile dep) and re-binds the maximize handler.
+  // overlay AND exit single in one press. When the overlay closes, this
+  // effect re-runs (activeDiffFile dep) and re-binds the handler.
   useEffect(() => {
-    if (maximizedNode == null || activeDiffFile != null) return;
+    if (viewMode !== 'single' || activeDiffFile != null) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') clearMaximizedNode();
+      if (e.key === 'Escape') exitSingleMode();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [maximizedNode, activeDiffFile, clearMaximizedNode]);
+  }, [viewMode, activeDiffFile, exitSingleMode]);
 
-  // If the maximized node disappears (closed, or filtered out by a mesh
-  // switch), drop the stale id so it doesn't suppress the grid on return.
-  useEffect(() => {
-    if (maximizedNodeId != null && maximizedNode == null) {
-      clearMaximizedNode();
-    }
-  }, [maximizedNodeId, maximizedNode, clearMaximizedNode]);
-
-  // Reflow the terminal grid whenever we enter or leave maximize: the soloed
-  // terminal grows to fill the area, and on restore every pane shrinks back.
-  // fitAll covers both directions. Never dispose — the singleton survives this.
+  // Reflow the terminal grid on every mode transition: switching modes
+  // changes which (and how many) NodeCards mount, and entering/leaving
+  // Single grows/shrinks the soloed terminal. fitAll covers all directions.
+  // Never dispose — the singleton survives this.
   useEffect(() => {
     terminalManager.fitAll();
-  }, [maximizedNode?.id]);
+  }, [viewMode, singleNode?.id]);
 
   // Refit when the Probe Panel expands/collapses: it shrinks/grows this view's
   // width via the App flex row, but xterm doesn't re-measure on flex reflow on
   // its own, so terminals would keep a stale column count (#374). Same
-  // never-dispose contract as the maximize refit above.
+  // never-dispose contract as the mode-switch refit above.
   useEffect(() => {
     terminalManager.fitAll();
   }, [probeOpen]);
@@ -225,7 +340,7 @@ export function AgentNodeView() {
   // After a drag reorder/swap, nodes move into slots that may be a different
   // size, so refit. Keyed on the id sequence so it fires only when order
   // actually changes (status flips reuse ids → no refit). Never disposes.
-  const orderKey = useMemo(() => filteredNodes.map(n => n.id).join(','), [filteredNodes]);
+  const orderKey = useMemo(() => visibleNodes.map(n => n.id).join(','), [visibleNodes]);
   useEffect(() => {
     terminalManager.fitAll();
   }, [orderKey]);
@@ -315,73 +430,43 @@ export function AgentNodeView() {
         >
         <DropIntentContext.Provider value={dropIntent}>
         <div className="flex-1 flex overflow-hidden">
-          {maximizedNode ? (
-            <div className="flex-1 flex flex-col p-1 bg-bg-surface overflow-hidden">
-              <NodeCard
-                node={maximizedNode}
-                isActive={maximizedNode.id === activeNodeId}
-                onActivate={setActiveNode}
-                onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
-                buildRunOpen={openBuildRun}
-                setBuildRunOpen={setOpenBuildRun}
-                draggable={false}
-              />
-            </div>
-          ) : filteredNodes.length === 0 ? (
-            <div className="flex-1 flex items-center justify-center text-text-muted">
-              <div className="text-center max-w-sm">
-                <p className="text-xl mb-2 text-text-primary font-sans font-semibold">Buildmesh</p>
-                <p className="text-sm text-text-secondary mb-6 font-sans">Orchestrate AI agents across your meshes. Add a mesh pointing at a Git repository, then spawn agents to work in parallel.</p>
-                <button
-                  onClick={() => useMeshStore.getState().addMesh()}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                  </svg>
-                  Add Mesh
-                </button>
-                <div className="mt-8 text-xs text-text-muted font-mono space-y-1">
-                  {/* Issue #748: the splash now sources its rows from
-                      SHORTCUT_CATALOG (entries flagged `splash: true`) instead
-                      of hand-coding five inline strings. A future catalog edit
-                      (e.g. renaming `?` to `Ctrl+/`) now propagates here
-                      automatically — the previous hand-coded version would
-                      silently drift.
-
-                      Modifier prefix follows the platform convention used
-                      elsewhere (Terminal.tsx context menu, README): ⌘ on macOS,
-                      Ctrl on Windows/Linux. The arrow glyphs (←/→/↑/↓) read
-                      identically across platforms and match the key names
-                      bound by Tauri's global-shortcut plugin.
-
-                      Issue #668 — Alt+G (Win/Linux) / ⌘+G (macOS) is the new
-                      maximize/restore toggle. Listed here so users discover it
-                      before they ever open a mesh. */}
-                  {SHORTCUT_CATALOG.filter(e => e.splash).map(entry => (
-                    <p key={entry.action}>
-                      <kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">
-                        {shortcutLabel(entry)}
-                      </kbd>
-                      {' '}{entry.description}
-                    </p>
-                  ))}
-                </div>
+          {viewMode === 'single' ? (
+            // Single solos one node; with no nodes at all (singleNode null)
+            // the shared splash is the only sensible empty state.
+            singleNode ? (
+              <div className="flex-1 flex flex-col p-1 bg-bg-surface overflow-hidden">
+                <NodeCard
+                  node={singleNode}
+                  isActive={singleNode.id === activeNodeId}
+                  onActivate={setActiveNode}
+                  onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
+                  buildRunOpen={openBuildRun}
+                  setBuildRunOpen={setOpenBuildRun}
+                  draggable={false}
+                />
               </div>
-            </div>
-          ) : filteredNodes.length <= 2 ? (
+            ) : (
+              <NoNodesSplash />
+            )
+          ) : visibleNodes.length === 0 ? (
+            // Empty states are mode-aware (ticket #986): Pinned explains
+            // pinning and offers All Nodes; mesh/all keep the splash.
+            viewMode === 'pinned' ? <PinnedEmptyState /> : <NoNodesSplash />
+          ) : visibleNodes.length <= 2 ? (
             <ResizablePanes
-              nodes={filteredNodes}
+              nodes={visibleNodes}
               onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
               buildRunOpen={openBuildRun}
               setBuildRunOpen={setOpenBuildRun}
+              draggable={viewMode !== 'pinned'}
             />
           ) : (
             <GridSplitter
-              nodes={filteredNodes}
+              nodes={visibleNodes}
               onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
               buildRunOpen={openBuildRun}
               setBuildRunOpen={setOpenBuildRun}
+              draggable={viewMode !== 'pinned'}
             />
           )}
         </div>

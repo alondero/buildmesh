@@ -45,6 +45,9 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
   const regenerateAgentNode = useAgentNodeStore((s) => s.regenerateAgentNode);
+  // Pin/Unpin (wayfinder #982 / #985) — the shared store action is the
+  // sole mutation path; `node.is_pinned` drives this item's label/icon.
+  const toggleNodePinned = useAgentNodeStore((s) => s.toggleNodePinned);
   // Closing a node first runs a worktree safety check that can take seconds on
   // a large repo; until it resolves the row stays on screen, so show a spinner
   // (and stop reacting to clicks) rather than letting the click look ignored.
@@ -95,12 +98,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // keyboard-nav handler so ArrowDown/Up inside the submenu wraps
   // around the full picker, not the per-group slice.
   const submenuItemCount = regenerateTargets.length;
-  // Render-time top-level item count: 1 (Regenerate only — it's now a
-  // submenu trigger, not a click action). Kept as a constant + ref so
-  // the keyboard-nav handler reads `itemCountRef` for the parent
-  // menu's wrap-around math (ArrowUp from item 0 → still item 0 since
-  // there's only one).
-  const itemCount = 1;
+  // Render-time top-level item count: 2 — Regenerate (a submenu trigger,
+  // not a click action) and Pin/Unpin (wayfinder #982 / #985). Kept as a
+  // constant + ref so the keyboard-nav handler reads `itemCountRef` for
+  // the parent menu's wrap-around math.
+  const itemCount = 2;
   const itemCountRef = useRef(itemCount);
   itemCountRef.current = itemCount;
 
@@ -211,6 +213,10 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
       // submenu). Both branches share the close path so a single
       // ArrowLeft dismisses the picker no matter where focus is.
       if (e.key === 'ArrowRight' && inMenu && !inSubmenu) {
+        // Only the Regenerate trigger owns a submenu — with the Pin/Unpin
+        // item now sharing the parent menu (#985), ArrowRight on any other
+        // item must not open the provider picker.
+        if (active !== menuItemRefs.current[0]) return;
         e.preventDefault();
         if (submenuItemCount === 0) return;
         setSubmenuOpen(true);
@@ -575,6 +581,33 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
               </div>
             )}
           </div>
+          {/* Pin/Unpin (wayfinder #982 / #985) — one conditional top-level
+              action next to Regenerate; label and icon reflect the node's
+              current is_pinned rather than rendering two items. Same menu
+              contract as Regenerate: role=menuitem, roving tabindex,
+              close-and-return-focus on activation. */}
+          <button
+            ref={(el) => { menuItemRefs.current[1] = el; }}
+            type="button"
+            role="menuitem"
+            aria-pressed={node.is_pinned}
+            tabIndex={activeIndex === 1 ? 0 : -1}
+            onClick={() => {
+              closeContextMenu();
+              toggleNodePinned(node.id).catch((err) => {
+                console.error('[NodeItem] Pin toggle failed:', err);
+              });
+            }}
+            title={node.is_pinned ? 'Remove this node from the Pinned grid' : 'Keep this node in the Pinned grid'}
+            data-testid="pin-toggle"
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill={node.is_pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 17v5" fill="none" />
+              <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+            </svg>
+            {node.is_pinned ? 'Unpin node' : 'Pin node'}
+          </button>
         </div>
       )}
 

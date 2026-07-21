@@ -730,6 +730,82 @@ describe('useAgentNodeStore', () => {
     });
   });
 
+  describe('setNodePinned / toggleNodePinned (wayfinder #982 / #984)', () => {
+    it('setNodePinned pins optimistically and adopts the backend-returned node', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 21, is_pinned: false, name: 'local-name' })] });
+      // The backend's returned AgentNode is the source of truth — a
+      // concurrent column change on the backend side must survive.
+      mockInvoke.mockResolvedValueOnce(makeNode({ id: 21, is_pinned: true, name: 'backend-name' }));
+
+      await useAgentNodeStore.getState().setNodePinned(21, true);
+
+      expect(mockInvoke).toHaveBeenCalledWith('set_node_pinned', { nodeId: 21, pinned: true });
+      const node = useAgentNodeStore.getState().agentNodes.find(n => n.id === 21)!;
+      expect(node.is_pinned).toBe(true);
+      expect(node.name).toBe('backend-name');
+    });
+
+    it('toggleNodePinned flips optimistically so the Pinned grid re-renders instantly', () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 22, is_pinned: false })] });
+      // A never-settling IPC lets us observe the optimistic window directly.
+      // (Left pending on purpose — an unresolved promise holds no timers and
+      // can't outlive the test.)
+      mockInvoke.mockReturnValueOnce(new Promise(() => {}));
+
+      void useAgentNodeStore.getState().toggleNodePinned(22);
+
+      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 22)!.is_pinned).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('toggle_node_pinned', { nodeId: 22 });
+    });
+
+    it('toggleNodePinned adopts the backend-returned node on success', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 22, is_pinned: true })] });
+      mockInvoke.mockResolvedValueOnce(makeNode({ id: 22, is_pinned: false }));
+
+      await useAgentNodeStore.getState().toggleNodePinned(22);
+
+      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 22)!.is_pinned).toBe(false);
+    });
+
+    it('toggleNodePinned rolls back ONLY is_pinned on rejection, preserving concurrent writes', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 23, is_pinned: false, status: 'idle' })] });
+      mockInvoke.mockRejectedValueOnce(new Error('db locked'));
+
+      const promise = useAgentNodeStore.getState().toggleNodePinned(23);
+      // A concurrent write to another column (e.g. an attention status
+      // flip from the orchestrator) lands while the IPC is in flight.
+      useAgentNodeStore.setState(s => ({
+        agentNodes: s.agentNodes.map(n => n.id === 23 ? { ...n, status: 'awaiting_input' as const } : n),
+      }));
+
+      await expect(promise).rejects.toThrow('db locked');
+
+      const node = useAgentNodeStore.getState().agentNodes.find(n => n.id === 23)!;
+      expect(node.is_pinned).toBe(false); // rolled back
+      expect(node.status).toBe('awaiting_input'); // concurrent write preserved
+      expect(useAgentNodeStore.getState().error).toContain('db locked');
+    });
+
+    it('setNodePinned rolls back and re-throws on rejection', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 24, is_pinned: true })] });
+      mockInvoke.mockRejectedValueOnce(new Error('node not found'));
+
+      await expect(
+        useAgentNodeStore.getState().setNodePinned(24, false)
+      ).rejects.toThrow('node not found');
+
+      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 24)!.is_pinned).toBe(true);
+      expect(useAgentNodeStore.getState().error).toContain('node not found');
+    });
+
+    it('throws before any IPC when the node is not loaded', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 25 })] });
+
+      await expect(useAgentNodeStore.getState().toggleNodePinned(999)).rejects.toThrow('not loaded');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+  });
+
   describe('reorderAgentNode', () => {
     // Three nodes in one mesh, positions 0,1,2.
     const seed = () => useAgentNodeStore.setState({

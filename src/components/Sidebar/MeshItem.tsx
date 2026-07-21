@@ -364,16 +364,16 @@ export function MeshItem({
           providerList={providerList}
           onSelect={() => {
             setActiveNode(node.id);
-            selectMesh(node.mesh_id);
-            // Retarget the solo view if one is open. The `null` check
-            // preserves "click-while-nothing-maximised leaves maximise
-            // null"; the store's idempotency guard handles self-clicks.
-            // Deferred: Ctrl+Arrow from maximised still exits in
-            // App.tsx:251-256 — revisit keyboard parity as a follow-up
-            // so mouse and keyboard agree.
-            const currentMaximized = useUIStore.getState().maximizedNodeId;
-            if (currentMaximized !== null) {
-              useUIStore.getState().setMaximizedNode(node.id);
+            // Single mode stays single (wayfinder #982 / #983): it renders
+            // the active node, so the click retargets the solo view
+            // automatically — this replaces the old setMaximizedNode
+            // retarget. In any grid mode we also select the node's mesh,
+            // which flips the canvas to Mesh Grid via the uiStore sync
+            // (calling selectMesh unconditionally would break out of
+            // Single). Ctrl+Arrow from Single still exits in App.tsx —
+            // keyboard parity follow-up is #987.
+            if (useUIStore.getState().viewMode !== 'single') {
+              selectMesh(node.mesh_id);
             }
           }}
           onDelete={(e) => onDeleteNode(e, node.id)}
