@@ -22,7 +22,7 @@
 //! precedent at `services::usage::read_agy_token`). The HTTP-only fns
 //! (`start_device_flow`, `fetch_workspaces`, `poll_for_token`) are
 //! platform-agnostic by design — the upstream host is reachable on every
-/// OS, even though the credential sink isn't.
+//! OS, even though the credential sink isn't.
 
 use crate::services::usage::UsageError;
 use reqwest::blocking::Client;
@@ -308,7 +308,6 @@ pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAut
 /// doesn't transactionally swap, so a concurrent refresh could clobber
 /// each other. Acceptable risk for a desktop app; follow-up PR may add
 /// per-target locking if profiling shows contention.
-#[allow(dead_code)] // awaiting refresh-on-401 seam in services::usage (issue #956 task 6)
 #[cfg(windows)]
 pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     use crate::services::windows_cred;
@@ -644,6 +643,9 @@ pub(crate) fn parse_opencode_console_full_credential(
 /// DTO path is the contract; this exists so `services::usage` keeps its
 /// single-statement read path (`parse(...).map(|...| (token, workspace))`)
 /// without leaking the optional-field plumbing into the fetcher.
+#[allow(dead_code)] // narrow helper retained for the parser unit tests; the live
+                    // fetcher moved to `services::usage::opencode_live_request_parts`
+                    // (issue #972) and no longer needs the tuple shape.
 pub(crate) fn parse_opencode_console_credential(
     blob: &[u8],
 ) -> Result<(String, String), UsageError> {
@@ -666,7 +668,6 @@ pub(crate) fn parse_opencode_console_credential(
 ///
 /// Cheap pure function used by the lazy-refresh gating: refresh fires when
 /// `is_expired(cached) || cached_age > REFRESH_TTL`.
-#[allow(dead_code)] // awaiting refresh-on-401 seam in services::usage (issue #956 task 6). Used by unit tests.
 pub(crate) fn cred_is_expired(cred: &OpenCodeConsoleCred, now_unix: i64) -> bool {
     let Some(expires_at) = cred.expires_at.as_deref() else {
         return false;
