@@ -46,7 +46,7 @@ use ts_rs::TS;
 use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
 use crate::db;
 use crate::models::{Mesh, DEFAULT_AUTOPILOT_TRIGGER_LABEL};
-use crate::services::github::{GitHubClient, Issue};
+use crate::services::github::{parse_blocked_by, GitHubClient, Issue};
 
 /// Payload of the `autopilot-node-closed` Tauri event. Emitted from the
 /// merged-PR sweep when an autopilot-managed PR was merged and the node is
@@ -84,6 +84,16 @@ const FINISHING_REDRIVE_STALE_MINUTES: i64 = 5;
 /// permission fetch + one log line, not one per pass. Cleared on restart —
 /// cheap to re-derive, and a permission granted meanwhile is picked up then.
 static GATED_TRIGGERS: Lazy<Mutex<HashSet<(i64, i64)>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// `(mesh_id, issue_number)` pairs whose blocked-by `info` log has already
+/// been emitted this app lifetime (map #976, issue #489's mirror inside the
+/// planner). Dedupes the LOG line, not the spawn-skip — the skip is
+/// unconditional whenever an unresolved blocker exists; the set just keeps
+/// the log from spamming once per 2-minute pass. Cleared on restart —
+/// cheap to re-derive, and a blocker that's since resolved (the blocker
+/// issue closed or its node archived) gets re-evaluated on the next pass.
+static LOGGED_BLOCKS: Lazy<Mutex<HashSet<(i64, i64)>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// Start the Autopilot polling daemon. Called once from Tauri `setup`
@@ -211,7 +221,32 @@ fn poll_mesh(
         .map_err(|e| e.to_string())?;
     let known = db::list_known_autopilot_issue_numbers(mesh.id).map_err(|e| e.to_string())?;
 
-    let planned = plan_spawns(&issues, &known, capacity as usize);
+    let candidates = plan_spawns(&issues, &known, capacity as usize);
+    // Map #976: skip issues whose body declares a `**Blocked by**` reference
+    // that's still unresolved on this pass. `plan_spawns` returns GitHub's
+    // best-match order (newest-labelled first for a label query); the
+    // blocked-by filter walks the candidate list once and drops the
+    // deferred ones. The open-number set is built per-pass from the
+    // labelled-open page — see `unresolved_blockers` for the fail-open
+    // semantics (decision 2).
+    let open_numbers: HashSet<i64> = issues.iter().map(|i| i.number).collect();
+    let planned: Vec<&Issue> = candidates
+        .into_iter()
+        .filter(|issue| {
+            let Some(unresolved) = unresolved_blockers(issue, &open_numbers, &known) else {
+                return true;
+            };
+            if mark_blocked_logged(mesh.id, issue.number) {
+                tracing::info!(
+                    "autopilot: issue #{} on mesh {} blocked by {:?} — parked, retry next pass",
+                    issue.number,
+                    mesh.name,
+                    unresolved
+                );
+            }
+            false
+        })
+        .collect();
     if planned.is_empty() {
         return Ok(());
     }
@@ -355,6 +390,53 @@ pub(crate) fn plan_spawns<'a>(
         .filter(|i| !known_issue_numbers.contains(&i.number))
         .take(capacity)
         .collect()
+}
+
+/// Pure planner step (map #976): if `issue` declares a `**Blocked by**`
+/// reference that's still unresolved on this pass, returns the unresolved
+/// blocker list. Returns `None` when there are no unresolved blockers —
+/// covers all three "not blocked" cases (no `**Blocked by**` section, the
+/// `None` short-circuit, and "every blocker is in neither set") because
+/// `parse_blocked_by` collapses the first two and the filter step collapses
+/// the third. The body is parsed exactly once per call.
+///
+/// In-flight blockers count (issue #976 decision 1): a blocker present in
+/// `known_issue_numbers` (the autopilot-managed dedupe set) keeps the
+/// dependent blocked even if the blocker is no longer labelled.
+///
+/// Fail-open (decision 2): a blocker absent from BOTH sets is treated as
+/// resolved. Cross-repo, off-label, paginated to page 2+, or simply
+/// deleted blockers fall through this way by design — better to spawn the
+/// dependent than to starve it forever.
+pub(crate) fn unresolved_blockers(
+    issue: &Issue,
+    open_issue_numbers: &HashSet<i64>,
+    known_issue_numbers: &[i64],
+) -> Option<Vec<i64>> {
+    let blockers = parse_blocked_by(&issue.body);
+    let unresolved: Vec<i64> = blockers
+        .into_iter()
+        .filter(|b| open_issue_numbers.contains(b) || known_issue_numbers.contains(b))
+        .collect();
+    if unresolved.is_empty() {
+        None
+    } else {
+        Some(unresolved)
+    }
+}
+
+/// Record that the blocked-by `info` log line was emitted for
+/// `(mesh_id, issue_number)`. Returns `true` if this is the first time
+/// the pair has been recorded (caller should emit the log), `false` on
+/// subsequent passes (caller should stay silent). Pure novelty wrapper
+/// over `LOGGED_BLOCKS` — the deduped state is the log emission, NOT
+/// the spawn-skip. Mirrors the `HashSet::insert` novelty signal used
+/// by `GATED_TRIGGERS`.
+pub(crate) fn mark_blocked_logged(mesh_id: i64, issue_number: i64) -> bool {
+    LOGGED_BLOCKS
+        .lock()
+        .unwrap()
+        .insert((mesh_id, issue_number))
 }
 
 /// Create the node row (Pending, worktree enforced) + `autopilot_runs` ledger
@@ -510,5 +592,231 @@ mod tests {
         // `capacity as usize` take in plan_spawns).
         assert_eq!(effective_capacity(2, Some(-3)), 0);
         assert_eq!(effective_capacity(2, Some(0)), 0, "pool size 0 pauses spawns");
+    }
+
+    // -- map #976: `**Blocked by**` planner filter -----------------------------
+
+    fn body_with_blocked_by(listing: &str) -> Issue {
+        // Setext-style heading — the format `parse_blocked_by` actually
+        // recognises. `**Blocked by**` alone (without the `----------`
+        // underline) is just inline-bold text and matches NEITHER of the
+        // section-regex alternatives. Mirrors the real shape used by
+        // alondero/buildmesh issues (see parse_blocked_by_setext_underline_*).
+        serde_json::from_str(&format!(
+            r#"{{ "number": 2, "title": "B", "user": {{"login": "octocat"}},
+                  "body": "**Blocked by**\n----------\n\n{}\n" }}"#,
+            listing
+        ))
+        .expect("issue parses")
+    }
+
+    #[test]
+    fn unresolved_blockers_returns_some_when_blocker_in_labelled_open_set() {
+        // Issue B lists #1 as a blocker; #1 is in the labelled-open set
+        // GitHub returned this pass. Spawning B now would race the spawn
+        // of #1 in the same iteration.
+        let issue = body_with_blocked_by("- #1");
+        let open: HashSet<i64> = [1].into_iter().collect();
+        let known: Vec<i64> = Vec::new();
+        let unresolved = unresolved_blockers(&issue, &open, &known);
+        assert_eq!(
+            unresolved,
+            Some(vec![1]),
+            "the blocker in the labelled-open set is the unresolved chain"
+        );
+    }
+
+    #[test]
+    fn unresolved_blockers_returns_some_when_blocker_is_in_flight_known_set() {
+        // Decision 1: an in-flight blocker counts. Issue A's spawn is
+        // already recorded in `autopilot_runs` (so it lives in `known`);
+        // B references A. A may no longer carry the trigger label, but
+        // A's node is still running — B must wait.
+        let issue = body_with_blocked_by("- #1");
+        let open: HashSet<i64> = HashSet::new();
+        let known: Vec<i64> = vec![1];
+        let unresolved = unresolved_blockers(&issue, &open, &known);
+        assert_eq!(
+            unresolved,
+            Some(vec![1]),
+            "in-flight blocker (in known) must gate B"
+        );
+    }
+
+    #[test]
+    fn unresolved_blockers_returns_none_when_blocker_unknown_fail_open() {
+        // Decision 2: a blocker absent from BOTH sets — cross-repo,
+        // off-label, paginated to page 2+, or deleted — is treated as
+        // resolved. Failing open is the safe default for the autonomous
+        // loop: better to spawn the dependent than to starve it forever.
+        let issue = body_with_blocked_by("- #99");
+        let open: HashSet<i64> = [1].into_iter().collect();
+        let known: Vec<i64> = Vec::new();
+        assert!(
+            unresolved_blockers(&issue, &open, &known).is_none(),
+            "unknown blocker must fail open"
+        );
+    }
+
+    #[test]
+    fn unresolved_blockers_returns_none_when_body_has_no_blocked_by_section() {
+        // Plain description, no `**Blocked by**` heading at all.
+        let issue: Issue = serde_json::from_str(
+            r#"{ "number": 1, "title": "task", "user": {"login": "octocat"},
+                "body": "Just a description, no Blocked by.\n" }"#,
+        )
+        .unwrap();
+        let open: HashSet<i64> = [1, 2, 3].into_iter().collect();
+        let known: Vec<i64> = Vec::new();
+        assert!(
+            unresolved_blockers(&issue, &open, &known).is_none(),
+            "body without a Blocked by section must not block"
+        );
+    }
+
+    #[test]
+    fn unresolved_blockers_returns_none_when_blocked_by_section_is_None() {
+        // The `None` short-circuit in `parse_blocked_by` must propagate.
+        // Issue may use `**Blocked by** None` to declare "no blockers" —
+        // that's a positive signal to proceed, not a blocked state.
+        let issue: Issue = serde_json::from_str(
+            r#"{ "number": 1, "title": "task", "user": {"login": "octocat"},
+                "body": "**Blocked by**\n----------\n\nNone\n" }"#,
+        )
+        .unwrap();
+        let open: HashSet<i64> = [1, 2].into_iter().collect();
+        let known: Vec<i64> = Vec::new();
+        assert!(
+            unresolved_blockers(&issue, &open, &known).is_none(),
+            "the `None` short-circuit in parse_blocked_by must propagate"
+        );
+    }
+
+    #[test]
+    fn mark_blocked_logged_first_insert_is_novel_subsequent_is_duplicate() {
+        // Pure novelty wrapper over `LOGGED_BLOCKS`. `HashSet::insert`
+        // returns `true` iff the value was newly added. First call:
+        // log-worthy. Second call: silent.
+        //
+        // Use a unique pair to avoid colliding with other tests'
+        // state in the global set — `cargo test` runs in parallel and
+        // the set is app-lifetime state.
+        let pair = (i64::MAX - 7, i64::MAX - 13);
+        LOGGED_BLOCKS.lock().unwrap().remove(&pair);
+        assert!(
+            mark_blocked_logged(pair.0, pair.1),
+            "first insert is novel — caller logs once"
+        );
+        assert!(
+            !mark_blocked_logged(pair.0, pair.1),
+            "second insert is a duplicate — caller stays silent"
+        );
+        // Tidy: leave the set as we found it.
+        LOGGED_BLOCKS.lock().unwrap().remove(&pair);
+    }
+
+    #[test]
+    fn blocked_by_filter_emits_log_once_on_first_observation_silently_after() {
+        // Acceptance criterion #6: first observation of a blocked
+        // (mesh_id, issue_number) pair emits ONE `info` log line; any
+        // subsequent observation of the same pair is silent. Captures
+        // `tracing::info!` events via a custom `MakeWriter` and mirrors
+        // the closure body in `poll_mesh` so the assertion reflects the
+        // exact behaviour the planner will exhibit at runtime — a
+        // regression in the `if mark_blocked_logged(...)` wiring would
+        // fail this test.
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(VecWriter(captured.clone()))
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+
+        let pair = (i64::MAX - 91, i64::MAX - 13);
+        let issue = body_with_blocked_by("- #1");
+        let open: HashSet<i64> = [1].into_iter().collect();
+        let known: Vec<i64> = Vec::new();
+
+        tracing::subscriber::with_default(subscriber, || {
+            // First observation: should emit the log line.
+            let unresolved = unresolved_blockers(&issue, &open, &known)
+                .expect("issue must be blocked so the log path runs");
+            if mark_blocked_logged(pair.0, pair.1) {
+                tracing::info!(
+                    "autopilot: issue #{} on mesh {} blocked by {:?} — parked, retry next pass",
+                    pair.1,
+                    "test_mesh",
+                    unresolved
+                );
+            }
+
+            // Second observation: same pair still blocked, but the log
+            // must NOT fire.
+            let unresolved = unresolved_blockers(&issue, &open, &known)
+                .expect("issue must still be blocked");
+            if mark_blocked_logged(pair.0, pair.1) {
+                tracing::info!("SHOULD NOT APPEAR");
+            }
+
+            // Third observation: explicit guard against log spam on
+            // further passes.
+            let _ = unresolved_blockers(&issue, &open, &known);
+            if mark_blocked_logged(pair.0, pair.1) {
+                tracing::info!("ALSO SHOULD NOT APPEAR");
+            }
+        });
+
+        // Tidy: leave LOGGED_BLOCKS as we found it.
+        LOGGED_BLOCKS.lock().unwrap().remove(&pair);
+
+        let logs = String::from_utf8(captured.lock().unwrap().clone())
+            .expect("captured log buffer is utf-8");
+        let autopilot_lines: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("autopilot:"))
+            .collect();
+        assert_eq!(
+            autopilot_lines.len(),
+            1,
+            "exactly one `autopilot:` log line on first observation. Captured:\n{}",
+            logs
+        );
+        assert!(
+            autopilot_lines[0].contains("blocked by"),
+            "first log line includes the blocker reason; got: {:?}",
+            autopilot_lines[0]
+        );
+        assert!(
+            !logs.contains("SHOULD NOT APPEAR"),
+            "second observation must be silent"
+        );
+        assert!(
+            !logs.contains("ALSO SHOULD NOT APPEAR"),
+            "third observation must be silent"
+        );
     }
 }

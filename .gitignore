@@ -48,6 +48,12 @@ test-results/
 # passed to `gh issue create`). Anything worth keeping should move out of
 # `.tmp/` and into `docs/` before commit.
 .tmp/
+# Wayfinder working-draft mirrors (per-map resolution transcripts, map-body
+# drafts). Never intended to ship — the canonical artifacts are the issue
+# comments and the map's body on GitHub. Mirrors stay local for the session
+# that produced them and serve as breadcrumbs if anyone pings the issue
+# later. See CLAUDE.local.md for the per-map layout convention.
+.wayfinder/
 # Scratch diff files from code-review agents (e.g. /tmp/real_diff.txt saved
 # into the worktree to coordinate with subagents). Never intended to ship.
 /real_diff.txt
