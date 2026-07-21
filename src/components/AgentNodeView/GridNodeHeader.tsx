@@ -97,11 +97,20 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   const openProbeTab = useUIStore(state => state.openProbeTab);
   const probeOpen = useUIStore(state => state.probeOpen);
   const probeTab = useUIStore(state => state.probeTab);
-  // Boolean selector (not the raw id) so only the two headers whose maximized
-  // status actually flips re-render on a toggle — not every header in the grid.
-  const isMaximized = useUIStore(state => state.maximizedNodeId === node.id);
-  const toggleMaximizedNode = useUIStore(state => state.toggleMaximizedNode);
+  // Boolean mode selector (wayfinder #982 / #983): Single mode subsumes the
+  // old per-node `maximizedNodeId` — in Single mode only the soloed card
+  // renders, so "this header is the solo view's" is exactly "the canvas is
+  // in Single mode". Boolean (not the raw mode) so headers only re-render
+  // when the boolean flips, not on every uiStore change.
+  const isSingleMode = useUIStore(state => state.viewMode === 'single');
+  const setViewMode = useUIStore(state => state.setViewMode);
+  const exitSingleMode = useUIStore(state => state.exitSingleMode);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
+  // Pin toggle (wayfinder #982 / #985) — the shared store action is the
+  // sole mutation path. Its optimistic patch flips `node.is_pinned` in
+  // place, so this header re-renders via the existing `node` prop with no
+  // local pin state of its own.
+  const toggleNodePinned = useAgentNodeStore(state => state.toggleNodePinned);
   const renameAgentNode = useAgentNodeStore(state => state.renameAgentNode);
   // The chip's click focuses the node before opening the probe — the
   // `AgentChangesTab` reads `useProbeContext().activeNodeId` to pick
@@ -146,6 +155,27 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   const handleClose = async (e: React.MouseEvent) => {
     e.stopPropagation();
     await deleteAgentNode(node.id);
+  };
+
+  // Enter Single mode on this node (explicit focus wins — ticket #983), or,
+  // when this header IS the solo view, exit back to the grid mode Single was
+  // entered from. Replaces the old toggleMaximizedNode.
+  const handleToggleSolo = () => {
+    if (isSingleMode) {
+      exitSingleMode();
+      return;
+    }
+    setActiveNode(node.id);
+    setViewMode('single');
+  };
+
+  // Pin/Unpin (#985). The store rolls back and surfaces the rejection on
+  // `state.error` (→ App toast pipeline), so the local catch only suppresses
+  // unhandled-rejection noise. Stop propagation so the click doesn't
+  // activate/select the card.
+  const handleTogglePin = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    void toggleNodePinned(node.id).catch(() => {});
   };
 
   const gitPath = getNodeGitPath(node);
@@ -194,8 +224,8 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   return (
     <div
       {...dragHandleProps}
-      onDoubleClick={() => toggleMaximizedNode(node.id)}
-      title={isMaximized
+      onDoubleClick={handleToggleSolo}
+      title={isSingleMode
         ? `Double-click or press ${toggleShortcutHint} to restore grid`
         : `Double-click or press ${toggleShortcutHint} to maximize`}
       // Issue #736 — `data-tier` is the test seam: jsdom can't observe the
@@ -346,7 +376,26 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
               <FolderOpenIcon className="w-3.5 h-3.5" />
             </button>
             <button
-              onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
+              type="button"
+              onClick={handleTogglePin}
+              // Pin/Unpin toggle (wayfinder #982 / #985) — same 28×28
+              // surface and 12px stroke-icon convention as the other header
+              // actions, placed beside maximize (before it) so the primary
+              // controls keep their order. Filled pin + aria-pressed when
+              // pinned; outline pin otherwise. Cyan hover matches the pin
+              // accent used by the Pinned view segment.
+              className="w-7 h-7 flex items-center justify-center rounded-md bg-bg-base/60 border border-border-default text-text-primary hover:text-accent-cyan hover:bg-accent-cyan/15 hover:border-accent-cyan/60 transition-colors"
+              title={node.is_pinned ? 'Unpin node' : 'Pin node'}
+              aria-label={node.is_pinned ? 'Unpin node' : 'Pin node'}
+              aria-pressed={node.is_pinned}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill={node.is_pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 17v5" fill="none" />
+                <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+              </svg>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); handleToggleSolo(); }}
               // Always-visible button surface (was opacity-0 until hover — invisible
               // against the mesh tint). Same `h-7` + `bg-bg-base/60 + border` as
               // BuildRunDropdown so the trio reads as one control group; hover
@@ -355,10 +404,10 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
               // Issue #668 — surface the Alt+G / ⌘+G shortcut in the button
               // tooltip so discoverability isn't gated on the header double-click
               // or the empty-state splash.
-              title={isMaximized ? `Restore grid (or ${toggleShortcutHint})` : `Maximize (or ${toggleShortcutHint})`}
-              aria-label={isMaximized ? 'Restore grid layout' : 'Maximize agent node'}
+              title={isSingleMode ? `Restore grid (or ${toggleShortcutHint})` : `Maximize (or ${toggleShortcutHint})`}
+              aria-label={isSingleMode ? 'Restore grid layout' : 'Maximize agent node'}
             >
-              {isMaximized ? (
+              {isSingleMode ? (
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
                 </svg>
@@ -392,9 +441,11 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
           // inline trio so we don't bloat scope. Tracking the analogous
           // kebab-trigger fix separately (issue TBD).
           <KebabActions
-            isMaximized={isMaximized}
+            isSingleMode={isSingleMode}
+            isPinned={node.is_pinned}
             toggleShortcutHint={toggleShortcutHint}
-            onToggleMaximized={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
+            onToggleSolo={(e) => { e.stopPropagation(); handleToggleSolo(); }}
+            onTogglePin={handleTogglePin}
             onClose={handleClose}
             onOpenInExplorer={handleOpenInExplorer}
             onFinish={handleFinish}
@@ -425,9 +476,11 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
  * snapshotting its `getBoundingClientRect` on the toggle click.
  */
 interface KebabActionsProps {
-  isMaximized: boolean;
+  isSingleMode: boolean;
+  isPinned: boolean;
   toggleShortcutHint: string;
-  onToggleMaximized: (e: React.MouseEvent) => void;
+  onToggleSolo: (e: React.MouseEvent) => void;
+  onTogglePin: (e: React.MouseEvent) => void;
   onClose: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
   onFinish: (e: React.MouseEvent) => void;
@@ -436,7 +489,7 @@ interface KebabActionsProps {
 const KEBAB_MIN_WIDTH = 160;
 const KEBAB_GAP = 4;
 
-function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onClose, onOpenInExplorer, onFinish }: KebabActionsProps) {
+function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer, onFinish }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -447,8 +500,9 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
   const menuIdRef = useRef(`grid-node-kebab-menu-${Math.random().toString(36).slice(2, 9)}`);
   const menuId = menuIdRef.current;
   // Reveal-in-explorer joined the existing maximize/close pair (#736);
-  // Finish joined in #484 — arrow navigation wraps at four.
-  const itemCount = 4;
+  // Finish joined in #484, Pin/Unpin in wayfinder #982 (#985) — arrow
+  // navigation wraps at five.
+  const itemCount = 5;
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
     setOpen(false);
@@ -592,20 +646,33 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
           <button
             ref={(el) => { menuItemRefs.current[1] = el; }}
             role="menuitem"
-            onClick={(e) => { closeAndReturnFocus(); onToggleMaximized(e); }}
+            aria-pressed={isPinned}
+            onClick={(e) => { closeAndReturnFocus(); onTogglePin(e); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 17v5" fill="none" />
+              <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+            </svg>
+            {isPinned ? 'Unpin node' : 'Pin node'}
+          </button>
+          <button
+            ref={(el) => { menuItemRefs.current[2] = el; }}
+            role="menuitem"
+            onClick={(e) => { closeAndReturnFocus(); onToggleSolo(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              {isMaximized ? (
+              {isSingleMode ? (
                 <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
               ) : (
                 <path d="M15 3h6m0 0v6m0-6-7 7M9 21H3m0 0v-6m0 6 7-7" />
               )}
             </svg>
-            {isMaximized ? `Restore grid (${toggleShortcutHint})` : `Maximize (${toggleShortcutHint})`}
+            {isSingleMode ? `Restore grid (${toggleShortcutHint})` : `Maximize (${toggleShortcutHint})`}
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[2] = el; }}
+            ref={(el) => { menuItemRefs.current[3] = el; }}
             role="menuitem"
             onClick={(e) => { closeAndReturnFocus(); onFinish(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
@@ -616,7 +683,7 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
             Finish (wrap-up &amp; PR)
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[3] = el; }}
+            ref={(el) => { menuItemRefs.current[4] = el; }}
             role="menuitem"
             onClick={(e) => { closeAndReturnFocus(); onClose(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"

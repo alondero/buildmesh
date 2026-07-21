@@ -45,6 +45,7 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
     source_pr_pinned_sha: null,
     position: 0,
     created_at: '2026-01-01',
+    is_pinned: false,
     ...overrides,
   };
 }
@@ -130,6 +131,16 @@ describe('NodeItem context menu (issue #776)', () => {
         return { ...(existing ?? makeNode()), provider: newProviderId } as AgentNode;
       },
     );
+    // Same pattern for the Pin/Unpin item (#985): the menu calls the
+    // shared `toggleNodePinned` store action; the spy lets the test
+    // assert the call without a real Tauri round-trip and without
+    // mutating the in-memory node list (optimistic patch included).
+    vi.spyOn(useAgentNodeStore.getState(), 'toggleNodePinned').mockImplementation(
+      async (nodeId) => {
+        const existing = useAgentNodeStore.getState().agentNodes.find(n => n.id === nodeId);
+        return { ...(existing ?? makeNode()), is_pinned: !(existing?.is_pinned ?? false) } as AgentNode;
+      },
+    );
   });
 
   // RTL doesn't auto-unmount in this vitest setup, so the previous
@@ -153,13 +164,18 @@ describe('NodeItem context menu (issue #776)', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull();
   });
 
-  it('marks the menu container with role="menu" and the item with role="menuitem"', () => {
+  it('marks the menu container with role="menu" and two items (Regenerate + Pin) with role="menuitem"', () => {
+    // Wayfinder #982 / #985: the menu grew from 1 → 2 items so a user
+    // can pin/unpin without entering the canvas, the same store action
+    // the header uses, kept keyboard-accessible via the existing
+    // roving-tabindex / arrow-wrap contract.
     renderNode();
     openContextMenu();
     expect(document.querySelector('[role="menu"]')).toBeTruthy();
     const items = document.querySelectorAll('[role="menuitem"]');
-    expect(items).toHaveLength(1);
+    expect(items).toHaveLength(2);
     expect(items[0].textContent).toMatch(/Regenerate/);
+    expect(items[1].textContent).toMatch(/Pin node|Unpin node/);
   });
 
   it('labels the menu with the node name via aria-labelledby pointing at the row id', () => {
@@ -311,6 +327,79 @@ describe('NodeItem context menu (issue #776)', () => {
       fireEvent.click(item);
 
       expect(useAgentNodeStore.getState().regenerateAgentNode).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Pin/Unpin item (wayfinder #982 / #985)', () => {
+    it('renders "Pin node" with aria-pressed=false for an unpinned node', () => {
+      renderNode();
+      openContextMenu();
+      const item = screen.getByText('Pin node').closest('button')!;
+      expect(item.getAttribute('aria-pressed')).toBe('false');
+      expect(item.getAttribute('title')).toBe('Keep this node in the Pinned grid');
+    });
+
+    it('renders "Unpin node" with aria-pressed=true for a pinned node', () => {
+      renderNode(makeNode({ is_pinned: true }));
+      openContextMenu();
+      const item = screen.getByText('Unpin node').closest('button')!;
+      expect(item.getAttribute('aria-pressed')).toBe('true');
+      expect(item.getAttribute('title')).toBe('Remove this node from the Pinned grid');
+    });
+
+    it('clicking the Pin item invokes the shared store action with the node id', async () => {
+      renderNode();
+      openContextMenu();
+      const item = screen.getByText('Pin node').closest('button')!;
+      // The action is async and the optimistic patch is in the store
+      // implementation; the spy on `toggleNodePinned` is what proves
+      // the click reached the right API — we don't have to wait for
+      // the resolved promise (the spy handles it synchronously after
+      // its single microtask tick).
+      await userEvent.click(item);
+      expect(useAgentNodeStore.getState().toggleNodePinned).toHaveBeenCalledWith(42);
+    });
+
+    it('ArrowDown wraps from Regenerate (0) to Pin (1) and back via ArrowUp', () => {
+      // Issue #985 — the menu grew from 1 → 2 items; ArrowDown/Up
+      // must wrap across the full count, not degenerate to a no-op.
+      renderNode(makeNode(), [makeProvider('claude')]);
+      openContextMenu();
+      // The two top-level menuitems are the only role=menuitems
+      // inside the parent menu (not the Regenerate submenu). Pick
+      // them directly so we don't read submenu rows.
+      const parentMenu = document.querySelector('[role="menu"]')!;
+      const topLevel = Array.from(parentMenu.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
+      expect(topLevel).toHaveLength(2);
+      // First (Regenerate) is auto-focused on open.
+      expect(document.activeElement).toBe(topLevel[0]);
+      // ArrowDown → Pin.
+      pressKey('ArrowDown');
+      expect(document.activeElement).toBe(topLevel[1]);
+      // ArrowDown → wraps back to Regenerate.
+      pressKey('ArrowDown');
+      expect(document.activeElement).toBe(topLevel[0]);
+      // ArrowUp → wraps forward to Pin.
+      pressKey('ArrowUp');
+      expect(document.activeElement).toBe(topLevel[1]);
+    });
+
+    it('ArrowRight on the Pin item does NOT open the Regenerate submenu', () => {
+      // The keyboard-nav guard (wayfinder #982 — ticket migration
+      // touch-up) ensures ArrowRight is a submenu command only when
+      // focus is on the Regenerate trigger. With two top-level items
+      // sharing the menu, ArrowRight on the Pin item used to open
+      // the provider picker — wrong.
+      renderNode(makeNode(), [makeProvider('claude')]);
+      openContextMenu();
+      const parentMenu = document.querySelector('[role="menu"]')!;
+      const topLevel = Array.from(parentMenu.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
+      expect(topLevel).toHaveLength(2);
+      // Focus the Pin item.
+      topLevel[1].focus();
+      pressKey('ArrowRight');
+      // Submenu must NOT be open.
+      expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
     });
   });
 

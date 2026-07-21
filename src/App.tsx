@@ -16,6 +16,7 @@ import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
+import { ViewModeSwitcher } from './components/ViewModeSwitcher/ViewModeSwitcher';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
@@ -279,14 +280,13 @@ function App() {
       if (!arrowThrottle()) return;
       const direction: ArrowDirection = action.slice('arrow-'.length) as ArrowDirection;
 
-      // Phase 1: if a node is maximized, the first arrow press restores the
-      // grid AND moves focus to the maximized node. Capturing the id BEFORE
-      // clearMaximizedNode() (which nulls it) is what lets the subsequent
-      // setActiveNode see the right id.
-      const maximizedId = useUIStore.getState().maximizedNodeId;
-      if (maximizedId !== null) {
-        useUIStore.getState().clearMaximizedNode();
-        useAgentNodeStore.getState().setActiveNode(maximizedId);
+      // Phase 1: in Single view mode (which subsumes the old maximize —
+      // wayfinder #982), the first arrow press restores the grid AND keeps
+      // focus on the soloed node. Single renders the active node, so
+      // exiting the mode is all that's needed — activeNodeId already points
+      // at the node the user was viewing.
+      if (useUIStore.getState().viewMode === 'single') {
+        useUIStore.getState().exitSingleMode();
         return;
       }
 
@@ -562,10 +562,19 @@ function App() {
     );
   }
 
-  return (
+    return (
     <div className="flex h-screen w-screen overflow-hidden bg-bg-base text-text-primary">
       <Sidebar />
-      <AgentNodeView />
+      {/* Canvas column (wayfinder #982 / ticket #983): a slim header strip
+          above the node canvas only — not app-wide, not in the sidebar —
+          carrying the ViewModeSwitcher right-aligned. The left side is the
+          seam for future canvas-level chrome (breadcrumb etc.). */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex items-center justify-end px-3 py-1.5 border-b border-border-subtle shrink-0">
+          <ViewModeSwitcher />
+        </div>
+        <AgentNodeView />
+      </div>
       <ProbePanel />
 
       <WorktreeCloseDialog />

@@ -113,14 +113,15 @@ const { openUrlMock } = vi.hoisted(() => ({
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: openUrlMock }));
 
 // Mirror the lib/tauri mock from `grid-node-header.test.tsx` so the
-// kebab's new "Reveal in file explorer" item doesn't dispatch a real
-// IPC during the responsive suite.
-const { openInFileManagerMock } = vi.hoisted(() => ({
+// kebab's "Reveal in file explorer" and Pin/Unpin items don't dispatch a
+// real IPC during the responsive suite.
+const { openInFileManagerMock, toggleNodePinnedMock } = vi.hoisted(() => ({
   openInFileManagerMock: vi.fn().mockResolvedValue(undefined),
+  toggleNodePinnedMock: vi.fn(),
 }));
 vi.mock('../../src/lib/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/lib/tauri')>();
-  return { ...actual, openInFileManager: openInFileManagerMock };
+  return { ...actual, openInFileManager: openInFileManagerMock, toggleNodePinned: toggleNodePinnedMock };
 });
 
 // Imported AFTER mocks so it sees the stubbed BuildRunDropdown etc.
@@ -140,6 +141,7 @@ const NODE: AgentNode = {
   created_at: new Date(0).toISOString(),
   scratchpad: '',
   sandbox: false,
+  is_pinned: false,
 };
 
 const MESH: Mesh = {
@@ -165,10 +167,13 @@ function setupWithSummaryAndPr() {
 function setupCommonState() {
   useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
   useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-  useUIStore.setState({ maximizedNodeId: null });
+  // Baseline grid mode — Single (which subsumes the old maximize) flips
+  // the header's solo/restore affordances, so tests opt into it explicitly.
+  useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
   summaryMock.mockReset();
   prMock.mockReset();
   openUrlMock.mockClear();
+  toggleNodePinnedMock.mockReset();
 }
 
 function renderHeader(width: number) {
@@ -411,22 +416,24 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       prMock.mockReturnValue(null);
     });
 
-    it('opens on click and reveals Reveal + Maximize + Finish + Close items', () => {
+    it('opens on click and reveals Reveal + Pin + Maximize + Finish + Close items', () => {
       // The actions are rendered inline above the kebab threshold; below
-      // it, all four fold into the menu so the title isn't squeezed out.
+      // it, all five fold into the menu so the title isn't squeezed out.
       // Kebab item order by DOM position: Open in file explorer (0),
-      // Maximize/Restore (1), Finish (2, issue #484), Close (3).
+      // Pin/Unpin (1, wayfinder #982 / #985), Maximize/Restore (2),
+      // Finish (3, issue #484), Close (4).
       const { root } = renderHeader(200);
       const trigger = screen.getByLabelText('Agent node actions');
       fireEvent.click(trigger);
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu).toBeTruthy();
-      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
+      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(5);
       const items = menu.querySelectorAll('[role="menuitem"]');
       expect(items[0].textContent).toContain('Open in file explorer');
-      expect(items[1].textContent!.toLowerCase()).toMatch(/maximize|restore grid/);
-      expect(items[2].textContent).toContain('Finish');
-      expect(items[3].textContent).toContain('Close agent node');
+      expect(items[1].textContent).toContain('Pin node');
+      expect(items[2].textContent!.toLowerCase()).toMatch(/maximize|restore grid/);
+      expect(items[3].textContent).toContain('Finish');
+      expect(items[4].textContent).toContain('Close agent node');
       // sanity: the trigger is in the DOM and the menu is its descendant tree
       expect(root.contains(trigger)).toBe(true);
     });
@@ -451,16 +458,41 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       expect(openInFileManagerMock).toHaveBeenCalledWith('/repo/.claude/worktrees/kebab-feat');
     });
 
-    it('toggles Maximize from the kebab item', () => {
+    it('toggles Maximize from the kebab item (enters Single — wayfinder #982)', () => {
       renderHeader(200);
-      expect(useUIStore.getState().maximizedNodeId).toBeNull();
+      expect(useUIStore.getState().viewMode).toBe('mesh');
       fireEvent.click(screen.getByLabelText('Agent node actions'));
-      // Click the first menuitem — note the label varies by platform (Alt vs ⌘).
+      // Find the item by its label — note it varies by platform (Alt vs ⌘).
       const maximizeItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
         .find((el) => /maximize/i.test(el.textContent ?? '')) as HTMLElement | undefined;
       expect(maximizeItem).toBeTruthy();
       fireEvent.click(maximizeItem!);
-      expect(useUIStore.getState().maximizedNodeId).toBe(NODE.id);
+      // Single subsumes the old per-node maximize; the mode switch solos
+      // the active node (NODE is active in setupCommonState).
+      expect(useUIStore.getState().viewMode).toBe('single');
+    });
+
+    it('toggles Pin from the kebab item (wayfinder #982 / #985)', () => {
+      toggleNodePinnedMock.mockResolvedValueOnce({ ...NODE, is_pinned: true });
+      renderHeader(200);
+      fireEvent.click(screen.getByLabelText('Agent node actions'));
+      const pinItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
+        .find((el) => /pin node/i.test(el.textContent ?? '')) as HTMLElement | undefined;
+      expect(pinItem).toBeTruthy();
+      fireEvent.click(pinItem!);
+      expect(toggleNodePinnedMock).toHaveBeenCalledWith(NODE.id);
+    });
+
+    it('labels the kebab pin item "Unpin node" when the node is pinned', () => {
+      const pinned = { ...NODE, is_pinned: true };
+      useAgentNodeStore.setState({ agentNodes: [pinned] });
+      render(<GridNodeHeader node={pinned} onBuildRun={() => {}} />);
+      fireResize(screen.getByTestId('grid-node-header'), 200);
+      fireEvent.click(screen.getByLabelText('Agent node actions'));
+      const pinItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
+        .find((el) => /unpin node/i.test(el.textContent ?? '')) as HTMLElement | undefined;
+      expect(pinItem).toBeTruthy();
+      expect(pinItem!.getAttribute('aria-pressed')).toBe('true');
     });
 
     it('toggles Close from the kebab item (closing the node)', async () => {
@@ -477,17 +509,18 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       });
     });
 
-    it('updates the kebab\'s Maximize label to "Restore grid" when already maximized', () => {
-      useUIStore.setState({ maximizedNodeId: NODE.id });
+    it('updates the kebab\'s Maximize label to "Restore grid" in Single mode', () => {
+      useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
       const { root } = renderHeader(200);
       fireEvent.click(screen.getByLabelText('Agent node actions'));
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu.textContent?.toLowerCase()).toMatch(/restore grid/);
       expect(menu.textContent?.toLowerCase()).not.toMatch(/^.*maximize/);
-      // Still a menu of four actions: Reveal + Maximize/Restore + Finish
-      // (#484) + Close (the inline buttons fold into the kebab at this
-      // tier too, so the count lives here as well as on the inline path).
-      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
+      // Still a menu of five actions: Reveal + Pin + Maximize/Restore +
+      // Finish (#484) + Close (the inline buttons fold into the kebab at
+      // this tier too, so the count lives here as well as on the inline
+      // path).
+      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(5);
       // Sanity: render did not unmount.
       expect(root.isConnected).toBe(true);
     });
