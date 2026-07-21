@@ -24,6 +24,7 @@ use crate::services::windows_cred;
 // it; the parser stays qualified (call sites read
 // `opencode_oauth::parse_opencode_console_credential(...)`) to make the
 // module boundary obvious at every read site.
+use crate::services::opencode_oauth::OpenCodeConsoleCred;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_CRED_TARGET;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -1106,19 +1107,26 @@ fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
     // error (NoCredential, Shape, transport) is treated identically: fall
     // through to the SQLite path. The returned ProviderUsage carries an
     // `error` for HTTP-level failures (401, 5xx, shape mismatch) which
-    // `choose_opencode_usage` checks below.
-    let live = read_opencode_console_credential().ok().map(|(token, workspace_id)| {
-        fetch_usage(
-            "opencode",
-            |c| {
-                c.post("https://opencode.ai/_server")
-                    .header("X-Server-Id", OPENCODE_SERVER_ID)
-                    .header("Authorization", format!("Bearer {}", token))
-                    .json(&[workspace_id])
-            },
-            parse_opencode_billing_response,
-        )
-    });
+    // `choose_opencode_usage` checks below. The `X-Server-Id` header is
+    // sourced from the persisted credential's `server_id` field
+    // (issue #972); pre-#956 blobs fall through to the legacy default and
+    // trigger a process-wide warn-once.
+    let live = read_opencode_console_credential_full()
+        .ok()
+        .and_then(|cred| {
+            opencode_live_request_parts(&cred).map(|(token, workspace_id, server_id)| {
+                fetch_usage(
+                    "opencode",
+                    move |c| {
+                        c.post("https://opencode.ai/_server")
+                            .header("X-Server-Id", server_id)
+                            .header("Authorization", format!("Bearer {}", token))
+                            .json(&[workspace_id])
+                    },
+                    parse_opencode_billing_response,
+                )
+            })
+        });
 
     // Offline SQLite fallback (#953). Same auth.json gate as before — a user
     // mid-OAuth (live path failed but auth.json present) still gets real
@@ -1177,16 +1185,20 @@ const AGY_CRED_TARGET: &str = "gemini:antigravity";
 // silent blank gauge. The credential blob lives at this target, written by
 // #956's Buildmesh-owned device-flow dance.
 
-/// SolidStart deployment id — the value of the `X-Server-Id` header the
-/// OpenCode CLI sends. Captured from the opencode-cli binary's outbound
-/// traffic (issue #944 / research ticket). Stable per deployment; not per-user.
+/// Legacy default for the SolidStart deployment id the `_server
+/// billing.get` probe sends in the `X-Server-Id` header. Captured from the
+/// opencode-cli binary's outbound traffic (issue #944 / research ticket).
+/// Stable per deployment; not per-user.
 ///
-/// On its way out: the OpenCode Console credential blob (issue #956) is
-/// already the canonical home for this id so the OAuth dance can persist
-/// the value it received from the device-flow exchange rather than
-/// re-emitting it from this binary string. The constant stays until the
-/// server-id migration lands; see `services::opencode_oauth` for the
-/// candidate replacement.
+/// After issue #956 ships the device-flow dance, fresh credentials persist
+/// the same deployment id into [`OpenCodeConsoleCred::server_id`]
+/// (`services::opencode_oauth`). The live probe — see
+/// [`resolve_opencode_server_id`] — reads the persisted value first and
+/// falls back to this constant when a blob predates the field (e.g. a
+/// credential written by an older build, or a developer-only fixture). The
+/// constant stays as the documented legacy default for at least one
+/// release (#963/#972); remove it after re-authentication has rolled out
+/// everywhere.
 const OPENCODE_SERVER_ID: &str =
     "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
 
@@ -1246,6 +1258,83 @@ fn read_opencode_console_credential() -> Result<(String, String), UsageError> {
     Err(UsageError::NoCredential(
         "OpenCode Console usage is only available on Windows".to_string(),
     ))
+}
+
+/// Reads the Buildmesh-owned OpenCode Console credential as the full DTO so
+/// callers can consume the optional `server_id` (issue #972) — and so the
+/// upcoming refresh seam (#970) can re-use the same read path to inspect
+/// `refresh_token` + `expires_at`. Keeps the narrow tuple-returning
+/// [`read_opencode_console_credential`] for call sites that only need the
+/// live RPC fields.
+#[cfg(windows)]
+fn read_opencode_console_credential_full() -> Result<OpenCodeConsoleCred, UsageError> {
+    crate::services::opencode_oauth::parse_opencode_console_full_credential(&windows_cred::read(
+        OPENCODE_CONSOLE_CRED_TARGET,
+    )?)
+}
+
+#[cfg(not(windows))]
+fn read_opencode_console_credential_full() -> Result<OpenCodeConsoleCred, UsageError> {
+    Err(UsageError::NoCredential(
+        "OpenCode Console usage is only available on Windows".to_string(),
+    ))
+}
+
+/// Resolves the value the live `_server billing.get` probe should send in
+/// the `X-Server-Id` header (issue #972).
+///
+/// Primary source is `OpenCodeConsoleCred.server_id` — the value the OAuth
+/// device-flow exchange returned and `persist_token_response` wrote into
+/// the persisted blob. Fallback is [`OPENCODE_SERVER_ID`] for blobs written
+/// before #956 added the field; the fallback fires a single process-wide
+/// `tracing::warn!` so a user who re-authenticates sees the warning stop.
+///
+/// Empty-string `server_id` is treated as missing — a hand-edited blob
+/// with `"server_id": ""` must not produce a useless `X-Server-Id: ` header.
+fn resolve_opencode_server_id(cred: &OpenCodeConsoleCred) -> &str {
+    if let Some(id) = cred.server_id.as_deref() {
+        if !id.is_empty() {
+            return id;
+        }
+    }
+    warn_legacy_opencode_server_id_once();
+    OPENCODE_SERVER_ID
+}
+
+/// Process-wide once-cell for the legacy-server-id warning. The cell lives
+/// for the lifetime of the buildmesh process; re-authenticating writes a
+/// fresh `server_id` into the blob and the resolver takes the
+/// `cred.server_id` branch on subsequent probes, so the warning never
+/// fires again even though the `Once` itself never resets.
+fn warn_legacy_opencode_server_id_once() {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "services::opencode_oauth",
+            "OpenCode Console credential predates the `server_id` field; \
+             falling back to the legacy OPENCODE_SERVER_ID constant. \
+             Re-authenticating will persist a fresh `server_id` into the \
+             credential blob and silence this warning. (issue #972)"
+        );
+    });
+}
+
+/// Pure pipeline that produces the three strings the live `_server
+/// billing.get` probe needs to bind into its HTTP request: the bearer
+/// token, the workspace id (JSON body), and the `X-Server-Id` header
+/// value. Extracted so the binding contract (issue #972 acceptance #5)
+/// is unit-testable without standing up an HTTP mock.
+///
+/// Returns `None` when the credential lacks a non-empty `access_token`
+/// or `workspace_id` — the caller (`opencode_usage_impl`) treats that as
+/// "no credential" and falls through to the SQLite path identically to a
+/// `NoCredential` read.
+fn opencode_live_request_parts(cred: &OpenCodeConsoleCred) -> Option<(String, String, String)> {
+    let token = cred.access_token.clone().filter(|s| !s.is_empty())?;
+    let workspace_id = cred.workspace_id.clone().filter(|s| !s.is_empty())?;
+    let server_id = resolve_opencode_server_id(cred).to_owned();
+    Some((token, workspace_id, server_id))
 }
 
 /// Minimal FFI to the Windows Credential Manager (`advapi32!CredReadW` /
@@ -2256,6 +2345,107 @@ mod tests {
     }
 
     // ── opencode_usage_impl — end-to-end fallback integration ──────────────
+
+    // ── resolve_opencode_server_id — issue #972 ─────────────────────────────
+    //
+    // The live `_server billing.get` probe must read its `X-Server-Id`
+    // header from the persisted `OpenCodeConsoleCred.server_id`, falling
+    // back to the legacy `OPENCODE_SERVER_ID` constant for credentials
+    // written before #956 added the field. These pure tests pin the
+    // resolver contract; the empty-string case is hand-edit safety.
+
+    fn cred_with_server_id(server_id: Option<&str>) -> OpenCodeConsoleCred {
+        OpenCodeConsoleCred {
+            access_token: Some("tok".to_string()),
+            workspace_id: Some("wrk".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            server_id: server_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn resolve_opencode_server_id_prefers_persisted_value() {
+        // Issue #972 acceptance #1: when `server_id` is present and
+        // non-empty, the resolver returns it verbatim — the live probe
+        // sends that value in the `X-Server-Id` header.
+        let cred = cred_with_server_id(Some("custom-deployment-id-abc123"));
+        assert_eq!(
+            resolve_opencode_server_id(&cred),
+            "custom-deployment-id-abc123"
+        );
+    }
+
+    #[test]
+    fn resolve_opencode_server_id_falls_back_to_constant_when_missing() {
+        // Issue #972 acceptance #2: a blob without `server_id` (the
+        // pre-#956 shape) keeps emitting the legacy constant so existing
+        // users don't lose their live probe.
+        let cred = cred_with_server_id(None);
+        assert_eq!(resolve_opencode_server_id(&cred), OPENCODE_SERVER_ID);
+    }
+
+    #[test]
+    fn resolve_opencode_server_id_falls_back_when_empty_string() {
+        // A hand-edited blob with `"server_id": ""` is treated as missing
+        // so the resolver never returns a useless empty `X-Server-Id`
+        // header. The fallback branch's warn-once still fires.
+        let cred = cred_with_server_id(Some(""));
+        assert_eq!(resolve_opencode_server_id(&cred), OPENCODE_SERVER_ID);
+    }
+
+    #[test]
+    fn opencode_live_request_parts_returns_persisted_server_id_for_header() {
+        // Issue #972 acceptance #5: a credential with a non-default
+        // `server_id` causes the live probe to send THAT value (not the
+        // legacy constant) in the `X-Server-Id` header. The token /
+        // workspace round-trip is pinned in the same assertion so a
+        // future refactor that drops the header binding still fails.
+        let cred = cred_with_server_id(Some("custom-deployment-id-xyz"));
+        let (token, workspace_id, server_id) =
+            opencode_live_request_parts(&cred).expect("credential is complete");
+        assert_eq!(token, "tok");
+        assert_eq!(workspace_id, "wrk");
+        assert_eq!(
+            server_id, "custom-deployment-id-xyz",
+            "header must read from cred.server_id, not OPENCODE_SERVER_ID"
+        );
+        assert_ne!(
+            server_id, OPENCODE_SERVER_ID,
+            "must not silently fall back to the constant"
+        );
+    }
+
+    #[test]
+    fn opencode_live_request_parts_uses_legacy_constant_when_persisted_missing() {
+        // The matching legacy-default branch: when the credential has no
+        // `server_id`, the header value IS the constant — that's how
+        // pre-#956 blobs continue to probe SolidStart without an
+        // immediate re-auth.
+        let cred = cred_with_server_id(None);
+        let (_token, _workspace_id, server_id) =
+            opencode_live_request_parts(&cred).expect("credential is complete");
+        assert_eq!(server_id, OPENCODE_SERVER_ID);
+    }
+
+    #[test]
+    fn opencode_live_request_parts_returns_none_when_token_missing() {
+        // A blob missing `access_token` (e.g. mid-flow) must collapse to
+        // `None` so the SQLite fallback runs. Mirrors how the live path
+        // originally responded to a `NoCredential` read.
+        let mut cred = cred_with_server_id(Some("custom"));
+        cred.access_token = None;
+        assert!(opencode_live_request_parts(&cred).is_none());
+    }
+
+    #[test]
+    fn opencode_live_request_parts_returns_none_when_workspace_missing() {
+        // Same invariant for `workspace_id` — the body needs a value
+        // even when the token is present.
+        let mut cred = cred_with_server_id(Some("custom"));
+        cred.workspace_id = None;
+        assert!(opencode_live_request_parts(&cred).is_none());
+    }
 
     #[test]
     fn opencode_usage_impl_with_sqlite_db_only_returns_sqlite_windows() {
