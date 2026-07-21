@@ -296,23 +296,41 @@ pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAut
     })
 }
 
-/// Refreshes an existing access token. The OAuth server accepts the
-/// `refresh_token` issued by the device-flow exchange and returns a new
-/// `(access_token, refresh_token, expires_in, workspace_id, server_id)`
-/// bundle. The lazy refresh strategy in `services::usage` calls this
-/// when the cached credential is `is_expired()` OR `cached_age > REFRESH_TTL`
-/// and the live probe returns 401.
+/// Full token-endpoint URL for the OAuth dance (issue #956): a single
+/// constant the parameterized refresh helper consumes so test fixtures
+/// (`127.0.0.1:<port>/auth/device/token`) and production
+/// (`https://console.opencode.ai/auth/device/token`) share one code path.
+/// Mirrors `OPENCODE_BILLING_URL` in `services::usage`.
+pub(crate) const OPENCODE_CONSOLE_TOKEN_URL: &str =
+    "https://console.opencode.ai/auth/device/token";
+
+/// Refreshes an existing access token at an arbitrary credential target.
+/// The OAuth server accepts the `refresh_token` issued by the device-flow
+/// exchange and returns a new `(access_token, refresh_token, expires_in,
+/// workspace_id, server_id)` bundle. The lazy refresh strategy in
+/// `services::usage` calls this when the cached credential is `is_expired()`
+/// OR `cached_age > REFRESH_TTL` and again on-the-spot when the live probe
+/// returns 401.
+///
+/// `cred_target` is the Windows Credential Manager target name (production
+/// uses `OPENCODE_CONSOLE_CRED_TARGET`; integration tests use a UUID-
+/// suffixed target so cleanup can drop the credential without affecting
+/// other tests). `refresh_url` is the full token endpoint — production uses
+/// [`OPENCODE_CONSOLE_TOKEN_URL`], tests point at a wiremock on
+/// `127.0.0.1:<port>`.
 ///
 /// Atomicity note: this function reads the prior `refresh_token` from the
 /// credential blob and writes the response back. The Credential Manager
 /// doesn't transactionally swap, so a concurrent refresh could clobber
 /// each other. Acceptable risk for a desktop app; follow-up PR may add
 /// per-target locking if profiling shows contention.
-#[allow(dead_code)] // awaiting refresh-on-401 seam in services::usage (issue #956 task 6)
 #[cfg(windows)]
-pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
+pub(crate) fn try_refresh_with_target_and_url(
+    cred_target: &str,
+    refresh_url: &str,
+) -> Result<TokenResponse, OAuthError> {
     use crate::services::windows_cred;
-    let blob = windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET).map_err(|e| {
+    let blob = windows_cred::read(cred_target).map_err(|e| {
         OAuthError::Shape(format!("refresh read failed: {e}"))
     })?;
     let cred = parse_opencode_console_full_credential(&blob).map_err(|e| {
@@ -326,10 +344,7 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
         .build()
         .map_err(|e| OAuthError::Transport(format!("refresh client: {e}")))?;
     let response = client
-        .post(format!(
-            "{OPENCODE_CONSOLE_HOST}{}",
-            device_flow::TOKEN_PATH
-        ))
+        .post(refresh_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&[
             ("grant_type", "refresh_token".to_string()),
@@ -337,25 +352,30 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
             ("refresh_token", refresh_token),
         ])
         .send()
-        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh send: {e}")))?;
+        .map_err(|e| OAuthError::Transport(format!("{refresh_url} refresh send: {e}")))?;
     let status = response.status();
     let body = response
         .text()
-        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh body: {e}")))?;
+        .map_err(|e| OAuthError::Transport(format!("{refresh_url} refresh body: {e}")))?;
     if !status.is_success() {
         return Err(OAuthError::Shape(format!(
-            "/auth/device/token refresh HTTP {status}: {body}"
+            "{refresh_url} refresh HTTP {status}: {body}"
         )));
     }
     let token = parse_token_response(&body)?;
     // Write the new bundle back to Credential Manager so the next live
-    // fetch and the next refresh see the same up-to-date credential.
-    persist_token_response(&token)?;
+    // fetch and the next refresh see the same up-to-date credential. Use
+    // the parameterized persistence helper so test fixtures land in their
+    // own target and not the production `opencode:console` slot.
+    persist_token_response_with_target(cred_target, &token)?;
     Ok(token)
 }
 
 #[cfg(not(windows))]
-pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
+pub(crate) fn try_refresh_with_target_and_url(
+    cred_target: &str,
+    _refresh_url: &str,
+) -> Result<TokenResponse, OAuthError> {
     // Per the locked #956 design decision, non-Windows mirrors the agy
     // precedent at services::usage::read_agy_token and returns a typed
     // NoCredential rather than a Shape error. The user can't be signed
@@ -364,19 +384,30 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     // NoCredential tells the higher layer to keep the SQLite (#953)
     // path active.
     Err(OAuthError::NoCredential(format!(
-        "{OPENCODE_CONSOLE_CRED_TARGET}: refresh not available on this platform"
+        "{cred_target}: refresh not available on this platform"
     )))
 }
 
+/// Production refresh entry point — pinned at the production credential
+/// target and OAuth host. Wraps [`try_refresh_with_target_and_url`] so
+/// call sites outside tests don't have to know the URL plumbing.
+#[allow(dead_code)] // exercise seam lands via services::usage::opencode_usage_impl (#970)
+pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
+    try_refresh_with_target_and_url(OPENCODE_CONSOLE_CRED_TARGET, OPENCODE_CONSOLE_TOKEN_URL)
+}
+
 /// Composes the credential blob from a fresh `TokenResponse` and writes
-/// it to the Windows Credential Manager. Used by both the device-flow
-/// dance (after `poll_for_token` returns a token) and the refresh seam
-/// (after `try_refresh` issues a new bundle).
-#[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2). The chain
-                     // to windows_cred::write inherits the same allow; the underlying
-                     // primitive is intentionally not used until the dance is live.
+/// it to the Windows Credential Manager at `cred_target`. Used by the
+/// device-flow dance (after `poll_for_token` returns a token) and the
+/// refresh seam (after [`try_refresh_with_target_and_url`] issues a new
+/// bundle). Parameterized on the target so test fixtures land in their
+/// own UUID-suffixed slot instead of clobbering the production
+/// `opencode:console` credential.
 #[cfg(windows)]
-pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthError> {
+pub(crate) fn persist_token_response_with_target(
+    cred_target: &str,
+    token: &TokenResponse,
+) -> Result<(), OAuthError> {
     use crate::services::windows_cred;
     let expires_at = chrono::Utc::now()
         + chrono::Duration::seconds(token.expires_in.as_secs() as i64);
@@ -389,12 +420,15 @@ pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthE
     };
     let blob = serde_json::to_vec(&cred)
         .map_err(|e| OAuthError::Shape(format!("persist serialize: {e}")))?;
-    windows_cred::write(OPENCODE_CONSOLE_CRED_TARGET, &blob)
+    windows_cred::write(cred_target, &blob)
         .map_err(|e| OAuthError::Shape(format!("persist write: {e}")))
 }
 
 #[cfg(not(windows))]
-pub(crate) fn persist_token_response(_token: &TokenResponse) -> Result<(), OAuthError> {
+pub(crate) fn persist_token_response_with_target(
+    cred_target: &str,
+    _token: &TokenResponse,
+) -> Result<(), OAuthError> {
     // Same design choice as try_refresh — non-Windows is NoCredential,
     // not Shape. The persist path is only reached after a successful
     // dance (a fresh TokenResponse); on non-Windows the dance can be
@@ -402,8 +436,25 @@ pub(crate) fn persist_token_response(_token: &TokenResponse) -> Result<(), OAuth
     // to land, so this arms as NoCredential to keep the higher layer's
     // error-matching symmetric with try_refresh and the live probe.
     Err(OAuthError::NoCredential(format!(
-        "{OPENCODE_CONSOLE_CRED_TARGET}: credential storage not available on this platform"
+        "{cred_target}: credential storage not available on this platform"
     )))
+}
+
+/// Production persist entry point — pinned at the production credential
+/// target. Thin wrapper around [`persist_token_response_with_target`].
+/// Awaiting the `persist_opencode_tokens` IPC wire (#968); once that
+/// lands the device-flow dance calls this directly with the response from
+/// `poll_for_token`.
+#[allow(dead_code)] // awaiting IPC wire (issue #962 part D / #968)
+#[cfg(windows)]
+pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthError> {
+    persist_token_response_with_target(OPENCODE_CONSOLE_CRED_TARGET, token)
+}
+
+#[allow(dead_code)] // awaiting IPC wire (issue #962 part D / #968)
+#[cfg(not(windows))]
+pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthError> {
+    persist_token_response_with_target(OPENCODE_CONSOLE_CRED_TARGET, token)
 }
 
 /// OpenCode workspace enumeration, returned by `GET /api/user` + `/api/orgs`.
@@ -644,6 +695,12 @@ pub(crate) fn parse_opencode_console_full_credential(
 /// DTO path is the contract; this exists so `services::usage` keeps its
 /// single-statement read path (`parse(...).map(|...| (token, workspace))`)
 /// without leaking the optional-field plumbing into the fetcher.
+///
+/// Test-only usage today (the seam at `services::usage::opencode_usage_impl_with_overrides`
+/// reads the full DTO via `parse_opencode_console_full_credential` and extracts
+/// inline); kept for the `list_opencode_workspaces` IPC (#967) which only needs
+/// `(access_token, workspace_id)` and benefits from a single-statement read.
+#[allow(dead_code)] // lib-only dead-code lint ignores #[cfg(test)] usage; CI runs `cargo test`
 pub(crate) fn parse_opencode_console_credential(
     blob: &[u8],
 ) -> Result<(String, String), UsageError> {

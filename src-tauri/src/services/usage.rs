@@ -232,41 +232,93 @@ fn unavailable(provider: &str, error: String) -> ProviderUsage {
 /// Drives the shared request → status-check → parse flow. Callers reach this
 /// only once a credential is confirmed present, so any failure here is reported
 /// as logged-in-but-unavailable. `parse` maps a 2xx body to `(windows, detail)`.
+///
+/// Returns a `ProviderUsage` plus the exact HTTP status code, so callers that
+/// need to discriminate a specific status (currently just OpenCode for the
+/// refresh-on-401 seam, issue #970) can do so without parsing the
+/// `error: Some(...)` string. `status` is `None` when the request never reached
+/// the server (client builder failure, transport error, TLS handshake fail).
+fn fetch_usage_attempt(
+    provider: &str,
+    build_request: impl FnOnce(&Client) -> RequestBuilder,
+    parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
+) -> FetchAttempt {
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Err(e) => {
+            return FetchAttempt {
+                usage: unavailable(provider, format!("Client error: {}", e)),
+                status: None,
+            };
+        }
+        Ok(c) => c,
+    };
+
+    match build_request(&client).send() {
+        Ok(r) if r.status() == 429 => FetchAttempt {
+            usage: unavailable(
+                provider,
+                "Rate limited — usage data temporarily unavailable".to_string(),
+            ),
+            status: Some(429),
+        },
+        Ok(r) if !r.status().is_success() => {
+            let code = r.status().as_u16();
+            FetchAttempt {
+                usage: unavailable(
+                    provider,
+                    format!("API error {}: {}", code, r.text().unwrap_or_default()),
+                ),
+                status: Some(code),
+            }
+        }
+        Ok(r) => {
+            let status = r.status().as_u16();
+            match parse(&r.text().unwrap_or_default()) {
+                Ok((windows, detail)) => FetchAttempt {
+                    usage: ProviderUsage {
+                        provider: provider.to_string(),
+                        logged_in: true,
+                        windows,
+                        balance: None,
+                        detail,
+                        error: None,
+                    },
+                    status: Some(status),
+                },
+                Err(e) => FetchAttempt {
+                    usage: unavailable(provider, format!("Failed to parse response: {}", e)),
+                    status: Some(status),
+                },
+            }
+        }
+        Err(e) => FetchAttempt {
+            usage: unavailable(provider, format!("Request failed: {}", e)),
+            status: None,
+        },
+    }
+}
+
+/// Drives the shared request → status-check → parse flow. Callers reach this
+/// only once a credential is confirmed present, so any failure here is reported
+/// as logged-in-but-unavailable. `parse` maps a 2xx body to `(windows, detail)`.
 fn fetch_usage(
     provider: &str,
     build_request: impl FnOnce(&Client) -> RequestBuilder,
     parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
 ) -> ProviderUsage {
-    let client = match Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => return unavailable(provider, format!("Client error: {}", e)),
-    };
+    fetch_usage_attempt(provider, build_request, parse).usage
+}
 
-    match build_request(&client).send() {
-        Ok(r) if r.status() == 429 => unavailable(
-            provider,
-            "Rate limited — usage data temporarily unavailable".to_string(),
-        ),
-        Ok(r) if !r.status().is_success() => {
-            let code = r.status().as_u16();
-            unavailable(
-                provider,
-                format!("API error {}: {}", code, r.text().unwrap_or_default()),
-            )
-        }
-        Ok(r) => match parse(&r.text().unwrap_or_default()) {
-            Ok((windows, detail)) => ProviderUsage {
-                provider: provider.to_string(),
-                logged_in: true,
-                windows,
-                balance: None,
-                detail,
-                error: None,
-            },
-            Err(e) => unavailable(provider, format!("Failed to parse response: {}", e)),
-        },
-        Err(e) => unavailable(provider, format!("Request failed: {}", e)),
-    }
+/// Status-aware fetch result. Carries the exact HTTP status alongside the
+/// [`ProviderUsage`] envelope so the OpenCode refresh-on-401 seam (#970) can
+/// branch on `status == Some(401)` without parsing the rendered error string.
+/// `status` is `None` for transport / client-builder failures.
+struct FetchAttempt {
+    usage: ProviderUsage,
+    status: Option<u16>,
 }
 
 fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
@@ -1096,38 +1148,115 @@ fn choose_opencode_usage(
     sqlite
 }
 
-fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
+/// Production billing URL for the OpenCode live usage probe (issue #957).
+/// `https://opencode.ai/_server` is a SolidStart server-function RPC; the
+/// `X-Server-Id` header value is the deployment id pinned at
+/// [`OPENCODE_SERVER_ID`] below. Surfaced as a module constant so the
+/// parameterized test seam ([`opencode_usage_impl_with_overrides`]) can
+/// substitute a wiremock URL while production callers keep the literal.
+const OPENCODE_BILLING_URL: &str = "https://opencode.ai/_server";
+
+/// In-memory tracker for credential refresh age. Keyed by credential target
+/// so the seam can distinguish "we just refreshed `opencode:console`" from
+/// "we just refreshed `buildmesh-test-…-uuid`". Process-local — the age is
+/// lost on restart, which is acceptable because a restart is itself a
+/// "fresh fetch" opportunity and the 401 retry path still repairs stale
+/// credentials.
+///
+/// **First-seen semantics:** when the seam observes a target for the first
+/// time, [`refresh_age`] inserts `Instant::now()` and returns `Duration::ZERO`
+/// so a freshly-seeded (i.e. just-persisted-by-the-OAuth-dance) credential
+/// is treated as fresh and skips the gate. The same applies on app restart
+/// — pre-existing credentials in Credential Manager look "fresh" again, but
+/// the live probe's 401 still triggers the refresh-on-the-spot branch.
+///
+/// **Forget on deletion:** [`forget_refresh_tracking`] drops the entry so a
+/// target whose credential is removed (Settings "Sign out", test cleanup)
+/// doesn't leave a stale `Instant` that would mask a future `NoCredential`.
+static REFRESH_TRACKER: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, Instant>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+/// Returns how long since the seam last successfully refreshed or first
+/// observed `target`. `Duration::ZERO` on first observation so a fresh
+/// credential skips the gate without a forced refresh on every cold start.
+fn refresh_age(target: &str) -> Duration {
+    let mut guard = REFRESH_TRACKER.lock().unwrap();
+    guard
+        .entry(target.to_string())
+        .or_insert_with(Instant::now)
+        .elapsed()
+}
+
+/// Records that the seam just successfully refreshed `target`. Resets the
+/// age so the next gate evaluation skips the refresh branch until another
+/// `REFRESH_TTL` elapses.
+fn mark_refresh_success(target: &str) {
+    let mut guard = REFRESH_TRACKER.lock().unwrap();
+    guard.insert(target.to_string(), Instant::now());
+}
+
+/// Drops `target` from the tracker. Called when Credential Manager reports
+/// `NoCredential` for `target` so a removed credential doesn't leave a
+/// phantom "freshly refreshed" timestamp that masks the next
+/// `NoCredential` read. Tests also call this in their cleanup guard.
+#[cfg_attr(not(test), allow(dead_code))] // exercised by tests; production revoke path doesn't yet wire through
+fn forget_refresh_tracking(target: &str) {
+    let mut guard = REFRESH_TRACKER.lock().unwrap();
+    guard.remove(target);
+}
+
+/// OpenCode Console live probe with refresh-on-401 (issues #957 + #970).
+///
+/// `cred_target` is the Windows Credential Manager target — production
+/// passes `OPENCODE_CONSOLE_CRED_TARGET` ("opencode:console"), integration
+/// tests pass a UUID-suffixed target so cleanup is isolated. `billing_url`
+/// is the SolidStart endpoint — production passes [`OPENCODE_BILLING_URL`],
+/// tests point at a wiremock on `127.0.0.1:<port>`. `refresh_url` is the
+/// OAuth refresh endpoint — production passes `OPENCODE_CONSOLE_TOKEN_URL`
+/// from `services::opencode_oauth`, tests pass a wiremock.
+///
+/// **Algorithm** (matches issue #970's body and the four test scenarios
+/// pinned at issue #971):
+///
+/// 1. Calculate SQLite fallback first so any failure path can short-circuit
+///    to it without re-reading the file. The `auth.json` + `opencode.db`
+///    shape is unchanged from #953 / #957.
+/// 2. Read the FULL credential at `cred_target`. Failure → live = `None`,
+///    fall through to SQLite.
+/// 3. Gate: `is_expired(cred) || refresh_age(cred_target) > REFRESH_TTL`.
+///    If gated, attempt exactly one refresh via
+///    `try_refresh_with_target_and_url`. On success: `mark_refresh_success`
+///    + `invalidate_cache()` (#970 step 5). On failure: warn and fall
+///    through to SQLite WITHOUT retrying the live probe (a stale token is
+///    worse than SQLite numbers — see issue #970's refresh-failure branch).
+/// 4. Use the (possibly freshly-refreshed) credential for the live probe.
+///    `fetch_usage_attempt` returns the exact HTTP status so we can branch
+///    on `401` without parsing the rendered error string.
+/// 5. **On-the-spot refresh** (scenario 4): if the live probe returns 401
+///    AND no refresh was attempted at the gate, attempt one refresh and
+///    retry the live probe exactly once. A second 401 or any other failure
+///    falls through to SQLite — at most one refresh per call so we never
+///    loop.
+/// 6. Assemble via [`choose_opencode_usage`]: live wins if it has no error,
+///    otherwise SQLite.
+fn opencode_usage_impl_with_overrides(
+    home: &std::path::Path,
+    cred_target: &str,
+    billing_url: &str,
+    refresh_url: &str,
+) -> ProviderUsage {
+    // ── SQLite fallback (#953) ──
     let opencode_dir = home.join(".local").join("share").join("opencode");
     let auth_path = opencode_dir.join("auth.json");
     let db_path = opencode_dir.join("opencode.db");
 
-    // Live path first — reads the Buildmesh-owned OAuth credential (#956) and
-    // POSTs `billing.get` to SolidStart. The `Result::ok` collapse means any
-    // error (NoCredential, Shape, transport) is treated identically: fall
-    // through to the SQLite path. The returned ProviderUsage carries an
-    // `error` for HTTP-level failures (401, 5xx, shape mismatch) which
-    // `choose_opencode_usage` checks below.
-    let live = read_opencode_console_credential().ok().map(|(token, workspace_id)| {
-        fetch_usage(
-            "opencode",
-            |c| {
-                c.post("https://opencode.ai/_server")
-                    .header("X-Server-Id", OPENCODE_SERVER_ID)
-                    .header("Authorization", format!("Bearer {}", token))
-                    .json(&[workspace_id])
-            },
-            parse_opencode_billing_response,
-        )
-    });
-
-    // Offline SQLite fallback (#953). Same auth.json gate as before — a user
-    // mid-OAuth (live path failed but auth.json present) still gets real
-    // numbers; a user who hasn't run any auth returns logged_out here.
-    let _token = match read_opencode_token(auth_path) {
-        Ok(t) => t,
-        Err(e) => return logged_out("opencode", e.to_string()),
-    };
-
+    // `auth.json` is the gate the offline path checks (issue #957 sub-spec
+    // point 4): a user mid-OAuth-flow with a valid `auth.json` still gets
+    // SQLite numbers when the live path fails. Without it, return
+    // `logged_out` — no offline data, no credential, nothing to show.
+    if let Err(e) = read_opencode_token(auth_path) {
+        return logged_out("opencode", e.to_string());
+    }
     let sqlite = match calculate_opencode_windows(&db_path) {
         Ok(windows) => ProviderUsage {
             provider: "opencode".to_string(),
@@ -1139,9 +1268,120 @@ fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
         },
         Err(e) => unavailable("opencode", format!("Failed to query opencode.db: {}", e)),
     };
-    // Pure assembly pins the degradation contract: live wins when it returns
-    // a usable envelope, anything else falls through to SQLite.
-    choose_opencode_usage(live.as_ref(), sqlite)
+
+    // ── Read full credential (refresh needs refresh_token + expires_at) ──
+    let full_cred = match read_opencode_console_full_credential(cred_target) {
+        Ok(c) => c,
+        Err(_) => {
+            // No credential at this target (deleted, never signed in, or
+            // non-Windows). Drop the tracker entry so a future successful
+            // refresh on a different target can't be masked, then fall
+            // through to SQLite.
+            forget_refresh_tracking(cred_target);
+            return choose_opencode_usage(None, sqlite);
+        }
+    };
+
+    // ── Gate-driven refresh (#970 step 2) ──
+    let now_unix = chrono::Utc::now().timestamp();
+    let needs_refresh = crate::services::opencode_oauth::cred_is_expired(&full_cred, now_unix)
+        || refresh_age(cred_target) > crate::services::opencode_oauth::REFRESH_TTL;
+
+    // After a successful refresh, the bearer/workspace come from the
+    // returned `TokenResponse` (the same blob that was just persisted).
+    // `refreshed` flags whether the refresh branch fired so scenario 4's
+    // on-the-spot refresh can be skipped if a refresh already happened
+    // this call (no loops on a 401-with-stale-token scenario).
+    let mut refresh_attempted = false;
+    let (token, workspace_id) = if needs_refresh {
+        refresh_attempted = true;
+        match crate::services::opencode_oauth::try_refresh_with_target_and_url(
+            cred_target, refresh_url,
+        ) {
+            Ok(t) => {
+                mark_refresh_success(cred_target);
+                invalidate_cache(); // #970 step 5: next read sees fresh numbers
+                (t.access_token, t.workspace_id)
+            }
+            Err(e) => {
+                // Refresh failed — fall through to SQLite. DO NOT retry the
+                // live probe with the now-stale credential: an expired
+                // token that successfully retries the billing endpoint
+                // returns 401 again, which would loop forever. SQLite
+                // numbers are the safe degradation.
+                tracing::warn!(
+                    target: "buildmesh.usage",
+                    "opencode refresh failed for {cred_target}: {e}"
+                );
+                return choose_opencode_usage(None, sqlite);
+            }
+        }
+    } else {
+        // No refresh needed — use the credential we already read.
+        match (
+            full_cred.access_token.as_deref(),
+            full_cred.workspace_id.as_deref(),
+        ) {
+            (Some(t), Some(w)) if !t.is_empty() && !w.is_empty() => {
+                (t.to_string(), w.to_string())
+            }
+            _ => return choose_opencode_usage(None, sqlite),
+        }
+    };
+
+    // ── Live probe ──
+    let attempt = fetch_usage_attempt(
+        "opencode",
+        |c| {
+            c.post(billing_url)
+                .header("X-Server-Id", OPENCODE_SERVER_ID)
+                .header("Authorization", format!("Bearer {token}"))
+                .json(&[&workspace_id])
+        },
+        parse_opencode_billing_response,
+    );
+
+    // ── On-the-spot refresh on 401 (scenario 4) ──
+    if attempt.status == Some(401) && !refresh_attempted {
+        match crate::services::opencode_oauth::try_refresh_with_target_and_url(
+            cred_target, refresh_url,
+        ) {
+            Ok(t) => {
+                mark_refresh_success(cred_target);
+                invalidate_cache();
+                let retry = fetch_usage_attempt(
+                    "opencode",
+                    |c| {
+                        c.post(billing_url)
+                            .header("X-Server-Id", OPENCODE_SERVER_ID)
+                            .header("Authorization", format!("Bearer {}", t.access_token))
+                            .json(&[&t.workspace_id])
+                    },
+                    parse_opencode_billing_response,
+                );
+                return choose_opencode_usage(Some(&retry.usage), sqlite);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "buildmesh.usage",
+                    "opencode on-the-spot refresh failed for {cred_target}: {e}"
+                );
+                // Fall through to choose_opencode_usage with the failed live
+                // attempt — SQLite wins because live.usage.error.is_some().
+            }
+        }
+    }
+
+    choose_opencode_usage(Some(&attempt.usage), sqlite)
+}
+
+fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
+    opencode_usage_impl_with_overrides(
+        home,
+        OPENCODE_CONSOLE_CRED_TARGET,
+        OPENCODE_BILLING_URL,
+        crate::services::opencode_oauth::OPENCODE_CONSOLE_TOKEN_URL,
+    )
 }
 
 pub fn opencode_usage() -> ProviderUsage {
@@ -1225,24 +1465,28 @@ fn read_agy_token() -> Result<String, UsageError> {
     ))
 }
 
-/// Reads the Buildmesh-owned OpenCode Console credential from the OS
-/// credential store. Windows-only for now (mirrors the agy precedent —
-/// macOS Keychain / Linux Secret Service is explicitly out of scope for #956
-/// and belongs to a future ticket). On non-Windows the live path simply
-/// reports `NoCredential` and the SQLite fallback (#953) runs.
-///
-/// The DTO + parser live in [`crate::services::opencode_oauth`] — extracted
-/// out of `usage` for #956 so the OAuth dance and the live fetcher don't
-/// share a private helper one of them silently drifts from.
+/// Reads the FULL Buildmesh-owned OpenCode Console credential DTO from the
+/// Windows Credential Manager at `cred_target`. The refresh seam (#970)
+/// needs `expires_at` and `refresh_token` in addition to `access_token` and
+/// `workspace_id`, so this returns the parsed struct rather than the
+/// `(token, workspace)` tuple [`read_opencode_console_credential`] extracts.
+/// `cred_target` is parameterized so integration tests can read from a
+/// UUID-suffixed target instead of clobbering the production
+/// `opencode:console` slot. On non-Windows returns `NoCredential` to mirror
+/// the existing decision (issue #956: non-Windows = agy-style NoCredential).
 #[cfg(windows)]
-fn read_opencode_console_credential() -> Result<(String, String), UsageError> {
-    crate::services::opencode_oauth::parse_opencode_console_credential(&windows_cred::read(
-        OPENCODE_CONSOLE_CRED_TARGET,
-    )?)
+fn read_opencode_console_full_credential(
+    cred_target: &str,
+) -> Result<crate::services::opencode_oauth::OpenCodeConsoleCred, UsageError> {
+    crate::services::opencode_oauth::parse_opencode_console_full_credential(
+        &windows_cred::read(cred_target)?,
+    )
 }
 
 #[cfg(not(windows))]
-fn read_opencode_console_credential() -> Result<(String, String), UsageError> {
+fn read_opencode_console_full_credential(
+    _cred_target: &str,
+) -> Result<crate::services::opencode_oauth::OpenCodeConsoleCred, UsageError> {
     Err(UsageError::NoCredential(
         "OpenCode Console usage is only available on Windows".to_string(),
     ))
@@ -1479,6 +1723,11 @@ pub fn invalidate_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `super::*` re-exports items from `services::usage`, but stdlib
+    // collections like `VecDeque` and `Path` are NOT pulled in by the
+    // `use super::*` glob. The refresh-on-401 scenarios need them.
+    use std::collections::VecDeque;
+    use std::path::Path;
 
     #[test]
     fn parse_anthropic_response_valid() {
@@ -2324,5 +2573,650 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    // ── refresh-on-401 contract — issue #971 ────────────────────────────────
+    //
+    // The four scenarios below pin the seam at
+    // `opencode_usage_impl_with_overrides` (issue #970). Each test stands
+    // up a stdlib `TcpListener` on `127.0.0.1:0`, enqueues canned HTTP
+    // responses, and inspects what the seam actually sent (method, path,
+    // headers, body) to confirm the refresh-on-401 contract is honored.
+
+    /// Minimal HTTP/1.1 mock server used only by the refresh-on-401
+    /// integration tests. Listens on `127.0.0.1:0` (kernel-assigned port),
+    /// routes requests by `(method, path)` to FIFO response queues, and
+    /// records every request for assertion. `Connection: close` on every
+    /// reply so the seam's reqwest client doesn't try to reuse the socket
+    /// mid-test (which would dead-lock the accept loop).
+    ///
+    /// Thread lifecycle: the accept thread polls a nonblocking listener.
+    /// Drop sets stop=true and releases the struct's `Arc<TcpListener>`
+    /// reference; the thread holds the other Arc and drops it on exit,
+    /// closing the underlying SOCKET. Without `Arc`, `try_clone` would
+    /// create an independent Windows SOCKET handle that wouldn't close
+    /// when the struct's listener was dropped — and `j.join()` would hang
+    /// forever on the accept loop.
+    /// Minimal HTTP mock server used only by the refresh-on-401
+    /// integration tests. Wraps `tiny_http` (already a dep — see
+    /// Cargo.toml:46) so we don't re-implement the accept/read/write
+    /// loop ourselves: tiny_http's `Server` runs its own accept loop on
+    /// background threads, eliminating the "thread-not-ready" race a
+    /// hand-rolled `TcpListener` + thread hit under parallel test load.
+    /// Routes requests by `(method, path)` to FIFO response queues and
+    /// records every request for assertion.
+    struct MockHttpServer {
+        base_url: String,
+        server: std::sync::Arc<tiny_http::Server>,
+        routes: Arc<Mutex<HashMap<(String, String), VecDeque<MockResponse>>>>,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[derive(Clone)]
+    struct MockResponse {
+        status: u16,
+        content_type: String,
+        body: Vec<u8>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        headers: std::collections::HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    impl MockHttpServer {
+        fn new() -> Self {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let port = server.server_addr().to_ip().unwrap().port();
+            let base_url = format!("http://127.0.0.1:{port}");
+            let server_arc = std::sync::Arc::new(server);
+
+            let routes: Arc<Mutex<HashMap<(String, String), VecDeque<MockResponse>>>> =
+                Arc::new(Mutex::new(HashMap::new()));
+            let requests: Arc<Mutex<Vec<RecordedRequest>>> =
+                Arc::new(Mutex::new(Vec::new()));
+
+            let routes_t = routes.clone();
+            let requests_t = requests.clone();
+            let server_t = server_arc.clone();
+            let join = std::thread::spawn(move || {
+                for mut request in server_t.incoming_requests() {
+                    let method = request.method().as_str().to_string();
+                    let path = request.url().to_string();
+                    let mut headers = std::collections::HashMap::new();
+                    for header in request.headers() {
+                        let key = header.field.as_str().to_string().to_lowercase();
+                        headers.insert(key, header.value.as_str().to_string());
+                    }
+                    let mut body = Vec::new();
+                    let mut reader = request.as_reader();
+                    std::io::Read::read_to_end(&mut reader, &mut body).ok();
+                    let key = (method.clone(), path.clone());
+                    let response = {
+                        let mut routes = routes_t.lock().unwrap();
+                        routes.get_mut(&key).and_then(|q| q.pop_front())
+                    }
+                    .unwrap_or_else(|| MockResponse {
+                        status: 500,
+                        content_type: "text/plain".to_string(),
+                        body: b"no mock response queued".to_vec(),
+                    });
+                    requests_t.lock().unwrap().push(RecordedRequest {
+                        method,
+                        path,
+                        headers,
+                        body,
+                    });
+                    let resp = tiny_http::Response::from_data(response.body)
+                        .with_status_code(tiny_http::StatusCode(response.status))
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                response.content_type.as_bytes(),
+                            )
+                            .unwrap(),
+                        );
+                    let _ = request.respond(resp);
+                }
+            });
+
+            Self {
+                base_url,
+                server: server_arc,
+                routes,
+                requests,
+                join: Some(join),
+            }
+        }
+
+        fn url(&self, path: &str) -> String {
+            format!("{}{}", self.base_url, path)
+        }
+
+        fn enqueue(&self, method: &str, path: &str, status: u16, body: &[u8]) {
+            let key = (method.to_string(), path.to_string());
+            let mut routes = self.routes.lock().unwrap();
+            routes
+                .entry(key)
+                .or_default()
+                .push_back(MockResponse {
+                    status,
+                    content_type: "application/json".to_string(),
+                    body: body.to_vec(),
+                });
+        }
+
+        fn requests_for(&self, method: &str, path: &str) -> Vec<RecordedRequest> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.method == method && r.path == path)
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl Drop for MockHttpServer {
+        fn drop(&mut self) {
+            // Drop the Server Arc so the listener stops accepting new
+            // connections. The accept thread's `incoming_requests()`
+            // iterator returns None once the Server is fully dropped
+            // (i.e. once its own Arc clone goes out of scope on thread
+            // exit). We detach the JoinHandle — joining would deadlock
+            // when the test process tries to exit because the listener
+            // is still bound to its ephemeral port. Cargo test
+            // tolerates detached threads; the OS reaps them at process
+            // exit.
+            drop(self.server.clone());
+            let _ = self.join.take();
+        }
+    }
+
+    /// UUID-suffixed Credential Manager target so tests don't collide on
+    /// the production `opencode:console` slot or on each other. Mirrors
+    /// the `unique_target` pattern in `services::windows_cred`.
+    fn opencode_unique_target(label: &str) -> String {
+        format!(
+            "buildmesh-test-{label}-{}",
+            uuid::Uuid::new_v4().simple().to_string()
+        )
+    }
+
+    /// Cleanup guard: deletes the test credential from Windows Credential
+    /// Manager, removes the fake home dir, drops the refresh-tracker
+    /// entry, and invalidates the usage cache so the next test starts
+    /// from a known state.
+    struct OpencodeRefreshCleanup {
+        target: String,
+        home: PathBuf,
+    }
+    impl Drop for OpencodeRefreshCleanup {
+        fn drop(&mut self) {
+            #[cfg(windows)]
+            {
+                let _ = crate::services::windows_cred::delete(&self.target);
+            }
+            forget_refresh_tracking(&self.target);
+            let _ = fs::remove_dir_all(&self.home);
+            invalidate_cache();
+        }
+    }
+
+    /// Builds the JSON blob `OpenCodeConsoleCred` serializes to, then
+    /// writes it to `target` via `windows_cred::write`. Centralizes the
+    /// field-name order so each test only sets the fields it cares about.
+    fn seed_opencode_cred(
+        target: &str,
+        access_token: &str,
+        workspace_id: &str,
+        refresh_token: &str,
+        expires_at: &str,
+        server_id: &str,
+    ) {
+        let blob = serde_json::json!({
+            "access_token": access_token,
+            "workspace_id": workspace_id,
+            "refresh_token": refresh_token,
+            "expires_at": expires_at,
+            "server_id": server_id,
+        })
+        .to_string();
+        crate::services::windows_cred::write(target, blob.as_bytes())
+            .expect("seed_opencode_cred: write to Credential Manager");
+    }
+
+    /// Sets up a fake home with a valid `auth.json` + `opencode.db` so the
+    /// SQLite fallback path is exercised when the live path doesn't return
+    /// real numbers. Mirrors the structure used by
+    /// `opencode_usage_impl_with_sqlite_db_only_returns_sqlite_windows`.
+    fn seed_opencode_sqlite(home: &Path, cost: f64) {
+        let opencode_dir = home.join(".local").join("share").join("opencode");
+        fs::create_dir_all(&opencode_dir).unwrap();
+        fs::write(
+            opencode_dir.join("auth.json"),
+            r#"{"opencode-go": {"type": "api", "key": "sk-test-abc"}}"#,
+        )
+        .unwrap();
+        let db_path = opencode_dir.join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                time_created INTEGER NOT NULL,
+                cost REAL DEFAULT 0 NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT INTO session (id, time_created, cost) VALUES (?, ?, ?)",
+            rusqlite::params!["ses_refresh_test", now_ms - 30 * 60 * 1000, cost],
+        )
+        .unwrap();
+    }
+
+    /// Returns the value of a query-string-free form body parameter from
+    /// `application/x-www-form-urlencoded`. Tests assert that the seam sent
+    /// `grant_type=refresh_token` etc. without re-implementing URL decoding.
+    fn form_value(body: &[u8], key: &str) -> Option<String> {
+        let s = std::str::from_utf8(body).ok()?;
+        for pair in s.split('&') {
+            if let Some(eq) = pair.find('=') {
+                if &pair[..eq] == key {
+                    return Some(url_decode(&pair[eq + 1..]));
+                }
+            }
+        }
+        None
+    }
+
+    fn url_decode(s: &str) -> String {
+        // Minimal decoder: handle `+` → space and `%XX` → byte. The OAuth
+        // refresh endpoint's form fields don't contain reserved characters
+        // beyond what this handles.
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => {
+                    out.push(' ');
+                    i += 1;
+                }
+                b'%' if i + 2 < bytes.len() => {
+                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                    if let Some(h) = hex {
+                        if let Ok(b) = u8::from_str_radix(h, 16) {
+                            out.push(b as char);
+                            i += 3;
+                            continue;
+                        }
+                    }
+                    out.push('%' as char);
+                    i += 1;
+                }
+                b => {
+                    out.push(b as char);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    // ── Scenario 1: expired cred, refresh succeeds, live probe succeeds ────
+    #[cfg(windows)]
+    #[test]
+    fn refresh_on_401_expired_cred_refresh_succeeds_then_live_succeeds() {
+        let server = MockHttpServer::new();
+        let target = opencode_unique_target("expired-refresh-ok");
+        let home = std::env::temp_dir().join(format!(
+            "opencode_refresh_s1_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _cleanup = OpencodeRefreshCleanup {
+            target: target.clone(),
+            home: home.clone(),
+        };
+        seed_opencode_sqlite(&home, 6.0); // SQLite fallback = 50% five-hour
+
+        // Expired credential: `expires_at` in 2020 forces the gate.
+        seed_opencode_cred(
+            &target,
+            "old-access",
+            "wrk-old",
+            "old-refresh",
+            "2020-01-01T00:00:00Z",
+            "server-old",
+        );
+
+        // Mock the refresh endpoint to return a new bundle.
+        server.enqueue(
+            "POST",
+            "/auth/device/token",
+            200,
+            br#"{
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_in": 3600,
+                "workspace_id": "wrk-new",
+                "server_id": "server-new"
+            }"#,
+        );
+
+        // Mock the live billing endpoint to return real windows (5-hour 25%).
+        server.enqueue(
+            "POST",
+            "/_server",
+            200,
+            br#"{"windows":[{"label":"5-hour","usedPercent":25.0,"resetsAt":"2026-07-20T22:00:00Z"}]}"#,
+        );
+
+        invalidate_cache();
+        let usage = opencode_usage_impl_with_overrides(
+            &home,
+            &target,
+            &server.url("/_server"),
+            &server.url("/auth/device/token"),
+        );
+
+        // Exactly one refresh and one billing call.
+        assert_eq!(
+            server.requests_for("POST", "/auth/device/token").len(),
+            1,
+            "refresh endpoint must be hit exactly once"
+        );
+        assert_eq!(
+            server.requests_for("POST", "/_server").len(),
+            1,
+            "billing endpoint must be hit exactly once"
+        );
+
+        // Refresh request carries the old refresh token and the standard
+        // grant/client fields.
+        let refresh_req = &server.requests_for("POST", "/auth/device/token")[0];
+        assert_eq!(form_value(&refresh_req.body, "grant_type").as_deref(), Some("refresh_token"));
+        assert_eq!(form_value(&refresh_req.body, "client_id").as_deref(), Some("opencode-cli"));
+        assert_eq!(form_value(&refresh_req.body, "refresh_token").as_deref(), Some("old-refresh"));
+
+        // Live billing uses the NEW bearer (proof that the persisted blob
+        // was read back, not the old in-memory token).
+        let billing_req = &server.requests_for("POST", "/_server")[0];
+        assert_eq!(
+            billing_req.headers.get("authorization").map(|s| s.as_str()),
+            Some("Bearer new-access")
+        );
+        let body_str = std::str::from_utf8(&billing_req.body).unwrap();
+        assert!(
+            body_str.contains("wrk-new"),
+            "billing body should include new workspace id, got: {body_str}"
+        );
+
+        // Final usage carries the live 25% number, not the SQLite 50%.
+        assert!(usage.error.is_none(), "live success must clear error: {:?}", usage.error);
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].label, "5-hour");
+        assert_eq!(
+            usage.windows[0].used_percent,
+            Some(25.0),
+            "live 25% must beat SQLite 50%"
+        );
+    }
+
+    // ── Scenario 2: expired cred, refresh fails, SQLite fallback ───────────
+    #[cfg(windows)]
+    #[test]
+    fn refresh_on_401_expired_cred_refresh_fails_falls_back_to_sqlite() {
+        let server = MockHttpServer::new();
+        let target = opencode_unique_target("expired-refresh-fail");
+        let home = std::env::temp_dir().join(format!(
+            "opencode_refresh_s2_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _cleanup = OpencodeRefreshCleanup {
+            target: target.clone(),
+            home: home.clone(),
+        };
+        seed_opencode_sqlite(&home, 6.0); // SQLite fallback = 50% five-hour
+
+        // Expired credential — gate fires.
+        seed_opencode_cred(
+            &target,
+            "stale-access",
+            "wrk-stale",
+            "stale-refresh",
+            "2020-01-01T00:00:00Z",
+            "server-stale",
+        );
+
+        // Refresh endpoint returns 500 — the seam must NOT retry the live
+        // probe with the stale token (a stale-token retry would 401, which
+        // could loop); it must fall through to SQLite.
+        server.enqueue(
+            "POST",
+            "/auth/device/token",
+            500,
+            br#"{"error":"server_error"}"#,
+        );
+        // No live billing response queued — the seam MUST NOT call it.
+
+        invalidate_cache();
+        let usage = opencode_usage_impl_with_overrides(
+            &home,
+            &target,
+            &server.url("/_server"),
+            &server.url("/auth/device/token"),
+        );
+
+        // Refresh was attempted, live was NOT.
+        assert_eq!(
+            server.requests_for("POST", "/auth/device/token").len(),
+            1,
+            "refresh endpoint must be hit exactly once"
+        );
+        assert_eq!(
+            server.requests_for("POST", "/_server").len(),
+            0,
+            "billing endpoint must NOT be hit after refresh failure"
+        );
+
+        // Final usage is the SQLite 50% — not the stale token's would-be
+        // 401, not the refresh error string.
+        assert!(
+            usage.error.is_none(),
+            "SQLite fallback must clear the refresh error: {:?}",
+            usage.error
+        );
+        assert!(
+            usage.logged_in,
+            "SQLite path keeps the user logged in (auth.json present)"
+        );
+        assert_eq!(usage.windows.len(), 3);
+        assert_eq!(usage.windows[0].label, "5-hour");
+        assert_eq!(
+            usage.windows[0].used_percent,
+            Some(50.0),
+            "SQLite 50% fallback should drive the result"
+        );
+    }
+
+    // ── Scenario 3: fresh cred, no refresh, live probe succeeds ────────────
+    #[cfg(windows)]
+    #[test]
+    fn refresh_on_401_fresh_cred_no_refresh_live_succeeds() {
+        let server = MockHttpServer::new();
+        let target = opencode_unique_target("fresh-no-refresh");
+        let home = std::env::temp_dir().join(format!(
+            "opencode_refresh_s3_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _cleanup = OpencodeRefreshCleanup {
+            target: target.clone(),
+            home: home.clone(),
+        };
+        seed_opencode_sqlite(&home, 6.0); // SQLite fallback = 50% five-hour
+
+        // Fresh credential: expires in 2099, AND first-seen by the
+        // refresh tracker so `refresh_age` returns 0 and the gate does
+        // not fire.
+        seed_opencode_cred(
+            &target,
+            "fresh-access",
+            "wrk-fresh",
+            "fresh-refresh",
+            "2099-01-01T00:00:00Z",
+            "server-fresh",
+        );
+
+        // Only the live billing response — no refresh response.
+        server.enqueue(
+            "POST",
+            "/_server",
+            200,
+            br#"{"windows":[{"label":"5-hour","usedPercent":30.0,"resetsAt":"2026-07-20T22:00:00Z"}]}"#,
+        );
+
+        invalidate_cache();
+        let usage = opencode_usage_impl_with_overrides(
+            &home,
+            &target,
+            &server.url("/_server"),
+            &server.url("/auth/device/token"),
+        );
+
+        // Refresh MUST NOT fire on a fresh credential.
+        assert_eq!(
+            server.requests_for("POST", "/auth/device/token").len(),
+            0,
+            "refresh endpoint must NOT be hit on a fresh credential"
+        );
+        // Live called exactly once.
+        assert_eq!(
+            server.requests_for("POST", "/_server").len(),
+            1,
+            "billing endpoint must be hit exactly once"
+        );
+        // Bearer is the fresh one (no refresh happened).
+        let billing_req = &server.requests_for("POST", "/_server")[0];
+        assert_eq!(
+            billing_req.headers.get("authorization").map(|s| s.as_str()),
+            Some("Bearer fresh-access")
+        );
+
+        assert!(usage.error.is_none());
+        assert_eq!(usage.windows[0].label, "5-hour");
+        assert_eq!(
+            usage.windows[0].used_percent,
+            Some(30.0),
+            "live 30% must beat SQLite 50%"
+        );
+    }
+
+    // ── Scenario 4: fresh cred, live 401, refresh-on-the-spot, retry ──────
+    #[cfg(windows)]
+    #[test]
+    fn refresh_on_401_fresh_cred_live_401_triggers_refresh_then_success() {
+        let server = MockHttpServer::new();
+        let target = opencode_unique_target("fresh-401-refresh");
+        let home = std::env::temp_dir().join(format!(
+            "opencode_refresh_s4_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _cleanup = OpencodeRefreshCleanup {
+            target: target.clone(),
+            home: home.clone(),
+        };
+        seed_opencode_sqlite(&home, 6.0); // SQLite fallback = 50% five-hour
+
+        // Fresh credential — gate doesn't fire, but the live probe returns
+        // 401 (e.g. server revoked or rotated the key between dance and
+        // probe). The on-the-spot refresh branch must kick in.
+        seed_opencode_cred(
+            &target,
+            "fresh-access",
+            "wrk-fresh",
+            "fresh-refresh",
+            "2099-01-01T00:00:00Z",
+            "server-fresh",
+        );
+
+        // Three responses in order: 401, refresh OK, live OK.
+        server.enqueue("POST", "/_server", 401, br#"{"error":"unauthorized"}"#);
+        server.enqueue(
+            "POST",
+            "/auth/device/token",
+            200,
+            br#"{
+                "access_token": "rotated-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": 3600,
+                "workspace_id": "wrk-rotated",
+                "server_id": "server-rotated"
+            }"#,
+        );
+        server.enqueue(
+            "POST",
+            "/_server",
+            200,
+            br#"{"windows":[{"label":"5-hour","usedPercent":35.0,"resetsAt":"2026-07-20T22:00:00Z"}]}"#,
+        );
+
+        invalidate_cache();
+        let usage = opencode_usage_impl_with_overrides(
+            &home,
+            &target,
+            &server.url("/_server"),
+            &server.url("/auth/device/token"),
+        );
+
+        let billing = server.requests_for("POST", "/_server");
+        let refreshes = server.requests_for("POST", "/auth/device/token");
+        assert_eq!(refreshes.len(), 1, "refresh must be hit exactly once");
+        assert_eq!(billing.len(), 2, "billing must be hit twice (initial + retry)");
+
+        // First billing request uses the original (fresh) access token —
+        // proves the gate didn't fire and the seam went straight to live.
+        assert_eq!(
+            billing[0].headers.get("authorization").map(|s| s.as_str()),
+            Some("Bearer fresh-access"),
+            "first billing call must use the original bearer"
+        );
+
+        // Refresh request uses the original refresh token.
+        assert_eq!(
+            form_value(&refreshes[0].body, "refresh_token").as_deref(),
+            Some("fresh-refresh")
+        );
+
+        // Retry billing uses the rotated bearer + workspace.
+        assert_eq!(
+            billing[1].headers.get("authorization").map(|s| s.as_str()),
+            Some("Bearer rotated-access"),
+            "retry billing call must use the rotated bearer"
+        );
+        let retry_body = std::str::from_utf8(&billing[1].body).unwrap();
+        assert!(
+            retry_body.contains("wrk-rotated"),
+            "retry billing body should include rotated workspace id, got: {retry_body}"
+        );
+
+        // Final usage is the retry's 35%, not SQLite's 50% or any error.
+        assert!(usage.error.is_none(), "retry success must clear error: {:?}", usage.error);
+        assert_eq!(usage.windows[0].label, "5-hour");
+        assert_eq!(
+            usage.windows[0].used_percent,
+            Some(35.0),
+            "retry 35% must win over SQLite 50%"
+        );
     }
 }
