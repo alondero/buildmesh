@@ -932,6 +932,50 @@ export const listDeviceSessions = () =>
 export const revokeDeviceSession = (id: number) =>
   _invoke('revoke_device_session', { id });
 
+// ── OpenCode Console OAuth (issue #956 + #969) ────────────────────────────
+//
+// Drive the RFC 8628 Device Flow + post-dance workspace enumeration from the
+// Settings → Providers tab. Stateless-server design: React holds the dance
+// state (`device_code`, `intervalSecs`, `startedAtMs`); each call is one
+// round-trip. `revoke_opencode_console` is idempotent — the card's "Sign
+// out" affordance never errors on a no-op (mirrors `windows_cred::delete`).
+// All four commands are wired in `lib.rs:566-575` of this branch.
+import type { OpenCodeWorkspace } from '../types/generated/OpenCodeWorkspace';
+import type { OpenCodeDeviceFlowStart } from '../types/generated/OpenCodeDeviceFlowStart';
+import type { OpenCodeDeviceCodeStatus } from '../types/generated/OpenCodeDeviceCodeStatus';
+import type { OpenCodeTokenResponse } from '../types/generated/OpenCodeTokenResponse';
+export type {
+  OpenCodeWorkspace,
+  OpenCodeDeviceFlowStart,
+  OpenCodeDeviceCodeStatus,
+  OpenCodeTokenResponse,
+};
+
+export const startOpencodeDeviceFlowConsole = () =>
+  _invoke<OpenCodeDeviceFlowStart>('start_device_flow_console');
+
+export const pollOpencodeDeviceToken = (
+  deviceCode: string,
+  currentIntervalSecs: number,
+  expiresInSecs: number,
+  startedAtMs: number,
+) =>
+  _invoke<OpenCodeDeviceCodeStatus>('poll_opencode_device_token', {
+    deviceCode,
+    currentIntervalSecs,
+    expiresInSecs,
+    startedAtMs,
+  });
+
+export const listOpencodeWorkspaces = () =>
+  _invoke<OpenCodeWorkspace[]>('list_opencode_workspaces');
+
+export const persistOpencodeTokens = (token: OpenCodeTokenResponse) =>
+  _invoke<void>('persist_opencode_tokens', { token });
+
+export const revokeOpencodeConsole = () =>
+  _invoke<void>('revoke_opencode_console');
+
 // ── LAN/VPN exposure & self-signed TLS (issue #501) ────────────────────────
 //
 // Off by default: the server binds loopback only. Enabling exposure binds the

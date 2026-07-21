@@ -1,0 +1,344 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, waitFor, act, cleanup } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { invoke } from '@tauri-apps/api/core';
+import { OpenCodeAccountCard } from '../../src/components/AppSettings/OpenCodeAccountCard';
+
+// `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
+// external URL. `vi.hoisted` so the mock factory can capture the spy ref
+// before the `vi.mock` call hoists the module replacement. Copied verbatim
+// from `tests/unit/safe-link.test.tsx:29-48` (the canonical pattern).
+const { openUrlMock } = vi.hoisted(() => ({
+  openUrlMock: vi.fn<[], Promise<void>>().mockResolvedValue(undefined),
+}));
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: openUrlMock,
+}));
+
+/**
+ * Per-command invoke routing. Each callable handler defaults to a benign
+ * empty/never-resolves shape — only the test mutates the implementation for
+ * the commands it exercises. Tracks call counts so the suite can assert
+ * "we called `start_device_flow_console` exactly once, not twice".
+ *
+ * Reuses the same shape as `tests/unit/authorized-devices-settings.test.tsx:20-78`.
+ *
+ * Note: this codebase uses `.textContent` + `.toBeTruthy()` for DOM assertions
+ * (rather than `@testing-library/jest-dom`'s `toHaveTextContent` /
+ * `toHaveValue` — jest-dom isn't installed). Tests read DOM properties
+ * directly.
+ */
+function mockBackend() {
+  const calls: Record<string, unknown[]> = {};
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    calls[cmd] = [...(calls[cmd] ?? []), args];
+    switch (cmd) {
+      case 'start_device_flow_console':
+        return Promise.resolve({
+          device_code: 'dc_test',
+          user_code: 'ABCD-1234',
+          verification_uri_complete: 'https://console.opencode.ai/auth/device?code=ABCD-1234',
+          interval_secs: 5,
+          expires_in_secs: 600,
+        });
+      case 'poll_opencode_device_token':
+        return Promise.resolve({ kind: 'pending' });
+      case 'list_opencode_workspaces':
+        return Promise.resolve([
+          { id: 'wrk_a', name: 'Acme' },
+          { id: 'wrk_b', name: 'Beta' },
+        ]);
+      case 'persist_opencode_tokens':
+        return Promise.resolve(undefined);
+      case 'revoke_opencode_console':
+        return Promise.resolve(undefined);
+      default:
+        return Promise.resolve({});
+    }
+  });
+  return calls;
+}
+
+beforeEach(() => {
+  vi.mocked(invoke).mockReset();
+  openUrlMock.mockReset();
+  openUrlMock.mockResolvedValue(undefined);
+});
+
+// Critical: each test must unmount its OpenCodeAccountCard before the next
+// test, otherwise the previous test's `setInterval` polling loop keeps firing
+// and re-dispatches into a stale component instance — which collides with
+// the new test's expected state and trips the "Cannot read properties of
+// undefined" error in the polling effect's `state.deviceCode` read.
+// testing-library/react auto-cleanup is gated on env detection; explicit
+// `cleanup()` is cheap insurance.
+afterEach(() => {
+  cleanup();
+});
+
+describe('OpenCodeAccountCard (issue #969)', () => {
+  it('renders the signedOut branch with a Sign-in button on mount', () => {
+    const calls = mockBackend();
+    render(<OpenCodeAccountCard />);
+    expect(screen.getByRole('button', { name: /sign in with opencode console/i })).toBeTruthy();
+    expect(calls['start_device_flow_console']).toBeUndefined();
+    expect(openUrlMock).not.toHaveBeenCalled();
+  });
+
+  it('Sign-in click invokes start_device_flow_console and opens the verification URL', async () => {
+    const calls = mockBackend();
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+
+    await waitFor(() => {
+      const code = screen.getByTestId('opencode-user-code');
+      expect(code.textContent).toBe('ABCD-1234');
+    });
+
+    expect(calls['start_device_flow_console']).toHaveLength(1);
+    expect(openUrlMock).toHaveBeenCalledWith(
+      'https://console.opencode.ai/auth/device?code=ABCD-1234',
+    );
+  });
+
+  it('a successful poll transitions to signedIn after persist + workspaces resolve', async () => {
+    const calls = mockBackend();
+    // Override poll to return a Success token on the first call.
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      calls[cmd] = [...(calls[cmd] ?? []), args];
+      switch (cmd) {
+        case 'start_device_flow_console':
+          return Promise.resolve({
+            device_code: 'dc_poll',
+            user_code: 'POLL-9999',
+            verification_uri_complete: 'https://console.opencode.ai/auth/device?code=POLL-9999',
+            interval_secs: 5,
+            expires_in_secs: 600,
+          });
+        case 'poll_opencode_device_token':
+          return Promise.resolve({
+            kind: 'success',
+            token: {
+              access_token: 'at_poll',
+              refresh_token: 'rt_poll',
+              expires_in_secs: 600,
+              workspace_id: 'wrk_a',
+              server_id: 'srv_poll',
+            },
+          });
+        case 'list_opencode_workspaces':
+          return Promise.resolve([{ id: 'wrk_a', name: 'Acme' }]);
+        case 'persist_opencode_tokens':
+          return Promise.resolve(undefined);
+        case 'revoke_opencode_console':
+          return Promise.resolve(undefined);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+
+    await waitFor(() => {
+      const name = screen.getByTestId('opencode-workspace-name');
+      expect(name.textContent).toBe('Acme');
+    });
+
+    expect(calls['persist_opencode_tokens']).toHaveLength(1);
+    expect(calls['list_opencode_workspaces']).toHaveLength(1);
+    expect(screen.getByTestId('opencode-sign-out')).toBeTruthy();
+  });
+
+  it('Sign Out two-step flow calls revoke_opencode_console and returns to signedOut', async () => {
+    const calls = mockBackend();
+    // Override ONLY the poll call. Re-routing the impl removes the
+    // mockBackend()'s built-in tracking, so this wrapper re-pushes to the
+    // same `calls` record to keep the assertions at the end of the test
+    // honest about which commands fired.
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      calls[cmd] = [...(calls[cmd] ?? []), args];
+      if (cmd === 'start_device_flow_console') {
+        return Promise.resolve({
+          device_code: 'dc_out',
+          user_code: 'OUT-7777',
+          verification_uri_complete: 'https://console.opencode.ai/auth/device?code=OUT-7777',
+          interval_secs: 5,
+          expires_in_secs: 600,
+        });
+      }
+      if (cmd === 'poll_opencode_device_token') {
+        return Promise.resolve({
+          kind: 'success',
+          token: {
+            access_token: 'at_out',
+            refresh_token: 'rt_out',
+            expires_in_secs: 600,
+            workspace_id: 'wrk_a',
+            server_id: 'srv_out',
+          },
+        });
+      }
+      if (cmd === 'list_opencode_workspaces') {
+        return Promise.resolve([{ id: 'wrk_a', name: 'Acme' }]);
+      }
+      return Promise.resolve(undefined);
+    });
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+    await waitFor(() => {
+      const name = screen.getByTestId('opencode-workspace-name');
+      expect(name.textContent).toBe('Acme');
+    });
+
+    await user.click(screen.getByTestId('opencode-sign-out'));
+    await user.click(screen.getByTestId('opencode-sign-out'));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('opencode-sign-in')).toBeTruthy();
+    });
+    expect(calls['revoke_opencode_console']).toHaveLength(1);
+  });
+
+  it('Sign Out failure rolls back to signedIn with the previous workspace preserved', async () => {
+    mockBackend();
+    let pollOnce = true;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'start_device_flow_console') {
+        return Promise.resolve({
+          device_code: 'dc_rollback',
+          user_code: 'ROLL-2222',
+          verification_uri_complete:
+            'https://console.opencode.ai/auth/device?code=ROLL-2222',
+          interval_secs: 5,
+          expires_in_secs: 600,
+        });
+      }
+      if (cmd === 'poll_opencode_device_token' && pollOnce) {
+        pollOnce = false;
+        return Promise.resolve({
+          kind: 'success',
+          token: {
+            access_token: 'at_rollback',
+            refresh_token: 'rt_rollback',
+            expires_in_secs: 600,
+            workspace_id: 'wrk_a',
+            server_id: 'srv_rollback',
+          },
+        });
+      }
+      if (cmd === 'list_opencode_workspaces') {
+        return Promise.resolve([
+          { id: 'wrk_a', name: 'Acme' },
+          { id: 'wrk_b', name: 'Beta' },
+        ]);
+      }
+      if (cmd === 'revoke_opencode_console') {
+        return Promise.reject(
+          new Error('Credential store temporarily unavailable'),
+        );
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+    await waitFor(() => {
+      const name = screen.getByTestId('opencode-workspace-name');
+      expect(name.textContent).toBe('Acme');
+    });
+
+    // Two-step Sign Out.
+    await user.click(screen.getByTestId('opencode-sign-out'));
+    await user.click(screen.getByTestId('opencode-sign-out'));
+
+    await waitFor(() => {
+      // After rollback we're still signedIn.
+      expect(screen.getByTestId('opencode-workspace-name')).toBeTruthy();
+    });
+    expect(screen.queryByTestId('opencode-sign-in')).toBeNull();
+  });
+
+  it('start_device_flow_console rejection renders the error branch with a retry button', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'start_device_flow_console') {
+        return Promise.reject(new Error('network unreachable'));
+      }
+      return Promise.resolve({});
+    });
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+
+    await waitFor(() => {
+      const err = screen.getByTestId('opencode-error');
+      expect(err.textContent ?? '').toMatch(/network unreachable/i);
+    });
+    expect(screen.getByTestId('opencode-retry')).toBeTruthy();
+    expect(openUrlMock).not.toHaveBeenCalled();
+  });
+
+  it('workspace picker dropdown appears when >1 workspaces and reacts to selection', async () => {
+    let pollOnce = true;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'start_device_flow_console') {
+        return Promise.resolve({
+          device_code: 'dc_picker',
+          user_code: 'PICK-1111',
+          verification_uri_complete: 'https://console.opencode.ai/auth/device?code=PICK-1111',
+          interval_secs: 5,
+          expires_in_secs: 600,
+        });
+      }
+      if (cmd === 'poll_opencode_device_token' && pollOnce) {
+        pollOnce = false;
+        return Promise.resolve({
+          kind: 'success',
+          token: {
+            access_token: 'at_picker',
+            refresh_token: 'rt_picker',
+            expires_in_secs: 600,
+            workspace_id: 'wrk_a',
+            server_id: 'srv_picker',
+          },
+        });
+      }
+      if (cmd === 'list_opencode_workspaces') {
+        return Promise.resolve([
+          { id: 'wrk_a', name: 'Acme' },
+          { id: 'wrk_b', name: 'Beta' },
+        ]);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+
+    const picker = await screen.findByTestId<HTMLSelectElement>(
+      'opencode-workspace-picker',
+    );
+    expect(picker.value).toBe('wrk_a');
+
+    // Switch to Beta — this dispatches WORKSPACE_CHOSEN which is purely
+    // visual state (no IPC), so we can assert the value flips.
+    await act(async () => {
+      await user.selectOptions(picker, 'wrk_b');
+    });
+    await waitFor(() => {
+      const name = screen.getByTestId('opencode-workspace-name');
+      expect(name.textContent).toBe('Beta');
+    });
+  });
+});

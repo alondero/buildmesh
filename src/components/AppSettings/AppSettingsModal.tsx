@@ -2,6 +2,7 @@ import { formatError } from '../../lib/errorUtils';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
+import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import * as api from '../../lib/tauri';
 import type {
@@ -1289,6 +1290,17 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                 onDirtyChange={d => siteDirtyChange(`account-${account.id}`, d)}
               />
             ))}
+          </div>
+
+          {/* OpenCode OAuth credential surface (issue #969). Sits between the
+              per-provider `AccountCard` list and the "+ Add custom provider"
+              button so it reads as a top-level auth method — different from the
+              API-key cards above (no api_key field; the credential lives in
+              Windows Credential Manager at `opencode:console`). No
+              `siteDirtyChange` — the card manages its own state via
+              `useReducer`; it never dirties the modal. */}
+          <div className="pt-6 border-t border-border-subtle space-y-4">
+            <OpenCodeAccountCard />
           </div>
 
           {addingCustom ? (
