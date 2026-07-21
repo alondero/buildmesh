@@ -995,6 +995,11 @@ mod tests {
             cli_session_id: None,
             worktree_name: Some("gh1-missing".to_string()),
             use_worktree: true,
+            // Required by the full-literal `AgentNode { ... }` initializer
+            // (wayfinder #982 / ticket #984). `is_pinned` is a UI-toggle
+            // field unrelated to this test's repo-open failure path;
+            // `false` matches the column default for a fresh node.
+            is_pinned: false,
             source_issue: Some(1),
             source_pr: None,
             head_repo_owner: None,

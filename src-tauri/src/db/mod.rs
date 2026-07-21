@@ -98,7 +98,16 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 28;
+//
+// v29 — Node Pinning (wayfinder #982 / ticket #984): add the
+// `agent_nodes.is_pinned INTEGER NOT NULL DEFAULT 0` column backing the
+// Pinned Grid view mode. NOT NULL + default means no backfill is needed —
+// every pre-v29 row reads back as `pinned = false` and the user can flip
+// individual rows from the UI affordance (ticket #985). The safety net
+// `ensure_agent_node_is_pinned` lives alongside the other `ensure_*`
+// helpers so a build that bumps `SCHEMA_VERSION` without yet containing
+// the inline `is_pinned` column still picks it up on the next launch.
+const SCHEMA_VERSION: i32 = 29;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -169,6 +178,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             cli_session_id TEXT,
             worktree_name TEXT,
             use_worktree INTEGER NOT NULL DEFAULT 1,
+            is_pinned INTEGER NOT NULL DEFAULT 0,
             position INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -272,6 +282,13 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_pr(&conn)?;
     ensure_agent_node_source_pr_fork_meta(&conn)?;
     ensure_agent_node_source_pr_pinned_sha(&conn)?;
+    // v29 — Node Pinning (wayfinder #982 / ticket #984). The
+    // `is_pinned INTEGER NOT NULL DEFAULT 0` column backs the Pinned Grid
+    // view mode. Same `ensure_*` safety-net shape as every other agent_nodes
+    // column — idempotent, runs on every init so a build that bumps
+    // SCHEMA_VERSION without yet containing the inline CREATE picks the
+    // column up on next launch.
+    ensure_agent_node_is_pinned(&conn)?;
     // v28 — issue #37. Nullable; pre-v28 rows read back as `None` so no
     // backfill is needed. `ensure_*` re-runs the ALTER on every init so
     // a build that bumps `SCHEMA_VERSION` without yet containing the inline
@@ -604,6 +621,20 @@ pub(crate) fn ensure_agent_node_source_pr_fork_meta(conn: &Connection) -> SqlRes
 pub(crate) fn ensure_agent_node_source_pr_pinned_sha(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "agent_nodes", "source_pr_pinned_sha", "TEXT")? {
         tracing::warn!("ensure_agent_node_source_pr_pinned_sha: added missing source_pr_pinned_sha column");
+    }
+    Ok(())
+}
+
+/// Safety net (v29, wayfinder #982 / ticket #984): ensure the `is_pinned`
+/// column exists on `agent_nodes`. Backing storage for the Pinned Grid
+/// view mode — the user flips individual nodes via the UI affordance
+/// (ticket #985), and the view switcher reads `is_pinned` to filter which
+/// cards render in Pinned Grid (ticket #986). NOT NULL + DEFAULT 0 means
+/// no backfill is needed: every pre-v29 row reads back as `pinned = false`
+/// and the user can opt-in row-by-row from the UI.
+pub(crate) fn ensure_agent_node_is_pinned(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "agent_nodes", "is_pinned", "INTEGER NOT NULL DEFAULT 0")? {
+        tracing::warn!("ensure_agent_node_is_pinned: added missing is_pinned column");
     }
     Ok(())
 }
@@ -1948,7 +1979,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -1966,21 +1997,27 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         cli_session_id: row.get(8)?,
         worktree_name: row.get(9)?,
         use_worktree: row.get::<_, i32>(12)? != 0,
+        // is_pinned is at index 13 (wayfinder #982 / ticket #984). Same
+        // NOT NULL + DEFAULT 0 storage as `use_worktree` — a pre-v29 row
+        // reads back as `false` via the ALTER-added default, and the
+        // coordinator digest / list path branches on this to render the
+        // Pinned Grid view (ticket #986).
+        is_pinned: row.get::<_, i32>(13)? != 0,
         source_issue: row.get(11)?,
-        position: row.get(13)?,
-        // source_pr is at index 14. Read as Option: the safety net adds the
+        position: row.get(14)?,
+        // source_pr is at index 15. Read as Option: the safety net adds the
         // column nullable for pre-v15 DBs, and rusqlite's typed read errors
         // the row on NULL otherwise. (v16 added head_repo_owner +
-        // head_repo_clone_url at 15/16, source_pr_pinned_sha at 17 — see
+        // head_repo_clone_url at 16/17, source_pr_pinned_sha at 18 — see
         // AGENT_NODE_COLUMNS.)
-        source_pr: row.get(14)?,
-        head_repo_owner: row.get(15)?,
-        head_repo_clone_url: row.get(16)?,
-        // source_pr_pinned_sha is at index 17 (issue #444). Same nullable
+        source_pr: row.get(15)?,
+        head_repo_owner: row.get(16)?,
+        head_repo_clone_url: row.get(17)?,
+        // source_pr_pinned_sha is at index 18 (issue #444). Same nullable
         // pattern as `source_pr`: a pre-v16 row that didn't store a SHA
         // reads back as `None`, and the drift-check path treats `None` as
         // "skip the comparison" rather than failing.
-        source_pr_pinned_sha: row.get(17)?,
+        source_pr_pinned_sha: row.get(18)?,
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -2034,17 +2071,17 @@ pub fn list_coordinator_node_rows_inner(
     let rows = stmt.query_map([], |row| {
         // map_agent_node_row reads positional indices 0..18, which match the
         // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 18 and 19 (v16 added head_repo_owner +
-        // head_repo_clone_url at 15/16, source_pr_pinned_sha at 17 — see
-        // AGENT_NODE_COLUMNS).
+        // status_changed_at follow at 19 and 20 (v16 added head_repo_owner +
+        // head_repo_clone_url at 16/17, source_pr_pinned_sha at 18, v29
+        // added is_pinned at 13 — see AGENT_NODE_COLUMNS).
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(18)?;
+        let mesh_name: String = row.get(19)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(19)?;
+        let status_changed_at: Option<String> = row.get(20)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -2634,6 +2671,76 @@ pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
         params![provider, id],
     )?;
     Ok(())
+}
+
+/// Set (or clear) an agent node's `is_pinned` flag (wayfinder #982 /
+/// ticket #984). The Pinned Grid view mode (ticket #986) renders every
+/// node whose `is_pinned = true`, regardless of mesh or status, so the
+/// user can build a curated cross-mesh focus list. Returns the number of
+/// rows updated so the caller can distinguish "node not found" (zero) from
+/// "successfully persisted" (one) — same contract as
+/// `update_agent_node_positions` and `set_agent_node_provider`. Mirrors
+/// the unconditional single-column UPDATE shape (no `AND is_pinned <> ?1`
+/// guard) because writing the same value the column already carries is
+/// harmless — the trigger is a UI toggle, not a hot loop.
+pub fn set_agent_node_pinned(id: i64, pinned: bool) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    set_agent_node_pinned_inner(&db, id, pinned)
+}
+
+/// Lock-free `_inner` so the migration tests in `db::migration_tests` can
+/// exercise the production SQL against an in-memory fixture; duplicating
+/// the SQL in the test silently drifts when this path changes.
+pub(crate) fn set_agent_node_pinned_inner(
+    conn: &Connection,
+    id: i64,
+    pinned: bool,
+) -> SqlResult<usize> {
+    conn.execute(
+        "UPDATE agent_nodes SET is_pinned = ?1 WHERE id = ?2",
+        params![if pinned { 1 } else { 0 }, id],
+    )
+}
+
+/// Flip an agent node's `is_pinned` flag and return the new value
+/// (wayfinder #982 / ticket #984). The return type carries the post-flip
+/// state so the frontend store can patch the local entry directly without
+/// a follow-up `get_agent_node_by_id` round-trip — same shape as
+/// `regenerate_agent_node` (issue #774), which also returns the
+/// post-write `AgentNode`.
+///
+/// The flip is atomic in SQLite: a single `UPDATE ... SET is_pinned = 1 -
+/// is_pinned ... RETURNING is_pinned` writes and reads back the new value
+/// in one statement. `RETURNING` requires SQLite ≥ 3.35 (March 2021),
+/// which every supported Buildmesh target carries (rusqlite 0.32 bundles
+/// SQLite ≥ 3.46, see issue #535 baseline). On a missing id the statement
+/// still succeeds (0 rows), but `RETURNING` then yields no row — we map
+/// that to `Ok(None)` and the caller surfaces "node not found" from the
+/// surrounding `#[command]` wrapper rather than faking a flipped boolean.
+pub fn toggle_agent_node_pinned(id: i64) -> SqlResult<Option<bool>> {
+    let db = get().lock().unwrap();
+    toggle_agent_node_pinned_inner(&db, id)
+}
+
+/// Lock-free `_inner` so the migration tests in `db::migration_tests` can
+/// exercise the production SQL against an in-memory fixture.
+pub(crate) fn toggle_agent_node_pinned_inner(
+    conn: &Connection,
+    id: i64,
+) -> SqlResult<Option<bool>> {
+    let mut stmt = conn.prepare(
+        "UPDATE agent_nodes SET is_pinned = 1 - is_pinned \
+         WHERE id = ?1 \
+         RETURNING is_pinned",
+    )?;
+    let mut rows = stmt.query(params![id])?;
+    match rows.next()? {
+        Some(row) => {
+            let new: i32 = row.get(0)?;
+            Ok(Some(new != 0))
+        }
+        None => Ok(None),
+    }
 }
 
 pub fn get_agent_node_by_id(id: i64) -> SqlResult<AgentNode> {

@@ -127,6 +127,21 @@ export const renameAgentNode = (nodeId: number, name: string) =>
 export const updateAgentNodePositions = (updates: [number, number][]) =>
   _invoke('update_agent_node_positions', { updates });
 
+/** Pin / unpin an agent node for the Pinned Grid view (wayfinder #982 /
+ * ticket #984). Used by the UI affordance when the user wants a
+ * known-good state (e.g. "Pin this node" in a context menu); `toggle`
+ * below flips whatever the current value is. Returns the post-write
+ * `AgentNode` so the store can patch the local entry directly. */
+export const setNodePinned = (nodeId: number, pinned: boolean) =>
+  _invoke<AgentNode>('set_node_pinned', { nodeId, pinned });
+
+/** Flip a node's `is_pinned` flag and return the post-write `AgentNode`
+ * (wayfinder #982 / ticket #984). The single-action shape the UI's
+ * click-to-pin button uses — the user doesn't need to know the current
+ * pinned value, just "toggle". */
+export const toggleNodePinned = (nodeId: number) =>
+  _invoke<AgentNode>('toggle_node_pinned', { nodeId });
+
 // Mesh — renamed from `*Project` to `*Mesh` in issue #490.
 export const addMesh = () =>
   _invoke<Mesh>('add_mesh');

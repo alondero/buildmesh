@@ -115,6 +115,20 @@ interface AgentNodeState {
   selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
   renameAgentNode: (id: number, name: string) => Promise<void>;
+  /// Pin a node explicitly (wayfinder #982 / ticket #984). Used by the
+  /// UI affordance when the user wants a known-good state (e.g. "Pin"
+  /// in a context menu) — distinguishes from `toggleNodePinned`, which
+  /// flips whatever the current value is. Optimistic: the local entry is
+  /// patched from the returned `AgentNode` so the grid re-renders
+  /// instantly; on rejection we revert *only* the `is_pinned` column to
+  /// its pre-call value (not the whole entry) so concurrent writes to
+  /// other columns survive, and surface the error on `state.error`.
+  setNodePinned: (nodeId: number, pinned: boolean) => Promise<AgentNode>;
+  /// Flip a node's `is_pinned` flag and patch the local entry from the
+  /// returned `AgentNode` (wayfinder #982 / ticket #984). The
+  /// single-action shape the UI's click-to-pin button uses. Same
+  /// optimistic + narrow-`is_pinned`-rollback pattern as `setNodePinned`.
+  toggleNodePinned: (nodeId: number) => Promise<AgentNode>;
   reorderAgentNode: (nodeId: number, insertIndex: number) => Promise<void>;
   swapAgentNodes: (aId: number, bId: number) => Promise<void>;
   setActiveNode: (id: number | null) => void;
@@ -455,6 +469,77 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       set((state) => ({
         agentNodes: state.agentNodes.map(s =>
           s.id === id ? { ...s, name: prior.name } : s
+        ),
+        error: formatError(e),
+      }));
+      throw e;
+    }
+  },
+
+  setNodePinned: async (nodeId, pinned) => {
+    const prior = get().agentNodes.find(s => s.id === nodeId);
+    if (!prior) {
+      throw new Error(`setNodePinned: node ${nodeId} is not loaded`);
+    }
+    // Optimistic patch so the Pinned Grid view re-renders instantly on
+    // a click. The backend's returned `AgentNode` is the source of truth
+    // — a future refactor that mutates other columns on the way back
+    // would otherwise be invisible. On rejection we revert only the
+    // `is_pinned` column to its pre-call value, so a concurrent update
+    // to any other column (e.g. status from the orchestrator) is
+    // preserved (matches the optimistic-rollback pattern in
+    // `renameAgentNode`, but with narrower scope so we don't clobber
+    // unrelated concurrent writes).
+    set((state) => ({
+      agentNodes: state.agentNodes.map(s =>
+        s.id === nodeId ? { ...s, is_pinned: pinned } : s
+      ),
+    }));
+    try {
+      const updated = await api.setNodePinned(nodeId, pinned);
+      set((state) => ({
+        agentNodes: state.agentNodes.map(s =>
+          s.id === nodeId ? updated : s
+        ),
+      }));
+      return updated;
+    } catch (e) {
+      set((state) => ({
+        agentNodes: state.agentNodes.map(s =>
+          s.id === nodeId ? { ...s, is_pinned: prior.is_pinned } : s
+        ),
+        error: formatError(e),
+      }));
+      throw e;
+    }
+  },
+
+  toggleNodePinned: async (nodeId) => {
+    const prior = get().agentNodes.find(s => s.id === nodeId);
+    if (!prior) {
+      throw new Error(`toggleNodePinned: node ${nodeId} is not loaded`);
+    }
+    // Optimistic flip — the visible state is `!prior.is_pinned` until
+    // the backend confirms. Same source-of-truth-from-response pattern
+    // as `setNodePinned`; on rejection we revert `is_pinned` only (not
+    // the whole entry) so concurrent writes to other columns survive.
+    set((state) => ({
+      agentNodes: state.agentNodes.map(s =>
+        s.id === nodeId ? { ...s, is_pinned: !s.is_pinned } : s
+      ),
+    }));
+    try {
+      const updated = await api.toggleNodePinned(nodeId);
+      set((state) => ({
+        agentNodes: state.agentNodes.map(s =>
+          s.id === nodeId ? updated : s
+        ),
+      }));
+      return updated;
+    } catch (e) {
+      set((state) => ({
+        agentNodes: state.agentNodes.map(s =>
+          s.id === nodeId ? { ...s, is_pinned: prior.is_pinned } : s
         ),
         error: formatError(e),
       }));
