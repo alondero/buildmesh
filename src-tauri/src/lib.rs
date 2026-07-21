@@ -563,6 +563,9 @@ pub fn run() {
             // Usage
             commands::usage::get_provider_meters,
             commands::usage::set_minimax_api_key,
+            // OpenCode OAuth (issue #956) — sign-out seam; device-flow
+            // start/poll commands land here too in the follow-up PRs.
+            commands::opencode_oauth::revoke_opencode_console,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

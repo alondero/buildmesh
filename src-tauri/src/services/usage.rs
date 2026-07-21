@@ -11,6 +11,20 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+// Credential Manager surface — Windows-only. Re-exported at the top so the
+// existing `windows_cred::read(...)` call sites below stay unchanged after
+// the inline module was extracted to `services::windows_cred` for #956.
+// On non-Windows the path doesn't exist; the `cfg(windows)` `read_*` helpers
+// catch the gap with `NoCredential`, so callers stay one-statement-uniform.
+#[cfg(windows)]
+use crate::services::windows_cred;
+// The OpenCode OAuth DTO + parser were extracted to `services::opencode_oauth`
+// for #956 so the OAuth dance and the live fetcher don't share a private
+// helper. The constant `OPENCODE_CONSOLE_CRED_TARGET` was lifted along with
+// it; the parser stays qualified (call sites read
+// `opencode_oauth::parse_opencode_console_credential(...)`) to make the
+// module boundary obvious at every read site.
+use crate::services::opencode_oauth::OPENCODE_CONSOLE_CRED_TARGET;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "UsageWindow.ts")]
@@ -1166,11 +1180,15 @@ const AGY_CRED_TARGET: &str = "gemini:antigravity";
 /// SolidStart deployment id — the value of the `X-Server-Id` header the
 /// OpenCode CLI sends. Captured from the opencode-cli binary's outbound
 /// traffic (issue #944 / research ticket). Stable per deployment; not per-user.
+///
+/// On its way out: the OpenCode Console credential blob (issue #956) is
+/// already the canonical home for this id so the OAuth dance can persist
+/// the value it received from the device-flow exchange rather than
+/// re-emitting it from this binary string. The constant stays until the
+/// server-id migration lands; see `services::opencode_oauth` for the
+/// candidate replacement.
 const OPENCODE_SERVER_ID: &str =
     "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
-/// Credential Manager target the Buildmesh-owned OpenCode OAuth dance (#956)
-/// stores its token blob under. Mirrors the agy `provider:subcontext` shape.
-const OPENCODE_CONSOLE_CRED_TARGET: &str = "opencode:console";
 
 #[derive(Deserialize)]
 struct AgyTokenField {
@@ -1207,51 +1225,20 @@ fn read_agy_token() -> Result<String, UsageError> {
     ))
 }
 
-/// Credential blob shape written by the Buildmesh-owned OpenCode device-flow
-/// dance (#956). `access_token` is the live RPC bearer; `workspace_id` is the
-/// `wrk_<id>` passed to the `_server billing.get` body. `refresh_token` +
-/// `expires_at` are the lazy-refresh inputs (#956's locked refresh strategy:
-/// refresh-on-401 + 300s idle TTL) — not used by this fetcher, but the same
-/// blob is the source of truth so #956 writes all four fields in one shot.
-#[derive(Deserialize)]
-struct OpenCodeConsoleCred {
-    access_token: Option<String>,
-    workspace_id: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    expires_at: Option<String>,
-}
-
-/// Parses the OpenCode Console credential blob into `(access_token,
-/// workspace_id)`. Both fields are required by the live fetcher; either
-/// missing or empty is treated as `NoCredential` so the offline SQLite path
-/// (#953) takes over with whatever partial state the user has on disk.
-fn parse_opencode_console_credential(blob: &[u8]) -> Result<(String, String), UsageError> {
-    let text = std::str::from_utf8(blob).map_err(|e| UsageError::Shape(e.to_string()))?;
-    let cred: OpenCodeConsoleCred =
-        serde_json::from_str(text).map_err(|e| UsageError::Shape(e.to_string()))?;
-    let token = cred
-        .access_token
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| UsageError::NoCredential(OPENCODE_CONSOLE_CRED_TARGET.to_string()))?;
-    let workspace = cred
-        .workspace_id
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| UsageError::NoCredential(OPENCODE_CONSOLE_CRED_TARGET.to_string()))?;
-    Ok((token, workspace))
-}
-
 /// Reads the Buildmesh-owned OpenCode Console credential from the OS
 /// credential store. Windows-only for now (mirrors the agy precedent —
 /// macOS Keychain / Linux Secret Service is explicitly out of scope for #956
 /// and belongs to a future ticket). On non-Windows the live path simply
 /// reports `NoCredential` and the SQLite fallback (#953) runs.
+///
+/// The DTO + parser live in [`crate::services::opencode_oauth`] — extracted
+/// out of `usage` for #956 so the OAuth dance and the live fetcher don't
+/// share a private helper one of them silently drifts from.
 #[cfg(windows)]
 fn read_opencode_console_credential() -> Result<(String, String), UsageError> {
-    parse_opencode_console_credential(&windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET)?)
+    crate::services::opencode_oauth::parse_opencode_console_credential(&windows_cred::read(
+        OPENCODE_CONSOLE_CRED_TARGET,
+    )?)
 }
 
 #[cfg(not(windows))]
@@ -1261,69 +1248,14 @@ fn read_opencode_console_credential() -> Result<(String, String), UsageError> {
     ))
 }
 
-/// Minimal FFI to the Windows Credential Manager (`advapi32!CredReadW`) — just
-/// enough to read a generic credential blob, so we avoid a winapi/windows dep.
-#[cfg(windows)]
-mod windows_cred {
-    use super::UsageError;
-    use std::os::windows::ffi::OsStrExt;
-
-    #[repr(C)]
-    struct Filetime {
-        _low: u32,
-        _high: u32,
-    }
-
-    #[repr(C)]
-    struct CredentialW {
-        _flags: u32,
-        _typ: u32,
-        _target_name: *mut u16,
-        _comment: *mut u16,
-        _last_written: Filetime,
-        credential_blob_size: u32,
-        credential_blob: *mut u8,
-        _persist: u32,
-        _attribute_count: u32,
-        _attributes: *mut core::ffi::c_void,
-        _target_alias: *mut u16,
-        _user_name: *mut u16,
-    }
-
-    #[link(name = "advapi32")]
-    extern "system" {
-        fn CredReadW(target: *const u16, typ: u32, flags: u32, cred: *mut *mut CredentialW) -> i32;
-        fn CredFree(buf: *mut core::ffi::c_void);
-    }
-
-    const CRED_TYPE_GENERIC: u32 = 1;
-
-    pub fn read(target: &str) -> Result<Vec<u8>, UsageError> {
-        let wide: Vec<u16> = std::ffi::OsStr::new(target)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        // SAFETY: `wide` is a NUL-terminated UTF-16 string; CredReadW writes a
-        // single owned pointer we free with CredFree after copying its blob.
-        unsafe {
-            let mut ptr: *mut CredentialW = std::ptr::null_mut();
-            if CredReadW(wide.as_ptr(), CRED_TYPE_GENERIC, 0, &mut ptr) == 0 || ptr.is_null() {
-                return Err(UsageError::NoCredential(target.to_string()));
-            }
-            let cred = &*ptr;
-            // `from_raw_parts` requires a non-null pointer even for length 0, so
-            // guard the empty/null-blob case rather than risk UB.
-            let blob = if cred.credential_blob.is_null() || cred.credential_blob_size == 0 {
-                Vec::new()
-            } else {
-                std::slice::from_raw_parts(cred.credential_blob, cred.credential_blob_size as usize)
-                    .to_vec()
-            };
-            CredFree(ptr as *mut core::ffi::c_void);
-            Ok(blob)
-        }
-    }
-}
+/// Minimal FFI to the Windows Credential Manager (`advapi32!CredReadW` /
+///
+/// `CredWriteW` / `CredDeleteW`) was extracted out of this module for #956
+/// and now lives at [`crate::services::windows_cred`]; the local
+/// `cfg(windows)` `use` at the top of `usage` keeps the call sites
+/// (`read_agy_token`, `read_opencode_console_credential`) reading naturally.
+///
+/// [`crate::services::windows_cred`]: crate::services::windows_cred
 
 #[derive(Deserialize)]
 struct AgyLoadResp {
@@ -2255,59 +2187,9 @@ mod tests {
         assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
     }
 
-    #[test]
-    fn parse_opencode_console_credential_extracts_token_and_workspace() {
-        // The blob shape is the contract #956's device-flow dance produces:
-        // both `access_token` and `workspace_id` are required for the live
-        // fetcher. `refresh_token` + `expires_at` ride along for the lazy
-        // refresh strategy but are not consumed by this fetcher.
-        let blob = br#"{
-            "access_token": "oc_sk_test_token_123",
-            "workspace_id": "wrk_xyz789",
-            "refresh_token": "rt_test_refresh",
-            "expires_at": "2026-07-21T12:00:00Z"
-        }"#;
-        let (token, workspace) = parse_opencode_console_credential(blob).unwrap();
-        assert_eq!(token, "oc_sk_test_token_123");
-        assert_eq!(workspace, "wrk_xyz789");
-    }
-
-    #[test]
-    fn parse_opencode_console_credential_rejects_missing_or_empty_fields() {
-        // Both `access_token` and `workspace_id` are load-bearing — missing
-        // either or having an empty string must be NoCredential (NOT a
-        // successful parse with empty strings, which would surface as a 401
-        // round-trip later and confuse the degradation chain's accounting).
-        // Vec (not fixed-size array) because the byte-string lengths differ.
-        let blobs: Vec<&[u8]> = vec![
-            br#"{"workspace_id": "wrk_xyz"}"#,                        // missing token
-            br#"{"access_token": "tok"}"#,                            // missing workspace
-            br#"{"access_token": "", "workspace_id": "wrk_xyz"}"#,    // empty token
-            br#"{"access_token": "tok", "workspace_id": ""}"#,        // empty workspace
-        ];
-        for blob in blobs {
-            let err = parse_opencode_console_credential(blob).unwrap_err();
-            assert!(
-                matches!(err, UsageError::NoCredential(_)),
-                "expected NoCredential, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_opencode_console_credential_rejects_malformed_json() {
-        // Non-JSON bytes (e.g. an empty blob, random padding) must fail as
-        // Shape so the live path returns unavailable rather than logging
-        // the user out for a transient store corruption.
-        assert!(matches!(
-            parse_opencode_console_credential(b"not json at all").unwrap_err(),
-            UsageError::Shape(_)
-        ));
-        assert!(matches!(
-            parse_opencode_console_credential(b"").unwrap_err(),
-            UsageError::Shape(_)
-        ));
-    }
+    // The OpenCode Console credential parser tests (formerly
+    // `parse_opencode_console_credential_*`) were relocated to
+    // `services::opencode_oauth` alongside the DTO + parser itself for #956.
 
     // ── choose_opencode_usage — the heart of the degradation chain ────────
 
