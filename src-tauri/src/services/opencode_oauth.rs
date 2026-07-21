@@ -15,10 +15,14 @@
 //! - `fetch_workspaces` — `GET /api/user` + `/api/orgs` enumeration,
 //! - `revoke` — `windows_cred::delete(OPENCODE_CONSOLE_CRED_TARGET)`.
 //!
-//! `#![cfg(windows)]` for the I/O surface; non-Windows callers in this module
-//! and `commands::opencode_oauth` return `UsageError::NoCredential("OpenCode
-//! Console … is only available on Windows")` to mirror the agy precedent
-//! at `services::usage::read_agy_token`.
+//! Compiles on every platform; specific fns that touch the OS credential
+//! store or persist tokens (`persist_token_response`, `try_refresh`) are
+//! `#[cfg(windows)]`-gated and surface `OAuthError::NoCredential` on the
+//! non-Windows arms (mirrors the locked #956 design decision and the agy
+//! precedent at `services::usage::read_agy_token`). The HTTP-only fns
+//! (`start_device_flow`, `fetch_workspaces`, `poll_for_token`) are
+//! platform-agnostic by design — the upstream host is reachable on every
+/// OS, even though the credential sink isn't.
 
 use crate::services::usage::UsageError;
 use reqwest::blocking::Client;
@@ -66,6 +70,13 @@ pub(crate) enum OAuthError {
     /// as an enum arm so a higher layer can decide to keep going vs. abort
     /// the dance (we always keep going in `poll_for_token_impl`).
     SlowDown,
+    /// No credential available for this operation. The non-Windows path
+    /// uses this for `try_refresh` / `persist_token_response` to mirror the
+    /// agy precedent at `services::usage::read_agy_token` (the locked #956
+    /// decision: "non-Windows = agy-style NoCredential"). String carries
+    /// the credential target name so a higher layer can render a stable
+    /// surface-level message.
+    NoCredential(String),
     /// Transport-level failure (DNS, TLS, connection refused, timeout).
     /// String carries the underlying message for diagnostics.
     Transport(String),
@@ -81,6 +92,7 @@ impl std::fmt::Display for OAuthError {
             OAuthError::CodeExpired => write!(f, "OpenCode OAuth: device code expired before activation"),
             OAuthError::AccessDenied => write!(f, "OpenCode OAuth: user denied the device-flow consent"),
             OAuthError::SlowDown => write!(f, "OpenCode OAuth: server requested slow-down"),
+            OAuthError::NoCredential(target) => write!(f, "OpenCode OAuth: no credential at {target}"),
             OAuthError::Transport(msg) => write!(f, "OpenCode OAuth transport: {msg}"),
             OAuthError::Shape(msg) => write!(f, "OpenCode OAuth shape: {msg}"),
         }
@@ -195,36 +207,93 @@ pub(crate) fn parse_token_response(body: &str) -> Result<TokenResponse, OAuthErr
     })
 }
 
-/// Fetches the org-list from `GET /api/orgs`. The user's own
-/// OAuth-scoped workspace (from `GET /api/user`) is folded in by the
-/// React side at display time — the API contract is "this is the list of
-/// WORKSPACES the user can switch to" and the user's own workspace is
-/// implicitly always included via the persisted `workspace_id` in the
-/// credential blob.
+/// Fetches the workspace list per the locked sub-spec #5: the
+/// OAuth-scoped user workspace (`GET /api/user`) plus every org the user
+/// can switch to (`GET /api/orgs`). The Settings workspace picker must
+/// show the user's own workspace alongside any org workspaces — never
+/// allow a multi-org user to be locked out of their default workspace.
+///
+/// The two calls are independent — a partial failure on one is
+/// surfaced as `Shape` so the React Settings UI can show a "couldn't
+/// load workspaces" affordance rather than silently dropping the user
+/// workspace.
 ///
 /// Wraps `reqwest::blocking::Client` in a 15s timeout to bound the
 /// network round-trip; matches the cadence `start_device_flow` uses.
 #[allow(dead_code)] // awaiting IPC wire + follow-up PR (issue #956 part 2)
-pub(crate) fn fetch_workspaces(access_token: &str) -> Result<Vec<OpenCodeWorkspace>, OAuthError> {
+pub(crate) fn fetch_workspaces(
+    access_token: &str,
+) -> Result<Vec<OpenCodeWorkspace>, OAuthError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| OAuthError::Transport(format!("workspace client: {e}")))?;
-    let response = client
-        .get(format!("{OPENCODE_CONSOLE_HOST}/api/orgs"))
-        .header("Authorization", format!("Bearer {access_token}"))
+    let auth = format!("Bearer {access_token}");
+
+    // /api/user — the OAuth-scoped workspace the user's token binds to.
+    // Shape is `{"id":"wrk_<id>","name":"<human>"}` (different field shape
+    // than /api/orgs, hence the separate parse).
+    let user_resp = client
+        .get(format!("{OPENCODE_CONSOLE_HOST}/api/user"))
+        .header("Authorization", &auth)
         .send()
-        .map_err(|e| OAuthError::Transport(format!("/api/orgs send: {e}")))?;
-    let status = response.status();
-    let body = response
+        .map_err(|e| OAuthError::Transport(format!("/api/user send: {e}")))?;
+    let user_status = user_resp.status();
+    let user_body = user_resp
         .text()
-        .map_err(|e| OAuthError::Transport(format!("/api/orgs body: {e}")))?;
-    if !status.is_success() {
+        .map_err(|e| OAuthError::Transport(format!("/api/user body: {e}")))?;
+    if !user_status.is_success() {
         return Err(OAuthError::Shape(format!(
-            "/api/orgs HTTP {status}: {body}"
+            "/api/user HTTP {user_status}: {user_body}"
         )));
     }
-    parse_workspaces_response(&body)
+    let user_workspace = parse_user_workspace(&user_body)?;
+
+    // /api/orgs — every workspace the user can switch to.
+    let orgs_resp = client
+        .get(format!("{OPENCODE_CONSOLE_HOST}/api/orgs"))
+        .header("Authorization", &auth)
+        .send()
+        .map_err(|e| OAuthError::Transport(format!("/api/orgs send: {e}")))?;
+    let orgs_status = orgs_resp.status();
+    let orgs_body = orgs_resp
+        .text()
+        .map_err(|e| OAuthError::Transport(format!("/api/orgs body: {e}")))?;
+    if !orgs_status.is_success() {
+        return Err(OAuthError::Shape(format!(
+            "/api/orgs HTTP {orgs_status}: {orgs_body}"
+        )));
+    }
+    let org_workspaces = parse_workspaces_response(&orgs_body)?;
+
+    // Merge: user's own workspace first (default-to-first per the locked
+    // spec decision), then every org workspace not already present.
+    let mut out = Vec::with_capacity(1 + org_workspaces.len());
+    out.push(user_workspace);
+    for ws in org_workspaces {
+        if !out.iter().any(|w| w.id == ws.id) {
+            out.push(ws);
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct UserWorkspaceResp {
+    id: String,
+    name: String,
+}
+
+/// Parses the `GET /api/user` body — `{ "id": "wrk_<id>", "name": "..." }`.
+/// Distinct from `parse_workspaces_response` because the wire shape is a
+/// single object, not an array.
+pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAuthError> {
+    let resp: UserWorkspaceResp = serde_json::from_str(body)
+        .map_err(|e| OAuthError::Shape(format!("/api/user body: {e}")))?;
+    Ok(OpenCodeWorkspace {
+        id: resp.id,
+        name: resp.name,
+    })
 }
 
 /// Refreshes an existing access token. The OAuth server accepts the
@@ -287,9 +356,16 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
 
 #[cfg(not(windows))]
 pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
-    Err(OAuthError::Shape(
-        "OpenCode OAuth refresh is only available on Windows".to_string(),
-    ))
+    // Per the locked #956 design decision, non-Windows mirrors the agy
+    // precedent at services::usage::read_agy_token and returns a typed
+    // NoCredential rather than a Shape error. The user can't be signed
+    // in on this platform (Credential Manager doesn't exist), so the
+    // refresh-on-401 fallback would be a no-op anyway; surfacing
+    // NoCredential tells the higher layer to keep the SQLite (#953)
+    // path active.
+    Err(OAuthError::NoCredential(format!(
+        "{OPENCODE_CONSOLE_CRED_TARGET}: refresh not available on this platform"
+    )))
 }
 
 /// Composes the credential blob from a fresh `TokenResponse` and writes
@@ -319,9 +395,15 @@ pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthE
 
 #[cfg(not(windows))]
 pub(crate) fn persist_token_response(_token: &TokenResponse) -> Result<(), OAuthError> {
-    Err(OAuthError::Shape(
-        "OpenCode OAuth credential storage is only available on Windows".to_string(),
-    ))
+    // Same design choice as try_refresh — non-Windows is NoCredential,
+    // not Shape. The persist path is only reached after a successful
+    // dance (a fresh TokenResponse); on non-Windows the dance can be
+    // initiated (the host is reachable) but the credential has nowhere
+    // to land, so this arms as NoCredential to keep the higher layer's
+    // error-matching symmetric with try_refresh and the live probe.
+    Err(OAuthError::NoCredential(format!(
+        "{OPENCODE_CONSOLE_CRED_TARGET}: credential storage not available on this platform"
+    )))
 }
 
 /// OpenCode workspace enumeration, returned by `GET /api/user` + `/api/orgs`.
@@ -498,7 +580,7 @@ pub(crate) fn poll_for_token(
 /// writes its token blob under. Mirrors the agy `provider:subcontext` shape
 /// (`gemini:antigravity`). Single source of truth — both
 /// `services::usage::read_opencode_console_credential` and
-/// `services::opencode_oauth::write_credential_blob` refer here.
+/// `services::opencode_oauth::persist_token_response` refer here.
 pub(crate) const OPENCODE_CONSOLE_CRED_TARGET: &str = "opencode:console";
 
 /// Idle TTL for the lazy refresh strategy (issue #956): a credential within
