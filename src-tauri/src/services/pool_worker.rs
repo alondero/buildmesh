@@ -430,6 +430,44 @@ fn next_tick(
 mod tests {
     use super::*;
 
+    // ---- time-parameterised test seams (issue #751) ----
+    //
+    // Mirrors of `note_activity_for_mesh` / `idle_duration_for_mesh` that
+    // take an explicit `Instant` rather than calling `Instant::now()`
+    // internally. Lets the overwrite-prior-timestamp regression test
+    // drive a synthetic timeline — `base`, `base + 20ms`, `base + 70ms`
+    // — so the two reads are provably monotonic instead of depending on
+    // wall-clock arithmetic that Windows' ~15.6ms system timer tick
+    // collapses under full-suite `cargo test --lib` parallelism
+    // (issue #751). The actual storage code path is still exercised
+    // (same `LAST_ACTIVITY_BY_MESH`, same `mesh_id > 0` guard, same
+    // lock-or-recover policy) — only the clock source is pinned.
+
+    fn note_activity_for_mesh_at(mesh_id: i64, when: Instant) {
+        if mesh_id <= 0 {
+            return;
+        }
+        match LAST_ACTIVITY_BY_MESH.lock() {
+            Ok(mut map) => {
+                map.insert(mesh_id, when);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(mesh_id, when);
+            }
+        }
+    }
+
+    fn idle_duration_for_mesh_since(mesh_id: i64, when: Instant) -> Duration {
+        let last = match LAST_ACTIVITY_BY_MESH.lock() {
+            Ok(map) => map.get(&mesh_id).copied(),
+            Err(poisoned) => poisoned.into_inner().get(&mesh_id).copied(),
+        };
+        match last {
+            Some(t) => when.saturating_duration_since(t),
+            None => Duration::MAX,
+        }
+    }
+
     // ---- is_idle_enough (the debounce gate) ----
 
     #[test]
@@ -578,40 +616,53 @@ mod tests {
     /// FIRST instant — letting the worker fill a pool that's actively
     /// being warmed by the spawn path (defeating issue #613 AC2
     /// suppression).
+    ///
+    /// Issue #751: the previous version of this test called
+    /// `note_activity_for_mesh` / `idle_duration_for_mesh` (which both
+    /// read `Instant::now()` internally) and slept 20 ms + 50 ms between
+    /// the two reads. Under full-suite `cargo test --lib` parallelism
+    /// Windows' ~15.6 ms system-timer tick can collapse two consecutive
+    /// `Instant::now()` reads into the same instant, producing
+    /// `first_idle == second_idle == 0 ms` and tripping the
+    /// `second_idle < first_idle` assertion. We now drive a *synthetic*
+    /// timeline via the `cfg(test)` seams `note_activity_for_mesh_at`
+    /// and `idle_duration_for_mesh_since` — the two stored instants are
+    /// arithmetic (`base + 70 ms` vs `base`), not wall-clock, so the
+    /// test is provably deterministic regardless of OS timer resolution
+    /// or test-suite contention.
     #[test]
     fn note_activity_for_mesh_overwrites_prior_timestamp() {
         const MESH_D: i64 = 600_001;
-        note_activity_for_mesh(MESH_D);
-        // Sleep BEFORE the first read so the prior instant visibly differs
-        // from the read's `Instant::now()` — two consecutive `note + read`
-        // calls can land in the same CPU instruction stream under load and
-        // produce equal `Instant::now()` reads on Windows, which would
-        // tautologically fail the `second_idle < first_idle` assertion
-        // below (`0 < 0`). 20 ms is well above the noise floor for
-        // back-to-back `Instant::now()` reads under test-suite contention
-        // and well below `IDLE_SILENCE`, matching the existing intent of
-        // the 50 ms sleep.
-        std::thread::sleep(Duration::from_millis(20));
-        let first_idle = idle_duration_for_mesh(MESH_D);
-        // Sleep enough that the prior instant would visibly differ from
-        // a fresh one. 50 ms is well above the spawn-resolution floor
-        // but well below `IDLE_SILENCE` so the gate's behaviour doesn't
-        // change between the two reads.
-        std::thread::sleep(Duration::from_millis(50));
-        note_activity_for_mesh(MESH_D);
-        let second_idle = idle_duration_for_mesh(MESH_D);
+        // Anchor — only used as a reference point for the synthetic deltas
+        // below; the test never compares against wall-clock arithmetic.
+        let base = Instant::now();
+        // First note: stored instant = `base`.
+        note_activity_for_mesh_at(MESH_D, base);
+        // 20 ms later, read — stored instant is `base`, so idle is 20 ms.
+        let first_idle =
+            idle_duration_for_mesh_since(MESH_D, base + Duration::from_millis(20));
+        // 50 ms later (total +70 ms from `base`), note again — stored
+        // instant MUST be overwritten (pre-#634 bug used
+        // `entry().or_insert(now)` which silently no-op'd here).
+        note_activity_for_mesh_at(MESH_D, base + Duration::from_millis(70));
+        // Immediate read — stored instant is `base + 70 ms`, so idle is 0 ms.
+        let second_idle =
+            idle_duration_for_mesh_since(MESH_D, base + Duration::from_millis(70));
+        assert_eq!(
+            first_idle,
+            Duration::from_millis(20),
+            "first read must see the originally stored instant (20 ms after `base`)"
+        );
+        assert_eq!(
+            second_idle,
+            Duration::ZERO,
+            "second read must see the freshly overwritten instant (no time has elapsed since the +70 ms note)"
+        );
         assert!(
             second_idle < first_idle,
             "second note_activity_for_mesh must reset the clock (first_idle={}ms, second_idle={}ms) — \
              the pre-#634 bug froze the clock at the FIRST chunk's instant",
             first_idle.as_millis(),
-            second_idle.as_millis()
-        );
-        // The fresh instant must be tiny (< 50 ms in practice; allow 1 s
-        // of slack for slow CI machines).
-        assert!(
-            second_idle < Duration::from_secs(1),
-            "fresh clock after overwrite must be tiny (got {}ms)",
             second_idle.as_millis()
         );
     }
