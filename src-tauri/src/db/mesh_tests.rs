@@ -127,6 +127,74 @@ mod tests {
         std::fs::remove_file(&temp_path).ok();
     }
 
+    /// Ticket #994 — the narrow `set_mesh_autopilot_enabled` Start/Stop write
+    /// flips ONLY `autopilot_enabled` and leaves the issue-driven policy
+    /// columns untouched (the reason it exists instead of reusing
+    /// `set_mesh_autopilot`). A missing mesh id updates zero rows so the
+    /// command layer can surface "mesh not found".
+    #[test]
+    fn test_set_mesh_autopilot_enabled_is_narrow() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path =
+            std::env::temp_dir().join(format!("buildmesh_ap_enabled_test_{}.db", test_id));
+        crate::db::init(&temp_path).unwrap();
+
+        let path = format!("/tmp/ap-enabled-test-{}", test_id);
+        let mesh = crate::db::create_mesh("Loop Mesh", &path).unwrap();
+
+        // Seed a full issue-driven policy so we can prove the narrow toggle
+        // preserves it.
+        crate::db::set_mesh_autopilot(
+            mesh.id,
+            false,
+            Some("buildmesh:run"),
+            3,
+            Some("minimax"),
+            Some("draft_pr"),
+        )
+        .unwrap();
+
+        // Start: flip enabled on WITHOUT clobbering the policy columns.
+        let rows = crate::db::set_mesh_autopilot_enabled(mesh.id, true).unwrap();
+        assert_eq!(rows, 1, "one row updated");
+        let on = crate::db::get_mesh_by_id(mesh.id).unwrap();
+        assert!(on.autopilot_enabled, "Start enables the mesh");
+        assert_eq!(
+            on.autopilot_trigger_label.as_deref(),
+            Some("buildmesh:run"),
+            "narrow toggle preserves the trigger label"
+        );
+        assert_eq!(on.autopilot_concurrency_limit, 3, "preserves concurrency");
+        assert_eq!(on.autopilot_provider.as_deref(), Some("minimax"));
+
+        // Stop: flip enabled off, policy still intact.
+        crate::db::set_mesh_autopilot_enabled(mesh.id, false).unwrap();
+        let off = crate::db::get_mesh_by_id(mesh.id).unwrap();
+        assert!(!off.autopilot_enabled, "Stop disables the mesh");
+        assert_eq!(off.autopilot_concurrency_limit, 3, "still preserved on Stop");
+
+        // Missing mesh → zero rows (drives the command's not-found guard).
+        let missing = crate::db::set_mesh_autopilot_enabled(999_999, true).unwrap();
+        assert_eq!(missing, 0, "no rows updated for a nonexistent mesh");
+
+        // Command layer maps the zero-rows case to the "mesh not found" error
+        // contract (ticket #994) — the guard the plan calls for, exercised
+        // through the async command via the repo's `block_on` idiom.
+        let err = tauri::async_runtime::block_on(
+            crate::commands::mesh_properties::set_mesh_autopilot_enabled(999_999, true),
+        )
+        .expect_err("a missing mesh must surface an error, not a silent success");
+        assert!(
+            err.contains("not found"),
+            "command surfaces the not-found contract, got: {err}"
+        );
+
+        std::fs::remove_file(&temp_path).ok();
+    }
+
     /// Wayfinder #990 / ticket #991 — Looping Autopilot config columns
     /// (v30) default to `IssueDriven` mode + no prompts + 0/None caps on
     /// a fresh mesh, persist through `set_mesh_loop_config`, and read back

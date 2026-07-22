@@ -55,20 +55,22 @@
  * IPC round-trip rejection).
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useSaveStatus } from '../../hooks/useSaveStatus';
 import {
+  getLoopStatus,
   getMeshProperties,
+  setMeshAutopilotEnabled,
   updateMeshLoopConfig,
   updateMeshUseWorktree,
 } from '../../lib/tauri';
 import type { MeshRow } from '../../types/generated/MeshRow';
 import type { AutopilotMode } from '../../types/generated/AutopilotMode';
+import type { LoopStatusDto } from '../../types/generated/LoopStatus';
 import { LoadingState } from '../shared/Spinner';
 import { SaveIndicator } from '../shared/SaveIndicator';
-import { SafeLink } from '../shared/SafeLink';
 import { ProbeTabBody } from './ProbeTabBody';
 import { Field } from './Field';
 
@@ -82,13 +84,13 @@ const AUTOPILOT_MODE_OPTIONS: ModeOption[] = [
   { value: 'looping', label: 'Looping' },
 ];
 
-/** Runtime loop status — the four states the ticket's badge wording names.
- *  Today the only reachable kind is `idle` (no runtime scheduler yet, see
- *  ticket #992). The shape is written now so the daemon's status feed
- *  plugs straight in without re-rendering this tab. */
+/** Runtime loop status — the badge states reachable in the Start/Stop MVP
+ *  (ticket #994). Derived from the backend `LoopStatusDto` via [`toLoopStatus`]:
+ *  a live iteration → `active`; enabled but idle → `idle`; disabled → `stopped`.
+ *  (There is no `paused` state — that needs a distinct DB column and is a
+ *  deferred follow-up; Stop simply disables the loop.) */
 export type LoopStatus =
   | { kind: 'active'; iteration: number }
-  | { kind: 'paused' }
   | { kind: 'idle' }
   | { kind: 'stopped' };
 
@@ -99,25 +101,34 @@ export type LoopStatus =
  *  at the call site, but it narrows `status` for free inside a `switch`. */
 const LOOP_STATUS_CLASSES: Record<LoopStatus['kind'], string> = {
   active: 'bg-accent-cyan/10 text-accent-cyan border-accent-cyan/30',
-  paused: 'bg-status-warning/10 text-status-warning border-status-warning/30',
   idle: 'bg-bg-card text-text-muted border-border-subtle',
   stopped: 'bg-status-error/10 text-status-error border-status-error/30',
 };
 
-/** Render the user-visible label for the four-state loop status badge.
- *  The `switch` narrows `status` per-case, so `status.iteration` is
- *  in-scope only on the `active` arm without an `as` re-narrow. */
+/** Render the user-visible label for the loop status badge. The `switch`
+ *  narrows `status` per-case, so `status.iteration` is in-scope only on the
+ *  `active` arm without an `as` re-narrow. */
 function loopStatusLabel(status: LoopStatus): string {
   switch (status.kind) {
     case 'active':
       return `Active loop iteration ${status.iteration}`;
-    case 'paused':
-      return 'Paused';
     case 'idle':
       return 'Idle';
     case 'stopped':
       return 'Stopped';
   }
+}
+
+/** Map the backend `LoopStatusDto` onto the badge's discriminated union.
+ *  A live iteration (`active_iteration != null`) wins regardless of the
+ *  enabled flag — a Stop during a running iteration still shows `Active`
+ *  until that iteration finishes on its own. Otherwise `enabled` ⇒ `idle`
+ *  (loop on, between iterations), `!enabled` ⇒ `stopped`. */
+function toLoopStatus(dto: LoopStatusDto): LoopStatus {
+  if (dto.active_iteration !== null) {
+    return { kind: 'active', iteration: dto.active_iteration };
+  }
+  return dto.enabled ? { kind: 'idle' } : { kind: 'stopped' };
 }
 
 /** Form state. Numeric loop caps live as strings so an empty input means
@@ -234,6 +245,10 @@ export function AutopilotProbeTab() {
   const { activeMeshId } = useProbeContext();
   const [form, setForm] = useState<AutopilotLoopForm>(blankLoopForm);
   const [loading, setLoading] = useState(true);
+  // Runtime loop status for the badge (ticket #994). `null` = not yet
+  // fetched (or not in looping mode); the row renders a muted "Checking…"
+  // placeholder until the first `get_loop_status` resolves.
+  const [loopStatus, setLoopStatus] = useState<LoopStatus | null>(null);
   const saveStatus = useSaveStatus();
   const mountedRef = useRef(true);
 
@@ -360,6 +375,47 @@ export function AutopilotProbeTab() {
     await wrappedSave(() => updateMeshUseWorktree(meshId, value));
   };
 
+  /** Fetch the live loop status and map it onto the badge union. Mesh-switch
+   *  guarded (drop the result if the user changed meshes mid-flight). A fetch
+   *  failure is logged, not surfaced through the SaveIndicator — the badge is
+   *  read-only telemetry, not a save the user just triggered. */
+  const refreshLoopStatus = useCallback(async () => {
+    const meshId = activeMeshIdRef.current;
+    if (meshId === null) return;
+    try {
+      const dto = await getLoopStatus(meshId);
+      if (!mountedRef.current || activeMeshIdRef.current !== meshId) return;
+      setLoopStatus(toLoopStatus(dto));
+    } catch (e) {
+      console.error('getLoopStatus failed:', e);
+    }
+  }, []);
+
+  // Poll the loop status while the Looping section is showing. The poller's
+  // own cadence is ~2 min, so a light 5s refetch is enough to move the badge
+  // from Idle → Active loop iteration N shortly after a spawn without hammering
+  // the DB. Cleared on mesh-switch / mode-flip / unmount.
+  useEffect(() => {
+    if (loading || form.mode !== 'looping' || activeMeshId === null) {
+      setLoopStatus(null);
+      return;
+    }
+    void refreshLoopStatus();
+    const id = setInterval(() => void refreshLoopStatus(), 5000);
+    return () => clearInterval(id);
+  }, [loading, form.mode, activeMeshId, refreshLoopStatus]);
+
+  /** Start/Stop the loop — flips `autopilot_enabled` via its narrow command,
+   *  then immediately refetches the status so the badge reflects the new state
+   *  without waiting for the next poll tick. Routed through `wrappedSave` so a
+   *  rejection surfaces in the SaveIndicator (this IS a user-triggered write). */
+  const setLoopEnabled = async (enabled: boolean) => {
+    const meshId = activeMeshIdRef.current;
+    if (meshId === null) return;
+    await wrappedSave(() => setMeshAutopilotEnabled(meshId, enabled));
+    await refreshLoopStatus();
+  };
+
   return (
     <ProbeTabBody padding="p-3" className="space-y-4">
       <SaveIndicator
@@ -410,6 +466,8 @@ export function AutopilotProbeTab() {
                 setForm={setForm}
                 onSaveLoopConfig={saveLoopConfig}
                 onSaveUseWorktree={saveUseWorktree}
+                loopStatus={loopStatus}
+                onSetLoopEnabled={setLoopEnabled}
                 mountedRef={mountedRef}
               />
           ) : (
@@ -430,6 +488,11 @@ interface LoopingSectionProps {
   /** Persist the mesh's `use_worktree` flag via its dedicated IPC —
    *  worktree lives on a different column. */
   onSaveUseWorktree: (value: boolean) => Promise<void>;
+  /** Live loop status for the badge, or `null` while the first fetch is
+   *  in flight (renders a muted placeholder). */
+  loopStatus: LoopStatus | null;
+  /** Start (`true`) / Stop (`false`) the loop by flipping `autopilot_enabled`. */
+  onSetLoopEnabled: (enabled: boolean) => Promise<void>;
   mountedRef: React.MutableRefObject<boolean>;
 }
 
@@ -438,19 +501,24 @@ function LoopingSection({
   setForm,
   onSaveLoopConfig,
   onSaveUseWorktree,
+  loopStatus,
+  onSetLoopEnabled,
   mountedRef,
 }: LoopingSectionProps) {
   return (
     <div className="space-y-4">
-      {/* Runtime loop status row. Until the loop scheduler (ticket #992)
-          lands there is no runtime surface to read — the badge can only
-          honestly report `Idle`, and Start/Pause/Stop stay disabled
-          with a tooltip pointing at the daemon ticket. The four
-          `LOOP_STATUS_DISPLAY` kinds are wired now so #992's status
-          stream plugs straight into the same pill without rearranging
-          the layout. The hint links to #992 so the placeholder reads
-          as "work in flight", not "broken". */}
-      <LoopStatusRow status={{ kind: 'idle' }} />
+      {/* Runtime loop status row + Start/Stop controls (ticket #994). The
+          loop is DB-config-driven: Start flips `autopilot_enabled` on and the
+          poller (`services::autopilot`) spawns iterations for this Looping mesh
+          within ~2 min; Stop flips it off (a running iteration finishes on its
+          own). The badge is derived from `get_loop_status` — the enabled flag +
+          iteration ledger — so it reflects real runtime state, not a guess. */}
+      <LoopStatusRow
+        status={loopStatus}
+        promptBlank={form.initialPrompt.trim() === ''}
+        onStart={() => onSetLoopEnabled(true)}
+        onStop={() => onSetLoopEnabled(false)}
+      />
 
       <Field
         label="Initial prompt"
@@ -601,62 +669,71 @@ function LoopingSection({
 }
 
 interface LoopStatusRowProps {
-  status: LoopStatus;
+  /** Live status, or `null` while the first fetch is in flight. */
+  status: LoopStatus | null;
+  /** Whether the initial prompt is blank — the loop stays idle when it is,
+   *  so Start is disabled with an explanatory tooltip. */
+  promptBlank: boolean;
+  onStart: () => void;
+  onStop: () => void;
 }
 
-function LoopStatusRow({ status }: LoopStatusRowProps) {
-  const DAEMON_HINT =
-    'Loop scheduler ships in #992 — Start will spawn the first iteration once the daemon is wired up.';
+function LoopStatusRow({ status, promptBlank, onStart, onStop }: LoopStatusRowProps) {
+  // `stopped` (or not-yet-loaded) means the loop is off → Start is the live
+  // action; any other state means it's on → Stop is the live action.
+  const enabled = status !== null && status.kind !== 'stopped';
+  const startDisabled = status === null || enabled || promptBlank;
+  const stopDisabled = status === null || !enabled;
+  const startTitle = promptBlank
+    ? 'Add an initial prompt first — the loop stays idle without one.'
+    : 'Start the loop — the poller spawns the first iteration within ~2 min.';
+
   return (
     <div className="rounded-md border border-border-subtle bg-bg-card/50 px-3 py-2 space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
-        <span
-          data-testid="loop-status-badge"
-          data-status={status.kind}
-          className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs font-medium ${LOOP_STATUS_CLASSES[status.kind]}`}
-        >
-          {loopStatusLabel(status)}
-        </span>
+        {status === null ? (
+          <span
+            data-testid="loop-status-badge"
+            data-status="loading"
+            className="inline-flex items-center px-2 py-0.5 rounded-full border text-xs font-medium bg-bg-card text-text-muted border-border-subtle"
+          >
+            Checking…
+          </span>
+        ) : (
+          <span
+            data-testid="loop-status-badge"
+            data-status={status.kind}
+            className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs font-medium ${LOOP_STATUS_CLASSES[status.kind]}`}
+          >
+            {loopStatusLabel(status)}
+          </span>
+        )}
         <div className="flex-1" />
         <button
           type="button"
-          disabled
-          title={DAEMON_HINT}
+          disabled={startDisabled}
+          onClick={onStart}
+          title={startTitle}
           aria-label="Start loop"
-          className="text-xs px-2 py-1 rounded-md border border-border-subtle text-text-muted/60 cursor-not-allowed transition-colors"
+          className="text-xs px-2 py-1 rounded-md border border-accent-cyan/40 text-accent-cyan hover:bg-accent-cyan/10 disabled:border-border-subtle disabled:text-text-muted/60 disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
         >
           Start
         </button>
         <button
           type="button"
-          disabled
-          title={DAEMON_HINT}
-          aria-label="Pause loop"
-          className="text-xs px-2 py-1 rounded-md border border-border-subtle text-text-muted/60 cursor-not-allowed transition-colors"
-        >
-          Pause
-        </button>
-        <button
-          type="button"
-          disabled
-          title={DAEMON_HINT}
+          disabled={stopDisabled}
+          onClick={onStop}
+          title="Stop the loop — no new iterations spawn (a running one finishes)."
           aria-label="Stop loop"
-          className="text-xs px-2 py-1 rounded-md border border-border-subtle text-text-muted/60 cursor-not-allowed transition-colors"
+          className="text-xs px-2 py-1 rounded-md border border-border-subtle text-text-secondary hover:bg-bg-card disabled:text-text-muted/60 disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
         >
           Stop
         </button>
       </div>
       <p className="text-2xs text-text-muted/70">
-        The runtime loop scheduler ships in{' '}
-        <SafeLink
-          url="https://github.com/alondero/buildmesh/issues/992"
-          ariaLabel="GitHub issue 992 — Looping Autopilot: Poller daemon & sequential spawn scheduler"
-          className="text-accent-cyan hover:underline"
-        >
-          #992
-        </SafeLink>
-        ; until then the badge stays at Idle and Start/Pause/Stop stay
-        disabled.
+        Looping runs while enabled; Stop halts new iterations (a running
+        iteration finishes on its own). Start/Stop take effect within ~2 min —
+        the poller re-reads config each pass.
       </p>
     </div>
   );

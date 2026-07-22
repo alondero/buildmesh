@@ -28,6 +28,7 @@ import type { GitSyncResult } from '../types/generated/GitSyncResult';
 import type { HoldingWorktree } from '../types/generated/HoldingWorktree';
 import type { IssueNodeDraft } from '../types/generated/IssueNodeDraft';
 import type { MeshRow } from '../types/generated/MeshRow';
+import type { LoopStatusDto } from '../types/generated/LoopStatus';
 import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { NetworkStatus } from '../types/generated/NetworkStatus';
@@ -298,6 +299,22 @@ export const updateMeshLoopConfig = (
     intervalSeconds,
     consecutiveFailures,
   });
+
+/** Looping Autopilot Start/Stop — flips ONLY `autopilot_enabled` (ticket #994).
+ *  The poller (`services::autopilot`) spawns iterations for any mesh in Looping
+ *  mode where this flag is true AND a non-empty `loop_initial_prompt` is set;
+ *  the change takes effect on the next poll pass (≤ 2 min), no restart. Narrow
+ *  dedicated command so Start/Stop can't clobber the issue-driven policy columns
+ *  (`updateMeshAutopilot` owns those). */
+export const setMeshAutopilotEnabled = (meshId: number, enabled: boolean) =>
+  _invoke<void>('set_mesh_autopilot_enabled', { meshId, enabled });
+
+/** Looping Autopilot runtime status for the Autopilot Probe tab's badge
+ *  (ticket #994) — the `autopilot_enabled` flag + the loop-iteration ledger
+ *  projected into Active N / Idle / Stopped. Thin wrapper over `get_loop_status`;
+ *  the DB is the source of truth (there is no separate scheduler state). */
+export const getLoopStatus = (meshId: number) =>
+  _invoke<LoopStatusDto>('get_loop_status', { meshId });
 
 /** Per-mesh target for the pre-spawn Worktree Pool
  *  (`services::warm_pool`, issue #611). `0` disables the pool for the

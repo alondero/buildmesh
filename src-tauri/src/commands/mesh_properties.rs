@@ -365,6 +365,47 @@ pub async fn update_mesh_autopilot(
     Ok(())
 }
 
+/// Toggle a mesh's Looping Autopilot on/off — the Start/Stop control on the
+/// Autopilot Probe tab (ticket #994). Looping mode is DB-config-driven: the
+/// poller (`services::autopilot`) spawns iterations for any mesh where
+/// `autopilot_enabled = 1` AND `autopilot_mode = Looping` AND a non-empty
+/// `loop_initial_prompt` is set. This command flips ONLY `autopilot_enabled`
+/// via the narrow `db::set_mesh_autopilot_enabled` write, so Start/Stop can't
+/// clobber the issue-driven policy columns (`update_mesh_autopilot` owns those).
+/// Takes effect on the next poll pass (≤ `services::autopilot::POLL_INTERVAL`)
+/// — no restart needed, since the poller re-reads the enabled-mesh set every
+/// pass. Zero-rows guard surfaces a "mesh deleted between load & save" race as
+/// an error rather than a silent success.
+#[tauri::command]
+pub async fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(), String> {
+    let rows = db::set_mesh_autopilot_enabled(mesh_id, enabled)
+        .map_err(|e| format!("failed to update autopilot_enabled: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    Ok(())
+}
+
+/// Runtime status of a mesh's Looping Autopilot for the Probe tab's status
+/// badge (ticket #994). Reads the mesh's `autopilot_enabled` flag +
+/// the loop-iteration ledger (`db::list_loop_iterations`) and returns the
+/// pure-derived [`crate::services::autopilot::LoopStatusDto`] (Active N /
+/// Idle / Stopped). No GitHub, no scheduler state — the loop is DB-driven, so
+/// status is a projection of the ledger + the enabled flag.
+#[tauri::command]
+pub async fn get_loop_status(
+    mesh_id: i64,
+) -> Result<crate::services::autopilot::LoopStatusDto, String> {
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let rows = db::list_loop_iterations(mesh_id)
+        .map_err(|e| format!("failed to list loop iterations for mesh {}: {}", mesh_id, e))?;
+    Ok(crate::services::autopilot::derive_loop_status(
+        mesh.autopilot_enabled,
+        &rows,
+    ))
+}
+
 #[tauri::command]
 pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
     let mesh = db::get_mesh_by_id(mesh_id)

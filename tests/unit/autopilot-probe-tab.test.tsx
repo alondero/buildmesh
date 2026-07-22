@@ -19,6 +19,7 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
+import type { LoopStatusDto } from '../../src/types/generated/LoopStatus';
 
 // The Mesh store's `Mesh` is the full generated 14+ field wire type
 // (wayfinder #990 ticket #991 added the six `loop_*` and the
@@ -79,9 +80,40 @@ function meshRow(overrides: Partial<MeshRow> = {}): MeshRow {
   return merged;
 }
 
-function mockBackend(row: MeshRow, opts: { rejectLoopConfig?: boolean } = {}) {
-  vi.mocked(invoke).mockImplementation((cmd: string) => {
+function mockBackend(
+  row: MeshRow,
+  opts: {
+    rejectLoopConfig?: boolean;
+    rejectSetEnabled?: boolean;
+    /** Seed the runtime status the tab reads via `get_loop_status`. The
+     *  `enabled` flag is stateful: a `set_mesh_autopilot_enabled` call flips
+     *  it so a follow-up `get_loop_status` reflects Start/Stop (mirrors the
+     *  real DB round-trip). Defaults derive from the row + a live-iteration
+     *  of none. */
+    loopStatus?: Partial<LoopStatusDto>;
+  } = {}
+) {
+  let enabled = opts.loopStatus?.enabled ?? row.autopilot_enabled;
+  const activeIteration = opts.loopStatus?.active_iteration ?? null;
+  const totalIterations = opts.loopStatus?.total_iterations ?? 0;
+
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'get_mesh_properties') return Promise.resolve(row);
+    if (cmd === 'get_loop_status') {
+      const dto: LoopStatusDto = {
+        enabled,
+        active_iteration: activeIteration,
+        total_iterations: totalIterations,
+      };
+      return Promise.resolve(dto);
+    }
+    if (cmd === 'set_mesh_autopilot_enabled') {
+      if (opts.rejectSetEnabled) {
+        return Promise.reject(new Error('mock: rejected start/stop'));
+      }
+      enabled = Boolean(args?.enabled);
+      return Promise.resolve();
+    }
     if (
       cmd === 'update_mesh_loop_config' ||
       cmd === 'update_mesh_use_worktree' ||
@@ -296,27 +328,145 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
     ).toBe(false);
   });
 
-  it('shows the loop status badge as Idle with Start/Pause/Stop disabled (awaiting #992)', async () => {
+  it('shows Stopped with Start enabled and Stop disabled when the loop is off', async () => {
     mockBackend(
       meshRow({
         autopilot_mode: 'looping',
+        autopilot_enabled: false,
+        loop_initial_prompt: 'ship the next issue',
+      })
+    );
+    await openAutopilotTab();
+
+    const badge = await screen.findByTestId('loop-status-badge');
+    // The badge starts as "Checking…" then resolves to Stopped once the
+    // first get_loop_status returns (enabled=false, no live iteration).
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
+    });
+    expect(badge.textContent).toContain('Stopped');
+
+    // Loop is off + a prompt is set → Start is the live action, Stop is inert.
+    expect(screen.getByRole('button', { name: 'Start loop' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Stop loop' }).hasAttribute('disabled')).toBe(true);
+    // No Pause in the Start/Stop MVP.
+    expect(screen.queryByRole('button', { name: 'Pause loop' })).toBeNull();
+  });
+
+  it('Start flips autopilot_enabled on and the badge moves to Idle', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'looping',
+        autopilot_enabled: false,
         loop_initial_prompt: 'ship the next issue',
       })
     );
     const user = userEvent.setup();
     await openAutopilotTab();
 
-    const badge = await screen.findByTestId('loop-status-badge');
-    expect(badge.textContent).toContain('Idle');
-    expect(badge.getAttribute('data-status')).toBe('idle');
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
+    });
 
-    // Action buttons render but stay disabled until the loop
-    // scheduler (ticket #992) wires in a runtime source. HTML's
-    // native `disabled` property is the cheapest check; jest-dom is
-    // not loaded in this repo.
+    await user.click(screen.getByRole('button', { name: 'Start loop' }));
+
+    expect(invoke).toHaveBeenCalledWith('set_mesh_autopilot_enabled', {
+      meshId: 42,
+      enabled: true,
+    });
+    // The immediate refetch reflects the flipped flag → Idle (enabled, no
+    // iteration running yet).
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('idle');
+    });
+  });
+
+  it('Stop flips autopilot_enabled off and the badge moves to Stopped', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'looping',
+        autopilot_enabled: true,
+        loop_initial_prompt: 'ship the next issue',
+      })
+    );
+    const user = userEvent.setup();
+    await openAutopilotTab();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('idle');
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Stop loop' }));
+
+    expect(invoke).toHaveBeenCalledWith('set_mesh_autopilot_enabled', {
+      meshId: 42,
+      enabled: false,
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
+    });
+  });
+
+  it('disables Start when the initial prompt is blank (loop would stay idle)', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'looping',
+        autopilot_enabled: false,
+        loop_initial_prompt: null,
+      })
+    );
+    await openAutopilotTab();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
+    });
+    const start = screen.getByRole('button', { name: 'Start loop' });
+    expect(start.hasAttribute('disabled')).toBe(true);
+    expect(start.getAttribute('title')).toMatch(/initial prompt/i);
+  });
+
+  it('renders Active loop iteration N from the live status', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'looping',
+        autopilot_enabled: true,
+        loop_initial_prompt: 'ship the next issue',
+      }),
+      { loopStatus: { enabled: true, active_iteration: 3, total_iterations: 3 } }
+    );
+    await openAutopilotTab();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('active');
+    });
+    expect(screen.getByTestId('loop-status-badge').textContent).toContain(
+      'Active loop iteration 3'
+    );
+    // A running loop → Start is inert, Stop is live.
     expect(screen.getByRole('button', { name: 'Start loop' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getByRole('button', { name: 'Pause loop' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getByRole('button', { name: 'Stop loop' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Stop loop' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('surfaces a Start/Stop rejection in the SaveIndicator', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'looping',
+        autopilot_enabled: false,
+        loop_initial_prompt: 'ship the next issue',
+      }),
+      { rejectSetEnabled: true }
+    );
+    const user = userEvent.setup();
+    await openAutopilotTab();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
+    });
+    await user.click(screen.getByRole('button', { name: 'Start loop' }));
+
+    // Start/Stop is a user-triggered write, so a rejection lands in the
+    // SaveIndicator (not swallowed like the read-only status poll).
+    expect(await screen.findByText(/Save failed: .*start\/stop/i)).toBeTruthy();
   });
 
   it('surfaces a backend rejection in the SaveIndicator', async () => {
