@@ -253,6 +253,33 @@ pub async fn write_json(
     write_full(lines, response.as_bytes()).await
 }
 
+/// Write a JSON response that also carries a `Retry-After` header (issue
+/// #750, item 1). Used for the drive route's `409 in_progress` arm — the
+/// orchestrator briefly waits for a peer to finalize a `pending` claim; if
+/// the wait window expires the route returns 409 with `Retry-After: 1` so the
+/// Coordinator retries after a short backoff rather than hammering
+/// immediately. Body shape matches the other 4xx JSON errors the route
+/// emits (`{"error":"..."}`).
+pub async fn write_json_with_retry_after(
+    lines: &mut tokio::io::BufStream<MaybeTls>,
+    status: &str,
+    body: &str,
+    retry_after_secs: u32,
+) -> std::io::Result<()> {
+    // Same wire shape as `write_json` plus the `Retry-After` header. The
+    // floor on `retry_after_secs` is the caller's responsibility — the
+    // rate-limit-style `>= 1` rule keeps a Coordinator from spinning in an
+    // instant-retry loop.
+    let response = format!(
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\n\r\n{}",
+        status,
+        retry_after_secs,
+        body.len(),
+        body
+    );
+    write_full(lines, response.as_bytes()).await
+}
+
 pub async fn send_json_error(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     status: &str,
