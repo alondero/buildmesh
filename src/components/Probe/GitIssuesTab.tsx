@@ -64,6 +64,7 @@ import {
   type GitHubIssue,
 } from '../../lib/tauri';
 import { useMeshStore } from '../../stores/meshStore';
+import { addToast } from '../../stores/toastStore'; // Issue #1001
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
@@ -120,18 +121,16 @@ export function GitIssuesTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawning, setSpawning] = useState<number | null>(null);
-  // Issue #979 — trigger-label toggle state. Three pieces:
+  // Issue #979 — trigger-label toggle state. Two pieces (a third,
+  // `toggleError`, was retired with issue #1001 — failures now surface
+  // through the shared toast pipeline instead of inline state):
   //   1. `pendingToggle`: issue numbers with an in-flight `set_issue_label`
   //      IPC. Used to disable the badge so a second click can't race.
   //   2. `optimisticLabels`: per-issue label list override applied while
   //      the toggle is in flight. Cleared on success/revert; the source
   //      of truth (`issues[i].labels`) shows through after.
-  //   3. `toggleError`: per-issue error message surfaced inline below
-  //      the badge when the IPC rejects. Auto-cleared after
-  //      `TOGGLE_ERROR_TTL_MS` so a transient failure doesn't linger.
   const [pendingToggle, setPendingToggle] = useState<Set<number>>(() => new Set());
   const [optimisticLabels, setOptimisticLabels] = useState<Map<number, string[]>>(() => new Map());
-  const [toggleError, setToggleError] = useState<Map<number, string>>(() => new Map());
   // Bump to force the load effect to re-run on a manual Refresh click
   // (issue #813 — Git Issues/PRs/Archive previously had no manual
   // refresh button). Mirrors the pattern `GitPullRequestsTab` already
@@ -306,14 +305,14 @@ export function GitIssuesTab() {
   //      `getRepoIssues` refresh will pick up the real state.
   //   4. On error, drop the optimistic override (the source-of-truth
   //      labels show through again) and surface the error message
-  //      inline below the badge. Auto-clear the error after
-  //      `TOGGLE_ERROR_TTL_MS` so a transient failure doesn't linger.
+  //      through the shared toast pipeline (issue #1001 — used to be
+  //      inline state below the badge before `addToast` was reachable
+  //      from outside App.tsx).
   //
   // The IPC error string is the backend's `Display` impl, which for
   // a 422 → `LabelNotFound` reads "Label `X` doesn't exist on the repo
   // — create it on GitHub first" — exactly the remediation message
   // we want the user to see.
-  const TOGGLE_ERROR_TTL_MS = 6000;
 
   const handleToggleLabel = async (issue: GitHubIssue, triggerLabel: string, action: 'add' | 'remove') => {
     if (activeMeshId === null) return;
@@ -344,12 +343,6 @@ export function GitIssuesTab() {
       next.set(issue.number, nextLabels);
       return next;
     });
-    setToggleError((prev) => {
-      if (!prev.has(issue.number)) return prev;
-      const next = new Map(prev);
-      next.delete(issue.number);
-      return next;
-    });
 
     try {
       await setIssueLabel(activeMeshId, issue.number, triggerLabel, action);
@@ -365,27 +358,15 @@ export function GitIssuesTab() {
         next.delete(issue.number);
         return next;
       });
-      // Surface the backend's error message inline. The backend's
-      // `Display` impl produces the human-readable string the user
-      // needs (e.g. "Label `buildmesh:run` doesn't exist on the repo
-      // — create it on GitHub first" for a 422, or
+      // Issue #1001: surface the failure via the shared toast pipeline
+      // (formerly inline error state below the badge). `formatError`
+      // unwraps the IPC rejection to the human-readable string the
+      // user needs (e.g. "Label `buildmesh:run` doesn't exist on the
+      // repo — create it on GitHub first" for a 422, or
       // "GitHub API error (403): ..." for missing triage access).
-      const message = e instanceof Error ? e.message : String(e);
-      setToggleError((prev) => {
-        const next = new Map(prev);
-        next.set(issue.number, message);
-        return next;
-      });
-      // Auto-clear the error after TTL so the row doesn't carry a
-      // stale failure string after the user has moved on.
-      window.setTimeout(() => {
-        setToggleError((prev) => {
-          if (!prev.has(issue.number)) return prev;
-          const next = new Map(prev);
-          next.delete(issue.number);
-          return next;
-        });
-      }, TOGGLE_ERROR_TTL_MS);
+      // The toast auto-dismisses after TOAST_TTL_MS so a transient
+      // failure doesn't linger.
+      addToast('GitHub', formatError(e), 'error');
     } finally {
       setPendingToggle((prev) => {
         if (!prev.has(issue.number)) return prev;
@@ -551,7 +532,6 @@ export function GitIssuesTab() {
                         const effectiveLabels = optimisticLabels.get(issue.number) ?? issue.labels;
                         const present = effectiveLabels.includes(triggerLabel);
                         const isPending = pendingToggle.has(issue.number);
-                        const errorMsg = toggleError.get(issue.number);
                         return (
                           <div
                             data-trigger-label-row
@@ -613,15 +593,6 @@ export function GitIssuesTab() {
                                 {present ? '✓' : '+'} {triggerLabel}
                               </span>
                             </button>
-                            {errorMsg && (
-                              <span
-                                data-trigger-label-error
-                                className="mt-0.5 text-2xs text-status-error leading-tight max-w-[180px] text-right"
-                                title={errorMsg}
-                              >
-                                {errorMsg}
-                              </span>
-                            )}
                           </div>
                         );
                       })()}

@@ -33,15 +33,7 @@ import { isMac } from './lib/platform';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
 import * as api from './lib/tauri';
-import {
-  applyToastCap,
-  dedupToasts,
-  TOAST_DEDUP_TTL_MS,
-  TOAST_MAX,
-  TOAST_TTL_MS,
-  type Toast,
-  type ToastSeverity,
-} from './lib/toastUtils';
+import { addToast, dismissToast, useToastStore } from './stores/toastStore';
 import './App.css';
 
 const createNodeGuard = createShortcutGuard(300);
@@ -67,14 +59,13 @@ const cheatsheetGuard = createShortcutGuard(300);
 // ~15 Hz macOS).
 const arrowThrottle = createKeyRepeatThrottle(200);
 
-type ErrorToast = Toast;
-
 function App() {
   const { fetchMeshes } = useMeshStore();
   const { fetchAgentNodes, initAttentionListeners } = useAgentNodeStore();
   const storeError = useAgentNodeStore(state => state.error);
 
-  const [toasts, setToasts] = useState<ErrorToast[]>([]);
+  // Issue #1001 — toast list lives in the shared store.
+  const toasts = useToastStore((s) => s.toasts);
   const [isReady, setIsReady] = useState(false);
   // Cheatsheet open state (issue #731). The <ShortcutCheatsheet> component
   // mounts only while true, which is what arms the <Modal>-owned Escape
@@ -389,13 +380,13 @@ function App() {
       addToast(event.payload.provider, event.payload.message, 'error');
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, [setToasts]);
+  }, [addToast]);
 
   useEffect(() => {
     if (storeError) {
       addToast('System', storeError, 'error');
     }
-  }, [storeError, setToasts]);
+  }, [storeError, addToast]);
 
   useEffect(() => {
     const init = async () => {
@@ -543,21 +534,10 @@ function App() {
   // that the user sees the toast disappear in real time.
   useEffect(() => {
     if (toasts.length === 0) return;
-    const tick = () => {
-      setToasts((prev) => prev.filter((t) => Date.now() - t.createdAt < TOAST_TTL_MS));
-    };
+    const tick = () => useToastStore.getState().dismissExpired(Date.now());
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
   }, [toasts.length]);
-
-  const addToast = useCallback(
-    (provider: string, message: string, severity: ToastSeverity = 'error') => {
-      const now = Date.now();
-      const incoming: ErrorToast = { id: now, provider, message, createdAt: now, severity };
-      setToasts((prev) => applyToastCap(dedupToasts(prev, incoming, now, TOAST_DEDUP_TTL_MS), TOAST_MAX));
-    },
-    [],
-  );
 
   // Issue #846: surface the sticky-lockout `naming-backend-failed` event as a
   // toast. The backend has already burned MAX_RENAME_ATTEMPTS=3 retries on
@@ -573,13 +553,9 @@ function App() {
         'error',
       );
     },
-    [addToast],
+    [],
   );
   useNamingBackendFailureToast(handleNamingBackendFailure);
-
-  const dismissToast = (id: number) => {
-    setToasts(prev => prev.filter(t => t.id !== id));
-  };
 
   if (!isReady) {
     return (
