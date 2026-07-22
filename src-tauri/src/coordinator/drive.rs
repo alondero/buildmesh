@@ -197,7 +197,7 @@ impl DriveTarget for RegistryTarget {
         // channel kept here.
         crate::attention_autoclear::disarm(node_id);
         if let Some(app) = crate::http::app_handle() {
-            let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+            let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
             let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
         } else {
             let _ = crate::agent::session_lifecycle::on_attention_cleared(

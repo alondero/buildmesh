@@ -675,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_blockers_returns_none_when_blocked_by_section_is_None() {
+    fn unresolved_blockers_returns_none_when_blocked_by_section_is_none() {
         // The `None` short-circuit in `parse_blocked_by` must propagate.
         // Issue may use `**Blocked by** None` to declare "no blockers" —
         // that's a positive signal to proceed, not a blocked state.
@@ -776,8 +776,13 @@ mod tests {
 
             // Second observation: same pair still blocked, but the log
             // must NOT fire.
-            let unresolved = unresolved_blockers(&issue, &open, &known)
-                .expect("issue must still be blocked");
+            assert!(
+                unresolved_blockers(&issue, &open, &known).is_some(),
+                "issue must still be blocked"
+            );
+            // (assertion message carries the diagnostic — a regression
+            // that flipped Some → None now halts here with a clear msg
+            // instead of panicking deep in the poll loop.)
             if mark_blocked_logged(pair.0, pair.1) {
                 tracing::info!("SHOULD NOT APPEAR");
             }

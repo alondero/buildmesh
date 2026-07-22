@@ -56,7 +56,7 @@ const RESTRICTING_SIDS: &[&str] = &[
     GRANT_SID,      // RESTRICTED — also the worktree grant target
 ];
 
-#[allow(non_snake_case, non_camel_case_types)]
+#[allow(non_snake_case, non_camel_case_types, clippy::upper_case_acronyms)]
 mod ffi {
     use super::Psid;
     use std::os::raw::c_void;
@@ -208,6 +208,7 @@ impl RestrictedToken {
     ///     at `CreateFileMapping` (criterion c fails).
     ///   * `true` — the user SID is in the restricting set, so `bash` inits
     ///     (criterion c) BUT home reads/writes are re-opened (d/e leak).
+    ///
     /// The two cannot co-hold; see [`super::spawn`] spike tests.
     pub fn new(include_user_sid: bool) -> Result<Self, String> {
         // SAFETY: each Win32 call's pointers are valid for its duration; handles

@@ -307,7 +307,7 @@ mod tests {
         std::fs::write(bin_dir.join("codex"), b"#!/bin/sh\n").unwrap();
 
         let profiles = detect_profiles(
-            &[bin_dir.clone()],
+            std::slice::from_ref(&bin_dir),
             &[""],
             None,
             &|p: &std::path::Path| p.exists(),

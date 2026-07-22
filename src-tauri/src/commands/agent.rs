@@ -1950,12 +1950,11 @@ mod tests {
         // ("kimi" USED to be in this list — Kimi Code is now a native
         // self-auth harness (wayfinder #918), so `is_claude_compatible_id`
         // returns false and the migration leaves its nodes alone.)
-        for id in ["minimax"] {
-            assert!(
-                crate::preferences::is_claude_compatible_id(id),
-                "{id} must be classified as claude_compatible so the migration picks it up"
-            );
-        }
+        let id = "minimax";
+        assert!(
+            crate::preferences::is_claude_compatible_id(id),
+            "{id} must be classified as claude_compatible so the migration picks it up"
+        );
     }
 
     /// A user-typed custom account id (e.g. "deepseek") is also
