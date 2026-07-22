@@ -341,6 +341,15 @@ pub fn run() {
             // Autopilot enabled.
             services::autopilot::start_autopilot_worker(app.handle().clone());
 
+            // Coordinator drive ledger GC (issue #750, item 3). One prune
+            // pass every 30 minutes keeps the `coordinator_drive_prompts`
+            // table bounded by the 7-day retention window so the ledger's
+            // size stays proportional to "unique drives per week" rather
+            // than "unique drives ever". Independent of the autopilot
+            // worker because the prune isn't mesh-scoped (it's a single
+            // bounded DELETE on `created_at`).
+            services::coordinator_ledger_maintenance::start_worker();
+
             // Always-on resource diagnostics (issue: background-refresh grind).
             // A low-frequency sampler writes process vitals (memory, handles,
             // threads, live child processes) + per-subsystem counters to a

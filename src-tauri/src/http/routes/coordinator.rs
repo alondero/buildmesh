@@ -103,6 +103,10 @@ fn validate_drive_request<'a>(
 /// - empty prompt, empty/oversized idempotency key, or malformed body → `400`
 /// - node not live (no agent process to write to) → `409` with a clear error
 /// - idempotency ledger unreadable (fail-safe, no send) → `503`, retryable
+/// - same key + different prompt → `409 key_payload_mismatch` (issue #750,
+///   item 2 — Stripe-style reject, prevents a silent 200 replay)
+/// - another caller is currently driving this key → `409 in_progress` with
+///   `Retry-After: 1` (issue #750, item 1 — atomic claim-before-send)
 /// - written → `200 {"verdict":..,"idempotency_key":..,"replayed":..}`
 /// - duplicate key → `200` replaying the original verdict, no second write
 pub async fn prompt(
@@ -168,6 +172,33 @@ pub async fn prompt(
         // 503 tells the Coordinator this is transient and safe to retry.
         Err(drive::DriveError::LedgerUnavailable(e)) => {
             request::send_json_error(lines, "503 Service Unavailable", &e).await;
+        }
+        // Same idempotency key + *different* prompt payload — Stripe-style
+        // reject (issue #750, item 2). 409 is the right shape: the request
+        // is well-formed and authenticated, but the resource state
+        // (existing row with a different payload) forbids the action. The
+        // Coordinator must mint a fresh key rather than silently drop the
+        // new prompt.
+        Err(drive::DriveError::KeyPayloadMismatch) => {
+            request::send_json_error(
+                lines,
+                "409 Conflict",
+                "key_payload_mismatch: same idempotency_key with a different prompt — mint a fresh key",
+            )
+            .await;
+        }
+        // A peer holds the claim in `pending` and the orchestrator's brief
+        // wait window expired (issue #750, item 1). 409 + `Retry-After: 1`
+        // tells the Coordinator to back off briefly and try again — the
+        // peer should have finalized by then (a successful drive is
+        // sub-millisecond; a stuck peer hits the orphan-recovery pass within
+        // `PENDING_CLAIM_TIMEOUT_SECS` = 30s).
+        Err(drive::DriveError::InProgress) => {
+            // Body uniformity with the other 4xx shapes — `{"error":"..."}`.
+            // The status line + `Retry-After` header is the load-bearing
+            // signal; the body is purely informational.
+            let body = r#"{"error":"in_progress: another caller is currently driving this key"}"#.to_string();
+            let _ = request::write_json_with_retry_after(lines, "409 Conflict", &body, 1).await;
         }
     }
 }

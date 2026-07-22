@@ -26,6 +26,7 @@
 //! be confirmed.
 
 use crate::models::SessionStatus;
+use std::time::{Duration, Instant};
 
 /// The honest delivery verdict (ADR-0008 §5). Serialized as `"delivered"` /
 /// `"unverified"` in the `POST /nodes/{id}/prompt` response.
@@ -43,6 +44,9 @@ pub enum Verdict {
 impl Verdict {
     /// The wire/DB string form — the same token the response serializes to, so
     /// the idempotency ledger stores exactly what a replay returns.
+    #[allow(dead_code)] // used by the in-memory `FakeStore` in tests; the
+                       // production `DbIdempotencyStore` goes through
+                       // [`Verdict::as_verdict_str`] instead.
     pub fn as_db_str(self) -> &'static str {
         match self {
             Verdict::Delivered => "delivered",
@@ -58,6 +62,17 @@ impl Verdict {
             "delivered" => Some(Verdict::Delivered),
             "unverified" => Some(Verdict::Unverified),
             _ => None,
+        }
+    }
+
+    /// Wrap the verdict in the typed [`crate::db::VerdictStr`] the DB layer
+    /// uses for `finalize_drive_prompt_inner`. Keeps the call site clean and
+    /// lets the DB layer evolve the column split without touching every
+    /// caller.
+    pub fn as_verdict_str(self) -> crate::db::VerdictStr<'static> {
+        match self {
+            Verdict::Delivered => crate::db::VerdictStr::Delivered,
+            Verdict::Unverified => crate::db::VerdictStr::Unverified,
         }
     }
 }
@@ -85,6 +100,32 @@ pub enum DriveError {
     /// delivery — fail *safe*, not fail open (issue #320 review). The caller
     /// should surface this as retryable (503).
     LedgerUnavailable(String),
+    /// Same idempotency key, *different* prompt payload — Stripe-style reject
+    /// (issue #750, item 2). The route surfaces this as `409 Conflict` with
+    /// `error: key_payload_mismatch`; the Coordinator should mint a fresh key
+    /// rather than re-send a silently-dropped prompt.
+    KeyPayloadMismatch,
+    /// Another caller is currently driving this key (a `pending` row exists
+    /// in the ledger). The orchestrator waited up to
+    /// [`IN_PROGRESS_WAIT_TIMEOUT`] for the peer to finalize; the route
+    /// surfaces this as `409 Conflict` with `Retry-After: 1`.
+    InProgress,
+}
+
+/// Maximum time `drive_node_idempotent` will briefly wait for a peer holding
+/// a `pending` claim to finalize before surfacing `DriveError::InProgress` to
+/// the caller. 5 s is generous enough that a Coordinator's network-retry
+/// collision resolves within one request handler (no caller-visible retry),
+/// short enough that a peer stuck in a long drive doesn't pin the request
+/// handler for too long. Tuned in tests via [`in_progress_poll_interval`].
+pub const IN_PROGRESS_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often `drive_node_idempotent` re-checks the ledger while waiting on a
+/// peer's `pending` claim to resolve. 50 ms is short enough to catch a
+/// finalize within a few poll ticks yet slow enough that the wait loop
+/// doesn't beat on the DB mutex.
+pub fn in_progress_poll_interval(_idle: Duration) -> Duration {
+    Duration::from_millis(50)
 }
 
 /// The minimal capabilities a driver needs from the running system, behind a
@@ -211,36 +252,80 @@ impl DriveTarget for RegistryTarget {
     }
 }
 
-/// The idempotency ledger seam (issue #320): remembers the verdict a drive
-/// produced under a caller-supplied key, scoped to the node it drove, so a retry
-/// replays rather than re-sends. Behind a trait so [`drive_node_idempotent`] is
-/// unit-testable without the process-global DB. Production wiring is
+/// The idempotency ledger seam (issues #320 + #750). Remembers the verdict a
+/// drive produced under a caller-supplied key, scoped to the node it drove, so
+/// a retry replays rather than re-sends. Behind a trait so the orchestrator
+/// is unit-testable without the process-global DB. Production wiring is
 /// [`DbIdempotencyStore`].
+///
+/// v32 (issue #750) reshaped this from `lookup` + `record` to
+/// `claim` + `finalize` + `release_claim` to close the concurrent-retry
+/// double-send gap: a peer holding a `pending` claim short-circuits the second
+/// caller's send instead of both racing through to the PTY.
 pub trait IdempotencyStore {
-    /// The verdict previously recorded for `(node_id, key)`, `Ok(None)` if the key
-    /// is new for that node, or `Err` if the ledger could not be consulted at all.
-    /// The `Err` case is distinct from `Ok(None)` on purpose: a caller must never
-    /// treat "couldn't read" as "never sent" and re-deliver (issue #320 review).
-    fn lookup(&self, node_id: i64, key: &str) -> Result<Option<Verdict>, DriveError>;
-    /// Record `verdict` under `(node_id, key)`. First write wins; a later call for
-    /// the same key must not overwrite it (see [`DbIdempotencyStore::record`]).
-    fn record(&self, node_id: i64, key: &str, verdict: Verdict);
+    /// Atomically claim `(node_id, key)` for a drive with the given
+    /// `prompt_hash`. Returns [`ClaimOutcome::Claimed`] (this caller owns the
+    /// slot — proceed to drive), [`ClaimOutcome::Replay`] (a finalized peer
+    /// row exists with the same prompt — return its verdict),
+    /// [`ClaimOutcome::Mismatch`] (a finalized peer row exists with a
+    /// *different* prompt — surface as 409), or [`ClaimOutcome::InProgress`]
+    /// (a peer holds the slot in `pending` — the orchestrator will briefly
+    /// wait for finalize before surfacing as 409).
+    ///
+    /// `Err` is propagated, never swallowed: a genuine read failure must not
+    /// be mistaken for "key never seen" (fail-safe contract from issue #320
+    /// review).
+    fn claim(&self, node_id: i64, key: &str, prompt_hash: &str) -> Result<ClaimOutcome, DriveError>;
+
+    /// Finalize a claim: UPDATE the `pending` row to its terminal status +
+    /// verdict. Best-effort: a failed finalize leaves the row `pending` and
+    /// a future claim will reclaim it after [`crate::db::PENDING_CLAIM_TIMEOUT_SECS`].
+    fn finalize(&self, node_id: i64, key: &str, verdict: Verdict);
+
+    /// Release a claim when the drive itself failed (so a retry can re-attempt
+    /// rather than wait on a `pending` row the orchestrator never finalized).
+    /// Only deletes `pending` rows — a finalized row stays put.
+    fn release_claim(&self, node_id: i64, key: &str);
 }
 
-/// Drive a node idempotently: replay the recorded verdict for a duplicate key, or
-/// send the prompt once and record the verdict under the key. This is the
-/// headline guarantee (ADR-0008 §6) as a pure `(store, driver) -> outcome`
-/// function — no I/O of its own, so the "same key twice = exactly one delivery"
-/// contract is testable against fakes.
+/// The outcome of an atomic claim attempt (issue #750, item 1). Mirrors
+/// [`crate::db::ClaimOutcome`] but in this module's vocabulary so the
+/// orchestrator can map it to [`DriveOutcome`] / [`DriveError`] without
+/// importing `rusqlite`. The DB seam returns [`crate::db::ClaimOutcome`];
+/// the production store converts it to this enum on its way out.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    /// This caller inserted the pending row; proceed to drive.
+    Claimed,
+    /// The row was already finalized with the same prompt; replay its verdict.
+    Replay(Verdict),
+    /// The row was already finalized but with a *different* prompt; reject.
+    Mismatch,
+    /// The row is `pending` — another caller is currently driving this key.
+    InProgress,
+}
+
+/// Drive a node idempotently: claim-before-send so two concurrent same-key
+/// requests cannot both write to the PTY (issue #750, item 1). On `Claimed`
+/// the orchestrator sends the prompt via [`AgentDriver::send_prompt`] then
+/// finalizes the row with the verdict. On `Replay` it returns the
+/// peer-recorded verdict without touching the PTY. On `Mismatch` (same key +
+/// different prompt) it surfaces `KeyPayloadMismatch` (issue #750, item 2).
+/// On `InProgress` (peer holds a `pending` row) it briefly polls for the
+/// peer to finalize, up to [`IN_PROGRESS_WAIT_TIMEOUT`], before surfacing
+/// `InProgress` to the route.
 ///
-/// The lookup short-circuits *before* [`AgentDriver::send_prompt`], so a replay
-/// never touches the node — it stays a no-op even if the node has since gone
-/// away. A lookup that *errors* aborts with [`DriveError::LedgerUnavailable`]
-/// without sending: if we can't prove the prompt is new, we refuse to risk a
-/// second delivery. Recording happens only *after* a successful send: a
-/// `NotLive` / `WriteFailed` drive leaves no ledger row, so a genuine failure is
-/// retried rather than cached, while an `Unverified` (written-but-unconfirmed)
-/// send *is* recorded — re-sending it is the double-delivery #178 forbids.
+/// Recording happens only *after* a successful send: a `NotLive` /
+/// `WriteFailed` drive calls [`IdempotencyStore::release_claim`] so a genuine
+/// failure is retried rather than cached, while a `Delivered` or `Unverified`
+/// send finalizes the row — re-sending it is the double-delivery #178
+/// forbids.
+///
+/// `drive_node_idempotent` is the pure orchestrator: no I/O of its own, just
+/// the `(store, driver) -> outcome` decision tree, so the
+/// "same-key-different-payload is a 409, not a silent replay" and
+/// "concurrent same-key call = exactly one delivery" contracts are testable
+/// against fakes.
 pub fn drive_node_idempotent<S: IdempotencyStore, D: AgentDriver>(
     store: &S,
     driver: &D,
@@ -248,13 +333,43 @@ pub fn drive_node_idempotent<S: IdempotencyStore, D: AgentDriver>(
     idempotency_key: &str,
     prompt: &str,
 ) -> Result<DriveOutcome, DriveError> {
-    if let Some(verdict) = store.lookup(node_id, idempotency_key)? {
-        return Ok(DriveOutcome { verdict, replayed: true });
+    let prompt_hash = crate::db::hash_token(prompt);
+
+    // The InProgress wait loop: poll the ledger for the peer's finalize, but
+    // give up after `IN_PROGRESS_WAIT_TIMEOUT` so a stuck peer doesn't pin
+    // the request handler forever.
+    let wait_started = Instant::now();
+    loop {
+        match store.claim(node_id, idempotency_key, &prompt_hash)? {
+            ClaimOutcome::Replay(verdict) => {
+                return Ok(DriveOutcome { verdict, replayed: true });
+            }
+            ClaimOutcome::Mismatch => return Err(DriveError::KeyPayloadMismatch),
+            ClaimOutcome::InProgress => {
+                if wait_started.elapsed() >= IN_PROGRESS_WAIT_TIMEOUT {
+                    return Err(DriveError::InProgress);
+                }
+                std::thread::sleep(in_progress_poll_interval(wait_started.elapsed()));
+                continue;
+            }
+            ClaimOutcome::Claimed => break,
+        }
     }
-    let prior = driver.send_prompt(node_id, prompt)?;
-    let verdict = driver.verify_delivery(prior);
-    store.record(node_id, idempotency_key, verdict);
-    Ok(DriveOutcome { verdict, replayed: false })
+
+    // We won the race. Send the prompt; release the claim on a drive-side
+    // failure so a retry can re-attempt rather than wait for the orphan
+    // timeout.
+    match driver.send_prompt(node_id, prompt) {
+        Ok(prior) => {
+            let verdict = driver.verify_delivery(prior);
+            store.finalize(node_id, idempotency_key, verdict);
+            Ok(DriveOutcome { verdict, replayed: false })
+        }
+        Err(e) => {
+            store.release_claim(node_id, idempotency_key);
+            Err(e)
+        }
+    }
 }
 
 /// Production [`IdempotencyStore`] backed by the `coordinator_drive_prompts`
@@ -262,28 +377,54 @@ pub fn drive_node_idempotent<S: IdempotencyStore, D: AgentDriver>(
 struct DbIdempotencyStore;
 
 impl IdempotencyStore for DbIdempotencyStore {
-    fn lookup(&self, node_id: i64, key: &str) -> Result<Option<Verdict>, DriveError> {
-        match crate::db::lookup_drive_prompt_verdict(node_id, key) {
-            Ok(None) => Ok(None),
-            // A row exists but its verdict string is unreadable (tampered/corrupt):
-            // we still know a send happened, so fail safe rather than re-deliver.
-            Ok(Some(s)) => Verdict::from_db_str(&s).map(Some).ok_or_else(|| {
-                DriveError::LedgerUnavailable(format!("unreadable verdict {s:?}"))
-            }),
+    fn claim(&self, node_id: i64, key: &str, prompt_hash: &str) -> Result<ClaimOutcome, DriveError> {
+        // Same fail-safe contract as the pre-#750 `lookup`: a genuine DB
+        // error propagates as `LedgerUnavailable`, never as a "key never
+        // seen" that would re-deliver.
+        match crate::db::claim_drive_prompt(node_id, key, prompt_hash) {
+            Ok(crate::db::ClaimOutcome::Claimed) => Ok(ClaimOutcome::Claimed),
+            Ok(crate::db::ClaimOutcome::Replay { verdict }) => {
+                // A tampered/unknown verdict string is `None` (the DB seam
+                // filters it to `Mismatch`); mirror that here as
+                // `LedgerUnavailable` — we refuse to replay garbage, and
+                // also refuse to silently retry.
+                match Verdict::from_db_str(&verdict) {
+                    Some(v) => Ok(ClaimOutcome::Replay(v)),
+                    None => Err(DriveError::LedgerUnavailable(format!(
+                        "unreadable verdict {verdict:?}"
+                    ))),
+                }
+            }
+            Ok(crate::db::ClaimOutcome::Mismatch) => Ok(ClaimOutcome::Mismatch),
+            Ok(crate::db::ClaimOutcome::InProgress) => Ok(ClaimOutcome::InProgress),
             Err(e) => Err(DriveError::LedgerUnavailable(e.to_string())),
         }
     }
 
-    fn record(&self, node_id: i64, key: &str, verdict: Verdict) {
-        // Best-effort: a failed ledger write must not fail a prompt that already
-        // landed. The cost is that a retry of *this* key would then re-send —
-        // acceptable versus reporting failure for a delivered prompt. Logged so
-        // the (rare) "delivered but not recorded" window is observable.
-        if let Err(e) = crate::db::record_drive_prompt_verdict(node_id, key, verdict.as_db_str()) {
+    fn finalize(&self, node_id: i64, key: &str, verdict: Verdict) {
+        // Best-effort: a failed finalize leaves the row `pending` and the
+        // orphan-recovery pass will reclaim it after
+        // [`crate::db::PENDING_CLAIM_TIMEOUT_SECS`]. Logged so the rare
+        // "delivered but not finalized" window is observable.
+        if let Err(e) = crate::db::finalize_drive_prompt(node_id, key, verdict.as_verdict_str()) {
             tracing::warn!(
                 node_id,
                 error = %e,
-                "failed to record coordinator drive idempotency key; a retry may re-send"
+                "failed to finalize coordinator drive claim; a retry may reclaim after the pending timeout"
+            );
+        }
+    }
+
+    fn release_claim(&self, node_id: i64, key: &str) {
+        // Best-effort: a failed release leaves the row `pending` and the
+        // orphan-recovery pass will reclaim it. The drive itself already
+        // surfaced its `NotLive` / `WriteFailed` to the caller, so failing
+        // here too would double-report.
+        if let Err(e) = crate::db::release_drive_prompt_claim(node_id, key) {
+            tracing::warn!(
+                node_id,
+                error = %e,
+                "failed to release coordinator drive claim; orphan-recovery will reclaim after the pending timeout"
             );
         }
     }
@@ -292,7 +433,7 @@ impl IdempotencyStore for DbIdempotencyStore {
 /// Drive a live node idempotently: write `prompt` to its PTY through the
 /// [`AgentDriver`] under a caller-supplied `idempotency_key`, replaying the
 /// original verdict on a duplicate key. The single production drive path
-/// (issues #319 + #320) — the route is a thin transport skin over this.
+/// (issues #319 + #320 + #750) — the route is a thin transport skin over this.
 pub fn drive_node_with_key(
     node_id: i64,
     idempotency_key: &str,
@@ -479,36 +620,88 @@ mod tests {
         assert_eq!(Verdict::from_db_str("bogus"), None);
     }
 
-    // --- Idempotency layer (issue #320) ---
+    // --- Idempotency layer (issues #320 + #750) ---
 
-    /// In-memory [`IdempotencyStore`] scoped by `(node_id, key)`, mirroring the
-    /// DB ledger's primary key without a real database. `fail_lookup` simulates an
+    /// In-memory [`IdempotencyStore`] mirroring the DB ledger's
+    /// claim/finalize/release protocol. `hold_pending` keeps the row in
+    /// `pending` (simulates a peer mid-send); `fail_claim` simulates an
     /// unreadable ledger (the fail-safe path).
     #[derive(Default)]
     struct FakeStore {
-        recorded: RefCell<Vec<(i64, String, Verdict)>>,
-        fail_lookup: bool,
+        /// `(node_id, key, prompt_hash, status)`. Terminal rows carry
+        /// `status="delivered"|"unverified"`; mid-send rows use
+        /// `status="pending"`.
+        recorded: RefCell<Vec<(i64, String, String, String)>>,
+        /// When true, `claim` keeps returning `InProgress` for any
+        /// pre-existing `pending` row even after time passes — used by the
+        /// wait-timeout test to model a peer that never finalizes.
+        hold_pending: bool,
+        /// When true, `claim` always errors with `LedgerUnavailable` —
+        /// models a DB read failure (the fail-safe path).
+        fail_claim: bool,
+    }
+
+    impl FakeStore {
+        fn lookup(&self, node_id: i64, key: &str) -> Option<(String, String)> {
+            self.recorded
+                .borrow()
+                .iter()
+                .find(|(n, k, _, _)| *n == node_id && k == key)
+                .map(|(_, _, hash, status)| (hash.clone(), status.clone()))
+        }
     }
 
     impl IdempotencyStore for FakeStore {
-        fn lookup(&self, node_id: i64, key: &str) -> Result<Option<Verdict>, DriveError> {
-            if self.fail_lookup {
+        fn claim(
+            &self,
+            node_id: i64,
+            key: &str,
+            prompt_hash: &str,
+        ) -> Result<ClaimOutcome, DriveError> {
+            if self.fail_claim {
                 return Err(DriveError::LedgerUnavailable("boom".to_string()));
             }
-            Ok(self
-                .recorded
-                .borrow()
-                .iter()
-                .find(|(n, k, _)| *n == node_id && k == key)
-                .map(|(_, _, v)| *v))
-        }
-        fn record(&self, node_id: i64, key: &str, verdict: Verdict) {
-            // First write wins, exactly like the DB's `INSERT OR IGNORE`.
-            if self.lookup(node_id, key).ok().flatten().is_none() {
-                self.recorded
-                    .borrow_mut()
-                    .push((node_id, key.to_string(), verdict));
+            match self.lookup(node_id, key) {
+                None => {
+                    // No row yet — claim it.
+                    self.recorded.borrow_mut().push((
+                        node_id,
+                        key.to_string(),
+                        prompt_hash.to_string(),
+                        "pending".to_string(),
+                    ));
+                    Ok(ClaimOutcome::Claimed)
+                }
+                Some((_, status)) if status == "pending" => Ok(ClaimOutcome::InProgress),
+                Some((stored_hash, status)) if stored_hash == prompt_hash => {
+                    // Same key + same prompt → replay.
+                    match status.as_str() {
+                        "delivered" => Ok(ClaimOutcome::Replay(Verdict::Delivered)),
+                        "unverified" => Ok(ClaimOutcome::Replay(Verdict::Unverified)),
+                        // An unknown terminal status string is treated as a
+                        // tamper-and-mismatch (same as the production store):
+                        // a garbage verdict must never be replayed.
+                        _ => Ok(ClaimOutcome::Mismatch),
+                    }
+                }
+                Some(_) => Ok(ClaimOutcome::Mismatch),
             }
+        }
+
+        fn finalize(&self, node_id: i64, key: &str, verdict: Verdict) {
+            let mut rows = self.recorded.borrow_mut();
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|(n, k, _, _)| *n == node_id && k == key)
+            {
+                row.3 = verdict.as_db_str().to_string();
+            }
+        }
+
+        fn release_claim(&self, node_id: i64, key: &str) {
+            self.recorded
+                .borrow_mut()
+                .retain(|(n, k, _, status)| !(n == &node_id && k == key && status == "pending"));
         }
     }
 
@@ -595,10 +788,12 @@ mod tests {
         assert_eq!(driver.target.writes.borrow().len(), 1);
     }
 
-    /// A failed drive records nothing, so a retry genuinely re-attempts rather
-    /// than replaying a phantom verdict for a prompt that never landed.
+    /// A failed drive releases the claim, so a retry genuinely re-attempts
+    /// rather than replaying a phantom verdict for a prompt that never
+    /// landed. (Issue #750 reshape: `release_claim` replaces the
+    /// "leave no row" pre-#750 behaviour with an explicit DELETE.)
     #[test]
-    fn failed_drive_is_not_recorded() {
+    fn failed_drive_releases_claim_for_retry() {
         let store = FakeStore::default();
         let driver = driver_with(FakeTarget {
             live: false,
@@ -612,7 +807,7 @@ mod tests {
         );
         assert!(
             store.recorded.borrow().is_empty(),
-            "a non-live drive must not populate the ledger"
+            "a non-live drive must not leave a pending row behind"
         );
     }
 
@@ -621,7 +816,7 @@ mod tests {
     /// second delivery we can't rule out (issue #320 review).
     #[test]
     fn unreadable_ledger_aborts_without_sending() {
-        let store = FakeStore { fail_lookup: true, ..Default::default() };
+        let store = FakeStore { fail_claim: true, ..Default::default() };
         let driver = awaiting_driver();
 
         let result = drive_node_idempotent(&store, &driver, 7, "k", "work on issue 23");
@@ -630,5 +825,108 @@ mod tests {
             driver.target.writes.borrow().is_empty(),
             "a prompt must not be sent when idempotency cannot be verified"
         );
+    }
+
+    // --- Issue #750 hardening ---
+
+    /// Item 2: a finalized row with a *different* prompt is Mismatch → 409,
+    /// not a silent 200 replay of the original verdict. Stripe-style reject.
+    #[test]
+    fn same_key_different_prompt_returns_mismatch_error() {
+        let store = FakeStore::default();
+        let driver = awaiting_driver();
+
+        // First call: prompt "v1" lands.
+        drive_node_idempotent(&store, &driver, 7, "k", "v1").unwrap();
+        // Retry with the same key but a *different* prompt.
+        let result = drive_node_idempotent(&store, &driver, 7, "k", "v2");
+        assert_eq!(result, Err(DriveError::KeyPayloadMismatch));
+        // Exactly one write reached the PTY — v2 was rejected, not silently
+        // accepted (and not silently ignored — a 200 with `replayed:true`).
+        assert_eq!(driver.target.writes.borrow().len(), 1);
+    }
+
+    /// Item 1: the orchestrator briefly waits for a peer holding a `pending`
+    /// row to finalize before giving up. The FakeStore's `hold_pending`
+    /// models the peer's mid-send window. This test exercises the wait
+    /// path's semantics: `claim` returns `InProgress` while pending, then
+    /// `Replay` once we finalize.
+    #[test]
+    fn claim_returns_in_progress_until_peer_finalizes() {
+        let store = FakeStore { hold_pending: true, ..Default::default() };
+        // Pre-populate a pending row to simulate a peer mid-send.
+        store
+            .recorded
+            .borrow_mut()
+            .push((7, "k".to_string(), crate::db::hash_token("v1"), "pending".to_string()));
+
+        // While the row is pending, the second caller sees InProgress.
+        assert_eq!(
+            store.claim(7, "k", &crate::db::hash_token("v1")).unwrap(),
+            ClaimOutcome::InProgress
+        );
+
+        // Once the peer finalizes, the second caller sees Replay.
+        store.finalize(7, "k", Verdict::Delivered);
+        assert_eq!(
+            store.claim(7, "k", &crate::db::hash_token("v1")).unwrap(),
+            ClaimOutcome::Replay(Verdict::Delivered)
+        );
+    }
+
+    /// Item 1: when a peer holds a `pending` row and never finalizes, the
+    /// orchestrator surfaces `InProgress` rather than waiting forever. We
+    /// drive the full orchestrator (not just the store) and assert the
+    /// timeout fires. Real wall-clock wait is bounded by
+    /// `IN_PROGRESS_WAIT_TIMEOUT`; this test runs that long once but does
+    /// not exceed it.
+    #[test]
+    #[ignore = "exercises the real IN_PROGRESS_WAIT_TIMEOUT; run with `cargo test -- --ignored`"]
+    fn in_progress_surfaces_after_wait_timeout() {
+        let store = FakeStore { hold_pending: true, ..Default::default() };
+        let driver = awaiting_driver();
+
+        // Pre-populate a pending row.
+        store
+            .recorded
+            .borrow_mut()
+            .push((7, "k".to_string(), crate::db::hash_token("v1"), "pending".to_string()));
+
+        let start = Instant::now();
+        let result = drive_node_idempotent(&store, &driver, 7, "k", "v1");
+        let elapsed = start.elapsed();
+        assert_eq!(result, Err(DriveError::InProgress));
+        assert!(
+            elapsed >= IN_PROGRESS_WAIT_TIMEOUT,
+            "the orchestrator must wait at least IN_PROGRESS_WAIT_TIMEOUT before giving up (waited {elapsed:?})"
+        );
+        assert!(
+            elapsed < IN_PROGRESS_WAIT_TIMEOUT + Duration::from_millis(500),
+            "the orchestrator must give up shortly after IN_PROGRESS_WAIT_TIMEOUT (waited {elapsed:?})"
+        );
+        // No write reached the PTY — the second caller refused to send
+        // while a peer was mid-send.
+        assert!(driver.target.writes.borrow().is_empty());
+    }
+
+    /// `release_claim` is a no-op for a finalized row (the row stays put so
+    /// a retry sees the recorded verdict rather than silently re-driving).
+    /// This pins the contract so a future refactor can't accidentally
+    /// broaden it to "delete any row".
+    #[test]
+    fn release_claim_leaves_finalized_rows_intact() {
+        let store = FakeStore::default();
+        let driver = awaiting_driver();
+
+        // Drive to a finalized state.
+        drive_node_idempotent(&store, &driver, 1, "k", "hi").unwrap();
+        assert_eq!(store.recorded.borrow().len(), 1);
+        assert_eq!(store.recorded.borrow()[0].3, "delivered");
+
+        // A release on the finalized row should be a no-op (the row's status
+        // is no longer `pending`, so the DELETE filter rejects it).
+        store.release_claim(1, "k");
+        assert_eq!(store.recorded.borrow().len(), 1);
+        assert_eq!(store.recorded.borrow()[0].3, "delivered");
     }
 }

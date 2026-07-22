@@ -64,6 +64,38 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // no data migration — `CREATE TABLE IF NOT EXISTS` in `init` materializes it
 // for every DB; the version bump just records the shape moved forward.
 //
+// v32 — Coordinator drive idempotency hardening (issue #750): three additive
+// columns on `coordinator_drive_prompts` close the deferred gaps from the
+// #320 review (PR #749):
+//   * `status` (`TEXT NOT NULL DEFAULT 'pending'`) — the drive's progress:
+//     `pending` → `delivered` | `unverified`. A `pending` row means a drive
+//     is in flight or crashed mid-send. The atomic claim step
+//     (`claim_drive_prompt_inner`, issue #750 item 1) inserts the row in
+//     `pending` state, then `finalize_drive_prompt_inner` flips it to the
+//     verdict after a successful send. The route rejects `pending` rows with
+//     `409 + Retry-After` rather than sending a second prompt.
+//   * `claimed_at` (`TEXT NOT NULL DEFAULT datetime('now')`) — when the
+//     `pending` claim was inserted. Two consumers: the orphan-recovery pass
+//     inside the claim transaction reclaims any `pending` row older than
+//     `PENDING_CLAIM_TIMEOUT_SECS` (a crashed-mid-send row must not block the
+//     key forever — a retry can re-send), and the GC sweep uses `created_at`
+//     rather than `claimed_at` for the bounded-age prune.
+//   * `prompt_hash` (`TEXT NOT NULL DEFAULT ''`) — SHA-256 hex of the prompt
+//     body, computed by the route from the same bytes the driver writes. The
+//     claim step compares incoming vs stored hash and returns `Mismatch` when
+//     the same key is reused with a different payload (issue #750 item 2 —
+//     Stripe-style, prevents a silent 200-replay-of-different-prompt).
+// `verdict` is loosened from `TEXT NOT NULL` to `TEXT NOT NULL DEFAULT ''` so
+// the `INSERT OR IGNORE` claim write doesn't need to set it. No data
+// migration: pre-v32 rows read back as `status='pending', claimed_at=<old
+// created_at>, prompt_hash='', verdict=<existing>`; the `prompt_hash=''`
+// default will surface as a `Mismatch` on any reuse (caller must mint a fresh
+// key) — acceptable because drive is off-by-default and unreleased (#313),
+// so no pre-v32 callers exist in the wild. Safety net
+// `ensure_coordinator_drive_prompt_claim_columns` lives alongside the other
+// `ensure_*` helpers so a build that bumps `SCHEMA_VERSION` without yet
+// containing the inline ALTERs picks the columns up on next launch.
+//
 /// v22 — Per-mesh pre-spawn pool size (issue #611): add the
 /// `meshes.pre_spawn_pool_size` INTEGER column (0 = feature off,
 /// 1..5 = target). The pool worker (issue #609 / v21) previously
@@ -156,7 +188,7 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // `ensure_mesh_loop_columns` lives alongside `ensure_mesh_autopilot_columns`
 // so a build that bumps `SCHEMA_VERSION` without yet containing the
 // inline ALTERs picks the columns up on next launch.
-const SCHEMA_VERSION: i32 = 31;
+const SCHEMA_VERSION: i32 = 32;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -253,19 +285,37 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             last_active_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        -- Coordinator drive idempotency ledger (issue #320, ADR-0008 §6). One
-        -- row per (node, caller-supplied key) the Coordinator drove: it records
-        -- the honest verdict so a retry with the same key replays that verdict
-        -- rather than sending the prompt a second time. Scoped by node so a key
-        -- accidentally reused across two nodes still drives each once. No data
-        -- migration — a fresh table, materialized here for every DB.
+        -- Coordinator drive idempotency ledger (issue #320, ADR-0008 §6,
+        -- hardened by issue #750). One row per (node, caller-supplied key)
+        -- the Coordinator drove. v32 (issue #750) adds three columns:
+        --   * `status` — pending | delivered | unverified. Drives the
+        --     claim-before-send race fix (item 1): the atomic claim inserts
+        --     `pending`, then finalize flips to the verdict after send.
+        --   * `claimed_at` — when the `pending` row was inserted. The
+        --     orphan-recovery pass reclaims rows older than
+        --     `PENDING_CLAIM_TIMEOUT_SECS` (a crashed-mid-send row must not
+        --     block the key forever — a retry can re-send).
+        --   * `prompt_hash` — SHA-256 of the prompt body. Reusing a key
+        --     with a *different* prompt is a 409 (Stripe-style, item 2) —
+        --     prevents a silent 200-replay-of-different-prompt.
+        -- `verdict` is now DEFAULT '' (was NOT NULL) so the claim
+        -- `INSERT OR IGNORE` doesn't need to set it. Scoped by node so a
+        -- key accidentally reused across two nodes still drives each node
+        -- once. No data migration — a fresh table materialized for every
+        -- DB; the additive ALTERs for v32 live in
+        -- `ensure_coordinator_drive_prompt_claim_columns`.
         CREATE TABLE IF NOT EXISTS coordinator_drive_prompts (
             node_id INTEGER NOT NULL,
             idempotency_key TEXT NOT NULL,
-            verdict TEXT NOT NULL,
+            verdict TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            prompt_hash TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (node_id, idempotency_key)
         );
+        CREATE INDEX IF NOT EXISTS idx_coordinator_drive_prompts_created_at
+            ON coordinator_drive_prompts(created_at);
 
         -- Pre-spawn Worktree Pool (issue #609, PRD #608). One row per
         -- detached-HEAD worktree the background worker has pre-warmed under
@@ -368,6 +418,20 @@ ensure_mesh_sandbox(&conn)?;
     // ordering (and so a future ticket #993 follow-up can rely on the
     // same additive shape).
     ensure_autopilot_run_loop_iteration(&conn)?;
+    // v32 — Coordinator drive idempotency hardening (issue #750). Three
+    // additive columns on `coordinator_drive_prompts`: `status`,
+    // `claimed_at`, `prompt_hash`. `verdict` was NOT NULL → DEFAULT '' in
+    // the inline CREATE; that loosening does not need an `ensure_*` (no
+    // existing row violates a DEFAULT), but the new columns do. Same
+    // additive pattern as every other column on this list: a build that
+    // bumps `SCHEMA_VERSION` without yet containing the inline CREATE
+    // picks the columns up on next launch.
+    ensure_coordinator_drive_prompt_claim_columns(&conn)?;
+    // v32 GC support (issue #750 item 3). Index on `created_at` keeps the
+    // bounded-age prune cheap even after the ledger grows; the existing
+    // `idx_coordinator_drive_prompts_*` family uses the same
+    // `IF NOT EXISTS` shape.
+    ensure_coordinator_drive_prompt_created_at_index(&conn)?;
     // v27 — per-context build/run commands (issue #802). Nullable: a mesh
     // without them falls back to build_command/run_command in both contexts.
     ensure_mesh_root_command_columns(&conn)?;
@@ -743,6 +807,48 @@ pub(crate) fn ensure_autopilot_run_loop_iteration(conn: &Connection) -> SqlResul
     if ensure_column(conn, "autopilot_runs", "loop_iteration", "INTEGER")? {
         tracing::warn!("ensure_autopilot_run_loop_iteration: added missing loop_iteration column");
     }
+    Ok(())
+}
+
+/// v32 — `coordinator_drive_prompts.{status, claimed_at, prompt_hash}`
+/// (issue #750, items 1 + 2). Three additive columns backing the
+/// claim-before-send race fix and the same-key-different-payload reject.
+/// Every column is NOT NULL with a safe default, so pre-v32 rows read back
+/// as `(status='pending', claimed_at=<old created_at>, prompt_hash='',
+/// verdict=<existing>)`; the `prompt_hash=''` default makes any reuse of a
+/// pre-v32 key surface as `Mismatch` (caller must mint a fresh key), which
+/// is acceptable because drive is off-by-default and unreleased (#313).
+/// Same additive safety-net shape as the helpers above: a build that bumps
+/// `SCHEMA_VERSION` without yet containing the inline CREATE picks the
+/// columns up on next launch.
+pub(crate) fn ensure_coordinator_drive_prompt_claim_columns(conn: &Connection) -> SqlResult<()> {
+    let columns = [
+        ("status", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("claimed_at", "TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ("prompt_hash", "TEXT NOT NULL DEFAULT ''"),
+    ];
+    for (name, ty) in columns {
+        if ensure_column(conn, "coordinator_drive_prompts", name, ty)? {
+            tracing::warn!(
+                "ensure_coordinator_drive_prompt_claim_columns: added missing {} column",
+                name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// v32 — `idx_coordinator_drive_prompts_created_at` (issue #750, item 3).
+/// Backs the bounded-age GC sweep
+/// (`prune_drive_prompts_older_than_inner`) so the DELETE filters on
+/// `created_at` without a full table scan once the ledger has grown. Uses
+/// `IF NOT EXISTS` so it is idempotent on every init.
+pub(crate) fn ensure_coordinator_drive_prompt_created_at_index(conn: &Connection) -> SqlResult<()> {
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_coordinator_drive_prompts_created_at
+            ON coordinator_drive_prompts(created_at)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1733,56 +1839,244 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
 // `coordinator::drive` module — the drive side owns the string↔enum mapping.
 // Lock-once + `_inner(&Connection)` so the logic is unit-testable in memory.
 
-/// The verdict recorded under `(node_id, key)`, or `None` if that key is new for
-/// the node. `None` means "go drive"; `Some` means "replay this, do not re-send".
-/// A genuine read error (`Err`) is *propagated, never swallowed*: the caller must
-/// be able to tell "this key is new" from "I couldn't check", because on a retry
-/// the difference is deliver-again versus fail-safe (issue #320 review).
-pub fn lookup_drive_prompt_verdict(node_id: i64, key: &str) -> SqlResult<Option<String>> {
-    let db = get().lock().unwrap();
-    lookup_drive_prompt_verdict_inner(&db, node_id, key)
+/// The outcome of an atomic claim attempt (issue #750, item 1). Drives the
+/// orchestrator: `Claimed` means the caller owns the row and must drive +
+/// finalize; `Replay` means a finalized peer row exists with the same prompt
+/// payload, return its verdict; `Mismatch` means a finalized peer row exists
+/// but the *prompt* differs — Stripe-style reject (#750 item 2); `InProgress`
+/// means a peer holds the row in `pending` (the caller's brief wait inside
+/// `drive_node_idempotent` polls for finalize before surfacing this).
+///
+/// A genuine read error is propagated as `Err` (not collapsed into any
+/// variant) so the drive path can fail safe — same fail-safe contract the
+/// pre-#750 lookup established (issue #320 review).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    /// This caller inserted the pending row; proceed to drive.
+    Claimed,
+    /// The row was already finalized with the same prompt; replay its verdict.
+    Replay { verdict: String },
+    /// The row was already finalized but with a different prompt; reject.
+    Mismatch,
+    /// The row is `pending` — another caller is currently driving this key.
+    InProgress,
 }
 
-pub fn lookup_drive_prompt_verdict_inner(
+/// Maximum age (in seconds) a `pending` row may sit in the ledger before the
+/// next claim attempt treats it as orphaned (crash-mid-send) and reclaims it.
+/// A successful drive is sub-millisecond; 30s is generous enough that a
+/// live, currently-driving peer is never reclaimed out from under itself, and
+/// short enough that a crashed Buildmesh doesn't lock out a key for long.
+pub const PENDING_CLAIM_TIMEOUT_SECS: i64 = 30;
+
+/// Atomic claim-before-send (issue #750, item 1). In a single transaction:
+///   1. Reclaim any `pending` row older than `PENDING_CLAIM_TIMEOUT_SECS`
+///      for this `(node_id, key)` (a crash-mid-send row must not block the
+///      key forever — a retry can re-send the prompt).
+///   2. Try to `INSERT OR IGNORE` a fresh `pending` row with the prompt
+///      hash. If this caller wins the race (no prior row exists), the
+///      orchestrator proceeds to drive; if a prior row exists, read its
+///      state and map to `Replay`/`Mismatch`/`InProgress`.
+///
+/// Lock-once + `_inner(&Connection)` so the drive logic is unit-testable
+/// in-memory (`db::drive_idempotency_tests`). Returns `Err(_)` only on a
+/// real DB failure (lock, IO, corruption) — the same fail-safe contract
+/// the pre-#750 `lookup` established (issue #320 review): the orchestrator
+/// must never mistake "couldn't read" for "key never seen".
+pub fn claim_drive_prompt(
+    node_id: i64,
+    key: &str,
+    prompt_hash: &str,
+) -> SqlResult<ClaimOutcome> {
+    let db = get().lock().unwrap();
+    claim_drive_prompt_inner(&db, node_id, key, prompt_hash)
+}
+
+pub fn claim_drive_prompt_inner(
     conn: &Connection,
     node_id: i64,
     key: &str,
-) -> SqlResult<Option<String>> {
-    // Only "no such row" is `Ok(None)` (= key never seen → go drive). Any other
-    // error (IO, lock, corruption) propagates so the drive path can fail safe
-    // rather than mistake an unreadable ledger for "not delivered yet".
-    match conn.query_row(
-        "SELECT verdict FROM coordinator_drive_prompts
+    prompt_hash: &str,
+) -> SqlResult<ClaimOutcome> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Step 1: orphan recovery. Any `pending` row older than the timeout is
+    // from a crashed prior attempt — the prompt never landed, so a retry
+    // is safe to re-send. DELETE (not UPDATE-to-expired) so the slot is
+    // open for the new INSERT OR IGNORE below.
+    tx.execute(
+        "DELETE FROM coordinator_drive_prompts
+            WHERE node_id = ?1 AND idempotency_key = ?2
+              AND status = 'pending'
+              AND claimed_at < datetime('now', '-' || ?3 || ' seconds')",
+        params![node_id, key, PENDING_CLAIM_TIMEOUT_SECS],
+    )?;
+
+    // Step 2: try to insert a fresh pending row. `INSERT OR IGNORE` is the
+    // race resolver: only one concurrent claim survives, the rest fall into
+    // the SELECT below.
+    let inserted = tx.execute(
+        "INSERT OR IGNORE INTO coordinator_drive_prompts
+             (node_id, idempotency_key, status, claimed_at, prompt_hash, verdict)
+             VALUES (?1, ?2, 'pending', datetime('now'), ?3, '')",
+        params![node_id, key, prompt_hash],
+    )?;
+
+    if inserted == 1 {
+        // We won the race — return early without the SELECT (no peer row to
+        // read). The finalize step will UPDATE this row after the send.
+        tx.commit()?;
+        return Ok(ClaimOutcome::Claimed);
+    }
+
+    // Step 3: we lost (or hit a finalized row). Read its current state to
+    // decide which `ClaimOutcome` variant to surface. The SELECT can't
+    // realistically miss — we just inserted or already had a row — but if
+    // it does, propagate the `Err` rather than collapse it to a default
+    // outcome (fail-safe contract from issue #320 review).
+    let (status, verdict, stored_hash) = tx.query_row(
+        "SELECT status, verdict, prompt_hash FROM coordinator_drive_prompts
              WHERE node_id = ?1 AND idempotency_key = ?2",
         params![node_id, key],
-        |row| row.get::<_, String>(0),
-    ) {
-        Ok(verdict) => Ok(Some(verdict)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e),
+        |row| {
+            let status: String = row.get(0)?;
+            let verdict: String = row.get(1)?;
+            let stored_hash: String = row.get(2)?;
+            Ok((status, verdict, stored_hash))
+        },
+    )?;
+
+    tx.commit()?;
+
+    Ok(match (status.as_str(), verdict.is_empty()) {
+        // Pre-v32 rows have a non-empty `verdict` (v23 required it NOT NULL)
+        // but `status='pending'` from the v32 column DEFAULT — treat them as
+        // finalized, not in-progress, so a Coordinator hitting a pre-v32
+        // ledger row replays the verdict rather than getting a phantom
+        // `InProgress` and stalling for `PENDING_CLAIM_TIMEOUT_SECS`.
+        // The `prompt_hash == ''` default still makes a key-reuse-with-
+        // different-payload surface as Mismatch (same-key-same-verdict but
+        // empty stored hash) — acceptable because drive is off-by-default
+        // and unreleased (#313), so there are no real pre-v32 callers.
+        (_, false) if stored_hash == prompt_hash => ClaimOutcome::Replay { verdict },
+        (_, false) => ClaimOutcome::Mismatch,
+        // Live `pending` row with an empty verdict — a real peer's
+        // in-flight drive. The orchestrator briefly polls for finalize.
+        ("pending", true) => ClaimOutcome::InProgress,
+        // A finalized row with no recorded verdict (shouldn't happen on
+        // v32+, where finalize always writes `verdict` together with
+        // `status`). Treated as Mismatch rather than a silent InProgress
+        // so the caller can mint a fresh key rather than wait for a row
+        // that will never finalize.
+        _ => ClaimOutcome::Mismatch,
+    })
+}
+
+/// Finalize a claim: UPDATE the `pending` row to its terminal status +
+/// verdict. Idempotent (UPDATE is naturally so) and does not insert if no
+/// `pending` row exists — a finalized row is left alone (the first verdict
+/// wins, mirroring the pre-#750 `INSERT OR IGNORE` rule). Returns the number
+/// of rows actually changed so the caller can log a warning when a drive
+/// completed but the finalize found no row to update.
+pub fn finalize_drive_prompt(
+    node_id: i64,
+    key: &str,
+    verdict: VerdictStr<'_>,
+) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    finalize_drive_prompt_inner(&db, node_id, key, verdict)
+}
+
+pub fn finalize_drive_prompt_inner(
+    conn: &Connection,
+    node_id: i64,
+    key: &str,
+    verdict: VerdictStr<'_>,
+) -> SqlResult<usize> {
+    // Only update `status` + `verdict`; the `prompt_hash` column stays as it
+    // was set during the claim — a future claim must be able to read it back
+    // and Replay (status == terminal AND stored_hash == incoming_hash) rather
+    // than Mismatch because we cleared the hash on finalize.
+    conn.execute(
+        "UPDATE coordinator_drive_prompts
+             SET status = ?3, verdict = ?4
+             WHERE node_id = ?1 AND idempotency_key = ?2 AND status = 'pending'",
+        params![node_id, key, verdict.as_status_str(), verdict.as_str()],
+    )
+}
+
+/// Verdict wrapper so callers don't have to thread both the DB status string
+/// ("delivered" / "unverified") and the wire verdict string. They're the same
+/// word today; this keeps the call site clean if they ever diverge.
+pub enum VerdictStr<'a> {
+    Delivered,
+    Unverified,
+    // PhantomData-friendly lifetime so the enum stays `'a`-parameterised
+    // (matches the wire form the tests use); the `PhantomData` is invisible
+    // to consumers and disappears at compile time.
+    #[doc(hidden)]
+    _Phantom(std::marker::PhantomData<&'a ()>),
+}
+
+impl<'a> VerdictStr<'a> {
+    /// The DB status string (`'delivered'` / `'unverified'`).
+    pub fn as_status_str(&self) -> &'static str {
+        match self {
+            VerdictStr::Delivered => "delivered",
+            VerdictStr::Unverified => "unverified",
+            VerdictStr::_Phantom(_) => unreachable!("PhantomData is uninhabited"),
+        }
+    }
+
+    /// The verdict wire string (same value as `as_status_str` today, but kept
+    /// distinct so a future schema split can move the two columns apart).
+    pub fn as_str(&self) -> &'static str {
+        self.as_status_str()
     }
 }
 
-/// Record the verdict a drive produced under its idempotency key. `INSERT OR
-/// IGNORE` keeps the *first* verdict authoritative: a racing duplicate that also
-/// slipped through the lookup cannot overwrite the original the retry will replay.
-pub fn record_drive_prompt_verdict(node_id: i64, key: &str, verdict: &str) -> SqlResult<()> {
+/// Release a claim when the drive itself failed (so a retry can re-attempt
+/// rather than wait on a `pending` row the orchestrator never finalized).
+/// Only deletes `pending` rows — a finalized row stays put, and a second
+/// `NotLive` retry still sees the verdict if the row happens to already be
+/// terminal from a peer.
+pub fn release_drive_prompt_claim(node_id: i64, key: &str) -> SqlResult<usize> {
     let db = get().lock().unwrap();
-    record_drive_prompt_verdict_inner(&db, node_id, key, verdict)
+    release_drive_prompt_claim_inner(&db, node_id, key)
 }
 
-pub fn record_drive_prompt_verdict_inner(
+pub fn release_drive_prompt_claim_inner(
     conn: &Connection,
     node_id: i64,
     key: &str,
-    verdict: &str,
-) -> SqlResult<()> {
+) -> SqlResult<usize> {
     conn.execute(
-        "INSERT OR IGNORE INTO coordinator_drive_prompts (node_id, idempotency_key, verdict)
-         VALUES (?1, ?2, ?3)",
-        params![node_id, key, verdict],
-    )?;
-    Ok(())
+        "DELETE FROM coordinator_drive_prompts
+             WHERE node_id = ?1 AND idempotency_key = ?2 AND status = 'pending'",
+        params![node_id, key],
+    )
+}
+
+/// Bounded-age prune (issue #750, item 3). Deletes every row whose
+/// `created_at` is older than `days` days — same shape as the
+/// `pending_worktree_removals` drain prior art. The background worker
+/// (`services::coordinator_ledger_maintenance`) calls this on a 30-minute
+/// cadence; a startup sweep runs from the same module. Returns the number of
+/// rows deleted (informational; the worker logs non-zero results).
+pub fn prune_drive_prompts_older_than(days: i64) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    prune_drive_prompts_older_than_inner(&db, days)
+}
+
+pub fn prune_drive_prompts_older_than_inner(
+    conn: &Connection,
+    days: i64,
+) -> SqlResult<usize> {
+    conn.execute(
+        "DELETE FROM coordinator_drive_prompts
+             WHERE created_at < datetime('now', '-' || ?1 || ' days')",
+        params![days],
+    )
 }
 
 // --- Persistent device sessions (issue #502, PRD #494) ---
