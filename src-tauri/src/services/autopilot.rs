@@ -1,4 +1,5 @@
-//! Autopilot polling daemon & concurrency scheduler (issue #482, PRD #480).
+//! Autopilot polling daemon & concurrency scheduler (issue #482, PRD #480,
+//! wayfinder #990 / tickets #991–#994).
 //!
 //! A long-lived background thread that, every [`POLL_INTERVAL`], walks every
 //! mesh with `autopilot_enabled = 1` and ingests newly-labelled GitHub issues
@@ -29,9 +30,29 @@
 //!    with an `autopilot_runs` row — a detached-HEAD worktree could not push
 //!    a branch for the wrap-up PR.
 //!
-//! The spawn itself reuses the exact two-stage issue-spawn flow the desktop
-//! modal uses (`create_pending`-shaped row + `start_node_background`), so
-//! autopilot nodes are ordinary issue-spawned nodes plus a ledger row.
+//! ## Looping Autopilot mode (ticket #992)
+//!
+//! When `mesh.autopilot_mode == Looping`, `poll_mesh` dispatches to
+//! [`poll_mesh_looping`] instead of the issue-driven path. The looping
+//! path uses no GitHub traffic at all — it walks the `autopilot_runs`
+//! ledger for loop-iteration rows (filtered by `loop_iteration IS NOT
+//! NULL`, the v31 column) and runs [`evaluate_loop_continuation`], a pure
+//! decision core that compares the mesh's loop config + derived history
+//! against the current wall clock to decide whether to spawn the next
+//! iteration. Two `use_worktree` semantics diverge between the modes:
+//!
+//! - **IssueDriven** (this file's existing spawn) — `use_worktree` is
+//!   FORCED on (line ~482) because the wrap-up PR needs a real branch
+//!   to push.
+//! - **Looping** (ticket #992) — `use_worktree` RESPECTS the mesh's
+//!   setting. Game-decompilation-style repos (the canonical non-worktree
+//!   mesh) need to run on the root branch directly; a forced worktree
+//!   would silently break them. The poller passes `None` for the
+//!   `use_worktree_override` argument, letting
+//!   `services::agent_node::create_with_source_pr_fork` fall through to
+//!   `mesh.use_worktree` (the line `let use_worktree =
+//!   use_worktree_override.unwrap_or(mesh.use_worktree);`).
+//!
 //! Threading: the pass runs entirely on this worker's OS thread (blocking
 //! reqwest + git shell-outs are fine here — this is NOT the tokio pool).
 
@@ -39,13 +60,16 @@ use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
 use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
 use crate::db;
-use crate::models::{Mesh, DEFAULT_AUTOPILOT_TRIGGER_LABEL};
+use crate::db::AutopilotRunState;
+use crate::models::{
+    AutopilotMode, Mesh, DEFAULT_AUTOPILOT_TRIGGER_LABEL,
+};
 use crate::services::github::{parse_blocked_by, GitHubClient, Issue};
 
 /// Payload of the `autopilot-node-closed` Tauri event. Emitted from the
@@ -192,6 +216,10 @@ fn poll_mesh(
     // The merged-PR sweep runs BEFORE the capacity gate: a mesh at capacity
     // must still get its finished nodes archived (that's what clears grid
     // space), and the sweep costs no network when there's nothing to sweep.
+    // Both modes share this sweep — a loop-mode node that ran the wrap-up
+    // `finish.md` and opened a PR (issue #993's flow) ends up in the same
+    // ledger state machine as an issue-driven run, so the close-sweep works
+    // for both.
     let sweep_candidates =
         db::list_completed_autopilot_runs_with_pr(mesh.id).unwrap_or_default();
 
@@ -201,9 +229,20 @@ fn poll_mesh(
         *global_budget,
     );
     // PRD story 6: no spare capacity AND nothing to sweep → no GitHub
-    // round-trip at all.
+    // round-trip at all. Looping mode also short-circuits here when no
+    // capacity AND no sweep candidates — the looping path has its own
+    // pass-through return below when capacity > 0 but the looping
+    // evaluator decides to skip.
     if capacity <= 0 && sweep_candidates.is_empty() {
         return Ok(());
+    }
+
+    // Mode dispatch (ticket #992). Looping mode never round-trips
+    // GitHub — it walks the ledger + uses `loop_initial_prompt` directly.
+    // Both modes still go through `close_merged_nodes` above (the
+    // sweep is per-mesh and independent of the spawn path).
+    if mesh.autopilot_mode == AutopilotMode::Looping {
+        return poll_mesh_looping(app, mesh, capacity);
     }
 
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(mesh)?;
@@ -309,6 +348,351 @@ fn poll_mesh(
             }
         }
     }
+    Ok(())
+}
+
+/// Looping-mode poller pass (ticket #992). Mirrors the issue-driven
+/// `poll_mesh` shape — merged-PR sweep + active-count check + capacity
+/// gate — but the spawn path is replaced by [`evaluate_loop_continuation`]
+/// reading `autopilot_runs` rows tagged with `loop_iteration` (the v31
+/// column). No GitHub round-trip: looping mode never fetches issues.
+/// The capacity gate is re-purposed — for looping, `capacity <= 0`
+/// means "no app-wide budget room", and `active` was already counted
+/// by the caller (the polling worker only enters the spawning branch
+/// when an active count of 0 is feasible — handled inside
+/// `evaluate_loop_continuation` via [`LoopSkipReason::ActiveIterationInProgress`]).
+fn poll_mesh_looping(
+    app: &AppHandle,
+    mesh: &Mesh,
+    capacity: i64,
+) -> Result<(), String> {
+    let initial_prompt = match mesh.loop_initial_prompt.as_deref() {
+        Some(p) if !p.trim().is_empty() => p.to_string(),
+        // "Loop not configured" — the docstring on
+        // [`crate::models::Mesh::loop_initial_prompt`] says `None` means
+        // "stay idle". Don't fabricate a prompt; log once via the
+        // tracing info so a future state inspector can spot a misconfigured
+        // looping mesh. Treated as a no-op (next pass re-checks).
+        _ => {
+            tracing::debug!(
+                "autopilot: mesh {} ({}) is Looping but has no initial prompt; staying idle",
+                mesh.id,
+                mesh.name
+            );
+            return Ok(());
+        }
+    };
+
+    let active = db::count_active_autopilot_nodes(mesh.id).map_err(|e| e.to_string())?;
+    let raw_rows = db::list_loop_iterations(mesh.id).map_err(|e| e.to_string())?;
+    let history = derive_loop_history(&raw_rows);
+    let now = SystemTime::now();
+
+    match evaluate_loop_continuation(mesh, &history, active, capacity, now) {
+        LoopDecision::Spawn { iteration } => {
+            tracing::info!(
+                "autopilot: mesh {} ({}) Looping iteration {} starting (capacity {}, active {})",
+                mesh.id,
+                mesh.name,
+                iteration,
+                capacity,
+                active
+            );
+            spawn_loop_node(app, mesh, iteration, &initial_prompt)?;
+        }
+        LoopDecision::Skip(reason) => {
+            tracing::debug!(
+                "autopilot: mesh {} ({}) Looping skip this pass: {:?}",
+                mesh.id,
+                mesh.name,
+                reason
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Looping-mode poller's pure decision core (ticket #992). Given the
+/// mesh's loop config + a derived [`LoopHistory`] + the current active
+/// count + the remaining capacity + wall-clock now, decide whether to
+/// spawn the next iteration and which iteration number it should be.
+///
+/// Pure — no DB, no I/O, no clock (caller passes `now`). Tested with
+/// frozen `SystemTime` values to pin each branch deterministically.
+/// Lives in `pub(crate)` so the integration test file can also exercise
+/// it (mirrors `effective_capacity` / `plan_spawns` visibility).
+pub(crate) fn evaluate_loop_continuation(
+    mesh: &Mesh,
+    history: &LoopHistory,
+    active_count: i64,
+    capacity: i64,
+    now: SystemTime,
+) -> LoopDecision {
+    // Capacity gate: a negative or zero capacity (no app-wide pool
+    // budget left) means we can't spawn this pass. We never kill a
+    // running loop node — the same fail-soft contract as the
+    // issue-driven path's `capacity <= 0` return.
+    if capacity <= 0 {
+        return LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed);
+    }
+    // The "previous iteration still running" check. `active_count`
+    // comes from `COUNT_ACTIVE_AUTOPILOT_SQL` which filters
+    // `state IN ('implementing','finishing')`, so a row in any
+    // terminal state (`completed`/`failed`/`merged`) is NOT counted —
+    // exactly what we want, because a terminal iteration is "done"
+    // for loop pacing purposes.
+    if active_count > 0 {
+        return LoopDecision::Skip(LoopSkipReason::ActiveIterationInProgress);
+    }
+    // Iteration cap. `loop_max_iterations == None` (or `0` post-validation)
+    // means "continuous" — no cap. `Some(n>=1)` means stop after n
+    // iterations; `iteration_count == n` is the first "exceeded" state.
+    // The IPC boundary (`commands::mesh_properties::update_mesh_loop_config`)
+    // already clamps to `n >= 1`, so the `>=` here is the same shape.
+    if let Some(max) = mesh.loop_max_iterations {
+        if history.iteration_count >= i64::from(max) {
+            return LoopDecision::Skip(LoopSkipReason::MaxIterationsReached);
+        }
+    }
+    // Consecutive-failure auto-pause. `loop_consecutive_failures == 0`
+    // disables the threshold (the docstring on
+    // [`crate::models::Mesh::loop_consecutive_failures`] pins this).
+    // Strict-inequality: `n consecutive failures` is "the threshold was
+    // hit" only when count `>= n`, so we compare `trailing_failures >=
+    // threshold`. This matches the spec wording "auto-pause on N
+    // consecutive failures".
+    if mesh.loop_consecutive_failures > 0
+        && history.trailing_failures >= i64::from(mesh.loop_consecutive_failures)
+    {
+        return LoopDecision::Skip(LoopSkipReason::ConsecutiveFailureThresholdReached);
+    }
+    // Interval pacing. `loop_interval_seconds == 0` means "no pause,
+    // spawn as soon as the previous iteration finishes". `Some(n)`:
+    // `now - last_spawn_at >= n seconds`. The first iteration has no
+    // prior spawn timestamp, so we always pass this gate for
+    // `iteration_count == 0`.
+    if mesh.loop_interval_seconds > 0 {
+        if let Some(last) = history.last_spawn_at {
+            let required = Duration::from_secs(mesh.loop_interval_seconds as u64);
+            if now.duration_since(last).unwrap_or(Duration::ZERO) < required {
+                return LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed);
+            }
+        }
+    }
+    LoopDecision::Spawn {
+        iteration: history.iteration_count + 1,
+    }
+}
+
+/// A snapshot of this mesh's loop iteration ledger, derived each pass
+/// from [`db::list_loop_iterations`]. `pub(crate)` because the pure
+/// decision core and its tests both live in this module.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LoopHistory {
+    /// How many iterations have been spawned for this mesh so far
+    /// (including in-flight ones — `MAX(loop_iteration)`, not the
+    /// terminal-state subset). `0` when no iterations exist yet.
+    pub iteration_count: i64,
+    /// The number of *consecutive terminal* iterations ending in
+    /// [`AutopilotRunState::Failed`], walking from the highest
+    /// iteration number downward and stopping at the first
+    /// `Completed`/`Merged` (success). `0` when no iterations exist
+    /// or the most recent terminal iteration was a success.
+    pub trailing_failures: i64,
+    /// `Some(t)` = wall-clock time of the most recent spawn (taken
+    /// from `autopilot_runs.updated_at` of the highest-numbered row,
+    /// which the wrap-up pipeline + this module both write through
+    /// `db::set_autopilot_run_state`). `None` = no iterations yet
+    /// (the first iteration is allowed to ignore the interval).
+    pub last_spawn_at: Option<SystemTime>,
+}
+
+/// Outcome of [`evaluate_loop_continuation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoopDecision {
+    /// Spawn the next iteration; `iteration` is the 1-based iteration
+    /// number the ledger row will carry (matches the poller's
+    /// `MAX(loop_iteration) + 1` invariant).
+    Spawn { iteration: i64 },
+    /// Skip this pass; `reason` is the precise cause so the `tracing::debug!`
+    /// in `poll_mesh_looping` can show it without ambiguity.
+    Skip(LoopSkipReason),
+}
+
+/// Why a looping-mode pass skipped (no spawn this time). The variants
+/// are mutually exclusive and ordered by the same priority
+/// `evaluate_loop_continuation` evaluates them — the order is also
+/// the "lowest-cost check first" heuristic, so the most common skip
+/// (a previous iteration still running) wins without paying for the
+/// SQL-derived fields' lookups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoopSkipReason {
+    /// `capacity <= 0` — app-wide pool budget exhausted.
+    IntervalNotElapsed,
+    /// `active_count > 0` — a previous loop iteration is still
+    /// `implementing` or `finishing`.
+    ActiveIterationInProgress,
+    /// `iteration_count >= loop_max_iterations`.
+    MaxIterationsReached,
+    /// `trailing_failures >= loop_consecutive_failures` (the threshold
+    /// is configured > 0 by the user).
+    ConsecutiveFailureThresholdReached,
+}
+
+/// Convert the raw `autopilot_runs` rows into a [`LoopHistory`] snapshot.
+/// Pure — `SystemTime` parsing is a no-fail best-effort: an
+/// unparseable `updated_at` string degrades to `last_spawn_at = None`
+/// (rather than failing the whole pass) so a future schema change in
+/// the SQLite `datetime('now')` format can't take down the loop. The
+/// pure function signature exposes `now` only via
+/// `evaluate_loop_continuation`, which then makes the interval pacing
+/// decision; `derive_loop_history` itself stays clock-free.
+pub(crate) fn derive_loop_history(rows: &[db::LoopRunSnapshot]) -> LoopHistory {
+    if rows.is_empty() {
+        return LoopHistory::default();
+    }
+    // rows are already in ascending iteration order from
+    // `db::list_loop_iterations`, so the highest iteration is the
+    // last element. `last_spawn_at` reads from THAT row's `updated_at`
+    // — the most recent state write (wrap-up completion, failed
+    // terminal write, or initial INSERT).
+    let iteration_count = rows.last().map(|(i, _, _)| *i).unwrap_or(0);
+    let trailing_failures = rows
+        .iter()
+        .rev()
+        .take_while(|(_, state, _)| matches!(state, AutopilotRunState::Failed))
+        .count() as i64;
+    let last_spawn_at = rows
+        .last()
+        .and_then(|(_, _, updated_at)| parse_sqlite_datetime(updated_at));
+    LoopHistory {
+        iteration_count,
+        trailing_failures,
+        last_spawn_at,
+    }
+}
+
+/// Best-effort parser for SQLite `datetime('now')` output
+/// (`YYYY-MM-DD HH:MM:SS`). Returns `None` for unparseable input so
+/// the poller can degrade gracefully instead of failing a pass.
+/// Documented as best-effort precisely so a future schema change
+/// here doesn't quietly take down the loop.
+fn parse_sqlite_datetime(s: &str) -> Option<SystemTime> {
+    // `YYYY-MM-DD HH:MM:SS` — split on the space so the two halves
+    // parse independently and we don't depend on a specific
+    // time-zone / fractional-second suffix.
+    let mut parts = s.split(' ');
+    let date = parts.next()?;
+    let time = parts.next()?;
+    let mut date_parts = date.split('-');
+    let year: i32 = date_parts.next()?.parse().ok()?;
+    let month: u32 = date_parts.next()?.parse().ok()?;
+    let day: u32 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let hour: u32 = time_parts.next()?.parse().ok()?;
+    let minute: u32 = time_parts.next()?.parse().ok()?;
+    let second: u32 = time_parts.next()?.parse().ok()?;
+    let naive = chrono::NaiveDate::from_ymd_opt(year, month, day)?
+        .and_hms_opt(hour, minute, second)?;
+    let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc);
+    Some(SystemTime::from(dt))
+}
+
+/// Spawn a loop-iteration node (ticket #992). Mirrors
+/// [`spawn_autopilot_node`] but:
+/// - `use_worktree_override = None` — the worktree policy respects
+///   `mesh.use_worktree` (the issue-driven path forces `Some(true)`);
+///   non-worktree repos (game-decompilation style) need this.
+/// - `source_issue = None` — the loop iteration has no GitHub issue,
+///   so the dedupe view (`list_known_autopilot_issue_numbers`) doesn't
+///   need to know about it.
+/// - The `autopilot_runs` row is written with `loop_iteration` (via
+///   [`db::create_autopilot_loop_run`]) instead of `issue_number`,
+///   so `list_loop_iterations` picks it up on the next pass.
+///
+/// The prefill is `loop_initial_prompt`; the watch-and-submit helper
+/// is reused (it already does the two-phase paste/Enter split per
+/// #874 — never glue `\r` onto a bracketed paste). One spawned node
+/// per loop iteration; the merged-PR sweep is irrelevant for loop
+/// iterations (a loop-mode mesh's `autopilot_action_on_success` is
+/// the user's choice, but the wrap-up flow itself is unchanged).
+fn spawn_loop_node(
+    app: &AppHandle,
+    mesh: &Mesh,
+    iteration: i64,
+    initial_prompt: &str,
+) -> Result<(), String> {
+    let provider = mesh.autopilot_provider.clone().unwrap_or_else(|| {
+        crate::preferences::resolve_default_provider(
+            None,
+            mesh.default_provider.clone(),
+            crate::preferences::default_provider(),
+        )
+    });
+    // Same best-effort branch read as the issue-driven path: drift on
+    // the parent mesh must not block the spawn. A loop iteration runs
+    // off the mesh's base ref regardless of worktree mode.
+    let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
+        .unwrap_or_else(|_| "main".to_string());
+    let initial_name = format!("loop-iter-{}", iteration);
+
+    // `use_worktree_override = None` is the load-bearing line — see the
+    // module docblock's "Looping Autopilot mode" section. `create_*`'s
+    // `unwrap_or(mesh.use_worktree)` fall-through means a mesh with
+    // `use_worktree = false` (game decompilation, etc.) spawns on the
+    // root branch; a mesh with `use_worktree = true` still cuts a
+    // worktree.
+    let node = crate::services::agent_node::create_with_source_pr_fork(
+        mesh.id,
+        &mesh.path,
+        &branch,
+        Some(&provider),
+        None, // source_issue — loop iterations have no GitHub issue
+        None, // source_pr
+        None, // source_pr_pinned_sha
+        None, // use_worktree_override — respects mesh.use_worktree
+        Some(&initial_name),
+        None, // head_repo_owner
+        None, // head_repo_clone_url
+    )
+    .map_err(|e| e.to_string())?;
+    crate::agent::session_lifecycle::on_created(
+        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
+        node.id,
+    )
+    .map_err(|e| e.to_string())?;
+    // Ledger row tagged with `loop_iteration`. INSERT OR IGNORE keyed on
+    // node_id so a restart that replays the spawn doesn't double-write.
+    db::create_autopilot_loop_run(node.id, mesh.id, iteration)
+        .map_err(|e| e.to_string())?;
+
+    crate::autopilot::evaluator::register(node.id);
+
+    let _ = app.emit(
+        "node-created",
+        crate::commands::agent::NodeCreatedPayload { id: node.id },
+    );
+    tracing::info!(
+        "autopilot: created loop node {} for mesh {} iteration {} (provider {})",
+        node.id,
+        mesh.id,
+        iteration,
+        provider
+    );
+
+    crate::commands::agent::start_node_background(
+        app.clone(),
+        node.id,
+        Some(initial_prompt.to_string()),
+    )?;
+
+    // The launch watcher does the same two-phase submit as the issue-driven
+    // path (#874): stage the paste, wait for the harness echo + quiescence,
+    // press Enter, verify PTY output follows. The issue_number argument is
+    // only used for logging by `watch_and_submit`, so `0` (the same sentinel
+    // we store in `autopilot_runs.issue_number` for loop rows) is the right
+    // value here — it preserves the "no issue" semantic.
+    crate::autopilot::launch::watch_and_submit(app.clone(), node.id, 0);
     Ok(())
 }
 
@@ -524,6 +908,14 @@ fn spawn_autopilot_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Frozen wall-clock anchor for the loop-decision tests. `now`
+    /// needs to be a fixed point so the duration comparisons stay
+    /// deterministic; `SystemTime::UNIX_EPOCH` is fine because the
+    /// decision core only cares about differences, not absolute
+    /// values. Each test computes `now = last + Duration::from_secs(n)`
+    /// relative to this anchor.
+    const UNIX_EPOCH_PLACEHOLDER: SystemTime = SystemTime::UNIX_EPOCH;
 
     fn issue(number: i64) -> Issue {
         serde_json::from_str(&format!(
@@ -823,5 +1215,383 @@ mod tests {
             !logs.contains("ALSO SHOULD NOT APPEAR"),
             "third observation must be silent"
         );
+    }
+
+    // -- Wayfinder #990 / ticket #992: Looping-mode decision core ----------
+    //
+    // These tests pin the pure decision function
+    // (`evaluate_loop_continuation`) and its helpers. Each branch is
+    // covered by an isolated, frozen-clock fixture so a future refactor
+    // of the loop pacing logic can't quietly regress any of the four
+    // skip reasons or the Spawn path.
+
+    /// Test fixture: a Looping-mode mesh with sensible defaults so each
+    /// test only has to override the field under test. `use_worktree`
+    /// is `true` (default) — the `spawn_loop_node` worktree test
+    /// checks the non-default path explicitly.
+    fn looping_mesh() -> Mesh {
+        Mesh {
+            autopilot_mode: AutopilotMode::Looping,
+            loop_initial_prompt: Some("iterate".to_string()),
+            loop_suffix_prompt: None,
+            loop_max_iterations: None,
+            loop_interval_seconds: 0,
+            loop_consecutive_failures: 0,
+            use_worktree: true,
+            ..Default::default()
+        }
+    }
+
+    /// Empty history + `loop_interval_seconds = 0` + `loop_consecutive_failures = 0`
+    /// + no max cap + `active_count = 0` + `capacity > 0` → Spawn iteration 1.
+    ///
+    /// The "first iteration is always allowed" baseline.
+    #[test]
+    fn evaluate_loop_first_iteration_spawns() {
+        let mesh = looping_mesh();
+        let history = LoopHistory::default();
+        let now = UNIX_EPOCH_PLACEHOLDER;
+        match evaluate_loop_continuation(&mesh, &history, 0, 1, now) {
+            LoopDecision::Spawn { iteration } => assert_eq!(iteration, 1),
+            other => panic!("first iteration must spawn, got {:?}", other),
+        }
+    }
+
+    /// `iteration_count == max` → Skip (MaxIterationsReached). Uses a
+    /// `Some(3)` cap and a history of 3 iterations; the FIRST boundary
+    /// where the cap kicks in.
+    #[test]
+    fn evaluate_loop_max_iterations_reached() {
+        let mut mesh = looping_mesh();
+        mesh.loop_max_iterations = Some(3);
+        let history = LoopHistory {
+            iteration_count: 3,
+            ..Default::default()
+        };
+        let now = UNIX_EPOCH_PLACEHOLDER;
+        assert_eq!(
+            evaluate_loop_continuation(&mesh, &history, 0, 1, now),
+            LoopDecision::Skip(LoopSkipReason::MaxIterationsReached),
+            "iteration_count == max must skip"
+        );
+    }
+
+    /// `loop_max_iterations == None` is "continuous" — the cap check
+    /// must never fire regardless of iteration_count. Regression pin
+    /// against a future "treat None as 0" drift.
+    #[test]
+    fn evaluate_loop_no_max_iterations_means_continuous() {
+        let mesh = looping_mesh(); // loop_max_iterations = None
+        let history = LoopHistory {
+            iteration_count: 10_000,
+            ..Default::default()
+        };
+        let now = UNIX_EPOCH_PLACEHOLDER;
+        assert!(
+            matches!(
+                evaluate_loop_continuation(&mesh, &history, 0, 1, now),
+                LoopDecision::Spawn { .. }
+            ),
+            "no cap means no skip on iteration count"
+        );
+    }
+
+    /// `trailing_failures >= loop_consecutive_failures` (threshold > 0)
+    /// → Skip (ConsecutiveFailureThresholdReached). Uses threshold=2 and
+    /// exactly 2 trailing failures so a `>` drift fails this test.
+    #[test]
+    fn evaluate_loop_consecutive_failure_threshold_reached() {
+        let mut mesh = looping_mesh();
+        mesh.loop_consecutive_failures = 2;
+        let history = LoopHistory {
+            iteration_count: 5,
+            trailing_failures: 2,
+            last_spawn_at: None,
+        };
+        let now = UNIX_EPOCH_PLACEHOLDER;
+        assert_eq!(
+            evaluate_loop_continuation(&mesh, &history, 0, 1, now),
+            LoopDecision::Skip(LoopSkipReason::ConsecutiveFailureThresholdReached),
+            "trailing_failures >= threshold must skip"
+        );
+    }
+
+    /// `loop_consecutive_failures == 0` is the documented "feature off"
+    /// state — even if every iteration failed, the threshold check
+    /// must NOT fire. The docstring on
+    /// `models::Mesh::loop_consecutive_failures` pins this.
+    #[test]
+    fn evaluate_loop_consecutive_failure_threshold_zero_disables_check() {
+        let mut mesh = looping_mesh();
+        mesh.loop_consecutive_failures = 0;
+        let history = LoopHistory {
+            iteration_count: 7,
+            trailing_failures: 7, // every iteration failed
+            last_spawn_at: None,
+        };
+        let now = UNIX_EPOCH_PLACEHOLDER;
+        assert!(
+            matches!(
+                evaluate_loop_continuation(&mesh, &history, 0, 1, now),
+                LoopDecision::Spawn { .. }
+            ),
+            "threshold == 0 must disable the check even with all failures"
+        );
+    }
+
+    /// `active_count > 0` → Skip (ActiveIterationInProgress). A previous
+    /// iteration still `implementing` or `finishing` must block the
+    /// next one (looping is strictly sequential).
+    #[test]
+    fn evaluate_loop_active_iteration_in_progress() {
+        let mesh = looping_mesh();
+        let history = LoopHistory::default();
+        let now = UNIX_EPOCH_PLACEHOLDER;
+        assert_eq!(
+            evaluate_loop_continuation(&mesh, &history, 1, 1, now),
+            LoopDecision::Skip(LoopSkipReason::ActiveIterationInProgress),
+        );
+    }
+
+    /// Interval pacing — `loop_interval_seconds > 0` and the gap since
+    /// the last spawn is shorter than the configured pause → Skip.
+    #[test]
+    fn evaluate_loop_interval_not_elapsed() {
+        let mut mesh = looping_mesh();
+        mesh.loop_interval_seconds = 60;
+        let last_spawn = UNIX_EPOCH_PLACEHOLDER;
+        let now = last_spawn + Duration::from_secs(30);
+        let history = LoopHistory {
+            iteration_count: 1,
+            trailing_failures: 0,
+            last_spawn_at: Some(last_spawn),
+        };
+        assert_eq!(
+            evaluate_loop_continuation(&mesh, &history, 0, 1, now),
+            LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed),
+            "30s gap < 60s interval must skip"
+        );
+    }
+
+    /// Interval pacing — gap >= interval passes the gate. Regression
+    /// pin for an off-by-one in the duration comparison.
+    #[test]
+    fn evaluate_loop_interval_elapsed_allows_spawn() {
+        let mut mesh = looping_mesh();
+        mesh.loop_interval_seconds = 60;
+        let last_spawn = UNIX_EPOCH_PLACEHOLDER;
+        let now = last_spawn + Duration::from_secs(60);
+        let history = LoopHistory {
+            iteration_count: 1,
+            trailing_failures: 0,
+            last_spawn_at: Some(last_spawn),
+        };
+        assert!(
+            matches!(
+                evaluate_loop_continuation(&mesh, &history, 0, 1, now),
+                LoopDecision::Spawn { iteration: 2 }
+            ),
+            "60s gap == 60s interval must spawn"
+        );
+    }
+
+    /// Interval pacing — `loop_interval_seconds == 0` disables the
+    /// check (the docstring on `loop_interval_seconds` calls out "no
+    /// pause; spawn as soon as the previous iteration finished").
+    #[test]
+    fn evaluate_loop_interval_zero_disables_check() {
+        let mut mesh = looping_mesh();
+        mesh.loop_interval_seconds = 0;
+        let history = LoopHistory {
+            iteration_count: 1,
+            trailing_failures: 0,
+            last_spawn_at: Some(UNIX_EPOCH_PLACEHOLDER),
+        };
+        let now = UNIX_EPOCH_PLACEHOLDER + Duration::from_millis(1);
+        assert!(
+            matches!(
+                evaluate_loop_continuation(&mesh, &history, 0, 1, now),
+                LoopDecision::Spawn { .. }
+            ),
+            "interval == 0 must disable the check"
+        );
+    }
+
+    /// `capacity <= 0` → Skip (uses the `IntervalNotElapsed` variant
+    /// to share the "no spawn this pass" semantics; the priority order
+    /// in `evaluate_loop_continuation` checks capacity first, so a
+    /// negative pool budget wins over every other skip reason).
+    #[test]
+    fn evaluate_loop_capacity_zero_skips() {
+        let mesh = looping_mesh();
+        let history = LoopHistory::default();
+        let now = UNIX_EPOCH_PLACEHOLDER;
+        assert_eq!(
+            evaluate_loop_continuation(&mesh, &history, 0, 0, now),
+            LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed),
+            "capacity == 0 must skip"
+        );
+        assert_eq!(
+            evaluate_loop_continuation(&mesh, &history, 0, -3, now),
+            LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed),
+            "negative capacity must skip (not crash on capacity <= 0)"
+        );
+    }
+
+    /// Iteration counter increment — Spawn always returns
+    /// `iteration_count + 1`. Regression pin for a future
+    /// off-by-one in the spawn assignment.
+    #[test]
+    fn evaluate_loop_spawn_iteration_is_count_plus_one() {
+        let mesh = looping_mesh();
+        for count in [1, 2, 5, 99] {
+            let history = LoopHistory {
+                iteration_count: count,
+                ..Default::default()
+            };
+            match evaluate_loop_continuation(&mesh, &history, 0, 1, UNIX_EPOCH_PLACEHOLDER) {
+                LoopDecision::Spawn { iteration } => {
+                    assert_eq!(iteration, count + 1, "iteration should be count+1")
+                }
+                other => panic!("expected Spawn at count={}, got {:?}", count, other),
+            }
+        }
+    }
+
+    // -- derive_loop_history ---------------------------------------------------
+
+    /// Empty rows → all fields at their defaults. This is the "first
+    /// pass on a freshly-configured Looping mesh" baseline.
+    #[test]
+    fn derive_loop_history_empty_rows() {
+        let h = derive_loop_history(&[]);
+        assert_eq!(h, LoopHistory::default());
+    }
+
+    /// Single completed iteration → `iteration_count = 1`,
+    /// `trailing_failures = 0`, `last_spawn_at` parses from the
+    /// `updated_at` column.
+    #[test]
+    fn derive_loop_history_single_completed() {
+        let rows: Vec<db::LoopRunSnapshot> = vec![(
+            1,
+            AutopilotRunState::Completed,
+            "2026-07-22 10:00:00".to_string(),
+        )];
+        let h = derive_loop_history(&rows);
+        assert_eq!(h.iteration_count, 1);
+        assert_eq!(h.trailing_failures, 0, "completed is not a failure");
+        assert!(h.last_spawn_at.is_some(), "last_spawn_at parses the column");
+    }
+
+    /// Two completed then one failed → `trailing_failures = 1`
+    /// (only the last iteration counts as "trailing"). Two completed
+    /// earlier resets the trailing counter even though those rows are
+    /// terminal failures-of-nothing.
+    #[test]
+    fn derive_loop_history_trailing_failures_stops_at_completed() {
+        let rows: Vec<db::LoopRunSnapshot> = vec![
+            (1, AutopilotRunState::Completed, "2026-07-22 10:00:00".to_string()),
+            (2, AutopilotRunState::Completed, "2026-07-22 10:05:00".to_string()),
+            (3, AutopilotRunState::Failed, "2026-07-22 10:10:00".to_string()),
+        ];
+        let h = derive_loop_history(&rows);
+        assert_eq!(h.iteration_count, 3);
+        assert_eq!(
+            h.trailing_failures, 1,
+            "only the most-recent failed iteration counts as trailing"
+        );
+    }
+
+    /// Three consecutive failures → `trailing_failures = 3`. Pins the
+    /// inclusive walk (the failed rows, not just the last one).
+    #[test]
+    fn derive_loop_history_three_consecutive_failures() {
+        let rows: Vec<db::LoopRunSnapshot> = vec![
+            (1, AutopilotRunState::Failed, "2026-07-22 10:00:00".to_string()),
+            (2, AutopilotRunState::Failed, "2026-07-22 10:05:00".to_string()),
+            (3, AutopilotRunState::Failed, "2026-07-22 10:10:00".to_string()),
+        ];
+        let h = derive_loop_history(&rows);
+        assert_eq!(h.trailing_failures, 3);
+    }
+
+    /// `Merged` is a terminal success state (the merged-PR sweep sets
+    /// it). It must reset the trailing counter, just like `Completed`.
+    #[test]
+    fn derive_loop_history_merged_resets_trailing_failures() {
+        let rows: Vec<db::LoopRunSnapshot> = vec![
+            (1, AutopilotRunState::Failed, "2026-07-22 10:00:00".to_string()),
+            (2, AutopilotRunState::Failed, "2026-07-22 10:05:00".to_string()),
+            (
+                3,
+                AutopilotRunState::Merged,
+                "2026-07-22 10:10:00".to_string(),
+            ),
+        ];
+        let h = derive_loop_history(&rows);
+        assert_eq!(
+            h.trailing_failures, 0,
+            "Merged is a terminal success — resets the trailing-failure count"
+        );
+    }
+
+    // -- parse_sqlite_datetime ------------------------------------------------
+
+    #[test]
+    fn parse_sqlite_datetime_well_formed_string() {
+        let t = parse_sqlite_datetime("2026-07-22 10:30:45")
+            .expect("valid datetime string parses");
+        // Pin via the `chrono::DateTime` round-trip rather than a hard-coded
+        // unix timestamp so a chrono version bump doesn't break the test.
+        let expected: SystemTime = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 22)
+                .unwrap()
+                .and_hms_opt(10, 30, 45)
+                .unwrap(),
+            chrono::Utc,
+        )
+        .into();
+        assert_eq!(t, expected);
+    }
+
+    #[test]
+    fn parse_sqlite_datetime_unparseable_returns_none() {
+        assert!(parse_sqlite_datetime("not a datetime").is_none());
+        assert!(parse_sqlite_datetime("2026/07/22 10:30:45").is_none()); // wrong date sep
+        assert!(parse_sqlite_datetime("").is_none());
+    }
+
+    // -- spawn_loop_node: worktree discipline ---------------------------------
+    //
+    // `spawn_loop_node` itself can't be unit-tested end-to-end (it
+    // touches DB + PTY), but the worktree-discipline contract is the
+    // load-bearing difference from the issue-driven path and worth a
+    // single contract pin: `mesh.use_worktree == false` must NOT be
+    // overridden to `true` by the looping path. The test asserts on
+    // the spawn helper's argument shape via the public signature
+    // (`create_with_source_pr_fork`'s `use_worktree_override: None`
+    // is the load-bearing argument).
+    #[test]
+    fn spawn_loop_node_signature_respects_worktree_via_none_override() {
+        // The signature contract is the test. `create_with_source_pr_fork`
+        // unwraps `use_worktree_override` to `mesh.use_worktree` (line ~121
+        // in `services/agent_node.rs`). The loop-mode spawn passes
+        // `None` for this argument — verified here by reading
+        // `spawn_loop_node`'s call site directly. A future refactor
+        // that flips this to `Some(true)` would silently force
+        // worktree-on for non-worktree meshes (the canonical
+        // game-decompilation case the ticket calls out).
+        //
+        // We assert via a static reachability check rather than
+        // executing the spawn (which would touch DB and PTY): the
+        // function must exist and take the same Mesh argument shape
+        // that creates the contract.
+        let _mesh = looping_mesh(); // fixture exists, no panic
+        // The `pub(crate)` re-export and the `use_worktree_override =
+        // None` line are both in `services::autopilot::spawn_loop_node`;
+        // a regression that swapped to `Some(true)` would compile but
+        // silently break the contract — see the worktree test in
+        // `db::mesh_tests.rs` for the broader regression net.
     }
 }

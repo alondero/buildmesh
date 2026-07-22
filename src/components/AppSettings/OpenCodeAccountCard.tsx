@@ -129,7 +129,12 @@ function SignedOutView({
           userCode: s.user_code,
           verificationUri: s.verification_uri_complete,
           intervalSecs: s.interval_secs,
-          expiresInSecs: s.expires_in_secs,
+          // The IPC carries the ORIGINAL window length verbatim — not a
+          // per-tick countdown. Pre-fix (#1010) the component computed
+          // `(expiresAtMs - Date.now()) / 1000` per tick and sent that as
+          // `expiresInSecs`, which made the Rust gate fire at the halfway
+          // point. See `OpenCodeAccountCard.reducer.ts` for the rename.
+          originalExpiresInSecs: s.expires_in_secs,
         });
         // Open the verification page. `SafeLink.tsx:145` is the canonical
         // precedent: route the URL through `openUrl` so the OS handles
@@ -180,9 +185,13 @@ function AwaitingActivationView({
 }) {
   // Polling loop — keyed on `state.deviceCode` + `state.intervalSecs` +
   // `state.expiresAtMs` so a `slow_down` re-subscribes with the bumped
-  // interval (cleanup of the previous effect clears the old `setInterval`).
-  // `state.startedAtMs` is fixed at START_SUCCEEDED time and so never changes
-  // inside this state — included only for ts-rs/spec completeness.
+  // interval (cleanup of the previous effect clears the old
+  // `setInterval`). `state.originalExpiresInSecs` + `state.startedAtMs`
+  // are both fixed at START_SUCCEEDED time and never change inside this
+  // state — kept off the dep list (the eslint-disable below) so we
+  // don't re-subscribe the interval on every render. `expiresAtMs` IS
+  // in the deps because it's read once on mount for the pre-flight
+  // gate (`Date.now() >= state.expiresAtMs`).
   useEffect(() => {
     // The deps below include `state.deviceCode` (etc.) which UNDEFINED-out
     // when state transitions to `signedIn`. Without this guard, the effect
@@ -203,15 +212,18 @@ function AwaitingActivationView({
     let cancelled = false;
     const tick = async () => {
       if (cancelled) return;
-      const remainingSecs = Math.max(
-        0,
-        Math.floor((state.expiresAtMs - Date.now()) / 1000),
-      );
       try {
+        // Ship the immutable ORIGINAL window length each tick — NOT a
+        // per-tick countdown. Pre-fix (#1010) the third arg was computed
+        // here as `(state.expiresAtMs - Date.now()) / 1000`, which made
+        // the Rust gate `now_ms - started_at_ms >= remaining*1000` fire
+        // when `elapsed == remaining` (the halfway point of the window).
+        // Storing the value at dance-start time and sending it verbatim
+        // each tick keeps the gate monotonic across the full window.
         const status = await api.pollOpencodeDeviceToken(
           state.deviceCode,
           state.intervalSecs,
-          remainingSecs,
+          state.originalExpiresInSecs,
           state.startedAtMs,
         );
         if (cancelled) return;
@@ -253,7 +265,7 @@ function AwaitingActivationView({
       cancelled = true;
       clearInterval(id);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- state.startedAtMs is fixed at dance-start; including it would re-subscribe the interval on every tick. dispatch is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- state.startedAtMs is fixed at dance-start; including it would re-subscribe the interval on every tick. dispatch is stable. state.originalExpiresInSecs is also fixed at dance-start so we keep it off the dep list for the same reason — the effect should only re-subscribe when intervalSecs changes (slow_down bump), not on every render.
   }, [
     state.deviceCode,
     state.intervalSecs,

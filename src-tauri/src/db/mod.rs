@@ -108,6 +108,24 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // helpers so a build that bumps `SCHEMA_VERSION` without yet containing
 // the inline `is_pinned` column still picks it up on the next launch.
 //
+// v31 — Looping Autopilot iteration marker (wayfinder #990 / ticket
+// #992): add a single nullable column to `autopilot_runs` so the
+// looping-mode poller can distinguish iteration rows from issue-driven
+// rows in the same ledger table.
+//   * `loop_iteration` (INTEGER, nullable) — the 1-based loop iteration
+//     number for nodes spawned by the Looping-mode poller. `NULL` for
+//     issue-driven rows (pre-v31 rows stay `NULL` and the Looping-mode
+//     poller never reads them, so no backfill is required). The column
+//     is the source of truth for: (a) iteration cap (`loop_max_iterations`
+//     check vs `MAX(loop_iteration)`); (b) trailing-failure count for the
+//     auto-pause threshold (`loop_consecutive_failures` check vs a
+//     descending walk of `(loop_iteration, state)`); (c) interval-delay
+//     pacing (`loop_interval_seconds` check vs `MAX(updated_at)` of
+//     loop rows). All three checks happen in `services::autopilot`
+//     (`evaluate_loop_continuation`), reading through the hydration
+//     helper `list_loop_history`. See `ensure_autopilot_run_loop_iteration`
+//     for the additive safety net.
+//
 // v30 — Looping Autopilot config (wayfinder #990 / ticket #991): add
 // six `meshes` columns that the poller (#992) reads to drive a
 // Looping-mode autopilot — sequential prompt-driven nodes, with optional
@@ -138,7 +156,7 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // `ensure_mesh_loop_columns` lives alongside `ensure_mesh_autopilot_columns`
 // so a build that bumps `SCHEMA_VERSION` without yet containing the
 // inline ALTERs picks the columns up on next launch.
-const SCHEMA_VERSION: i32 = 30;
+const SCHEMA_VERSION: i32 = 31;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -295,6 +313,12 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             attempts INTEGER NOT NULL DEFAULT 0,
             pr_number INTEGER,
             pr_url TEXT,
+            -- v31 — Looping Autopilot iteration marker (ticket #992). NULL
+            -- for issue-driven runs (the pre-v31 default; preserves every
+            -- existing row). The Looping-mode poller writes the 1-based
+            -- iteration number on each spawn, so iteration count + cap
+            -- checks reduce to MAX(loop_iteration) + 1 vs loop_max_iterations.
+            loop_iteration INTEGER,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -337,6 +361,13 @@ ensure_mesh_sandbox(&conn)?;
     // Six additive columns on `meshes`, every column nullable or with a
     // safe default, so pre-v30 rows read back as "loop not configured".
     ensure_mesh_loop_columns(&conn)?;
+    // v31 — Looping Autopilot iteration marker (ticket #992). Nullable
+    // column on `autopilot_runs`; pre-v31 rows read back as `NULL` so the
+    // Looping-mode poller naturally skips them. Called AFTER the loop
+    // config columns above so the docblock ordering matches the migration
+    // ordering (and so a future ticket #993 follow-up can rely on the
+    // same additive shape).
+    ensure_autopilot_run_loop_iteration(&conn)?;
     // v27 — per-context build/run commands (issue #802). Nullable: a mesh
     // without them falls back to build_command/run_command in both contexts.
     ensure_mesh_root_command_columns(&conn)?;
@@ -698,6 +729,19 @@ pub(crate) fn ensure_autopilot_run_pr_columns(conn: &Connection) -> SqlResult<()
         if ensure_column(conn, "autopilot_runs", name, ty)? {
             tracing::warn!("ensure_autopilot_run_pr_columns: added missing {} column", name);
         }
+    }
+    Ok(())
+}
+
+/// v31 — `autopilot_runs.loop_iteration INTEGER` (ticket #992). NULL for
+/// issue-driven runs (the pre-v31 default, preserved by `NULL`); the
+/// Looping-mode poller writes the 1-based iteration number on each spawn.
+/// Same additive safety-net shape as `ensure_autopilot_run_pr_columns`
+/// above: a build that bumps `SCHEMA_VERSION` without yet containing the
+/// inline CREATE picks the column up on next launch.
+pub(crate) fn ensure_autopilot_run_loop_iteration(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "autopilot_runs", "loop_iteration", "INTEGER")? {
+        tracing::warn!("ensure_autopilot_run_loop_iteration: added missing loop_iteration column");
     }
     Ok(())
 }
@@ -2315,6 +2359,30 @@ pub fn create_autopilot_run(node_id: i64, mesh_id: i64, issue_number: i64) -> Sq
     Ok(())
 }
 
+/// Record a loop-iteration node (wayfinder #990 / ticket #992). Mirrors
+/// [`create_autopilot_run`] but writes `loop_iteration = ?4` instead of
+/// `issue_number`, so the Looping-mode poller can distinguish iteration
+/// rows from issue-driven rows in the same ledger. `issue_number` is
+/// stored as `0` (the column is NOT NULL on the table) — the
+/// `loop_iteration IS NOT NULL` predicate is the authoritative
+/// discriminator; the `0` sentinel is never read for loop rows.
+///
+/// Idempotent per node (`INSERT OR IGNORE` + PRIMARY KEY on node_id), so
+/// a restart that replays the spawn doesn't double-write the iteration.
+pub fn create_autopilot_loop_run(
+    node_id: i64,
+    mesh_id: i64,
+    loop_iteration: i64,
+) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "INSERT OR IGNORE INTO autopilot_runs (node_id, mesh_id, issue_number, loop_iteration) \
+         VALUES (?1, ?2, 0, ?3)",
+        params![node_id, mesh_id, loop_iteration],
+    )?;
+    Ok(())
+}
+
 /// Typed view of the `autopilot_runs.state` column (migrates the stringly-
 /// typed surface that issue #855 tracked). The DB column stays TEXT for
 /// backward-compat; `to_db_str` matches the column constraint and every
@@ -2481,6 +2549,41 @@ pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
 pub fn count_active_autopilot_nodes_total() -> SqlResult<i64> {
     let db = get().lock().unwrap();
     db.query_row(COUNT_ACTIVE_AUTOPILOT_SQL, [], |row| row.get(0))
+}
+
+/// Per-iteration snapshot consumed by the Looping-mode poller's pure
+/// decision core (`services::autopilot::evaluate_loop_continuation`,
+/// ticket #992). One row per loop iteration on this mesh, in
+/// ascending-iteration order so the caller's trailing-failure walk is
+/// a forward iteration from the front. `updated_at` is the raw SQLite
+/// `datetime('now')` text the ledger stores on every state write —
+/// `services::autopilot` parses it to a `SystemTime` for the
+/// interval-delay check.
+pub type LoopRunSnapshot = (i64, AutopilotRunState, String);
+
+/// All loop-iteration rows for one mesh, in ascending iteration order
+/// (ticket #992). Returns an empty `Vec` when the mesh has no loop
+/// iterations yet (or the poller has just started). The empty case is
+/// NOT an error — a fresh Looping-mode mesh with no prior spawns reads
+/// back as `iteration_count = 0` and `trailing_failures = 0`, exactly
+/// the state that allows the first spawn.
+///
+/// Pre-existing issue-driven rows are filtered by `loop_iteration IS
+/// NOT NULL` so the two modes never cross-contaminate the ledger view.
+pub fn list_loop_iterations(mesh_id: i64) -> SqlResult<Vec<LoopRunSnapshot>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT loop_iteration, state, updated_at FROM autopilot_runs \
+         WHERE mesh_id = ?1 AND loop_iteration IS NOT NULL \
+         ORDER BY loop_iteration ASC",
+    )?;
+    let rows = stmt.query_map(params![mesh_id], |row| {
+        let iteration: i64 = row.get(0)?;
+        let state_str: String = row.get(1)?;
+        let updated_at: String = row.get(2)?;
+        Ok((iteration, AutopilotRunState::from_db_str(&state_str), updated_at))
+    })?;
+    rows.collect()
 }
 
 /// Node ids of `finishing` runs (all meshes) whose ledger row hasn't

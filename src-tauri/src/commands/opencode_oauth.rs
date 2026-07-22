@@ -50,9 +50,14 @@ pub async fn start_device_flow_console() -> Result<OpenCodeDeviceFlowStart, Stri
 }
 
 /// One polling round-trip against `POST /auth/device/token`. React owns the
-/// `(device_code, current_interval_secs, expires_in_secs, started_at_ms)`
+/// `(device_code, current_interval_secs, original_expires_in_secs, started_at_ms)`
 /// quadruple in component state; the IPC just advances the dance one HTTP
 /// call and returns a tagged enum React switches on via `status.kind`.
+///
+/// `original_expires_in_secs` is the immutable window length captured at
+/// `start_device_flow_console` time, NOT a per-tick countdown — see
+/// `services::opencode_oauth::device_code_is_expired` for the gate and
+/// issue #1010 for the rationale.
 ///
 /// Stateless: no Rust-side task, no per-mesh cleanup. React cancels by
 /// clearing its `setInterval` on unmount. The CLI-friendly
@@ -67,14 +72,14 @@ pub async fn start_device_flow_console() -> Result<OpenCodeDeviceFlowStart, Stri
 pub async fn poll_opencode_device_token(
     device_code: String,
     current_interval_secs: u32,
-    expires_in_secs: u32,
+    original_expires_in_secs: u32,
     started_at_ms: i64,
 ) -> Result<OpenCodeDeviceCodeStatus, String> {
     crate::commands::run_blocking("poll_opencode_device_token", move || {
         crate::services::opencode_oauth::poll_for_token_once(
             &device_code,
             current_interval_secs,
-            expires_in_secs,
+            original_expires_in_secs,
             started_at_ms,
         )
         .map_err(|e| e.to_string())

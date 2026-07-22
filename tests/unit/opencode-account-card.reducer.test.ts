@@ -31,6 +31,7 @@ const awaiting = (over: Partial<Extract<State, { kind: 'awaitingActivation' }>> 
   verificationUri: 'https://console.opencode.ai/auth/device?code=WXYZ-1234',
   intervalSecs: 5,
   expiresAtMs: Date.now() + 600_000,
+  originalExpiresInSecs: 600,
   startedAtMs: Date.now() - 1000,
   ...over,
 });
@@ -56,7 +57,7 @@ describe('opencodeAccountReducer (issue #969)', () => {
       userCode: 'ABCD-1234',
       verificationUri: 'https://console.opencode.ai/auth/device?code=ABCD-1234',
       intervalSecs: 7,
-      expiresInSecs: 600,
+      originalExpiresInSecs: 600,
     });
     expect(next.kind).toBe('awaitingActivation');
     if (next.kind !== 'awaitingActivation') return;
@@ -69,6 +70,10 @@ describe('opencodeAccountReducer (issue #969)', () => {
     expect(next.startedAtMs).toBeLessThanOrEqual(Date.now());
     expect(next.expiresAtMs).toBeGreaterThanOrEqual(before + 600 * 1000 - 50);
     expect(next.expiresAtMs).toBeLessThanOrEqual(Date.now() + 600 * 1000 + 50);
+    // Issue #1010: the immutable ORIGINAL window length is stored verbatim
+    // on the state — the IPC sends this each tick (not a per-tick countdown)
+    // so the Rust expiry gate stays monotonic across the full window.
+    expect(next.originalExpiresInSecs).toBe(600);
   });
 
   it('START_SUCCEEDED is dropped if the reducer was already off the signedOut branch', () => {
@@ -81,7 +86,7 @@ describe('opencodeAccountReducer (issue #969)', () => {
       userCode: 'LATE-9999',
       verificationUri: 'https://late',
       intervalSecs: 9,
-      expiresInSecs: 600,
+      originalExpiresInSecs: 600,
     });
     expect(next).toEqual(awaiting());
   });

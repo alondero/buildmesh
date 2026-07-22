@@ -5,9 +5,6 @@ import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import { listProviders } from '../../lib/tauri';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
-import Wordmark from '../../assets/wordmark.png';
-import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
-import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { MeshCreateModal } from '../Mesh/MeshCreateModal';
 import { defaultMeshColor } from '../../lib/meshColors';
 import {
@@ -71,8 +68,6 @@ export function Sidebar() {
   const openProbeTab = useUIStore(s => s.openProbeTab);
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
-  const [remoteAccessOpen, setRemoteAccessOpen] = useState(false);
-  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const [createMeshOpen, setCreateMeshOpen] = useState(false);
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
@@ -191,41 +186,6 @@ export function Sidebar() {
       />
 
       <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
-        {/* Header */}
-        <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle flex items-center gap-2">
-          <img src={Wordmark} className="h-8 w-auto max-w-full" alt="Buildmesh" />
-          <button
-            type="button"
-            onClick={() => setAppSettingsOpen(true)}
-            className="ml-auto p-1 rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors"
-            title="Settings"
-            aria-label="Open settings"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={() => setRemoteAccessOpen(true)}
-            className="p-1 rounded-md text-accent-cyan hover:text-accent-blue hover:bg-bg-card transition-colors"
-            title="Remote access"
-            aria-label="Open remote access"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
-              <line x1="12" y1="18" x2="12" y2="18"/>
-            </svg>
-          </button>
-        </div>
-
-        {appSettingsOpen && (
-          <AppSettingsModal
-            onClose={() => { setAppSettingsOpen(false); refreshProviders(); }}
-          />
-        )}
-        {remoteAccessOpen && <RemoteAccessModal onClose={() => setRemoteAccessOpen(false)} />}
         {createMeshOpen && (
           <MeshCreateModal
             onClose={() => setCreateMeshOpen(false)}

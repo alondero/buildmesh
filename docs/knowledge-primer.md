@@ -22,6 +22,12 @@
 ### Layout: Grid-Only
 Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid. The UI auto-scales 1–6 panes via CSS grid.
 
+### Frameless Window & Bespoke TitleBar
+The window runs with `"decorations": false` (`src-tauri/tauri.conf.json`); `src/components/TitleBar/TitleBar.tsx` is the window chrome (wordmark, ViewModeSwitcher, settings/remote icons, min/max/close). Three traps this recipe already burned once:
+- **Drag regions are per-target.** Tauri's injected script checks `e.target.hasAttribute('data-tauri-drag-region')` — put the attribute on the bar/spacer/wordmark, but *never* on buttons or their SVGs, or the click is eaten and the button starts a drag instead. Double-click maximize on a drag region is built into the same script (`internal_toggle_maximize`).
+- **`core:window:default` does NOT cover `allow-minimize`, `allow-close`, `allow-toggle-maximize`, or `allow-start-dragging`** — a frameless window's controls silently no-op without them. Add them explicitly in `src-tauri/capabilities/default.json` (done; keep them if the capability file is regenerated).
+- **One writer for window state.** Track `isMaximized` only via the `onResized` listener re-querying `win.isMaximized()`; don't optimistically flip local state on click — a rejected IPC desyncs the glyph.
+
 ### WSL Path Mapping
 Linux paths from WSL agents must map to Windows UNC paths (`\\wsl$\...`) before backend file operations. Use `env::to_host_path` in `src-tauri/src/env/host_path.rs` (the `HostPath` sub-module). The CLAUDE.md hard rule is **structurally** enforced: `HostPath` is the *only* module in the tree that builds `\\wsl$\` or `/mnt/` strings; no other module should. Never pass Linux paths to Windows-side APIs.
 

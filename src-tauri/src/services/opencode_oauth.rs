@@ -300,6 +300,48 @@ pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAut
     })
 }
 
+/// Refreshes an existing access token against a parameterized
+/// `refresh_url`. Pure HTTP — does NOT read from or write to Windows
+/// Credential Manager; the caller is responsible for both. Production
+/// callers pin `OPENCODE_CONSOLE_HOST + device_flow::TOKEN_PATH` via
+/// [`try_refresh`]; tests substitute a loopback `tiny_http` listener so
+/// the full refresh round-trip is exercised without hitting the live
+/// server (issue #971).
+///
+/// The form-encoded request body matches RFC 6749 §6: `grant_type`,
+/// `client_id`, `refresh_token`. Response is the same `TokenResponse`
+/// shape the device-flow dance returns, parsed via
+/// [`parse_token_response`].
+pub(crate) fn try_refresh_against(
+    refresh_url: &str,
+    refresh_token: &str,
+) -> Result<TokenResponse, OAuthError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| OAuthError::Transport(format!("refresh client: {e}")))?;
+    let response = client
+        .post(refresh_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "refresh_token".to_string()),
+            ("client_id", OPENCODE_OAUTH_CLIENT_ID.to_string()),
+            ("refresh_token", refresh_token.to_string()),
+        ])
+        .send()
+        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh send: {e}")))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh body: {e}")))?;
+    if !status.is_success() {
+        return Err(OAuthError::Shape(format!(
+            "/auth/device/token refresh HTTP {status}: {body}"
+        )));
+    }
+    parse_token_response(&body)
+}
+
 /// Refreshes an existing access token. The OAuth server accepts the
 /// `refresh_token` issued by the device-flow exchange and returns a new
 /// `(access_token, refresh_token, expires_in, workspace_id, server_id)`
@@ -313,6 +355,9 @@ pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAut
 /// each other. Acceptable risk for a desktop app; follow-up PR may add
 /// per-target locking if profiling shows contention.
 #[cfg(windows)]
+#[allow(dead_code)] // Retained as the documented public seam (issue #970); the live refresh
+                    // path in `services::usage` now calls `try_refresh_against` directly
+                    // (#971) so this wrapper is currently unused.
 pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     use crate::services::windows_cred;
     let blob = windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET).map_err(|e| {
@@ -324,33 +369,10 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     let refresh_token = cred.refresh_token.ok_or_else(|| {
         OAuthError::Shape("refresh requires refresh_token in stored credential".to_string())
     })?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| OAuthError::Transport(format!("refresh client: {e}")))?;
-    let response = client
-        .post(format!(
-            "{OPENCODE_CONSOLE_HOST}{}",
-            device_flow::TOKEN_PATH
-        ))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&[
-            ("grant_type", "refresh_token".to_string()),
-            ("client_id", OPENCODE_OAUTH_CLIENT_ID.to_string()),
-            ("refresh_token", refresh_token),
-        ])
-        .send()
-        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh send: {e}")))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh body: {e}")))?;
-    if !status.is_success() {
-        return Err(OAuthError::Shape(format!(
-            "/auth/device/token refresh HTTP {status}: {body}"
-        )));
-    }
-    let token = parse_token_response(&body)?;
+    let token = try_refresh_against(
+        &format!("{}{}", OPENCODE_CONSOLE_HOST, device_flow::TOKEN_PATH),
+        &refresh_token,
+    )?;
     // Write the new bundle back to Credential Manager so the next live
     // fetch and the next refresh see the same up-to-date credential.
     persist_token_response(&token)?;
@@ -358,6 +380,7 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)] // Same retention rationale as the Windows arm above.
 pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     // Per the locked #956 design decision, non-Windows mirrors the agy
     // precedent at services::usage::read_agy_token and returns a typed
@@ -547,6 +570,17 @@ pub(crate) fn start_device_flow() -> Result<(DeviceCode, Client), OAuthError> {
     Ok((parsed, client))
 }
 
+/// True when the device code's `original_expires_in_secs` window has
+/// elapsed relative to `now_ms`. Pure helper (no clock reads) so the
+/// halfway-point regression behind issue #1010 can be pinned with
+/// deterministic timestamps; see `tests::device_code_is_expired_*` below.
+/// `saturating_sub` clamps negative elapsed to zero (clock-skew defense)
+/// so a future `started_at_ms` doesn't spuriously fire the gate.
+fn device_code_is_expired(started_at_ms: i64, original_expires_in_secs: u32, now_ms: i64) -> bool {
+    now_ms.saturating_sub(started_at_ms)
+        >= (original_expires_in_secs as i64).saturating_mul(1000)
+}
+
 /// Polls `POST /auth/device/token` honoring RFC 8628 §3.5 backoff rules.
 /// Returns the [`TokenResponse`] on success, [`OAuthError::CodeExpired`]
 /// when the device code's window lapses, [`OAuthError::AccessDenied`]
@@ -640,7 +674,7 @@ pub(crate) fn poll_for_token(
 }
 
 /// Stateless one-shot poll for `commands::opencode_oauth::poll_opencode_device_token`.
-/// React owns the `(device_code, current_interval_secs, expires_in_secs,
+/// React owns the `(device_code, current_interval_secs, original_expires_in_secs,
 /// started_at_ms)` quadruple in component state and asks Rust to advance the
 /// dance by one HTTP round-trip; the IPC returns a tagged
 /// [`OpenCodeDeviceCodeStatus`] React switches on via `status.kind`.
@@ -651,15 +685,22 @@ pub(crate) fn poll_for_token(
 /// the user closes the modal. React-as-owner is simpler; Rust-as-pure-poll is
 /// the right grain.
 ///
+/// `original_expires_in_secs` is the IMMUTABLE window length captured at
+/// `start_device_flow_console` time — NOT a per-tick countdown. Pre-fix
+/// (#1010) React passed the per-tick remaining seconds, so the gate
+/// `now_ms - started_at_ms >= original*1000` fired at the halfway point of
+/// the window; the rename + the [`device_code_is_expired`] helper below
+/// pin the fix.
+///
 /// `now_ms` is computed via `SystemTime::now()` inside the function; callers
 /// that need deterministic clocking for tests should pass `started_at_ms` and
-/// set `expires_in_secs` short enough that the expiry gate fires. The
+/// set `original_expires_in_secs` short enough that the expiry gate fires. The
 /// `current_interval_secs` argument is held for symmetry with `poll_for_token`
 /// and to pin a future pre-emptive backoff — it's not consumed today.
 pub(crate) fn poll_for_token_once(
     device_code: &str,
     current_interval_secs: u32,
-    expires_in_secs: u32,
+    original_expires_in_secs: u32,
     started_at_ms: i64,
 ) -> Result<OpenCodeDeviceCodeStatus, OAuthError> {
     let _ = current_interval_secs; // pin for future pre-emptive backoff hook
@@ -667,7 +708,7 @@ pub(crate) fn poll_for_token_once(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(i64::MAX);
-    if now_ms.saturating_sub(started_at_ms) >= (expires_in_secs as i64).saturating_mul(1000) {
+    if device_code_is_expired(started_at_ms, original_expires_in_secs, now_ms) {
         return Ok(OpenCodeDeviceCodeStatus::CodeExpired);
     }
     let client = Client::builder()
@@ -1108,6 +1149,90 @@ mod tests {
             ..Default::default()
         };
         assert!(!cred_is_expired(&malformed, 1_700_000_000));
+    }
+
+    // ── Device-code expiry gate (issue #1010) ───────────────────────────
+    //
+    // The previous wire contract sent React's per-tick countdown
+    // (`remainingSecs`) into the Rust gate as if it were the original
+    // window length. The math `elapsed >= remaining*1000` therefore fired
+    // at the halfway point of the window — a 600s code expired at ~300s.
+    // The fix is to pass the ORIGINAL window length across the wire and
+    // gate against Rust's own clock; these tests pin the helper directly.
+
+    #[test]
+    fn device_code_is_not_expired_at_halfway_with_original_window() {
+        // Issue #1010 regression pin: a 600s window must not be expired at
+        // the 300s mark. Pre-fix the wire carried the per-tick remaining
+        // seconds, so halfway through the gate was true (`elapsed 300s >=
+        // remaining 300s * 1000`); post-fix the wire carries the original
+        // 600s, so the gate stays false for the full window.
+        let started_at_ms = 1_700_000_000_000;
+        let halfway_now_ms = started_at_ms + 300_000;
+        assert!(
+            !device_code_is_expired(started_at_ms, 600, halfway_now_ms),
+            "600s window must not be expired at the 300s mark — issue #1010 regression"
+        );
+    }
+
+    #[test]
+    fn device_code_is_not_expired_one_ms_before_boundary() {
+        let started_at_ms = 1_700_000_000_000;
+        let one_ms_short_now_ms = started_at_ms + 600_000 - 1;
+        assert!(
+            !device_code_is_expired(started_at_ms, 600, one_ms_short_now_ms),
+            "599.999s into a 600s window is still fresh"
+        );
+    }
+
+    #[test]
+    fn device_code_is_expired_exactly_at_boundary() {
+        // >= is the right operator: the user should not get one final
+        // tick after the window closes. RFC 8628 §3.5 leaves the boundary
+        // choice to the client; using `>=` means the dance bails at the
+        // first call past expiry rather than burning one extra poll.
+        let started_at_ms = 1_700_000_000_000;
+        let boundary_now_ms = started_at_ms + 600_000;
+        assert!(
+            device_code_is_expired(started_at_ms, 600, boundary_now_ms),
+            "a 600s window MUST be expired at exactly the 600s mark"
+        );
+    }
+
+    #[test]
+    fn device_code_is_expired_well_past_boundary() {
+        let started_at_ms = 1_700_000_000_000;
+        let way_past_now_ms = started_at_ms + 1_000_000;
+        assert!(
+            device_code_is_expired(started_at_ms, 600, way_past_now_ms),
+            "a window 1000s past expiry must be expired"
+        );
+    }
+
+    #[test]
+    fn device_code_is_expired_handles_zero_window() {
+        // Defensive: a server returning `expires_in: 0` would mean the
+        // device code is born expired. The math holds: any non-negative
+        // `now - started >= 0` is true, so the gate fires on the first
+        // poll rather than burning a request.
+        let started_at_ms = 1_700_000_000_000;
+        assert!(device_code_is_expired(started_at_ms, 0, started_at_ms));
+    }
+
+    #[test]
+    fn device_code_is_not_expired_before_started_at() {
+        // Clock skew defense: if Rust's wall-clock is somehow behind the
+        // recorded `started_at_ms` (a client clock that ran fast and
+        // handed Rust a future timestamp), `saturating_sub` clamps to
+        // zero, so the gate stays false — the dance gets to keep polling
+        // until the wall-clock catches up rather than spuriously firing
+        // on a negative elapsed.
+        let started_at_ms = 1_700_000_000_000;
+        let before_started_now_ms = started_at_ms - 1_000;
+        assert!(
+            !device_code_is_expired(started_at_ms, 600, before_started_now_ms),
+            "negative elapsed (clock skew) must not spuriously expire the dance"
+        );
     }
 
     // ── Device Flow parsers — pinned RFC 8628 §3.5 / §6.1 contract ────────
