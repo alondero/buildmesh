@@ -8,9 +8,8 @@ import { TOAST_DEDUP_TTL_MS, TOAST_MAX, TOAST_TTL_MS, type Toast } from '../../s
 // behavior end-to-end, including the imperative wrappers used by non-React
 // callers (event listeners, store actions, naming-backend callback).
 //
-// We freeze `Date.now()` to make dedup and cap assertions deterministic.
-// Two synchronous `addToast` calls in the same test would otherwise share
-// a millisecond, which would scramble id/createdAt assertions.
+// We freeze `Date.now()` to make dedup, expiry, and cap assertions
+// deterministic. Toast identity is independent of wall-clock time.
 
 const FROZEN_NOW = 1_700_000_000_000;
 
@@ -90,26 +89,20 @@ describe('useToastStore', () => {
       expect(messages).toEqual(['msg 1', 'msg 2', `msg ${TOAST_MAX}`]);
     });
 
-    it('treats different providers as distinct toasts (no cross-provider dedup)', () => {
+    it('assigns monotonic ids to distinct toasts created in the same millisecond', () => {
       useToastStore.getState().addToast('System', 'same message');
       useToastStore.getState().addToast('GitHub', 'same message');
-      expect(useToastStore.getState().toasts).toHaveLength(2);
+
+      const [first, second] = useToastStore.getState().toasts;
+      expect(first.createdAt).toBe(FROZEN_NOW);
+      expect(second.createdAt).toBe(FROZEN_NOW);
+      expect(second.id).toBeGreaterThan(first.id);
     });
   });
 
   describe('dismissToast', () => {
     it('removes the toast with the matching id', () => {
-      // Advance time between adds so the two toasts get distinct ids —
-      // real-world callers spread adds across renders / events, but
-      // `Date.now()`-based ids collapse under synchronous back-to-back
-      // calls. That's a pre-existing limitation of the id scheme (not
-      // introduced by #1001); see the auto-dismiss interval comment for
-      // the same constraint. The functional contract being tested here
-      // is "dismiss by id removes the matching toast", which holds once
-      // ids are distinct.
-      vi.setSystemTime(FROZEN_NOW);
       useToastStore.getState().addToast('System', 'a');
-      vi.setSystemTime(FROZEN_NOW + 1);
       useToastStore.getState().addToast('GitHub', 'b');
       const [first, second] = useToastStore.getState().toasts;
 
@@ -136,10 +129,8 @@ describe('useToastStore', () => {
     it('drops toasts older than TOAST_TTL_MS', () => {
       vi.setSystemTime(FROZEN_NOW);
       useToastStore.getState().addToast('System', 'old');
-      // Different provider + 200ms gap so the two toasts have distinct ids
-      // (Date.now()-based ids collapse under synchronous back-to-back adds —
-      // see dismissToast test for the same constraint) AND so 'fresh'
-      // sits comfortably inside its own TTL window when 'old' expires.
+      // The 200ms gap keeps 'fresh' comfortably inside its own TTL window
+      // when 'old' expires.
       vi.setSystemTime(FROZEN_NOW + 200);
       useToastStore.getState().addToast('GitHub', 'fresh');
 

@@ -2757,9 +2757,10 @@ impl serde::Serialize for AutopilotRunState {
 /// hand-spawned nodes. `loop_iteration` distinguishes the mode used to spawn
 /// this run even if the mesh configuration changes while it is active;
 /// `pr_url` survives the gap between verified wrap-up and a suffix turn.
-pub fn get_autopilot_run(
-    node_id: i64,
-) -> SqlResult<Option<(i64, AutopilotRunState, i32, Option<i64>, Option<String>)>> {
+/// `(issue_number, state, attempts, loop_iteration, pr_url)` for an Autopilot-managed node.
+pub type AutopilotRun = (i64, AutopilotRunState, i32, Option<i64>, Option<String>);
+
+pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<AutopilotRun>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT issue_number, state, attempts, loop_iteration, pr_url \

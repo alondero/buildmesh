@@ -1612,7 +1612,7 @@ mod tests {
     #[test]
     fn derive_loop_status_disabled_no_rows() {
         let s = derive_loop_status(false, &[]);
-        assert_eq!(s.enabled, false);
+        assert!(!s.enabled);
         assert_eq!(s.active_iteration, None);
         assert_eq!(s.total_iterations, 0);
     }
@@ -1627,7 +1627,7 @@ mod tests {
             (2, AutopilotRunState::Merged, "2026-07-22 10:05:00".to_string()),
         ];
         let s = derive_loop_status(true, &rows);
-        assert_eq!(s.enabled, true);
+        assert!(s.enabled);
         assert_eq!(
             s.active_iteration, None,
             "completed/merged are terminal — no iteration is live"
@@ -1667,7 +1667,7 @@ mod tests {
             AutopilotRunState::Implementing,
             "2026-07-22 10:00:00".to_string(),
         )];
-        assert_eq!(derive_loop_status(false, &rows).enabled, false);
+        assert!(!derive_loop_status(false, &rows).enabled);
         assert_eq!(
             derive_loop_status(false, &rows).active_iteration,
             Some(1),
