@@ -46,6 +46,8 @@ interface ToastState {
   dismissExpired: (now: number) => void;
 }
 
+let nextToastId = 0;
+
 export const useToastStore = create<ToastState>((set) => ({
   toasts: [],
   addToast: (provider, message, severity = 'error') => {
@@ -54,13 +56,14 @@ export const useToastStore = create<ToastState>((set) => ({
     // snapshot — important under React 19 StrictMode's double-invocation
     // and for any future caller that calls `addToast` twice in the same
     // tick (the second call would otherwise race against the first). `now`
-    // is computed once above so the incoming id, createdAt, and dedup
-    // comparison all reference the same timestamp.
+    // is computed once above so createdAt and the dedup comparison reference
+    // the same timestamp. Identity uses a monotonic counter because multiple
+    // calls can share the same millisecond.
     set((state) => ({
       toasts: applyToastCap(
         dedupToasts(
           state.toasts,
-          { id: now, provider, message, createdAt: now, severity },
+          { id: ++nextToastId, provider, message, createdAt: now, severity },
           now,
           TOAST_DEDUP_TTL_MS,
         ),

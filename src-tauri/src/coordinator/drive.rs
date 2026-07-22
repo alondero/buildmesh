@@ -635,6 +635,7 @@ mod tests {
         /// When true, `claim` keeps returning `InProgress` for any
         /// pre-existing `pending` row even after time passes — used by the
         /// wait-timeout test to model a peer that never finalizes.
+        #[allow(dead_code)]
         hold_pending: bool,
         /// When true, `claim` always errors with `LedgerUnavailable` —
         /// models a DB read failure (the fail-safe path).
