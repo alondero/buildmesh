@@ -490,6 +490,12 @@ pub fn run() {
             commands::mesh_properties::update_mesh_use_worktree,
             commands::mesh_properties::update_mesh_sandbox,
             commands::mesh_properties::update_mesh_autopilot,
+            // Looping Autopilot config (wayfinder #990 / ticket #991).
+            // The dedicated Autopilot Probe UI tab (#994) flips the mode
+            // and edits the prompt / cap inputs through this command; the
+            // command validates the typed inputs and writes the six
+            // `loop_*` columns atomically.
+            commands::mesh_properties::update_mesh_loop_config,
             commands::mesh_properties::update_mesh_pool_size,
             commands::mesh_properties::get_mesh_pool_count,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)

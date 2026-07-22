@@ -229,6 +229,84 @@ pub async fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), Stri
         .map_err(|e| format!("failed to update sandbox: {}", e))
 }
 
+/// Persist a mesh's Looping Autopilot configuration (wayfinder #990 /
+/// ticket #991). The poller (ticket #992) reads `mode` at startup to
+/// decide which spawn strategy to use; the dedicated typed command
+/// mirrors `update_mesh_autopilot` (issue #481) so validation lives
+/// here, not in the DB helper. The zero-rows guard surfaces a "mesh
+/// deleted between load & save" race as an error rather than a silent
+/// success — same contract as every other `update_mesh_*` command.
+///
+/// Validation:
+/// - `mode` is the typed `AutopilotMode` enum (no free-form strings).
+/// - `max_iterations` is `Option<i32>`: `None` = continuous, `Some(n)`
+///   must have `n >= 1` (a cap of 0 would stop the loop on the very
+///   first iteration — almost certainly a user mistake).
+/// - `interval_seconds` and `consecutive_failures` must be `>= 0` —
+///   negative values are nonsensical. No upper bound: the spec defines
+///   the defaults (`0`) but no max, and any value the user picks is a
+///   deliberate config choice.
+#[tauri::command]
+pub async fn update_mesh_loop_config(
+    mesh_id: i64,
+    mode: crate::models::AutopilotMode,
+    initial_prompt: Option<String>,
+    suffix_prompt: Option<String>,
+    max_iterations: Option<i32>,
+    interval_seconds: i32,
+    consecutive_failures: i32,
+) -> Result<(), String> {
+    // Trim + collapse empty / whitespace-only prompts to NULL — same
+    // `clean` shape as `update_mesh_autopilot`, so a blank textfield
+    // writes `None` rather than the empty string and the poller's
+    // `Some/None` branching on the read side mirrors what the user
+    // typed at the IPC edge.
+    let clean = |v: Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let initial_prompt = clean(initial_prompt);
+    let suffix_prompt = clean(suffix_prompt);
+
+    if let Some(n) = max_iterations {
+        if n < 1 {
+            return Err(format!(
+                "invalid loop_max_iterations {}: must be None (continuous) or >= 1",
+                n
+            ));
+        }
+    }
+    if interval_seconds < 0 {
+        return Err(format!(
+            "invalid loop_interval_seconds {}: must be >= 0",
+            interval_seconds
+        ));
+    }
+    if consecutive_failures < 0 {
+        return Err(format!(
+            "invalid loop_consecutive_failures {}: must be >= 0",
+            consecutive_failures
+        ));
+    }
+
+    let rows = db::set_mesh_loop_config(
+        mesh_id,
+        mode,
+        initial_prompt.as_deref(),
+        suffix_prompt.as_deref(),
+        max_iterations,
+        interval_seconds,
+        consecutive_failures,
+    )
+    .map_err(|e| format!("failed to update loop config: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    Ok(())
+}
+
 /// Persist a mesh's Autopilot Policy (issue #481, PRD #480) in one write.
 /// Dedicated typed command (not the string-only `update_mesh_column`
 /// catch-all) so the enabled flag stays a real `bool`, the concurrency
