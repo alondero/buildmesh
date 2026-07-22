@@ -269,6 +269,15 @@ export default function TerminalScreen({
     }
     wsRef.current = ws;
 
+    // A single socket's failure must charge the backoff counter exactly
+    // once. Browsers fire BOTH `error` and `close` for the same failure
+    // (in that order). Without deduping here, two events from one dropped
+    // socket increment the counter twice, schedule overlapping timers that
+    // race each other, and burn through MAX_RECONNECT at twice the rate the
+    // user expects — exactly the "fails while backgrounded and gives up"
+    // symptom from issue #806.
+    let reconnectScheduled = false;
+
     ws.onopen = () => {
       reconnectAttemptRef.current = 0;
       setReconnectIn(null);
@@ -292,11 +301,15 @@ export default function TerminalScreen({
     };
 
     ws.onclose = () => {
-      if (!closedByUserRef.current) scheduleReconnect();
+      if (closedByUserRef.current || reconnectScheduled) return;
+      reconnectScheduled = true;
+      scheduleReconnect();
     };
 
     ws.onerror = () => {
-      if (!closedByUserRef.current) scheduleReconnect();
+      if (closedByUserRef.current || reconnectScheduled) return;
+      reconnectScheduled = true;
+      scheduleReconnect();
     };
   }
 
