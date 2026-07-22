@@ -40,6 +40,13 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.OPEN;
     this.onopen?.();
   }
+  /// Standalone `onerror` — does NOT flip readyState, mirroring how a real
+  /// browser fires an error event for an opening or live socket before the
+  /// accompanying close. The dedup tests use this to confirm the reconnect
+  /// counter only ticks once when both events arrive for one failure.
+  simulateError() {
+    this.onerror?.();
+  }
   simulateDrop() {
     this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.();
@@ -134,5 +141,111 @@ describe("TerminalScreen reconnect on foreground/online", () => {
     expect(terminalWsUrl).toHaveBeenCalledTimes(1);
 
     utils.unmount();
+  });
+
+  // Regression coverage: a real browser fires BOTH `error` AND `close` for a
+  // single socket failure (in that order). The current code subscribes to
+  // both independently, so without dedupe the counter ticks twice per
+  // failure and the budget is exhausted 2x as fast as the user expects —
+  // which is exactly how a phone left backgrounded for a minute could
+  // land on the "Connection lost." sentinel.
+  it("ticks the counter once when onerror and onclose both fire for one failure", async () => {
+    const utils = await mountAndConnect();
+
+    // Error first (typical browser ordering), then close.
+    act(() => sockets[0].simulateError());
+    act(() => sockets[0].simulateDrop());
+
+    // The overlay should show the 1st-attempt delay (1s), not the 2nd
+    // (2s) — proves only one scheduleReconnect fired.
+    await waitFor(() => {
+      const overlay = document.querySelector(
+        '[data-testid="reconnect-overlay"]',
+      );
+      expect(overlay).toBeTruthy();
+      expect(overlay!.textContent).toContain("reconnecting in 1s");
+    });
+
+    utils.unmount();
+  });
+
+  it("survives multiple back-to-back background→foreground cycles", async () => {
+    const utils = await mountAndConnect();
+    expect(sockets.length).toBe(1);
+
+    // Three cycles, each: drop the current socket, then foreground.
+    // The listener must keep firing fresh reconnects, not bleed across
+    // cycles or get stuck after the first round-trip.
+    for (let i = 0; i < 3; i++) {
+      act(() => {
+        sockets[sockets.length - 1].simulateDrop();
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await waitFor(() => expect(sockets.length).toBe(i + 2));
+    }
+    // Three new sockets; the original is sockets[0].
+    expect(sockets.length).toBe(4);
+
+    utils.unmount();
+  });
+
+  it("resets the backoff from the 'gave up' state on foreground", async () => {
+    // Mount with real timers, then switch to fake so we can drive the
+    // 1/2/4/8/16s backoff forward without losing 31s of wall-clock.
+    const utils = await mountAndConnect();
+    vi.useFakeTimers();
+    try {
+      // Drive 5 reconnect cycles (no intermediate opens), so the counter
+      // ticks 0 → 5. Each drop is on the still-CONNECTING socket that the
+      // previous timer fired. act() flushes the scheduleReconnect state
+      // update synchronously, so no waitFor is needed for assertions.
+      const delays = [1000, 2000, 4000, 8000, 16000];
+      for (const ms of delays) {
+        await act(async () => {
+          sockets[sockets.length - 1].simulateDrop();
+          await vi.advanceTimersByTimeAsync(ms);
+        });
+      }
+      expect(sockets.length).toBe(6);
+
+      // One more drop pushes the counter to 5 → scheduleReconnect's >= check
+      // fires and we land on the sentinel "gave up" UI state.
+      act(() => sockets[sockets.length - 1].simulateDrop());
+      const overlay = document.querySelector(
+        '[data-testid="reconnect-overlay"]',
+      );
+      expect(overlay).toBeTruthy();
+      expect(overlay!.textContent).toContain("Connection lost.");
+
+      // Foreground must reset + reconnect immediately.
+      const before = sockets.length;
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      expect(sockets.length).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+    utils.unmount();
+  });
+
+  it("removes the foreground/online listeners on unmount", async () => {
+    const utils = await mountAndConnect();
+    const initialCalls = (terminalWsUrl as ReturnType<typeof vi.fn>).mock
+      .calls.length;
+
+    utils.unmount();
+
+    // Listeners removed by the cleanup — neither event should drive a
+    // reconnect on an unmounted screen.
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    // Allow any stray microtask to flush.
+    await Promise.resolve();
+    expect(terminalWsUrl).toHaveBeenCalledTimes(initialCalls);
   });
 });
