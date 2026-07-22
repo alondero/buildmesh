@@ -453,7 +453,7 @@ pub(crate) struct OpenCodeTokenResponse {
 /// Struct variants are required: `serde`'s `#[serde(tag = "…")]` (a.k.a.
 /// internally-tagged) rejects tuple variants because it needs a place to put the
 /// discriminator. Plan-agent validation caught this on the first draft.
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "OpenCodeDeviceCodeStatus.ts")]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum OpenCodeDeviceCodeStatus {
@@ -1098,5 +1098,82 @@ mod tests {
         let json = r#"{"orgs": []}"#;
         let parsed = parse_workspaces_response(json).unwrap();
         assert!(parsed.is_empty());
+    }
+
+    // Pins the IPC wire contract (issue #966). serde internally-tagged
+    // enums silently corrupt when the discriminator (`"kind"`) or the
+    // rename rules (`rename_all = "snake_case"`) drift; the only consumer,
+    // `OpenCodeAccountCard.reducer.ts`, switches on `status.kind`, so a
+    // drift would only surface at the React layer.
+    #[test]
+    fn opencode_device_code_status_serde_shape() {
+        let token = OpenCodeTokenResponse {
+            access_token: "oc_sk_test".to_string(),
+            refresh_token: "rt_test".to_string(),
+            expires_in_secs: 3600,
+            workspace_id: "wrk_q".to_string(),
+            server_id:
+                "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d".to_string(),
+        };
+        let cases: Vec<(OpenCodeDeviceCodeStatus, serde_json::Value)> = vec![
+            (
+                OpenCodeDeviceCodeStatus::Pending,
+                serde_json::json!({ "kind": "pending" }),
+            ),
+            (
+                OpenCodeDeviceCodeStatus::SlowDown { new_interval_secs: 10 },
+                serde_json::json!({ "kind": "slow_down", "new_interval_secs": 10 }),
+            ),
+            (
+                OpenCodeDeviceCodeStatus::Success { token: token.clone() },
+                serde_json::json!({
+                    "kind": "success",
+                    "token": {
+                        "access_token": "oc_sk_test",
+                        "refresh_token": "rt_test",
+                        "expires_in_secs": 3600,
+                        "workspace_id": "wrk_q",
+                        "server_id":
+                            "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d",
+                    }
+                }),
+            ),
+            (
+                OpenCodeDeviceCodeStatus::CodeExpired,
+                serde_json::json!({ "kind": "code_expired" }),
+            ),
+            (
+                OpenCodeDeviceCodeStatus::AccessDenied,
+                serde_json::json!({ "kind": "access_denied" }),
+            ),
+            (
+                OpenCodeDeviceCodeStatus::Error {
+                    message: "DNS resolution failed".to_string(),
+                },
+                serde_json::json!({ "kind": "error", "message": "DNS resolution failed" }),
+            ),
+        ];
+
+        for (variant, expected_json) in cases {
+            let serialized =
+                serde_json::to_value(&variant).expect("serialize must not fail");
+            assert_eq!(
+                serialized, expected_json,
+                "wire shape drifted for {variant:?}"
+            );
+
+            // Re-serialise the deserialised value so any drift between the
+            // Rust representation and the wire JSON surfaces here rather
+            // than at the React reducer.
+            let rehydrated: OpenCodeDeviceCodeStatus =
+                serde_json::from_value(expected_json.clone())
+                    .expect("deserialize must not fail");
+            let reserialized =
+                serde_json::to_value(&rehydrated).expect("re-serialize must not fail");
+            assert_eq!(
+                reserialized, expected_json,
+                "round-trip mismatch for {variant:?}"
+            );
+        }
     }
 }
