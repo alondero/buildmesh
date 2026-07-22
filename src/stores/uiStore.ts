@@ -49,8 +49,10 @@ function persistViewMode(mode: ViewMode): void {
 // generated wire enum) because it's a pure UI concern — no backend serialises
 // it. `usage` was added in issue #601 as the dedicated glanceable surface
 // for Usage Meters (subscription quota + cash balance), reached from a
-// meter icon in the sidebar header.
-export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
+// meter icon in the sidebar header. `autopilot` was added in wayfinder
+// #990 ticket #994 as the dedicated configure + monitor surface for the
+// Issue-Driven and Looping Autopilot modes.
+export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'autopilot' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
 
 // Which baseline a single-file diff is taken against:
 //   'head' — uncommitted working-tree changes vs HEAD (Project Files tab,

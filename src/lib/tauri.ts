@@ -5,6 +5,7 @@ import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { AiContextStatus } from '../types/generated/AiContextStatus';
 import type { AppPreferences } from '../types/generated/AppPreferences';
+import type { AutopilotMode } from '../types/generated/AutopilotMode';
 import type { AutopilotRunStateRow } from '../types/generated/AutopilotRunState';
 import type { BillingBalance } from '../types/generated/BillingBalance';
 import type { BillingMode } from '../types/generated/BillingMode';
@@ -268,6 +269,34 @@ export const updateMeshAutopilot = (
     concurrencyLimit,
     provider,
     actionOnSuccess,
+  });
+
+/** Persist a mesh's Looping Autopilot config in one write (wayfinder #990,
+ *  ticket #991 backend / #994 UI). Dedicated typed command like
+ *  `updateMeshAutopilot` — the backend trims blank prompts to NULL and
+ *  range-checks `maxIterations >= 1 when Some`,
+ *  `intervalSeconds >= 0`, `consecutiveFailures >= 0`; the six
+ *  `loop_*` + `autopilot_mode` columns land atomically so the loop
+ *  scheduler (#992) reads them as one config. The mode toggle
+ *  (Issue-Driven vs Looping) and every numeric/prompt control funnel
+ *  through this command — there is no per-field write path for loops. */
+export const updateMeshLoopConfig = (
+  meshId: number,
+  mode: AutopilotMode,
+  initialPrompt: string | null,
+  suffixPrompt: string | null,
+  maxIterations: number | null,
+  intervalSeconds: number,
+  consecutiveFailures: number
+) =>
+  _invoke<void>('update_mesh_loop_config', {
+    meshId,
+    mode,
+    initialPrompt,
+    suffixPrompt,
+    maxIterations,
+    intervalSeconds,
+    consecutiveFailures,
   });
 
 /** Per-mesh target for the pre-spawn Worktree Pool

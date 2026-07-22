@@ -157,6 +157,21 @@ export function CompassIcon({ className }: IconProps) {
   );
 }
 
+/** Lucide `repeat` — Autopilot (wayfinder #990 ticket #994). Reads as the
+ *  loop the destination doc names for this tab; also advertises the
+ *  generic Autopilot surface that the mode toggle inside the tab
+ *  switches between issue-driven and looping. */
+export function AutopilotIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="m17 2 4 4-4 4" />
+      <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+      <path d="m7 22-4-4 4-4" />
+      <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+    </Svg>
+  );
+}
+
 /** Lucide `search` — "No active agent node" shell empty state. */
 export function SearchIcon({ className }: IconProps) {
   return (

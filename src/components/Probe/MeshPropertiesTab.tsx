@@ -54,6 +54,7 @@ import {
 } from '../../lib/projectPresets';
 import { LoadingState } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
+import { Field } from './Field';
 
 // Autopilot Policy (issue #481, PRD #480) — mirrors the backend's
 // `update_mesh_autopilot` validation: 1..=8 concurrency, known actions.
@@ -893,30 +894,5 @@ sandbox: config.sandbox,
         />
       )}
     </ProbeTabBody>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  htmlFor: string;
-  hint?: string;
-  children: React.ReactNode;
-}
-
-/**
- * A small wrapper that standardises the label/control rhythm. Kept local
- * because it only ever appears inside this tab. The `htmlFor`/`id` wiring
- * is what lets `getByLabelText` resolve the form control in tests — and
- * what lets click-to-focus the label work for keyboard users.
- */
-function Field({ label, htmlFor, hint, children }: FieldProps) {
-  return (
-    <div>
-      <label htmlFor={htmlFor} className="block text-xs text-text-muted mb-1">
-        {label}
-        {hint && <span className="text-text-muted/60"> ({hint})</span>}
-      </label>
-      {children}
-    </div>
   );
 }
