@@ -141,6 +141,10 @@ _Avoid_: Auto-worker, event listener
 **Autopilot Policy**:
 The set of configuration settings (trigger labels, concurrency limits, provider overrides, and success actions) that govern a Mesh's Autopilot behavior.
 
+**Looping Autopilot**:
+A per-Mesh Autopilot mode (selected via `autopilot_mode` = `"looping"`, set apart from `"issue_driven"`) that runs a single sequential Agent Node per loop iteration, executes the configured wrap-up sequence (session `finish.md` — verification + commit + push + open a draft PR if enabled), optionally injects a `loop_suffix_prompt` post-verification as a second prompt turn, then pauses `loop_interval_seconds` before the next iteration. Configuration lives on six nullable columns on the `meshes` row plus the `autopilot_mode` discriminator (wayfinder #990 ticket #991) and is edited through the dedicated **Autopilot** Probe tab (ticket #994); runtime state (Active / iteration N, Paused, Idle, Stopped) lives in process state until the loop scheduler (ticket #992) ships. Looping iterations respect the mesh's `use_worktree` setting; issue-driven autopilot always runs in a worktree (its poller overrides `use_worktree_override = Some(true)` — see `services/autopilot.rs`).
+_Avoid_: Sequential autopilot, retry loop, cron autopilot
+
 **Node Digest**:
 A coordinator-facing read summary of a single Agent Node answering "what's going on, and does it need feedback?". Layered: an always-available spine from Buildmesh's own DB (lifecycle `status`, "needs feedback" = `awaiting_input`) enriched, for the Claude Code provider family only, with semantic content read from the agent's on-disk JSONL transcript. Non-supporting providers, or a transcript that fails to parse, degrade to the spine with the enrichment explicitly flagged unavailable (never silently omitted). The rendered terminal/TUI is deliberately **not** a digest source.
 _Avoid_: Node summary, status payload, snapshot

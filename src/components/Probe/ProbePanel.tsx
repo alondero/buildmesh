@@ -44,6 +44,7 @@ import { ProjectFilesTab } from './ProjectFilesTab';
 import { AgentChangesTab } from './AgentChangesTab';
 import { MeshPropertiesTab } from './MeshPropertiesTab';
 import { WorktreeManagerTab } from './WorktreeManagerTab';
+import { AutopilotProbeTab } from './AutopilotProbeTab';
 import { GitIssuesTab } from './GitIssuesTab';
 import { GitPullRequestsTab } from './GitPullRequestsTab';
 import { ArchivedNodesTab } from './ArchivedNodesTab';
@@ -51,6 +52,7 @@ import { ScratchpadTab } from './ScratchpadTab';
 import { UsageTab } from './UsageTab';
 import {
   ArchiveIcon,
+  AutopilotIcon,
   CompassIcon,
   FilesIcon,
   IssuesIcon,
@@ -88,6 +90,12 @@ const PROBE_TABS: ProbeTabDef[] = [
   { tab: 'usage', icon: UsageIcon, label: 'Usage', tooltip: 'Provider usage meters' },
   { tab: 'worktrees', icon: WorktreesIcon, label: 'Worktree Manager' },
   { tab: 'properties', icon: PropertiesIcon, label: 'Mesh Properties' },
+  // Issue-driven and looping autopilot policy + status (wayfinder #990,
+  // ticket #994). Sits next to Mesh Properties so the two config tabs
+  // cluster visually — issue-driven policy still lives in Mesh Properties
+  // today, this tab is the dedicated surface for the mode toggle and the
+  // looping config.
+  { tab: 'autopilot', icon: AutopilotIcon, label: 'Autopilot' },
   { tab: 'issues', icon: IssuesIcon, label: 'Git Issues' },
   { tab: 'pulls', icon: PullsIcon, label: 'Pull Requests' },
   { tab: 'sessions', icon: ArchiveIcon, label: 'Archive', tooltip: 'Archived Nodes' },
@@ -362,6 +370,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
   if (tab === 'properties') return <MeshPropertiesTab />;
+  if (tab === 'autopilot') return <AutopilotProbeTab />;
   if (tab === 'worktrees') return <WorktreeManagerTab />;
   if (tab === 'issues') return <GitIssuesTab />;
   if (tab === 'pulls') return <GitPullRequestsTab />;
