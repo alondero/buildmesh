@@ -2297,6 +2297,21 @@ pub fn set_mesh_autopilot(
     )
 }
 
+/// Toggle ONLY the `autopilot_enabled` flag for a mesh — the Looping
+/// Autopilot Start/Stop control (ticket #994). Deliberately narrow: unlike
+/// [`set_mesh_autopilot`] (which rewrites the five issue-driven policy
+/// columns), this writes a single column so the looping Start/Stop buttons
+/// can't clobber a mesh's issue-driven trigger label / concurrency / provider
+/// config. Returns rows updated so the command layer can surface "mesh not
+/// found" (same zero-rows contract as `set_mesh_autopilot`).
+pub fn set_mesh_autopilot_enabled(id: i64, enabled: bool) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET autopilot_enabled = ?1 WHERE id = ?2",
+        params![if enabled { 1 } else { 0 }, id],
+    )
+}
+
 /// Persist the full Looping Autopilot configuration for a mesh in one write
 /// (wayfinder #990 / ticket #991). Companion to `set_mesh_autopilot` — the
 /// poller (ticket #992) reads `autopilot_mode` to decide which spawn strategy

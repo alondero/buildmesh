@@ -572,6 +572,60 @@ pub(crate) fn derive_loop_history(rows: &[db::LoopRunSnapshot]) -> LoopHistory {
     }
 }
 
+/// Runtime status of a mesh's Looping Autopilot, surfaced to the Autopilot
+/// Probe tab's status badge (ticket #994). Derived each fetch from the mesh's
+/// `autopilot_enabled` flag + the loop-iteration ledger — there is no separate
+/// runtime scheduler state to read, because the loop is DB-config-driven (see
+/// the module docs). The pure [`derive_loop_status`] builds it so the mapping
+/// is unit-testable without a DB or clock.
+///
+/// Generated to `src/types/generated/LoopStatus.ts`; the TS half maps it to
+/// the tab's `LoopStatus` discriminated union (Active N / Idle / Stopped).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "LoopStatus.ts")]
+pub struct LoopStatusDto {
+    /// The mesh's `autopilot_enabled` flag. `false` ⇒ the poller skips this
+    /// mesh entirely (badge shows Stopped).
+    pub enabled: bool,
+    /// The 1-based iteration number of the currently-running loop node
+    /// (`implementing`/`finishing`), or `None` when no iteration is live
+    /// (badge shows Idle when `enabled`, Stopped when not).
+    #[ts(as = "Option<i32>")]
+    pub active_iteration: Option<i64>,
+    /// The highest loop iteration number spawned so far (`0` when none) —
+    /// informational count for the badge / tooltip.
+    #[ts(as = "i32")]
+    pub total_iterations: i64,
+}
+
+/// Pure derivation of [`LoopStatusDto`] from the enabled flag + the
+/// loop-iteration ledger rows (ticket #994). No DB, no clock — mirrors the
+/// [`derive_loop_history`] shape so it unit-tests deterministically. Both
+/// derived fields are computed order-independently (via `max`, not by
+/// assuming the caller's slice is sorted), so the pure function honours its
+/// contract for any slice: `active_iteration` is the highest-numbered row
+/// still in a non-terminal state (`Implementing`/`Finishing`) — a sequential
+/// loop has at most one live iteration; `total_iterations` is the largest
+/// iteration number seen (`0` when empty).
+pub(crate) fn derive_loop_status(enabled: bool, rows: &[db::LoopRunSnapshot]) -> LoopStatusDto {
+    let active_iteration = rows
+        .iter()
+        .filter(|(_, state, _)| {
+            matches!(
+                state,
+                AutopilotRunState::Implementing | AutopilotRunState::Finishing
+            )
+        })
+        .map(|(iteration, _, _)| *iteration)
+        .max();
+    let total_iterations = rows.iter().map(|(i, _, _)| *i).max().unwrap_or(0);
+    LoopStatusDto {
+        enabled,
+        active_iteration,
+        total_iterations,
+    }
+}
+
 /// Best-effort parser for SQLite `datetime('now')` output
 /// (`YYYY-MM-DD HH:MM:SS`). Returns `None` for unparseable input so
 /// the poller can degrade gracefully instead of failing a pass.
@@ -1527,6 +1581,96 @@ mod tests {
         assert_eq!(
             h.trailing_failures, 0,
             "Merged is a terminal success — resets the trailing-failure count"
+        );
+    }
+
+    // -- derive_loop_status (ticket #994) ------------------------------------
+
+    /// Disabled mesh, no iterations → Stopped: `enabled = false`, no active
+    /// iteration, zero total. The tab maps this to the `Stopped` badge.
+    #[test]
+    fn derive_loop_status_disabled_no_rows() {
+        let s = derive_loop_status(false, &[]);
+        assert_eq!(s.enabled, false);
+        assert_eq!(s.active_iteration, None);
+        assert_eq!(s.total_iterations, 0);
+    }
+
+    /// Enabled with only terminal rows → Idle: no live iteration, but the
+    /// total reflects the ledger. The tab maps `enabled && active == None`
+    /// to the `Idle` badge (loop on, between iterations).
+    #[test]
+    fn derive_loop_status_enabled_all_terminal_is_idle() {
+        let rows: Vec<db::LoopRunSnapshot> = vec![
+            (1, AutopilotRunState::Completed, "2026-07-22 10:00:00".to_string()),
+            (2, AutopilotRunState::Merged, "2026-07-22 10:05:00".to_string()),
+        ];
+        let s = derive_loop_status(true, &rows);
+        assert_eq!(s.enabled, true);
+        assert_eq!(
+            s.active_iteration, None,
+            "completed/merged are terminal — no iteration is live"
+        );
+        assert_eq!(s.total_iterations, 2);
+    }
+
+    /// A live `Implementing` row → Active N: the newest non-terminal
+    /// iteration is surfaced as `active_iteration`. `Finishing` counts too.
+    #[test]
+    fn derive_loop_status_active_iteration_from_live_row() {
+        let rows: Vec<db::LoopRunSnapshot> = vec![
+            (1, AutopilotRunState::Completed, "2026-07-22 10:00:00".to_string()),
+            (2, AutopilotRunState::Implementing, "2026-07-22 10:05:00".to_string()),
+        ];
+        let s = derive_loop_status(true, &rows);
+        assert_eq!(s.active_iteration, Some(2), "the implementing row is live");
+        assert_eq!(s.total_iterations, 2);
+
+        // `Finishing` is also a live (non-terminal) state.
+        let finishing: Vec<db::LoopRunSnapshot> = vec![(
+            3,
+            AutopilotRunState::Finishing,
+            "2026-07-22 10:10:00".to_string(),
+        )];
+        assert_eq!(derive_loop_status(true, &finishing).active_iteration, Some(3));
+    }
+
+    /// `enabled` is reported verbatim even while an iteration is live — the
+    /// flag and the run state are independent projections (a Stop during a
+    /// running iteration reads `enabled = false` with an active iteration
+    /// that finishes on its own).
+    #[test]
+    fn derive_loop_status_reports_enabled_flag_verbatim() {
+        let rows: Vec<db::LoopRunSnapshot> = vec![(
+            1,
+            AutopilotRunState::Implementing,
+            "2026-07-22 10:00:00".to_string(),
+        )];
+        assert_eq!(derive_loop_status(false, &rows).enabled, false);
+        assert_eq!(
+            derive_loop_status(false, &rows).active_iteration,
+            Some(1),
+            "a running iteration is still live even after the mesh is disabled"
+        );
+    }
+
+    /// The pure function must not assume the caller sorted the slice: both
+    /// derived fields use `max`, not the last element. An out-of-order slice
+    /// still yields the highest iteration number (`total`) and the
+    /// highest-numbered live row (`active`).
+    #[test]
+    fn derive_loop_status_is_order_independent() {
+        let rows: Vec<db::LoopRunSnapshot> = vec![
+            (3, AutopilotRunState::Completed, "2026-07-22 10:10:00".to_string()),
+            (1, AutopilotRunState::Completed, "2026-07-22 10:00:00".to_string()),
+            (2, AutopilotRunState::Implementing, "2026-07-22 10:05:00".to_string()),
+        ];
+        let s = derive_loop_status(true, &rows);
+        assert_eq!(s.total_iterations, 3, "max iteration, not the last slice element");
+        assert_eq!(
+            s.active_iteration,
+            Some(2),
+            "the live row's iteration, regardless of slice position"
         );
     }
 

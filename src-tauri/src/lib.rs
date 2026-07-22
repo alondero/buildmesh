@@ -496,6 +496,12 @@ pub fn run() {
             // command validates the typed inputs and writes the six
             // `loop_*` columns atomically.
             commands::mesh_properties::update_mesh_loop_config,
+            // Looping Autopilot Start/Stop + status (ticket #994). The
+            // Start/Stop buttons flip only `autopilot_enabled` (the poller's
+            // on-switch for a Looping mesh); `get_loop_status` projects the
+            // enabled flag + loop-iteration ledger into the tab's status badge.
+            commands::mesh_properties::set_mesh_autopilot_enabled,
+            commands::mesh_properties::get_loop_status,
             commands::mesh_properties::update_mesh_pool_size,
             commands::mesh_properties::get_mesh_pool_count,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
