@@ -48,6 +48,14 @@ import type { RestoreResult } from '../types/generated/RestoreResult';
 import type { UsageWindow } from '../types/generated/UsageWindow';
 import type { WorktreeInfo } from '../types/generated/WorktreeInfo';
 import type { WorktreeCloseSafety } from './worktreeClose';
+import {
+  deleteDefaultProviderPromise,
+  getDefaultProviderPromise,
+  getProviderListPromise,
+  resetProviderCachesForTests,
+  setDefaultProviderPromise,
+  setProviderListPromise,
+} from './providerCache';
 
 /**
  * Central IPC chokepoint (issue #386). Every wrapper below calls through
@@ -178,22 +186,15 @@ export const updateMeshPositions = (updates: [number, number][]) =>
 export const updateMeshName = (meshId: number, name: string) =>
   _invoke('update_mesh_name', { meshId, name });
 
-// Module-level memoisation for stable, scope-bounded reads (issue #405).
-// `listProviders` is cached for the process lifetime; `getDefaultProvider`
-// is cached per mesh. A rejected promise is evicted so the next caller
-// retries rather than inheriting a permanently-failed read. See
-// `tests/unit/tauri-provider-cache.test.ts` for the contract — concurrent
-// callers de-dupe onto the in-flight promise, and a rejection evicts the
-// slot for that mesh / for the global list.
-let providerListPromise: Promise<ProviderInfo[]> | null = null;
-const defaultProviderByMesh = new Map<number, Promise<string>>();
+// Provider-read memoisation lives in `providerCache.ts` so the global Vitest
+// fixture can reset it even when a test fully mocks this public IPC module.
 
 export const getDefaultProvider = (meshId: number): Promise<string> => {
-  let p = defaultProviderByMesh.get(meshId);
+  let p = getDefaultProviderPromise(meshId);
   if (!p) {
     p = _invoke<string>('get_default_provider', { meshId });
-    p.catch(() => { defaultProviderByMesh.delete(meshId); });
-    defaultProviderByMesh.set(meshId, p);
+    p.catch(() => { deleteDefaultProviderPromise(meshId); });
+    setDefaultProviderPromise(meshId, p);
   }
   return p;
 };
@@ -722,11 +723,13 @@ export const createAiContextPortabilityPr = (meshId: number) =>
   _invoke<string>('create_ai_context_portability_pr', { meshId });
 
 export const listProviders = (): Promise<ProviderInfo[]> => {
-  if (!providerListPromise) {
-    providerListPromise = _invoke<ProviderInfo[]>('list_providers');
-    providerListPromise.catch(() => { providerListPromise = null; });
+  let promise = getProviderListPromise();
+  if (!promise) {
+    promise = _invoke<ProviderInfo[]>('list_providers');
+    promise.catch(() => { setProviderListPromise(null); });
+    setProviderListPromise(promise);
   }
-  return providerListPromise;
+  return promise;
 };
 
 /** Provider UI metadata for the agent picker — generated from the Rust struct
@@ -850,7 +853,7 @@ export const setHarnessOrder = async (order: string[]) => {
   try {
     return await _invoke('set_harness_order', { order });
   } finally {
-    providerListPromise = null;
+    setProviderListPromise(null);
   }
 };
 
@@ -873,7 +876,7 @@ export const setProxiedProviderOrder = async (
       providerIds,
     });
   } finally {
-    providerListPromise = null;
+    setProviderListPromise(null);
   }
 };
 
@@ -897,7 +900,7 @@ export const upsertProviderAccount = async (account: ProviderAccount) => {
     // AFTER the write resolves, not before: a concurrent listProviders() during
     // the in-flight write would otherwise repopulate the cache with the pre-add
     // catalogue and leave the new provider missing until the next bust (#534).
-    providerListPromise = null;
+    setProviderListPromise(null);
   }
 };
 
@@ -907,7 +910,7 @@ export const removeProviderAccount = async (id: string) => {
   } finally {
     // Removing a custom account drops its paired harness profile — same
     // bust-after-resolve reasoning as the upsert above (#534).
-    providerListPromise = null;
+    setProviderListPromise(null);
   }
 };
 
@@ -943,7 +946,7 @@ export const attachProxiedProvider = async (
   try {
     return await _invoke('attach_proxied_provider', { harnessId, providerId, apiKey });
   } finally {
-    providerListPromise = null;
+    setProviderListPromise(null);
   }
 };
 
@@ -955,7 +958,7 @@ export const removeProviderPairing = async (
   try {
     return await _invoke('remove_provider_pairing', { harnessId, providerId });
   } finally {
-    providerListPromise = null;
+    setProviderListPromise(null);
   }
 };
 
@@ -1117,6 +1120,5 @@ export const getAppIdentifier = () =>
 /** Test-only: clear the module-level provider caches between cases. Exported
  *  with a leading-underscore name so accidental production use is loud. */
 export function __resetProviderCachesForTests(): void {
-  providerListPromise = null;
-  defaultProviderByMesh.clear();
+  resetProviderCachesForTests();
 }
