@@ -1013,13 +1013,17 @@ export const startOpencodeDeviceFlowConsole = () =>
 export const pollOpencodeDeviceToken = (
   deviceCode: string,
   currentIntervalSecs: number,
-  expiresInSecs: number,
+  // Renamed from `expiresInSecs` for issue #1010: this is the ORIGINAL
+  // window length captured at dance-start, NOT a per-tick countdown.
+  // The Rust gate `now_ms - started_at_ms >= original_expires_in_secs*1000`
+  // must stay monotonic across the full window.
+  originalExpiresInSecs: number,
   startedAtMs: number,
 ) =>
   _invoke<OpenCodeDeviceCodeStatus>('poll_opencode_device_token', {
     deviceCode,
     currentIntervalSecs,
-    expiresInSecs,
+    originalExpiresInSecs,
     startedAtMs,
   });
 

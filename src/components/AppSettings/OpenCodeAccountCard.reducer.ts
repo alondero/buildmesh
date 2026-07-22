@@ -36,6 +36,12 @@ export type State =
       verificationUri: string;
       intervalSecs: number;
       expiresAtMs: number;
+      /** Immutable window length captured at `start_device_flow_console`
+       *  time. The polling IPC sends this verbatim each tick — NOT a
+       *  per-tick countdown — so the Rust gate stays monotonic across the
+       *  full window. Pre-fix (#1010) the field carried a countdown that
+       *  caused the gate to fire at the halfway point. */
+      originalExpiresInSecs: number;
       startedAtMs: number;
     }
   | {
@@ -54,7 +60,11 @@ export type Action =
       userCode: string;
       verificationUri: string;
       intervalSecs: number;
-      expiresInSecs: number;
+      /** Renamed from `expiresInSecs` for issue #1010: this is the
+       *  ORIGINAL window length captured at dance-start, not a per-tick
+       *  countdown. The reducer stores it verbatim and the IPC sends it
+       *  verbatim each tick. */
+      originalExpiresInSecs: number;
     }
   | { type: 'START_FAILED'; message: string }
   | { type: 'POLL_RESULT'; status: OpenCodeDeviceCodeStatus }
@@ -98,7 +108,9 @@ export function opencodeAccountReducer(state: State, action: Action): State {
       // transition — the browser-open is imperative, not part of this pure
       // reducer. `expiresAtMs` is computed at dispatch time so a slow React
       // render can't cause the polling loop to drift outside the device
-      // code's window.
+      // code's window. `originalExpiresInSecs` is captured verbatim for the
+      // IPC to send unchanged each tick — see #1010 for why a per-tick
+      // countdown breaks the Rust expiry gate.
       if (state.kind !== 'signedOut') return state;
       const now = Date.now();
       return {
@@ -107,7 +119,8 @@ export function opencodeAccountReducer(state: State, action: Action): State {
         userCode: action.userCode,
         verificationUri: action.verificationUri,
         intervalSecs: action.intervalSecs,
-        expiresAtMs: now + action.expiresInSecs * 1000,
+        expiresAtMs: now + action.originalExpiresInSecs * 1000,
+        originalExpiresInSecs: action.originalExpiresInSecs,
         startedAtMs: now,
       };
     }
