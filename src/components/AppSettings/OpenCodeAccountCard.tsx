@@ -276,30 +276,50 @@ function AwaitingActivationView({
   return (
     <>
       <p className="text-base text-text-muted mb-3">
-        Enter this code in the browser window we just opened:
+        Enter this code in the browser window we just opened. If the window
+        didn&apos;t open, copy the link below into your browser:
       </p>
       <div
         data-testid="opencode-user-code"
-        className="font-mono text-2xl tracking-widest text-center bg-bg-card border border-border-subtle rounded-md px-4 py-3 mb-4 select-all"
+        className="font-mono text-2xl tracking-widest text-center bg-bg-card border border-border-subtle rounded-md px-4 py-3 mb-3 select-all"
       >
         {state.userCode}
+      </div>
+      {/* Fallback so the user can copy/paste the URL if `openUrl()` fails
+          for any reason — capability drift, OS default-browser mis-config,
+          or a Tauri regression. Mirrors the user-code block above. */}
+      <div
+        data-testid="opencode-verification-url"
+        className="font-mono text-sm break-all bg-bg-card border border-border-subtle rounded-md px-3 py-2 mb-4 select-all"
+      >
+        {state.verificationUri}
       </div>
       <p className="text-base text-text-muted mb-4">
         Polling every {state.intervalSecs}s while the window stays open…
       </p>
       <div className="flex gap-3 items-center">
-        <button
-          type="button"
-          data-testid="opencode-reopen"
-          onClick={() =>
+        {/* Dual-route link matching the `SafeLink` pattern: the `<a href>`
+            keeps right-click → "Open in browser", ⌘-click, and screen-reader
+            fallbacks alive even if `openUrl()` fails. `target="_blank"` is
+            a no-op in Tauri 2 without `core:webview:allow-create-webview-window`
+            (we don't grant it), so the onClick calls `preventDefault` +
+            `stopPropagation` and routes through `openUrl()` instead. */}
+        <a
+          href={state.verificationUri}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-testid="opencode-verification-link"
+          className="text-base text-accent-cyan hover:text-accent-cyan/80"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
             openUrl(state.verificationUri).catch((err: unknown) =>
               console.error('openUrl failed for OpenCode verification URL:', err),
-            )
-          }
-          className="text-base text-accent-cyan hover:text-accent-cyan/80"
+            );
+          }}
         >
           Reopen verification page ↗
-        </button>
+        </a>
         <button
           type="button"
           onClick={() =>

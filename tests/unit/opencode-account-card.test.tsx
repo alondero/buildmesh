@@ -302,6 +302,63 @@ describe('OpenCodeAccountCard (issue #969)', () => {
     expect(openUrlMock).not.toHaveBeenCalled();
   });
 
+  it('awaitingActivation view displays the verification URL as text so the user can copy/paste it as a fallback', async () => {
+    // Regression pin for "the OpenCode verification thingy doesn't open a
+    // browser window, nor does clicking the link either that is shown"
+    // (issue tracked at the top of this fix). The card MUST surface the
+    // verification URL as plain text in the awaitingActivation branch so:
+    //   - if `openUrl()` fails (capability drift, OS default-browser
+    //     mis-config), the user can still copy the URL and paste it into a
+    //     browser manually;
+    //   - the URL is visible at a glance instead of being inferred from
+    //     the "console.opencode.ai" string in the signedOut prompt;
+    //   - screen readers announce the destination alongside the user code.
+    mockBackend();
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+
+    const url = await screen.findByTestId('opencode-verification-url');
+    expect(url.textContent).toBe(
+      'https://console.opencode.ai/auth/device?code=ABCD-1234',
+    );
+  });
+
+  it('awaitingActivation view renders the verification URL as a clickable anchor (not just a button)', async () => {
+    // The canonical Tauri-2-safe external-link pattern (see SafeLink.tsx
+    // file header) is `<a href={url} onClick={(e) => { e.preventDefault();
+    // openUrl(url); }}>`. The dual route lets right-click → "Open in
+    // browser", ⌘-click, and assistive tech all work even when the JS
+    // open fails. A bare `<button onClick={openUrl}>` would lose every
+    // one of those fallbacks — which is exactly the regression that
+    // surfaced in production: clicking the button did nothing AND there
+    // was no visible URL to fall back to.
+    mockBackend();
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+
+    const link = await screen.findByTestId('opencode-verification-link');
+    expect(link.tagName).toBe('A');
+    expect(link.getAttribute('href')).toBe(
+      'https://console.opencode.ai/auth/device?code=ABCD-1234',
+    );
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+
+    // Pin the click contract: clicking the anchor must route through
+    // `openUrl` (the documented SafeLink behaviour). Pre-fix this was a
+    // bare `<button onClick>` — same call shape but the user had no
+    // right-click / ⌘-click fallback if the JS open failed.
+    openUrlMock.mockClear();
+    await user.click(link);
+    expect(openUrlMock).toHaveBeenCalledWith(
+      'https://console.opencode.ai/auth/device?code=ABCD-1234',
+    );
+  });
+
   it('workspace picker dropdown appears when >1 workspaces and reacts to selection', async () => {
     let pollOnce = true;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
