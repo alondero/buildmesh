@@ -742,11 +742,17 @@ fn spawn_loop_node(
 
     // The launch watcher does the same two-phase submit as the issue-driven
     // path (#874): stage the paste, wait for the harness echo + quiescence,
-    // press Enter, verify PTY output follows. The issue_number argument is
-    // only used for logging by `watch_and_submit`, so `0` (the same sentinel
-    // we store in `autopilot_runs.issue_number` for loop rows) is the right
-    // value here — it preserves the "no issue" semantic.
-    crate::autopilot::launch::watch_and_submit(app.clone(), node.id, 0);
+    // press Enter, verify PTY output follows. The marker is derived from
+    // the prefill text (wayfinder #1027: passing `0` as the issue number
+    // would produce a literal `issue #0` marker — invisible in any
+    // user-authored loop prefill — and the watcher would silently time
+    // out). `issue_number = 0` is preserved for the toast payload only.
+    crate::autopilot::launch::watch_and_submit(
+        app.clone(),
+        node.id,
+        0,
+        initial_prompt,
+    );
     Ok(())
 }
 
@@ -950,12 +956,21 @@ fn spawn_autopilot_node(
         provider
     );
 
-    crate::commands::agent::start_node_background(app.clone(), node.id, Some(prefill))?;
+    crate::commands::agent::start_node_background(app.clone(), node.id, Some(prefill.clone()))?;
 
     // The prefill only *stages* the prompt in the harness's input box —
     // nothing submits it. Watch the PTY until the harness is observably
     // ready (prefill echoed + output quiet), then press Enter for it.
-    crate::autopilot::launch::watch_and_submit(app.clone(), node.id, issue.number);
+    // The marker is derived from the prefill (wayfinder #1027) — the
+    // old `submit_marker(issue.number)` literal `issue #N` still
+    // happened to match the issue-driven prefill, but loop-mode
+    // prefills carry no issue reference and silently timed out.
+    crate::autopilot::launch::watch_and_submit(
+        app.clone(),
+        node.id,
+        issue.number,
+        &prefill,
+    );
     Ok(())
 }
 
@@ -1704,6 +1719,21 @@ mod tests {
         assert!(parse_sqlite_datetime("not a datetime").is_none());
         assert!(parse_sqlite_datetime("2026/07/22 10:30:45").is_none()); // wrong date sep
         assert!(parse_sqlite_datetime("").is_none());
+    }
+
+    // -- spawn_loop_node: marker signature pin (wayfinder #1027) --------------
+    //
+    // Behaviour is pinned in `autopilot::launch::tests`; here we just
+    // confirm the cross-module helper still exists with the expected
+    // path/signature, so a future rename drops this test out of the
+    // build before any call site silently references a non-existent
+    // function. Mirrors `spawn_loop_node_signature_respects_worktree_via_none_override`
+    // below.
+    #[test]
+    fn spawn_loop_node_signature_uses_prefill_via_marker_hint() {
+        let _marker = crate::autopilot::launch::marker_hint_for_prefill(
+            "Iterate on the failing test cases",
+        );
     }
 
     // -- spawn_loop_node: worktree discipline ---------------------------------
