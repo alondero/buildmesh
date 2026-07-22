@@ -182,8 +182,11 @@ beforeEach(async () => {
   // top-level import would cause `platform.ts` to be cached with the
   // real `navigator.platform` value, defeating the test files that
   // mock it to force `isWindows = true` (issue #354 follow-up).
-  const { resetPathInvalidatedCacheForTests } = await import(
-    '../../src/lib/pathInvalidatedCache'
-  );
+  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }] =
+    await Promise.all([
+      import('../../src/lib/pathInvalidatedCache'),
+      import('../../src/lib/providerCache'),
+    ]);
   resetPathInvalidatedCacheForTests();
+  resetProviderCachesForTests();
 });

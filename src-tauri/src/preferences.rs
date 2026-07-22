@@ -10,7 +10,7 @@
 use crate::models::Provider;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{OnceLock, Mutex};
+use std::sync::Mutex;
 use ts_rs::TS;
 
 /// A user-selectable **Agent Harness** profile (ADR-0014 / PRD #534).
@@ -355,27 +355,40 @@ pub struct AppPreferences {
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
-static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+static APP_DATA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// In-process cache, refreshed on every write. Reads consult the file only if
 /// the cache is empty (first read).
 static CACHE: Mutex<Option<AppPreferences>> = Mutex::new(None);
 
 pub fn init(app_data_dir: PathBuf) {
-    // Safe to ignore: setup runs once, so OnceLock::set never realistically fails.
-    let _ = APP_DATA_DIR.set(app_data_dir);
+    *APP_DATA_DIR.lock().unwrap_or_else(|p| p.into_inner()) = Some(app_data_dir);
+}
+
+#[cfg(test)]
+pub(crate) fn init_for_tests(app_data_dir: PathBuf) {
+    init(app_data_dir);
+    *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+#[cfg(test)]
+pub(crate) fn reset_for_tests() {
+    *APP_DATA_DIR.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 /// The app-data directory `init` was wired to, for sibling config files
 /// that live next to `preferences.json` (e.g. Autopilot's `finish.md`,
 /// issue #484). `None` before `init` runs (tests without a Tauri setup).
 pub(crate) fn app_data_dir() -> Option<PathBuf> {
-    APP_DATA_DIR.get().cloned()
+    APP_DATA_DIR
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 fn preferences_path() -> Result<PathBuf, String> {
-    APP_DATA_DIR
-        .get()
+    app_data_dir()
         .map(|d| d.join("preferences.json"))
         .ok_or_else(|| "preferences module not initialized".to_string())
 }
@@ -1727,24 +1740,48 @@ mod tests {
     use std::sync::Mutex as TestMutex;
 
     /// Tests in this module share `APP_DATA_DIR` and `CACHE` global state, so
-    /// they must run serially. A real test crate would use `serial_test`, but
-    /// a local Mutex is fine here.
+    /// they must run serially.
     static TEST_LOCK: TestMutex<()> = TestMutex::new(());
+    static TEST_DIR_COUNTER: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
 
-    fn with_temp_dir<F: FnOnce(&PathBuf)>(f: F) {
+    fn test_dir() -> PathBuf {
+        let id = TEST_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "buildmesh-prefs-test-{}-{id}",
+            std::process::id()
+        ))
+    }
+
+    fn with_temp_dir<F: FnOnce(&PathBuf)>(f: F) -> PathBuf {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = std::env::temp_dir().join(format!("buildmesh-prefs-test-{}", std::process::id()));
+        let tmp = test_dir();
         std::fs::create_dir_all(&tmp).unwrap();
 
-        // Reset globals for each test (OnceLock can't be reset, so we work
-        // around it by checking whether the existing value already points at
-        // a buildmesh-prefs-test dir — in which case we just reuse).
-        let _ = APP_DATA_DIR.set(tmp.clone());
-        *CACHE.lock().unwrap() = None;
+        init_for_tests(tmp.clone());
 
         f(&tmp);
 
+        reset_for_tests();
         let _ = std::fs::remove_dir_all(&tmp);
+        tmp
+    }
+
+    #[test]
+    fn preference_files_are_isolated_between_temp_directories() {
+        let first_dir = with_temp_dir(|_| {
+            save(AppPreferences {
+                default_provider: Some("minimax".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        });
+
+        let second_dir = with_temp_dir(|_| {
+            assert_eq!(load().unwrap(), AppPreferences::default());
+        });
+
+        assert_ne!(first_dir, second_dir);
     }
 
     #[test]
