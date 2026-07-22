@@ -1995,6 +1995,67 @@ mod tests {
         );
     }
 
+    /// Regression pin for issue #638: the SPA shell must carry the
+    /// `<!--buildmesh-debug-shim-->` marker in the body the server writes
+    /// to the wire. Before the fix, a minifier that uppercased the
+    /// `</head>` tag (or dropped it entirely — HTML5 allows omission
+    /// before `<body>`) would make the previous `String::replace` a
+    /// silent no-op, so a developer staring at a blank phone screen
+    /// had no diagnostic. This test fails LOUDLY (not silently) when
+    /// the marker disappears from the served output.
+    ///
+    /// The pure `inject_debug_shim` helper has its own unit tests in
+    /// `assets::tests`; this is the end-to-end version that catches a
+    /// regression in `serve_spa_shell`'s wiring (e.g. someone reverts
+    /// to a `String::replace` call site) that the unit tests can't see.
+    #[tokio::test]
+    async fn root_shell_body_contains_debug_shim_marker() {
+        const MARKER: &[u8] = b"<!--buildmesh-debug-shim-->";
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
+                Ok(Err(_)) => break,
+                Err(_) => panic!("server hung mid-response"),
+            }
+        }
+
+        let split = received
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response missing header terminator");
+        let body = &received[split + 4..];
+
+        assert!(
+            body.windows(MARKER.len()).any(|w| w == MARKER),
+            "served shell body missing the debug shim marker — \
+             issue #638 regression: the injected script is silently absent \
+             (the minifier may have uppercased or dropped </head>)"
+        );
+    }
+
     #[tokio::test]
     async fn v2_root_redirects_to_root() {
         // /v2 is a deprecated alias kept around so saved phone bookmarks
