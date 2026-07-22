@@ -5,9 +5,10 @@
 //! ```text
 //! implementing --(evaluator says COMPLETED)--> finishing(attempt 1)
 //!   |                                             |
-//!   |(BLOCKED: emit autopilot-blocked,            |-- verification green --> completed
-//!   | stay implementing)                          |     (node status Completed, PR event)
-//!   |(WORKING: nothing)                           |-- verification red, attempts < 3
+//!   |(BLOCKED: emit autopilot-blocked,            |-- verification green + loop suffix
+//!   | stay implementing)                          |     --> suffix_pending --(Node Turn)--> completed
+//!   |(WORKING: nothing)                           |-- verification green, no suffix --> completed
+//!                                                 |-- verification red, attempts < 3
 //!                                                 |     --> inject correction, attempt+1
 //!                                                 |-- verification red, attempts >= 3
 //!                                                       --> failed (node status Error)
@@ -220,6 +221,27 @@ pub(crate) fn decide_finishing(state: &WrapupState, attempts: i32) -> FinishOutc
         FinishOutcome::Fail(reasons)
     } else {
         FinishOutcome::Retry(reasons)
+    }
+}
+
+/// What a verified-green wrap-up does next. A suffix belongs only to the loop
+/// run that was tagged at spawn time — the mesh may have changed mode while
+/// this node was working, so current mesh mode is not a safe discriminator.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum VerifiedWrapupAction<'a> {
+    CompleteNow,
+    InjectSuffix(&'a str),
+}
+
+pub(crate) fn decide_verified_wrapup<'a>(
+    loop_iteration: Option<i64>,
+    suffix_prompt: Option<&'a str>,
+) -> VerifiedWrapupAction<'a> {
+    match (loop_iteration, suffix_prompt) {
+        (Some(_), Some(prompt)) if !prompt.trim().is_empty() => {
+            VerifiedWrapupAction::InjectSuffix(prompt)
+        }
+        _ => VerifiedWrapupAction::CompleteNow,
     }
 }
 
@@ -563,7 +585,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
             return;
         }
     };
-    let (issue_number, state, attempts) = run;
+    let (issue_number, state, attempts, loop_iteration, persisted_pr_url) = run;
 
     let node = match db::get_agent_node_by_id(node_id) {
         Ok(n) => n,
@@ -639,7 +661,15 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
         S::Finishing => {
             let observed = observe_wrapup_state(&node, action_on_success != "none");
             match decide_finishing(&observed, attempts) {
-                FinishOutcome::Complete => complete_finishing_run(node_id, issue_number, &observed, app),
+                FinishOutcome::Complete => handle_verified_wrapup(
+                    node_id,
+                    issue_number,
+                    attempts,
+                    loop_iteration,
+                    mesh.as_ref().and_then(|m| m.loop_suffix_prompt.as_deref()),
+                    &observed,
+                    app,
+                ),
                 FinishOutcome::Retry(reasons) => {
                     let prompt = correction_prompt(&reasons, &evaluator::cleaned_tail(node_id));
                     match write_prompt_to_pty(node_id, &prompt, app) {
@@ -693,25 +723,100 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                 }
             }
         }
+        S::SuffixPending => {
+            // Reaching a Node Turn proves the suffix prompt's turn yielded.
+            // It is already post-verification, so do not classify it or inject
+            // `finish.md` a second time.
+            complete_autopilot_run(node_id, issue_number, persisted_pr_url, app);
+        }
         // terminal — stale registration cleanup
         S::Completed | S::Failed | S::Merged => evaluator::unregister(node_id),
     }
 }
 
-/// Mark a verified-green `finishing` run Completed. Shared by the turn path
-/// and the poller re-drive so the two exits can't drift.
-fn complete_finishing_run(
+/// Route a verified-green wrap-up either to terminal completion or to the
+/// optional second turn for a loop iteration. Shared by Node Turn evaluation
+/// and the stalled-finishing re-drive so neither path can bypass the suffix.
+fn handle_verified_wrapup(
     node_id: i64,
     issue_number: i64,
+    attempts: i32,
+    loop_iteration: Option<i64>,
+    suffix_prompt: Option<&str>,
     observed: &WrapupState,
     app: &AppHandle,
 ) {
-    // PR identity first, state second: the merged-PR sweep
-    // keys off `state = completed AND pr_number IS NOT NULL`,
-    // so this order can't yield a sweepable row without a PR.
+    // PR identity first: suffix completion happens on a later callback, after
+    // this in-memory observation is gone, and the merged-PR sweep reads these
+    // persisted columns once the run reaches `completed`.
     if let (Some(n), Some(url)) = (observed.pr_number, observed.pr_url.as_deref()) {
-        let _ = db::set_autopilot_run_pr(node_id, n, url);
+        if let Err(e) = db::set_autopilot_run_pr(node_id, n, url) {
+            tracing::warn!(
+                "autopilot pipeline({}): verified PR could not be persisted: {}",
+                node_id,
+                e
+            );
+            return;
+        }
     }
+
+    match decide_verified_wrapup(loop_iteration, suffix_prompt) {
+        VerifiedWrapupAction::CompleteNow => {
+            complete_autopilot_run(node_id, issue_number, observed.pr_url.clone(), app);
+        }
+        VerifiedWrapupAction::InjectSuffix(prompt) => {
+            if let Err(e) = start_suffix_turn(node_id, attempts, prompt, app) {
+                tracing::warn!(
+                    "autopilot pipeline({}): suffix injection failed; left in finishing for retry: {}",
+                    node_id,
+                    e
+                );
+            }
+        }
+    }
+}
+
+/// Persist the non-terminal state before staging the prompt, so even a very
+/// fast suffix turn cannot be mistaken for another `finishing` turn. If the
+/// PTY write fails, roll back to `finishing`; the existing stale-run re-drive
+/// can then retry without falsely completing the iteration.
+fn start_suffix_turn(
+    node_id: i64,
+    attempts: i32,
+    prompt: &str,
+    app: &AppHandle,
+) -> Result<(), String> {
+    db::set_autopilot_run_state(node_id, SuffixPending, None).map_err(|e| e.to_string())?;
+    if let Err(write_error) = write_prompt_to_pty(node_id, prompt, app) {
+        if let Err(rollback_error) =
+            db::set_autopilot_run_state(node_id, Finishing, Some(attempts))
+        {
+            tracing::warn!(
+                "autopilot pipeline({}): suffix state rollback failed after PTY error: {}",
+                node_id,
+                rollback_error
+            );
+        }
+        return Err(write_error);
+    }
+
+    clear_attention_after_injection(node_id, app);
+    tracing::info!(
+        "autopilot pipeline({}): wrap-up verified — suffix prompt injected; waiting for its Node Turn",
+        node_id
+    );
+    Ok(())
+}
+
+/// Mark an Autopilot run Completed and publish the lifecycle/event effects.
+/// For a loop suffix this is called by the suffix Node Turn; without a suffix
+/// it is called immediately after deterministic wrap-up verification.
+fn complete_autopilot_run(
+    node_id: i64,
+    issue_number: i64,
+    pr_url: Option<String>,
+    app: &AppHandle,
+) {
     let _ = db::set_autopilot_run_state(node_id, Completed, None);
     // Routes through SessionLifecycle (issue #132).
     let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
@@ -721,14 +826,14 @@ fn complete_finishing_run(
         AutopilotPrCreatedPayload {
             node_id,
             issue: issue_number,
-            pr_url: observed.pr_url.clone(),
+            pr_url: pr_url.clone(),
         },
     );
     evaluator::unregister(node_id);
     tracing::info!(
-        "autopilot pipeline({}): wrap-up verified (pr: {:?}) — node Completed",
+        "autopilot pipeline({}): wrap-up lifecycle complete (pr: {:?}) — node Completed",
         node_id,
-        observed.pr_url
+        pr_url
     );
 }
 
@@ -834,8 +939,10 @@ pub fn watchdog_pass(app: &AppHandle, candidates: &[i64]) {
 fn redrive_one(node_id: i64, app: &AppHandle) {
     // Read the ledger under the guard, not from the stalled listing: a turn
     // may have advanced the state (or the attempts count) in between.
-    let (issue_number, attempts) = match db::get_autopilot_run(node_id) {
-        Ok(Some((issue, S::Finishing, attempts))) => (issue, attempts),
+    let (issue_number, attempts, loop_iteration) = match db::get_autopilot_run(node_id) {
+        Ok(Some((issue, S::Finishing, attempts, loop_iteration, _))) => {
+            (issue, attempts, loop_iteration)
+        }
         _ => return,
     };
     let node = match db::get_agent_node_by_id(node_id) {
@@ -845,19 +952,28 @@ fn redrive_one(node_id: i64, app: &AppHandle) {
             return;
         }
     };
-    let action_on_success = db::get_mesh_by_id(node.mesh_id)
-        .ok()
-        .and_then(|m| m.autopilot_action_on_success)
+    let mesh = db::get_mesh_by_id(node.mesh_id).ok();
+    let action_on_success = mesh
+        .as_ref()
+        .and_then(|m| m.autopilot_action_on_success.clone())
         .unwrap_or_else(|| "draft_pr".to_string());
 
     let observed = observe_wrapup_state(&node, action_on_success != "none");
     match decide_finishing(&observed, attempts) {
         FinishOutcome::Complete => {
             tracing::info!(
-                "autopilot redrive({}): stalled wrap-up is observably green — completing",
+                "autopilot redrive({}): stalled wrap-up is observably green — advancing",
                 node_id
             );
-            complete_finishing_run(node_id, issue_number, &observed, app);
+            handle_verified_wrapup(
+                node_id,
+                issue_number,
+                attempts,
+                loop_iteration,
+                mesh.as_ref().and_then(|m| m.loop_suffix_prompt.as_deref()),
+                &observed,
+                app,
+            );
         }
         FinishOutcome::Retry(reasons) | FinishOutcome::Fail(reasons) => {
             tracing::info!(
@@ -1050,6 +1166,31 @@ mod tests {
         // green on the final attempt completes normally.
         let s = wrapup(false, true, Some("url"), true);
         assert_eq!(decide_finishing(&s, MAX_FINISH_ATTEMPTS), FinishOutcome::Complete);
+    }
+
+    // ── verified loop wrap-up decisions (#993) ───────────────────────────────
+
+    #[test]
+    fn loop_run_with_a_suffix_injects_a_second_turn() {
+        assert_eq!(
+            decide_verified_wrapup(Some(4), Some("review the result and report")),
+            VerifiedWrapupAction::InjectSuffix("review the result and report")
+        );
+    }
+
+    #[test]
+    fn issue_runs_and_blank_suffixes_complete_immediately() {
+        assert_eq!(
+            decide_verified_wrapup(None, Some("configured on the mesh")),
+            VerifiedWrapupAction::CompleteNow,
+            "the ledger row, not the mesh's current mode, identifies a loop iteration"
+        );
+        for suffix in [None, Some(""), Some("   \n\t")] {
+            assert_eq!(
+                decide_verified_wrapup(Some(4), suffix),
+                VerifiedWrapupAction::CompleteNow
+            );
+        }
     }
 
     #[test]

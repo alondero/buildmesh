@@ -64,6 +64,18 @@ export const AUTOPILOT_PILL_STYLES: Record<AutopilotRunState, { label: string; c
     className: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
     title: 'Autopilot: wrap-up in progress (verify, commit, push, PR)',
   },
+  // Issue #993: a loop iteration's deterministic wrap-up passed and the
+  // optional `loop_suffix_prompt` is now driving a second PTY turn on the
+  // same node. The node is still active (it holds the mesh capacity slot
+  // and the iteration row) until that suffix turn yields and the run
+  // reaches `completed`. Renders with the same amber treatment as
+  // `finishing` so the user can tell this is still in flight, not a wrap-
+  // up verification failure.
+  suffix_pending: {
+    label: 'autopilot · suffix',
+    className: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
+    title: 'Autopilot: wrap-up verified, running the optional suffix prompt turn before this iteration completes',
+  },
   completed: {
     label: 'autopilot · complete',
     className: 'bg-accent-green/10 text-accent-green ring-accent-green/30',

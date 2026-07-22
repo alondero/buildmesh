@@ -252,9 +252,11 @@ mod tests {
         use crate::db::AutopilotRunState as S;
         crate::db::create_autopilot_run(node.id, mesh.id, 42).unwrap();
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 1);
-        let (issue, state, attempts) =
+        let (issue, state, attempts, loop_iteration, pr_url) =
             crate::db::get_autopilot_run(node.id).unwrap().expect("run row exists");
         assert_eq!((issue, state, attempts), (42, S::Implementing, 0));
+        assert_eq!(loop_iteration, None, "issue-driven rows are not loop iterations");
+        assert_eq!(pr_url, None);
 
         // The issue number is known → the poller must not respawn it.
         let known = crate::db::list_known_autopilot_issue_numbers(mesh.id).unwrap();
@@ -426,6 +428,93 @@ mod tests {
         assert!(states.iter().all(|(id, _)| *id != node.id));
         let known = crate::db::list_known_autopilot_issue_numbers(mesh.id).unwrap();
         assert!(known.contains(&99), "archived run still dedupes its issue");
+
+        std::fs::remove_file(&temp_path).ok();
+    }
+
+    /// Issue #993 — a loop iteration that has passed deterministic wrap-up
+    /// remains active while its optional suffix turn runs. The same ledger row
+    /// must retain its iteration/PR context, then release capacity only when
+    /// that suffix turn reaches `Completed`.
+    #[test]
+    fn test_loop_suffix_pending_preserves_context_and_capacity() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path =
+            std::env::temp_dir().join(format!("buildmesh_loop_suffix_{}.db", test_id));
+        crate::db::init(&temp_path).unwrap();
+
+        let path = format!("/tmp/loop-suffix-{}", test_id);
+        let mesh = crate::db::create_mesh("Loop Suffix Mesh", &path).unwrap();
+        let total_before = crate::db::count_active_autopilot_nodes_total().unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "loop-iter-4",
+            &mesh.path,
+            "origin/main",
+            crate::models::EnvType::Windows,
+            "anthropic",
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+
+        use crate::db::AutopilotRunState as S;
+        crate::db::create_autopilot_loop_run(node.id, mesh.id, 4).unwrap();
+        crate::db::set_autopilot_run_pr(node.id, 993, "https://github.com/x/y/pull/993")
+            .unwrap();
+        crate::db::set_autopilot_run_state(node.id, S::SuffixPending, Some(2)).unwrap();
+
+        assert_eq!(S::SuffixPending.as_db_str(), "suffix_pending");
+        assert_eq!(S::from_db_str("suffix_pending"), S::SuffixPending);
+        let (issue, state, attempts, iteration, pr_url) =
+            crate::db::get_autopilot_run(node.id).unwrap().expect("run row exists");
+        assert_eq!(issue, 0);
+        assert_eq!(state, S::SuffixPending);
+        assert_eq!(attempts, 2, "suffix turn does not consume a wrap-up attempt");
+        assert_eq!(iteration, Some(4));
+        assert_eq!(pr_url.as_deref(), Some("https://github.com/x/y/pull/993"));
+        assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 1);
+        assert_eq!(
+            crate::db::count_active_autopilot_nodes_total().unwrap(),
+            total_before + 1
+        );
+        assert!(crate::db::list_active_autopilot_node_ids()
+            .unwrap()
+            .contains(&node.id));
+
+        // `suffix_pending` is active but is not another stale wrap-up
+        // verification candidate, even when its timestamp is old.
+        {
+            let db = crate::db::get().lock().unwrap();
+            db.execute(
+                "UPDATE autopilot_runs SET updated_at = datetime('now', '-10 minutes') \
+                 WHERE node_id = ?1",
+                rusqlite::params![node.id],
+            )
+            .unwrap();
+        }
+        assert!(!crate::db::list_stalled_finishing_autopilot_runs(5)
+            .unwrap()
+            .contains(&node.id));
+
+        crate::db::set_autopilot_run_state(node.id, S::Completed, None).unwrap();
+        assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 0);
+        assert_eq!(
+            crate::db::count_active_autopilot_nodes_total().unwrap(),
+            total_before
+        );
+        let rows = crate::db::list_loop_iterations(mesh.id).unwrap();
+        assert!(rows.iter().any(|(iteration, state, _)| {
+            *iteration == 4 && *state == S::Completed
+        }));
 
         std::fs::remove_file(&temp_path).ok();
     }

@@ -436,11 +436,11 @@ pub(crate) fn evaluate_loop_continuation(
         return LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed);
     }
     // The "previous iteration still running" check. `active_count`
-    // comes from `COUNT_ACTIVE_AUTOPILOT_SQL` which filters
-    // `state IN ('implementing','finishing')`, so a row in any
-    // terminal state (`completed`/`failed`/`merged`) is NOT counted —
-    // exactly what we want, because a terminal iteration is "done"
-    // for loop pacing purposes.
+    // comes from `COUNT_ACTIVE_AUTOPILOT_SQL` which filters all non-terminal
+    // states (`implementing`, `finishing`, and `suffix_pending`), so a row in
+    // any terminal state (`completed`/`failed`/`merged`) is NOT counted —
+    // exactly what we want, because a terminal iteration is "done" for loop
+    // pacing purposes.
     if active_count > 0 {
         return LoopDecision::Skip(LoopSkipReason::ActiveIterationInProgress);
     }

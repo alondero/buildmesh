@@ -695,6 +695,19 @@ describe('GridNodeHeader autopilot pill', () => {
     expect(pill.className).toContain('text-accent-amber');
   });
 
+  // Issue #993 — a loop iteration's deterministic wrap-up has passed and the
+  // optional `loop_suffix_prompt` is driving a second PTY turn on the same
+  // node. Renders with the same amber family as `finishing` but its own
+  // label, so a user can tell that the iteration is still in flight while a
+  // final prompt runs (rather than waiting for wrap-up to be re-verified).
+  it('flips to the amber suffix treatment while the suffix turn is in flight', () => {
+    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'suffix_pending' } });
+    const { getByTestId } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const pill = getByTestId('autopilot-pill');
+    expect(pill.textContent).toContain('suffix');
+    expect(pill.className).toContain('text-accent-amber');
+  });
+
   it('shows green when completed and red when failed', () => {
     useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'completed' } });
     const { getByTestId, rerender } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
@@ -716,7 +729,7 @@ describe('GridNodeHeader autopilot pill', () => {
     // rather than silently degrading to a default. The pin: the map and
     // the union live in lockstep on both sides of the wire.
     expect(Object.keys(AUTOPILOT_PILL_STYLES).sort()).toEqual(
-      ['completed', 'failed', 'finishing', 'implementing', 'merged'],
+      ['completed', 'failed', 'finishing', 'implementing', 'merged', 'suffix_pending'],
     );
   });
 
