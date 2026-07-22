@@ -101,6 +101,21 @@ describe('OpenCodeAccountCard (issue #969)', () => {
     expect(openUrlMock).toHaveBeenCalledWith(
       'https://console.opencode.ai/auth/device?code=ABCD-1234',
     );
+
+    // Issue #1010 wire-contract pin: the first poll must carry the
+    // ORIGINAL window length under the renamed key, NOT a per-tick
+    // countdown. The Rust gate treats this arg as the immutable
+    // lifetime — passing a countdown here made a 600s code expire at
+    // ~300s. The reducer test pins the field; this assertion pins the
+    // IPC arg key + value the component sends.
+    await waitFor(() => {
+      expect(calls['poll_opencode_device_token']).toBeDefined();
+      expect(calls['poll_opencode_device_token']!.length).toBeGreaterThanOrEqual(1);
+    });
+    const firstPollArgs = calls['poll_opencode_device_token']![0] as Record<string, unknown>;
+    expect(firstPollArgs.originalExpiresInSecs).toBe(600);
+    expect(firstPollArgs.deviceCode).toBe('dc_test');
+    expect(firstPollArgs.startedAtMs).toEqual(expect.any(Number));
   });
 
   it('a successful poll transitions to signedIn after persist + workspaces resolve', async () => {
