@@ -861,7 +861,12 @@ fn check_gh_auth_cached() -> bool {
     let mut guard = cell.lock().expect("gh-auth cache mutex poisoned");
     if now.duration_since(guard.0) >= GH_AUTH_CACHE_TTL {
         guard.1 = crate::commands::github::check_gh_auth_blocking();
-        guard.0 = now;
+        // Stamp post-call, not at entry. The HTTPS GET has a 30 s request
+        // timeout, the same magnitude as the cache TTL — a near-timeout
+        // call would otherwise leave `guard.0` already past the TTL before
+        // the result is even returned, and the very next reader triggers a
+        // second miss (issue #782).
+        guard.0 = Instant::now();
         GH_AUTH_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     }
     guard.1
