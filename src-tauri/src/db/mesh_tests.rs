@@ -127,6 +127,97 @@ mod tests {
         std::fs::remove_file(&temp_path).ok();
     }
 
+    /// Wayfinder #990 / ticket #991 — Looping Autopilot config columns
+    /// (v30) default to `IssueDriven` mode + no prompts + 0/None caps on
+    /// a fresh mesh, persist through `set_mesh_loop_config`, and read back
+    /// via `get_mesh_by_id` (i.e. survive an app reload). Clearing the
+    /// optional strings with `None` returns them to `None` (poller reads
+    /// these as "loop not configured"). Mirrors the autopilot-policy
+    /// round-trip pattern just above.
+    #[test]
+    fn test_mesh_loop_config_round_trips() {
+        use crate::db::AutopilotMode;
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path =
+            std::env::temp_dir().join(format!("buildmesh_loop_test_{}.db", test_id));
+        crate::db::init(&temp_path).unwrap();
+
+        let path = format!("/tmp/loop-test-{}", test_id);
+        let mesh = crate::db::create_mesh("Loop Mesh", &path).unwrap();
+        // Defaults — every column at its schema default (mode = issue_driven,
+        // prompts = None, caps = 0 / None).
+        assert_eq!(mesh.autopilot_mode, AutopilotMode::IssueDriven);
+        assert_eq!(mesh.loop_initial_prompt, None);
+        assert_eq!(mesh.loop_suffix_prompt, None);
+        assert_eq!(mesh.loop_max_iterations, None);
+        assert_eq!(mesh.loop_interval_seconds, 0);
+        assert_eq!(mesh.loop_consecutive_failures, 0);
+
+        // Write all six columns in one atomic UPDATE, then read back.
+        let rows = crate::db::set_mesh_loop_config(
+            mesh.id,
+            AutopilotMode::Looping,
+            Some("ship the next iteration of X"),
+            Some("now run the verify suite and report"),
+            Some(5),
+            30,
+            3,
+        )
+        .unwrap();
+        assert_eq!(rows, 1, "one row updated");
+        let saved = crate::db::get_mesh_by_id(mesh.id).unwrap();
+        assert_eq!(saved.autopilot_mode, AutopilotMode::Looping);
+        assert_eq!(saved.loop_initial_prompt.as_deref(), Some("ship the next iteration of X"));
+        assert_eq!(saved.loop_suffix_prompt.as_deref(), Some("now run the verify suite and report"));
+        assert_eq!(saved.loop_max_iterations, Some(5));
+        assert_eq!(saved.loop_interval_seconds, 30);
+        assert_eq!(saved.loop_consecutive_failures, 3);
+
+        // Unknown persisted value (e.g. a row written by a future build with
+        // a renamed mode) degrades to IssueDriven — same fail-open semantics
+        // as SessionStatus::from_db_str. Defensive: the poller refuses to
+        // crash on a malformed row.
+        {
+            let db = crate::db::get().lock().unwrap();
+            db.execute(
+                "UPDATE meshes SET autopilot_mode = 'tomorrow' WHERE id = ?1",
+                rusqlite::params![mesh.id],
+            )
+            .unwrap();
+        }
+        let degraded = crate::db::get_mesh_by_id(mesh.id).unwrap();
+        assert_eq!(
+            degraded.autopilot_mode,
+            AutopilotMode::IssueDriven,
+            "unknown autopilot_mode strings must degrade to IssueDriven (fail-open for the poller)"
+        );
+
+        // Back to defaults via the same helper.
+        crate::db::set_mesh_loop_config(
+            mesh.id,
+            AutopilotMode::IssueDriven,
+            None,
+            None,
+            None,
+            0,
+            0,
+        )
+        .unwrap();
+        let cleared = crate::db::get_mesh_by_id(mesh.id).unwrap();
+        assert_eq!(cleared.autopilot_mode, AutopilotMode::IssueDriven);
+        assert_eq!(cleared.loop_initial_prompt, None);
+        assert_eq!(cleared.loop_suffix_prompt, None);
+        assert_eq!(cleared.loop_max_iterations, None);
+        assert_eq!(cleared.loop_interval_seconds, 0);
+        assert_eq!(cleared.loop_consecutive_failures, 0);
+
+        std::fs::remove_file(&temp_path).ok();
+    }
+
     /// Issue #482 — the `autopilot_runs` ledger: create → active count,
     /// state transitions, dedupe list, and slot release on completion.
     #[test]

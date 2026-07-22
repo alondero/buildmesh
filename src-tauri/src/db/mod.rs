@@ -107,7 +107,38 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // `ensure_agent_node_is_pinned` lives alongside the other `ensure_*`
 // helpers so a build that bumps `SCHEMA_VERSION` without yet containing
 // the inline `is_pinned` column still picks it up on the next launch.
-const SCHEMA_VERSION: i32 = 29;
+//
+// v30 — Looping Autopilot config (wayfinder #990 / ticket #991): add
+// six `meshes` columns that the poller (#992) reads to drive a
+// Looping-mode autopilot — sequential prompt-driven nodes, with optional
+// suffix prompt and configurable iteration / interval / failure caps:
+//   * `autopilot_mode` (TEXT NOT NULL DEFAULT 'issue_driven') — the
+//     discriminated mode the poller reads (`IssueDriven` is today's
+//     GitHub-label poller; `Looping` is the new sequential spawner).
+//   * `loop_initial_prompt` (TEXT, nullable) — body of the prompt
+//     injected into every loop-iteration node. `None` falls back to an
+//     implementation-defined default at spawn time (ticket #992).
+//   * `loop_suffix_prompt` (TEXT, nullable) — optional second-turn
+//     prompt injected AFTER the issue-style wrap-up (#485) verifies
+//     green, before the next loop iteration starts. `None` = no
+//     suffix turn.
+//   * `loop_max_iterations` (INTEGER, nullable) — optional hard cap on
+//     loop iterations. `None` = continuous; `Some(n >= 1)` = stop after
+//     n iterations.
+//   * `loop_interval_seconds` (INTEGER NOT NULL DEFAULT 0) — pause
+//     between consecutive loop spawns; the poller re-checks after this
+//     many seconds. `0` = no pause.
+//   * `loop_consecutive_failures` (INTEGER NOT NULL DEFAULT 0) —
+//     auto-pause threshold; when `>= configured_cap` consecutive loop
+//     iterations wrap-up-failed, the poller stops spawning until the
+//     user clears or resets it. `0` default = feature off.
+// Every column has a sensible default (or is nullable), so pre-v30
+// rows read back as "loop not configured" without a backfill — the
+// same pattern as `pre_spawn_pool_size` (v22). Safety net
+// `ensure_mesh_loop_columns` lives alongside `ensure_mesh_autopilot_columns`
+// so a build that bumps `SCHEMA_VERSION` without yet containing the
+// inline ALTERs picks the columns up on next launch.
+const SCHEMA_VERSION: i32 = 30;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -302,6 +333,10 @@ ensure_mesh_sandbox(&conn)?;
     ensure_mesh_color(&conn)?;
     // v26 — Autopilot Policy columns (issue #481, PRD #480).
     ensure_mesh_autopilot_columns(&conn)?;
+    // v30 — Looping Autopilot config (wayfinder #990 / ticket #991).
+    // Six additive columns on `meshes`, every column nullable or with a
+    // safe default, so pre-v30 rows read back as "loop not configured".
+    ensure_mesh_loop_columns(&conn)?;
     // v27 — per-context build/run commands (issue #802). Nullable: a mesh
     // without them falls back to build_command/run_command in both contexts.
     ensure_mesh_root_command_columns(&conn)?;
@@ -726,6 +761,32 @@ pub(crate) fn ensure_mesh_autopilot_columns(conn: &Connection) -> SqlResult<()> 
     for (name, ty) in columns {
         if ensure_column(conn, "meshes", name, ty)? {
             tracing::warn!("ensure_mesh_autopilot_columns: added missing {} column", name);
+        }
+    }
+    Ok(())
+}
+
+/// Safety net (v30, wayfinder #990 / ticket #991): ensure the Looping
+/// Autopilot config columns exist on `meshes`. Same one-line-per-column
+/// shape as `ensure_mesh_autopilot_columns` and `ensure_mesh_pre_spawn_pool_size` —
+/// additive migration, every column nullable or with a safe default, so no
+/// backfill is required and pre-v30 rows read back as "loop not
+/// configured" (mode = `issue_driven`, prompts = None, caps = 0/None).
+pub(crate) fn ensure_mesh_loop_columns(conn: &Connection) -> SqlResult<()> {
+    let columns: &[(&str, &str)] = &[
+        // Default 'issue_driven' matches the v29 behaviour byte-for-byte
+        // (every existing mesh keeps using the GitHub-label poller) so a
+        // upgrade is invisible to the existing autopilot flow.
+        ("autopilot_mode", "TEXT NOT NULL DEFAULT 'issue_driven'"),
+        ("loop_initial_prompt", "TEXT"),
+        ("loop_suffix_prompt", "TEXT"),
+        ("loop_max_iterations", "INTEGER"),
+        ("loop_interval_seconds", "INTEGER NOT NULL DEFAULT 0"),
+        ("loop_consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
+    ];
+    for (name, ty) in columns {
+        if ensure_column(conn, "meshes", name, ty)? {
+            tracing::warn!("ensure_mesh_loop_columns: added missing {} column", name);
         }
     }
     Ok(())
@@ -1931,7 +1992,11 @@ const MESH_COLUMNS: &str =
      COALESCE(autopilot_enabled, 0), COALESCE(autopilot_trigger_label, ''), \
      COALESCE(autopilot_concurrency_limit, 2), COALESCE(autopilot_provider, ''), \
      COALESCE(autopilot_action_on_success, ''), \
-     COALESCE(root_build_command, ''), COALESCE(root_run_command, '')";
+     COALESCE(root_build_command, ''), COALESCE(root_run_command, ''), \
+     COALESCE(autopilot_mode, 'issue_driven'), \
+     COALESCE(loop_initial_prompt, ''), COALESCE(loop_suffix_prompt, ''), \
+     loop_max_iterations, \
+     COALESCE(loop_interval_seconds, 0), COALESCE(loop_consecutive_failures, 0)";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -1964,6 +2029,12 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         autopilot_action_on_success: parse_str(row.get::<_, String>(22)?),
         root_build_command: parse_str(row.get::<_, String>(23)?),
         root_run_command: parse_str(row.get::<_, String>(24)?),
+        autopilot_mode: AutopilotMode::from_db_str(&row.get::<_, String>(25)?),
+        loop_initial_prompt: parse_str(row.get::<_, String>(26)?),
+        loop_suffix_prompt: parse_str(row.get::<_, String>(27)?),
+        loop_max_iterations: row.get(28)?,
+        loop_interval_seconds: row.get::<_, i32>(29)?,
+        loop_consecutive_failures: row.get::<_, i32>(30)?,
     })
 }
 
@@ -2178,6 +2249,45 @@ pub fn set_mesh_autopilot(
             provider,
             action_on_success,
             id
+        ],
+    )
+}
+
+/// Persist the full Looping Autopilot configuration for a mesh in one write
+/// (wayfinder #990 / ticket #991). Companion to `set_mesh_autopilot` — the
+/// poller (ticket #992) reads `autopilot_mode` to decide which spawn strategy
+/// to use, then reads the loop_* fields if mode == `Looping`. Empty strings
+/// for the prompt TEXT columns store NULL so they read back as `None`
+/// (matching `parse_str`). Range / nullability validation lives at the IPC
+/// boundary (`commands::mesh_properties::update_mesh_loop_config`), not here
+/// — the DB layer is the typed write, the command is the validation. Returns
+/// the number of rows updated so the caller can surface "mesh not found"
+/// (same zero-rows contract as `set_mesh_autopilot` and
+/// `update_mesh_pool_size`).
+#[allow(clippy::too_many_arguments)]
+pub fn set_mesh_loop_config(
+    id: i64,
+    mode: AutopilotMode,
+    initial_prompt: Option<&str>,
+    suffix_prompt: Option<&str>,
+    max_iterations: Option<i32>,
+    interval_seconds: i32,
+    consecutive_failures: i32,
+) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET autopilot_mode = ?1, loop_initial_prompt = ?2, \
+         loop_suffix_prompt = ?3, loop_max_iterations = ?4, \
+         loop_interval_seconds = ?5, loop_consecutive_failures = ?6 \
+         WHERE id = ?7",
+        params![
+            mode.as_db_str(),
+            initial_prompt,
+            suffix_prompt,
+            max_iterations,
+            interval_seconds,
+            consecutive_failures,
+            id,
         ],
     )
 }
