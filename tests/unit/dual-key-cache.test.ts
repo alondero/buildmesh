@@ -415,3 +415,149 @@ describe('minRefetchIntervalMs — freshness window on bus invalidation', () => 
     expect(client.read(7)).toBeUndefined();
   });
 });
+
+// Issue #780 — `notifyByPath` is the programmatic twin of the bus
+// listener's per-path dispatch. The merge flow uses it to force the
+// Open PR chip in GridNodeHeader to re-fetch immediately, bypassing
+// the 60s `minRefetchIntervalMs` window the bus honours.
+describe('notifyByPath — programmatic invalidation (issue #780)', () => {
+  it('drops the cache + freshness stamp + fires the subscriber even inside the window', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    // Without programmatic invalidation, an event at t+1ms inside the
+    // 30s window is suppressed (per the freshness-window tests above).
+    // notifyByPath must bypass that check.
+    vi.advanceTimersByTime(1);
+    client.notifyByPath('/repo');
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
+    // The freshness stamp is cleared too — a bus event immediately
+    // after would NOT be re-suppressed.
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels a pending trailing refetch — no duplicate notify at window expiry', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    // Arm a trailing refetch via a suppressed bus event.
+    vi.advanceTimersByTime(1);
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).not.toHaveBeenCalled();
+
+    // Programmatic invalidation: drops cache, cancels trailing timer,
+    // notifies. The cancelled timer must NOT fire one window later.
+    client.notifyByPath('/repo');
+    expect(cb).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(60_000);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('only notifies THIS client — a sibling client on the same path is untouched', async () => {
+    // Same scoping guarantee as the bus dispatch (footgun 1): notifyByPath
+    // must not wipe a sibling cache client's entry for a colliding key.
+    const clientA = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('value-A'),
+    });
+    const clientB = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('value-B'),
+    });
+    await clientA.refresh(7);
+    await clientB.refresh(7);
+    expect(clientA.read(7)).toBe('value-A');
+    expect(clientB.read(7)).toBe('value-B');
+
+    const cbA = vi.fn();
+    clientA.subscribeByPath(7, '/repo', cbA);
+
+    clientA.notifyByPath('/repo');
+    expect(cbA).toHaveBeenCalledTimes(1);
+    expect(clientA.read(7)).toBeUndefined();
+    // clientB has no subscriber on /repo, but its cache for 7 must also
+    // be untouched (the dispatch is per-clientId, not per-path-global).
+    expect(clientB.read(7)).toBe('value-B');
+  });
+
+  it('only fires subscribers of the matching path — a different path is untouched', async () => {
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+    });
+    await client.refresh(7);
+    await client.refresh(8);
+
+    const cbRepo = vi.fn();
+    const cbOther = vi.fn();
+    client.subscribeByPath(7, '/repo', cbRepo);
+    client.subscribeByPath(8, '/other', cbOther);
+
+    client.notifyByPath('/repo');
+    expect(cbRepo).toHaveBeenCalledTimes(1);
+    expect(cbOther).not.toHaveBeenCalled();
+    // Key 8's cache is on a different path and untouched.
+    expect(client.read(8)).toBe('fresh');
+  });
+
+  it('fires ALL keyed subscribers on the matching path (multiple nodeIds share a path)', async () => {
+    // Two useOpenPr instances for sibling nodes whose worktree paths
+    // collapse to the same `gitPath` (rare but possible). Both must
+    // re-fetch — the merge flow calls notifyByPath once per matching
+    // node, but a single path may host several nodeIds.
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('v'),
+    });
+    await client.refresh(7);
+    await client.refresh(8);
+    const cb7 = vi.fn();
+    const cb8 = vi.fn();
+    client.subscribeByPath(7, '/shared', cb7);
+    client.subscribeByPath(8, '/shared', cb8);
+
+    client.notifyByPath('/shared');
+    expect(cb7).toHaveBeenCalledTimes(1);
+    expect(cb8).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires callback-only subscribers (subscribeGitPathInvalidation callers) on the same path', async () => {
+    // The callback-only subscriber from `subscribeGitPathInvalidation`
+    // carries no key (the noop-client dispatch), so notifyByPath
+    // detects it via `isCallbackSubscriber` and just fires `notify`.
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+    });
+    await client.refresh(7);
+    const cbKeyed = vi.fn();
+    client.subscribeByPath(7, '/repo', cbKeyed);
+    const cbCallback = vi.fn();
+    subscribeGitPathInvalidation('/repo', cbCallback);
+
+    client.notifyByPath('/repo');
+    expect(cbKeyed).toHaveBeenCalledTimes(1);
+    expect(cbCallback).toHaveBeenCalledTimes(1);
+  });
+
+  it('is a no-op for a path with no subscribers', async () => {
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+    });
+    await client.refresh(7);
+    // Path /unknown has no subscribers — must not throw.
+    expect(() => client.notifyByPath('/unknown')).not.toThrow();
+    // The populated cache is unaffected.
+    expect(client.read(7)).toBe('fresh');
+  });
+});

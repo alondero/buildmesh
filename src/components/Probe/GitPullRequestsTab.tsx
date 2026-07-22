@@ -65,7 +65,10 @@ import {
   type PrMergeability,
 } from '../../lib/tauri';
 import { useMeshStore } from '../../stores/meshStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { refreshOpenPrByPath } from '../../hooks/useOpenPr';
+import { getNodeGitPath } from '../../lib/paths';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
@@ -542,6 +545,30 @@ export function GitPullRequestsTab() {
     });
     try {
       await mergePr(pr.url);
+      // Issue #780 — force-invalidate the Open PR cache for every
+      // agent node whose branch matches the merged PR's head ref, so
+      // the chip in GridNodeHeader flips to "no open PR" immediately
+      // instead of lagging up to 60s behind the merge while the
+      // bus-driven freshness window suppresses the next GIT_CHANGED
+      // refetch. We match by `branch` (the agent node's working
+      // branch) rather than refreshing the whole mesh so the
+      // invalidation is scoped to chips that actually change.
+      // `getNodeGitPath` mirrors the path the chip's `useOpenPr`
+      // subscribed to — worktree subdir for a Worktree Node, mesh
+      // root for a Root Node.
+      if (pr.head_ref && activeMeshId !== null) {
+        // Snapshot at click-time (not a reactive subscription) — we
+        // only need the current set of nodes to find matching branches
+        // for this one merge, and a stale store read doesn't matter
+        // because `agentNodes.filter(branch === pr.head_ref)` is a
+        // per-node branch match, not an identity check.
+        const agentNodes = useAgentNodeStore.getState().agentNodes;
+        for (const node of agentNodes) {
+          if (node.mesh_id === activeMeshId && node.branch === pr.head_ref) {
+            refreshOpenPrByPath(getNodeGitPath(node));
+          }
+        }
+      }
       // Refetch so the merged PR drops out of the open list. Bumping
       // reloadKey aborts the in-flight effect (if any) and re-runs it
       // — see the useAsyncEffect deps at the top of this component.
