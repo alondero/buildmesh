@@ -51,6 +51,7 @@ fn profile_name(session_id: i64) -> String {
 /// [`spawn_sandboxed_restricted`]. This fn + [`cleanup`] are retained only as the
 /// record exercised by the ignored `repro_*` diagnostic tests — do not re-wire
 /// them into production without restoring the matching [`cleanup`] call.
+#[allow(clippy::type_complexity)]
 pub fn spawn_sandboxed(
     cmd: &CommandBuilder,
     session_id: i64,
@@ -167,6 +168,7 @@ static RESTRICTED_CLEANUP: Lazy<Mutex<HashMap<i64, RestrictedCleanup>>> =
 /// When `grant_home` is set, also grants the home paths the default Anthropic
 /// agent chain needs (`~/.claude`, `~/.local/bin`, `~/.claude.json`). See the
 /// module comment for `include_user_sid`.
+#[allow(clippy::type_complexity)]
 pub fn spawn_sandboxed_restricted(
     cmd: &CommandBuilder,
     session_id: i64,
@@ -744,6 +746,7 @@ mod tests {
     ///     its user-SID-keyed `CreateFileMapping` (c ✗) — msys can't init.
     ///   * PERMISSIVE (`true`): `bash` inits (c ✓) and the network reaches the API
     ///     + loopback (f ✓), but the user SID re-opens home reads (d ✗ — leak).
+    ///
     /// Child spawn (b) works in both. Criterion (a) — named-pipe creation for
     /// child stdio, the #528 operation — is proven by the live-claude sibling
     /// test (libuv); cmd/bash can't exercise it directly.

@@ -1393,11 +1393,6 @@ fn read_agy_token() -> Result<String, UsageError> {
     ))
 }
 
-/// (The narrow `read_opencode_console_credential` helper that previously
-/// lived here was retired when the live fetch moved to
-/// [`opencode_live_request_parts`] for issue #972; the full-DTO sibling
-/// below covers both the refresh seam (#970) and the live fetch.)
-///
 /// Reads the Buildmesh-owned OpenCode Console credential as the full DTO so
 /// callers can consume the optional `server_id` (issue #972) — and so the
 /// refresh seam (#970) can re-use the same read path to inspect

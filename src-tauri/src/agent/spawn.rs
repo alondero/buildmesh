@@ -640,6 +640,7 @@ pub fn spawn_child(
 /// (`grant_home = false`). Deny-by-default reads are a tracked follow-up
 /// (separate-user principal / WSL).
 #[cfg(target_os = "windows")]
+#[allow(clippy::type_complexity)]
 fn sandbox_spawn(
     cmd: &CommandBuilder,
     session_id: i64,
@@ -651,6 +652,7 @@ fn sandbox_spawn(
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::type_complexity)]
 fn sandbox_spawn(
     _cmd: &CommandBuilder,
     _session_id: i64,
@@ -754,6 +756,7 @@ pub fn is_agent_already_running(session_id: &i64) -> bool {
 /// `record_first_input_if_first` (via `AgentProcess.spawn_start`) to
 /// timestamp the `first_user_input` log line against the same reference
 /// as every other `spawn_timing:` checkpoint.
+#[allow(clippy::too_many_arguments)]
 fn register_agent(
     session_id: i64,
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -864,6 +867,7 @@ pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, 
 ///   `spawn_agent_inner`. Used by the `first_pty_output` checkpoint log
 ///   so it lines up with every other `spawn_timing:` line (all
 ///   measured against the same "user clicked Spawn" instant).
+#[allow(clippy::too_many_arguments)]
 fn start_reader(
     app: tauri::AppHandle,
     session_id: i64,
@@ -1139,7 +1143,7 @@ pub async fn spawn_agent_inner(
         if mesh_id > 0
             && crate::services::warm_pool::should_claim_for_spawn(existing_present)
         {
-            match crate::services::warm_pool::try_claim(&app, mesh_id) {
+            match crate::services::warm_pool::try_claim(app, mesh_id) {
                 Ok(Some(entry)) => {
                     tracing::info!(
                         "spawn_agent_inner: claimed warm pool entry id={} path={} slug={} base_sha={}",
@@ -1803,7 +1807,6 @@ pub async fn spawn_agent_inner(
                 session_id,
                 e
             );
-        } else {
         }
     }
     // One flag instance shared three ways: the registry entry (kill_session

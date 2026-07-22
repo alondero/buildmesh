@@ -61,17 +61,13 @@ pub(crate) enum OAuthError {
     CodeExpired,
     /// The user clicked "Deny" on the consent screen.
     AccessDenied,
-    /// The polling interval was too aggressive; per RFC 8628 §3.5 we MUST
-    /// increase `interval` by at least 5 seconds and continue. Surfaced
-    /// as an enum arm so a higher layer can decide to keep going vs. abort
-    /// the dance (we always keep going in `poll_for_token_impl`).
-    SlowDown,
     /// No credential available for this operation. The non-Windows path
     /// uses this for `try_refresh` / `persist_token_response` to mirror the
     /// agy precedent at `services::usage::read_agy_token` (the locked #956
     /// decision: "non-Windows = agy-style NoCredential"). String carries
     /// the credential target name so a higher layer can render a stable
     /// surface-level message.
+    #[cfg_attr(windows, allow(dead_code))]
     NoCredential(String),
     /// Transport-level failure (DNS, TLS, connection refused, timeout).
     /// String carries the underlying message for diagnostics.
@@ -87,7 +83,6 @@ impl std::fmt::Display for OAuthError {
         match self {
             OAuthError::CodeExpired => write!(f, "OpenCode OAuth: device code expired before activation"),
             OAuthError::AccessDenied => write!(f, "OpenCode OAuth: user denied the device-flow consent"),
-            OAuthError::SlowDown => write!(f, "OpenCode OAuth: server requested slow-down"),
             OAuthError::NoCredential(target) => write!(f, "OpenCode OAuth: no credential at {target}"),
             OAuthError::Transport(msg) => write!(f, "OpenCode OAuth transport: {msg}"),
             OAuthError::Shape(msg) => write!(f, "OpenCode OAuth shape: {msg}"),
@@ -360,6 +355,9 @@ pub(crate) fn try_refresh_against(
 /// each other. Acceptable risk for a desktop app; follow-up PR may add
 /// per-target locking if profiling shows contention.
 #[cfg(windows)]
+#[allow(dead_code)] // Retained as the documented public seam (issue #970); the live refresh
+                    // path in `services::usage` now calls `try_refresh_against` directly
+                    // (#971) so this wrapper is currently unused.
 pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     use crate::services::windows_cred;
     let blob = windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET).map_err(|e| {
@@ -382,6 +380,7 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)] // Same retention rationale as the Windows arm above.
 pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     // Per the locked #956 design decision, non-Windows mirrors the agy
     // precedent at services::usage::read_agy_token and returns a typed
@@ -401,9 +400,14 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
 /// (after `try_refresh` issues a new bundle).
 #[cfg(windows)]
 pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthError> {
+    persist_token_response_to(OPENCODE_CONSOLE_CRED_TARGET, token)
+}
+
+#[cfg(windows)]
+fn persist_token_response_to(target: &str, token: &TokenResponse) -> Result<(), OAuthError> {
     use crate::services::windows_cred;
-    let expires_at = chrono::Utc::now()
-        + chrono::Duration::seconds(token.expires_in.as_secs() as i64);
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::seconds(token.expires_in.as_secs() as i64);
     let cred = OpenCodeConsoleCred {
         access_token: Some(token.access_token.clone()),
         workspace_id: Some(token.workspace_id.clone()),
@@ -413,8 +417,7 @@ pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthE
     };
     let blob = serde_json::to_vec(&cred)
         .map_err(|e| OAuthError::Shape(format!("persist serialize: {e}")))?;
-    windows_cred::write(OPENCODE_CONSOLE_CRED_TARGET, &blob)
-        .map_err(|e| OAuthError::Shape(format!("persist write: {e}")))
+    windows_cred::write(target, &blob).map_err(|e| OAuthError::Shape(format!("persist write: {e}")))
 }
 
 #[cfg(not(windows))]
@@ -536,7 +539,7 @@ pub(crate) fn parse_workspaces_response(body: &str) -> Result<Vec<OpenCodeWorksp
 /// id. Returns `(DeviceCode, Client)` where the `Client` is the standard
 /// `reqwest::blocking::Client` — `start_device_flow_console` projects the
 /// user-facing half into the `OpenCodeDeviceFlowStart` wire type (`user_code`
-/// + `verification_uri_complete`) the Settings UI renders before React drives
+/// and `verification_uri_complete`) the Settings UI renders before React drives
 /// the polling loop via [`poll_for_token_once`].
 ///
 /// The `Client` is returned (not stashed in module state) so the call site
@@ -945,6 +948,89 @@ pub(crate) fn revoke() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    struct CleanupTarget(String);
+
+    #[cfg(windows)]
+    impl Drop for CleanupTarget {
+        fn drop(&mut self) {
+            let _ = crate::services::windows_cred::delete(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persist_token_response_round_trips_all_five_fields() {
+        use crate::services::windows_cred;
+        use uuid::Uuid;
+
+        let target = format!(
+            "buildmesh-test-opencode-persist-{}",
+            Uuid::new_v4().simple()
+        );
+        let _cleanup = CleanupTarget(target.clone());
+        let token = TokenResponse {
+            access_token: "oc_sk_persist_test".to_string(),
+            refresh_token: "rt_persist_test".to_string(),
+            expires_in: Duration::from_secs(3_600),
+            workspace_id: "wrk_persist_test".to_string(),
+            server_id: "srv_persist_test".to_string(),
+        };
+        let before = chrono::Utc::now();
+
+        persist_token_response_to(&target, &token).expect("persist should succeed");
+
+        let after = chrono::Utc::now();
+        let blob = windows_cred::read(&target).expect("persisted credential should be readable");
+        let json: serde_json::Value =
+            serde_json::from_slice(&blob).expect("persisted credential should be JSON");
+        let object = json
+            .as_object()
+            .expect("persisted credential should be a JSON object");
+        let expected_keys = [
+            "access_token",
+            "workspace_id",
+            "refresh_token",
+            "expires_at",
+            "server_id",
+        ];
+        assert_eq!(object.len(), expected_keys.len());
+        for key in expected_keys {
+            assert!(object.contains_key(key), "credential missing {key}");
+        }
+
+        let cred = parse_opencode_console_full_credential(&blob)
+            .expect("persisted credential should match the reader shape");
+        assert_eq!(
+            cred.access_token.as_deref(),
+            Some(token.access_token.as_str())
+        );
+        assert_eq!(
+            cred.refresh_token.as_deref(),
+            Some(token.refresh_token.as_str())
+        );
+        assert_eq!(
+            cred.workspace_id.as_deref(),
+            Some(token.workspace_id.as_str())
+        );
+        assert_eq!(cred.server_id.as_deref(), Some(token.server_id.as_str()));
+
+        let expires_at = chrono::DateTime::parse_from_rfc3339(
+            cred.expires_at.as_deref().expect("expires_at should exist"),
+        )
+        .expect("expires_at should be RFC 3339")
+        .with_timezone(&chrono::Utc);
+        let requested_duration = chrono::Duration::from_std(token.expires_in).unwrap();
+        assert!(
+            expires_at >= before + requested_duration - chrono::Duration::seconds(1),
+            "expires_at should not precede the requested lifetime"
+        );
+        assert!(
+            expires_at <= after + requested_duration + chrono::Duration::seconds(1),
+            "expires_at should not exceed the requested lifetime"
+        );
+    }
 
     #[test]
     fn parse_full_credential_round_trips_all_five_fields() {

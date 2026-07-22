@@ -27,7 +27,7 @@ use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 use super::appcontainer::AppContainerProfile;
 use super::restricted_token::RestrictedToken;
 
-#[allow(non_snake_case, non_camel_case_types)]
+#[allow(non_snake_case, non_camel_case_types, clippy::upper_case_acronyms)]
 mod ffi {
     use std::os::raw::c_void;
 

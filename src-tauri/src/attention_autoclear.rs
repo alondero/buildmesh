@@ -108,7 +108,7 @@ fn clear_now(node_id: i64) {
         node_id
     );
     if let Some(app) = crate::http::app_handle() {
-        let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+        let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
         let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
     } else {
         // No app handle — write the status but skip the emit (matches

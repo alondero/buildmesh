@@ -2113,6 +2113,7 @@ mod tests {
     ///   - the global DB (so `db::get_agent_node_by_id` returns a real row),
     ///   - `HOME`/`USERPROFILE` (so `env::claude_dir()` resolves to the temp
     ///     dir holding the fixture transcript at the encoded Claude Code path).
+    ///
     /// Both are race-prone between test files (the DB OnceCell is shared; the
     /// env var is process-global), so we serialise under a Mutex and cache
     /// the (raw_token, node_id) pair in an OnceLock so the second test in
@@ -3167,6 +3168,8 @@ ANY / -> Public (SPA shell)";
 
     /// Lock serializing rate-limit dispatcher tests. Same concern as the
     /// `rate_limit::tests::TEST_LOCK` (the global counter is process-wide).
+    // These tests intentionally hold a process-wide lock across requests so
+    // parallel cases cannot reset the shared rate limiter mid-assertion.
     static RATE_LIMIT_DISPATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Send a raw HTTP/1.1 POST to `path` and parse the FIRST response line,
@@ -3210,6 +3213,7 @@ ANY / -> Public (SPA shell)";
         (status, raw)
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn ws_ticket_endpoint_rate_limits_a_repeated_bearer_after_the_cap() {
         // AC: "Exceeding the cap returns 429 Too Many Requests with a Retry-After
@@ -3266,6 +3270,7 @@ ANY / -> Public (SPA shell)";
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn ws_ticket_endpoint_429_body_is_uniform_with_401_shape() {
         // AC: "the response body is uniform with the other auth-failure shapes
@@ -3300,6 +3305,7 @@ ANY / -> Public (SPA shell)";
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn ws_ticket_endpoint_per_token_isolation_at_the_dispatcher() {
         // AC: "per-token isolation (one token's flood does not affect another)".

@@ -202,8 +202,6 @@ pub async fn update_mesh_positions(updates: Vec<(i64, i64)>) -> Result<(), Strin
 }
 
 /// Get or create the root remote access token for the whole buildmesh instance
-
-/// Get or create the root remote access token for the whole buildmesh instance
 #[command]
 pub async fn get_root_token() -> Result<String, String> {
     db::get_or_create_root_token().map_err(|e| e.to_string())

@@ -982,6 +982,7 @@ pub(crate) fn minimax_default_tiers() -> ModelTiers {
 /// a native self-auth harness, so the default Kimi account no longer ships
 /// these tiers, but a user with a stored custom `kimi` Claude-compatible
 /// account (from before #918) still has these defaults to reference.
+#[allow(dead_code)] // Retained for cfg(test) compatibility fixtures.
 pub(crate) fn kimi_default_tiers() -> ModelTiers {
     ModelTiers {
         default: Some("kimi-k2.6".to_string()),

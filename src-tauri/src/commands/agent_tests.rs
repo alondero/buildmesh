@@ -84,6 +84,7 @@ mod tests {
     /// selection. The `ANTHROPIC_*` injection from a custom provider account has
     /// its own focused tests (`*_injects_backend_env`). Keeps the bulk of the
     /// suite terse while still exercising the real composition function.
+    #[allow(clippy::too_many_arguments)]
     fn cmd_for(
         resolved: &ResolvedPath,
         provider: Provider,

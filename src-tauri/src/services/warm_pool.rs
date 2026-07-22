@@ -40,7 +40,7 @@
 //! to the per-mesh target.
 //!
 //! `maintain_all_pools` — the idle worker's per-tick body (issue #613): drains
-//! + fills every worktree-enabled mesh to target. Serialized behind the fill
+//! and fills every worktree-enabled mesh to target. Serialized behind the fill
 //! lock and gated on idleness by the caller (`services::pool_worker`).
 //!
 //! `refresh_stale_warm_worktrees` / `on_fetch_completed` — the post-fetch
@@ -243,8 +243,8 @@ pub fn try_claim(
 /// microsecond TOCTOU window inside `try_claim` itself. Both fail closed.
 pub fn recheck_after_claim(id: i64, path: &str) -> bool {
     recheck_after_claim_id(
-        &db::delete_warm_worktree,
-        &db::delete_pending_worktree_removal,
+        db::delete_warm_worktree,
+        db::delete_pending_worktree_removal,
         id,
         path,
     )
@@ -261,7 +261,7 @@ pub(crate) fn recheck_after_claim_inner(
 ) -> bool {
     let delete_row = |row_id: i64| db::delete_warm_worktree_inner(conn, row_id);
     let cancel_tombstone = |p: &str| db::delete_pending_worktree_removal_inner(conn, p);
-    recheck_after_claim_id(&delete_row, &cancel_tombstone, id, path)
+    recheck_after_claim_id(delete_row, cancel_tombstone, id, path)
 }
 
 /// The shared body of `recheck_after_claim` and `_inner`. Pulled out so

@@ -658,11 +658,7 @@ mod tests {
             for chunk in der.chunks(48) {
                 // base64 with `STANDARD_NO_PAD` would be nicer but the
                 // standard alphabet + `=` padding is what openssl accepts.
-                write!(
-                    s,
-                    "{}\n",
-                    base64_encode(chunk)
-                ).unwrap();
+                writeln!(s, "{}", base64_encode(chunk)).unwrap();
             }
             s.push_str("-----END ");
             s.push_str(label);
@@ -702,7 +698,7 @@ mod tests {
     fn base64_encode(data: &[u8]) -> String {
         const ALPHA: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
         let chunks = data.chunks(3);
         let mut last_len = 0;
         for chunk in chunks {

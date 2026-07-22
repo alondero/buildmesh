@@ -473,30 +473,30 @@ mod tests {
         assert_eq!(available_remaining, 2, "every available row must survive the GC");
     }
 
-    /// The `claimed`-row GC's safety contract is **per-row classification**,
-    /// not "never touches the filesystem" (#697 reworks the design from the
-    /// pre-#642 row-only GC). A claimed row is:
-    ///
-    ///   * **Adopted** (live PROCESS_REGISTRY session on the same mesh):
-    ///     drop the row, **preserve** the directory. The agent is alive;
-    ///     the directory is its CWD. Even when
-    ///     `set_agent_node_worktree_name` silently failed (#642.2 corner
-    ///     case), the live session alone is sufficient evidence.
-    ///   * **Orphan** (no live session, directory exists on disk):
-    ///     **tear down** the directory, drop the row. This is the leak
-    ///     #697 closes — a crashed mid-claim spawn left the directory
-    ///     without a corresponding row drop.
-    ///   * **Mid-move / pre-missing** (no live session, no directory):
-    ///     drop the row only (no fs action).
-    ///
-    /// The four tests below pin each branch and the #642.2 corner case.
-    /// The old `delete_orphaned_claimed_does_not_touch_directories` test
-    /// (pre-#697, "never touches the filesystem" — see PR #696) was
-    /// obsolete by design: that contract is exactly the leak the new
-    /// PROCESS_REGISTRY-based algorithm exists to close. The replacement
-    /// tests use the looser "live session on this mesh ⇒ preserve" guard,
-    /// which is safe against the silent-UPDATE-failure corner case AND
-    /// sharp enough to recover orphan dirs.
+    // The `claimed`-row GC's safety contract is **per-row classification**,
+    // not "never touches the filesystem" (#697 reworks the design from the
+    // pre-#642 row-only GC). A claimed row is:
+    //
+    //   * **Adopted** (live PROCESS_REGISTRY session on the same mesh):
+    //     drop the row, **preserve** the directory. The agent is alive;
+    //     the directory is its CWD. Even when
+    //     `set_agent_node_worktree_name` silently failed (#642.2 corner
+    //     case), the live session alone is sufficient evidence.
+    //   * **Orphan** (no live session, directory exists on disk):
+    //     **tear down** the directory, drop the row. This is the leak
+    //     #697 closes — a crashed mid-claim spawn left the directory
+    //     without a corresponding row drop.
+    //   * **Mid-move / pre-missing** (no live session, no directory):
+    //     drop the row only (no fs action).
+    //
+    // The four tests below pin each branch and the #642.2 corner case.
+    // The old `delete_orphaned_claimed_does_not_touch_directories` test
+    // (pre-#697, "never touches the filesystem" — see PR #696) was
+    // obsolete by design: that contract is exactly the leak the new
+    // PROCESS_REGISTRY-based algorithm exists to close. The replacement
+    // tests use the looser "live session on this mesh ⇒ preserve" guard,
+    // which is safe against the silent-UPDATE-failure corner case AND
+    // sharp enough to recover orphan dirs.
 
     // -----------------------------------------------------------------------
     // Issue #697 — PROCESS_REGISTRY-based claimed-row GC

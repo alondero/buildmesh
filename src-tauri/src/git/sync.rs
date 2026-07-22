@@ -925,13 +925,12 @@ pub async fn locked_fetch_origin(
             SPAWN_SYNC_LOCK_TIMEOUT,
             || fetch_origin(&mesh_path, &base_ref),
         )
-        .map(|inner| {
+        .inspect(|inner| {
             // Stamp the per-Mesh fetch-freshness registry from the bounded-
             // wait's outcome (ADR 0020): a spawn that won the lock and ran
             // the fetch must record both attempt + (when reached) success,
             // matching the policy `stamp_fetch_freshness` enforces.
             stamp_fetch_freshness(&mesh_path, &inner.as_ref().map(|o| o.fetched_ok()).unwrap_or(false));
-            inner
         })
         .unwrap_or_else(|| {
             tracing::warn!(
