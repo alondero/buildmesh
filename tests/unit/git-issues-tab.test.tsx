@@ -129,8 +129,6 @@ function mockBackend(opts: { issues?: GitHubIssue[]; providers?: typeof PROVIDER
         return Promise.resolve('anthropic');
       case 'create_issue_node':
         return Promise.resolve(DRAFT);
-      case 'start_node_background':
-        return Promise.resolve(undefined);
       // Issue #979 — trigger-label toggle. Default to success; tests
       // that want a failing path override via mockImplementation /
       // mockRejectedValueOnce. The `args` are logged to the IPC record
@@ -193,28 +191,24 @@ describe('GitIssuesTab (#378)', () => {
     expect(screen.getByText('gh: not authenticated')).toBeTruthy();
   });
 
-  it('does the two-stage spawn on the primary Spawn button (issue #302)', async () => {
+  it('does the one-stage spawn on the primary Spawn button (issue #302, #247)', async () => {
     mockBackend();
     render(<GitIssuesTab />);
 
     // Each issue row renders its own `SpawnButtonCluster` whose `+` button
-    // carries `data-testid="spawn-default"` — the two-stage-spawn test
-    // wants the first row's button.
+    // carries `data-testid="spawn-default"` — the spawn test wants the
+    // first row's button.
     const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
+    // One accepted call. The backend now owns the slow launch.
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('create_issue_node', {
         meshId: 42, issueNumber: 101, issueTitle: 'Fix the wobble', provider: 'anthropic',
       });
     });
-    // Stage 2 is fire-and-forget; verify the second IPC is called with the
-    // draft id + prefill returned by stage 1.
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('start_node_background', {
-        nodeId: 7, prefill: 'Fix the wobble (issue #101)',
-      });
-    });
+    // No second IPC, no transient prefill hand-off.
+    expect(invoke).not.toHaveBeenCalledWith('start_node_background', expect.anything());
   });
 
   it('disables the split button while a spawn is in flight to block double-clicks', async () => {
@@ -265,11 +259,11 @@ describe('GitIssuesTab (#378)', () => {
     const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
-    // Stage 2 fires; the dock must NOT have closed.
+    // One accepted call drives the entire spawn; the dock stays open.
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('start_node_background', expect.objectContaining({
-        nodeId: 7,
-      }));
+      expect(invoke).toHaveBeenCalledWith('create_issue_node', {
+        meshId: 42, issueNumber: 101, issueTitle: 'Fix the wobble', provider: 'anthropic',
+      });
     });
     expect(useUIStore.getState().probeOpen).toBe(true);
   });
@@ -517,7 +511,6 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
-      if (cmd === 'start_node_background') return Promise.resolve(undefined);
       return Promise.resolve({});
     });
     const { rerender } = render(<GitIssuesTab />);
@@ -675,7 +668,6 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
-      if (cmd === 'start_node_background') return Promise.resolve(undefined);
       return Promise.resolve({});
     });
     render(<GitIssuesTab />);

@@ -1,7 +1,7 @@
 //! Agent Node service — creation, deletion, and lifecycle orchestration
 
 use crate::agent::provider::parse_spawn_option_id;
-use crate::agent::spawn::{spawn_agent_inner, SpawnOptions};
+use crate::agent::spawn::{spawn_with_intent, SpawnIntent, SpawnRequest, TerminalSize};
 use crate::db;
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
@@ -557,28 +557,29 @@ pub async fn regenerate(
     // 5. Reload the node so the spawn call sees the new provider.
     let node = db::get_agent_node_by_id(node_id)?;
 
-    // 6. Decide resume mode and call `spawn_agent_inner`. We preload
-    //    the node (`opts.node = Some(node)`) so the spawn pipeline
-    //    skips its own DB read at step 3 (spawn.rs:755-762).
+    // 6. Decide whether the intent is a same-harness resume. The spawner
+    //    reloads the node and owns the actual session-id/adapter policy.
     let resume = decide_resume(&old_provider, new_provider, node.cli_session_id.as_deref());
-    let new_provider_enum = resolve_harness_provider(new_provider);
+    let intent = if resume.is_some() {
+        SpawnIntent::Resume {
+            cause: crate::agent::spawn::ResumeCause::Explicit,
+        }
+    } else {
+        SpawnIntent::Fresh
+    };
 
-    spawn_agent_inner(
+    spawn_with_intent(
         app,
-        SpawnOptions {
-            session_id: node_id,
-            provider: new_provider_enum,
-            resume,
-            rows: 24,
-            cols: 80,
-            prefill: None,
-            node: Some(node.clone()),
+        SpawnRequest {
+            node_id,
+            intent,
+            terminal_size: TerminalSize { rows: 24, cols: 80 },
         },
     )
     .await
     .map_err(AgentNodeError::Backend)?;
 
-    Ok(node)
+    Ok(db::get_agent_node_by_id(node_id)?)
 }
 
 #[cfg(test)]

@@ -20,6 +20,11 @@ use crate::git::worktree::provision::{
 // `with_mesh_sync_lock` around the bare helpers so callers can't forget to
 // serialize concurrent PR-spawn fetches.
 use crate::models::{AgentNode, EnvType, Provider};
+
+mod intent;
+pub(crate) use intent::{
+    GitHubWorkContext, ResumeCause, SpawnIntent, SpawnOutcome, SpawnRequest, TerminalSize,
+};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use serde::Serialize;
@@ -999,8 +1004,124 @@ fn start_reader(
 // Public Tauri command interface
 // ---------------------------------------------------------------------------
 
-/// Inner implementation shared by spawn_agent command and auto_resume_sessions.
-pub async fn spawn_agent_inner(
+/// Start an Agent Node from a domain intent.
+///
+/// The durable node is the source of truth for provider, path, and session
+/// identity. Callers only select the reason for starting it and the initial
+/// terminal size; low-level `SpawnOptions` stays inside this module while
+/// existing callers migrate to the intent seam.
+pub(crate) async fn spawn_with_intent(
+    app: &tauri::AppHandle,
+    request: SpawnRequest,
+) -> Result<SpawnOutcome, String> {
+    let SpawnRequest {
+        node_id,
+        intent,
+        terminal_size,
+    } = request;
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    let provider = crate::preferences::resolve_harness_provider(&node.provider);
+    let adapter = provider.adapter();
+    let is_resume_intent = matches!(intent, SpawnIntent::Resume { .. });
+
+    let resume = match &intent {
+        SpawnIntent::Resume { cause } => {
+            let Some(cli_session_id) = node
+                .cli_session_id
+                .clone()
+                .filter(|id| !id.is_empty())
+            else {
+                let message = format!(
+                    "cannot resume node {}: no CLI session ID is stored",
+                    node.id
+                );
+                if matches!(cause, ResumeCause::Startup) {
+                    let sink = session_lifecycle::AppSessionLifecycleSink { app };
+                    session_lifecycle::on_idle(&sink, node.id).ok();
+                    return Ok(SpawnOutcome::Skipped(node));
+                }
+                return Err(message);
+            };
+
+            if matches!(cause, ResumeCause::Startup) && !adapter.auto_resume_on_startup() {
+                let sink = session_lifecycle::AppSessionLifecycleSink { app };
+                session_lifecycle::on_idle(&sink, node.id).ok();
+                return Ok(SpawnOutcome::Skipped(node));
+            }
+            if !adapter.supports_resume() {
+                return Err(format!(
+                    "cannot resume node {}: provider '{}' does not support resume",
+                    node.id, node.provider
+                ));
+            }
+            Some(cli_session_id)
+        }
+        _ => None,
+    };
+
+    let prefill = intent.prefill().filter(|prefill| {
+        if adapter.supports_prefill() {
+            true
+        } else {
+            tracing::warn!(
+                "spawn_with_intent: provider '{}' does not support prefill; skipping {} bytes",
+                node.provider,
+                prefill.len()
+            );
+            false
+        }
+    });
+
+    if is_agent_already_running(&node_id) {
+        return Ok(SpawnOutcome::AlreadyActive(node));
+    }
+
+    let result = spawn_agent_inner(
+        app,
+        SpawnOptions {
+            session_id: node_id,
+            provider,
+            resume,
+            rows: terminal_size.rows,
+            cols: terminal_size.cols,
+            prefill,
+            node: Some(node.clone()),
+        },
+    )
+    .await;
+
+    match result {
+        Ok(()) => {
+            let refreshed = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+            let _ = app.emit(
+                "node-spawn-completed",
+                crate::commands::agent::NodeSpawnCompletedPayload { node_id },
+            );
+            Ok(SpawnOutcome::Started(refreshed))
+        }
+        Err(error) => {
+            let sink = session_lifecycle::AppSessionLifecycleSink { app };
+            if is_resume_intent {
+                let _ = session_lifecycle::on_resume_failed(&sink, node_id, &error);
+            } else {
+                let _ = session_lifecycle::on_error(&sink, node_id);
+            }
+            let _ = app.emit(
+                "node-spawn-failed",
+                crate::commands::agent::NodeSpawnFailedPayload {
+                    node_id,
+                    error: error.clone(),
+                },
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Transitional implementation retained while transport callers migrate to
+/// [`spawn_with_intent`]. It is private to the agent module once migration is
+/// complete.
+pub(crate) async fn spawn_agent_inner(
     app: &tauri::AppHandle,
     opts: SpawnOptions,
 ) -> Result<(), String> {
@@ -3782,6 +3903,24 @@ mod tests {
             !reader_should_capture_session_id(&SessionIdMode::None, false),
             "reader MUST NOT capture when provider does not self-assign; \
              any UUID match would overwrite the existing cli_session_id"
+        );
+    }
+
+    #[test]
+    fn issue_intent_builds_its_prefill_at_the_spawn_seam() {
+        let intent = SpawnIntent::Issue(GitHubWorkContext {
+            owner: "alondero".into(),
+            repo: "buildmesh".into(),
+            number: 247,
+            title: "Deepen spawn pipeline".into(),
+        });
+
+        assert_eq!(
+            intent.prefill().as_deref(),
+            Some(
+                "Please work on GitHub issue #247 — Deepen spawn pipeline\n\
+https://github.com/alondero/buildmesh/issues/247"
+            )
         );
     }
 }

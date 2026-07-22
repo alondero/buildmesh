@@ -481,7 +481,6 @@ pub fn run() {
             commands::agent::spawn_issue_agent,
             commands::agent::spawn_handover_agent,
             commands::agent::create_issue_node,
-            commands::agent::start_node_background,
             commands::agent::trigger_finish,
             commands::agent::list_autopilot_runs,
             // Build/Run

@@ -628,51 +628,26 @@ export const getPrFiles = (meshId: number, prNumber: number) =>
 export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
   _invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, provider });
 
-/// Two-stage spawn (issue flow) — stage 1 of 2.
-///
-/// `create_issue_node` is the fast DB-only half of the two-stage spawn
-/// flow: it creates a `pending` agent node row and returns it with the
-/// prefill string the caller must pass to `startNodeBackground`. Returns
-/// in ~20ms (vs. 5-10s for the old synchronous `spawn_issue_agent`),
-/// so the modal can close and the new node can appear almost
-/// immediately. The original `spawnIssueAgent` is kept for the mobile
-/// HTTP route, which has no interactive UI to keep responsive.
-///
-/// `IssueNodeDraft` is generated from the Rust struct in
-/// `src-tauri/src/commands/agent.rs` (issue #404). The Rust struct uses
-/// `#[serde(flatten)]` so the wire form is the flat merge of `AgentNode`
-/// + `prefill`, matching the `extends AgentNode` shape the hand-written
-/// TS used to carry.
+/// Fast acceptance of an issue spawn. The backend commits the `pending` row,
+/// starts the slow intent-driven launch in the background, and later emits
+/// `node-spawn-completed` or `node-spawn-failed`. The returned draft keeps the
+/// existing wire shape for compatibility; callers no longer need to hand the
+/// transient prefill to a second IPC command.
 export type { IssueNodeDraft };
 
 export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
   _invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider });
 
-/// Two-stage spawn (issue flow) — stage 2 of 2.
-///
-/// `start_node_background` runs the slow work (git fetch, worktree
-/// create, PTY spawn, workspace-trust + attention-hook write) on a
-/// background task. Fire-and-forget — the IPC returns immediately.
-/// On completion the backend emits `node-spawn-completed`; on failure,
-/// `node-spawn-failed` (with the node's status already flipped to
-/// `error` in the DB).
-export const startNodeBackground = (nodeId: number, prefill?: string) =>
-  _invoke<void>('start_node_background', { nodeId, prefill });
-
 export const spawnHandoverAgent = (meshId: number, prefill: string, provider?: string) =>
   _invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });
+
 
 export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
   _invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 
-/// Two-stage spawn (PR flow) — stage 1 of 2 (issue #420, extended by #443
-/// for fork PRs).
-///
-/// `create_pr_node` is the PR-flow mirror of `createIssueNode`: fast DB-only
-/// IPC that returns a `pending` agent node row + the prefill string the
-/// caller must pass to `startNodeBackground`. Returns in ~20ms; the slow
-/// work (git fetch <remote> <head_ref>, worktree create off the head ref,
-/// PTY spawn) runs on stage-2's background task.
+/// One backend-owned acceptance call. The PR row's `+` button is on the
+/// `SpawnButtonCluster`; the tab now relies on `create_pr_node` to
+/// accept the row and start the intent-driven launch in the background.
 ///
 /// The `headRef` field comes from the GitHub API's `head.ref` (now exposed
 /// on `GitHubPullRequest` for this purpose). For fork PRs (issue #443) the
@@ -684,8 +659,8 @@ export const createPrForMesh = (meshPath: string, title: string, body: string, b
 /// exposed on `GitHubPullRequest` via `head_sha`. The backend persists it
 /// as `source_pr_pinned_sha` on the new node and verifies the local
 /// `origin/<head_ref>` SHA matches it after `git fetch`, emitting a
-/// non-fatal `pr_sha_drift` `mesh-sync-warning` if not (force-push /
-/// rebase between click-time and spawn-time). An empty `headSha` skips
+/// non-fatal `pr_sha_drift` `mesh-sync-warning` on mismatch (force-push
+/// / rebase between click-time and spawn-time). An empty `headSha` skips
 /// the drift check (same fail-open semantics as `pr_head_unfetchable`).
 ///
 /// Reuses the generated `IssueNodeDraft` type for the return value: the wire

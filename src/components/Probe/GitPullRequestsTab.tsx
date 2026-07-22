@@ -34,11 +34,12 @@
  * Spawn companion (issue #420): open PRs get a split spawn button (default
  * provider + ▾ picker) that mirrors `GitIssuesTab`'s issue-spawn flow. The
  * backend `create_pr_node` creates a `pending` node with the PR's head ref
- * stored in `branch` (and `source_pr` set), then stage-2 fetches
- * `origin/<head_ref>` and cuts the worktree from it — so the agent lands on
- * the same commits the PR is built from (worktree adoption, #36 follow-up).
- * The dock stays open after a successful spawn (matches the issue-tab
- * behaviour, see memory buildmesh-spawn-from-probe-keeps-dock-open).
+ * stored in `branch` (and `source_pr` set) and starts the intent-driven
+ * launch in the background — which fetches `origin/<head_ref>` and cuts
+ * the worktree from it so the agent lands on the same commits the PR is
+ * built from (worktree adoption, #36 follow-up). The dock stays open
+ * after a successful spawn (matches the issue-tab behaviour, see memory
+ * buildmesh-spawn-from-probe-keeps-dock-open).
  *
  * Read-the-body companion (issue #461): mirror of PR #459's
  * `GitIssuesTab` pattern. Body is clamped to 2 lines; clicking it flips
@@ -59,7 +60,6 @@ import {
   getPrsMergeability,
   mergePr,
   createPrNode,
-  startNodeBackground,
   listProviders,
   type GitHubPullRequest,
   type PrMergeability,
@@ -433,23 +433,9 @@ export function GitPullRequestsTab() {
   // drift that #492 fixed in Sidebar.
   useClickOutside(openDropdown, () => setOpenDropdown(null));
 
-  // Two-stage PR spawn (issue #420, extended by #443 for fork PRs) —
-  // mirrors the issue-spawn flow in `GitIssuesTab`. Stage-1
-  // (`createPrNode`) is the fast DB-only IPC (~20ms) that returns a
-  // `pending` node + the prefill; stage-2 (`startNodeBackground`) does the
-  // slow work (git fetch <remote> <head_ref>, worktree create off the
-  // head ref, PTY spawn) in the background and the store flips the node
-  // to `running` / `error` via `node-spawn-completed` /
-  // `node-spawn-failed` events. We deliberately do NOT toggle the probe —
-  // the dock stays open so the user can fire off another PR without
-  // re-opening the context menu (matches the issue-tab contract; see
-  // memory buildmesh-spawn-from-probe-keeps-dock-open).
-  //
-  // For fork PRs (#443) the stage-2 path adds the fork as a remote and
-  // fetches the head ref from there instead of from `origin`. The fork
-  // fields come from the GitHub list response (`head_repo_owner` +
-  // `head_repo_clone_url` on `GitHubPullRequest`); for same-repo PRs both
-  // are empty strings and the backend takes the #420 origin-fetch path.
+  // One backend-owned acceptance call. The node-created event makes the row
+  // visible immediately; completion/failure events arrive when the intent
+  // spawner has registered (or rejected) the PTY.
   const handleSpawn = async (pr: GitHubPullRequest, providerId: string) => {
     if (activeMeshId === null) return;
     setSpawning(pr.number);
@@ -459,7 +445,7 @@ export function GitPullRequestsTab() {
       return next;
     });
     try {
-      const draft = await createPrNode(
+      await createPrNode(
         activeMeshId,
         pr.number,
         pr.title,
@@ -477,10 +463,6 @@ export function GitPullRequestsTab() {
         pr.head_repo_clone_url,
       );
       setOpenDropdown(null);
-      // Dispatch stage-2 BEFORE clearing the busy state so the
-      // fire-and-forget IPC is on the wire before the same-row button
-      // re-enables for another click.
-      startNodeBackground(draft.id, draft.prefill);
       setSpawning(null);
     } catch (e) {
       console.error('Failed to spawn PR agent:', e);
@@ -510,7 +492,7 @@ export function GitPullRequestsTab() {
     });
     try {
       const defaultProvider = await getDefaultProvider(activeMeshId);
-      const draft = await createPrNode(
+      await createPrNode(
         activeMeshId,
         pr.number,
         pr.title,
@@ -521,9 +503,6 @@ export function GitPullRequestsTab() {
         pr.head_repo_clone_url,
       );
       setOpenDropdown(null);
-      // Same ordering as `handleSpawn`: stage-2 IPC first, then clear the
-      // busy state. Dock stays open (see handleSpawn).
-      startNodeBackground(draft.id, draft.prefill);
       setSpawning(null);
     } catch (e) {
       console.error('Failed to spawn PR agent:', e);

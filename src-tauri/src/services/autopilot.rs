@@ -734,11 +734,24 @@ fn spawn_loop_node(
         provider
     );
 
-    crate::commands::agent::start_node_background(
-        app.clone(),
-        node.id,
-        Some(initial_prompt.to_string()),
-    )?;
+    let app_for_spawn = app.clone();
+    let prompt_for_spawn = initial_prompt.to_string();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = crate::agent::spawn::spawn_with_intent(
+            &app_for_spawn,
+            crate::agent::spawn::SpawnRequest {
+                node_id: node.id,
+                intent: crate::agent::spawn::SpawnIntent::Loop {
+                    initial_prompt: prompt_for_spawn,
+                },
+                terminal_size: crate::agent::spawn::TerminalSize { rows: 24, cols: 80 },
+            },
+        )
+        .await
+        {
+            tracing::error!("autopilot: loop node {} failed: {}", node.id, error);
+        }
+    });
 
     // The launch watcher does the same two-phase submit as the issue-driven
     // path (#874): stage the paste, wait for the harness echo + quiescence,
@@ -956,7 +969,29 @@ fn spawn_autopilot_node(
         provider
     );
 
-    crate::commands::agent::start_node_background(app.clone(), node.id, Some(prefill.clone()))?;
+    let app_for_spawn = app.clone();
+    let intent = crate::agent::spawn::SpawnIntent::Issue(
+        crate::agent::spawn::GitHubWorkContext {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number: issue.number,
+            title: issue.title.clone(),
+        },
+    );
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = crate::agent::spawn::spawn_with_intent(
+            &app_for_spawn,
+            crate::agent::spawn::SpawnRequest {
+                node_id: node.id,
+                intent,
+                terminal_size: crate::agent::spawn::TerminalSize { rows: 24, cols: 80 },
+            },
+        )
+        .await
+        {
+            tracing::error!("autopilot: issue node {} failed: {}", node.id, error);
+        }
+    });
 
     // The prefill only *stages* the prompt in the harness's input box —
     // nothing submits it. Watch the PTY until the harness is observably
