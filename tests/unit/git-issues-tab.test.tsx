@@ -22,6 +22,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { GitIssuesTab } from '../../src/components/Probe/GitIssuesTab';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
+import { addToast } from '../../src/stores/toastStore';
 import type { GitHubIssue } from '../../src/types/generated/GitHubIssue';
 
 // `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
@@ -35,6 +36,23 @@ const { openUrlMock } = vi.hoisted(() => ({
 }));
 vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: openUrlMock,
+}));
+
+// Issue #1001 — the trigger-label toggle now surfaces IPC failures
+// through the shared `addToast` wrapper from `stores/toastStore` instead
+// of inline `<span data-trigger-label-error>` state. Mock the wrapper
+// the same way Terminal.tsx is mocked in `agent-node-store.test.ts`:
+// the production code imports the named export, tests capture the spy
+// via `vi.mocked(addToast)`, and `addToastMock.mockReset()` in
+// `beforeEach` clears call history between tests.
+const { addToastMock } = vi.hoisted(() => ({
+  addToastMock: vi.fn(),
+}));
+vi.mock('../../src/stores/toastStore', () => ({
+  addToast: addToastMock,
+  // `dismissToast` is exported by the module but isn't exercised by this
+  // test file; pass through to keep the module shape intact.
+  dismissToast: vi.fn(),
 }));
 
 const MESH: Mesh = {
@@ -134,6 +152,10 @@ describe('GitIssuesTab (#378)', () => {
     // Re-establish the default resolved value after the reset.
     openUrlMock.mockReset();
     openUrlMock.mockResolvedValue(undefined);
+    // Issue #1001 — clear toast call history between tests so the
+    // "calls addToast on failure" assertion below doesn't see calls
+    // from a prior test.
+    addToastMock.mockReset();
     useUIStore.setState({ probeOpen: true, probeTab: 'issues', activeDiffFile: null });
     useMeshStore.setState({
       meshesById: new Map([[MESH.id, MESH]]),
@@ -973,13 +995,19 @@ describe('GitIssuesTab (#378)', () => {
     confirmSpy.mockRestore();
   });
 
-  it('reverts + surfaces the error inline when set_issue_label rejects', async () => {
+  it('reverts + calls addToast when set_issue_label rejects', async () => {
     // The optimistic flip on click is followed by an IPC failure (the
     // backend surfaces the 422 → LabelNotFound message verbatim). The
-    // badge must revert to its pre-click state and the error message
-    // must render inline below the badge with `data-trigger-label-error`.
-    // Regression guard for decision #3 (optimistic UI with rollback) and
-    // decision #4 (the toast message is the backend's exact wording).
+    // badge must revert to its pre-click state (decision #3 rollback)
+    // and the failure must reach the shared toast pipeline (issue #1001).
+    //
+    // Pre-#1001 this asserted `data-trigger-label-error` rendered inline
+    // below the badge; the toast pipeline is now the single source of
+    // truth for IPC failure surfacing across the app, so we assert the
+    // wrapper was called with the exact provider + backend message +
+    // severity. The toast itself is rendered by App.tsx — covered by
+    // `tests/unit/toast-store.test.ts` and the visual layer (not
+    // asserted here).
     const errorMessage =
       'Label `buildmesh:run` doesn\'t exist on the repo — create it on GitHub first';
     vi.mocked(invoke).mockImplementation((cmd: string) => {
@@ -1006,10 +1034,12 @@ describe('GitIssuesTab (#378)', () => {
       ).toBeTruthy();
     });
 
-    // The error message surfaces inline below the badge.
-    const errorEl = screen.getByText(errorMessage);
-    expect(errorEl).toBeTruthy();
-    expect(errorEl.getAttribute('data-trigger-label-error')).not.toBeNull();
+    // Issue #1001: the failure reaches the shared toast pipeline with
+    // the backend's verbatim message. The wrapper is mocked at module
+    // load — the production code's `import { addToast }` resolves to
+    // `addToastMock`, captured via `vi.mocked(addToast)` so the
+    // assertion carries the same type as the production call site.
+    expect(vi.mocked(addToast)).toHaveBeenCalledWith('GitHub', errorMessage, 'error');
   });
 
   it('disables the badge while a toggle is in flight to block double-clicks', async () => {

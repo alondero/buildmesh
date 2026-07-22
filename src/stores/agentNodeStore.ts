@@ -16,6 +16,12 @@ import type { AutopilotNodeClosedPayload } from '../types/generated/AutopilotNod
 import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
 import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
+// Issue #1001 — `deleteAgentNode` Phase 2 (delete_commit) now surfaces
+// its failure via the shared toast pipeline instead of the previously
+// silent `state.error` Zustand field. Phase 1 (worktree safety check)
+// is unchanged — it still sets `state.error`, which App.tsx routes
+// through the generic "System" toast pipeline.
+import { addToast } from './toastStore';
 import { useMeshStore } from './meshStore';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
@@ -423,24 +429,33 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       await api.deleteAgentNode(id, removeWorktree);
     } catch (e) {
       // Issue #645: restore the optimistically-removed row so UI/DB stay in
-      // sync. Without this the catch would silently swallow the rejection —
-      // `state.error` alone is invisible to the user (no toast), and any
-      // unrelated fetchAgentNodes (node-created, mesh switch, …) would
-      // resurrect the row anyway, making it look like a "zombie" close.
-      // Re-inserting here makes the resurrection immediate and the failure
-      // visible via the App.tsx state.error → 'System' toast pipeline
-      // (App.tsx:186-190). Re-throw to match createAgentNode / renameAgentNode
-      // so callers awaiting the close can react. `nodeForRestore` was
-      // captured AFTER Phase 1's await so a `node-renamed` event fired
-      // mid-flight (e.g. user renamed then closed) restores the post-rename
-      // version, not a stale pre-rename snapshot.
+      // sync. Without this the catch would silently swallow the rejection,
+      // and any unrelated fetchAgentNodes (node-created, mesh switch, …)
+      // would resurrect the row anyway, making it look like a "zombie"
+      // close. Re-inserting here makes the resurrection immediate. Re-throw
+      // to match createAgentNode / renameAgentNode so callers awaiting the
+      // close can react. `nodeForRestore` was captured AFTER Phase 1's
+      // await so a `node-renamed` event fired mid-flight (e.g. user
+      // renamed then closed) restores the post-rename version, not a stale
+      // pre-rename snapshot.
       //
       // Issue #647: leave the terminal alive — the row is restored and
       // needs its scrollback + live PTY for the user to retry.
+      //
+      // Issue #1001: surface the failure through the shared toast pipeline.
+      // The explicit toast is the single source of truth for delete
+      // failures — `state.error` is intentionally NOT written here
+      // because App.tsx subscribes to `useAgentNodeStore(state => state.error)`
+      // for its generic "System" pipeline, and retaining it would produce
+      // a duplicate "System" toast alongside the explicit "Node" toast
+      // (different providers, the dedup wouldn't collapse them, two of
+      // the three toast slots would burn on a single failure). Every
+      // other `state.error` setter (Phase 1 worktree safety check, etc.)
+      // continues to use the App.tsx System pipeline unchanged.
       set((state) => ({
         agentNodes: nodeForRestore ? [...state.agentNodes, nodeForRestore] : state.agentNodes,
-        error: formatError(e),
       }));
+      addToast('Node', `Failed to close node: ${formatError(e)}`, 'error');
       throw e;
     }
 

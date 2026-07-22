@@ -26,9 +26,27 @@ vi.mock('../../src/components/Terminal/Terminal', () => ({
   AgentTerminal: () => null,
 }));
 
+// Issue #1001 — `deleteAgentNode` Phase 2 (delete_commit) now surfaces
+// its failure via the shared `addToast` wrapper from `stores/toastStore`
+// instead of writing to `state.error` (which would produce a duplicate
+// 'System' toast alongside the explicit 'Node' toast). Mock the wrapper
+// the same way `Terminal.tsx` is mocked above — production code imports
+// the named export, tests capture the spy via `vi.mocked(addToast)`.
+const { addToastMock } = vi.hoisted(() => ({
+  addToastMock: vi.fn(),
+}));
+vi.mock('../../src/stores/toastStore', () => ({
+  addToast: addToastMock,
+  // `dismissToast` is exported by the module but isn't exercised by this
+  // test file; pass through to keep the module shape intact.
+  dismissToast: vi.fn(),
+}));
+
 import { disposeTerminal } from '../../src/components/Terminal/Terminal';
+import { addToast } from '../../src/stores/toastStore';
 
 const mockDisposeTerminal = disposeTerminal as ReturnType<typeof vi.fn>;
+const mockAddToast = vi.mocked(addToast);
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 const mockEmit = emit as ReturnType<typeof vi.fn>;
@@ -485,9 +503,14 @@ describe('useAgentNodeStore', () => {
     //      mesh switch, …) re-fetches from the DB and the row "zombie"
     //      reappears, looking like the close silently failed. Pin the row
     //      back BEFORE the next refetch.
-    //   2. The error is surfaced on `state.error`. App.tsx:186-190 already
-    //      subscribes to that field and adds a 'System' toast — that's the
-    //      user-visible feedback path. The store's job is to write to it.
+    //   2. The error reaches the shared toast pipeline (issue #1001).
+    //      `addToast('Node', \`Failed to close node: ${formatError(e)}\`, 'error')`
+    //      is the user-visible feedback path. Phase 2 no longer writes
+    //      `state.error` because that would produce a duplicate 'System'
+    //      toast alongside the explicit 'Node' toast (different providers,
+    //      dedup wouldn't collapse them, two of three slots burned on one
+    //      failure). Phase 1 (worktree safety check) still writes
+    //      `state.error` — App.tsx's System toast pipeline handles it.
     //   3. The promise rejects, so any caller wanting to react (catch block,
     //      await rejection) can. Matches `createAgentNode` / `renameAgentNode`
     //      which already re-throw.
@@ -510,7 +533,7 @@ describe('useAgentNodeStore', () => {
       expect(restored[0]).toEqual(node);
     });
 
-    it('surfaces the delete_agent_node rejection on state.error for the toast pipeline', async () => {
+    it('surfaces the delete_agent_node rejection through the shared toast pipeline (issue #1001)', async () => {
       const node = makeNode({ id: 42 });
       useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 42 });
       mockInvoke.mockImplementation((cmd: string) => {
@@ -523,9 +546,18 @@ describe('useAgentNodeStore', () => {
         useAgentNodeStore.getState().deleteAgentNode(42)
       ).rejects.toThrow('foreign key');
 
-      // App.tsx subscribes to state.error and adds a 'System' toast on change.
-      // Pin that the store writes the message there — not just to console.
-      expect(useAgentNodeStore.getState().error).toContain('foreign key');
+      // Issue #1001 — the failure reaches the shared toast pipeline with
+      // the explicit 'Node' provider, the formatted 'Failed to close node:
+      // ...' message, and the 'error' severity. The toast itself is
+      // rendered by App.tsx; this test pins the wrapper was called with
+      // the right args. `state.error` is NOT written here — keeping it
+      // would produce a duplicate 'System' toast alongside the 'Node'
+      // one (different providers → not deduped).
+      expect(mockAddToast).toHaveBeenCalledWith(
+        'Node',
+        'Failed to close node: foreign key violation',
+        'error',
+      );
     });
 
     it('rejects the outer promise so callers can react to a delete_agent_node failure', async () => {
