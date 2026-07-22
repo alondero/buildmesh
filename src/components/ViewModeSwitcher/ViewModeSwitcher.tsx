@@ -5,8 +5,9 @@ import { resolveMeshScopeId } from '../../lib/viewModes';
 
 /**
  * ViewModeSwitcher — the four-segment View Mode control (wayfinder #982 /
- * ticket #983). Lives in the slim canvas header above `AgentNodeView` (see
- * App.tsx) and drives `uiStore.viewMode`. Hand-rolled `<button>` + Tailwind
+ * ticket #983). Lives in the bespoke TitleBar (see `components/TitleBar`,
+ * moved out of the old canvas header strip when the window went frameless)
+ * and drives `uiStore.viewMode`. Hand-rolled `<button>` + Tailwind
  * per repo convention (no component library); icons follow the
  * `probeIcons.tsx` idiom — 24×24 viewBox, stroke="currentColor", 1.75
  * width, round caps — so each glyph inherits the segment's text colour.

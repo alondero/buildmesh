@@ -12,11 +12,11 @@ import type { AutopilotNodeClosedPayload } from './types/generated/AutopilotNode
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
+import { TitleBar } from './components/TitleBar/TitleBar';
 import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
-import { ViewModeSwitcher } from './components/ViewModeSwitcher/ViewModeSwitcher';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
@@ -583,30 +583,34 @@ function App() {
 
   if (!isReady) {
     return (
-      <div
-        role="status"
-        aria-label="Loading Buildmesh"
-        className="flex h-screen w-screen items-center justify-center bg-bg-base"
-      >
-        <div className="text-accent-cyan text-2xl animate-pulse">●</div>
+      <div className="flex flex-col h-screen w-screen bg-bg-base">
+        <TitleBar />
+        <div
+          role="status"
+          aria-label="Loading Buildmesh"
+          className="flex flex-1 items-center justify-center"
+        >
+          <div className="text-accent-cyan text-2xl animate-pulse">●</div>
+        </div>
       </div>
     );
   }
 
     return (
-    <div className="flex h-screen w-screen overflow-hidden bg-bg-base text-text-primary">
-      <Sidebar />
-      {/* Canvas column (wayfinder #982 / ticket #983): a slim header strip
-          above the node canvas only — not app-wide, not in the sidebar —
-          carrying the ViewModeSwitcher right-aligned. The left side is the
-          seam for future canvas-level chrome (breadcrumb etc.). */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="flex items-center justify-end px-3 py-1.5 border-b border-border-subtle shrink-0">
-          <ViewModeSwitcher />
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-bg-base text-text-primary">
+      {/* Bespoke window chrome (replaces the native title bar): wordmark,
+          the ViewModeSwitcher toolbar, settings/remote icons and the
+          minimize/maximize/close controls. The window runs frameless
+          ("decorations": false in tauri.conf.json); dragging and
+          double-click maximize are handled by the bar's drag regions. */}
+      <TitleBar />
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar />
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <AgentNodeView />
         </div>
-        <AgentNodeView />
+        <ProbePanel />
       </div>
-      <ProbePanel />
 
       <WorktreeCloseDialog />
       <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => setCheatsheetOpen(false)} />
