@@ -121,6 +121,31 @@ export interface PathKeyedClient<V> {
    * `key` (via `pathMatchesGitEvent` — worktree-subdir + WUNC-aware). The
    * returned function unsubscribes; call it from the hook's cleanup. */
   subscribe(key: string, onInvalidate: () => void): () => void;
+  /**
+   * Programmatically forces every subscriber of `path` to re-fetch,
+   * bypassing the `minRefetchIntervalMs` freshness window. Mirrors the
+   * bus listener's per-path dispatch but skips the freshness check (a
+   * deliberate invalidation from the same process is always
+   * authoritative). Drops the cache + freshness stamp per keyed
+   * subscriber first so the subscriber's `onInvalidate` sees the same
+   * "evicted, please refetch" precondition the bus path establishes,
+   * then calls the per-subscriber `notify` callback — hook subscribers
+   * re-fetch through `client.refresh(key)` exactly as they would on a
+   * real `GIT_CHANGED` event.
+   *
+   * Scoping mirrors the bus dispatch one-for-one:
+   *   - Callback-only subscribers (from `subscribeGitPathInvalidation`,
+   *     registered with the shared `NOOP_CLIENT_ID`) carry no key
+   *     and no client state — always fire `notify`.
+   *   - Keyed subscribers fire only when their `clientId` matches
+   *     THIS client, so sibling cache clients on the same path are
+   *     untouched (footgun 1 in the module docstring).
+   * No-op when `path` has no subscribers. Issue #780 — the buildmesh
+   * create/merge PR flows use this to update the Open PR chip in
+   * GridNodeHeader immediately instead of waiting up to
+   * `minRefetchIntervalMs` for the bus-driven trailing refetch.
+   */
+  notifyByPath(path: string): void;
 }
 
 /** Dual-key client: `key` is an entity id; `path` is the separate git path
@@ -143,6 +168,15 @@ export interface DualKeyClient<K, V> {
   /** Registers a callback to be invoked when a `GIT_CHANGED` event matches
    * `path` (via `pathMatchesGitEvent`). The returned function unsubscribes. */
   subscribeByPath(key: K, path: string, onInvalidate: () => void): () => void;
+  /**
+   * Same as [`PathKeyedClient.notifyByPath`] but for the dual-key shape —
+   * drops the cache + freshness stamp for each keyed subscriber whose
+   * `clientId` matches this client, then fires the subscriber's `notify`.
+   * Callback-only subscribers (`subscribeGitPathInvalidation` callers) on
+   * the same path also fire (they have no cache to evict). See
+   * `PathKeyedClient.notifyByPath` for the full contract. Issue #780.
+   */
+  notifyByPath(path: string): void;
 }
 
 /** Options accepted by both factories. */
@@ -347,6 +381,8 @@ interface InternalClient<K, V> {
   /** Wires the bus handler + listener and registers a keyed subscriber
    * on `path`. Returns the idempotent unsubscribe. */
   subscribeOn(key: K, path: string, onInvalidate: () => void): () => void;
+  /** See the public-client `notifyByPath` docstring — issue #780. */
+  notifyByPath(path: string): void;
 }
 
 function createInternalClient<K, V>(
@@ -530,6 +566,46 @@ function createInternalClient<K, V>(
       const sub: KeyedPathSubscriber<K> = { kind: 'keyed', clientId, key, notify: onInvalidate };
       return addPathSubscriber(sub, path);
     },
+
+    notifyByPath(path) {
+      // Programmatic invalidation for buildmesh's own write-paths
+      // (create/merge PR flows, issue #780). Mirrors the bus listener's
+      // per-path dispatch (`installListener`) but skips the freshness
+      // check entirely — a deliberate invalidation from the same
+      // process is always authoritative.
+      //
+      // Scoping mirrors the bus dispatch one-for-one:
+      //   - Callback-only subscribers (from `subscribeGitPathInvalidation`,
+      //     registered with the shared `NOOP_CLIENT_ID`) carry no key
+      //     and no client state — always fire `notify`.
+      //   - Keyed subscribers fire only when their `clientId` matches
+      //     THIS client, so a sibling cache client on the same path
+      //     is untouched. The keyed branch drops `known` / `values` /
+      //     `pending` / `lastFetchedAt` (mirroring the bus handler's
+      //     evict step) and cancels any armed trailing refetch — the
+      //     caller is about to drive its own refresh, so a deferred
+      //     second eviction would race it.
+      const subs = pathSubscribers.get(path);
+      if (!subs) return;
+      for (const sub of subs) {
+        if (isCallbackSubscriber(sub)) {
+          sub.notify();
+          continue;
+        }
+        if (sub.clientId !== clientId) continue;
+        // `pathSubscribers` stores `KeyedPathSubscriber<unknown>` (the
+        // shared, cross-client Set); we just narrowed `clientId` to
+        // OUR client, so `sub.key` is in fact a `K`. The cast mirrors
+        // the per-client handler's typing (see `KeyedBusHandler<K>`).
+        const keyed = sub as KeyedPathSubscriber<K>;
+        cancelTrailing(keyed.key);
+        known.delete(keyed.key);
+        values.delete(keyed.key);
+        pending.delete(keyed.key);
+        lastFetchedAt.delete(keyed.key);
+        keyed.notify();
+      }
+    },
   };
 }
 
@@ -589,15 +665,17 @@ export function createDualKeyCache<K, V>(
 
   // The `subscribe` and `subscribeOn` members are intentionally NOT
   // exposed on the dual-key public type — `subscribeByPath` is the only
-  // public subscription method. `read`/`refresh`/`lastError`/`invalidate`
-  // come straight from the internal client. Issue #342 adds `lastError`.
-  const { read, refresh, lastError, invalidate, subscribeOn } = internal;
+  // public subscription method. `read`/`refresh`/`lastError`/`invalidate`/
+  // `notifyByPath` come straight from the internal client. Issue #342 adds
+  // `lastError`; #780 adds `notifyByPath`.
+  const { read, refresh, lastError, invalidate, subscribeOn, notifyByPath } = internal;
   return {
     read,
     refresh,
     lastError,
     invalidate,
     subscribeByPath: subscribeOn,
+    notifyByPath,
   };
 }
 

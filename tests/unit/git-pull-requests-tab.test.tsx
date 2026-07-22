@@ -26,6 +26,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { GitPullRequestsTab } from '../../src/components/Probe/GitPullRequestsTab';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
+import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { GitHubPullRequest } from '../../src/types/generated/GitHubPullRequest';
 import type { PrMergeability } from '../../src/types/generated/PrMergeability';
 import type { PrMergeabilityEntry } from '../../src/types/generated/PrMergeabilityEntry';
@@ -42,6 +43,21 @@ const { openUrlMock } = vi.hoisted(() => ({
 vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: openUrlMock,
 }));
+
+// Issue #780 — spy on the Open PR cache invalidation the merge flow
+// fires for any agent node whose branch matches the merged PR's head
+// ref. We keep the rest of `useOpenPr` real (the `useOpenPr` hook is
+// imported transitively by nothing in this test file, so the spy is
+// the only thing the merge flow sees).
+const { refreshOpenPrByPathSpy } = vi.hoisted(() => ({
+  refreshOpenPrByPathSpy: vi.fn(),
+}));
+vi.mock('../../src/hooks/useOpenPr', async () => {
+  const actual = await vi.importActual<typeof import('../../src/hooks/useOpenPr')>(
+    '../../src/hooks/useOpenPr',
+  );
+  return { ...actual, refreshOpenPrByPath: refreshOpenPrByPathSpy };
+});
 
 const MESH: Mesh = {
   id: 42,
@@ -168,11 +184,16 @@ describe('GitPullRequestsTab', () => {
     // Re-establish the default resolved value after the reset.
     openUrlMock.mockReset();
     openUrlMock.mockResolvedValue(undefined);
+    refreshOpenPrByPathSpy.mockReset();
     useUIStore.setState({ probeOpen: true, probeTab: 'pulls', activeDiffFile: null });
     useMeshStore.setState({
       meshesById: new Map([[MESH.id, MESH]]),
       selectedMeshId: MESH.id,
     });
+    // Clear any agent nodes left over from sibling tests — this tab
+    // doesn't render them, but the merge-wiring test below reads them
+    // via `useAgentNodeStore`.
+    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
   });
 
   // RTL doesn't auto-unmount between tests in this vitest setup, so the
@@ -247,6 +268,164 @@ describe('GitPullRequestsTab', () => {
     await waitFor(() => {
       expect(vi.mocked(invoke).mock.calls.filter(([c]) => c === 'get_repo_pulls').length).toBeGreaterThan(1);
     });
+  });
+
+  // Issue #780 — the merge flow must force-invalidate the Open PR
+  // cache for any agent node whose branch matches the merged PR's head
+  // ref, so the chip in GridNodeHeader updates immediately instead of
+  // waiting up to 60s for the freshness window to expire. The cache
+  // primitive is unit-tested in `dual-key-cache.test.ts`; this test
+  // pins the wiring between the merge flow and the cache primitive.
+  it('after a successful merge, refreshOpenPrByPath fires for matching agent nodes', async () => {
+    // Agent node whose branch matches PR 201's head ref (`feat/201-add-widget`).
+    // Worktree name is empty → `getNodeGitPath` returns `node.path`
+    // (the mesh root), which is the simplest assertion target.
+    const matchingNode = {
+      id: 99,
+      mesh_id: 42,
+      name: 'feat-201',
+      path: '/repos/demo',
+      branch: 'feat/201-add-widget',
+      worktree_name: null,
+      use_worktree: false,
+      env: 'wsl',
+      provider: 'anthropic',
+      status: 'idle',
+      session_id: null,
+      created_at: '2026-01-01',
+      position: 0,
+      source_issue: null,
+      source_pr: null,
+      is_pinned: false,
+    };
+    // Sibling node whose branch does NOT match — must NOT trigger refresh.
+    const unrelatedNode = {
+      ...matchingNode,
+      id: 100,
+      name: 'other-branch',
+      branch: 'feat/999-different',
+    };
+    useAgentNodeStore.setState({ agentNodes: [matchingNode, unrelatedNode] });
+
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    await userEvent.click(mergeBtn);
+    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    await userEvent.click(confirmBtn);
+
+    // The merge flow must invalidate the cache for the matching node's
+    // resolved git path (mesh root here, because `use_worktree: false`).
+    await waitFor(() => {
+      expect(refreshOpenPrByPathSpy).toHaveBeenCalledWith('/repos/demo');
+    });
+    // …and NOT for the sibling node (different branch) — refresh is
+    // scoped to chips that actually change.
+    expect(refreshOpenPrByPathSpy).not.toHaveBeenCalledWith(expect.stringContaining('feat/999'));
+    // Called exactly once for the matching node (no double-fire from
+    // sibling hook instances on the same path).
+    expect(refreshOpenPrByPathSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('after a successful merge, refreshOpenPrByPath fires with the worktree subdir for Worktree Nodes', async () => {
+    // Pin the path derivation: a Worktree Node (use_worktree: true +
+    // worktree_name) resolves to `<path>/.claude/worktrees/<name>` per
+    // `getNodeGitPath`, not the mesh root. The merge-flow invalidation
+    // must use the same path the chip's `useOpenPr` subscribed to,
+    // otherwise the subscriber wouldn't fire (path mismatch).
+    const worktreeNode = {
+      id: 99,
+      mesh_id: 42,
+      name: 'feat-201',
+      path: '/repos/demo',
+      branch: 'feat/201-add-widget',
+      worktree_name: 'swift-otter',
+      use_worktree: true,
+      env: 'wsl',
+      provider: 'anthropic',
+      status: 'idle',
+      session_id: null,
+      created_at: '2026-01-01',
+      position: 0,
+      source_issue: null,
+      source_pr: null,
+      is_pinned: false,
+    };
+    useAgentNodeStore.setState({ agentNodes: [worktreeNode] });
+
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    await userEvent.click(mergeBtn);
+    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    await userEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(refreshOpenPrByPathSpy).toHaveBeenCalledWith('/repos/demo/.claude/worktrees/swift-otter');
+    });
+  });
+
+  it('after a successful merge, refreshOpenPrByPath does NOT fire when no agent node matches the head ref', async () => {
+    // The invalidation is scoped to matching branches — if no agent
+    // node has the merged PR's head ref as its branch, there is no
+    // chip to update and the refresh is a no-op (the spy confirms no
+    // spurious invalidations are emitted for unrelated nodes).
+    useAgentNodeStore.setState({ agentNodes: [] });
+
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    await userEvent.click(mergeBtn);
+    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    await userEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('merge_pr', expect.anything());
+    });
+    expect(refreshOpenPrByPathSpy).not.toHaveBeenCalled();
+  });
+
+  it('cancelled merge does NOT fire refreshOpenPrByPath', async () => {
+    // Pin the negative case: the confirm-then-cancel path dismisses
+    // the confirm UI without firing `merge_pr`, and must therefore NOT
+    // touch the Open PR cache. A regression that wires refresh into
+    // the wrong branch (e.g. the cancel button's onClick) would be
+    // caught here.
+    useAgentNodeStore.setState({
+      agentNodes: [{
+        id: 99,
+        mesh_id: 42,
+        name: 'feat-201',
+        path: '/repos/demo',
+        branch: 'feat/201-add-widget',
+        worktree_name: null,
+        use_worktree: false,
+        env: 'wsl',
+        provider: 'anthropic',
+        status: 'idle',
+        session_id: null,
+        created_at: '2026-01-01',
+        position: 0,
+        source_issue: null,
+        source_pr: null,
+        is_pinned: false,
+      }],
+    });
+
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    await userEvent.click(mergeBtn);
+    const cancelBtn = await screen.findByRole('button', { name: /cancel merge/i });
+    await userEvent.click(cancelBtn);
+
+    // No merge IPC after cancellation.
+    expect(invoke).not.toHaveBeenCalledWith('merge_pr', expect.anything());
+    expect(refreshOpenPrByPathSpy).not.toHaveBeenCalled();
   });
 
   /// The confirm step now exposes a Cancel button (icon-only) so the user

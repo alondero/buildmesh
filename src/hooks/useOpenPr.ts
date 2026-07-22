@@ -43,3 +43,31 @@ export function useOpenPr(nodeId: number, gitPath: string | null): {
   );
   return { pr: data, loading, refresh };
 }
+
+/**
+ * Force-invalidate the Open PR cache for every subscriber whose git
+ * path matches `gitPath`, bypassing the 60s `minRefetchIntervalMs`
+ * freshness window on bus-driven refetch.
+ *
+ * Use after buildmesh's own write-paths that change a node's PR state
+ * (the Probe Panel's `merge_pr` flow is the current caller — issue
+ * #780). Without this, the Open PR chip in `GridNodeHeader` would lag
+ * up to 60s waiting for the freshness window to expire before
+ * re-fetching, even though GitHub's response has already flipped to
+ * `null`.
+ *
+ * The match-by-path is sufficient because each `useOpenPr` instance
+ * subscribes to its own node's resolved `gitPath` (`getNodeGitPath`).
+ * The Probe Panel passes the merged PR's head-ref-owning node's
+ * `getNodeGitPath(node)` to scope the invalidation to exactly that
+ * chip. Callback-only subscribers on the same path (from
+ * `subscribeGitPathInvalidation`) also fire.
+ *
+ * Symmetric to the hook's `refresh()` — both drop the freshness stamp
+ * + trigger a re-fetch — but doesn't require a hook instance to be
+ * mounted. Caller only needs to know the node's `gitPath`, which the
+ * Probe Panel derives from `agentNodes` filtered by branch match.
+ */
+export function refreshOpenPrByPath(gitPath: string): void {
+  prClient.notifyByPath(gitPath);
+}
