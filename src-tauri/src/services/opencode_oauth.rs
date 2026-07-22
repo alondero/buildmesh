@@ -305,6 +305,48 @@ pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAut
     })
 }
 
+/// Refreshes an existing access token against a parameterized
+/// `refresh_url`. Pure HTTP — does NOT read from or write to Windows
+/// Credential Manager; the caller is responsible for both. Production
+/// callers pin `OPENCODE_CONSOLE_HOST + device_flow::TOKEN_PATH` via
+/// [`try_refresh`]; tests substitute a loopback `tiny_http` listener so
+/// the full refresh round-trip is exercised without hitting the live
+/// server (issue #971).
+///
+/// The form-encoded request body matches RFC 6749 §6: `grant_type`,
+/// `client_id`, `refresh_token`. Response is the same `TokenResponse`
+/// shape the device-flow dance returns, parsed via
+/// [`parse_token_response`].
+pub(crate) fn try_refresh_against(
+    refresh_url: &str,
+    refresh_token: &str,
+) -> Result<TokenResponse, OAuthError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| OAuthError::Transport(format!("refresh client: {e}")))?;
+    let response = client
+        .post(refresh_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "refresh_token".to_string()),
+            ("client_id", OPENCODE_OAUTH_CLIENT_ID.to_string()),
+            ("refresh_token", refresh_token.to_string()),
+        ])
+        .send()
+        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh send: {e}")))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh body: {e}")))?;
+    if !status.is_success() {
+        return Err(OAuthError::Shape(format!(
+            "/auth/device/token refresh HTTP {status}: {body}"
+        )));
+    }
+    parse_token_response(&body)
+}
+
 /// Refreshes an existing access token. The OAuth server accepts the
 /// `refresh_token` issued by the device-flow exchange and returns a new
 /// `(access_token, refresh_token, expires_in, workspace_id, server_id)`
@@ -329,33 +371,10 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     let refresh_token = cred.refresh_token.ok_or_else(|| {
         OAuthError::Shape("refresh requires refresh_token in stored credential".to_string())
     })?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| OAuthError::Transport(format!("refresh client: {e}")))?;
-    let response = client
-        .post(format!(
-            "{OPENCODE_CONSOLE_HOST}{}",
-            device_flow::TOKEN_PATH
-        ))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&[
-            ("grant_type", "refresh_token".to_string()),
-            ("client_id", OPENCODE_OAUTH_CLIENT_ID.to_string()),
-            ("refresh_token", refresh_token),
-        ])
-        .send()
-        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh send: {e}")))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh body: {e}")))?;
-    if !status.is_success() {
-        return Err(OAuthError::Shape(format!(
-            "/auth/device/token refresh HTTP {status}: {body}"
-        )));
-    }
-    let token = parse_token_response(&body)?;
+    let token = try_refresh_against(
+        &format!("{}{}", OPENCODE_CONSOLE_HOST, device_flow::TOKEN_PATH),
+        &refresh_token,
+    )?;
     // Write the new bundle back to Credential Manager so the next live
     // fetch and the next refresh see the same up-to-date credential.
     persist_token_response(&token)?;
@@ -1243,7 +1262,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let mut server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback");
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback");
         let port = match server.server_addr() {
             tiny_http::ListenAddr::IP(std::net::SocketAddr::V4(v4)) => v4.port(),
             other => panic!("expected a v4 loopback listener, got {other:?}"),
