@@ -9,11 +9,13 @@ import {
 describe('frontendLog bridge', () => {
   let origError: typeof console.error;
   let origWarn: typeof console.warn;
+  let origInfo: typeof console.info;
 
   beforeEach(() => {
     _resetFrontendLogBridgeForTests();
     origError = console.error;
     origWarn = console.warn;
+    origInfo = console.info;
     vi.mocked(invoke).mockClear();
     vi.mocked(invoke).mockResolvedValue(undefined);
   });
@@ -21,6 +23,7 @@ describe('frontendLog bridge', () => {
   afterEach(() => {
     console.error = origError;
     console.warn = origWarn;
+    console.info = origInfo;
   });
 
   it('logFrontend forwards level + message to log_frontend command', () => {
@@ -53,6 +56,26 @@ describe('frontendLog bridge', () => {
     expect(invoke).toHaveBeenCalledWith('log_frontend', {
       level: 'warn',
       message: 'careful',
+    });
+  });
+
+  // Issue #602: console.info must forward so the frontend xterm_mount
+  // spawn-timing checkpoint reaches buildmesh.log alongside the Rust
+  // SpawnTimer lines (the Rust `log_frontend` already maps level="info"
+  // to `tracing::info!(target: "frontend", …)`).
+  it('install patches console.info to forward and still call original', () => {
+    const spy = vi.fn();
+    console.info = spy;
+    installFrontendLogBridge();
+
+    console.info('spawn_timing: session=42 checkpoint=xterm_mount elapsed=17ms');
+
+    expect(spy).toHaveBeenCalledWith(
+      'spawn_timing: session=42 checkpoint=xterm_mount elapsed=17ms',
+    );
+    expect(invoke).toHaveBeenCalledWith('log_frontend', {
+      level: 'info',
+      message: 'spawn_timing: session=42 checkpoint=xterm_mount elapsed=17ms',
     });
   });
 

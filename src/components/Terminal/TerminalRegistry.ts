@@ -61,6 +61,15 @@ export class TerminalRegistry {
   // `instance.unlisten` already covers the agent-output / serialize-request
   // listeners and is released by dispose().
   private unlistenFns: UnlistenFn[] = [];
+  // Per-node `performance.now()` captured the first time `getOrCreate`
+  // created a fresh instance for the node. Used as the elapsed reference
+  // for the `xterm_mount` spawn-timing checkpoint (issue #602) so the
+  // log line measures pure frontend mount latency — how long from
+  // "frontend realized it needs an xterm" to "xterm is in the DOM" —
+  // and stays self-contained (the frontend has no access to the Rust
+  // `spawn_start` `Instant`). Cleared by `dispose` to avoid a slow leak
+  // across many spawn/delete cycles.
+  private nodeStartTimes = new Map<number, number>();
 
   constructor() {
     // Post-spawn PTY-size reconcile (issue #332). The backend emits
@@ -106,6 +115,14 @@ export class TerminalRegistry {
     if (this.pending.has(nodeId)) {
       return this.pending.get(nodeId)!;
     }
+    // Stamp the per-node spawn-timing reference NOW (issue #602). This is
+    // the moment the frontend first sees a fresh nodeId — the "frontend
+    // realized it needs an xterm" anchor that the `xterm_mount` checkpoint
+    // at `attachToDOM` will measure against. Doing it here (rather than
+    // inside `doCreate`) means concurrent callers of `getOrCreate` for the
+    // same nodeId all share the original stamp: `pending` already
+    // deduplicates them, and only the first path reaches this line.
+    this.nodeStartTimes.set(nodeId, performance.now());
     const promise = this.doCreate(nodeId);
     this.pending.set(nodeId, promise);
     try {
@@ -118,10 +135,10 @@ export class TerminalRegistry {
   async attach(nodeId: number, container: HTMLElement): Promise<TerminalInstance | null> {
     const inst = await this.getOrCreate(nodeId);
     if (!inst) return null;
-    return this.attachToDOM(inst, container);
+    return this.attachToDOM(nodeId, inst, container);
   }
 
-  private attachToDOM(inst: TerminalInstance, container: HTMLElement): TerminalInstance {
+  private attachToDOM(nodeId: number, inst: TerminalInstance, container: HTMLElement): TerminalInstance {
     const wasFreshOpen = !inst.opened;
     if (!inst.opened) {
       inst.opened = true;
@@ -154,6 +171,24 @@ export class TerminalRegistry {
       if (wasFreshOpen) inst.term.scrollToBottom();
       inst.term.refresh(0, inst.term.rows - 1);
     });
+
+    // Issue #602: emit the `xterm_mount` spawn-timing checkpoint on fresh
+    // open only. The line format mirrors the Rust `SpawnTimer` checkpoints
+    // (`spawn_timing: session={} checkpoint={} elapsed={}ms`) so a reader
+    // grepping `spawn_timing:` across `buildmesh.log` + the browser console
+    // gets a single coherent timeline. Re-attach (fluid-grid pane swap,
+    // workspace focus flip) re-parents an already-mounted xterm — it isn't
+    // a mount, so it must NOT re-emit, or every pane swap would flood the
+    // log. The elapsed reference is `getOrCreate`'s first-saw stamp: pure
+    // frontend mount latency (no shared Instant with the Rust side).
+    if (wasFreshOpen) {
+      const start = this.nodeStartTimes.get(nodeId);
+      if (start !== undefined) {
+        console.info(
+          `spawn_timing: session=${nodeId} checkpoint=xterm_mount elapsed=${Math.round(performance.now() - start)}ms`,
+        );
+      }
+    }
 
     return inst;
   }
@@ -228,6 +263,11 @@ export class TerminalRegistry {
       this.writer.unregister(nodeId);
       this.fontSizeManager.unregister(nodeId);
       this.themeManager.unregister(nodeId);
+      // Drop the per-node spawn-timing stamp (issue #602). Without this
+      // every spawn/delete cycle adds an entry to `nodeStartTimes` and
+      // the map grows unbounded for long-running sessions that cycle
+      // through many nodes.
+      this.nodeStartTimes.delete(nodeId);
       this.notify();
     }
   }
@@ -380,6 +420,14 @@ export class TerminalRegistry {
       return instance;
     } catch (e) {
       console.error(`[TerminalRegistry] Failed to create terminal for ${nodeId}`, e);
+      // Drop the spawn-timing stamp set by `getOrCreate` (issue #602). The
+      // success path's `dispose(nodeId)` is the normal cleanup, but it
+      // walks `this.instances` and never runs when creation failed before
+      // the instance was inserted — leaving a dead entry in the map.
+      // Without this, a long-running session that fails many creates
+      // (e.g. a corrupted `@xterm/xterm` import) would leak the map
+      // unbounded alongside the console errors above.
+      this.nodeStartTimes.delete(nodeId);
       return null;
     }
   }
