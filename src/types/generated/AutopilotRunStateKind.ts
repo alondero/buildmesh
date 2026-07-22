@@ -5,5 +5,8 @@
  * typed surface that issue #855 tracked). The DB column stays TEXT for
  * backward-compat; `to_db_str` matches the column constraint and every
  * existing row's stored value. Wire shape is the same snake-case union.
+ * `suffix_pending` (issue #993) is a non-terminal Looping-mode state set
+ * after deterministic wrap-up passes while the optional second-turn
+ * `loop_suffix_prompt` runs on the same node.
  */
-export type AutopilotRunState = "implementing" | "finishing" | "completed" | "failed" | "merged";
+export type AutopilotRunState = "implementing" | "finishing" | "suffix_pending" | "completed" | "failed" | "merged";

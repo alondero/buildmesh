@@ -2387,11 +2387,17 @@ pub fn create_autopilot_loop_run(
 /// typed surface that issue #855 tracked). The DB column stays TEXT for
 /// backward-compat; `to_db_str` matches the column constraint and every
 /// existing row's stored value. Wire shape is the same snake-case union.
+/// `suffix_pending` (issue #993) is a non-terminal Looping-mode state set
+/// after deterministic wrap-up passes while the optional second-turn
+/// `loop_suffix_prompt` runs on the same node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
-#[ts(rename_all = "snake_case", export_to = "AutopilotRunStateKind.ts")]
+#[ts(export, rename_all = "snake_case", export_to = "AutopilotRunStateKind.ts")]
 pub enum AutopilotRunState {
     Implementing,
     Finishing,
+    /// Deterministic wrap-up passed and the optional Looping-mode suffix was
+    /// injected; the same node stays active until that second turn yields.
+    SuffixPending,
     Completed,
     Failed,
     /// Terminal state set by the merged-PR auto-close sweep. The node row
@@ -2407,6 +2413,7 @@ impl AutopilotRunState {
         match self {
             Self::Implementing => "implementing",
             Self::Finishing => "finishing",
+            Self::SuffixPending => "suffix_pending",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Merged => "merged",
@@ -2421,6 +2428,7 @@ impl AutopilotRunState {
         match s {
             "implementing" => Self::Implementing,
             "finishing" => Self::Finishing,
+            "suffix_pending" => Self::SuffixPending,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "merged" => Self::Merged,
@@ -2436,11 +2444,17 @@ impl serde::Serialize for AutopilotRunState {
 }
 
 /// The pipeline row for a node, if it is Autopilot-managed:
-/// `(issue_number, state, attempts)`. `Ok(None)` for hand-spawned nodes.
-pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<(i64, AutopilotRunState, i32)>> {
+/// `(issue_number, state, attempts, loop_iteration, pr_url)`. `Ok(None)` for
+/// hand-spawned nodes. `loop_iteration` distinguishes the mode used to spawn
+/// this run even if the mesh configuration changes while it is active;
+/// `pr_url` survives the gap between verified wrap-up and a suffix turn.
+pub fn get_autopilot_run(
+    node_id: i64,
+) -> SqlResult<Option<(i64, AutopilotRunState, i32, Option<i64>, Option<String>)>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT issue_number, state, attempts FROM autopilot_runs WHERE node_id = ?1",
+        "SELECT issue_number, state, attempts, loop_iteration, pr_url \
+         FROM autopilot_runs WHERE node_id = ?1",
     )?;
     let mut rows = stmt.query_map(params![node_id], |row| {
         let s: String = row.get(1)?;
@@ -2448,6 +2462,8 @@ pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<(i64, AutopilotRunSta
             row.get(0)?,
             AutopilotRunState::from_db_str(&s),
             row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
         ))
     })?;
     rows.next().transpose()
@@ -2521,12 +2537,12 @@ pub fn delete_autopilot_run(node_id: i64) -> SqlResult<()> {
 }
 
 /// Shared "active autopilot node" count shape: runs still in the pipeline
-/// (`implementing`/`finishing`) whose node hasn't been archived. The single
+/// (`implementing`/`finishing`/`suffix_pending`) whose node hasn't been
 /// definition both counters below share, so the per-mesh gate and the
 /// app-wide pool gate can never drift on what "active" means.
 const COUNT_ACTIVE_AUTOPILOT_SQL: &str = "SELECT COUNT(*) FROM autopilot_runs r \
      JOIN agent_nodes a ON a.id = r.node_id \
-     WHERE r.state IN ('implementing', 'finishing') \
+     WHERE r.state IN ('implementing', 'finishing', 'suffix_pending') \
      AND a.status != 'archived'";
 
 /// Number of *active* Autopilot nodes for a mesh. This is the count the
@@ -2614,7 +2630,8 @@ pub fn list_stalled_finishing_autopilot_runs(stale_minutes: i64) -> SqlResult<Ve
 pub fn list_active_autopilot_node_ids() -> SqlResult<Vec<i64>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT node_id FROM autopilot_runs WHERE state IN ('implementing', 'finishing')",
+        "SELECT node_id FROM autopilot_runs \
+         WHERE state IN ('implementing', 'finishing', 'suffix_pending')",
     )?;
     let rows = stmt.query_map([], |row| row.get(0))?;
     rows.collect()
