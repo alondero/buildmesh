@@ -497,15 +497,15 @@ pub(crate) fn parse_workspaces_response(body: &str) -> Result<Vec<OpenCodeWorksp
 
 /// Cold-start Device Flow: `POST /auth/device/code` with the pinned client
 /// id. Returns `(DeviceCode, Client)` where the `Client` is the standard
-/// `reqwest::blocking::Client` — the Settings UI holds the `DeviceCode`
-/// (for `user_code` + `verification_uri_complete`) and then enters the
-/// polling loop via [`poll_for_token`].
+/// `reqwest::blocking::Client` — `start_device_flow_console` projects the
+/// user-facing half into the `OpenCodeDeviceFlowStart` wire type (`user_code`
+/// + `verification_uri_complete`) the Settings UI renders before React drives
+/// the polling loop via [`poll_for_token_once`].
 ///
 /// The `Client` is returned (not stashed in module state) so the call site
 /// owns its timeout + connection pool. Knowledge-primer anti-pattern line 64
 /// (`blocking network in async runtime`) applies — callers wrap this in
 /// `commands::run_blocking` when invoked from `#[command]`.
-#[allow(dead_code)] // Client half is dropped at the IPC seam; DeviceCode half consumed via OpenCodeDeviceFlowStart.
 pub(crate) fn start_device_flow() -> Result<(DeviceCode, Client), OAuthError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
@@ -639,7 +639,6 @@ pub(crate) fn poll_for_token(
 /// set `expires_in_secs` short enough that the expiry gate fires. The
 /// `current_interval_secs` argument is held for symmetry with `poll_for_token`
 /// and to pin a future pre-emptive backoff — it's not consumed today.
-#[allow(dead_code)] // Consumed by `commands::opencode_oauth::poll_opencode_device_token` — wired in #969.
 pub(crate) fn poll_for_token_once(
     device_code: &str,
     current_interval_secs: u32,
