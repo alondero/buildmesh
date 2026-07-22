@@ -1,14 +1,21 @@
 /**
  * Frontend log bridge.
  *
- * Forwards `console.error`, `console.warn`, `window.error`, and
- * `unhandledrejection` into the Rust `log_frontend` Tauri command so they land
- * in `buildmesh.log` alongside backend traces.
+ * Forwards `console.error`, `console.warn`, `console.info`, `window.error`,
+ * and `unhandledrejection` into the Rust `log_frontend` Tauri command so they
+ * land in `buildmesh.log` alongside backend traces.
  *
  * Why: WebView2's devtools console is invisible to anyone debugging headlessly
  * (CI, `/verify`, autonomous agents). Past silent regressions
  * (e.g. `requestAnimationFrame` "Illegal invocation" swallowed by a Tauri
  * listener) only surface here if we forward them out of the webview.
+ *
+ * `console.info` was added in issue #602 so the frontend's `xterm_mount`
+ * spawn-timing checkpoint (emitted by `TerminalRegistry.attachToDOM`) lands
+ * in `buildmesh.log` next to the Rust `SpawnTimer` lines — letting a reader
+ * `grep spawn_timing:` across both halves of the IPC boundary as one
+ * timeline. Without this forwarding, the checkpoint stays devtools-only and
+ * the cross-boundary format parity is silent for headless debuggers.
  *
  * Design notes:
  * - Best-effort. If `invoke` fails (e.g. command not registered, app shutting
@@ -83,6 +90,7 @@ export function installFrontendLogBridge(): void {
 
   const origError = console.error.bind(console);
   const origWarn = console.warn.bind(console);
+  const origInfo = console.info.bind(console);
 
   console.error = (...args: unknown[]) => {
     origError(...args);
@@ -92,6 +100,15 @@ export function installFrontendLogBridge(): void {
   console.warn = (...args: unknown[]) => {
     origWarn(...args);
     forward('warn', format(args));
+  };
+
+  // Forward `console.info` so the `xterm_mount` spawn-timing checkpoint
+  // (issue #602) reaches `buildmesh.log`. Same shape as the error/warn
+  // patches above; the Rust side's `log_frontend` already maps
+  // `level="info"` to `tracing::info!(target: "frontend", …)`.
+  console.info = (...args: unknown[]) => {
+    origInfo(...args);
+    forward('info', format(args));
   };
 
   window.addEventListener('error', (e: ErrorEvent) => {
