@@ -24,11 +24,12 @@ import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
 import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
-import { arrowTargetIndex } from './lib/gridTraversal';
-import { toggleGridMaximize } from './lib/gridShortcuts';
+import { traversalTargetId } from './lib/gridTraversal';
+import { toggleGridMaximize, cycleGridMode } from './lib/gridShortcuts';
+import { scopeNodesForMode } from './lib/viewModes';
+import type { NonSingleViewMode } from './stores/uiStore';
 import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
 import { isMac } from './lib/platform';
-import { getGridRows } from './hooks/useGridLayout';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
 import * as api from './lib/tauri';
@@ -49,6 +50,10 @@ const createNodeGuard = createShortcutGuard(300);
 // burst of toggles, short enough that a deliberate second press feels
 // responsive.
 const toggleMaximizeGuard = createShortcutGuard(300);
+// Cooldown for the Ctrl+Alt+G / Cmd+Alt+G view-mode cycle (ticket #987). Same
+// 300ms budget as the grid-toggle guard: a held key must not burst-rotate
+// through Mesh → Pinned → All faster than the user can read the switcher.
+const cycleViewModeGuard = createShortcutGuard(300);
 // Cooldown for the ?-key cheatsheet toggle (issue #731). Belt-and-braces
 // against accidental double-taps (e.g. finger-roll on the keyboard) firing
 // the modal twice within 300 ms; the `e.repeat` guard inside the handler
@@ -86,7 +91,8 @@ function App() {
   // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
   // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
   // Only register shortcuts when the window is focused so they don't steal from other apps.
-  // Ctrl/Cmd+Alt+←/→/↑/↓ traverses the on-screen agent-node grid in the active mesh.
+  // Ctrl/Cmd+Alt+←/→/↑/↓ traverses the on-screen agent-node grid of the active
+  // View Mode (Mesh / Pinned / All — ticket #987).
   // We use TWO modifiers here (not bare Ctrl/Cmd+Arrow) because Ctrl+←/→ is
   // the readline `backward-word` / `forward-word` gesture in bash/zsh/fish/
   // PSReadLine and every node/python REPL — the global-shortcut plugin
@@ -122,6 +128,12 @@ function App() {
       // in src/lib/awaitingInputShortcuts.ts as a pure store mutator so it
       // can be unit-tested without standing up the plugin.
       { key: 'CommandOrControl+Period', action: 'jump-to-next-awaiting' },
+      // Ctrl+Alt+G (Win/Linux) / Cmd+Alt+G (macOS) cycles the grid View Modes
+      // Mesh → Pinned → All (ticket #987) — the keyboard peer to the mouse-only
+      // ViewModeSwitcher. Platform-uniform `CommandOrControl+Alt+G`: it can't
+      // collide with the Single solo toggle (`Alt+G` on Win/Linux, `Cmd+G` on
+      // macOS) because it carries the extra Alt/⌥ modifier.
+      { key: 'CommandOrControl+Alt+G', action: 'cycle-grid-modes' },
       gridToggleShortcut,
     ];
     const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
@@ -188,16 +200,16 @@ function App() {
     };
   }, []);
 
-  // Handle shortcut events emitted from Rust (Ctrl+T new-agent; Ctrl/Cmd+Arrow for
-  // node traversal). Arrow traversal works in two phases: if a node is currently
-  // maximized, the first arrow press restores the grid AND moves focus to the
-  // maximized node (so the user "exits" the solo view onto the node they were
-  // actually viewing, not whatever was active before the zoom); on the next press
-  // (and beyond) we walk the on-screen grid from that node. Edge semantics are
-  // defined in `arrowTargetIndex` (src/lib/gridTraversal.ts): Left/Right wrap
-  // within the row, Up/Down are no-ops at the grid's vertical edges.
+  // Handle shortcut events (Ctrl+T new-agent; Ctrl/Cmd+Alt+Arrow for node
+  // traversal). Arrow traversal works in two phases: in Single view mode the
+  // first arrow press exits the solo view back onto the node the user was
+  // viewing (activeNodeId already points at it); on the next press (and beyond)
+  // we walk the on-screen grid of the active View Mode from that node. Edge
+  // semantics are defined in `arrowTargetIndex` (src/lib/gridTraversal.ts):
+  // Left/Right wrap within the row, Up/Down are no-ops at the grid's vertical
+  // edges.
   //
-  // Note: this differs from the Escape-to-un-maximize path in AgentNodeView.tsx
+  // Note: this differs from the Escape-to-exit-Single path in AgentNodeView.tsx
   // (which leaves activeNodeId alone). Esc is a passive exit; Ctrl+Arrow is an
   // exit-and-move, so it makes sense to refocus the node the user was on.
   useEffect(() => {
@@ -251,6 +263,19 @@ function App() {
         return;
       }
 
+      if (action === 'cycle-grid-modes') {
+        // Ticket #987 — Ctrl+Alt+G / Cmd+Alt+G rotates the grid View Modes; the
+        // rotation itself is the pure `cycleGridMode` mutator. Same wiring
+        // discipline as Alt+G: focus guard so the canvas doesn't rotate behind
+        // an inline rename, cooldown so a held key can't burst-cycle. Guard
+        // BEFORE the cooldown wrapper — a no-op press must not burn the window.
+        if (isTextInputFocused()) return;
+        cycleViewModeGuard(async () => {
+          cycleGridMode();
+        });
+        return;
+      }
+
       if (action === 'jump-to-next-awaiting') {
         // Issue #64 — Ctrl/Cmd+. cycles to the next agent node whose
         // `status === 'awaiting_input'` in the active node's mesh, wrapping
@@ -285,26 +310,32 @@ function App() {
       // focus on the soloed node. Single renders the active node, so
       // exiting the mode is all that's needed — activeNodeId already points
       // at the node the user was viewing.
-      if (useUIStore.getState().viewMode === 'single') {
-        useUIStore.getState().exitSingleMode();
+      const ui = useUIStore.getState();
+      if (ui.viewMode === 'single') {
+        ui.exitSingleMode();
         return;
       }
+      // Capture the narrowed mode here — right after the 'single' guard, before
+      // any intervening call — so TS keeps `ui.viewMode` as NonSingleViewMode.
+      const mode: NonSingleViewMode = ui.viewMode;
 
-      // Phase 2: walk the active mesh's grid. Sort by `position` because that's
-      // the on-screen order the grid renders in (matches `list_agent_nodes`).
+      // Phase 2: walk the grid the active View Mode actually renders. Ticket
+      // #987 — `scopeNodesForMode` returns exactly the on-screen node set (Mesh
+      // for the resolved mesh, Pinned cross-mesh, or All) in the store's
+      // canonical (mesh_id, position) order, so traversal matches AgentNodeView
+      // cell-for-cell. This replaces the old `mesh_id === activeNode.mesh_id`
+      // filter, which stranded Ctrl+Alt+Arrow on the active node's mesh in
+      // Pinned/All. `setActiveNode` only writes `activeNodeId` (not
+      // `selectedMeshId`), so a cross-mesh hop in Pinned/All won't trip the
+      // sidebar-sync subscription back into Mesh mode.
       const activeNode = useAgentNodeStore.getState().getActiveNode();
       if (!activeNode) return;
-      const meshNodes = useAgentNodeStore.getState().agentNodes
-        .filter(s => s.mesh_id === activeNode.mesh_id)
-        .sort((a, b) => a.position - b.position);
-      const currentIndex = meshNodes.findIndex(s => s.id === activeNode.id);
-      if (currentIndex === -1) return;
-
-      const rows = getGridRows(meshNodes.length);
-      const targetIndex = arrowTargetIndex(currentIndex, direction, rows);
-      const target = meshNodes[targetIndex];
-      if (target && target.id !== activeNode.id) {
-        useAgentNodeStore.getState().setActiveNode(target.id);
+      const { agentNodes } = useAgentNodeStore.getState();
+      const selectedMeshId = useMeshStore.getState().selectedMeshId;
+      const visibleNodes = scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id);
+      const targetId = traversalTargetId(visibleNodes, activeNode.id, direction);
+      if (targetId !== null) {
+        useAgentNodeStore.getState().setActiveNode(targetId);
       }
     };
 

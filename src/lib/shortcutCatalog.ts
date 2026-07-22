@@ -134,6 +134,16 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     splash: true,
   },
   {
+    // Ticket #987 — keyboard peer to the mouse-only ViewModeSwitcher. Not
+    // flagged `splash`: cycling grid modes is meaningless on the pre-spawn
+    // empty canvas the splash advertises (no nodes to scope Mesh/Pinned/All).
+    action: 'cycle-grid-modes',
+    group: 'grid',
+    description: 'Cycle grid modes (Mesh → Pinned → All)',
+    winKey: 'Ctrl+Alt+G',
+    macKey: '⌘+⌥+G',
+  },
+  {
     action: 'arrow-left',
     group: 'grid',
     description: 'Move focus left (wrap within row)',

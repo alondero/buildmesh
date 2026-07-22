@@ -2,10 +2,10 @@
  * Compute the next flat node index when the user presses an arrow key.
  *
  * Used by the keyboard-shortcut handler that traverses the on-screen agent-node
- * grid (Ctrl/Cmd+←/→/↑/↓). The grid is laid out row-first using
+ * grid (Ctrl/Cmd+Alt+←/→/↑/↓). The grid is laid out row-first using
  * `getGridRows(nodeCount)`; nodes are addressed by their flat index in the
- * filtered, mesh-scoped list — i.e. index 0 is the top-left, increasing
- * left-to-right, top-to-bottom.
+ * scoped, on-screen list (the active View Mode's node set) — i.e. index 0 is
+ * the top-left, increasing left-to-right, top-to-bottom.
  *
  * Edge semantics, locked in by user testing:
  *   • Left / Right — wrap within the current row. A row of one node is a dead
@@ -16,9 +16,11 @@
  *     and bottom rows have no row to step into, so the press is a no-op
  *     (no wrap-around at the grid's vertical edges).
  *
- * Pure function. The caller (App.tsx) handles the "no active node" / "wrong
- * mesh" cases by filtering first and looking up the active node's flat index.
+ * Pure function. `traversalTargetId` (below) scopes the visible node set and
+ * maps the returned index back to a node id.
  */
+
+import { getGridRows } from '../hooks/useGridLayout';
 
 export type ArrowDirection = 'left' | 'right' | 'up' | 'down';
 
@@ -70,4 +72,28 @@ export function arrowTargetIndex(
   const nextRowStart = acc + rows[rowIdx];
   const targetCol = Math.min(col, nextRowLen - 1);
   return nextRowStart + targetCol;
+}
+
+/**
+ * The node an arrow press moves focus to, given the *visible* node set for the
+ * active View Mode (wayfinder #982, ticket #987). The caller scopes it with
+ * `scopeNodesForMode` (Mesh, Pinned — cross-mesh — or All), replacing the old
+ * mesh-only filter that stranded Ctrl+Alt+Arrow on the active node's mesh.
+ *
+ * `visibleNodes` must be in on-screen order — the store's canonical
+ * (mesh_id, position) order that `scopeNodesForMode` preserves — so a flat
+ * index maps to its grid cell. Returns null for a no-op press (active node not
+ * in the set, or an edge that stays put) so the caller leaves focus alone.
+ */
+export function traversalTargetId(
+  visibleNodes: readonly { id: number }[],
+  activeNodeId: number,
+  direction: ArrowDirection,
+): number | null {
+  const currentIndex = visibleNodes.findIndex(n => n.id === activeNodeId);
+  if (currentIndex === -1) return null;
+  const rows = getGridRows(visibleNodes.length);
+  const targetIndex = arrowTargetIndex(currentIndex, direction, rows);
+  const target = visibleNodes[targetIndex];
+  return target && target.id !== activeNodeId ? target.id : null;
 }
