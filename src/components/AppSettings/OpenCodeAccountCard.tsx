@@ -229,15 +229,29 @@ function AwaitingActivationView({
         if (cancelled) return;
         dispatch({ type: 'POLL_RESULT', status });
         if (status.kind === 'success') {
-          // Persist token + enumerate workspaces before flipping to
-          // signedIn. Failures are recoverable: persist failure throws,
-          // which surfaces as a START_FAILED-equivalent error; workspace
-          // fetch failure falls through with an empty workspaces list (see
-          // SignedInFromTokenEffect below).
-          await api.persistOpencodeTokens(status.token);
+          // Enumerate workspaces FIRST so we can thread the OAuth-scoped
+          // workspace_id into the persisted token blob. The live server's
+          // token response (verified 2026-07-23) does NOT carry
+          // workspace_id — the live `_server billing.get` probe at
+          // services::usage::opencode_live_request_parts requires it, so
+          // we must source it from GET /api/user (the first entry in the
+          // list_opencode_workspaces result) before persisting.
+          //
+          // Pass the freshly-polled access_token explicitly: on a
+          // first-time sign-in the credential blob has NOT been written
+          // yet, so the IPC's read-from-Credential-Manager fallback would
+          // see nothing and return `[]`. The token-bearing path avoids
+          // that hole and keeps the persisted workspace_id non-empty.
           const workspaces = await api
-            .listOpencodeWorkspaces()
+            .listOpencodeWorkspaces(status.token.access_token)
             .catch((): OpenCodeWorkspace[] => []);
+          if (cancelled) return;
+          const firstWorkspaceId = workspaces[0]?.id;
+          await api.persistOpencodeTokens(
+            status.token,
+            firstWorkspaceId,
+            undefined,
+          );
           if (cancelled) return;
           dispatch({
             type: 'SIGNED_IN_FROM_TOKEN',

@@ -87,45 +87,76 @@ pub async fn poll_opencode_device_token(
     .await
 }
 
-/// Returns the workspace list `GET /api/user` + `/api/orgs`, computed from
-/// the access_token re-read from the Windows credential manager. No args —
-/// the React side has nothing to pass; the credential IS the contract.
+/// Returns the workspace list `GET /api/user` + `/api/orgs`.
 ///
-/// Returns `Err(String)` only on a non-recoverable Windows failure (rare); a
-/// missing credential (`Ok(None)` from the service layer) collapses here to an
-/// empty vec, which the React state machine handles as "the dance has
-/// started but no workspaces yet" rather than a toast.
+/// `access_token` is optional: when present (the first-time sign-in case,
+/// where the fresh token is still in the React reducer and the credential
+/// blob hasn't been persisted yet), the IPC uses it directly. When
+/// absent (the signedIn view's auto-refresh on workspace switch —
+/// workspace binding is read-only after sign-in — and any future
+/// "refresh signed-in state" probe), the IPC falls back to the persisted
+/// credential. Without this fallback, the first-time sign-in flow would
+/// read an empty/missing credential, return `[]`, and persist the token
+/// with `workspace_id: None` — which the live probe (services::usage::
+/// opencode_live_request_parts) refuses to dispatch.
+///
+/// Returns `Err(String)` only on a non-recoverable Windows failure (rare);
+/// a missing credential (`Ok(None)` from the service layer) collapses here
+/// to an empty vec, which the React state machine handles as "the dance
+/// has started but no workspaces yet" rather than a toast.
 #[command]
-pub async fn list_opencode_workspaces() -> Result<Vec<crate::services::opencode_oauth::OpenCodeWorkspace>, String> {
+pub async fn list_opencode_workspaces(
+    access_token: Option<String>,
+) -> Result<Vec<crate::services::opencode_oauth::OpenCodeWorkspace>, String> {
     crate::commands::run_blocking("list_opencode_workspaces", move || {
-        let cred = crate::services::opencode_oauth::read_opencode_console_full_credential()?
-            .ok_or_else(|| "no opencode credential".to_string())?;
-        let token = cred
-            .access_token
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "opencode credential missing access_token".to_string())?;
+        let token = if let Some(t) = access_token.filter(|s| !s.is_empty()) {
+            t
+        } else {
+            // Fall back to the persisted credential. A missing credential
+            // collapses to an empty vec — the React state machine renders
+            // "no workspaces" rather than erroring out.
+            let cred = crate::services::opencode_oauth::read_opencode_console_full_credential()?
+                .ok_or_else(|| "no opencode credential".to_string())?;
+            cred.access_token
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "opencode credential missing access_token".to_string())?
+        };
         crate::services::opencode_oauth::fetch_workspaces(&token).map_err(|e| e.to_string())
     })
     .await
 }
 
 /// Persists a fresh token bundle (issue #969: the React side calls this right
-/// after `poll_opencode_device_token` returns `Success { token }`, before the
-/// `list_opencode_workspaces` IPC). On Windows this is a Credential Manager
+/// after `list_opencode_workspaces` resolves, with the first workspace's id
+/// threaded in as `workspace_id`). On Windows this is a Credential Manager
 /// write; on non-Windows the service returns `OAuthError::NoCredential` per
 /// the locked #956 decision, surfaced here as `Err(String)` matching every
 /// other IPC boundary contract.
+///
+/// `workspace_id` and `server_id` are sourced separately from the token
+/// response because the live server's token body (verified 2026-07-23) does
+/// not carry them: `workspace_id` comes from `GET /api/user` (the React flow
+/// calls `list_opencode_workspaces` first and passes the first workspace's
+/// id here), and `server_id` defaults to the legacy `OPENCODE_SERVER_ID`
+/// constant in `services::usage` when the caller passes `None`.
 #[command]
-pub async fn persist_opencode_tokens(token: OpenCodeTokenResponse) -> Result<(), String> {
+pub async fn persist_opencode_tokens(
+    token: OpenCodeTokenResponse,
+    workspace_id: Option<String>,
+    server_id: Option<String>,
+) -> Result<(), String> {
     crate::commands::run_blocking("persist_opencode_tokens", move || {
         let inner = crate::services::opencode_oauth::TokenResponse {
             access_token: token.access_token,
             refresh_token: token.refresh_token,
             expires_in: Duration::from_secs(token.expires_in_secs as u64),
-            workspace_id: token.workspace_id,
-            server_id: token.server_id,
         };
-        crate::services::opencode_oauth::persist_token_response(&inner).map_err(|e| e.to_string())
+        crate::services::opencode_oauth::persist_token_response(
+            &inner,
+            workspace_id.as_deref(),
+            server_id.as_deref(),
+        )
+        .map_err(|e| e.to_string())
     })
     .await
 }

@@ -1186,7 +1186,11 @@ fn opencode_usage_impl_with_hosts(
                 ) {
                     Ok(token) => {
                         invalidate_provider_cache("opencode");
-                        current_cred = Some(cred_from_token(&token));
+                        current_cred = Some(cred_from_token(
+                            &token,
+                            c.workspace_id.as_deref(),
+                            c.server_id.as_deref(),
+                        ));
                     }
                     Err(e) => tracing::warn!("opencode refresh failed: {e}"),
                 }
@@ -1223,7 +1227,11 @@ fn opencode_usage_impl_with_hosts(
                     refresh_url,
                     &refresh_token,
                 ) {
-                    let new_cred = cred_from_token(&token);
+                    let new_cred = cred_from_token(
+                        &token,
+                        c.workspace_id.as_deref(),
+                        c.server_id.as_deref(),
+                    );
                     live = opencode_live_request_at(live_url, &new_cred);
                 }
             }
@@ -1295,16 +1303,37 @@ fn needs_retry_on_401(live: Option<&ProviderUsage>) -> bool {
 /// Mirrors the field shape of [`persist_token_response`] but skips the
 /// Windows Credential Manager write — the test path uses this to
 /// thread the new bundle into the reactive retry's live probe.
-fn cred_from_token(token: &crate::services::opencode_oauth::TokenResponse) -> OpenCodeConsoleCred {
+///
+/// The token response (verified 2026-07-23) no longer carries
+/// `workspace_id` or `server_id` — the OAuth scope is stable across
+/// refreshes, so we read the prior `workspace_id` AND `server_id` from
+/// the existing credential. The `server_id` fallback to the legacy
+/// `OPENCODE_SERVER_ID` constant kicks in only when the prior credential
+/// had no server_id (a pre-#956 blob), per the
+/// `resolve_opencode_server_id` contract. New flows that bind a custom
+/// `server_id` (issue #972 forwarded the OAuth dance's response) keep
+/// it across refreshes — a custom-then-default flip would silently
+/// degrade the live probe's `X-Server-Id` header.
+///
+/// Test-only: the call site in `opencode_usage_impl_with_hosts` passes
+/// the prior credential's fields; the `try_refresh` path in
+/// `services::opencode_oauth` writes the same shape via
+/// `persist_token_response` so the live probe sees the same wiring
+/// whether the credential was just refreshed or freshly issued.
+fn cred_from_token(
+    token: &crate::services::opencode_oauth::TokenResponse,
+    prior_workspace_id: Option<&str>,
+    prior_server_id: Option<&str>,
+) -> OpenCodeConsoleCred {
     let expires_at = (chrono::Utc::now()
         + chrono::Duration::seconds(token.expires_in.as_secs() as i64))
     .to_rfc3339();
     OpenCodeConsoleCred {
         access_token: Some(token.access_token.clone()),
-        workspace_id: Some(token.workspace_id.clone()),
+        workspace_id: prior_workspace_id.map(str::to_owned),
         refresh_token: Some(token.refresh_token.clone()),
         expires_at: Some(expires_at),
-        server_id: Some(token.server_id.clone()),
+        server_id: prior_server_id.map(str::to_owned),
     }
 }
 
@@ -2905,9 +2934,8 @@ mod tests {
     const REFRESH_BODY_OK: &str = r#"{
         "access_token": "new_tok",
         "refresh_token": "new_rt",
-        "expires_in": 3600,
-        "workspace_id": "wrk_q",
-        "server_id": "srv_v2"
+        "token_type": "Bearer",
+        "expires_in": 3600
     }"#;
 
     // ------- Scenario 1: expired → refresh succeeds → live probe succeeds

@@ -7,9 +7,12 @@
  * refresh, or for the React-owned dance that exchanges `device_code` itself).
  *
  * `expires_in_secs` is the wall-clock expiry the React-side state machine
- * stores as `accessTokenExpiresAtMs = now + expires_in_secs*1000`; `workspace_id`
- * is the `wrk_<id>` the live `_server billing.get` POST needs; `server_id` is the
- * SolidStart deployment id captured into the `X-Server-Id` header (still hard-coded
- * in `services::usage::opencode_usage_impl` today, but persisted here for #972).
+ * stores as `accessTokenExpiresAtMs = now + expires_in_secs*1000`. The
+ * `workspace_id` and `server_id` fields that used to live here were
+ * dropped: the live server's token response (verified 2026-07-23) does
+ * not return them. The `workspace_id` is supplied separately by the
+ * React flow via `list_opencode_workspaces` (`GET /api/user`); the
+ * `server_id` defaults to the legacy `OPENCODE_SERVER_ID` constant in
+ * `services::usage`.
  */
-export type OpenCodeTokenResponse = { access_token: string, refresh_token: string, expires_in_secs: number, workspace_id: string, server_id: string, };
+export type OpenCodeTokenResponse = { access_token: string, refresh_token: string, expires_in_secs: number, };

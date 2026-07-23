@@ -128,8 +128,6 @@ describe('opencodeAccountReducer (issue #969)', () => {
           access_token: 'at_x',
           refresh_token: 'rt_x',
           expires_in_secs: 600,
-          workspace_id: 'wrk_a',
-          server_id: 'srv_x',
         },
       },
     });
