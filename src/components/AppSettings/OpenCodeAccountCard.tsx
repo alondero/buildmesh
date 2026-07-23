@@ -2,6 +2,8 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import * as api from '../../lib/tauri';
 import type { OpenCodeWorkspace } from '../../types/generated/OpenCodeWorkspace';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { addToast } from '../../stores/toastStore';
 import {
   errorMessageFromUnknown,
   opencodeAccountReducer,
@@ -35,6 +37,41 @@ export function OpenCodeAccountCard() {
   // guards with their own button labels.
   const startingRef = useRef(false);
   const signingOutRef = useRef(false);
+
+  // Mount-time restore: if a credential is already sitting in
+  // Windows Credential Manager (the user previously signed in
+  // successfully and re-opens Settings), transition to `signedIn`
+  // without re-running the dance. The IPC
+  // `get_opencode_console_status` bundles the workspace list with the
+  // active workspace id and the access-token expiry epoch so the
+  // `STATUS_FETCHED` reducer arm can pick the right sub-state
+  // (`signedIn` vs `signedInExpired`).
+  //
+  // `signal.aborted` gates the setState so a fast modal close during
+  // the IPC roundtrip doesn't dispatch into a stale component
+  // instance (mirrors the `UsageTab` mount-time fetch idiom,
+  // `src/components/Probe/UsageTab.tsx:185-187`).
+  useAsyncEffect((signal) => {
+    void api
+      .getOpencodeConsoleStatus()
+      .then((status) => {
+        if (signal.aborted) return;
+        // Defensive: a unit test that pre-dates the
+        // `get_opencode_console_status` IPC may leave its mock
+        // returning `undefined`. A real backend failure
+        // (rare) would also resolve to `undefined` from
+        // `_invoke`'s error path. Either way, treat as "not
+        // signed in" — the dance is still reachable from
+        // `signedOut`, and the user can re-dance to recover.
+        if (!status || typeof status !== 'object') return;
+        dispatch({ type: 'STATUS_FETCHED', status });
+      })
+      .catch(() => {
+        // Best-effort: a credential-store read failure should not
+        // crash the Settings modal. The user sees the default
+        // `signedOut` UI and can re-dance to recover.
+      });
+  }, []);
 
   return (
     <div className="border border-border-subtle rounded-lg p-5">
@@ -75,6 +112,14 @@ function StateBody({
     case 'signedIn':
       return (
         <SignedInView
+          state={state}
+          dispatch={dispatch}
+          signingOutRef={signingOutRef}
+        />
+      );
+    case 'signedInExpired':
+      return (
+        <SignedInExpiredView
           state={state}
           dispatch={dispatch}
           signingOutRef={signingOutRef}
@@ -412,37 +457,78 @@ function SignedInView({
         Signed in to OpenCode Console.
       </p>
       <div className="text-base text-text-primary mb-3">
-        Workspace:{' '}
-        <span className="font-mono" data-testid="opencode-workspace-name">
-          {state.workspace.name}
+        Account:{' '}
+        <span className="font-mono" data-testid="opencode-account-name">
+          {formatAccountLabel(state.workspace, state.workspaces)}
         </span>
       </div>
       {state.workspaces.length > 1 && (
+        <p className="text-xs text-text-muted mb-4">
+          Choose which account's live usage to fetch. You can switch at any time.
+        </p>
+      )}
+      {state.workspaces.length > 1 && (
         <div className="mb-4">
           <label
-            htmlFor="opencode-workspace-picker"
+            htmlFor="opencode-account-picker"
             className="text-sm text-text-muted mr-2"
           >
-            Switch workspace:
+            Switch account:
           </label>
           <select
-            id="opencode-workspace-picker"
-            data-testid="opencode-workspace-picker"
+            id="opencode-account-picker"
+            data-testid="opencode-account-picker"
             value={state.workspace.id}
+            disabled={state.pendingWorkspaceSwitch != null}
             onChange={(e) => {
               const next = state.workspaces.find(
                 (w) => w.id === e.target.value,
               );
-              if (next) dispatch({ type: 'WORKSPACE_CHOSEN', workspace: next });
+              if (!next || next.id === state.workspace.id) return;
+              // Optimistic flip + IPC. The reducer transitions
+              // PENDING → CONFIRMED on resolve, PENDING → FAILED on
+              // reject (with rollback to the captured previous
+              // workspace). Captures the previous workspace for the
+              // reducer's rollback path.
+              const previous = state.workspace;
+              dispatch({ type: 'WORKSPACE_CHOSEN_PENDING', workspace: next });
+              api
+                .setOpencodeConsoleWorkspace(next.id)
+                .then(() => {
+                  dispatch({ type: 'WORKSPACE_CHOSEN_CONFIRMED' });
+                })
+                .catch((err: unknown) => {
+                  // Surface the error in a toast AND roll the
+                  // reducer back — the picker flip is purely
+                  // optimistic and would leave the user with no
+                  // signal that the switch failed. The toast
+                  // survives a Settings modal close, unlike a
+                  // banner.
+                  const message = errorMessageFromUnknown(err);
+                  addToast('opencode', `Switch account failed: ${message}`);
+                  dispatch({
+                    type: 'WORKSPACE_CHOSEN_FAILED',
+                    previousWorkspace: previous,
+                    message,
+                  });
+                });
             }}
             className="bg-bg-card border border-border-subtle rounded-md px-2 py-1 text-base text-text-primary"
           >
             {state.workspaces.map((w) => (
               <option key={w.id} value={w.id}>
-                {w.name}
+                {formatAccountLabel(w, state.workspaces)}
               </option>
             ))}
           </select>
+          {state.pendingWorkspaceSwitch && (
+            <span
+              className="ml-3 text-xs text-text-muted"
+              data-testid="opencode-account-switch-pending"
+            >
+              Switching…
+            </span>
+          )}
         </div>
       )}
       <button
@@ -461,6 +547,182 @@ function SignedInView({
       </button>
     </>
   );
+}
+
+/* ── signedInExpired ─────────────────────────────────────────────────── */
+
+function SignedInExpiredView({
+  state,
+  dispatch,
+  signingOutRef,
+}: {
+  state: Extract<State, { kind: 'signedInExpired' }>;
+  dispatch: React.Dispatch<Action>;
+  signingOutRef: React.MutableRefObject<boolean>;
+}) {
+  // Same affordances as SignedInView (switch account still works
+  // even with an expired session — the live probe will surface the
+  // 401 and reactive refresh-on-401 will self-heal), plus a
+  // yellow "Session expired" banner and a "Sign in again" button
+  // that kicks off a fresh dance.
+  const [confirmingSignOut, setConfirmingSignOut] = useState(false);
+  const capturedRef = useRef<{
+    workspace: OpenCodeWorkspace;
+    workspaces: OpenCodeWorkspace[];
+    accessTokenExpiresAtMs: number;
+  } | null>(null);
+
+  const onSignOut = async () => {
+    if (signingOutRef.current) return;
+    if (!confirmingSignOut) {
+      setConfirmingSignOut(true);
+      capturedRef.current = {
+        workspace: state.workspace,
+        workspaces: state.workspaces,
+        accessTokenExpiresAtMs: state.accessTokenExpiresAtMs,
+      };
+      return;
+    }
+    signingOutRef.current = true;
+    dispatch({ type: 'SIGNOUT_REQUESTED' });
+    try {
+      await api.revokeOpencodeConsole();
+      dispatch({ type: 'SIGNOUT_SUCCEEDED' });
+    } catch (err) {
+      const captured = capturedRef.current;
+      if (captured) {
+        dispatch({
+          type: 'SIGNOUT_FAILED',
+          message: errorMessageFromUnknown(err),
+          previousWorkspace: captured.workspace,
+          previousWorkspaces: captured.workspaces,
+          previousExpiresAtMs: captured.accessTokenExpiresAtMs,
+        });
+      }
+    } finally {
+      signingOutRef.current = false;
+      capturedRef.current = null;
+      setConfirmingSignOut(false);
+    }
+  };
+
+  return (
+    <>
+      <div
+        data-testid="opencode-session-expired"
+        role="status"
+        className="border border-status-warning/40 rounded-md px-3 py-2 mb-4 text-base text-status-warning bg-status-warning/10"
+      >
+        Session expired — re-authenticate to refresh usage.
+      </div>
+      <p className="text-base text-text-muted mb-4">
+        Last account:{' '}
+        <span className="font-mono" data-testid="opencode-account-name">
+          {formatAccountLabel(state.workspace, state.workspaces)}
+        </span>
+      </p>
+      {state.workspaces.length > 1 && (
+        <div className="mb-4">
+          <label
+            htmlFor="opencode-account-picker"
+            className="text-sm text-text-muted mr-2"
+          >
+            Switch account:
+          </label>
+          <select
+            id="opencode-account-picker"
+            data-testid="opencode-account-picker"
+            value={state.workspace.id}
+            disabled={state.pendingWorkspaceSwitch != null}
+            onChange={(e) => {
+              const next = state.workspaces.find(
+                (w) => w.id === e.target.value,
+              );
+              if (!next || next.id === state.workspace.id) return;
+              const previous = state.workspace;
+              dispatch({ type: 'WORKSPACE_CHOSEN_PENDING', workspace: next });
+              api
+                .setOpencodeConsoleWorkspace(next.id)
+                .then(() => {
+                  dispatch({ type: 'WORKSPACE_CHOSEN_CONFIRMED' });
+                })
+                .catch((err: unknown) => {
+                  // Surface the error in a toast AND roll the
+                  // reducer back — the picker flip is purely
+                  // optimistic and would leave the user with no
+                  // signal that the switch failed. The toast
+                  // survives a Settings modal close, unlike a
+                  // banner.
+                  const message = errorMessageFromUnknown(err);
+                  addToast('opencode', `Switch account failed: ${message}`);
+                  dispatch({
+                    type: 'WORKSPACE_CHOSEN_FAILED',
+                    previousWorkspace: previous,
+                    message,
+                  });
+                });
+            }}
+            className="bg-bg-card border border-border-subtle rounded-md px-2 py-1 text-base text-text-primary"
+          >
+            {state.workspaces.map((w) => (
+              <option key={w.id} value={w.id}>
+                {formatAccountLabel(w, state.workspaces)}
+              </option>
+            ))}
+          </select>
+          {state.pendingWorkspaceSwitch && (
+            <span
+              className="ml-3 text-xs text-text-muted"
+              data-testid="opencode-account-switch-pending"
+            >
+              Switching…
+            </span>
+          )}
+        </div>
+      )}
+      <div className="flex gap-3">
+        <button
+          type="button"
+          onClick={() => dispatch({ type: 'START_REQUESTED' })}
+          data-testid="opencode-sign-in-again"
+          className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
+        >
+          Sign in again
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            void onSignOut();
+          }}
+          data-testid="opencode-sign-out"
+          className={
+            confirmingSignOut
+              ? 'px-4 py-2 bg-status-error text-white text-base rounded-md hover:bg-status-error/90'
+              : 'px-4 py-2 bg-status-error/15 text-status-error text-base rounded-md hover:bg-status-error/25'
+          }
+        >
+          {confirmingSignOut ? 'Confirm sign out' : 'Sign out'}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * Formats a single workspace entry as a human-friendly account label.
+ * Slot 0 of the picker (the OAuth-scoped user identity from
+ * `/api/user`) is rendered as "Personal — {email}". Slots 1+ (org
+ * workspaces from `/api/orgs`) are rendered as "Organization —
+ * {name}". Single-workspace users see just one row.
+ */
+function formatAccountLabel(
+  workspace: OpenCodeWorkspace,
+  workspaces: OpenCodeWorkspace[],
+): string {
+  const isPersonal = workspaces.length > 0 && workspaces[0].id === workspace.id;
+  return isPersonal
+    ? `Personal — ${workspace.name}`
+    : `Organization — ${workspace.name}`;
 }
 
 /* ── error ────────────────────────────────────────────────────────────── */

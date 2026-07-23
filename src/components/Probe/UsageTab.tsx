@@ -122,6 +122,7 @@ import * as api from '../../lib/tauri';
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useOpencodeAccountInvalidation } from '../../hooks/useOpencodeAccountInvalidation';
 import { UsagePanel } from '../AppSettings/UsageRender';
 import {
   EmptyState,
@@ -194,6 +195,15 @@ export function UsageTab() {
   // mounted. Same hook every other Probe tab uses — module-scope event-name
   // constant lives in `useProviderListInvalidation.ts` (Rust+TS drift guard).
   useProviderListInvalidation(() => { void loadMeters(false); });
+
+  // OpenCode account surface — when the user signs in, signs out, or
+  // switches workspaces, the `opencode-console-changed` event fires
+  // from Rust (see `commands/opencode_oauth.rs::emit_opencode_console_changed`).
+  // The Rust-side per-provider cache is also invalidated at the same
+  // emit sites, so a `force=true` re-fetch here can't hit a stale
+  // envelope. Without this, a freshly-signed-in user would see
+  // outdated numbers for up to 5 minutes (the `CACHE_TTL`).
+  useOpencodeAccountInvalidation(() => { void loadMeters(true); });
 
   // Tick once a second so the "Refreshed X ago" label updates without
   // a re-fetch. Cheap (one no-op render), and only mounted while the

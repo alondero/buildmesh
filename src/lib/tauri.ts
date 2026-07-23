@@ -1039,6 +1039,27 @@ export const persistOpencodeTokens = (
 export const revokeOpencodeConsole = () =>
   _invoke<void>('revoke_opencode_console');
 
+// Read-only session state for the Settings → OpenCode Console card.
+// Returns `signed_in: true` plus the workspace picker list, the
+// active workspace id, the access-token expiry epoch (in ms), and a
+// `session_expired` flag when the credential's `expires_at` is in
+// the past. Consumed by `OpenCodeAccountCard` on mount to render
+// `signedIn` without re-running the dance. See
+// `services::opencode_oauth::OpenCodeConsoleStatus` for the Rust
+// side; ts-rs export lives at `src/types/generated/OpenCodeConsoleStatus.ts`.
+export type { OpenCodeConsoleStatus } from '../types/generated/OpenCodeConsoleStatus';
+export const getOpencodeConsoleStatus = () =>
+  _invoke<OpenCodeConsoleStatus>('get_opencode_console_status');
+
+// Persist a workspace switch without rotating the bearer. The Rust
+// side re-writes the credential blob with a new `workspace_id` and
+// keeps `access_token` / `refresh_token` / `expires_at` / `server_id`
+// verbatim. On success, `opencode-console-changed` is emitted so the
+// Usage tab re-fetches the live probe with `force=true`. The dropdown
+// in `OpenCodeAccountCard` is the only caller today.
+export const setOpencodeConsoleWorkspace = (workspaceId: string) =>
+  _invoke<void>('set_opencode_console_workspace', { workspaceId });
+
 // ── LAN/VPN exposure & self-signed TLS (issue #501) ────────────────────────
 //
 // Off by default: the server binds loopback only. Enabling exposure binds the

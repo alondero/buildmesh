@@ -1,6 +1,7 @@
 import type { OpenCodeWorkspace } from '../../types/generated/OpenCodeWorkspace';
 import type { OpenCodeDeviceCodeStatus } from '../../types/generated/OpenCodeDeviceCodeStatus';
 import type { OpenCodeTokenResponse } from '../../types/generated/OpenCodeTokenResponse';
+import type { OpenCodeConsoleStatus } from '../../types/generated/OpenCodeConsoleStatus';
 
 /**
  * State machine for the OpenCode Console OAuth Device Flow (issue #969).
@@ -13,6 +14,7 @@ import type { OpenCodeTokenResponse } from '../../types/generated/OpenCodeTokenR
  *   signedOut ─ START_REQUESTED → signedOut
  *     └─START_SUCCEEDED → awaitingActivation
  *     └─START_FAILED    → error
+ *     └─STATUS_FETCHED  → signedIn | signedInExpired | signedOut (no-op)
  *
  *   awaitingActivation ─ POLL_RESULT.Pending      → awaitingActivation
  *                    ─ POLL_RESULT.SlowDown       → awaitingActivation (interval updated)
@@ -22,9 +24,16 @@ import type { OpenCodeTokenResponse } from '../../types/generated/OpenCodeTokenR
  *                    ─ POLL_RESULT.Error          → error
  *                    ─ SIGNED_IN_FROM_TOKEN       → signedIn
  *
- *   signedIn  ─ WORKSPACE_CHOSEN    → signedIn
- *           ─ SIGNOUT_REQUESTED     → signedOut (optimistic)
- *           ─ SIGNOUT_FAILED        → signedIn (rollback; effect captures previous values)
+ *   signedIn  ─ WORKSPACE_CHOSEN_PENDING → signedIn (optimistic flip)
+ *           ─ WORKSPACE_CHOSEN_CONFIRMED → signedIn (clear pending)
+ *           ─ WORKSPACE_CHOSEN_FAILED   → signedIn (rollback to previousWorkspace)
+ *           ─ SIGNOUT_REQUESTED         → signedOut (optimistic)
+ *           ─ SIGNOUT_FAILED            → signedIn (rollback; effect captures previous values)
+ *
+ *   signedInExpired (returned by STATUS_FETCHED) — same UI affordances as
+ *   `signedIn` plus a "Session expired" hint; transitions to `signedOut`
+ *   on `SIGNOUT_REQUESTED` and back to `signedIn` if the user re-dances
+ *   successfully.
  */
 
 export type State =
@@ -49,6 +58,20 @@ export type State =
       workspace: OpenCodeWorkspace;
       workspaces: OpenCodeWorkspace[];
       accessTokenExpiresAtMs: number;
+      /** Set while `set_opencode_console_workspace` is in flight; the
+       *  dropdown is disabled so the user can't fire a second switch
+       *  before the first resolves. Cleared on CONFIRMED / FAILED. */
+      pendingWorkspaceSwitch?: OpenCodeWorkspace;
+    }
+  | {
+      kind: 'signedInExpired';
+      workspace: OpenCodeWorkspace;
+      workspaces: OpenCodeWorkspace[];
+      accessTokenExpiresAtMs: number;
+      /** Set while `set_opencode_console_workspace` is in flight; the
+       *  dropdown is disabled so the user can't fire a second switch
+       *  before the first resolves. Cleared on CONFIRMED / FAILED. */
+      pendingWorkspaceSwitch?: OpenCodeWorkspace;
     }
   | { kind: 'error'; message: string };
 
@@ -73,7 +96,17 @@ export type Action =
       workspaces: OpenCodeWorkspace[];
       accessTokenExpiresAtMs: number;
     }
-  | { type: 'WORKSPACE_CHOSEN'; workspace: OpenCodeWorkspace }
+  /** On-mount read of the persisted credential. Restores `signedIn`
+   *  without re-running the dance when the credential is fresh, or
+   *  `signedInExpired` when the `expires_at` is in the past. */
+  | { type: 'STATUS_FETCHED'; status: OpenCodeConsoleStatus }
+  | { type: 'WORKSPACE_CHOSEN_PENDING'; workspace: OpenCodeWorkspace }
+  | { type: 'WORKSPACE_CHOSEN_CONFIRMED' }
+  | {
+      type: 'WORKSPACE_CHOSEN_FAILED';
+      previousWorkspace: OpenCodeWorkspace;
+      message: string;
+    }
   | { type: 'SIGNOUT_REQUESTED' }
   | { type: 'SIGNOUT_SUCCEEDED' }
   // `previousWorkspace` + `previousWorkspaces` + `previousExpiresAtMs` lets the
@@ -189,12 +222,94 @@ export function opencodeAccountReducer(state: State, action: Action): State {
       };
     }
 
-    case 'WORKSPACE_CHOSEN':
-      // Optimistic; no IPC today (workspace switching is a pure visual
-      // selection since the access_token's workspace_id is bound at sign-in
-      // time and a future per-workspace-bound token is a separate ticket).
-      if (state.kind !== 'signedIn') return state;
-      return { ...state, workspace: action.workspace };
+    case 'STATUS_FETCHED': {
+      // On-mount restore from the persisted credential. Reached from
+      // any state (the dance may have completed in a previous session)
+      // so we don't gate on a specific `state.kind`. Three outcomes:
+      //   - signed_in: false → no-op; stay in the current state so a
+      //     `signedOut` mount doesn't flash a transient success.
+      //   - signed_in: true, no active_workspace_id → no-op; the
+      //     live probe needs the id to dispatch, so a credential
+      //     missing the field is a "not signed in" state from the
+      //     card's perspective.
+      //   - signed_in: true, session_expired: true → signedInExpired.
+      //   - signed_in: true, session_expired: false → signedIn.
+      //
+      // The active workspace is matched by id against the freshly
+      // fetched workspace list; if the persisted id isn't in the
+      // list (e.g. the user was removed from an org), fall back to
+      // the first workspace so the card never lands in `signedIn`
+      // with no active selection.
+      const status = action.status;
+      if (!status.signed_in) {
+        return state;
+      }
+      if (status.workspaces.length === 0) {
+        // No workspaces enumerable — treat as a not-signed-in state
+        // from the UI's perspective. The user re-dances to refresh.
+        return state;
+      }
+      const activeId = status.active_workspace_id;
+      const active =
+        (activeId && status.workspaces.find((w) => w.id === activeId)) ||
+        status.workspaces[0];
+      const expiresAtMs = status.access_token_expires_at_ms ?? 0;
+      if (status.session_expired) {
+        return {
+          kind: 'signedInExpired',
+          workspace: active,
+          workspaces: status.workspaces,
+          accessTokenExpiresAtMs: expiresAtMs,
+        };
+      }
+      return {
+        kind: 'signedIn',
+        workspace: active,
+        workspaces: status.workspaces,
+        accessTokenExpiresAtMs: expiresAtMs,
+      };
+    }
+
+    case 'WORKSPACE_CHOSEN_PENDING':
+      // Optimistic: flip the picker to the new value AND mark the
+      // switch as in-flight so the dropdown disables. The IPC fires
+      // next (in the component effect); CONFIRMED / FAILED follows.
+      // Allowed from both `signedIn` and `signedInExpired` — the
+      // picker is also rendered in the expired branch (signing in
+      // elsewhere may have refreshed a different account's token
+      // before the user reopens Settings), so the same optimistic
+      // flow has to work there.
+      if (state.kind !== 'signedIn' && state.kind !== 'signedInExpired') return state;
+      return {
+        ...state,
+        workspace: action.workspace,
+        pendingWorkspaceSwitch: action.workspace,
+      };
+
+    case 'WORKSPACE_CHOSEN_CONFIRMED':
+      // Clear the in-flight flag. The workspace is already set from
+      // the optimistic PENDING transition. Strip the transient field
+      // so the type stays narrow on subsequent renders (no stale
+      // `pendingWorkspaceSwitch` on a user-initiated re-switch after
+      // the prior one resolved).
+      if (state.kind !== 'signedIn' && state.kind !== 'signedInExpired') return state;
+      if (!state.pendingWorkspaceSwitch) return state;
+      return {
+        ...state,
+        pendingWorkspaceSwitch: undefined,
+      };
+
+    case 'WORKSPACE_CHOSEN_FAILED':
+      // Roll back the optimistic flip to the captured previous
+      // workspace. The component additionally surfaces the error
+      // message in a toast (see `OpenCodeAccountCard.tsx`).
+      // Allowed from both `signedIn` and `signedInExpired` for the
+      // same reason as PENDING.
+      if (state.kind !== 'signedIn' && state.kind !== 'signedInExpired') return state;
+      return {
+        ...state,
+        workspace: action.previousWorkspace,
+      };
 
     case 'SIGNOUT_REQUESTED':
       if (state.kind !== 'signedIn') return state;
