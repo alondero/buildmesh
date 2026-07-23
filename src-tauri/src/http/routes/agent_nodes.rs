@@ -135,16 +135,17 @@ pub async fn import_and_resume(
         return;
     };
 
-    if let Err(e) = crate::agent::spawn::spawn_agent_inner(
+    if let Err(e) = crate::agent::spawn::spawn_with_intent(
         app,
-        crate::agent::spawn::SpawnOptions {
-            session_id: node.id,
-            provider: crate::preferences::resolve_harness_provider(provider_id),
-            resume: Some(req.cli_session_id.clone()),
-            rows: req.rows,
-            cols: req.cols,
-            prefill: None,
-            node: Some(node.clone()),
+        crate::agent::spawn::SpawnRequest {
+            node_id: node.id,
+            intent: crate::agent::spawn::SpawnIntent::Resume {
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
+            terminal_size: crate::agent::spawn::TerminalSize {
+                rows: req.rows,
+                cols: req.cols,
+            },
         },
     )
     .await
@@ -161,6 +162,18 @@ pub async fn import_and_resume(
         return;
     }
 
+    let node = match db::get_agent_node_by_id(node.id) {
+        Ok(node) => node,
+        Err(e) => {
+            request::send_json_error(
+                lines,
+                "500 Internal Server Error",
+                &format!("Failed to reload node: {}", e),
+            )
+            .await;
+            return;
+        }
+    };
     let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
     let _ = request::write_json(lines, "200 OK", &body).await;
 }

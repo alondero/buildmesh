@@ -8,7 +8,9 @@
 use crate::agent::process::PROCESS_REGISTRY;
 use crate::agent::provider::{Platform, ProviderInfo};
 use crate::agent::session_lifecycle::{self, SessionLifecycleSink as _};
-use crate::agent::spawn::SpawnOptions;
+use crate::agent::spawn::{
+    spawn_with_intent, GitHubWorkContext, SpawnIntent, SpawnOutcome, SpawnRequest, TerminalSize,
+};
 use crate::db;
 use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, Emitter};
@@ -349,31 +351,42 @@ pub async fn list_providers() -> Vec<ProviderInfo> {
 // Spawn / resume
 // ---------------------------------------------------------------------------
 
-/// Spawn a new agent for the given session with the specified provider.
+/// Spawn a new agent for the given session. The `provider` argument is
+/// resolved by the spawner from the persisted `AgentNode` row.
 #[command]
 pub async fn spawn_agent(
     app: AppHandle,
     session_id: i64,
-    provider: String,
+    _provider: String,
     resume: Option<String>,
     rows: Option<u16>,
     cols: Option<u16>,
 ) -> Result<(), String> {
-    crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
-        session_id,
-        provider: crate::preferences::resolve_harness_provider(&provider),
-        resume,
-        rows: rows.unwrap_or(24),
-        cols: cols.unwrap_or(80),
-        prefill: None,
-        node: None,
-    }).await
+    crate::agent::spawn::spawn_with_intent(
+        &app,
+        SpawnRequest {
+            node_id: session_id,
+            intent: if resume.is_some() {
+                SpawnIntent::Resume {
+                    cause: crate::agent::spawn::ResumeCause::Explicit,
+                }
+            } else {
+                SpawnIntent::Fresh
+            },
+            terminal_size: TerminalSize {
+                rows: rows.unwrap_or(24),
+                cols: cols.unwrap_or(80),
+            },
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Internal implementation shared by spawn_issue_agent and spawn_handover_agent.
-/// Takes a pre-fetched `&Mesh` and a fully-formatted prefill string. Source-specific
-/// shaping (e.g. GitHub issue → URL+title) happens in the caller before this is
-/// called, so the impl is just: resolve provider → create node → spawn.
+/// Takes a pre-fetched `&Mesh` and intent-specific context. Node creation stays
+/// in the agent-node service; process policy and prefill construction belong to
+/// the spawn intent seam.
 ///
 /// `initial_name` lets the caller seed the node with a meaningful name (e.g.
 /// the issue-title slug for `spawn_issue_agent`); handover leaves it `None`
@@ -381,7 +394,7 @@ pub async fn spawn_agent(
 async fn spawn_new_agent_impl(
     app: &AppHandle,
     mesh: &crate::models::Mesh,
-    prefill: String,
+    intent: SpawnIntent,
     provider: Option<String>,
     source_issue: Option<i64>,
     initial_name: Option<String>,
@@ -392,10 +405,6 @@ async fn spawn_new_agent_impl(
         crate::preferences::default_provider(),
     );
 
-    // `.await` the async wrapper, NOT call the sync core directly — these
-    // sites are `async fn` so the caller is on a Tauri tokio worker, and a
-    // direct `_blocking` call would park that worker on a `Repository::open`
-    // (issue #762 review). The wrapper offloads onto the blocking pool.
     let branch = crate::commands::git::get_default_branch(mesh.path.clone())
         .await;
 
@@ -405,38 +414,28 @@ async fn spawn_new_agent_impl(
         &branch,
         Some(&effective_provider),
         source_issue,
-        None, // source_pr — non-PR spawn path (issue #450)
-        None, // source_pr_pinned_sha — non-PR spawn path (issue #444)
-        None, // use_worktree_override — None falls back to mesh default
+        None,
+        None,
+        None,
         initial_name.as_deref(),
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
-    // Resolve once and reuse — the profile lookup isn't free, and any future
-    // change to the resolution rule should only need to update one site.
-    let provider = crate::preferences::resolve_harness_provider(&effective_provider);
+    let outcome = spawn_with_intent(
+        app,
+        SpawnRequest {
+            node_id: node.id,
+            intent,
+            terminal_size: TerminalSize { rows: 24, cols: 80 },
+        },
+    )
+    .await?;
 
-    let prefill_text = if provider.adapter().supports_prefill() {
-        Some(prefill)
-    } else {
-        tracing::warn!(
-            "spawn_new_agent_impl: --prefill not supported for provider '{}', skipping",
-            effective_provider
-        );
-        None
-    };
-
-    let node_id = node.id;
-    crate::agent::spawn::spawn_agent_inner(app, SpawnOptions {
-        session_id: node_id,
-        provider,
-        resume: None,
-        rows: 24,
-        cols: 80,
-        prefill: prefill_text,
-        node: Some(node),
-    }).await?;
-
-    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    Ok(match outcome {
+        SpawnOutcome::Started(node)
+        | SpawnOutcome::AlreadyActive(node)
+        | SpawnOutcome::Skipped(node) => node,
+    })
 }
 
 /// Spawn an agent pre-filled with a pointer to a GitHub issue (URL + title hint).
@@ -462,21 +461,18 @@ pub async fn spawn_issue_agent(
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
 
-    let prefill = format_issue_prefill(&owner, &repo, issue_number, &issue_title);
-    // Issue #111: seed the node with a slugified issue title so the user can
-    // identify it in the mesh list from the moment the modal closes (instead
-    // of waiting on the LLM rename). The name is prefixed with `gh{N}-` so
-    // the user can spot the originating issue at a glance (e.g. issue #123
-    // "Fix this feature" → `gh123-fix-this-feature`). Falls back to a random
-    // default name if the title doesn't yield a valid `SLUG_REGEX` match —
-    // the `gh` prefix is still applied to the fallback so the user always
-    // sees which issue the node came from.
+    let intent = SpawnIntent::Issue(GitHubWorkContext {
+        owner,
+        repo,
+        number: issue_number,
+        title: issue_title.clone(),
+    });
     let initial_name = crate::session_naming::issue_node_name(issue_number, &issue_title);
 
     let node = spawn_new_agent_impl(
         &app,
         &mesh,
-        prefill,
+        intent,
         provider,
         Some(issue_number),
         Some(initial_name),
@@ -550,10 +546,9 @@ pub struct IssueNodeDraft {
     pub prefill: String,
 }
 
-/// Fast stage-1 of the GitHub-issue spawn flow. Creates a `Pending` agent
-/// node row, returns the row + the prefill the caller must pass to
-/// `start_node_background`. Does NOT touch the network, the worktree, or
-/// the process tree — so it returns in ~20ms instead of 5-10s.
+/// Fast acceptance of a GitHub-issue spawn. The row is committed and returned
+/// immediately; the same backend intent seam owns the slow worktree/PTY launch
+/// and emits the completion/failure event.
 #[command]
 pub fn create_issue_node(
     app: AppHandle,
@@ -565,12 +560,16 @@ pub fn create_issue_node(
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
-    let prefill = format_issue_prefill(&owner, &repo, issue_number, &issue_title);
+    let intent = SpawnIntent::Issue(GitHubWorkContext {
+        owner,
+        repo,
+        number: issue_number,
+        title: issue_title.clone(),
+    });
+    let prefill = intent.prefill().unwrap_or_default();
     // Issue #111: seed the node with a `gh{N}-{slug}` name (mirrors
     // `spawn_issue_agent` so the desktop modal and mobile route produce
-    // identical names). The `gh` prefix lets the user spot the originating
-    // issue at a glance. Falls back to a random default if the title doesn't
-    // yield a valid slug — the prefix is still applied in that case.
+    // identical names).
     let initial_name = crate::session_naming::issue_node_name(issue_number, &issue_title);
 
     let effective_provider = crate::preferences::resolve_default_provider(
@@ -578,13 +577,6 @@ pub fn create_issue_node(
         mesh.default_provider.clone(),
         crate::preferences::default_provider(),
     );
-    // Sync `#[command]` IPC — body runs on Tauri's tokio worker pool
-    // without our wrapping. Adding `.await` to a sync fn is a syntax
-    // error, so use the sync core directly here. `create_issue_node` is
-    // stage-1 of the spawn flow (returns ~20ms after creating the row),
-    // and the repo-open is bounded by the IPC dispatch latency budget.
-    // The async `spawn_new_agent_impl` path above (where the offload
-    // matters) does `.await` the wrapper (issue #762 review).
     let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
         .unwrap_or_else(|_| "main".to_string());
 
@@ -594,23 +586,32 @@ pub fn create_issue_node(
         &branch,
         Some(&effective_provider),
         Some(issue_number),
-        None, // source_pr — issue-spawn path, not PR-spawn (issue #450)
-        None, // source_pr_pinned_sha — issue-spawn doesn't pin (issue #444)
+        None,
+        None,
         Some(&initial_name),
     )
     .map_err(|e| e.to_string())?;
 
-    // The frontend `agentNodeStore.initAttentionListeners` listens for
-    // `node-created` and refetches the list — issue #490 renamed this event
-    // alongside the `*_agent_node` IPC surface. The `id` field is the new
-    // node's row id.
-    let _ = app.emit(
-        "node-created",
-        NodeCreatedPayload { id: node.id },
-    );
+    let _ = app.emit("node-created", NodeCreatedPayload { id: node.id });
+    let app_for_spawn = app.clone();
+    let node_id = node.id;
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = spawn_with_intent(
+            &app_for_spawn,
+            SpawnRequest {
+                node_id,
+                intent,
+                terminal_size: TerminalSize { rows: 24, cols: 80 },
+            },
+        )
+        .await
+        {
+            tracing::error!("create_issue_node: node {} failed: {}", node_id, error);
+        }
+    });
 
     tracing::info!(
-        "create_issue_node: created pending node {} for issue #{} on mesh {}",
+        "create_issue_node: accepted pending node {} for issue #{} on mesh {}",
         node.id,
         issue_number,
         mesh_id
@@ -848,6 +849,17 @@ pub fn create_pr_node(
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
 ) -> Result<IssueNodeDraft, String> {
+    let intent_context = {
+        let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+        let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
+            .map_err(|e| format!("{} — cannot derive PR URL", e))?;
+        GitHubWorkContext {
+            owner,
+            repo,
+            number: pr_number,
+            title: pr_title.clone(),
+        }
+    };
     let draft = create_pr_node_impl(
         mesh_id,
         pr_number,
@@ -858,11 +870,28 @@ pub fn create_pr_node(
         head_repo_owner,
         head_repo_clone_url,
     )?;
-    // Mirrors `create_issue_node` — see that block for the rationale.
     let _ = app.emit(
         "node-created",
         NodeCreatedPayload { id: draft.node.id },
     );
+
+    let app_for_spawn = app.clone();
+    let node_id = draft.node.id;
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = spawn_with_intent(
+            &app_for_spawn,
+            SpawnRequest {
+                node_id,
+                intent: SpawnIntent::PullRequest(intent_context),
+                terminal_size: TerminalSize { rows: 24, cols: 80 },
+            },
+        )
+        .await
+        {
+            tracing::error!("create_pr_node: node {} failed: {}", node_id, error);
+        }
+    });
+
     Ok(draft)
 }
 
@@ -953,97 +982,6 @@ pub(crate) fn create_pr_node_impl(
     Ok(IssueNodeDraft { node, prefill })
 }
 
-/// Slow stage-2 of the two-stage spawn flow. Runs the existing
-/// `spawn_agent_inner` pipeline (git fetch, worktree create, PTY spawn,
-/// workspace-trust + attention-hook write, reader thread) for a node
-/// row that already exists. Fire-and-forget — the Tauri command
-/// returns immediately; the work happens on a background task.
-///
-/// Emits `node-spawn-completed` on success and `node-spawn-failed` on
-/// failure. On failure, the node's status is updated to `Error` so the
-/// UI shows a red badge and the user can close the node normally.
-#[command]
-pub fn start_node_background(
-    app: AppHandle,
-    node_id: i64,
-    prefill: Option<String>,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn(async move {
-        let result = start_node_inner(&app, node_id, prefill.as_deref()).await;
-        match result {
-            Ok(()) => {
-                let _ = app.emit(
-                    "node-spawn-completed",
-                    NodeSpawnCompletedPayload { node_id },
-                );
-                tracing::info!("start_node_background: node {} ready", node_id);
-            }
-            Err(e) => {
-                tracing::error!(
-                    "start_node_background: node {} failed: {}",
-                    node_id,
-                    e
-                );
-                // Routes through SessionLifecycle (issue #132). The
-                // `unless_in(Error, Archived)` guard is preserved inside
-                // `on_error`.
-                let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
-                let _ = session_lifecycle::on_error(&sink, node_id);
-                let _ = app.emit(
-                    "node-spawn-failed",
-                    NodeSpawnFailedPayload {
-                        node_id,
-                        error: e.to_string(),
-                    },
-                );
-            }
-        }
-    });
-    Ok(())
-}
-
-/// Body of stage-2: load the node, optionally filter the prefill through
-/// the provider's `supports_prefill()` check, and delegate to the
-/// existing `spawn_agent_inner`. The same function is reused by
-/// `auto_resume_sessions` (via `spawn_agent_inner` directly) and the
-/// handover path (via `spawn_handover_agent`); this is the issue-spawn
-/// entry point.
-async fn start_node_inner(
-    app: &AppHandle,
-    node_id: i64,
-    prefill: Option<&str>,
-) -> Result<(), String> {
-    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-    // `node.provider` is the stored harness id (String); resolve it to a
-    // concrete executor at this spawn seam (issue #535).
-    let provider = crate::preferences::resolve_harness_provider(&node.provider);
-    let prefill_text = if provider.adapter().supports_prefill() {
-        prefill.filter(|s| !s.is_empty()).map(String::from)
-    } else {
-        if prefill.is_some() {
-            tracing::warn!(
-                "start_node_inner: --prefill not supported for provider '{:?}', skipping",
-                provider
-            );
-        }
-        None
-    };
-
-    crate::agent::spawn::spawn_agent_inner(
-        app,
-        crate::agent::spawn::SpawnOptions {
-            session_id: node_id,
-            provider,
-            resume: None,
-            rows: 24,
-            cols: 80,
-            prefill: prefill_text,
-            node: Some(node),
-        },
-    )
-    .await
-}
-
 /// Spawn a new agent node pre-filled with selected text from a parent terminal.
 /// Used by the "Handover to new Node" context menu option.
 #[command]
@@ -1057,7 +995,9 @@ pub async fn spawn_handover_agent(
     let node = spawn_new_agent_impl(
         &app,
         &mesh,
-        prefill,
+        SpawnIntent::Handover {
+            selected_text: prefill,
+        },
         provider,
         None,
         None,
@@ -1088,51 +1028,31 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     let mut resumed: Vec<i64> = Vec::new();
 
     for node in &nodes {
-        // Extract the captured session id once. The empty-string guard is
-        // load-bearing: `list_suspended_nodes` filters `IS NOT NULL`, but
-        // legacy rows can carry an empty string that the SQL predicate
-        // passes through. Such a node can't be resumed — skip it.
-        let cli_id = match &node.cli_session_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => {
-                tracing::warn!("auto_resume_agent_nodes: node {} has no cli_session_id, skipping", node.id);
-                let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
-                session_lifecycle::on_idle(&sink, node.id).ok();
-                continue;
-            }
-        };
-
-        // `node.provider` is the stored harness id (String); resolve it to a
-        // concrete executor for both the capability check and the spawn (#535).
-        let provider = crate::preferences::resolve_harness_provider(&node.provider);
-        if !provider.adapter().auto_resume_on_startup() {
-            tracing::info!("auto_resume_agent_nodes: skipping non-resumable node {} ({:?})", node.id, node.provider);
-            let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
-            session_lifecycle::on_idle(&sink, node.id).ok();
-            continue;
-        }
-
-        match crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
-            session_id: node.id,
-            provider,
-            resume: Some(cli_id),
-            rows: 24,
-            cols: 80,
-            prefill: None,
-            node: Some(node.clone()),
-        }).await {
-            Ok(()) => {
+        match spawn_with_intent(
+            &app,
+            SpawnRequest {
+                node_id: node.id,
+                intent: SpawnIntent::Resume {
+                    cause: crate::agent::spawn::ResumeCause::Startup,
+                },
+                terminal_size: TerminalSize { rows: 24, cols: 80 },
+            },
+        )
+        .await
+        {
+            Ok(SpawnOutcome::Started(_) | SpawnOutcome::AlreadyActive(_)) => {
                 resumed.push(node.id);
                 tracing::info!("auto_resume_agent_nodes: resumed node {}", node.id);
             }
+            Ok(SpawnOutcome::Skipped(_)) => {
+                tracing::info!("auto_resume_agent_nodes: skipped node {}", node.id);
+            }
             Err(e) => {
-                tracing::error!("auto_resume_agent_nodes: failed to resume node {}: {}", node.id, e);
-                let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
-                // Routes through SessionLifecycle (issue #132).
-                // `on_resume_failed` is the single entry point for the
-                // Error + resume-failed pair — callers never call
-                // `sink.emit_resume_failed` directly.
-                let _ = session_lifecycle::on_resume_failed(&sink, node.id, &e);
+                tracing::error!(
+                    "auto_resume_agent_nodes: failed to resume node {}: {}",
+                    node.id,
+                    e
+                );
             }
         }
 

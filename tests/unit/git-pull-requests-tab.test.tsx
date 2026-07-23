@@ -167,8 +167,6 @@ function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequ
         return Promise.resolve(PR_DRAFT);
       case 'merge_pr':
         return Promise.resolve('Merged (squash) via abc123 — done');
-      case 'start_node_background':
-        return Promise.resolve(undefined);
       default:
         return Promise.resolve({});
     }
@@ -882,20 +880,14 @@ describe('GitPullRequestsTab', () => {
     ).toBeTruthy();
   });
 
-  // ----- Spawn button (issue #420) ---------------------------------------
-  // Open PRs expose a split spawn button (default provider + ▾ picker) that
-  // mirrors `GitIssuesTab`'s two-stage issue-spawn flow:
-  //   1. `create_pr_node` — fast DB-only IPC (~20ms) returns a `pending`
-  //      node with `branch = head_ref` and `source_pr = Some(n)`, plus the
-  //      prefill string the caller must hand to stage-2.
-  //   2. `start_node_background` — fire-and-forget; `spawn_agent_inner`
-  //      does the slow work (git fetch origin <head_ref>, worktree create
-  //      off the head ref, PTY spawn).
-  // The dock stays open after a successful spawn so the user can fire off
-  // another PR without re-opening the context menu — same UX contract as
-  // the issue tab (memory buildmesh-spawn-from-probe-keeps-dock-open).
+  // ----- Spawn button (issue #420, #247) ---------------------------------
+  // One backend-owned call. The PR row's `+` button is on the
+  // `SpawnButtonCluster`; the tab now relies on `create_pr_node` to
+  // accept the row and start the intent-driven launch in the background.
+  // The dock stays open after a successful spawn (mirrors the issue tab
+  // UX contract — memory buildmesh-spawn-from-probe-keeps-dock-open).
 
-  it('does the two-stage spawn on the primary Spawn button (issue #420)', async () => {
+  it('does the one-stage spawn on the primary Spawn button (issue #420, #247)', async () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
@@ -905,12 +897,8 @@ describe('GitPullRequestsTab', () => {
     const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
-    // Stage 1 — `create_pr_node` carries the head ref from the fixture,
-    // plus the resolved default provider from `get_default_provider`. The
-    // `headSha` (issue #444) is the exact-pinning handle: the backend
-    // persists it as `source_pr_pinned_sha` and verifies the local
-    // `origin/<head_ref>` SHA matches it after `git fetch`, emitting a
-    // non-fatal `pr_sha_drift` `mesh-sync-warning` on mismatch.
+    // One accepted call carries the head ref, the SHA (issue #444) and the
+    // resolved default provider. The backend owns the slow launch.
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('create_pr_node', {
         meshId: 42,
@@ -921,13 +909,7 @@ describe('GitPullRequestsTab', () => {
         provider: 'anthropic',
       });
     });
-    // Stage 2 — fire-and-forget IPC with the draft id + prefill from stage 1.
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('start_node_background', {
-        nodeId: 17,
-        prefill: 'Please review pull request #201 — Add widget\nhttps://github.com/acme/demo/pull/201',
-      });
-    });
+    expect(invoke).not.toHaveBeenCalledWith('start_node_background', expect.anything());
   });
 
   it('keeps the dock open after a successful spawn (mirrors issue-tab contract)', async () => {
@@ -941,7 +923,7 @@ describe('GitPullRequestsTab', () => {
     await userEvent.click(spawns[0]);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('start_node_background', expect.objectContaining({ nodeId: 17 }));
+      expect(invoke).toHaveBeenCalledWith('create_pr_node', expect.objectContaining({ prNumber: 201 }));
     });
     expect(useUIStore.getState().probeOpen).toBe(true);
   });
@@ -1001,7 +983,6 @@ describe('GitPullRequestsTab', () => {
       }
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_pr_node') return Promise.resolve(PR_DRAFT);
-      if (cmd === 'start_node_background') return Promise.resolve(undefined);
       return Promise.resolve({});
     });
     render(<GitPullRequestsTab />);

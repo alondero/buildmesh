@@ -81,18 +81,16 @@ pub async fn create(
     };
 
     let node_id = node.id;
-    let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
 
-    if let Err(e) = crate::agent::spawn::spawn_agent_inner(
+    if let Err(e) = crate::agent::spawn::spawn_with_intent(
         app,
-        crate::agent::spawn::SpawnOptions {
-            session_id: node_id,
-            provider: crate::preferences::resolve_harness_provider(&req.provider),
-            resume: None,
-            rows: req.rows,
-            cols: req.cols,
-            prefill: None,
-            node: Some(node),
+        crate::agent::spawn::SpawnRequest {
+            node_id,
+            intent: crate::agent::spawn::SpawnIntent::Fresh,
+            terminal_size: crate::agent::spawn::TerminalSize {
+                rows: req.rows,
+                cols: req.cols,
+            },
         },
     )
     .await
@@ -101,6 +99,20 @@ pub async fn create(
         request::send_json_error(lines, "500 Internal Server Error", &msg).await;
         return;
     }
+
+    let node = match db::get_agent_node_by_id(node_id) {
+        Ok(node) => node,
+        Err(e) => {
+            request::send_json_error(
+                lines,
+                "500 Internal Server Error",
+                &format!("Failed to reload node: {}", e),
+            )
+            .await;
+            return;
+        }
+    };
+    let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
 
     let _ = app.emit(
         "node-created",

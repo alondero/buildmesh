@@ -7,20 +7,12 @@
  * and renders the same list + split-spawn button in the probe's 360px
  * body.
  *
- * Two-stage spawn (issue #302)
- * ----------------------------
- * The primary "Spawn" button uses the mesh's resolved default provider
- * (explicit > per-mesh > app-wide > "anthropic" fallback, enforced
- * server-side by `resolve_default_provider`). The `▾` half of the split
- * button opens a provider picker that bypasses the default. Both call
- * sites go through the same two-stage flow:
+ * Both call sites use the same backend-owned acceptance path:
  *
- *   1. `create_issue_node` — fast DB-only IPC (~20ms) returns a `pending`
- *      node + the prefill to hand off to stage 2.
- *   2. `start_node_background` — fire-and-forget; the slow work (git
- *      fetch, worktree create, PTY spawn) runs in the background, and
- *      `node-spawn-completed` / `node-spawn-failed` store listeners flip
- *      the node to `running` / `error`.
+ *   1. `create_issue_node` — commits a `pending` row and starts the intent-
+ *      driven launch in the background.
+ *   2. `node-spawn-completed` / `node-spawn-failed` store listeners mirror
+ *      the backend lifecycle transition.
  *
  * The user sees the dock-close → node-appear transition in well under
  * 500ms instead of the 5-10s they used to wait for the old synchronous
@@ -59,7 +51,6 @@ import {
   getRepoIssues,
   setIssueLabel,
   createIssueNode,
-  startNodeBackground,
   listProviders,
   type GitHubIssue,
 } from '../../lib/tauri';
@@ -235,30 +226,20 @@ export function GitIssuesTab() {
   // future caller can't reintroduce the loose-selector drift from Sidebar.
   useClickOutside(openDropdown, () => setOpenDropdown(null));
 
-  // Two-stage spawn: stage-1 (`create_issue_node`) is a fast DB-only
-  // IPC (~20ms) that returns a `pending` node + the prefill to hand
-  // off to stage-2. The dock stays open after a successful spawn so
-  // the user can fire off another issue without re-opening the
-  // context-menu → "Open Issues" route — the legacy modal's
-  // `onClose()` parity was a vestige from the one-shot dialog and
-  // doesn't fit a persistent dock. Stage-2 (`startNodeBackground`)
-  // is fire-and-forget — the slow work (git fetch, worktree create,
-  // PTY spawn) runs in the background, and the node flips to
-  // 'running' (or 'error' on failure) via the `node-spawn-completed`
-  // / `node-spawn-failed` store listeners. The user dismisses the
-  // dock with the activity-bar toggle (or by switching to a non-issues
-  // tab) when they're done.
+  // One backend-owned acceptance call. `create_issue_node` commits the
+  // `pending` row and starts the intent-driven launch in the background.
+  // The dock stays open after a successful spawn so the user can fire off
+  // another issue without re-opening the context-menu → "Open Issues"
+  // route. The node flips to 'running' (or 'error' on failure) via the
+  // `node-spawn-completed` / `node-spawn-failed` store listeners. The
+  // user dismisses the dock with the activity-bar toggle (or by
+  // switching to a non-issues tab) when they're done.
   const handleSpawn = async (issue: GitHubIssue, providerId: string) => {
     if (activeMeshId === null) return;
     setSpawning(issue.number);
     try {
-      const draft = await createIssueNode(activeMeshId, issue.number, issue.title, providerId);
+      await createIssueNode(activeMeshId, issue.number, issue.title, providerId);
       setOpenDropdown(null);
-      // Dispatch stage-2 BEFORE clearing the busy state so the
-      // fire-and-forget IPC is on the wire before the same-row button
-      // re-enables for another click. We deliberately do NOT toggle
-      // the probe — the dock stays open so the user can spawn more.
-      startNodeBackground(draft.id, draft.prefill);
       setSpawning(null);
     } catch (e) {
       console.error('Failed to spawn issue agent:', e);
@@ -280,11 +261,8 @@ export function GitIssuesTab() {
     setSpawning(issue.number);
     try {
       const defaultProvider = await getDefaultProvider(activeMeshId);
-      const draft = await createIssueNode(activeMeshId, issue.number, issue.title, defaultProvider);
+      await createIssueNode(activeMeshId, issue.number, issue.title, defaultProvider);
       setOpenDropdown(null);
-      // Same ordering as `handleSpawn`: stage-2 IPC first, then clear
-      // the busy state. Dock stays open (see handleSpawn).
-      startNodeBackground(draft.id, draft.prefill);
       setSpawning(null);
     } catch (e) {
       console.error('Failed to spawn issue agent:', e);
