@@ -192,16 +192,155 @@ describe('opencodeAccountReducer (issue #969)', () => {
     expect(next.message).toMatch(/No workspaces/i);
   });
 
-  it('WORKSPACE_CHOSEN swaps the active workspace inside signedIn', () => {
+  it('WORKSPACE_CHOSEN_PENDING optimistically flips the workspace AND marks the switch in-flight', () => {
     const before = signedIn({ workspace: ws1 });
     const next = opencodeAccountReducer(before, {
-      type: 'WORKSPACE_CHOSEN',
+      type: 'WORKSPACE_CHOSEN_PENDING',
       workspace: ws2,
     });
+    expect(next.kind).toBe('signedIn');
+    if (next.kind !== 'signedIn') return;
+    expect(next.workspace).toEqual(ws2);
+    expect(next.pendingWorkspaceSwitch).toEqual(ws2);
+  });
+
+  it('WORKSPACE_CHOSEN_PENDING is allowed from signedInExpired (the picker renders there too)', () => {
+    // Spec fix: the expired branch renders the picker so a user can
+    // switch to an account whose token they have already re-issued
+    // elsewhere. The reducer arm must accept this state — pre-fix
+    // it gated on `kind === 'signedIn'` and silently dropped the
+    // action, leaving the user with a working-looking picker that
+    // did nothing on click.
+    const before: State = {
+      kind: 'signedInExpired',
+      workspace: ws1,
+      workspaces: [ws1, ws2],
+      accessTokenExpiresAtMs: 0,
+    };
+    const next = opencodeAccountReducer(before, {
+      type: 'WORKSPACE_CHOSEN_PENDING',
+      workspace: ws2,
+    });
+    expect(next.kind).toBe('signedInExpired');
+    if (next.kind !== 'signedInExpired') return;
+    expect(next.workspace).toEqual(ws2);
+    expect(next.pendingWorkspaceSwitch).toEqual(ws2);
+  });
+
+  it('WORKSPACE_CHOSEN_CONFIRMED clears the in-flight flag, preserves the new workspace', () => {
+    const before = signedIn({ workspace: ws2 });
+    before.pendingWorkspaceSwitch = ws2;
+    const next = opencodeAccountReducer(before, {
+      type: 'WORKSPACE_CHOSEN_CONFIRMED',
+    });
+    expect(next.kind).toBe('signedIn');
+    if (next.kind !== 'signedIn') return;
+    expect(next.workspace).toEqual(ws2);
+    expect(next.pendingWorkspaceSwitch).toBeUndefined();
+  });
+
+  it('WORKSPACE_CHOSEN_FAILED rolls back to the captured previousWorkspace', () => {
+    const before = signedIn({ workspace: ws2 });
+    before.pendingWorkspaceSwitch = ws2;
+    const next = opencodeAccountReducer(before, {
+      type: 'WORKSPACE_CHOSEN_FAILED',
+      previousWorkspace: ws1,
+      message: 'IPC failed',
+    });
+    expect(next.kind).toBe('signedIn');
+    if (next.kind !== 'signedIn') return;
+    expect(next.workspace).toEqual(ws1);
+  });
+
+  it('STATUS_FETCHED with signed_in=false is a no-op from any state', () => {
+    expect(
+      opencodeAccountReducer(signedIn(), {
+        type: 'STATUS_FETCHED',
+        status: {
+          signed_in: false,
+          workspaces: [],
+          active_workspace_id: null,
+          access_token_expires_at_ms: null,
+          session_expired: false,
+        },
+      }),
+    ).toEqual(signedIn());
+    expect(
+      opencodeAccountReducer({ kind: 'signedOut' }, {
+        type: 'STATUS_FETCHED',
+        status: {
+          signed_in: false,
+          workspaces: [],
+          active_workspace_id: null,
+          access_token_expires_at_ms: null,
+          session_expired: false,
+        },
+      }),
+    ).toEqual({ kind: 'signedOut' });
+  });
+
+  it('STATUS_FETCHED with signed_in=true and session_expired=false transitions signedOut → signedIn matching the active workspace', () => {
+    const next = opencodeAccountReducer(
+      { kind: 'signedOut' },
+      {
+        type: 'STATUS_FETCHED',
+        status: {
+          signed_in: true,
+          workspaces: [ws1, ws2],
+          active_workspace_id: 'wrk_b',
+          access_token_expires_at_ms: 1_700_000_000_000,
+          session_expired: false,
+        },
+      },
+    );
     expect(next).toEqual({
-      ...before,
+      kind: 'signedIn',
       workspace: ws2,
+      workspaces: [ws1, ws2],
+      accessTokenExpiresAtMs: 1_700_000_000_000,
     });
+  });
+
+  it('STATUS_FETCHED with session_expired=true transitions to signedInExpired', () => {
+    const next = opencodeAccountReducer(
+      { kind: 'signedOut' },
+      {
+        type: 'STATUS_FETCHED',
+        status: {
+          signed_in: true,
+          workspaces: [ws1, ws2],
+          active_workspace_id: 'wrk_a',
+          access_token_expires_at_ms: 1_500_000_000_000, // long past
+          session_expired: true,
+        },
+      },
+    );
+    expect(next.kind).toBe('signedInExpired');
+    if (next.kind !== 'signedInExpired') return;
+    expect(next.workspace).toEqual(ws1);
+  });
+
+  it('STATUS_FETCHED falls back to the first workspace when active_workspace_id is not in the list', () => {
+    // Defensive: a user removed from an org (their previously-active
+    // org id no longer in the freshly-enumerated picker) shouldn't
+    // land in `signedIn` with no active selection. The reducer
+    // falls back to slot 0 (their personal identity).
+    const next = opencodeAccountReducer(
+      { kind: 'signedOut' },
+      {
+        type: 'STATUS_FETCHED',
+        status: {
+          signed_in: true,
+          workspaces: [ws1, ws2],
+          active_workspace_id: 'wrk_orphaned',
+          access_token_expires_at_ms: 1_700_000_000_000,
+          session_expired: false,
+        },
+      },
+    );
+    expect(next.kind).toBe('signedIn');
+    if (next.kind !== 'signedIn') return;
+    expect(next.workspace).toEqual(ws1);
   });
 
   it('SIGNOUT_REQUESTED optimistically flips signedIn → signedOut', () => {

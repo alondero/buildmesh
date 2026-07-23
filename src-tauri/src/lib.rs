@@ -602,6 +602,8 @@ pub fn run() {
             commands::opencode_oauth::list_opencode_workspaces,
             commands::opencode_oauth::persist_opencode_tokens,
             commands::opencode_oauth::revoke_opencode_console,
+            commands::opencode_oauth::get_opencode_console_status,
+            commands::opencode_oauth::set_opencode_console_workspace,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

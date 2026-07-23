@@ -15,6 +15,13 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: openUrlMock,
 }));
 
+// The toast store is a Zustand global that wires into the app's
+// toast stack. The card calls `addToast` on a workspace-switch
+// failure, so we mock it to a spy and assert on the call.
+vi.mock('../../src/stores/toastStore', () => ({
+  addToast: vi.fn(),
+}));
+
 /**
  * Per-command invoke routing. Each callable handler defaults to a benign
  * empty/never-resolves shape — only the test mutates the implementation for
@@ -52,6 +59,20 @@ function mockBackend() {
         return Promise.resolve(undefined);
       case 'revoke_opencode_console':
         return Promise.resolve(undefined);
+      // On-mount restore (issue #969 fix) — default to "not signed
+      // in" so a card mount with no override stays in `signedOut`
+      // and the existing tests' `Sign in` button assertions hold.
+      // Tests that exercise the restore path override this case.
+      case 'get_opencode_console_status':
+        return Promise.resolve({
+          signed_in: false,
+          workspaces: [],
+          active_workspace_id: null,
+          access_token_expires_at_ms: null,
+          session_expired: false,
+        });
+      case 'set_opencode_console_workspace':
+        return Promise.resolve(undefined);
       default:
         return Promise.resolve({});
     }
@@ -77,6 +98,125 @@ afterEach(() => {
 });
 
 describe('OpenCodeAccountCard (issue #969)', () => {
+  it('mounts in signedIn when get_opencode_console_status returns a fresh session', async () => {
+    // Restore-on-mount: the persisted credential lives in Windows
+    // Credential Manager. When the user re-opens Settings, the card
+    // should NOT show the "Sign in" button — it should restore the
+    // signedIn state directly. The IPC contract here is a
+    // signed_in: true response with the workspace picker list.
+    const calls = mockBackend();
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      calls[cmd] = [...(calls[cmd] ?? []), undefined];
+      switch (cmd) {
+        case 'get_opencode_console_status':
+          return Promise.resolve({
+            signed_in: true,
+            workspaces: [
+              { id: 'acc_personal', name: 'alice@example.com' },
+              { id: 'wrk_acme', name: 'Acme' },
+            ],
+            active_workspace_id: 'wrk_acme',
+            access_token_expires_at_ms: Date.now() + 3600_000,
+            session_expired: false,
+          });
+        default:
+          return Promise.resolve({});
+      }
+    });
+    render(<OpenCodeAccountCard />);
+    await waitFor(() => {
+      const name = screen.getByTestId('opencode-account-name');
+      expect(name.textContent).toContain('Organization — Acme');
+    });
+    // The signed-in branch renders the Switch account picker.
+    expect(screen.getByTestId('opencode-account-picker')).toBeTruthy();
+  });
+
+  it('mounts in signedInExpired when get_opencode_console_status reports an expired session', async () => {
+    // The card should NOT show "Sign in" when a session exists but
+    // the credential's expires_at is in the past. It should show
+    // the warning banner + "Sign in again" affordance.
+    const calls = mockBackend();
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      calls[cmd] = [...(calls[cmd] ?? []), undefined];
+      switch (cmd) {
+        case 'get_opencode_console_status':
+          return Promise.resolve({
+            signed_in: true,
+            workspaces: [{ id: 'acc_personal', name: 'alice@example.com' }],
+            active_workspace_id: 'acc_personal',
+            access_token_expires_at_ms: 1_500_000_000_000, // long past
+            session_expired: true,
+          });
+        default:
+          return Promise.resolve({});
+      }
+    });
+    render(<OpenCodeAccountCard />);
+    await waitFor(() => {
+      expect(screen.getByTestId('opencode-session-expired')).toBeTruthy();
+    });
+    expect(screen.getByTestId('opencode-sign-in-again')).toBeTruthy();
+  });
+
+  it('workspace switch failure rolls back to the previous workspace', async () => {
+    // Override the set_opencode_console_workspace mock to reject;
+    // assert that the optimistic flip rolls back and the error
+    // surfaces in the WORKSPACE_CHOSEN_FAILED reducer path.
+    const calls = mockBackend();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      calls[cmd] = [...(calls[cmd] ?? []), args];
+      switch (cmd) {
+        case 'start_device_flow_console':
+          return Promise.resolve({
+            device_code: 'dc_test',
+            user_code: 'ABCD-1234',
+            verification_uri_complete: 'https://console.opencode.ai/auth/device?code=ABCD-1234',
+            interval_secs: 5,
+            expires_in_secs: 600,
+          });
+        case 'poll_opencode_device_token':
+          return Promise.resolve({
+            kind: 'success',
+            token: { access_token: 'tok', refresh_token: 'rt', expires_in_secs: 3600 },
+          });
+        case 'list_opencode_workspaces':
+          return Promise.resolve([
+            { id: 'wrk_a', name: 'Acme' },
+            { id: 'wrk_b', name: 'Beta' },
+          ]);
+        case 'persist_opencode_tokens':
+          return Promise.resolve(undefined);
+        case 'set_opencode_console_workspace':
+          return Promise.reject('boom: switch failed');
+        default:
+          return Promise.resolve({});
+      }
+    });
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+    // Run the dance so the picker is rendered.
+    await user.click(screen.getByTestId('opencode-sign-in'));
+    const picker = await screen.findByTestId<HTMLSelectElement>('opencode-account-picker');
+    expect(picker.value).toBe('wrk_a');
+    await act(async () => {
+      await user.selectOptions(picker, 'wrk_b');
+    });
+    // After the rejection, the optimistic flip rolls back to wrk_a
+    // (the previous workspace). The picker value mirrors the
+    // controlled value so it must reflect the rollback too.
+    await waitFor(() => {
+      expect(picker.value).toBe('wrk_a');
+    });
+    // The toast call mirrors the rollback so a user closing the
+    // modal still sees the failure.
+    const { addToast } = await import('../../src/stores/toastStore');
+    expect(addToast).toHaveBeenCalledWith(
+      'opencode',
+      expect.stringContaining('Switch account failed'),
+    );
+  });
+
   it('renders the signedOut branch with a Sign-in button on mount', () => {
     const calls = mockBackend();
     render(<OpenCodeAccountCard />);
@@ -158,8 +298,8 @@ describe('OpenCodeAccountCard (issue #969)', () => {
     await user.click(screen.getByTestId('opencode-sign-in'));
 
     await waitFor(() => {
-      const name = screen.getByTestId('opencode-workspace-name');
-      expect(name.textContent).toBe('Acme');
+      const name = screen.getByTestId('opencode-account-name');
+      expect(name.textContent).toContain('Acme');
     });
 
     expect(calls['persist_opencode_tokens']).toHaveLength(1);
@@ -211,7 +351,7 @@ describe('OpenCodeAccountCard (issue #969)', () => {
 
     await user.click(screen.getByTestId('opencode-sign-in'));
     await waitFor(() => {
-      expect(screen.getByTestId('opencode-workspace-name')).toBeTruthy();
+      expect(screen.getByTestId('opencode-account-name')).toBeTruthy();
     });
 
     // The list call MUST carry the access_token; the persist call MUST
@@ -259,8 +399,8 @@ describe('OpenCodeAccountCard (issue #969)', () => {
 
     await user.click(screen.getByTestId('opencode-sign-in'));
     await waitFor(() => {
-      const name = screen.getByTestId('opencode-workspace-name');
-      expect(name.textContent).toBe('Acme');
+      const name = screen.getByTestId('opencode-account-name');
+      expect(name.textContent).toContain('Acme');
     });
 
     await user.click(screen.getByTestId('opencode-sign-out'));
@@ -316,8 +456,8 @@ describe('OpenCodeAccountCard (issue #969)', () => {
 
     await user.click(screen.getByTestId('opencode-sign-in'));
     await waitFor(() => {
-      const name = screen.getByTestId('opencode-workspace-name');
-      expect(name.textContent).toBe('Acme');
+      const name = screen.getByTestId('opencode-account-name');
+      expect(name.textContent).toContain('Acme');
     });
 
     // Two-step Sign Out.
@@ -326,7 +466,7 @@ describe('OpenCodeAccountCard (issue #969)', () => {
 
     await waitFor(() => {
       // After rollback we're still signedIn.
-      expect(screen.getByTestId('opencode-workspace-name')).toBeTruthy();
+      expect(screen.getByTestId('opencode-account-name')).toBeTruthy();
     });
     expect(screen.queryByTestId('opencode-sign-in')).toBeNull();
   });
@@ -409,8 +549,10 @@ describe('OpenCodeAccountCard (issue #969)', () => {
   });
 
   it('workspace picker dropdown appears when >1 workspaces and reacts to selection', async () => {
+    const calls: Record<string, unknown[]> = {};
     let pollOnce = true;
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      calls[cmd] = [...(calls[cmd] ?? []), args];
       if (cmd === 'start_device_flow_console') {
         return Promise.resolve({
           device_code: 'dc_picker',
@@ -446,18 +588,24 @@ describe('OpenCodeAccountCard (issue #969)', () => {
     await user.click(screen.getByTestId('opencode-sign-in'));
 
     const picker = await screen.findByTestId<HTMLSelectElement>(
-      'opencode-workspace-picker',
+      'opencode-account-picker',
     );
     expect(picker.value).toBe('wrk_a');
 
-    // Switch to Beta — this dispatches WORKSPACE_CHOSEN which is purely
-    // visual state (no IPC), so we can assert the value flips.
+    // Switch to Beta — dispatches WORKSPACE_CHOSEN_PENDING which is
+    // optimistic (the picker flips immediately), then the IPC fires
+    // and dispatches WORKSPACE_CHOSEN_CONFIRMED. We assert both the
+    // optimistic flip AND the IPC call (the new behavior is the
+    // persistence, not just the visual).
     await act(async () => {
       await user.selectOptions(picker, 'wrk_b');
     });
     await waitFor(() => {
-      const name = screen.getByTestId('opencode-workspace-name');
-      expect(name.textContent).toBe('Beta');
+      const name = screen.getByTestId('opencode-account-name');
+      expect(name.textContent).toContain('Organization — Beta');
     });
+    expect(calls['set_opencode_console_workspace']).toEqual([
+      { workspaceId: 'wrk_b' },
+    ]);
   });
 });

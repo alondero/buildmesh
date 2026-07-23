@@ -16,11 +16,30 @@
 
 use std::time::Duration;
 
-use tauri::command;
+use tauri::{command, AppHandle, Emitter};
 
 use crate::services::opencode_oauth::{
-    OpenCodeDeviceFlowStart, OpenCodeDeviceCodeStatus, OpenCodeTokenResponse,
+    OpenCodeConsoleStatus, OpenCodeDeviceFlowStart, OpenCodeDeviceCodeStatus,
+    OpenCodeTokenResponse, OPENCODE_CONSOLE_CHANGED_EVENT,
 };
+
+/// Emits `opencode-console-changed` on the desktop bus and busts the
+/// Rust-side per-provider usage cache. The emitted event is the
+/// trigger `useOpencodeAccountInvalidation` listens for so the React
+/// side's Usage tab re-fetches with `force=true`. The cache bust
+/// handles the rare case where another Rust caller (not React) is
+/// the source of the change. Both are no-ops when nothing changed;
+/// `set_cached_usage` is keyed by provider name so the cache entry
+/// only exists if a previous `opencode_usage()` call populated it.
+fn emit_opencode_console_changed(app: &AppHandle) {
+    // `invalidate_provider_cache` is the Rust-side mirror of the React
+    // re-fetch. Even if no listeners exist, the next
+    // `getProviderMeters(false)` call will hit the live probe rather
+    // than serving a stale envelope matched against the wrong
+    // workspace_id.
+    crate::services::usage::invalidate_provider_cache("opencode");
+    let _ = app.emit(OPENCODE_CONSOLE_CHANGED_EVENT, ());
+}
 
 /// Kicks off the RFC 8628 Device Flow: `POST /auth/device/code` with the pinned
 /// client id. Returns the `user_code` + `verification_uri_complete` React uses
@@ -141,11 +160,12 @@ pub async fn list_opencode_workspaces(
 /// constant in `services::usage` when the caller passes `None`.
 #[command]
 pub async fn persist_opencode_tokens(
+    app: AppHandle,
     token: OpenCodeTokenResponse,
     workspace_id: Option<String>,
     server_id: Option<String>,
 ) -> Result<(), String> {
-    crate::commands::run_blocking("persist_opencode_tokens", move || {
+    let result = crate::commands::run_blocking("persist_opencode_tokens", move || {
         let inner = crate::services::opencode_oauth::TokenResponse {
             access_token: token.access_token,
             refresh_token: token.refresh_token,
@@ -158,7 +178,11 @@ pub async fn persist_opencode_tokens(
         )
         .map_err(|e| e.to_string())
     })
-    .await
+    .await;
+    if result.is_ok() {
+        emit_opencode_console_changed(&app);
+    }
+    result
 }
 
 /// Revokes the Buildmesh-managed OpenCode Console credential by deleting
@@ -172,6 +196,69 @@ pub async fn persist_opencode_tokens(
 /// errors are NOT possible; this command does no I/O beyond the local
 /// credential manager call.
 #[command]
-pub async fn revoke_opencode_console() -> Result<(), String> {
-    crate::services::opencode_oauth::revoke()
+pub async fn revoke_opencode_console(app: AppHandle) -> Result<(), String> {
+    let result = crate::services::opencode_oauth::revoke();
+    if result.is_ok() {
+        emit_opencode_console_changed(&app);
+    }
+    result
+}
+
+/// Returns the read-only session state for the OpenCode Console OAuth
+/// card. Read on mount by `OpenCodeAccountCard` to render `signedIn`
+/// without re-running the dance. Bundles the persisted credential
+/// (when present) with the workspace picker list (queried from the
+/// live Console host with the bearer), the active workspace id, and
+/// the access-token expiry epoch.
+///
+/// Errors collapse to `Err(String)` only on a non-recoverable Windows
+/// failure (rare); a missing credential collapses to
+/// `signed_in: false` so the React side stays in `signedOut` rather
+/// than erroring out.
+#[command]
+pub async fn get_opencode_console_status() -> Result<OpenCodeConsoleStatus, String> {
+    crate::commands::run_blocking("get_opencode_console_status", move || {
+        crate::services::opencode_oauth::read_opencode_console_status()
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Switches the persisted credential's `workspace_id` to a new value
+/// without touching the bearer or refresh_token. The live probe at
+/// `services::usage::opencode_usage_impl_with_hosts` reads
+/// `workspace_id` from the freshly-persisted blob, so the next
+/// `getProviderMeters(force=true)` fetch returns usage for the
+/// newly-bound account.
+///
+/// Errors:
+/// - `Err("no opencode credential".to_string())` — no credential is
+///   persisted (the user never signed in or already signed out).
+///   Returned as a String rather than a typed error so the React
+///   side's catch block treats it identically to a transport failure.
+/// - `Err(String)` — non-recoverable Windows failure (rare).
+///
+/// Emits `opencode-console-changed` on success so the Usage tab
+/// re-fetches with `force=true` without waiting for the 5-minute
+/// cache TTL to lapse.
+#[command]
+pub async fn set_opencode_console_workspace(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<(), String> {
+    let result = crate::commands::run_blocking(
+        "set_opencode_console_workspace",
+        move || {
+            if workspace_id.is_empty() {
+                return Err("workspace_id must be non-empty".to_string());
+            }
+            crate::services::opencode_oauth::set_active_workspace(&workspace_id)
+                .map_err(|e| e.to_string())
+        },
+    )
+    .await;
+    if result.is_ok() {
+        emit_opencode_console_changed(&app);
+    }
+    result
 }
