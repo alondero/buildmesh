@@ -28,8 +28,6 @@ mod tests {
         claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
         count_droppable_warm_entries_for_mesh_inner,
         delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktrees_for_mesh_inner,
-        ensure_mesh_pre_spawn_pool_size, ensure_pool_default_backfill,
-        ensure_warm_worktables_table,
         insert_warm_worktree_inner, is_warm_pool_path_inner,
         warm_pool_claims_path_inner,
         list_oldest_warm_entries_for_mesh_inner,
@@ -101,7 +99,7 @@ mod tests {
             .unwrap();
         assert_eq!(before, 0, "v20 DB must not yet have warm_worktrees");
 
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
         let after: i64 = conn
             .query_row(
@@ -118,9 +116,9 @@ mod tests {
     #[test]
     fn ensure_warm_worktables_table_is_idempotent() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         // Second call must succeed without error.
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 
     /// Claim is atomic: two concurrent claims on the same mesh each see
@@ -130,7 +128,7 @@ mod tests {
     #[test]
     fn claim_is_atomic_under_concurrent_call() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
         // Insert two available rows for mesh 1.
         let id_a = insert_warm_worktree_inner(
@@ -177,7 +175,7 @@ mod tests {
     #[test]
     fn claim_skips_filling_rows() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         insert_warm_worktree_inner(
             &conn,
             1,
@@ -199,7 +197,7 @@ mod tests {
     #[test]
     fn mark_available_flips_filling_to_available() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let id = insert_warm_worktree_inner(
             &conn,
             1,
@@ -241,7 +239,7 @@ mod tests {
     #[test]
     fn reconcile_flags_available_row_with_missing_directory() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         // Ghost row: directory doesn't exist (path is just a fresh tempfile
         // string; we won't create it). Deliberately left at the fresh
         // `created_at` to prove `available` rows ignore the age guard.
@@ -286,7 +284,7 @@ mod tests {
     #[test]
     fn reconcile_flags_old_filling_row_with_live_directory() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let filling_id = insert_warm_worktree_inner(
             &conn,
@@ -316,7 +314,7 @@ mod tests {
     #[test]
     fn reconcile_skips_fresh_filling_row() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         // Inserted at `datetime('now')` — NOT aged.
         insert_warm_worktree_inner(
@@ -343,7 +341,7 @@ mod tests {
     #[test]
     fn reconcile_flags_old_refreshing_row() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let id = insert_warm_worktree_inner(
             &conn,
@@ -368,7 +366,7 @@ mod tests {
     #[test]
     fn reconcile_never_flags_claimed_rows() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let id = insert_warm_worktree_inner(
             &conn,
@@ -418,7 +416,7 @@ mod tests {
     #[test]
     fn delete_orphaned_claimed_prunes_every_claimed_row() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         // Three claimed rows + two available rows. GC must touch ONLY the
         // claimed rows — the available rows are healthy pool inventory. Three
@@ -956,7 +954,7 @@ mod tests {
     #[test]
     fn delete_for_mesh_removes_every_row_for_that_mesh() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         // Mesh 1 owns two rows; mesh 2 (we add manually) owns one. Only the
         // mesh-1 rows must be deleted.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1021,7 +1019,7 @@ mod tests {
     #[test]
     fn list_paths_returns_every_pool_row_path_for_mesh() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         // Mesh 1 owns one row per status — every status must come back.
         let path_a = tmp.path().join("a").to_str().unwrap().to_string();
@@ -1108,7 +1106,7 @@ mod tests {
     #[test]
     fn list_paths_droppable_excludes_claimed_rows() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         // Available + Filling + Refreshing come back; Claimed is dropped.
         let path_a = tmp.path().join("a").to_str().unwrap().to_string();
@@ -1154,7 +1152,7 @@ mod tests {
     #[test]
     fn list_paths_returns_empty_when_mesh_has_no_pool_rows() {
         let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let paths = list_warm_paths_for_mesh_inner(&conn, 1).unwrap();
         assert!(
             paths.is_empty(),
@@ -1217,8 +1215,8 @@ mod tests {
     fn v22_schema_with_mesh(pool_size: i64) -> Connection {
         let conn = v20_schema_with_mesh(true);
         // Forward both: column add (v21→v22) and table create (v20→v21).
-        ensure_mesh_pre_spawn_pool_size(&conn).unwrap();
-        ensure_warm_worktables_table(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         conn.execute(
             "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = 1",
             rusqlite::params![pool_size],
@@ -1602,13 +1600,30 @@ mod tests {
     /// Build a v22-era DB with three meshes covering the backfill's
     /// decision table: worktree-enabled at 0 (flips), worktree-disabled at
     /// 0 (stays), worktree-enabled with an explicit size (stays).
+    ///
+    /// Setup order: a v20 schema (no `pre_spawn_pool_size` column) with
+    /// one worktree-enabled mesh and `schema_version = 23` (one below
+    /// the v24 backfill). The runner's version-gated pass walks every
+    /// entry with version > 23, which adds the v22 column AND runs the
+    /// v24 OneShotBackfill (flag clear). Mesh 1's
+    /// `pre_spawn_pool_size` flips from 0 (the v22 ALTER-time default)
+    /// to 1 (the v24 inline default).
     fn v22_schema_for_backfill() -> Connection {
         let conn = v20_schema_with_mesh(true); // mesh 1: use_worktree=1
-        ensure_mesh_pre_spawn_pool_size(&conn).unwrap();
-        ensure_warm_worktables_table(&conn).unwrap();
-        // The v22-era default was 0 — simulate rows that predate v24.
-        conn.execute("UPDATE meshes SET pre_spawn_pool_size = 0 WHERE id = 1", [])
-            .unwrap();
+        // Stamp schema_version as 23 — one version below the v24
+        // backfill, so the version-gated pass walks every entry that
+        // adds columns AND runs the OneShotBackfill (gated flag clear
+        // on first call). Mesh 1 ends up at pre_spawn_pool_size = 1.
+        conn.execute(
+            "UPDATE app_settings SET value = '23' WHERE key = 'schema_version'",
+            [],
+        ).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        // Post-backfill: mesh 1 has pre_spawn_pool_size = 1 (flipped).
+        // The non-backfill scenarios below are inserted AFTER the
+        // backfill — they verify the WHERE clause is precise (a
+        // worktree-disabled mesh stays 0; an explicitly-sized mesh
+        // stays at its user-set value).
         conn.execute(
             "INSERT INTO meshes (name, path, use_worktree, pre_spawn_pool_size)
              VALUES ('no-wt', '/repo/no-wt', 0, 0)",
@@ -1636,7 +1651,7 @@ mod tests {
     #[test]
     fn backfill_enables_pool_only_for_worktree_enabled_zero_meshes() {
         let conn = v22_schema_for_backfill();
-        ensure_pool_default_backfill(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         assert_eq!(
             pool_size_for(&conn, "/repo/m"),
             1,
@@ -1661,12 +1676,12 @@ mod tests {
     #[test]
     fn backfill_runs_at_most_once_per_db() {
         let conn = v22_schema_for_backfill();
-        ensure_pool_default_backfill(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         // User opts back out.
         conn.execute("UPDATE meshes SET pre_spawn_pool_size = 0 WHERE path = '/repo/m'", [])
             .unwrap();
         // Every subsequent init re-calls the ensure — it must be a no-op.
-        ensure_pool_default_backfill(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         assert_eq!(
             pool_size_for(&conn, "/repo/m"),
             0,
@@ -1680,7 +1695,7 @@ mod tests {
     #[test]
     fn fresh_column_default_is_pool_on() {
         let conn = v20_schema_with_mesh(true);
-        ensure_mesh_pre_spawn_pool_size(&conn).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         // The fixture mesh predates the column add — it reads the ALTER
         // default.
         assert_eq!(

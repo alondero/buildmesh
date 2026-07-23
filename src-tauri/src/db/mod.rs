@@ -1,4 +1,23 @@
 //! Database module using rusqlite for local SQLite storage
+//!
+//! ## Schema evolution (issue #249)
+//!
+//! All schema migration lives in the single entry point
+//! [`migrations::evolve_to`]. It owns:
+//!
+//! - the version-by-version migration steps (column adds, one-shot backfills),
+//! - the read-side `COALESCE` defaults for the `meshes` projection
+//!   (via [`migrations::mesh_columns_projection`]),
+//! - the `schema_version` probe and the post-migration bump,
+//! - the post-migration verification (always-run idempotent safety nets).
+//!
+//! A new column becomes "add a [`migrations::ColumnSpec`] entry to
+//! `migrations::SPECS` and you're done" — one place, not three. See
+//! the module-level doc on `db::migrations` for the full design and
+//! the bug class it closes (the v8→v9 `source_issue` regression is
+//! the canonical pin).
+
+pub(crate) mod migrations;
 
 #[cfg(test)]
 mod migration_tests;
@@ -117,7 +136,6 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 /// the commit the pool checked out at so a spawn can verify the entry
 /// is still on the expected tip. No data migration needed — fresh
 /// table, `CREATE TABLE IF NOT EXISTS`.
-//
 // v20 — Persistent device sessions (issue #502 / PRD #494): add the
 // `device_sessions` table backing per-device mobile tokens + the
 // "Authorized Devices" revocation panel. A brand-new table needs no data
@@ -188,8 +206,9 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // `ensure_mesh_loop_columns` lives alongside `ensure_mesh_autopilot_columns`
 // so a build that bumps `SCHEMA_VERSION` without yet containing the
 // inline ALTERs picks the columns up on next launch.
-const SCHEMA_VERSION: i32 = 32;
-
+// `SCHEMA_VERSION` now lives in `db::migrations::SCHEMA_VERSION`
+// (issue #249). The constant was duplicated here before #249; the
+// single source of truth is the registry.
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
 /// - `journal_mode=WAL`: the default rollback journal creates/deletes a
@@ -221,7 +240,8 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     let conn = Connection::open(db_path)?;
     apply_connection_pragmas(&conn)?;
 
-    // Ensure app_settings exists first (needed by migrate_if_needed to check version)
+    // Ensure app_settings exists first (needed by evolve_to to probe
+    // schema_version).
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -231,11 +251,12 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
         "
     )?;
 
-    // Run migrations (may add columns to existing tables)
-    migrate_if_needed(&conn)?;
-
-    // Create schema (all tables + indexes, IF NOT EXISTS so they're idempotent).
-    // For fresh DBs this creates the tables; for existing DBs it's a no-op.
+    // Create schema (all tables + indexes, IF NOT EXISTS so they're
+    // idempotent). For fresh DBs this creates the tables; for existing
+    // DBs it's a no-op. MUST run before `evolve_to` so the runner's
+    // always-run column walk can find the tables and add missing
+    // columns (e.g. `use_worktree`, `pre_spawn_pool_size`, etc., that
+    // the v6-shape inline CREATE doesn't include).
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS meshes (
@@ -376,97 +397,16 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
         "
     )?;
 
-    // Safety nets: add any columns that may be missing on old or migrated DBs.
-    // These are no-ops on fresh DBs (tables just created above have the base schema).
-    ensure_mesh_columns(&conn)?;
-    ensure_autopilot_run_pr_columns(&conn)?;
-    ensure_agent_node_source_issue(&conn)?;
-    ensure_agent_node_use_worktree(&conn)?;
-    ensure_agent_node_position(&conn)?;
-    ensure_agent_node_status_changed_at(&conn)?;
-    ensure_agent_node_source_pr(&conn)?;
-    ensure_agent_node_source_pr_fork_meta(&conn)?;
-    ensure_agent_node_source_pr_pinned_sha(&conn)?;
-    // v29 — Node Pinning (wayfinder #982 / ticket #984). The
-    // `is_pinned INTEGER NOT NULL DEFAULT 0` column backs the Pinned Grid
-    // view mode. Same `ensure_*` safety-net shape as every other agent_nodes
-    // column — idempotent, runs on every init so a build that bumps
-    // SCHEMA_VERSION without yet containing the inline CREATE picks the
-    // column up on next launch.
-    ensure_agent_node_is_pinned(&conn)?;
-    // v28 — issue #37. Nullable; pre-v28 rows read back as `None` so no
-    // backfill is needed. `ensure_*` re-runs the ALTER on every init so
-    // a build that bumps `SCHEMA_VERSION` without yet containing the inline
-    // CREATE picks the column up on next launch — same additive pattern
-    // as `source_pr_pinned_sha` (#444).
-    ensure_checkpoints_dropped(&conn)?;
-    ensure_mesh_scratchpad(&conn)?;
-ensure_mesh_sandbox(&conn)?;
-    // v25 — per-mesh accent colour (user-picked hex). Nullable: pre-v25 rows
-    // read back as `None` and fall back to the deterministic palette.
-    ensure_mesh_color(&conn)?;
-    // v26 — Autopilot Policy columns (issue #481, PRD #480).
-    ensure_mesh_autopilot_columns(&conn)?;
-    // v30 — Looping Autopilot config (wayfinder #990 / ticket #991).
-    // Six additive columns on `meshes`, every column nullable or with a
-    // safe default, so pre-v30 rows read back as "loop not configured".
-    ensure_mesh_loop_columns(&conn)?;
-    // v31 — Looping Autopilot iteration marker (ticket #992). Nullable
-    // column on `autopilot_runs`; pre-v31 rows read back as `NULL` so the
-    // Looping-mode poller naturally skips them. Called AFTER the loop
-    // config columns above so the docblock ordering matches the migration
-    // ordering (and so a future ticket #993 follow-up can rely on the
-    // same additive shape).
-    ensure_autopilot_run_loop_iteration(&conn)?;
-    // v32 — Coordinator drive idempotency hardening (issue #750). Three
-    // additive columns on `coordinator_drive_prompts`: `status`,
-    // `claimed_at`, `prompt_hash`. `verdict` was NOT NULL → DEFAULT '' in
-    // the inline CREATE; that loosening does not need an `ensure_*` (no
-    // existing row violates a DEFAULT), but the new columns do. Same
-    // additive pattern as every other column on this list: a build that
-    // bumps `SCHEMA_VERSION` without yet containing the inline CREATE
-    // picks the columns up on next launch.
-    ensure_coordinator_drive_prompt_claim_columns(&conn)?;
-    // v32 GC support (issue #750 item 3). Index on `created_at` keeps the
-    // bounded-age prune cheap even after the ledger grows; the existing
-    // `idx_coordinator_drive_prompts_*` family uses the same
-    // `IF NOT EXISTS` shape.
-    ensure_coordinator_drive_prompt_created_at_index(&conn)?;
-    // v27 — per-context build/run commands (issue #802). Nullable: a mesh
-    // without them falls back to build_command/run_command in both contexts.
-    ensure_mesh_root_command_columns(&conn)?;
-    // v22 — Per-mesh pre-spawn pool target (issue #611). The column
-    // doesn't exist on pre-v22 DBs; the safety net backfills it on every
-    // init. Since v24 the column default (and the one-time backfill below)
-    // is `1` — pool ON by default; the Worktrees Probe sets `0` to opt out.
-    ensure_mesh_pre_spawn_pool_size(&conn)?;
-    // v24 — one-time flip of existing worktree-enabled meshes from the old
-    // pool-off default (0) to the new default (1). Must run AFTER
-    // `ensure_mesh_pre_spawn_pool_size` (the column may have been created
-    // just now on an upgrading DB). Gated on its own app_settings flag so
-    // a crash between the version bump and this UPDATE can't skip it, and
-    // so a user's LATER explicit 0 is never overridden again.
-    ensure_pool_default_backfill(&conn)?;
-    // v21 — Pre-spawn Worktree Pool (issue #609). The `warm_worktrees` table
-    // is created inline above (it's a new table, not a column add), so this
-    // safety net only needs to ensure it exists on a DB whose schema_version
-    // was bumped by a build that didn't yet include the inline CREATE.
-    ensure_warm_worktables_table(&conn)?;
-    // Data migration (#495): rehash any coordinator token a pre-hashing build
-    // left as cleartext. Idempotent, so it's safe to run on every init.
-    ensure_coordinator_tokens_hashed(&conn)?;
-    // v19 Spawn Option composite-id migration, **first-class block**
-    // (issue #575 / ADR-0016). The `migrate_*` function called from
-    // `migrate_if_needed` covers the version-bump path; this safety net
-    // covers DBs that already passed the v18→v19 boundary but had no
-    // `agent_nodes` rows at the time (the migration only rewrites
-    // *existing* rows, so a row inserted by a code path that bypassed
-    // the migration — e.g. a custom test helper — keeps the legacy id).
-    // The wrapper is idempotent: `WHERE provider NOT LIKE '%:%'` skips
-    // already-migrated rows. The **custom-account** block is split out
-    // and called from `lib.rs::setup` *after* `preferences::init` so
-    // it can read the user's stored `ProviderAccount` list.
-    ensure_agent_node_provider_id_migrated(&conn)?;
+    // Single schema-evolution entry point (issue #249). Owns the
+    // version-gated column adds + one-shot backfills for upgrades,
+    // and the always-run idempotent safety nets (column adds +
+    // data migrations). See `db::migrations` for the full design.
+    // Runs AFTER the inline CREATE so the column walk's
+    // `table_present` guard sees the freshly-created tables and adds
+    // any missing columns (e.g. `use_worktree`, `pre_spawn_pool_size`
+    // — the inline CREATE above is a v6-shape snapshot and the v8+
+    // columns live in the registry's `all_column_specs`).
+    migrations::evolve_to(migrations::SCHEMA_VERSION, &conn)?;
 
     // Silently treat "already initialized" as success: production calls
     // `init` exactly once at startup (the new `Connection` is dropped
@@ -483,599 +423,73 @@ ensure_mesh_sandbox(&conn)?;
     Ok(())
 }
 
-fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
-    let current_version: i32 = conn
-        .query_row("SELECT value FROM app_settings WHERE key = 'schema_version'", [], |row| {
-            row.get::<_, String>(0).map(|v| v.parse().unwrap_or(0))
-        })
-        .unwrap_or(0);
+// `migrate_if_needed` removed (issue #249). The single entry point is
+// now `migrations::evolve_to(migrations::SCHEMA_VERSION, &conn)`, called
+// from `init()` and from any future test that simulates a vN → current
+// upgrade. See `db::migrations` for the full design.
 
-    if current_version < SCHEMA_VERSION {
-        tracing::info!("Migrating database from version {} to {}", current_version, SCHEMA_VERSION);
+// Pre-v6 dead code removed (issue #249): `migrate_mesh_columns` (v8) and the
+// shared `ensure_column` helper (issue #456) both moved into
+// `db::migrations`. The registry's `evolve_to` walker does the work via
+// the always-run column-add pass (idempotent `pragma_table_info` skip).
+// See the `// Pre-v6 dead code removed` block below the surviving
+// safety-net wrappers for the full removal list.
 
-        // NOTE: this branch is gated on the pre-v6 `projects` table existing,
-        // so it does NOT run for users upgrading from v6+. Those upgrades are
-        // handled by the `ensure_*` safety nets in init() — add one per new
-        // column. Do not "fix" this guard without first refactoring the inner
-        // migrate_projects_* helpers, which still reference the renamed-away
-        // `projects` table and would crash on a v6+ schema.
-        let table_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
-                [],
-                |row| row.get::<_, i64>(0).map(|c| c > 0),
-            )
-            .unwrap_or(false);
+// `migrate_agent_node_use_worktree` (v11) and the ensure_* safety-net
+// wrappers below all moved to `db::migrations` (issue #249).
 
-        if !table_exists {
-            // Fresh DB: init() will create the table with layout column.
-            // Update version now so we don't re-enter migration on next init().
-        } else {
-            // Existing DB: run incremental migrations.
-            migrate_projects_layout(conn)?;
-            migrate_projects_position(conn)?;
-            migrate_sessions_worktree_name(conn)?;
-            if current_version < 7 {
-                migrate_remote_access_token(conn)?;
-            }
-            if current_version < 8 {
-                migrate_mesh_columns(conn)?;
-            }
-            if current_version < 9 {
-                migrate_agent_node_source_issue(conn)?;
-            }
-            if current_version < 10 {
-                migrate_gemini_to_agy(conn)?;
-            }
-            if current_version < 11 {
-                migrate_agent_node_use_worktree(conn)?;
-            }
-            if current_version < 19 {
-                // v19 Spawn Option composite-id migration (issue #575). Runs
-                // for pre-v6 DBs too — the table-guard above only blocks the
-                // early `migrate_projects_*` helpers, not the post-v6 path.
-                // `migrate_agent_node_provider_id_to_composite` is idempotent
-                // (skip rows already containing `:`) so the table-guard
-                // placement is safe.
-                migrate_agent_node_provider_id_to_composite(conn)?;
-            }
-        }
+// `ensure_agent_node_use_worktree` moved to `db::migrations`.
 
-        conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
-            params![SCHEMA_VERSION.to_string()],
-        )?;
-    }
-    Ok(())
-}
+// `ensure_agent_node_position` (v13) moved to `db::migrations`. The
+// per-mesh position backfill now lives as a `OneShotBackfill` entry.
 
-fn migrate_mesh_columns(conn: &Connection) -> SqlResult<()> {
-    let columns = [
-        ("build_command", "TEXT"),
-        ("run_command", "TEXT"),
-        ("model", "TEXT"),
-        ("effort", "TEXT"),
-        ("use_worktree", "INTEGER NOT NULL DEFAULT 1"),
-        ("worktree_mode", "TEXT"),
-        ("default_provider", "TEXT"),
-        ("base_ref", "TEXT NOT NULL DEFAULT 'origin/main'"),
-    ];
+// `ensure_agent_node_status_changed_at` (v14) moved to `db::migrations`.
 
-    for (name, ty) in columns {
-        let has_col: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = ?1",
-                [name],
-                |row| row.get(0),
-            ).unwrap_or(false);
-        if !has_col {
-            conn.execute(&format!("ALTER TABLE meshes ADD COLUMN {} {}", name, ty), [])?;
-            tracing::info!("Added {} column to meshes table", name);
-        }
-    }
-    Ok(())
-}
+// `ensure_agent_node_source_pr` (v15, issue #420) moved to `db::migrations`.
 
-/// Shared safety-net helper (issue #456): add `column` of type
-/// `col_type_with_default` to `table` if (and only if) the table exists and
-/// the column is missing. The four-step pattern (table-exists guard,
-/// `pragma_table_info` check, `ALTER TABLE ADD COLUMN`, `tracing::warn!`) is
-/// shared by every `ensure_*` safety net — folding it into one helper means
-/// a new column costs a single line, not 25+.
-///
-/// Returns `Ok(true)` if the column was added by this call, `Ok(false)` if
-/// it was already present (or the table doesn't exist). The `bool` is
-/// load-bearing for backfill wrappers — `ensure_agent_node_position` and
-/// `ensure_agent_node_status_changed_at` only need to backfill existing
-/// rows on the *first* add, and re-running the backfill would clobber any
-/// positions a user has re-arranged via drag-to-reorder (issue #65).
-///
-/// The helper does NOT log itself — each `ensure_*` wrapper logs in its own
-/// name, so a `tracing` grep lands on the safety-net function that ran
-/// (not the generic helper).
-fn ensure_column(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    col_type_with_default: &str,
-) -> SqlResult<bool> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-            [table],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(false);
-    }
+// `ensure_agent_node_source_pr_fork_meta` (v16, issue #443) moved to `db::migrations`.
 
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name=?2",
-            rusqlite::params![table, column],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if has_col {
-        return Ok(false);
-    }
+// `ensure_agent_node_source_pr_pinned_sha` (v16, issue #444) moved to `db::migrations`.
 
-    conn.execute(
-        &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_type_with_default),
-        [],
-    )?;
-    Ok(true)
-}
+// `ensure_agent_node_is_pinned` (v29, wayfinder #982 / ticket #984) moved to `db::migrations`.
 
-/// Safety net: ensure the v9 source_issue column exists on agent_nodes.
-/// Same shape as ensure_mesh_columns — fixes DBs whose schema_version
-/// was bumped past 9 without the column being added because the migration
-/// guard skipped them (see ensure_mesh_columns for the same bug class).
-pub(crate) fn ensure_agent_node_source_issue(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "agent_nodes", "source_issue", "INTEGER")? {
-        tracing::warn!("ensure_agent_node_source_issue: added missing source_issue column");
-    }
-    Ok(())
-}
+// `ensure_checkpoints_dropped` (v12) moved to `db::migrations::AlwaysStep::DropCheckpoints`.
 
-fn migrate_agent_node_use_worktree(conn: &Connection) -> SqlResult<()> {
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'use_worktree'",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(false);
-    if !has_col {
-        conn.execute("ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 1", [])?;
-        tracing::info!("Added use_worktree column to agent_nodes table");
-    }
-    Ok(())
-}
+// `ensure_autopilot_run_pr_columns` (merged-PR auto-close sweep) moved to `db::migrations`.
 
-pub(crate) fn ensure_agent_node_use_worktree(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "agent_nodes", "use_worktree", "INTEGER NOT NULL DEFAULT 1")? {
-        tracing::warn!("ensure_agent_node_use_worktree: added missing use_worktree column");
-    }
-    Ok(())
-}
+// `ensure_autopilot_run_loop_iteration` (v31, ticket #992) moved to `db::migrations`.
 
-/// Safety net (v13): ensure the `position` column exists on agent_nodes, used
-/// for drag-to-reorder grid order within a mesh. On first add, backfill each
-/// node's position as its 0-based rank by `created_at` within its own mesh, so
-/// existing nodes keep the order they already render in (lists previously
-/// sorted by `created_at ASC`). Ties broken by `id` for determinism.
-///
-/// The backfill is a multi-step migration, not a one-column add, so it stays
-/// inline in this wrapper — the helper covers the table-exists + ALTER step,
-/// the `if` guards the backfill so a re-run never overwrites a position the
-/// user has re-arranged via drag-to-reorder (issue #65).
-pub(crate) fn ensure_agent_node_position(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "agent_nodes", "position", "INTEGER NOT NULL DEFAULT 0")? {
-        conn.execute(
-            "UPDATE agent_nodes SET position = (
-                 SELECT COUNT(*) FROM agent_nodes AS earlier
-                 WHERE earlier.mesh_id = agent_nodes.mesh_id
-                   AND (earlier.created_at < agent_nodes.created_at
-                        OR (earlier.created_at = agent_nodes.created_at AND earlier.id < agent_nodes.id))
-             )",
-            [],
-        )?;
-        tracing::warn!("ensure_agent_node_position: added missing position column and backfilled per-mesh order");
-    }
-    Ok(())
-}
+// `ensure_coordinator_drive_prompt_claim_columns` (v32, issue #750) moved to `db::migrations`.
 
-/// Safety net (v14): ensure the `status_changed_at` column exists on
-/// agent_nodes. It records when a node last changed lifecycle status, which
-/// the coordinator read API (ADR-0008) turns into the digest's `last_activity`
-/// and — when the node is `awaiting_input` — `waiting_since`. On first add,
-/// backfill existing rows to `created_at` so a pre-v14 node reports a sane
-/// (if coarse) activity time instead of NULL. SQLite forbids a non-constant
-/// default on `ALTER TABLE ADD COLUMN`, hence the add-then-backfill two-step.
-pub(crate) fn ensure_agent_node_status_changed_at(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "agent_nodes", "status_changed_at", "TEXT")? {
-        conn.execute(
-            "UPDATE agent_nodes SET status_changed_at = created_at WHERE status_changed_at IS NULL",
-            [],
-        )?;
-        tracing::warn!("ensure_agent_node_status_changed_at: added column and backfilled from created_at");
-    }
-    Ok(())
-}
+// `ensure_coordinator_drive_prompt_created_at_index` (v32, issue #750
+// item 3) — the inline CREATE INDEX in init() handles this for fresh
+// DBs; the helper was an idempotent safety-net re-run that is no
+// longer needed once the inline `CREATE INDEX IF NOT EXISTS` is the
+// canonical schema. The inline CREATE is still in init().
 
-/// Safety net (v15): ensure the `source_pr` column exists on agent_nodes.
-/// Added for issue #420 — PR-spawned nodes record the originating PR number
-/// so the spawn path can fetch the head ref and use it as the worktree's
-/// `base_ref` (worktree adoption, #36). `None` for every existing row, so no
-/// backfill is needed — `#[serde(default)]` on the Rust struct (and the
-/// generated TS shape) makes the absence explicit and the spawn path
-/// branches on it.
-pub(crate) fn ensure_agent_node_source_pr(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "agent_nodes", "source_pr", "INTEGER")? {
-        tracing::warn!("ensure_agent_node_source_pr: added missing source_pr column");
-    }
-    Ok(())
-}
+// `ensure_mesh_columns` (v8 user-tunable columns) moved to `db::migrations`.
 
-/// Safety net (v16): ensure the `head_repo_owner` + `head_repo_clone_url`
-/// columns exist on `agent_nodes`. Added for issue #443 — PR-spawned nodes
-/// spawned from a fork PR record the fork's owner login and clone URL so
-/// `spawn_agent_inner` can add the fork as a remote and fetch the head ref
-/// (worktree adoption for fork PRs, #36). Both columns are nullable; only
-/// rows spawned from a fork PR set them. Pre-v16 rows stay `NULL` and the
-/// spawn path treats that as "same-repo PR" (the #420 path).
-pub(crate) fn ensure_agent_node_source_pr_fork_meta(conn: &Connection) -> SqlResult<()> {
-    for (name, ty) in [("head_repo_owner", "TEXT"), ("head_repo_clone_url", "TEXT")] {
-        if ensure_column(conn, "agent_nodes", name, ty)? {
-            tracing::warn!(
-                "ensure_agent_node_source_pr_fork_meta: added missing {} column",
-                name
-            );
-        }
-    }
-    Ok(())
-}
+// `ensure_mesh_scratchpad` (v17, issue #516) moved to `db::migrations`.
 
-/// Safety net (v16): ensure the `source_pr_pinned_sha` column exists on
-/// agent_nodes. Added for issue #444 — PR-spawned nodes may store the
-/// originating PR's head commit SHA so the spawn path can verify the local
-/// `origin/<head_ref>` SHA matches it after `git fetch` and emit a
-/// `pr_sha_drift` warning if the PR was force-pushed (or rebased) between
-/// the user clicking Spawn and the worktree being cut. The column is
-/// nullable: `None` for every existing v15 PR-spawned node (no SHA was
-/// known at the time), and `None` for issue-spawned / hand-spawned nodes
-/// entirely. The drift-check path branches on `Some(_)` so a `None` skips
-/// the comparison rather than failing — same fail-open semantics as the
-/// existing `pr_head_unfetchable` fallback.
-pub(crate) fn ensure_agent_node_source_pr_pinned_sha(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "agent_nodes", "source_pr_pinned_sha", "TEXT")? {
-        tracing::warn!("ensure_agent_node_source_pr_pinned_sha: added missing source_pr_pinned_sha column");
-    }
-    Ok(())
-}
+// `ensure_mesh_sandbox` (v18, #497/#498) moved to `db::migrations`.
 
-/// Safety net (v29, wayfinder #982 / ticket #984): ensure the `is_pinned`
-/// column exists on `agent_nodes`. Backing storage for the Pinned Grid
-/// view mode — the user flips individual nodes via the UI affordance
-/// (ticket #985), and the view switcher reads `is_pinned` to filter which
-/// cards render in Pinned Grid (ticket #986). NOT NULL + DEFAULT 0 means
-/// no backfill is needed: every pre-v29 row reads back as `pinned = false`
-/// and the user can opt-in row-by-row from the UI.
-pub(crate) fn ensure_agent_node_is_pinned(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "agent_nodes", "is_pinned", "INTEGER NOT NULL DEFAULT 0")? {
-        tracing::warn!("ensure_agent_node_is_pinned: added missing is_pinned column");
-    }
-    Ok(())
-}
+// `ensure_mesh_autopilot_columns` (v26, issue #481) moved to `db::migrations`.
 
-/// Safety net (v12): drop the obsolete `checkpoints` table. The checkpoint
-/// feature was removed, so the table is dead. This runs every init() rather
-/// than as a version-gated migration because the gated branch only fires for
-/// pre-v6 DBs (it's guarded on the legacy `projects` table); v6+ DBs rely on
-/// these `ensure_*` nets instead. `DROP TABLE IF EXISTS` is fully idempotent.
-pub(crate) fn ensure_checkpoints_dropped(conn: &Connection) -> SqlResult<()> {
-    conn.execute("DROP TABLE IF EXISTS checkpoints", [])?;
-    Ok(())
-}
+// `ensure_mesh_loop_columns` (v30, wayfinder #990 / ticket #991) moved to `db::migrations`.
 
-/// Safety net: ensure all v8 user-tunable columns exist on the meshes table.
-/// Called after migrate_if_needed to fix DBs that skipped migration due to
-/// the projects-table guard (existing DBs that already had schema_version=8
-/// but whose meshes table lacked those columns).
-/// Safety net: ensure the `pr_number`/`pr_url` columns exist on
-/// `autopilot_runs`. Added for the merged-PR auto-close sweep — a completed
-/// run records the wrap-up PR so the poller can later check GitHub for its
-/// merge and archive the node. Nullable; pre-existing rows stay `NULL` and
-/// are simply never swept.
-pub(crate) fn ensure_autopilot_run_pr_columns(conn: &Connection) -> SqlResult<()> {
-    for (name, ty) in [("pr_number", "INTEGER"), ("pr_url", "TEXT")] {
-        if ensure_column(conn, "autopilot_runs", name, ty)? {
-            tracing::warn!("ensure_autopilot_run_pr_columns: added missing {} column", name);
-        }
-    }
-    Ok(())
-}
+// `ensure_mesh_root_command_columns` (v27, issue #802) moved to `db::migrations`.
 
-/// v31 — `autopilot_runs.loop_iteration INTEGER` (ticket #992). NULL for
-/// issue-driven runs (the pre-v31 default, preserved by `NULL`); the
-/// Looping-mode poller writes the 1-based iteration number on each spawn.
-/// Same additive safety-net shape as `ensure_autopilot_run_pr_columns`
-/// above: a build that bumps `SCHEMA_VERSION` without yet containing the
-/// inline CREATE picks the column up on next launch.
-pub(crate) fn ensure_autopilot_run_loop_iteration(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "autopilot_runs", "loop_iteration", "INTEGER")? {
-        tracing::warn!("ensure_autopilot_run_loop_iteration: added missing loop_iteration column");
-    }
-    Ok(())
-}
+// `ensure_mesh_color` (v25) moved to `db::migrations`.
 
-/// v32 — `coordinator_drive_prompts.{status, claimed_at, prompt_hash}`
-/// (issue #750, items 1 + 2). Three additive columns backing the
-/// claim-before-send race fix and the same-key-different-payload reject.
-/// Every column is NOT NULL with a safe default, so pre-v32 rows read back
-/// as `(status='pending', claimed_at=<old created_at>, prompt_hash='',
-/// verdict=<existing>)`; the `prompt_hash=''` default makes any reuse of a
-/// pre-v32 key surface as `Mismatch` (caller must mint a fresh key), which
-/// is acceptable because drive is off-by-default and unreleased (#313).
-/// Same additive safety-net shape as the helpers above: a build that bumps
-/// `SCHEMA_VERSION` without yet containing the inline CREATE picks the
-/// columns up on next launch.
-pub(crate) fn ensure_coordinator_drive_prompt_claim_columns(conn: &Connection) -> SqlResult<()> {
-    let columns = [
-        ("status", "TEXT NOT NULL DEFAULT 'pending'"),
-        ("claimed_at", "TEXT NOT NULL DEFAULT (datetime('now'))"),
-        ("prompt_hash", "TEXT NOT NULL DEFAULT ''"),
-    ];
-    for (name, ty) in columns {
-        if ensure_column(conn, "coordinator_drive_prompts", name, ty)? {
-            tracing::warn!(
-                "ensure_coordinator_drive_prompt_claim_columns: added missing {} column",
-                name
-            );
-        }
-    }
-    Ok(())
-}
+// `ensure_mesh_pre_spawn_pool_size` (v22, issue #611) + the v24 one-shot
+// `ensure_pool_default_backfill` moved to `db::migrations`. The column
+// add runs from the always-pass column walk; the v24 backfill runs as a
+// `OneShotBackfill` gated on the same `pool_default_backfill_v24` flag.
 
-/// v32 — `idx_coordinator_drive_prompts_created_at` (issue #750, item 3).
-/// Backs the bounded-age GC sweep
-/// (`prune_drive_prompts_older_than_inner`) so the DELETE filters on
-/// `created_at` without a full table scan once the ledger has grown. Uses
-/// `IF NOT EXISTS` so it is idempotent on every init.
-pub(crate) fn ensure_coordinator_drive_prompt_created_at_index(conn: &Connection) -> SqlResult<()> {
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_coordinator_drive_prompts_created_at
-            ON coordinator_drive_prompts(created_at)",
-        [],
-    )?;
-    Ok(())
-}
-
-fn ensure_mesh_columns(conn: &Connection) -> SqlResult<()> {
-    let columns = [
-        ("build_command", "TEXT"),
-        ("run_command", "TEXT"),
-        ("model", "TEXT"),
-        ("effort", "TEXT"),
-        ("use_worktree", "INTEGER NOT NULL DEFAULT 1"),
-        ("worktree_mode", "TEXT"),
-        ("default_provider", "TEXT"),
-        ("base_ref", "TEXT NOT NULL DEFAULT 'origin/main'"),
-    ];
-    for (name, ty) in columns {
-        if ensure_column(conn, "meshes", name, ty)? {
-            tracing::warn!("ensure_mesh_columns: added missing column {}", name);
-        }
-    }
-    Ok(())
-}
-
-/// Safety net (v17): ensure the `scratchpad` column exists on `meshes`.
-/// Added for the Scratch Pad Probe tab — a mesh-scoped free-text note field
-/// owned entirely by Buildmesh (not visible to agents, not on disk). Always
-/// non-null with a `''` default, so the no-mesh-yet case and the
-/// already-has-notes case are indistinguishable at the read boundary. No
-/// backfill needed — pre-v17 rows just get the empty string.
-pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "meshes", "scratchpad", "TEXT NOT NULL DEFAULT ''")? {
-        tracing::warn!("ensure_mesh_scratchpad: added missing scratchpad column");
-    }
-    Ok(())
-}
-
-/// Safety net (v18): ensure the `sandbox` column exists on `meshes`.
-/// Added for the OS-level sandbox toggle — per-mesh default for whether agent
-/// PTY processes are confined (Windows AppContainer #498, macOS Seatbelt #497).
-///
-/// Off by default (`0`): the macOS Seatbelt path ships first (#497), the
-/// Windows AppContainer path follows (#498). Pre-v18 rows and hosts where the
-/// native spawn is not built simply read `false`. No backfill needed.
-pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "meshes", "sandbox", "INTEGER NOT NULL DEFAULT 0")? {
-        tracing::warn!("ensure_mesh_sandbox: added missing sandbox column");
-    }
-    Ok(())
-}
-
-/// Safety net (v26): ensure the Autopilot Policy columns exist on `meshes`
-/// (issue #481). Same one-line-per-column shape as `migrate_mesh_columns`.
-pub(crate) fn ensure_mesh_autopilot_columns(conn: &Connection) -> SqlResult<()> {
-    let columns = [
-        ("autopilot_enabled", "INTEGER NOT NULL DEFAULT 0"),
-        ("autopilot_trigger_label", "TEXT"),
-        ("autopilot_concurrency_limit", "INTEGER NOT NULL DEFAULT 2"),
-        ("autopilot_provider", "TEXT"),
-        ("autopilot_action_on_success", "TEXT"),
-    ];
-    for (name, ty) in columns {
-        if ensure_column(conn, "meshes", name, ty)? {
-            tracing::warn!("ensure_mesh_autopilot_columns: added missing {} column", name);
-        }
-    }
-    Ok(())
-}
-
-/// Safety net (v30, wayfinder #990 / ticket #991): ensure the Looping
-/// Autopilot config columns exist on `meshes`. Same one-line-per-column
-/// shape as `ensure_mesh_autopilot_columns` and `ensure_mesh_pre_spawn_pool_size` —
-/// additive migration, every column nullable or with a safe default, so no
-/// backfill is required and pre-v30 rows read back as "loop not
-/// configured" (mode = `issue_driven`, prompts = None, caps = 0/None).
-pub(crate) fn ensure_mesh_loop_columns(conn: &Connection) -> SqlResult<()> {
-    let columns: &[(&str, &str)] = &[
-        // Default 'issue_driven' matches the v29 behaviour byte-for-byte
-        // (every existing mesh keeps using the GitHub-label poller) so a
-        // upgrade is invisible to the existing autopilot flow.
-        ("autopilot_mode", "TEXT NOT NULL DEFAULT 'issue_driven'"),
-        ("loop_initial_prompt", "TEXT"),
-        ("loop_suffix_prompt", "TEXT"),
-        ("loop_max_iterations", "INTEGER"),
-        ("loop_interval_seconds", "INTEGER NOT NULL DEFAULT 0"),
-        ("loop_consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
-    ];
-    for (name, ty) in columns {
-        if ensure_column(conn, "meshes", name, ty)? {
-            tracing::warn!("ensure_mesh_loop_columns: added missing {} column", name);
-        }
-    }
-    Ok(())
-}
-
-/// Safety net (v27): ensure the per-context build/run command columns exist
-/// on `meshes` (issue #802). Both are nullable — a mesh that never sets them
-/// falls back to `build_command` / `run_command` in the root context, so the
-/// column absence IS the historical (PR #801) behaviour. No backfill needed.
-pub(crate) fn ensure_mesh_root_command_columns(conn: &Connection) -> SqlResult<()> {
-    for (name, ty) in [("root_build_command", "TEXT"), ("root_run_command", "TEXT")] {
-        if ensure_column(conn, "meshes", name, ty)? {
-            tracing::warn!("ensure_mesh_root_command_columns: added missing {} column", name);
-        }
-    }
-    Ok(())
-}
-
-/// Safety net (v25): ensure the `color` column exists on `meshes`.
-/// Holds the user-picked accent colour as a `#rrggbb` hex string. Nullable —
-/// pre-v25 rows and meshes whose owner never picked a colour read back as
-/// `None`, and the frontend falls back to the deterministic id-keyed palette.
-/// No backfill: the fallback IS the historical behaviour.
-pub(crate) fn ensure_mesh_color(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "meshes", "color", "TEXT")? {
-        tracing::warn!("ensure_mesh_color: added missing color column");
-    }
-    Ok(())
-}
-
-/// Safety net (v22): ensure the `pre_spawn_pool_size` column exists on
-/// `meshes`. The column is the per-mesh target for the pre-spawn Worktree
-/// Pool worker (issue #609 / v21), which previously hardcoded
-/// `POOL_TARGET_PER_MESH = 1`. A value of `0` means the pool is off for
-/// the mesh (no warm entries created); `1..=5` is the target the worker
-/// fills to on startup + after each claim. Clamping happens at the IPC
-/// boundary (`update_mesh_pool_size`), not here — this column is the
-/// typed integer the worker reads.
-///
-/// ON by default (`1`) since v24 (ADR 0020) — the pool is the largest
-/// spawn-latency win and its lifecycle is hardened, so opt-out is the
-/// right polarity. The user opts out via the Worktrees Probe's
-/// ConfigurationCard → "Pre-spawn warm worktrees" toggle (issue #611).
-/// Pre-v24 rows (whose column was ALTER-added with the old `DEFAULT 0`)
-/// are flipped once by [`ensure_pool_default_backfill`].
-pub(crate) fn ensure_mesh_pre_spawn_pool_size(conn: &Connection) -> SqlResult<()> {
-    // DEFAULT 1 since v24 (ADR 0020): pool ON by default. A DB whose column
-    // was added by a pre-v24 build keeps its ALTER-time DEFAULT 0 — that's
-    // what `ensure_pool_default_backfill` and `create_mesh`'s explicit
-    // insert value are for.
-    if ensure_column(
-        conn,
-        "meshes",
-        "pre_spawn_pool_size",
-        "INTEGER NOT NULL DEFAULT 1",
-    )? {
-        tracing::warn!("ensure_mesh_pre_spawn_pool_size: added missing column");
-    }
-    Ok(())
-}
-
-/// One-time v24 backfill (ADR 0020): flip worktree-enabled meshes still on
-/// the old pool-off default (`pre_spawn_pool_size = 0`) to the new default
-/// of 1 pre-warmed worktree. Runs at most once per DB, gated on the
-/// `pool_default_backfill_v24` app_settings flag — written only AFTER the
-/// UPDATE succeeds, so a crash mid-init retries next launch, and a user
-/// who sets a mesh back to 0 afterwards is never overridden again.
-///
-/// Worktree-disabled meshes are left at 0: the pool is meaningless for
-/// them, and leaving them untouched means enabling worktrees later starts
-/// from an explicit choice in the Worktrees Probe rather than a surprise
-/// background checkout.
-pub(crate) fn ensure_pool_default_backfill(conn: &Connection) -> SqlResult<()> {
-    let done: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM app_settings WHERE key = 'pool_default_backfill_v24'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if done {
-        return Ok(());
-    }
-    let updated = conn.execute(
-        "UPDATE meshes
-         SET pre_spawn_pool_size = 1
-         WHERE COALESCE(pre_spawn_pool_size, 0) = 0
-           AND COALESCE(use_worktree, 1) = 1",
-        [],
-    )?;
-    if updated > 0 {
-        tracing::info!(
-            "ensure_pool_default_backfill: enabled the pre-spawn pool (size 1) on {} mesh(es); \
-             opt out per-mesh via the Worktrees Probe",
-            updated
-        );
-    }
-    conn.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('pool_default_backfill_v24', '1')",
-        [],
-    )?;
-    Ok(())
-}
-
-/// Safety net (v19): re-apply the **first-class** Spawn Option
-/// composite-id migration to any `agent_nodes` row the version-bump
-/// path missed (issue #575). The first-class block is
-/// preferences-independent (it's a hardcoded SQL `IN ('minimax',
-/// 'kimi')` rewrite), so it can run from `db::init` and is
-/// idempotent. The custom-account block is split into
-/// [`ensure_agent_node_provider_id_custom_accounts_migrated`],
-/// called from `lib.rs::setup` after `preferences::init`.
-///
-/// A node inserted by a code path that didn't go through
-/// `migrate_if_needed` (e.g. a hand-written test fixture) would
-/// keep a legacy bare id for the first-class providers; this
-/// safety net catches it on every subsequent init.
-///
-/// Idempotent: the rewrite's `WHERE provider NOT LIKE '%:%'`
-/// guard skips rows already in the composite form, so the safety
-/// net is a no-op on healthy v19+ DBs. See
-/// [`migrate_agent_node_provider_id_to_composite`] for the full
-/// migration semantics.
-pub(crate) fn ensure_agent_node_provider_id_migrated(conn: &Connection) -> SqlResult<()> {
-    // Table-exists guard mirrors the other safety nets: a fresh DB
-    // creates the table above, so this is a no-op there. The NOT LIKE
-    // guard turns it into a no-op once v19+ data is present.
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-    migrate_agent_node_provider_id_to_composite(conn)
-}
+// `ensure_agent_node_provider_id_migrated` (v19, issue #575 first-class
+// block) moved to `db::migrations::AlwaysStep::RewriteAgentNodeProviderId`.
+// The always-run idempotent step runs every launch; the version-gated
+// pass no longer has its own duplicate call.
 
 /// Safety net (v19): re-apply the **custom-account** Spawn Option
 /// composite-id migration. Called from `lib.rs::setup` after
@@ -1144,296 +558,46 @@ pub(crate) fn ensure_mesh_default_provider_normalized(conn: &Connection) -> SqlR
     Ok(())
 }
 
-fn migrate_projects_layout(conn: &Connection) -> SqlResult<()> {
-    let has_layout: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'layout'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
+// `migrate_projects_layout` removed (issue #249 — pre-v6 dead code).
+// The legacy `projects` table has not existed since v6; this helper
+// only ever ran via the version-gated `migrate_if_needed` ladder
+// when the `projects` table was present (a state no production DB
+// has been in for six years). The v6+ safety-net path always used
+// `ensure_mesh_columns` (also now in `db::migrations`).
 
-    if !has_layout {
-        conn.execute(
-            "ALTER TABLE projects ADD COLUMN layout TEXT NOT NULL DEFAULT 'grid'",
-            [],
-        )?;
-        tracing::info!("Added layout column to projects table");
-    }
-    Ok(())
-}
+// `migrate_projects_position` removed (issue #249 — pre-v6 dead code).
 
-fn migrate_projects_position(conn: &Connection) -> SqlResult<()> {
-    let has_position: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'position'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
+// `migrate_sessions_worktree_name` removed (issue #249 — pre-v6 dead code).
 
-    if !has_position {
-        conn.execute(
-            "ALTER TABLE projects ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-        tracing::info!("Added position column to projects table");
-        conn.execute(
-            "UPDATE projects SET position = (
-                SELECT COUNT(*) FROM projects p2 WHERE p2.created_at < projects.created_at
-            )",
-            [],
-        )?;
-    }
-    Ok(())
-}
+// `migrate_mesh_rename` removed (issue #249 — pre-v6 dead code). The
+// `projects`→`meshes` table rename is part of the v6 migration that
+// production DBs completed six years ago; the helper was kept alive
+// only by tests simulating v2 → current upgrades.
 
-fn migrate_sessions_worktree_name(conn: &Connection) -> SqlResult<()> {
-    // Guard: sessions table may not exist in very old schemas (v2-v3)
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
+// `migrate_remote_access_token` removed (issue #249 — the v7 root
+// token mint is now part of `get_or_create_root_token_inner`, which
+// is idempotent and called on first read).
 
-    if !table_exists {
-        return Ok(());
-    }
+// `migrate_agent_node_source_issue` removed (issue #249). The v9 column
+// add runs from the registry's always-pass column walk — the same
+// pragma_table_info check skips present columns.
 
-    let has_worktree_name: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name = 'worktree_name'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
+// `migrate_gemini_to_agy` removed (issue #249). The v10 rewrite
+// (`gemini` → `agy`) lives nowhere in the schema-evolution registry
+// because it predates the registry — it was a one-line `UPDATE`
+// guarded by `WHERE provider = 'gemini'`. The pre-#697 harness list
+// already covers every harness id; a v10-shape DB's `gemini` rows
+// read back at runtime via the harness resolver (which has handled
+// the missing id since #918). The rewrite is preserved here as a
+// documentation note — re-introduce it as a `OneShotBackfill` only if
+// a regression pin surfaces.
 
-    if !has_worktree_name {
-        conn.execute(
-            "ALTER TABLE sessions ADD COLUMN worktree_name TEXT",
-            [],
-        )?;
-        tracing::info!("Added worktree_name column to sessions table");
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
-    // Guard: only rename if old table names exist (upgrade path from v5)
-    let projects_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-
-    if !projects_exists {
-        // Already migrated or fresh install — nothing to do
-        return Ok(());
-    }
-
-    // Also guard on sessions — partial schemas (v2 without sessions) would crash otherwise
-    let sessions_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-
-    // Always rename projects→meshes; only rename sessions-related tables if they exist.
-    // Without this, DBs that have `projects` but no `sessions` (v2 schema) would skip
-    // the rename and then crash in migrate_mesh_columns (which references `meshes`).
-    if !sessions_exists {
-        conn.execute("ALTER TABLE projects RENAME TO meshes", [])?;
-        tracing::info!("Migrated projects→meshes (no sessions table present)");
-        return Ok(());
-    }
-
-    let result: SqlResult<()> = (|| {
-        conn.execute("BEGIN TRANSACTION", [])?;
-        conn.execute("ALTER TABLE projects RENAME TO meshes", [])?;
-        conn.execute("ALTER TABLE sessions RENAME TO agent_nodes", [])?;
-        conn.execute("ALTER TABLE agent_nodes RENAME COLUMN project_id TO mesh_id", [])?;
-        conn.execute("COMMIT", [])?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            tracing::info!("Migrated to v6: projects→meshes, sessions→agent_nodes, project_id→mesh_id");
-        }
-        Err(e) => {
-            conn.execute("ROLLBACK", [])?;
-            return Err(e);
-        }
-    }
-    Ok(())
-}
-
-fn migrate_remote_access_token(conn: &Connection) -> SqlResult<()> {
-    // Ensure the remote_access_token key exists in app_settings with a generated token
-    let has_token: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM app_settings WHERE key = 'remote_access_token'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-
-    if !has_token {
-        let token = generate_token();
-        conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('remote_access_token', ?1)",
-            params![&token],
-        )?;
-        tracing::info!("Generated remote access root token");
-    }
-    Ok(())
-}
-
-fn migrate_agent_node_source_issue(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-
-    if !table_exists {
-        return Ok(());
-    }
-
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if !has_col {
-        conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_issue INTEGER", [])?;
-        tracing::info!("Added source_issue column to agent_nodes table");
-    }
-    Ok(())
-}
-
-fn migrate_gemini_to_agy(conn: &Connection) -> SqlResult<()> {
-    let rows_agents = conn.execute(
-        "UPDATE agent_nodes SET provider = 'agy' WHERE provider = 'gemini'",
-        [],
-    )?;
-    if rows_agents > 0 {
-        tracing::info!("Migrated {} agent_nodes from gemini to agy", rows_agents);
-    }
-    let rows_meshes = conn.execute(
-        "UPDATE meshes SET default_provider = 'agy' WHERE default_provider = 'gemini'",
-        [],
-    )?;
-    if rows_meshes > 0 {
-        tracing::info!("Migrated {} meshes default_provider from gemini to agy", rows_meshes);
-    }
-    Ok(())
-}
-
-/// v19 — Spawn Option composite-id migration (issue #575 / ADR-0016 §6).
-///
-/// Rewrites legacy `agent_nodes.provider` ids into the new composite
-/// `<harness>:<provider>` form so archived nodes resolve under the
-/// grouped Spawn Menu without a permanent resolver shim:
-///
-/// * `minimax` → `claude:minimax` (first-class provider, #566)
-/// * `kimi` → `claude:kimi` (first-class provider, #566)
-/// * Any other bare id that names a `claude_compatible` `ProviderAccount`
-///   in the current `preferences.json` → `claude:<id>` (custom accounts)
-/// * Everything else (`claude`, `codex`, `agy`, `opencode`, `terminal`,
-///   `anthropic`, unknown harness profile ids) is left untouched — those
-///   are already valid native Spawn Option ids.
-///
-/// The mapping is **unambiguous today** because every Proxied Provider
-/// currently pairs with the Claude Code harness only (ADR-0016 §6). When
-/// multi-harness attach ships, this rewrite is no longer sound and a
-/// different solution (resolver shim or user-driven remap) is needed —
-/// issue #575 closes before that work begins.
-///
-/// v19 Spawn Option composite-id migration — **first-class block**
-/// (issue #575 / ADR-0016 §6, issue #583 scope-clarification).
-///
-/// Rewrites legacy bare ids for the two first-class Proxied Providers
-/// (`minimax`, `kimi` — issue #566) to the composite form `claude:<id>`.
-/// Custom-account rewrites live in a sibling function — see
-/// [`migrate_agent_node_provider_id_custom_accounts`].
-///
-/// **Scope**: only the first-class block. The function name does NOT
-/// cover the custom-account rewrite even though both are part of the
-/// v19 Spawn Option migration. Splitting the two is mandatory, not
-/// stylistic — see *Two-step init order* below.
-///
-/// **Idempotent**: rows whose `provider` already contains `:` are skipped
-/// (the `provider NOT LIKE '%:%'` guard in the UPDATE).
-///
-/// **Two-step init order** (code-review finding): `db::init` runs
-/// *before* `preferences::init` in `lib.rs::setup`, so when this
-/// migration first runs the `APP_DATA_DIR` OnceLock is unset and
-/// `preferences::provider_accounts()` would only return the
-/// code-defined defaults (no user-stored custom accounts). To avoid
-/// silently dropping the custom-account rewrite on the very first
-/// v19 launch, this function only does the **first-class** block
-/// (always-safe SQL with no preferences dependency). The
-/// **custom-account** block is split into
-/// [`migrate_agent_node_provider_id_custom_accounts`], which is
-/// called from `lib.rs::setup` *after* `preferences::init` with the
-/// live `Vec<ProviderAccount>`. The safety-net
-/// `ensure_agent_node_provider_id_migrated` re-runs the first-class
-/// block on every init (idempotent) and is paired with
-/// `ensure_agent_node_provider_id_custom_accounts_migrated` in
-/// `lib.rs::setup` for the custom-account block.
-pub(crate) fn migrate_agent_node_provider_id_to_composite(conn: &Connection) -> SqlResult<()> {
-    // Table-exists guard: the version-bump path runs `migrate_if_needed`
-    // against every DB the user has, including pre-v6 DBs (test fixtures
-    // use these) where the `agent_nodes` table was only created later
-    // in `init()`. A bare `UPDATE agent_nodes` against those DBs would
-    // `SqliteFailure: no such table`, breaking the idempotency test and
-    // any pre-v6 production upgrade path. Skipping is correct: there's
-    // nothing to rewrite on a DB that never recorded an agent node.
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-    // The first-class Proxied Provider (issue #566) that still needs the
-    // composite-form rewrite. `kimi` was removed from this list by wayfinder
-    // #918: Kimi Code is now a native self-auth harness, so bare `kimi` rows
-    // already resolve to `Provider::Kimi` via `from_db_str` — no rewrite
-    // needed, and rewriting would put them in a `claude:kimi` state with no
-    // corresponding Proxied row in the spawn menu. (Follow-up: a post-#918
-    // migration that *re-rewrites* `claude:kimi` → `kimi` for users who
-    // already passed through v19 — see `kimi_node_provider_rewrite` ticket.)
-    let rows_first_class = conn.execute(
-        "UPDATE agent_nodes
-            SET provider = 'claude:' || provider
-          WHERE provider = 'minimax'",
-        [],
-    )?;
-    if rows_first_class > 0 {
-        tracing::info!(
-            "migrate_agent_node_provider_id_to_composite: rewrote {} agent_nodes from minimax bare id",
-            rows_first_class
-        );
-    }
-
-    Ok(())
-}
+// `migrate_agent_node_provider_id_to_composite` (v19, issue #575
+// first-class block) removed. The rewrite lives in
+// `db::migrations::AlwaysStep::RewriteAgentNodeProviderId` — the
+// `WHERE provider = 'minimax'` guard makes it idempotent and the
+// registry's always-run pass handles DBs that bypassed the version
+// gate (the v18→v19 bug class the doc-comment warned about).
 
 /// v19 Spawn Option composite-id migration, **custom-account block**
 /// (issue #575 / ADR-0016 §6). Rewrites any bare id that names a
@@ -2222,78 +1386,17 @@ pub fn login_device_session_inner(
     Ok(None)
 }
 
-/// Safety net (issue #495): rehash any coordinator token still stored as
-/// pre-hashing cleartext. A token minted before token hashing sits in
-/// `app_settings` as the 32-char raw hex output of `generate_token`; this
-/// rewrites it in place to its SHA-256 so a DB dump can no longer reveal the
-/// secret, while the raw token the user already holds keeps validating (the
-/// validator hashes the incoming token). Idempotent: a SHA-256 hex is 64 chars,
-/// so an already-hashed (or empty) value is left untouched.
-///
-/// The root token (`remote_access_token`) is deliberately excluded: the Remote
-/// Access QR re-reads its *raw* value on every open, so it stays cleartext until
-/// the Keychain/device-token slice moves it out of SQLite (PRD #494).
-pub(crate) fn ensure_coordinator_tokens_hashed(conn: &Connection) -> SqlResult<()> {
-    for key in [COORDINATOR_READ_TOKEN_KEY, COORDINATOR_DRIVE_TOKEN_KEY] {
-        let value: Option<String> = conn
-            .query_row(
-                "SELECT value FROM app_settings WHERE key = ?1",
-                params![key],
-                |row| row.get(0),
-            )
-            .ok();
-        // Only a raw token (the 32-char `generate_token` output) needs
-        // rewriting; a 64-char hash is already migrated and an empty value is
-        // nothing to hash.
-        if let Some(raw) = value {
-            if raw.len() == 32 {
-                conn.execute(
-                    "UPDATE app_settings SET value = ?2 WHERE key = ?1",
-                    params![key, hash_token(&raw)],
-                )?;
-                tracing::warn!("ensure_coordinator_tokens_hashed: rehashed cleartext {}", key);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Exposes migrate_if_needed for integration testing.
-/// In tests, call this on an existing Connection to simulate schema upgrade.
-#[cfg(test)]
-pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
-    let current_version: i32 = conn
-        .query_row("SELECT value FROM app_settings WHERE key = 'schema_version'", [], |row| {
-            row.get::<_, String>(0).map(|v| v.parse().unwrap_or(0))
-        })
-        .unwrap_or(0);
-
-    if current_version < SCHEMA_VERSION {
-        migrate_projects_layout(conn)?;
-        migrate_projects_position(conn)?;
-        migrate_sessions_worktree_name(conn)?;
-        if current_version < 6 {
-            migrate_mesh_rename(conn)?;
-        }
-        if current_version < 7 {
-            migrate_remote_access_token(conn)?;
-        }
-        if current_version < 8 {
-            migrate_mesh_columns(conn)?;
-        }
-        if current_version < 9 {
-            migrate_agent_node_source_issue(conn)?;
-        }
-        if current_version < 19 {
-            migrate_agent_node_provider_id_to_composite(conn)?;
-        }
-        conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
-            params![SCHEMA_VERSION.to_string()],
-        )?;
-    }
-    Ok(())
-}
+// `ensure_coordinator_tokens_hashed` (issue #495) moved to
+// `db::migrations::AlwaysStep::HashCoordinatorTokens`. The 32-char raw
+// token → SHA-256 hash rehash runs as part of the registry's
+// always-pass step on every launch.
+//
+// `test_migrate_if_needed` removed — its purpose was to exercise the
+// pre-v6 `migrate_projects_*` / `migrate_mesh_rename` ladder against
+// in-memory fixtures simulating v2 → current upgrades. With those
+// helpers gone, the function has no callers; tests that need to
+// simulate a v6 → current upgrade now call
+// `migrations::evolve_to(migrations::SCHEMA_VERSION, &conn)` directly.
 
 pub fn get() -> &'static Mutex<Connection> {
     DB.get().expect("database not initialized")
@@ -2317,27 +1420,29 @@ pub fn is_initialized() -> bool {
 
 // --- Internal Helpers (no locking) ---
 
-/// Canonical column projection for reading a `Mesh` row. The `COALESCE`
-/// defaults must stay in sync with `map_mesh_row`'s positional `row.get`s.
-const MESH_COLUMNS: &str =
-    "id, name, path, layout, position, created_at, \
-     COALESCE(build_command, ''), COALESCE(run_command, ''), \
-     COALESCE(model, ''), COALESCE(effort, ''), \
-     COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
-     COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
-     scratchpad, COALESCE(sandbox, 0), \
-     COALESCE(pre_spawn_pool_size, 0), COALESCE(color, ''), \
-     COALESCE(autopilot_enabled, 0), COALESCE(autopilot_trigger_label, ''), \
-     COALESCE(autopilot_concurrency_limit, 2), COALESCE(autopilot_provider, ''), \
-     COALESCE(autopilot_action_on_success, ''), \
-     COALESCE(root_build_command, ''), COALESCE(root_run_command, ''), \
-     COALESCE(autopilot_mode, 'issue_driven'), \
-     COALESCE(loop_initial_prompt, ''), COALESCE(loop_suffix_prompt, ''), \
-     loop_max_iterations, \
-     COALESCE(loop_interval_seconds, 0), COALESCE(loop_consecutive_failures, 0)";
+/// Canonical column projection for reading a `Mesh` row, built from
+/// `migrations::mesh_columns_projection()` (the registry's
+/// `ColumnSpec::read_default` for each mesh column). The projection
+/// order pins the `map_mesh_row` positional reads below — reordering
+/// the registry reshuffles them in lockstep. See the registry's
+/// `mesh_column_specs` doc for the invariants and the regression
+/// tests in `db::migrations` for the shape pins.
+///
+/// Replaces the pre-#249 hand-written `const MESH_COLUMNS: &str`
+/// (every `COALESCE(col, default)` literal) — the COALESCE defaults
+/// now live next to the [`migrations::ColumnSpec`] entry that
+/// introduces the column, so a new column is one entry in the
+/// registry, not three edits across `init()`, the safety net, and
+/// the projection string.
+fn mesh_columns() -> &'static str {
+    migrations::mesh_columns_projection()
+}
 
-/// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
-/// normalizes empty config strings to `None` (via `parse_str`).
+/// Map a row selected with [`mesh_columns`] into a `Mesh`. Single
+/// place that normalizes empty config strings to `None` (via
+/// `parse_str`). The positional `row.get(N)` indices track the
+/// `migrations::mesh_column_specs` iteration order — don't reorder
+/// the registry without re-mapping this function.
 fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
     Ok(Mesh {
         id: row.get(0)?,
@@ -2378,7 +1483,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
 
 fn get_mesh_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Mesh> {
     let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM meshes WHERE id = ?1", MESH_COLUMNS)
+        &format!("SELECT {} FROM meshes WHERE id = ?1", mesh_columns())
     )?;
     stmt.query_row(params![id], map_mesh_row)
 }
@@ -2650,7 +1755,7 @@ pub fn list_autopilot_enabled_meshes() -> SqlResult<Vec<Mesh>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(&format!(
         "SELECT {} FROM meshes WHERE COALESCE(autopilot_enabled, 0) = 1 ORDER BY id",
-        MESH_COLUMNS
+        mesh_columns()
     ))?;
     let rows = stmt.query_map([], map_mesh_row)?;
     rows.collect()
@@ -3073,7 +2178,7 @@ pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        &format!("SELECT {} FROM meshes ORDER BY position ASC, name ASC", MESH_COLUMNS)
+        &format!("SELECT {} FROM meshes ORDER BY position ASC, name ASC", mesh_columns())
     )?;
     let rows = stmt.query_map([], map_mesh_row)?;
     rows.collect()
@@ -3083,7 +2188,7 @@ pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
 pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        &format!("SELECT {} FROM meshes WHERE path = ?1", MESH_COLUMNS)
+        &format!("SELECT {} FROM meshes WHERE path = ?1", mesh_columns())
     )?;
     stmt.query_row(params![path], map_mesh_row)
 }
@@ -3581,30 +2686,11 @@ impl WarmWorktreeStatus {
     }
 }
 
-/// Safety-net (v21): create the `warm_worktrees` table if it isn't there.
-/// Mirrors the `ensure_*` pattern: a DB whose schema_version was bumped past
-/// v21 by a build that didn't yet include the inline CREATE will gain the
-/// table here. Idempotent — `CREATE TABLE IF NOT EXISTS` is a no-op when the
-/// table is already present.
-pub(crate) fn ensure_warm_worktables_table(conn: &Connection) -> SqlResult<()> {
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS warm_worktrees (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
-            path TEXT NOT NULL UNIQUE,
-            preassigned_name TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'filling',
-            base_sha TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
-        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
-        ",
-    )?;
-    Ok(())
-}
+// `ensure_warm_worktables_table` (v21) moved to
+// `db::migrations::AlwaysStep::EnsureWarmWorktreesTable`. Fresh DBs
+// still create the table via the inline CREATE in `init()`; the
+// always-run pass is the v6+ safety net for DBs whose
+// `schema_version` was bumped past 21 without the inline CREATE.
 
 /// Insert a new warm_worktrees row. The pool worker calls this AFTER cutting
 /// the on-disk worktree so a `status = 'available'` row always points at a

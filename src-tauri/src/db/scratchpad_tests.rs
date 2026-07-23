@@ -128,11 +128,11 @@ mod tests {
     }
 
     #[test]
-    fn ensure_mesh_scratchpad_is_idempotent_on_a_pre_v17_schema() {
+    fn evolve_to_adds_scratchpad_column_on_a_pre_v17_schema() {
         // Simulate an upgrade: a v16 schema (no scratchpad column)
-        // opened by `ensure_mesh_scratchpad` should add the column and
-        // a second call should be a no-op. Mirrors the
-        // "existing DB upgrade" path the app actually takes.
+        // opened by `evolve_to` should add the column and a second
+        // call should be a no-op. Mirrors the "existing DB upgrade"
+        // path the app actually takes.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE meshes (
@@ -148,7 +148,7 @@ mod tests {
         .unwrap();
 
         // First call: column added.
-        db::ensure_mesh_scratchpad(&conn).unwrap();
+        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let col_present: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'scratchpad'",
@@ -178,6 +178,6 @@ mod tests {
 
         // Second call must be a no-op (the helper returns Ok even if
         // the column already exists; the boolean just flips false).
-        db::ensure_mesh_scratchpad(&conn).unwrap();
+        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 }

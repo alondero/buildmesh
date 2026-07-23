@@ -182,7 +182,11 @@ mod tests {
         assert!(!has_before, "PRECONDITION: position column must not exist in v12 schema");
 
         // Act
-        crate::db::ensure_agent_node_position(&conn).unwrap();
+        crate::db::migrations::evolve_to(
+            crate::db::migrations::SCHEMA_VERSION,
+            &conn,
+        )
+        .unwrap();
 
         // Assert: column exists and ranks are per-mesh, ordered by created_at.
         let pos = |name: &str| -> i64 {
@@ -198,7 +202,11 @@ mod tests {
         assert_eq!(pos("m2-b"), 1, "mesh 2, second");
 
         // Idempotent: a second call (column present) must not renumber anything.
-        crate::db::ensure_agent_node_position(&conn).unwrap();
+        crate::db::migrations::evolve_to(
+            crate::db::migrations::SCHEMA_VERSION,
+            &conn,
+        )
+        .unwrap();
         assert_eq!(pos("m1-c"), 2, "second call must be a no-op");
     }
 
@@ -248,7 +256,11 @@ mod tests {
         assert!(!has_before, "PRECONDITION: source_pr_pinned_sha must not exist in v15 schema");
 
         // Act — first call adds the column.
-        crate::db::ensure_agent_node_source_pr_pinned_sha(&conn).unwrap();
+        crate::db::migrations::evolve_to(
+            crate::db::migrations::SCHEMA_VERSION,
+            &conn,
+        )
+        .unwrap();
 
         // Assert: column now exists and is nullable (no NOT NULL constraint).
         let has_after: bool = conn.query_row(
@@ -285,7 +297,11 @@ mod tests {
         assert_eq!(sha.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
 
         // Idempotent: a second call must not error (the column already exists).
-        crate::db::ensure_agent_node_source_pr_pinned_sha(&conn).unwrap();
+        crate::db::migrations::evolve_to(
+            crate::db::migrations::SCHEMA_VERSION,
+            &conn,
+        )
+        .unwrap();
 
         // The pinned row is still queryable after the second call.
         let sha_after: Option<String> = conn.query_row(
@@ -334,64 +350,157 @@ mod tests {
         std::fs::remove_file(&db_path).ok();
     }
 
-    /// Issue #456: the shared `ensure_column` helper must (a) add a missing
-    /// column with the requested type/default, (b) be a no-op on a second
-    /// call (column already present), and (c) be a no-op when the table
-    /// itself is missing (mirrors the table-exists guard in every
-    /// `ensure_*` wrapper). Returns `Ok(true)` on add / `Ok(false)` on skip
-    /// so callers that need to do follow-up work (backfill) can branch.
-    #[test]
-    fn ensure_column_adds_idempotently_and_handles_missing_table() {
-        // --- Case 1: missing column on a present table ---
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE widgets (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
-        ).unwrap();
+    /// Issue #456 (post-#249 reformulation): the runner's always-pass
+/// column walk must (a) add a missing column with the requested
+/// type/default, (b) be a no-op on a second call (column already
+/// present), and (c) be a no-op when the table itself is missing
+/// (mirrors the table-exists guard the shared `ensure_column` helper
+/// used to provide). The helper is now private to `db::migrations`;
+/// this test pins the runner-level invariant by exercising a fresh
+/// connection against a non-registry table (so the always-pass walk
+/// can't accidentally mutate it) and a registry table (so the walk
+/// adds the column).
+#[test]
+fn evolve_to_column_walk_is_idempotent_and_table_aware() {
+    // --- Case 1: a fresh in-memory connection with a non-registry
+    // table. The runner's always-pass walk must NOT touch the table
+    // (no entry for it in the registry) and must NOT error on a
+    // missing-table situation when its own walks hit a registry entry
+    // whose table isn't present.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE widgets (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
+    )
+    .unwrap();
 
-        let added = crate::db::ensure_column(&conn, "widgets", "weight", "INTEGER NOT NULL DEFAULT 0").unwrap();
-        assert!(added, "first call must report the column as added");
+    // Pre-state: only the inline CREATE columns are present.
+    let before: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        before,
+        vec!["id".to_string(), "name".to_string()],
+        "PRECONDITION: widgets has only its inline columns before evolve_to"
+    );
 
-        let has_col: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('widgets') WHERE name = 'weight'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert!(has_col, "column must exist after first call");
+    // Act: call evolve_to. The always-pass walk runs every entry in
+    // the column registry; none of them target `widgets`, so the
+    // table is untouched. The walk also hits registry entries for
+    // tables that don't exist (e.g. `autopilot_runs`) — the
+    // `table_present` guard makes those a no-op rather than an error.
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    )
+    .unwrap();
 
-        // NOT NULL constraint must be honored when the caller passes it.
-        let notnull: i64 = conn.query_row(
-            "SELECT \"notnull\" FROM pragma_table_info('widgets') WHERE name = 'weight'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(notnull, 1, "column must be NOT NULL when caller said so");
+    // Assert: `widgets` is still untouched (the runner must not
+    // mutate tables that aren't in the registry).
+    let after_first: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        after_first,
+        vec!["id".to_string(), "name".to_string()],
+        "evolve_to must not mutate tables outside its column registry"
+    );
 
-        // --- Case 2: column already present — no-op on second call ---
-        let added_again = crate::db::ensure_column(&conn, "widgets", "weight", "INTEGER NOT NULL DEFAULT 0").unwrap();
-        assert!(!added_again, "second call must report no change");
+    // --- Case 2: idempotent — a second call must not error and must
+    // not change anything. (Every column ALTER is gated on
+    // `pragma_table_info`; every backfill on its app_settings flag;
+    // every AlwaysStep is naturally idempotent.)
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    )
+    .unwrap();
+    let after_second: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        after_second, after_first,
+        "second evolve_to call must be a no-op"
+    );
 
-        // Pre-existing semantics must be untouched by the helper.
-        conn.execute(
-            "INSERT INTO widgets (name, weight) VALUES ('alpha', 42)",
-            [],
-        ).unwrap();
-        let w: i64 = conn.query_row(
-            "SELECT weight FROM widgets WHERE name = 'alpha'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(w, 42, "existing column semantics must be untouched by the helper");
+    // Pre-existing semantics on the un-touched table: a fresh INSERT
+    // reads back the inserted value (the runner's no-mutation
+    // guarantee is end-to-end, not just for the column-projection).
+    conn.execute(
+        "INSERT INTO widgets (name) VALUES ('alpha')",
+        [],
+    )
+    .unwrap();
+    let name: String = conn
+        .query_row("SELECT name FROM widgets WHERE name = 'alpha'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(name, "alpha");
 
-        // --- Case 3: table missing — no-op, no error ---
-        let added_no_table = crate::db::ensure_column(&conn, "no_such_table", "x", "INTEGER").unwrap();
-        assert!(!added_no_table, "missing-table case must report no change");
+    // --- Case 3: a registry target. Stamp `mesh_id` on `widgets`
+    // (a registry column for `meshes`) so we can prove the walk
+    // adds it when the table exists — closes the loop with the
+    // shared `ensure_column` "added on present table" property the
+    // pre-#249 helper covered.
+    conn.execute(
+        "CREATE TABLE meshes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE
+         );",
+        [],
+    )
+    .unwrap();
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    )
+    .unwrap();
+    let meshes_cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('meshes') ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    // Every registry entry for `meshes` must now be present (the
+    // fresh-table CREATE above deliberately omitted the
+    // registry-only columns so the walk has work to do).
+    let registry_cols: Vec<String> = crate::db::migrations::mesh_column_specs()
+        .iter()
+        .map(|c| c.column.to_string())
+        .collect();
+    for col in &registry_cols {
+        assert!(
+            meshes_cols.contains(col),
+            "registry column {col} must exist on meshes after evolve_to (got: {:?})",
+            meshes_cols
+        );
     }
+}
 
-    /// Issue #495: a DB created before token hashing stores the coordinator
-    /// tokens as 32-char cleartext. `ensure_coordinator_tokens_hashed` must
-    /// rehash them in place so a DB dump no longer exposes the secret, while the
-    /// raw token the user already holds keeps validating. The root token is
-    /// deliberately left cleartext (Option 3 — the QR re-reads its raw value).
-    /// Re-running must be idempotent (never hash an already-hashed value).
+    /// Issue #495 (post-#249 reformulation): a DB created before token
+    /// hashing stores the coordinator tokens as 32-char cleartext.
+    /// The runner's `AlwaysStep::HashCoordinatorTokens` rehashes them
+    /// in place so a DB dump no longer exposes the secret, while the
+    /// raw token the user already holds keeps validating. The root
+    /// token is deliberately left cleartext (Option 3 — the QR
+    /// re-reads its raw value). Re-running must be idempotent (never
+    /// hash an already-hashed value).
     #[test]
-    fn ensure_coordinator_tokens_hashed_rehashes_cleartext_idempotently() {
+    fn evolve_to_rehashes_cleartext_coordinator_tokens_idempotently() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
@@ -408,7 +517,11 @@ mod tests {
             rusqlite::params![raw_read, raw_drive, raw_root],
         ).unwrap();
 
-        crate::db::ensure_coordinator_tokens_hashed(&conn).unwrap();
+        crate::db::migrations::evolve_to(
+            crate::db::migrations::SCHEMA_VERSION,
+            &conn,
+        )
+        .unwrap();
 
         let stored = |key: &str| -> String {
             conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |r| r.get(0)).unwrap()
@@ -428,7 +541,11 @@ mod tests {
 
         // Idempotent: a second run must not hash the hash.
         let after_first = stored("coordinator_read_token");
-        crate::db::ensure_coordinator_tokens_hashed(&conn).unwrap();
+        crate::db::migrations::evolve_to(
+            crate::db::migrations::SCHEMA_VERSION,
+            &conn,
+        )
+        .unwrap();
         assert_eq!(stored("coordinator_read_token"), after_first, "must not double-hash");
     }
 
@@ -543,13 +660,15 @@ mod tests {
         );
     }
 
-    /// v28→v29: `ensure_agent_node_is_pinned` must add the new `is_pinned`
-    /// column to a v28-shape `agent_nodes` table, and a second call must be
-    /// a no-op (idempotent). Same safety-net shape as
-    /// `ensure_agent_node_source_pr_pinned_sha` (#444) — the v15→v16 test
-    /// above is the structural twin.
+    /// v28→v29: `migrations::evolve_to` must add the new `is_pinned`
+    /// column to a v28-shape `agent_nodes` table via its always-pass
+    /// column walk, and a second call must be a no-op (idempotent).
+    /// Same structural shape as `test_v8_to_v9_adds_source_issue_via_safety_net`
+    /// above — the runner's always-pass column walk replaces every
+    /// per-column `ensure_*` wrapper. The v15→v16 test for
+    /// `source_pr_pinned_sha` (#444) exercises the same path.
     #[test]
-    fn ensure_agent_node_is_pinned_adds_column_idempotently() {
+    fn evolve_to_adds_v29_is_pinned_column_idempotently() {
         let conn = Connection::open_in_memory().unwrap();
         // v28-shape agent_nodes: everything except the new `is_pinned`
         // column. Mirrors the inline CREATE in db::init up to v28.
@@ -592,7 +711,11 @@ mod tests {
         assert!(!has_before, "PRECONDITION: is_pinned must not exist in v28 schema");
 
         // Act — first call adds the column.
-        crate::db::ensure_agent_node_is_pinned(&conn).unwrap();
+        crate::db::migrations::evolve_to(
+            crate::db::migrations::SCHEMA_VERSION,
+            &conn,
+        )
+        .unwrap();
 
         // Assert: column now exists and is NOT NULL with default 0.
         let has_after: bool = conn.query_row(
@@ -636,7 +759,11 @@ mod tests {
 
         // Idempotent: a second call must not error (the column already
         // exists) and must not corrupt existing data.
-        crate::db::ensure_agent_node_is_pinned(&conn).unwrap();
+        crate::db::migrations::evolve_to(
+            crate::db::migrations::SCHEMA_VERSION,
+            &conn,
+        )
+        .unwrap();
         let pinned_after: i64 = conn.query_row(
             "SELECT is_pinned FROM agent_nodes WHERE name = 'pinned'",
             [], |row| row.get(0),

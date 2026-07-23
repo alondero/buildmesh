@@ -1,78 +1,31 @@
-//! Integration tests for the real migrate_if_needed implementation.
+//! Integration tests for the schema-evolution runner (`db::migrations`).
 //!
-//! These tests call the ACTUAL migrate_if_needed() function from db::mod
-//! against an in-memory connection with a v2 schema to verify it handles
-//! incremental columns correctly (or expose the current DROP-based bug).
+//! These tests exercise the ACTUAL [`migrations::evolve_to`] function from
+//! `db::migrations` against in-memory connections with various pre-current
+//! schemas to verify the runner handles v6+ upgrades correctly. The
+//! pre-#249 tests that simulated v2 → current upgrades were removed
+//! with the v6 `migrate_projects_*` dead code; the new
+//! `evolve_to_handles_v6_to_current` test pins the post-v6 migration
+//! path the issue body specifically asks for.
 //!
 //! Run with: cargo test --package buildmesh --lib db::tests
+
+use std::collections::HashSet;
 
 // File-level `#[cfg(test)]` is applied by the parent module's
 // `#[cfg(test)] mod tests;` declaration — no inner `mod tests {}` wrapper
 // needed (clippy::module_inception otherwise fires because the file is
 // already called `tests.rs`).
 
-use crate::db::test_migrate_if_needed;
-
-/// Sets up an in-memory v2 schema (before layout column) directly,
-/// then calls the real migrate_if_needed to simulate what happens
-/// when the app starts with an old DB on disk.
-#[test]
-fn test_migrate_if_needed_with_v2_schema_has_no_layout_column() {
-    // Arrange: in-memory connection with v2 schema
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO app_settings (key, value) VALUES ('schema_version', '2');
-        CREATE TABLE IF NOT EXISTS projects (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            path TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        "
-    ).unwrap();
-
-    // Verify layout column does NOT exist
-    let has_layout_before: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'layout'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
-    assert!(!has_layout_before, "PRECONDITION: layout column must not exist in v2 schema");
-
-    // Insert a project before migration (should survive)
-    conn.execute(
-        "INSERT INTO projects (name, path) VALUES ('existing-project', '/tmp/existing')",
-        [],
-    ).unwrap();
-
-    // Act: call the REAL migrate_if_needed (our exported test helper)
-    let result = test_migrate_if_needed(&conn);
-    assert!(result.is_ok(), "migrate_if_needed should not error");
-
-    // Assert: layout column now exists (table renamed to meshes during migration)
-    let has_layout_after: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
-    assert!(has_layout_after, "layout column must exist after migration");
-
-    // Assert: existing project survived migration with 'grid' default
-    let layout: String = conn.query_row(
-        "SELECT layout FROM meshes WHERE name = 'existing-project'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
-    assert_eq!(layout, "grid", "existing project should get 'grid' default after migration");
-}
-
 /// Regression: upgrading a v8 DB (post-rename, has `meshes` not `projects`)
-/// to v9 must add the `source_issue` column to agent_nodes. Before the fix,
-/// the migration was gated on the absence of the renamed-away `projects`
-/// table and silently skipped, leaving the column missing while still
-/// bumping schema_version → "no such column: source_issue" at runtime.
+/// to current must add the `source_issue` column to agent_nodes. Before
+/// the fix, the migration was gated on the absence of the renamed-away
+/// `projects` table and silently skipped, leaving the column missing
+/// while still bumping schema_version → "no such column: source_issue"
+/// at runtime. After #249 the runner's always-pass column walk
+/// (`migrations::evolve_to`) is structurally responsible for the
+/// same outcome — a v8 DB at the current version gains every column
+/// the registry knows about regardless of the version-bump gate.
 #[test]
 fn test_v8_to_v9_adds_source_issue_via_safety_net() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -102,8 +55,9 @@ fn test_v8_to_v9_adds_source_issue_via_safety_net() {
         "
     ).unwrap();
 
-    // Precondition: schema_version is already at 9 (bug state), so
-    // migrate_if_needed sees no work to do. The safety net must still run.
+    // Precondition: schema_version is already at 9 (bug state), so the
+    // version-gated pass in `evolve_to` sees no work to do. The
+    // always-pass column walk must still add the missing column.
     let has_col_before: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
         [],
@@ -111,25 +65,42 @@ fn test_v8_to_v9_adds_source_issue_via_safety_net() {
     ).unwrap();
     assert!(!has_col_before, "source_issue must be missing before fix");
 
-    crate::db::ensure_agent_node_source_issue(&conn).unwrap();
+    // Bug state: bump schema_version to current so the runner's
+    // version-gated pass short-circuits (current >= 9). The
+    // always-pass column walk is what should pick the column up.
+    conn.execute(
+        "UPDATE app_settings SET value = ?1 WHERE key = 'schema_version'",
+        rusqlite::params![crate::db::migrations::SCHEMA_VERSION.to_string()],
+    ).unwrap();
+
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    ).unwrap();
 
     let has_col_after: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
         [],
         |row| row.get(0),
     ).unwrap();
-    assert!(has_col_after, "source_issue must exist after safety-net runs");
+    assert!(has_col_after, "source_issue must exist after evolve_to's always-pass column walk");
 
-    // Idempotent: running it again must be a no-op, not an error.
-    crate::db::ensure_agent_node_source_issue(&conn).unwrap();
+    // Idempotent: running evolve_to again must be a no-op (every ALTER
+    // is gated on the pragma_table_info skip, every backfill on its
+    // app_settings flag, every AlwaysStep is naturally idempotent).
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    ).unwrap();
 }
 
 /// Regression guard for the v18 sandbox column (issue #497): a pre-v18 `meshes`
-/// table (no `sandbox` column) must gain it via the safety net, and a second
-/// call must be a no-op. Mirrors the scratchpad (v17) safety-net test — the
-/// same migration-gate-skipped bug class that bit `source_issue`.
+/// table (no `sandbox` column) must gain it via the registry's always-pass
+/// column walk, and a second call must be a no-op. Mirrors the source-issue
+/// (v9) regression above — the same migration-gate-skipped bug class the
+/// runner closes structurally.
 #[test]
-fn test_ensure_mesh_sandbox_adds_column_and_is_idempotent() {
+fn test_evolve_to_adds_v18_sandbox_column_idempotently() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(
         "CREATE TABLE meshes (
@@ -137,7 +108,9 @@ fn test_ensure_mesh_sandbox_adds_column_and_is_idempotent() {
             name TEXT NOT NULL,
             path TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
-         );",
+         );
+         CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO app_settings (key, value) VALUES ('schema_version', '17');",
     )
     .unwrap();
 
@@ -150,11 +123,17 @@ fn test_ensure_mesh_sandbox_adds_column_and_is_idempotent() {
         .unwrap()
     };
 
-    assert!(!present(&conn), "sandbox must be missing before the safety net runs");
-    crate::db::ensure_mesh_sandbox(&conn).unwrap();
-    assert!(present(&conn), "sandbox must exist after the safety net runs");
+    assert!(!present(&conn), "sandbox must be missing before evolve_to runs");
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    ).unwrap();
+    assert!(present(&conn), "sandbox must exist after evolve_to's always-pass column walk");
     // Idempotent: a second call must not error.
-    crate::db::ensure_mesh_sandbox(&conn).unwrap();
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    ).unwrap();
     // Default must be 0 (off) — the feature is opt-in.
     conn.execute("INSERT INTO meshes (name, path) VALUES ('m', '/tmp/m')", []).unwrap();
     let sandbox: i32 = conn
@@ -258,33 +237,173 @@ fn delete_pending_removes_only_named_path() {
     assert_eq!(remaining[0].worktree_path, "/repo/b");
 }
 
-/// Verify idempotency: running migration twice does not error
+/// Issue #249 regression pin: a v6 DB (post-`projects`→`meshes` rename,
+/// has `meshes` + `agent_nodes` but no v8+ columns) must upgrade cleanly
+/// to the current schema in one `evolve_to` call. Pre-#249 the v8+
+/// column adds lived in the version-gated ladder gated on the pre-v6
+/// `projects` table — v6+ upgrades were structurally impossible (the
+/// comment at `db/mod.rs:101-106` warned future developers not to
+/// "fix" the guard). Post-#249 the runner's version-gated pass handles
+/// v6+ upgrades via the column registry, and the always-pass walk
+/// catches any column a build might have missed.
+///
+/// A second `evolve_to` call must be a no-op (every column ALTER is
+/// gated on `pragma_table_info`, every backfill on its `app_settings`
+/// flag, every AlwaysStep is naturally idempotent). This is the
+/// single-test equivalent of every `ensure_*` safety net running
+/// concurrently — a regression here means the runner lost either its
+/// column-add idempotency or its version-bump gate.
 #[test]
-fn test_migrate_if_needed_is_idempotent() {
+fn evolve_to_handles_v6_to_current_upgrade() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
+
+    // v6-shape schema: `meshes` + `agent_nodes` exist with the v6
+    // column set, but every v8+ column is missing. No `app_settings`
+    // key — `current_version()` returns 0 so the version-gated pass
+    // walks every entry in the registry.
     conn.execute_batch(
         "
-        CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO app_settings (key, value) VALUES ('schema_version', '2');
-        CREATE TABLE IF NOT EXISTS projects (
+        CREATE TABLE meshes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             path TEXT NOT NULL UNIQUE,
+            layout TEXT NOT NULL DEFAULT 'grid',
+            position INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        "
-    ).unwrap();
+        CREATE TABLE agent_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id),
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            env TEXT NOT NULL DEFAULT 'windows',
+            provider TEXT NOT NULL DEFAULT 'anthropic',
+            status TEXT NOT NULL DEFAULT 'idle',
+            cli_session_id TEXT,
+            worktree_name TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO meshes (id, name, path) VALUES (1, 'legacy', '/tmp/legacy');
+        INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (1, 1, 'a', '/tmp/legacy/a');
+        ",
+    )
+    .unwrap();
 
-    test_migrate_if_needed(&conn).unwrap();
-    test_migrate_if_needed(&conn).unwrap(); // should not panic or error
+    // Sanity: every column the registry knows about for `meshes` and
+    // `agent_nodes` is missing BEFORE the upgrade. The projection
+    // must be the full registry set, not just a subset — a future
+    // column that forgets to land in `SPECS` slips past this pin.
+    let missing_meshes_columns: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('meshes')")
+            .unwrap();
+        let present: HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        crate::db::migrations::mesh_column_specs()
+            .iter()
+            .filter(|c| !present.contains(c.column))
+            .map(|c| c.column.to_string())
+            .collect()
+    };
+    assert!(
+        missing_meshes_columns.len() >= 20,
+        "a v6 DB must be missing at least 20 columns from the current registry \
+         (this guards against the runner's mesh subset silently regressing); \
+         missing so far: {:?}",
+        missing_meshes_columns
+    );
 
-    // Table renamed from projects→meshes during migration
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM meshes",
-        [],
-        |row| row.get(0),
-    ).unwrap();
-    assert_eq!(count, 0, "no meshes should exist after double migration");
+    // Act: upgrade to current. First call does the work.
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    )
+    .unwrap();
+
+    // Assert: every mesh column the registry lists exists on the
+    // table. (For agent_nodes the column set is the same; the
+    // `mesh_column_specs` subset is the cheaper pin because the
+    // projection is built from it.)
+    let present_after: HashSet<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('meshes')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    let still_missing: Vec<&'static str> = crate::db::migrations::mesh_column_specs()
+        .iter()
+        .filter(|c| !present_after.contains(c.column))
+        .map(|c| c.column)
+        .collect();
+    assert!(
+        still_missing.is_empty(),
+        "every registry column must exist after evolve_to; missing: {:?}",
+        still_missing
+    );
+
+    // Assert: schema_version is now current.
+    let v: i32 = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0).map(|s| s.parse().unwrap_or(0)),
+        )
+        .unwrap_or(0);
+    assert_eq!(v, crate::db::migrations::SCHEMA_VERSION as i32);
+
+    // Assert: the v6 mesh + agent_node row survived. (Read via the
+    // projection's COALESCE shape so the freshly-added nullable
+    // columns don't break the read.)
+    let legacy_name: String = conn
+        .query_row("SELECT name FROM meshes WHERE id = 1", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(legacy_name, "legacy");
+    let node_name: String = conn
+        .query_row("SELECT name FROM agent_nodes WHERE id = 1", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(node_name, "a");
+
+    // Assert: a v24-era mesh (worktree-enabled) had its
+    // `pre_spawn_pool_size` flipped from the v22 ALTER-time default
+    // (0) to the v24 default (1) by the one-shot backfill — the
+    // pre-#249 `ensure_pool_default_backfill` path, now an entry in
+    // `migrations::ONE_SHOT_BACKFILLS`.
+    let pool_size: i32 = conn
+        .query_row(
+            "SELECT pre_spawn_pool_size FROM meshes WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // The test mesh has no explicit `use_worktree`, so the column's
+    // inline default (1) applies. (The v24 backfill's worktree-
+    // enabled filter `COALESCE(use_worktree, 1) = 1` also flips it
+    // to 1 — both paths converge.)
+    assert_eq!(pool_size, 1, "v22 ALTER-time default 0 must flip to v24 default 1");
+
+    // Idempotent: a second call must be a no-op (no error, no
+    // duplicate-column, no backfill re-flip).
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    )
+    .unwrap();
+    let pool_size_after: i32 = conn
+        .query_row(
+            "SELECT pre_spawn_pool_size FROM meshes WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pool_size_after, 1,
+        "second evolve_to must not re-run the backfill and clobber a user's explicit 0"
+    );
 }
 
 // ----- v19 Spawn Option composite-id migration (issue #575) ----------
@@ -369,11 +488,22 @@ fn v19_read_providers(conn: &rusqlite::Connection) -> Vec<String> {
 /// `kimi` was removed from this block by wayfinder #918: Kimi Code is now
 /// a native self-auth harness, so bare `kimi` rows resolve to
 /// `Provider::Kimi` via `from_db_str` without a rewrite. This block is
-/// preferences-independent and safe to run from `db::init`.
+/// preferences-independent and safe to run from `db::init` (lives in
+/// `db::migrations::AlwaysStep::RewriteAgentNodeProviderId` post-#249).
 #[test]
 fn v19_first_class_migration_rewrites_minimax_only() {
     let conn = v19_setup_with_legacy_rows();
-    crate::db::migrate_agent_node_provider_id_to_composite(&conn).unwrap();
+    // First call to `evolve_to` creates `app_settings` (via
+    // `current_version`'s self-sufficient CREATE TABLE IF NOT EXISTS)
+    // and brings the schema forward to current, including the
+    // version-gated column adds (none of which this v18-shape schema
+    // is missing) and the always-pass `RewriteAgentNodeProviderId`
+    // rewrite.
+    crate::db::migrations::evolve_to(
+        crate::db::migrations::SCHEMA_VERSION,
+        &conn,
+    )
+    .unwrap();
 
     let providers = v19_read_providers(&conn);
     // 7 rows: minimax, kimi, deepseek, claude, codex, terminal, claude:minimax
