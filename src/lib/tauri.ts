@@ -1022,11 +1022,19 @@ export const pollOpencodeDeviceToken = (
     startedAtMs,
   });
 
-export const listOpencodeWorkspaces = () =>
-  _invoke<OpenCodeWorkspace[]>('list_opencode_workspaces');
+export const listOpencodeWorkspaces = (accessToken?: string) =>
+  _invoke<OpenCodeWorkspace[]>('list_opencode_workspaces', { accessToken });
 
-export const persistOpencodeTokens = (token: OpenCodeTokenResponse) =>
-  _invoke<void>('persist_opencode_tokens', { token });
+export const persistOpencodeTokens = (
+  token: OpenCodeTokenResponse,
+  workspaceId?: string,
+  serverId?: string,
+) =>
+  _invoke<void>('persist_opencode_tokens', {
+    token,
+    workspaceId,
+    serverId,
+  });
 
 export const revokeOpencodeConsole = () =>
   _invoke<void>('revoke_opencode_console');

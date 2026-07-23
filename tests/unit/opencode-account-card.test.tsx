@@ -139,8 +139,6 @@ describe('OpenCodeAccountCard (issue #969)', () => {
               access_token: 'at_poll',
               refresh_token: 'rt_poll',
               expires_in_secs: 600,
-              workspace_id: 'wrk_a',
-              server_id: 'srv_poll',
             },
           });
         case 'list_opencode_workspaces':
@@ -169,6 +167,61 @@ describe('OpenCodeAccountCard (issue #969)', () => {
     expect(screen.getByTestId('opencode-sign-out')).toBeTruthy();
   });
 
+  it('passes the freshly-polled access_token into list_opencode_workspaces on first sign-in', async () => {
+    // Regression pin: the first-time sign-in flow has NO credential in
+    // Windows Credential Manager yet (the token was just polled, not yet
+    // persisted). The IPC must use the polled access_token instead of
+    // reading the missing credential — otherwise the workspace list comes
+    // back empty, the persisted workspace_id is None, and the live
+    // `_server billing.get` probe refuses to dispatch. This is the
+    // spec-class bug the opencode-account-card.test.tsx flow test once
+    // missed (the manual UI shell covered the success path but the
+    // backend was passing None to persist).
+    const calls = mockBackend();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      calls[cmd] = [...(calls[cmd] ?? []), args];
+      switch (cmd) {
+        case 'start_device_flow_console':
+          return Promise.resolve({
+            device_code: 'dc_tokenpass',
+            user_code: 'PASS-1234',
+            verification_uri_complete: 'https://console.opencode.ai/auth/device?code=PASS-1234',
+            interval_secs: 5,
+            expires_in_secs: 600,
+          });
+        case 'poll_opencode_device_token':
+          return Promise.resolve({
+            kind: 'success',
+            token: {
+              access_token: 'at_first_sign_in',
+              refresh_token: 'rt_first_sign_in',
+              expires_in_secs: 600,
+            },
+          });
+        case 'list_opencode_workspaces':
+          return Promise.resolve([{ id: 'wrk_first', name: 'First Workspace' }]);
+        case 'persist_opencode_tokens':
+          return Promise.resolve(undefined);
+        default:
+          return Promise.resolve({});
+      }
+    });
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    await user.click(screen.getByTestId('opencode-sign-in'));
+    await waitFor(() => {
+      expect(screen.getByTestId('opencode-workspace-name')).toBeTruthy();
+    });
+
+    // The list call MUST carry the access_token; the persist call MUST
+    // carry the workspace_id sourced from the list response.
+    const listArgs = calls['list_opencode_workspaces']![0] as Record<string, unknown>;
+    expect(listArgs.accessToken).toBe('at_first_sign_in');
+    const persistArgs = calls['persist_opencode_tokens']![0] as Record<string, unknown>;
+    expect(persistArgs.workspaceId).toBe('wrk_first');
+  });
+
   it('Sign Out two-step flow calls revoke_opencode_console and returns to signedOut', async () => {
     const calls = mockBackend();
     // Override ONLY the poll call. Re-routing the impl removes the
@@ -193,8 +246,6 @@ describe('OpenCodeAccountCard (issue #969)', () => {
             access_token: 'at_out',
             refresh_token: 'rt_out',
             expires_in_secs: 600,
-            workspace_id: 'wrk_a',
-            server_id: 'srv_out',
           },
         });
       }
@@ -243,8 +294,6 @@ describe('OpenCodeAccountCard (issue #969)', () => {
             access_token: 'at_rollback',
             refresh_token: 'rt_rollback',
             expires_in_secs: 600,
-            workspace_id: 'wrk_a',
-            server_id: 'srv_rollback',
           },
         });
       }
@@ -379,8 +428,6 @@ describe('OpenCodeAccountCard (issue #969)', () => {
             access_token: 'at_picker',
             refresh_token: 'rt_picker',
             expires_in_secs: 600,
-            workspace_id: 'wrk_a',
-            server_id: 'srv_picker',
           },
         });
       }

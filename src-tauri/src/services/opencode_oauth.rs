@@ -126,6 +126,16 @@ struct DeviceCodeResp {
 /// Parses the OpenCode Console `POST /auth/device/code` body. The host
 /// returns 200 with this shape on success and 4xx with a shape-mismatch
 /// payload on bad client-id; the caller checks status BEFORE this parse.
+///
+/// The live server returns `verification_uri_complete` as a *relative* path
+/// (e.g. `/device?user_code=...`); the opencode CLI itself prepends
+/// `https://console.opencode.ai` to build the full URL. We do the same —
+/// otherwise React's `openUrl()` opens a relative path that browsers reject,
+/// and the user has no full URL to copy/paste as a fallback. The prepending
+/// is conditional on the URI not already starting with `http://` or
+/// `https://`, so a future server returning absolute URLs is preserved
+/// (defensive against the CLI's potential `${host}${url}` double-prefix
+/// regression).
 #[allow(dead_code)] // Used by unit tests in this module only.
 pub(crate) fn parse_device_code_response(body: &str) -> Result<DeviceCode, OAuthError> {
     let resp: DeviceCodeResp = serde_json::from_str(body)
@@ -142,39 +152,58 @@ pub(crate) fn parse_device_code_response(body: &str) -> Result<DeviceCode, OAuth
     Ok(DeviceCode {
         device_code: resp.device_code,
         user_code: resp.user_code,
-        verification_uri_complete: resp.verification_uri_complete,
+        verification_uri_complete: absolutize_verification_uri(resp.verification_uri_complete),
         expires_in: Duration::from_secs(resp.expires_in as u64),
         interval: Duration::from_secs(resp.interval.max(1) as u64),
     })
 }
 
-/// OAuth Device Flow token response from `POST /auth/device/token`. Carries
-/// the long-lived refresh token + short-lived access token + workspace
-/// binding + server id (the SolidStart deployment id captured into the
-/// `X-Server-Id` header on the live usage probe).
+/// Builds a full URL from the server's `verification_uri_complete`. If the
+/// URI is already absolute (starts with `http://` or `https://`) it is
+/// returned verbatim; otherwise the OpenCode console host is prepended.
+/// Mirrors the opencode CLI's `url: \`${normalizedServer}${url}\`` pattern
+/// (verified 2026-07-23 against console.opencode.ai). Exposed at module
+/// scope so the defensive behaviour can be unit-tested without going
+/// through the JSON deserialiser.
+fn absolutize_verification_uri(uri: String) -> String {
+    let trimmed = uri.trim_start();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        uri
+    } else {
+        format!("{OPENCODE_CONSOLE_HOST}{trimmed}")
+    }
+}
+
+/// OAuth Device Flow token response from `POST /auth/device/token`. The live
+/// server's success body shape (verified 2026-07-23 against
+/// console.opencode.ai) is `{access_token, refresh_token, token_type,
+/// expires_in}` — no `workspace_id` / `server_id`. The `workspace_id` is
+/// sourced from a separate `GET /api/user` call (wired into
+/// `list_opencode_workspaces`); the `server_id` defaults to the legacy
+/// `OPENCODE_SERVER_ID` constant in `services::usage`. Keeping the in-memory
+/// shape aligned with the wire shape keeps the parser honest.
 #[derive(Debug, Clone)]
 pub(crate) struct TokenResponse {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: Duration,
-    pub workspace_id: String,
-    pub server_id: String,
 }
 
 #[derive(Deserialize)]
 struct TokenResp {
     access_token: String,
     refresh_token: String,
+    #[serde(default)]
+    #[allow(dead_code)] // server sends it; we don't use it; tolerate its absence
+    token_type: Option<String>,
     expires_in: i64,
-    workspace_id: String,
-    server_id: String,
 }
 
 /// Parses the OpenCode Console `POST /auth/device/token` 200 body. Caller
 /// must have already routed the RFC 8628 polling error shapes
 /// (`authorization_pending` → keep polling, `slow_down` → bump interval,
-/// `access_denied` / `expired_token` → terminal) — `parse_token_response`
-/// only sees the success branch.
+/// `access_denied` / `expired_token` / `invalid_grant` → terminal) —
+/// `parse_token_response` only sees the success branch.
 #[allow(dead_code)] // Used by unit tests in this module only.
 pub(crate) fn parse_token_response(body: &str) -> Result<TokenResponse, OAuthError> {
     let resp: TokenResp = serde_json::from_str(body)
@@ -189,8 +218,6 @@ pub(crate) fn parse_token_response(body: &str) -> Result<TokenResponse, OAuthErr
         access_token: resp.access_token,
         refresh_token: resp.refresh_token,
         expires_in: Duration::from_secs(resp.expires_in as u64),
-        workspace_id: resp.workspace_id,
-        server_id: resp.server_id,
     })
 }
 
@@ -373,9 +400,16 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
         &format!("{}{}", OPENCODE_CONSOLE_HOST, device_flow::TOKEN_PATH),
         &refresh_token,
     )?;
-    // Write the new bundle back to Credential Manager so the next live
-    // fetch and the next refresh see the same up-to-date credential.
-    persist_token_response(&token)?;
+    // Refresh keeps the OAuth scope stable — the prior workspace_id stays
+    // the workspace_id, and the server_id is the same SolidStart deployment
+    // (the legacy OPENCODE_SERVER_ID constant from services::usage is the
+    // documented default). Thread both from the existing credential so the
+    // new bundle has the same live-probe wiring as the old one.
+    persist_token_response(
+        &token,
+        cred.workspace_id.as_deref(),
+        cred.server_id.as_deref(),
+    )?;
     Ok(token)
 }
 
@@ -398,22 +432,42 @@ pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
 /// it to the Windows Credential Manager. Used by both the device-flow
 /// dance (after `poll_for_token` returns a token) and the refresh seam
 /// (after `try_refresh` issues a new bundle).
+///
+/// `workspace_id` and `server_id` are no longer in the token response
+/// (verified 2026-07-23 against console.opencode.ai). The caller supplies
+/// them: the React flow fetches `workspace_id` from `GET /api/user` via
+/// `list_opencode_workspaces` and threads it across the IPC seam; the
+/// refresh path reads the prior `workspace_id` from the existing
+/// credential (the OAuth scope is stable across refreshes) and defaults
+/// `server_id` to the legacy `OPENCODE_SERVER_ID` constant from
+/// `services::usage`. Either parameter is `None` when the caller chose
+/// not to supply it — the persisted blob mirrors that with `None` and
+/// the reader's `Option<String>` defaults keep the round-trip lossless.
 #[cfg(windows)]
-pub(crate) fn persist_token_response(token: &TokenResponse) -> Result<(), OAuthError> {
-    persist_token_response_to(OPENCODE_CONSOLE_CRED_TARGET, token)
+pub(crate) fn persist_token_response(
+    token: &TokenResponse,
+    workspace_id: Option<&str>,
+    server_id: Option<&str>,
+) -> Result<(), OAuthError> {
+    persist_token_response_to(OPENCODE_CONSOLE_CRED_TARGET, token, workspace_id, server_id)
 }
 
 #[cfg(windows)]
-fn persist_token_response_to(target: &str, token: &TokenResponse) -> Result<(), OAuthError> {
+fn persist_token_response_to(
+    target: &str,
+    token: &TokenResponse,
+    workspace_id: Option<&str>,
+    server_id: Option<&str>,
+) -> Result<(), OAuthError> {
     use crate::services::windows_cred;
     let expires_at =
         chrono::Utc::now() + chrono::Duration::seconds(token.expires_in.as_secs() as i64);
     let cred = OpenCodeConsoleCred {
         access_token: Some(token.access_token.clone()),
-        workspace_id: Some(token.workspace_id.clone()),
+        workspace_id: workspace_id.map(str::to_owned),
         refresh_token: Some(token.refresh_token.clone()),
         expires_at: Some(expires_at.to_rfc3339()),
-        server_id: Some(token.server_id.clone()),
+        server_id: server_id.map(str::to_owned),
     };
     let blob = serde_json::to_vec(&cred)
         .map_err(|e| OAuthError::Shape(format!("persist serialize: {e}")))?;
@@ -421,7 +475,11 @@ fn persist_token_response_to(target: &str, token: &TokenResponse) -> Result<(), 
 }
 
 #[cfg(not(windows))]
-pub(crate) fn persist_token_response(_token: &TokenResponse) -> Result<(), OAuthError> {
+pub(crate) fn persist_token_response(
+    _token: &TokenResponse,
+    _workspace_id: Option<&str>,
+    _server_id: Option<&str>,
+) -> Result<(), OAuthError> {
     // Same design choice as try_refresh — non-Windows is NoCredential,
     // not Shape. The persist path is only reached after a successful
     // dance (a fresh TokenResponse); on non-Windows the dance can be
@@ -468,18 +526,19 @@ pub(crate) struct OpenCodeDeviceFlowStart {
 /// refresh, or for the React-owned dance that exchanges `device_code` itself).
 ///
 /// `expires_in_secs` is the wall-clock expiry the React-side state machine
-/// stores as `accessTokenExpiresAtMs = now + expires_in_secs*1000`; `workspace_id`
-/// is the `wrk_<id>` the live `_server billing.get` POST needs; `server_id` is the
-/// SolidStart deployment id captured into the `X-Server-Id` header (still hard-coded
-/// in `services::usage::opencode_usage_impl` today, but persisted here for #972).
+/// stores as `accessTokenExpiresAtMs = now + expires_in_secs*1000`. The
+/// `workspace_id` and `server_id` fields that used to live here were
+/// dropped: the live server's token response (verified 2026-07-23) does
+/// not return them. The `workspace_id` is supplied separately by the
+/// React flow via `list_opencode_workspaces` (`GET /api/user`); the
+/// `server_id` defaults to the legacy `OPENCODE_SERVER_ID` constant in
+/// `services::usage`.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "OpenCodeTokenResponse.ts")]
 pub(crate) struct OpenCodeTokenResponse {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in_secs: u32,
-    pub workspace_id: String,
-    pub server_id: String,
 }
 
 /// Tagged enum returned by `commands::opencode_oauth::poll_opencode_device_token`
@@ -703,6 +762,29 @@ pub(crate) fn poll_for_token_once(
     original_expires_in_secs: u32,
     started_at_ms: i64,
 ) -> Result<OpenCodeDeviceCodeStatus, OAuthError> {
+    poll_for_token_once_against(
+        OPENCODE_CONSOLE_HOST,
+        device_code,
+        current_interval_secs,
+        original_expires_in_secs,
+        started_at_ms,
+    )
+}
+
+/// HTTP-aware variant of [`poll_for_token_once`] parameterized on the API
+/// host. The production wrapper above pins `OPENCODE_CONSOLE_HOST`; tests
+/// substitute a loopback `tiny_http` listener so the full round-trip
+/// (status routing, error-code routing, body parse) is exercised without
+/// touching the live server. Mirrors the `fetch_workspaces` →
+/// `fetch_workspaces_against` and `try_refresh` → `try_refresh_against`
+/// pattern in this module.
+pub(crate) fn poll_for_token_once_against(
+    base_url: &str,
+    device_code: &str,
+    current_interval_secs: u32,
+    original_expires_in_secs: u32,
+    started_at_ms: i64,
+) -> Result<OpenCodeDeviceCodeStatus, OAuthError> {
     let _ = current_interval_secs; // pin for future pre-emptive backoff hook
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -716,7 +798,7 @@ pub(crate) fn poll_for_token_once(
         .build()
         .map_err(|e| OAuthError::Transport(format!("poll-once client: {e}")))?;
     let response = client
-        .post(format!("{OPENCODE_CONSOLE_HOST}{}", device_flow::TOKEN_PATH))
+        .post(format!("{base_url}{}", device_flow::TOKEN_PATH))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&[
             (
@@ -739,8 +821,6 @@ pub(crate) fn poll_for_token_once(
                 access_token: token.access_token,
                 refresh_token: token.refresh_token,
                 expires_in_secs: token.expires_in.as_secs() as u32,
-                workspace_id: token.workspace_id,
-                server_id: token.server_id,
             },
         });
     }
@@ -758,7 +838,11 @@ pub(crate) fn poll_for_token_once(
                     new_interval_secs: current_interval_secs.saturating_add(5),
                 },
                 "access_denied" => OpenCodeDeviceCodeStatus::AccessDenied,
-                "expired_token" => OpenCodeDeviceCodeStatus::CodeExpired,
+                // The live server returns `invalid_grant` for expired /
+                // unknown device codes (verified 2026-07-23) — same terminal
+                // meaning as `expired_token`, so route to `CodeExpired`
+                // rather than the generic `Error` branch.
+                "expired_token" | "invalid_grant" => OpenCodeDeviceCodeStatus::CodeExpired,
                 other => OpenCodeDeviceCodeStatus::Error {
                     message: format!("/auth/device/token unknown error code: {other}"),
                 },
@@ -974,12 +1058,16 @@ mod tests {
             access_token: "oc_sk_persist_test".to_string(),
             refresh_token: "rt_persist_test".to_string(),
             expires_in: Duration::from_secs(3_600),
-            workspace_id: "wrk_persist_test".to_string(),
-            server_id: "srv_persist_test".to_string(),
         };
         let before = chrono::Utc::now();
 
-        persist_token_response_to(&target, &token).expect("persist should succeed");
+        persist_token_response_to(
+            &target,
+            &token,
+            Some("wrk_persist_test"),
+            Some("srv_persist_test"),
+        )
+        .expect("persist should succeed");
 
         let after = chrono::Utc::now();
         let blob = windows_cred::read(&target).expect("persisted credential should be readable");
@@ -1010,11 +1098,8 @@ mod tests {
             cred.refresh_token.as_deref(),
             Some(token.refresh_token.as_str())
         );
-        assert_eq!(
-            cred.workspace_id.as_deref(),
-            Some(token.workspace_id.as_str())
-        );
-        assert_eq!(cred.server_id.as_deref(), Some(token.server_id.as_str()));
+        assert_eq!(cred.workspace_id.as_deref(), Some("wrk_persist_test"));
+        assert_eq!(cred.server_id.as_deref(), Some("srv_persist_test"));
 
         let expires_at = chrono::DateTime::parse_from_rfc3339(
             cred.expires_at.as_deref().expect("expires_at should exist"),
@@ -1239,12 +1324,16 @@ mod tests {
 
     #[test]
     fn parse_device_code_response_valid() {
-        // Real-shape body (verified against console.opencode.ai 2026-07-20).
-        // All five fields are required by RFC 8628 §6.1.
+        // Real-shape body (verified against console.opencode.ai 2026-07-23).
+        // The server returns `verification_uri_complete` as a RELATIVE path;
+        // the opencode CLI itself prepends `https://console.opencode.ai` to
+        // build the full URL. We do the same — otherwise React's openUrl()
+        // opens a relative path that browsers reject, and the user has no
+        // full URL to copy/paste as a fallback.
         let json = r#"{
             "device_code": "dc_abcdef123456",
             "user_code": "ABCD-EFGH",
-            "verification_uri_complete": "https://console.opencode.ai/auth/device?code=ABCD-EFGH",
+            "verification_uri_complete": "/auth/device?code=ABCD-EFGH",
             "expires_in": 600,
             "interval": 5
         }"#;
@@ -1257,6 +1346,27 @@ mod tests {
         );
         assert_eq!(parsed.expires_in, Duration::from_secs(600));
         assert_eq!(parsed.interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn parse_device_code_response_preserves_absolute_uri() {
+        // Defensive: a hypothetical future server that returns absolute URLs
+        // must NOT be double-prefixed (the CLI's `${normalizedServer}${...}`
+        // pattern would produce a malformed URL like
+        // "https://console.opencode.aihttps://example.com"). The prepending
+        // is conditional on the URI being relative.
+        let json = r#"{
+            "device_code": "dc_abs",
+            "user_code": "U",
+            "verification_uri_complete": "https://example.com/device",
+            "expires_in": 600,
+            "interval": 5
+        }"#;
+        let parsed = parse_device_code_response(json).unwrap();
+        assert_eq!(
+            parsed.verification_uri_complete,
+            "https://example.com/device"
+        );
     }
 
     #[test]
@@ -1281,22 +1391,22 @@ mod tests {
 
     #[test]
     fn parse_token_response_valid() {
+        // The live server's success body shape (verified 2026-07-23 against
+        // console.opencode.ai). The OAuth dance was failing with
+        // "missing field `workspace_id`" because the parser previously
+        // expected `workspace_id` and `server_id` here — neither is in the
+        // actual response. The workspace_id is sourced from a follow-up
+        // GET /api/user call (already wired into `list_opencode_workspaces`).
         let json = r#"{
             "access_token": "oc_sk_test",
             "refresh_token": "rt_test",
-            "expires_in": 3600,
-            "workspace_id": "wrk_q",
-            "server_id": "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d"
+            "token_type": "Bearer",
+            "expires_in": 3600
         }"#;
         let parsed = parse_token_response(json).unwrap();
         assert_eq!(parsed.access_token, "oc_sk_test");
         assert_eq!(parsed.refresh_token, "rt_test");
         assert_eq!(parsed.expires_in, Duration::from_secs(3600));
-        assert_eq!(parsed.workspace_id, "wrk_q");
-        assert_eq!(
-            parsed.server_id,
-            "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d"
-        );
     }
 
     #[test]
@@ -1593,9 +1703,6 @@ mod tests {
             access_token: "oc_sk_test".to_string(),
             refresh_token: "rt_test".to_string(),
             expires_in_secs: 3600,
-            workspace_id: "wrk_q".to_string(),
-            server_id:
-                "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d".to_string(),
         };
         let cases: Vec<(OpenCodeDeviceCodeStatus, serde_json::Value)> = vec![
             (
@@ -1614,9 +1721,6 @@ mod tests {
                         "access_token": "oc_sk_test",
                         "refresh_token": "rt_test",
                         "expires_in_secs": 3600,
-                        "workspace_id": "wrk_q",
-                        "server_id":
-                            "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d",
                     }
                 }),
             ),
@@ -1656,6 +1760,115 @@ mod tests {
                 reserialized, expected_json,
                 "round-trip mismatch for {variant:?}"
             );
+        }
+    }
+
+    // ── Live-server wire shape pins (fix OpenCode OAuth dance) ─────────
+    //
+    // The OAuth dance was failing because Buildmesh's parser expected
+    // fields the live OpenCode Console server doesn't return. These tests
+    // pin the actual live shape (verified 2026-07-23 against
+    // console.opencode.ai) so a future drift on either side surfaces as a
+    // local test failure instead of a silent runtime "missing field
+    // workspace_id" error in production.
+
+    #[cfg(windows)]
+    #[test]
+    fn persist_token_response_writes_workspace_id_from_param() {
+        // The token endpoint no longer carries workspace_id; the caller
+        // must supply it from GET /api/user. This pins the new contract:
+        // the persisted blob's workspace_id comes from the explicit
+        // parameter, not from the token struct.
+        use crate::services::windows_cred;
+        use uuid::Uuid;
+
+        let target = format!(
+            "buildmesh-test-opencode-ws-{}",
+            Uuid::new_v4().simple()
+        );
+        let _cleanup = CleanupTarget(target.clone());
+        let token = TokenResponse {
+            access_token: "oc_sk_ws".to_string(),
+            refresh_token: "rt_ws".to_string(),
+            expires_in: Duration::from_secs(3_600),
+        };
+        persist_token_response_to(&target, &token, Some("wrk_from_param"), None)
+            .expect("persist should succeed");
+        let blob = windows_cred::read(&target).expect("persisted credential readable");
+        let cred = parse_opencode_console_full_credential(&blob).unwrap();
+        assert_eq!(cred.workspace_id.as_deref(), Some("wrk_from_param"));
+        // server_id is None when the caller didn't supply one — the
+        // resolver in `services::usage` falls back to the legacy
+        // OPENCODE_SERVER_ID constant.
+        assert_eq!(cred.server_id, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persist_token_response_writes_server_id_from_param() {
+        // Mirror of the workspace_id pin: server_id is no longer in the
+        // token response, so the caller (the refresh-on-401 path or the
+        // React flow) must supply it explicitly.
+        use crate::services::windows_cred;
+        use uuid::Uuid;
+
+        let target = format!(
+            "buildmesh-test-opencode-srv-{}",
+            Uuid::new_v4().simple()
+        );
+        let _cleanup = CleanupTarget(target.clone());
+        let token = TokenResponse {
+            access_token: "oc_sk_srv".to_string(),
+            refresh_token: "rt_srv".to_string(),
+            expires_in: Duration::from_secs(3_600),
+        };
+        persist_token_response_to(&target, &token, None, Some("srv_custom"))
+            .expect("persist should succeed");
+        let blob = windows_cred::read(&target).expect("persisted credential readable");
+        let cred = parse_opencode_console_full_credential(&blob).unwrap();
+        assert_eq!(cred.server_id.as_deref(), Some("srv_custom"));
+        assert_eq!(cred.workspace_id, None);
+    }
+
+    #[test]
+    fn poll_for_token_once_routes_invalid_grant_to_code_expired() {
+        // The live server returns `invalid_grant` for expired/invalid
+        // device codes (verified 2026-07-23). This MUST be a terminal
+        // `CodeExpired` so the React state machine flips to the error
+        // branch — the `opencode_account_reducer` already maps
+        // `code_expired` to "OpenCode sign-in timed out. Please start the
+        // dance again." — rather than spinning indefinitely on a
+        // generic `Error { message }` that the user can't act on.
+        //
+        // The `started_at_ms` is read from the wall clock at the call
+        // site that we control — pick a recent timestamp so the expiry
+        // gate (saturating_sub) does NOT fire before the HTTP request.
+        // An older timestamp like `1_000_000` (epoch + 1s) would
+        // short-circuit to `CodeExpired` via the expiry gate, not via
+        // the `invalid_grant` route — false-green.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(i64::MAX);
+        let started_at_ms = now_ms - 1_000; // 1s ago — not expired
+        let port = spawn_loopback(1, |req| {
+            let body = r#"{"_tag":"DeviceTokenError","error":"invalid_grant","error_description":"The device code is invalid"}"#;
+            let _ = req.respond(
+                tiny_http::Response::from_string(body).with_status_code(400),
+            );
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let status = poll_for_token_once_against(
+            &base,
+            "dc_xyz",
+            5,
+            600,
+            started_at_ms,
+        )
+        .unwrap();
+        match status {
+            OpenCodeDeviceCodeStatus::CodeExpired => {}
+            other => panic!("expected CodeExpired, got {other:?}"),
         }
     }
 }
