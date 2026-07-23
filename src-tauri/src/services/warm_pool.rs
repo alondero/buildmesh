@@ -1524,7 +1524,7 @@ mod tests {
             ",
         )
         .unwrap();
-        db::ensure_warm_worktables_table(conn).unwrap();
+        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, conn).unwrap();
         db::insert_warm_worktree_inner(
             conn,
             1,
@@ -1541,7 +1541,7 @@ mod tests {
     #[test]
     fn recheck_after_claim_returns_true_when_directory_present() {
         let conn = Connection::open_in_memory().unwrap();
-        db::ensure_warm_worktables_table(&conn).unwrap();
+        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().to_str().unwrap().to_string();
         let id = make_claimed_row(&conn, &path);
@@ -1568,7 +1568,7 @@ mod tests {
     #[test]
     fn recheck_after_claim_returns_false_and_drops_row_when_dir_missing() {
         let conn = Connection::open_in_memory().unwrap();
-        db::ensure_warm_worktables_table(&conn).unwrap();
+        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().to_str().unwrap().to_string();
         let id = make_claimed_row(&conn, &path);
@@ -1601,7 +1601,7 @@ mod tests {
     #[test]
     fn recheck_after_claim_is_idempotent_on_already_dropped_row() {
         let conn = Connection::open_in_memory().unwrap();
-        db::ensure_warm_worktables_table(&conn).unwrap();
+        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().to_str().unwrap().to_string();
         let id = make_claimed_row(&conn, &path);

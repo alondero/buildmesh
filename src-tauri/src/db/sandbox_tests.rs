@@ -1,6 +1,8 @@
 //! Tests for the per-mesh `sandbox` DB helper (`set_mesh_sandbox_inner`) and
-//! the `ensure_mesh_sandbox` safety net (schema v18 — the column backs both the
-//! macOS Seatbelt #497 and Windows AppContainer #498 toggles).
+//! the v18 `sandbox` column add (the column backs both the macOS Seatbelt
+//! #497 and Windows AppContainer #498 toggles). The safety-net side of the
+//! migration lives in `db::migrations` (issue #249); the test calls
+//! `migrations::evolve_to` against a pre-v18 schema to exercise that path.
 //!
 //! Uses an in-memory SQLite connection rather than the global `DB` OnceCell,
 //! mirroring `scratchpad_tests`, so the whole suite can run as one
@@ -104,7 +106,7 @@ mod tests {
         )
         .unwrap();
 
-        db::ensure_mesh_sandbox(&conn).unwrap();
+        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
         let col_present: bool = conn
             .query_row(
@@ -124,6 +126,6 @@ mod tests {
         );
 
         // Second call is a no-op.
-        db::ensure_mesh_sandbox(&conn).unwrap();
+        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 }
