@@ -262,8 +262,10 @@ pub(crate) fn fetch_workspaces_against(
     let auth = format!("Bearer {access_token}");
 
     // /api/user — the OAuth-scoped workspace the user's token binds to.
-    // Shape is `{"id":"wrk_<id>","name":"<human>"}` (different field shape
-    // than /api/orgs, hence the separate parse).
+    // Shape is `{"id":"<account_id>","email":"..."}` (live console wire;
+    // see `parse_user_workspace`'s doc for the upstream citation). The
+    // separate parse from `/api/orgs` is needed because the orgs endpoint
+    // returns a bare `Org[]` array, not a single object.
     let user_resp = client
         .get(format!("{base_url}/api/user"))
         .header("Authorization", &auth)
@@ -312,18 +314,23 @@ pub(crate) fn fetch_workspaces_against(
 #[derive(Deserialize)]
 struct UserWorkspaceResp {
     id: String,
-    name: String,
+    email: String,
 }
 
-/// Parses the `GET /api/user` body — `{ "id": "wrk_<id>", "name": "..." }`.
-/// Distinct from `parse_workspaces_response` because the wire shape is a
-/// single object, not an array.
+/// Parses the `GET /api/user` body — `{ "id": "<account_id>", "email": "..." }`,
+/// per the live OpenCode Console schema (`User = { id: AccountID, email: string }`
+/// in `sst/opencode packages/opencode/src/account/schema.ts`, verified against
+/// the live wire 2026-07-23). The settings picker renders the `email` as the
+/// user workspace's display name — the wire does not carry a separate `name`
+/// field for the user account, only the email. Distinct from
+/// `parse_workspaces_response` because the wire shape is a single object, not
+/// an array.
 pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAuthError> {
     let resp: UserWorkspaceResp = serde_json::from_str(body)
         .map_err(|e| OAuthError::Shape(format!("/api/user body: {e}")))?;
     Ok(OpenCodeWorkspace {
         id: resp.id,
-        name: resp.name,
+        name: resp.email,
     })
 }
 
@@ -565,11 +572,15 @@ pub(crate) enum OpenCodeDeviceCodeStatus {
     Error { message: String },
 }
 
+/// Live console wire-shape: `GET /api/orgs` returns a bare `Org[]` array,
+/// NOT an object wrapping `{ "orgs": [...] }`. `serde(transparent)` unwraps
+/// the array directly into the struct — verified against the opencode-cli
+/// source (`packages/opencode/src/account/account.ts` `fetchOrgs`: `yield*
+/// HttpClientResponse.schemaBodyJson(Schema.Array(Org))(response)`) and
+/// against the live wire 2026-07-23.
 #[derive(Deserialize)]
-struct OrgListResp {
-    #[serde(default)]
-    orgs: Vec<OrgEntry>,
-}
+#[serde(transparent)]
+struct OrgListResp(Vec<OrgEntry>);
 
 #[derive(Deserialize)]
 struct OrgEntry {
@@ -577,15 +588,15 @@ struct OrgEntry {
     name: String,
 }
 
-/// Parses the `GET /api/orgs` body. `GET /api/user` is the workspace the
-/// OAuth token was originally scoped to and `parse_workspaces_response`
-/// additionally folds that in by appending it to the list if absent —
-/// `fetch_workspaces` handles that orchestration.
+/// Parses the `GET /api/orgs` body. Returns a bare `Org[]` array per the
+/// live OpenCode Console schema (`Schema.Array(Org)` in the upstream
+/// `account.ts`); `fetch_workspaces` is responsible for prepending the
+/// user workspace from `/api/user` and deduping.
 pub(crate) fn parse_workspaces_response(body: &str) -> Result<Vec<OpenCodeWorkspace>, OAuthError> {
     let resp: OrgListResp = serde_json::from_str(body)
         .map_err(|e| OAuthError::Shape(format!("/api/orgs body: {e}")))?;
     Ok(resp
-        .orgs
+        .0
         .into_iter()
         .map(|o| OpenCodeWorkspace {
             id: o.id,
@@ -874,10 +885,12 @@ pub(crate) const OPENCODE_CONSOLE_CRED_TARGET: &str = "opencode:console";
 pub(crate) const REFRESH_TTL: Duration = Duration::from_secs(300);
 
 /// JSON shape of the credential blob written by the device-flow dance.
-/// `access_token` is the live RPC bearer; `workspace_id` is the `wrk_<id>`
-/// passed to the `_server billing.get` body; `refresh_token` + `expires_at`
-/// drive the lazy refresh; `server_id` is the SolidStart deployment id the
-/// OAuth device-flow exchange returns and is consumed by
+/// `access_token` is the live RPC bearer; `workspace_id` is the
+/// `<account_id>` (`acc_<id>`-prefixed) sourced from `GET /api/user` via
+/// `list_opencode_workspaces` and passed to the `_server billing.get`
+/// body; `refresh_token` + `expires_at` drive the lazy refresh;
+/// `server_id` is the SolidStart deployment id the OAuth device-flow
+/// exchange returns and is consumed by
 /// `services::usage::opencode_usage_impl` at the `X-Server-Id` header
 /// (issue #972) — with a documented legacy default (`OPENCODE_SERVER_ID`)
 /// for blobs written before this field was added by #956.
@@ -1411,12 +1424,13 @@ mod tests {
 
     #[test]
     fn parse_workspaces_response_returns_org_list() {
-        let json = r#"{
-            "orgs": [
-                {"id": "wrk_a", "name": "Acme"},
-                {"id": "wrk_b", "name": "Beta"}
-            ]
-        }"#;
+        // Live wire: `/api/orgs` returns a bare `Org[]` array, not
+        // `{ orgs: [...] }`. Pinned by the fetch_workspaces_against
+        // round-trip test below.
+        let json = r#"[
+            {"id": "wrk_a", "name": "Acme"},
+            {"id": "wrk_b", "name": "Beta"}
+        ]"#;
         let parsed = parse_workspaces_response(json).unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].id, "wrk_a");
@@ -1429,7 +1443,7 @@ mod tests {
     fn parse_workspaces_response_empty_orgs_returns_empty_vec() {
         // A user with a single workspace (the OAuth-scoped one) gets an
         // empty org list; the Settings picker only materializes for >1.
-        let json = r#"{"orgs": []}"#;
+        let json = r#"[]"#;
         let parsed = parse_workspaces_response(json).unwrap();
         assert!(parsed.is_empty());
     }
@@ -1486,16 +1500,17 @@ mod tests {
         // Happy path: `/api/user` populates slot 0 (the OAuth-scoped
         // workspace — never allow a multi-org user to be locked out of
         // their default), `/api/orgs` appends in server-returned order.
+        // Wire shapes verified against the live OpenCode Console (2026-07-23).
         let port = spawn_loopback(2, |req| match req.url() {
             "/api/user" => {
                 let resp = tiny_http::Response::from_string(
-                    r#"{"id":"wrk_user","name":"User Workspace"}"#,
+                    r#"{"id":"acc_user","email":"User Workspace"}"#,
                 );
                 let _ = req.respond(resp);
             }
             "/api/orgs" => {
                 let resp = tiny_http::Response::from_string(
-                    r#"{"orgs":[{"id":"wrk_a","name":"Acme"},{"id":"wrk_b","name":"Beta"}]}"#,
+                    r#"[{"id":"wrk_a","name":"Acme"},{"id":"wrk_b","name":"Beta"}]"#,
                 );
                 let _ = req.respond(resp);
             }
@@ -1507,7 +1522,7 @@ mod tests {
         let base = format!("http://127.0.0.1:{port}");
         let result = fetch_workspaces_against(&base, "tok").unwrap();
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].id, "wrk_user");
+        assert_eq!(result[0].id, "acc_user");
         assert_eq!(result[0].name, "User Workspace");
         assert_eq!(result[1].id, "wrk_a");
         assert_eq!(result[1].name, "Acme");
@@ -1520,16 +1535,16 @@ mod tests {
         // Some tenants' OpenCode Console returns the user's own workspace
         // in BOTH `/api/user` and `/api/orgs`. Without the dedup, the
         // Settings picker would render the same workspace twice — the
-        // user's own should win (it carries the OAuth-scoped name and id).
+        // user's own should win (it carries the OAuth-scoped id and email).
         let port = spawn_loopback(2, |req| match req.url() {
             "/api/user" => {
                 let _ = req.respond(tiny_http::Response::from_string(
-                    r#"{"id":"wrk_user","name":"User Workspace"}"#,
+                    r#"{"id":"acc_user","email":"User Workspace"}"#,
                 ));
             }
             "/api/orgs" => {
                 let _ = req.respond(tiny_http::Response::from_string(
-                    r#"{"orgs":[{"id":"wrk_user","name":"Duplicate"},{"id":"wrk_b","name":"Beta"}]}"#,
+                    r#"[{"id":"acc_user","name":"Duplicate"},{"id":"wrk_b","name":"Beta"}]"#,
                 ));
             }
             _ => {
@@ -1540,9 +1555,10 @@ mod tests {
         let base = format!("http://127.0.0.1:{port}");
         let result = fetch_workspaces_against(&base, "tok").unwrap();
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].id, "wrk_user");
+        assert_eq!(result[0].id, "acc_user");
         // User-workspace entry wins over the duplicate org entry — keeps
-        // the OAuth-scoped `name` ("User Workspace", not "Duplicate").
+        // the OAuth-scoped `name` derived from the email ("User Workspace",
+        // not "Duplicate").
         assert_eq!(result[0].name, "User Workspace");
         assert_eq!(result[1].id, "wrk_b");
         assert_eq!(result[1].name, "Beta");
@@ -1551,16 +1567,16 @@ mod tests {
     #[test]
     fn fetch_workspaces_against_returns_only_user_workspace_when_orgs_empty() {
         // Single-workspace user (the locked spec's default-to-first
-        // scenario). `/api/orgs` returns an empty `orgs` array — the
-        // Settings picker must not materialize a phantom second option.
+        // scenario). `/api/orgs` returns an empty array — the Settings
+        // picker must not materialize a phantom second option.
         let port = spawn_loopback(2, |req| match req.url() {
             "/api/user" => {
                 let _ = req.respond(tiny_http::Response::from_string(
-                    r#"{"id":"wrk_only","name":"Solo"}"#,
+                    r#"{"id":"acc_only","email":"Solo"}"#,
                 ));
             }
             "/api/orgs" => {
-                let _ = req.respond(tiny_http::Response::from_string(r#"{"orgs":[]}"#));
+                let _ = req.respond(tiny_http::Response::from_string(r#"[]"#));
             }
             _ => {
                 let _ = req
@@ -1570,8 +1586,53 @@ mod tests {
         let base = format!("http://127.0.0.1:{port}");
         let result = fetch_workspaces_against(&base, "tok").unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id, "wrk_only");
+        assert_eq!(result[0].id, "acc_only");
         assert_eq!(result[0].name, "Solo");
+    }
+
+    // Regression for issue surfaced 2026-07-23: the live OpenCode Console
+    // (sst/opencode `packages/opencode/src/account/schema.ts` in the
+    // upstream repo) returns `/api/user` as `{ "id": "<acc>", "email": "..." }`
+    // — NOT `{ "id": "<wrk>", "name": "..." }` — and `/api/orgs` as a bare
+    // array `[{ "id": "...", "name": "..." }, ...]` — NOT an object wrapping
+    // `{ "orgs": [...] }`. Pre-fix the parsers expected the wrapped shapes
+    // and surfaced `OAuthError::Shape` on every sign-in, which the React
+    // dance's `.catch((): OpenCodeWorkspace[] => [])` collapsed into the
+    // "No workspaces available for this account" error state. Pins both
+    // server contracts so a future shape drift can't silently regress.
+    #[test]
+    fn fetch_workspaces_against_parses_live_wire_shape() {
+        let port = spawn_loopback(2, |req| match req.url() {
+            "/api/user" => {
+                // Live schema: `User = { id: AccountID, email: string }`
+                let _ = req.respond(tiny_http::Response::from_string(
+                    r#"{"id":"acc_abc123","email":"alice@example.com"}"#,
+                ));
+            }
+            "/api/orgs" => {
+                // Live schema: `Schema.Array(Org)` — bare array, no wrapper.
+                let _ = req.respond(tiny_http::Response::from_string(
+                    r#"[{"id":"wrk_a","name":"Acme"},{"id":"wrk_b","name":"Beta"}]"#,
+                ));
+            }
+            _ => {
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let result = fetch_workspaces_against(&base, "tok").unwrap();
+        // User workspace slots 0 (id derived from `/api/user` account id,
+        // display name derived from email — the only human-friendly string
+        // the wire actually carries).
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].id, "acc_abc123");
+        assert_eq!(result[0].name, "alice@example.com");
+        // Org workspaces appended in server-returned order.
+        assert_eq!(result[1].id, "wrk_a");
+        assert_eq!(result[1].name, "Acme");
+        assert_eq!(result[2].id, "wrk_b");
+        assert_eq!(result[2].name, "Beta");
     }
 
     #[test]
@@ -1593,13 +1654,13 @@ mod tests {
                 "/api/user" => {
                     let _ = user_tx.send(auth);
                     let _ = req.respond(tiny_http::Response::from_string(
-                        r#"{"id":"wrk_user","name":"User"}"#,
+                        r#"{"id":"acc_user","email":"User"}"#,
                     ));
                 }
                 "/api/orgs" => {
                     let _ = orgs_tx.send(auth);
                     let _ = req
-                        .respond(tiny_http::Response::from_string(r#"{"orgs":[]}"#));
+                        .respond(tiny_http::Response::from_string(r#"[]"#));
                 }
                 _ => {
                     let _ = req.respond(
@@ -1636,7 +1697,7 @@ mod tests {
             }
             "/api/orgs" => {
                 let _ = req
-                    .respond(tiny_http::Response::from_string(r#"{"orgs":[]}"#));
+                    .respond(tiny_http::Response::from_string(r#"[]"#));
             }
             _ => {
                 let _ = req.respond(
@@ -1665,7 +1726,7 @@ mod tests {
         let port = spawn_loopback(2, |req| match req.url() {
             "/api/user" => {
                 let _ = req.respond(tiny_http::Response::from_string(
-                    r#"{"id":"wrk_user","name":"User"}"#,
+                    r#"{"id":"acc_user","email":"User"}"#,
                 ));
             }
             "/api/orgs" => {
