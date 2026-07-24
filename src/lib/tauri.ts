@@ -995,11 +995,13 @@ import type { OpenCodeWorkspace } from '../types/generated/OpenCodeWorkspace';
 import type { OpenCodeDeviceFlowStart } from '../types/generated/OpenCodeDeviceFlowStart';
 import type { OpenCodeDeviceCodeStatus } from '../types/generated/OpenCodeDeviceCodeStatus';
 import type { OpenCodeTokenResponse } from '../types/generated/OpenCodeTokenResponse';
+import type { OpenCodeConsoleStatus } from '../types/generated/OpenCodeConsoleStatus';
 export type {
   OpenCodeWorkspace,
   OpenCodeDeviceFlowStart,
   OpenCodeDeviceCodeStatus,
   OpenCodeTokenResponse,
+  OpenCodeConsoleStatus,
 };
 
 export const startOpencodeDeviceFlowConsole = () =>
@@ -1047,7 +1049,8 @@ export const revokeOpencodeConsole = () =>
 // `signedIn` without re-running the dance. See
 // `services::opencode_oauth::OpenCodeConsoleStatus` for the Rust
 // side; ts-rs export lives at `src/types/generated/OpenCodeConsoleStatus.ts`.
-export type { OpenCodeConsoleStatus } from '../types/generated/OpenCodeConsoleStatus';
+// Re-exported at the top of the OpenCode block alongside the other
+// `OpenCode*` types so the type is in scope for `_invoke<OpenCodeConsoleStatus>(…)`.
 export const getOpencodeConsoleStatus = () =>
   _invoke<OpenCodeConsoleStatus>('get_opencode_console_status');
 
