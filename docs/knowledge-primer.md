@@ -16,6 +16,55 @@
 
 ## Key Conventions
 
+### First-class Model Providers and the credential-per-row invariant
+
+A **First-class Model Provider** is one Model Provider Buildmesh ships built-in
+knowledge of — brand identity (icon, accent colour), billing model, and a Usage
+Meter fetcher. Examples: Anthropic, MiniMax, Kimi (Moonshot). Rendered as one
+card on the Providers page; polled by one Usage Meter fetcher. See CONTEXT.md
+"First-class Model Provider" for the canonical definition.
+
+**The invariant — one credential/billing identity per row.** Per CONTEXT.md,
+"Usage follows the credential, not the pairing" — proxying one credential
+through several harnesses is still one Usage Meter (a single Moonshot API key
+used via Claude Code and via Codex is one wallet). A provider MAY legitimately
+expose multiple Usage Meters (e.g. an Anthropic subscription *and* an API
+wallet — different billing relationships, same brand). What is forbidden is
+*duplicate rows for the same credential/billing identity* — that produces
+two cards on the Providers page, two fetcher paths, and confusing UI.
+
+**The Spawn Menu is where harness↔provider pairings live.** The Spawn Menu
+derives one Spawn Option per `(harness, provider)` pairing as the composite
+id `<harness>:<provider>` (e.g. `claude:kimi`). Pairings are *not* rows in
+`BUILTIN_PROVIDER_ACCOUNTS` — they are computed by `effective_pairings` from
+the keyed `ProviderAccount`.
+
+**The two registries are independent.** The brand string may coincide across
+namespaces, but each registry is the single source of its own kind:
+
+| Registry | What it carries | Example for Kimi |
+|---|---|---|
+| `BUILTIN_PROVIDER_ACCOUNTS` (`src-tauri/src/preferences.rs`) | One row per credential/billing identity — keyed/Claude-compatible with `api_key` + `base_url` + `model_tiers` + Usage Meter fetcher wiring. | `id: "kimi", self_auth: false, base_url: "https://api.moonshot.ai/anthropic"` |
+| `HarnessProfile` + `Provider::Kimi` enum variant + `KIMI` adapter | The Kimi Code CLI Agent Harness — uses `~/.kimi/config.toml` for its own auth; Buildmesh doesn't manage the credential. | `HarnessProfile { id: "kimi", harness: "kimi", binaries: &["kimi"] }` + `KimiAdapter` |
+
+The string `"kimi"` appearing in both is fine because the namespaces are
+different (`ProviderAccount.id` vs `HarnessProfile.id` / `Provider` enum).
+What is **never** fine is two rows in `BUILTIN_PROVIDER_ACCOUNTS` for the same
+credential — that produces two cards, two fetcher paths, and confusing UI.
+
+**Pinned by tests** (regression net):
+- `builtin_provider_accounts_have_no_via_substring_in_id` (`preferences.rs` tests) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
+- `kimi_via_claude_id_does_not_exist_in_default_provider_accounts` — the literal dual-id bug.
+- `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — the positive shape: keyed/Claude-compatible, Moonshot endpoint, `kimi_default_tiers()`.
+- `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi` — one-time migration for users who picked up PR #1044.
+
+**Don't.** Do not add a `kimi-via-claude`-style companion row when restoring
+or re-introducing a First-class Model Provider. Restore the original row to
+its proper keyed/Claude-compatible posture and let the Spawn Menu derive the
+harness pairings. If a credential migration is needed (e.g. a user already
+stored a key against the companion id), carry it over in a one-time read
+migration that persists back to `preferences.json` — don't leave stale data.
+
 ### Terminal Persistence (CRITICAL)
 `TerminalManager` is a **singleton**. xterm.js instances survive React remounts via a hidden container stack. Never call `dispose()` on a terminal unless the agent node is explicitly deleted — see `src/components/Terminal/Terminal.tsx`. Disposing a terminal causes permanent blanking.
 

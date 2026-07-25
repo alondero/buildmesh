@@ -14,9 +14,11 @@ const FETCHABLE: [&str; 8] = ["anthropic", "codex", "minimax", "agy", "kimi", "o
 /// Map a self-authenticating **native** provider account to the harness whose
 /// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
 /// id `anthropic`), `codex`↔Codex, `agy`↔Antigravity, `opencode`↔OpenCode. A keyed provider
-/// (MiniMax/custom Claude-compatible) returns `None` — it's gated on the user
-/// enabling it, not on a detected binary. Kimi Code (#918) is native
-/// self_auth, not a keyed Claude-compatible endpoint.
+/// (MiniMax/Kimi/OpenRouter/custom Claude-compatible) returns `None` — it's
+/// gated on the user enabling it, not on a detected binary. The Kimi Code CLI
+/// Agent Harness itself is registered separately in `HarnessProfile` /
+/// `Provider::Kimi` / `KIMI` adapter; the `kimi` row here is the
+/// First-class Model Provider for the Moonshot Kimi LLM endpoint.
 fn native_harness_for(account_id: &str) -> Option<&'static str> {
     match account_id {
         "anthropic" => Some("anthropic"),
@@ -40,10 +42,12 @@ fn harness_detected(harness_id: &str, profiles: &[HarnessProfile]) -> bool {
 /// #574, detection-gated). A **native** provider appears only when its harness is
 /// installed — it self-authenticates, so no key is needed and an uninstalled
 /// harness is never shown (e.g. no Codex card on a box without Codex). A **keyed**
-/// provider (first-class MiniMax or a Generic custom endpoint) always has a
-/// card so its credential editor and enable toggle stay reachable. Kimi Code
-/// (#918) is self_auth and has no credential editor — it appears in the
-/// spawn menu as a native harness, not as a provider card.
+/// provider (first-class MiniMax/Kimi/OpenRouter or a Generic custom endpoint)
+/// always has a card so its credential editor and enable toggle stay reachable.
+/// The Kimi Code CLI Agent Harness itself doesn't appear as a provider card —
+/// it's a Harness, registered in `HarnessProfile` / `Provider::Kimi` /
+/// `KIMI` adapter, and surfaces through the Spawn Menu's native-row builder
+/// rather than this account-driven visibility gate.
 ///
 /// This is *card* visibility, deliberately independent of `enabled`: a user who
 /// disables a provider must keep its card (showing "Disabled") so they can turn

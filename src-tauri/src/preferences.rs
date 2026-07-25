@@ -741,17 +741,20 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "codex",     name: "OpenAI / Codex",        self_auth: true  },
     BuiltInProviderAccount { id: "agy",       name: "Google / Antigravity",  self_auth: true  },
     BuiltInProviderAccount { id: "grok",      name: "xAI / Grok",           self_auth: true  },
-    BuiltInProviderAccount { id: "kimi",      name: "Moonshot / Kimi Code", self_auth: true  },
+    // Kimi (Moonshot) — keyed via the user's Moonshot API key. The string
+    // `kimi` also names the Kimi Code CLI Agent Harness in a different
+    // namespace (`HarnessProfile.harness`); see CONTEXT.md "First-class
+    // Model Provider" + "Usage follows the credential, not the pairing".
+    BuiltInProviderAccount { id: "kimi",      name: "Moonshot / Kimi",       self_auth: false },
     BuiltInProviderAccount { id: "opencode",  name: "OpenCode",             self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
-    // Companion First-class Model Provider for the Moonshot Kimi LLM endpoint
-    // (issue #918 reclaimed the `kimi` id for the native Kimi Code CLI
-    // harness). Without this row the only path is the "Add custom provider"
-    // workaround, which is undiscoverable for users who don't already know
-    // the Moonshot base URL + tier map.
-    BuiltInProviderAccount { id: "kimi-via-claude", name: "Kimi via Claude Code", self_auth: false },
 ];
+
+// One row per credential/billing identity. Pairings live in the Spawn Menu
+// as composite ids (`claude:kimi`), not as additional rows here. See the
+// "First-class Model Providers and the single-meter invariant" section
+// in docs/knowledge-primer.md for the full rationale.
 
 /// Whether `id` names a Claude-compatible keyed provider — one that carries an
 /// API key/endpoint, shows credential + model-tier fields in the UI, and can
@@ -801,10 +804,10 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
                 model_tiers: openai_tiers("MiniMax-M3[1m]"),
             },
         ],
-        // Deliberately no `kimi` arm — `kimi` is the Native Agent Harness
-        // for the Kimi Code CLI (issue #918). The Moonshot Kimi LLM endpoint
-        // lives on the companion `kimi-via-claude` First-class Model Provider
-        // row below.
+        // Kimi (Moonshot) — Anthropic-compatible Claude Code pairing surface
+        // plus an OpenAI Codex surface, both tier-mapped via
+        // `kimi_default_tiers()` (Anthropic) / `openai_tiers("kimi-k3")`
+        // (Codex, strong-model default). Mirrors the MiniMax precedent.
         //
         // Deliberately no `openrouter` arm — the OpenRouter integration ships
         // Anthropic-skin ONLY by a conscious scope decision (paired with empty
@@ -814,7 +817,7 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
         // OpenRouter OpenAI surface is reachable but not first-class here.
         // Documented in PR #702 body so the asymmetry with MiniMax is
         // discoverable rather than silent.
-        "kimi-via-claude" => vec![
+        "kimi" => vec![
             SurfaceEndpoint {
                 surface: ApiSurface::Anthropic,
                 base_url: "https://api.moonshot.ai/anthropic".to_string(),
@@ -931,11 +934,10 @@ pub fn pairing_for(harness_id: &str, provider_id: &str) -> Option<ProviderPairin
 /// MiniMax is the first-class Claude-compatible provider (issue #566): it
 /// ships the base URL + per-tier model map the absorbed `cwrap` launcher
 /// used (byte-for-byte parity), so the user only needs to add an API key.
-/// `kimi` was first-class Claude-compatible until #918 (Kimi Code became a
-/// native self-auth harness; users wanting the legacy Claude Code + Moonshot
-/// setup now add a custom Claude-compatible account under a different id).
-/// usage fetcher yet (pragmatic scope), so it defaults to **disabled** — enabling
-/// it and adding a key is the single opt-in step before it appears in the menu.
+/// Kimi is the first-class Claude-compatible provider for the Moonshot
+/// endpoint — same shape as MiniMax: pre-filled Moonshot base URL + tier
+/// map, user pastes their Moonshot API key. One row, one Usage Meter, no
+/// companion id.
 ///
 /// Materialised from [`BUILTIN_PROVIDER_ACCOUNTS`], the single declaration
 /// site for built-ins (issue #571). Per-builtin specifics (base URL, model
@@ -950,6 +952,18 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
                     Some("https://api.minimax.io/anthropic".to_string()),
                     minimax_default_tiers(),
                 ),
+                "kimi" => (
+                    // The Moonshot Kimi LLM endpoint — First-class Model
+                    // Provider, Claude-compatible. Pre-fills the credential
+                    // section so the user only needs to paste their Moonshot
+                    // API key. The Kimi Code CLI Agent Harness (Native
+                    // Provider via `~/.kimi/config.toml`) is registered
+                    // separately in `HarnessProfile` / `Provider::Kimi` /
+                    // `KIMI` adapter — different namespace, same brand
+                    // string by convention.
+                    Some("https://api.moonshot.ai/anthropic".to_string()),
+                    kimi_default_tiers(),
+                ),
                 "openrouter" => (
                     // OpenRouter's "Anthropic Skin" integration — the same
                     // `claude` CLI binary, but routed through OpenRouter's
@@ -961,24 +975,10 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
                     Some("https://openrouter.ai/api".to_string()),
                     ModelTiers::default(),
                 ),
-                "kimi-via-claude" => (
-                    // The Moonshot Kimi LLM endpoint — exposed under the
-                    // companion First-class Model Provider id (the `kimi`
-                    // id is the Native Agent Harness for the Kimi Code CLI,
-                    // issue #918). Pre-fills the credential section so the
-                    // user only needs to paste their Moonshot API key.
-                    Some("https://api.moonshot.ai/anthropic".to_string()),
-                    kimi_default_tiers(),
-                ),
                 _ => (None, ModelTiers::default()),
             };
-            // Self-auth built-ins (anthropic/codex/agy/grok/kimi/opencode) ship enabled —
-            // the user has nothing to configure (their login lives in the
-            // harness's own config dir, e.g. `~/.kimi/config.toml`). The
-            // pre-#918 "kimi is opt-in" special case is gone: that flag existed
-            // because the old Claude-compatible Kimi Moonshot account had no
-            // usage fetcher; the new Kimi Code native harness is self-auth
-            // like Grok, so it lands enabled on day one.
+            // All built-ins land enabled by default — opt-in for the keyed
+            // ones is via missing API key rather than a flag.
             let enabled = true;
             ProviderAccount {
                 id: b.id.to_string(),
@@ -1017,11 +1017,11 @@ pub(crate) fn minimax_default_tiers() -> ModelTiers {
 }
 
 /// Kimi's default tier map for the **First-class Model Provider** row
-/// `kimi-via-claude`. **Single source** consumed by both the per-account
-/// `model_tiers` (in `default_provider_accounts`) and the Anthropic surface's
-/// `model_tiers` in `first_class_surfaces("kimi-via-claude")` — the same
-/// pairing pattern as `minimax_default_tiers`. Any drift between the two
-/// consumers is pinned by `kimi_via_claude_is_first_class_claude_compatible_for_claude_code`.
+/// `kimi`. **Single source** consumed by both the per-account `model_tiers`
+/// (in `default_provider_accounts`) and the Anthropic surface's
+/// `model_tiers` in `first_class_surfaces("kimi")` — the same pairing
+/// pattern as `minimax_default_tiers`. Any drift between the two consumers
+/// is pinned by `kimi_is_first_class_claude_compatible_with_moonshot_endpoint`.
 pub(crate) fn kimi_default_tiers() -> ModelTiers {
     ModelTiers {
         // Fable and Opus pick the strongest reasoning model. `default` mirrors
@@ -1044,14 +1044,59 @@ pub(crate) fn kimi_default_tiers() -> ModelTiers {
 /// Mirrors [`harness_profiles`] so a built-in can never be removed by an empty
 /// or partial `preferences.json`.
 pub fn provider_accounts() -> Vec<ProviderAccount> {
-    let stored = match load() {
-        Ok(prefs) => prefs.provider_accounts,
+    let mut prefs = match load() {
+        Ok(prefs) => prefs,
         Err(e) => {
             tracing::warn!("preferences::provider_accounts load failed, using defaults: {}", e);
-            Vec::new()
+            return default_provider_accounts();
         }
     };
-    merge_provider_accounts(default_provider_accounts(), stored)
+    let merged = merge_provider_accounts(default_provider_accounts(), prefs.provider_accounts.clone());
+    let (migrated, changed) = migrate_kimi_companion(merged);
+    // One-shot persistence: if a PR #1044 `kimi-via-claude` row was carried
+    // over to the first-class `kimi` row, write the cleaned list back so the
+    // stale row stops haunting subsequent reads. Subsequent reads see no
+    // companion, so `changed` is false and the save is skipped.
+    if changed {
+        prefs.provider_accounts = migrated.clone();
+        if let Err(e) = save(prefs) {
+            tracing::warn!("preferences::provider_accounts migration save failed: {}", e);
+        }
+    }
+    migrated
+}
+
+/// Migrate any stored `kimi-via-claude` companion (left over from PR #1044)
+/// into the first-class `kimi` row and drop the companion. Returns the
+/// migrated list plus a `changed` flag so the caller can persist the result
+/// when the migration actually moved state. Pure — no disk side effects —
+/// so the migration is unit-testable without I/O. See
+/// `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi`.
+fn migrate_kimi_companion(
+    mut accounts: Vec<ProviderAccount>,
+) -> (Vec<ProviderAccount>, bool) {
+    let Some(companion_idx) = accounts.iter().position(|a| a.id == "kimi-via-claude") else {
+        return (accounts, false);
+    };
+    let companion = accounts[companion_idx].clone();
+    if let Some(kimi) = accounts.iter_mut().find(|a| a.id == "kimi") {
+        // Carry the user's Moonshot API key over only if the new row
+        // doesn't already have one — a pre-#918 keyed `kimi` override would
+        // already have won the merge.
+        if kimi.api_key.as_ref().is_none_or(|v| v.is_empty()) {
+            kimi.api_key = companion.api_key.clone();
+        }
+        // Tier overrides: compare against the canonical defaults (not
+        // `ModelTiers::default()` — the first-class `kimi` row already
+        // carries `kimi_default_tiers()` from `default_provider_accounts`,
+        // so a zero-defaults comparison would always be false and drop
+        // the companion's user-set tiers.
+        if kimi.model_tiers == kimi_default_tiers() {
+            kimi.model_tiers = companion.model_tiers.clone();
+        }
+    }
+    accounts.remove(companion_idx);
+    (accounts, true)
 }
 
 /// Pure merge — defaults first, then each stored account overrides by `id` or
@@ -2468,36 +2513,37 @@ mod tests {
     #[test]
     fn default_provider_accounts_cover_the_builtin_providers() {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "kimi", "opencode", "minimax", "openrouter", "kimi-via-claude"]);
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "kimi", "opencode", "minimax", "openrouter"]);
         // Pay-as-you-go First-class Model Providers (Claude-compatible) are
-        // minimax / openrouter / kimi-via-claude. Self-auth Native Agent
-        // Harnesses (anthropic / codex / agy / grok / kimi / opencode) hold
-        // no creds in Buildmesh — their login lives in the harness's own
-        // config dir (e.g. `~/.kimi/config.toml` for the Kimi Code CLI,
-        // issue #918).
+        // minimax / openrouter / kimi. Self-auth Native Agent Harnesses
+        // (anthropic / codex / agy / grok / opencode) hold no creds in
+        // Buildmesh — their login lives in the harness's own config dir
+        // (e.g. `~/.kimi/config.toml` for the Kimi Code CLI, issue #918).
+        // The `kimi` row here is NOT a self-auth harness — it's the
+        // First-class Model Provider for the Moonshot Kimi LLM endpoint.
+        // The Kimi Code CLI Agent Harness is registered separately in
+        // `HarnessProfile` / `Provider::Kimi` / `KIMI` adapter; the
+        // strings coincide but the namespaces do not.
         let by_id = |id: &str| default_provider_accounts().into_iter().find(|a| a.id == id).unwrap();
         assert_eq!(by_id("minimax").billing_mode, BillingMode::PayAsYouGo);
         assert!(by_id("minimax").claude_compatible);
         assert!(by_id("openrouter").claude_compatible);
-        assert!(by_id("kimi-via-claude").claude_compatible);
+        assert!(by_id("kimi").claude_compatible);
         assert!(!by_id("anthropic").claude_compatible);
         assert!(!by_id("codex").claude_compatible);
         assert!(!by_id("agy").claude_compatible);
         assert!(!by_id("grok").claude_compatible);
-        assert!(!by_id("kimi").claude_compatible);
         assert!(!by_id("opencode").claude_compatible);
         // MiniMax ships its absorbed-cwrap-parity base URL + tier map;
         // OpenRouter ships its API base URL with an empty tier map (the user
-        // picks providers/models via the 5-tier UI fields); Kimi Code ships
-        // no base URL (self-auth); kimi-via-claude ships the Moonshot
-        // endpoint + the tier map defined in `kimi_default_tiers`.
+        // picks providers/models via the 5-tier UI fields); Kimi ships the
+        // Moonshot endpoint + the tier map defined in `kimi_default_tiers`.
         assert_eq!(by_id("minimax").base_url.as_deref(), Some("https://api.minimax.io/anthropic"));
         assert_eq!(by_id("openrouter").base_url.as_deref(), Some("https://openrouter.ai/api"));
-        assert_eq!(by_id("kimi").base_url, None);
-        assert_eq!(by_id("kimi-via-claude").base_url.as_deref(), Some("https://api.moonshot.ai/anthropic"));
+        assert_eq!(by_id("kimi").base_url.as_deref(), Some("https://api.moonshot.ai/anthropic"));
         assert_eq!(by_id("minimax").model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
         assert_eq!(by_id("openrouter").model_tiers, ModelTiers::default());
-        assert_eq!(by_id("kimi-via-claude").model_tiers.default.as_deref(), Some("kimi-k3"));
+        assert_eq!(by_id("kimi").model_tiers.default.as_deref(), Some("kimi-k3"));
         // All built-ins land enabled by default — opt-in for the keyed ones
         // is via missing API key rather than a flag.
         assert!(by_id("anthropic").enabled);
@@ -2507,7 +2553,6 @@ mod tests {
         assert!(by_id("kimi").enabled);
         assert!(by_id("opencode").enabled);
         assert!(by_id("openrouter").enabled);
-        assert!(by_id("kimi-via-claude").enabled);
     }
 
     #[test]
@@ -2545,13 +2590,13 @@ mod tests {
             custom_account("deepseek"),
         ];
         let merged = merge_provider_accounts(defaults, stored);
-        // Nine First-class Model Providers + Native Agent Harnesses (anthropic/
-        // codex/agy/grok/opencode/minimax/kimi/openrouter/kimi-via-claude),
-        // no duplicate minimax, plus the custom one.
+        // Eight First-class Model Providers + Native Agent Harnesses
+        // (anthropic/codex/agy/grok/opencode/minimax/kimi/openrouter), no
+        // duplicate minimax, plus the custom one.
         assert_eq!(merged.iter().filter(|a| a.id == "minimax").count(), 1);
         assert!(!merged.iter().find(|a| a.id == "minimax").unwrap().enabled);
         assert!(merged.iter().any(|a| a.id == "deepseek"));
-        assert_eq!(merged.len(), 10);
+        assert_eq!(merged.len(), 9);
     }
 
     #[test]
@@ -2840,28 +2885,21 @@ mod tests {
     }
 
     #[test]
-    fn builtin_kimi_account_is_self_auth_and_emits_no_env() {
-        // Wayfinder #918 flipped the built-in `kimi` from a Claude-compatible
-        // Moonshot LLM endpoint account (claude_compatible=true, base_url=
-        // moonshot.ai/anthropic) to a self-auth native-harness account
-        // (Kimi Code CLI handles auth via `~/.kimi/config.toml`). The
-        // account therefore has no base_url and no api_key, so the spawn
-        // path's `provider_account_env` produces no `ANTHROPIC_*` overrides
-        // — the `kimi` binary is launched as-is and reads its own config.
-        // This is what `provider_account_env_empty_for_builtin_without_endpoint_or_absent`
-        // already pins for the Anthropic account; this test pins the same
-        // invariant for Kimi specifically so a future refactor that
-        // accidentally re-promotes Kimi to Claude-compatible trips it.
+    fn builtin_kimi_account_is_not_self_auth() {
+        // Anti-regression: post-#918 the built-in `kimi` was wrongly flipped
+        // to `self_auth: true` to stand in for the Kimi Code CLI harness's
+        // own auth path. That collapsed the Moonshot LLM First-class Model
+        // Provider and PR #1044 papered over it with a companion id — see
+        // `builtin_provider_accounts_have_no_via_substring_in_id` for the
+        // mechanical guard. The full surface contract lives in
+        // `kimi_is_first_class_claude_compatible_with_moonshot_endpoint`.
         let kimi = default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
-        assert!(!kimi.claude_compatible, "kimi built-in must be self_auth (wayfinder #918)");
-        assert_eq!(kimi.base_url, None, "self-auth kimi must have no base_url");
-        assert_eq!(kimi.api_key, None, "self-auth kimi must have no api_key");
-        assert!(kimi.enabled, "self-auth kimi lands enabled by default (#918)");
         assert!(
-            provider_account_env(Some(&kimi)).is_empty(),
-            "self-auth kimi must inject no ANTHROPIC_* env — got {:?}",
-            provider_account_env(Some(&kimi))
+            !kimi.claude_compatible || kimi.base_url.is_some(),
+            "kimi must be keyed/Claude-compatible with a Moonshot base URL — \
+             a self-auth bare `kimi` would lose the First-class Model Provider status"
         );
+        assert_eq!(kimi.billing_mode, BillingMode::PayAsYouGo);
     }
 
     #[test]
@@ -3495,60 +3533,28 @@ mod tests {
         assert_eq!(anthropic_surface.model_tiers, minimax_default_tiers());
     }
 
-    /// Pins `kimi-via-claude` as a First-class Model Provider that the Claude
-    /// Code attach picker will surface (Anthropic-compatible surface).
+    /// Pins `kimi` as a First-class Model Provider that the Claude Code
+    /// attach picker will surface (Anthropic-compatible surface). This is
+    /// the single canonical row for the Kimi brand — no `kimi-via-claude`
+    /// companion. The `claude:kimi` Proxied Provider pairing is derived
+    /// from this row via `effective_pairings`.
+    /// A keyed `kimi` account attached to the Claude Code harness emits the
+    /// Moonshot Anthropic base URL + per-account tier env — the canonical
+    /// spawn-env shape for the `claude:kimi` Proxied Provider pairing.
     #[test]
-    fn kimi_via_claude_is_first_class_claude_compatible_for_claude_code() {
-        let account = default_provider_accounts()
-            .into_iter()
-            .find(|a| a.id == "kimi-via-claude")
-            .expect("kimi-via-claude must exist in the default accounts list");
-
-        assert!(account.claude_compatible, "kimi-via-claude must be Claude-compatible");
-        assert_eq!(account.billing_mode, BillingMode::PayAsYouGo);
-        assert!(account.enabled, "kimi-via-claude lands enabled like the other Claude-compatible First-class Model Providers");
-        assert_eq!(
-            account.base_url.as_deref(),
-            Some("https://api.moonshot.ai/anthropic"),
-        );
-        assert_eq!(account.model_tiers, kimi_default_tiers());
-
-        let surfaces = first_class_surfaces("kimi-via-claude");
-        let anthropic = surfaces
-            .iter()
-            .find(|s| s.surface == ApiSurface::Anthropic)
-            .expect("kimi-via-claude must publish an Anthropic surface");
-        assert_eq!(anthropic.base_url, "https://api.moonshot.ai/anthropic");
-        assert_eq!(anthropic.model_tiers, kimi_default_tiers());
-
-        // The surface-match half of the Claude Code attach picker must
-        // include Anthropic for kimi-via-claude. We check the pure
-        // `provider_surfaces` predicate directly so the assertion is
-        // independent of stored preferences (a fresh-install default has
-        // no `api_key` yet, so the keyed+enabled gate in
-        // `compatible_providers_for_harness` would otherwise exclude it
-        // even though the surface is right).
-        assert!(
-            provider_surfaces(&account).contains(&ApiSurface::Anthropic),
-        );
-    }
-
-    /// A keyed kimi-via-claude account attached to the Claude Code harness
-    /// emits the Moonshot Anthropic base URL + per-account tier env.
-    #[test]
-    fn resolve_provider_env_kimi_via_claude_attached_to_claude_emits_moonshot() {
+    fn resolve_provider_env_kimi_attached_to_claude_emits_moonshot() {
         with_temp_dir(|_| {
-            let mut kimi_via_claude = default_provider_accounts()
+            let mut kimi = default_provider_accounts()
                 .into_iter()
-                .find(|a| a.id == "kimi-via-claude")
+                .find(|a| a.id == "kimi")
                 .unwrap();
-            kimi_via_claude.api_key = Some("sk-moon-123".into());
+            kimi.api_key = Some("sk-moon-123".into());
             let mut prefs = AppPreferences::default();
-            upsert_provider_account(&mut prefs, kimi_via_claude);
+            upsert_provider_account(&mut prefs, kimi);
             save(prefs).unwrap();
             *CACHE.lock().unwrap() = None;
 
-            let env = resolve_provider_env("claude:kimi-via-claude");
+            let env = resolve_provider_env("claude:kimi");
             let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
             assert_eq!(get("ANTHROPIC_BASE_URL"), Some("https://api.moonshot.ai/anthropic"));
             assert_eq!(get("ANTHROPIC_AUTH_TOKEN"), Some("sk-moon-123"));
@@ -3557,6 +3563,151 @@ mod tests {
             assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("kimi-2.7-code"));
             assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("kimi-2.6"));
             assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("kimi-2.6"));
+        });
+    }
+
+    // ── Regression: collapse Kimi dual-id into a single First-class Model Provider ──
+    //
+    // User-reported bug (post PR #1044): two Usage Meters for Kimi. Per
+    // CONTEXT.md "Usage follows the credential, not the pairing", one
+    // credential = one row in `BUILTIN_PROVIDER_ACCOUNTS` = one Usage Meter.
+
+    /// Pin that the "Kimi via Claude Code" companion id is gone — a First-class
+    /// Model Provider row expresses a single brand, not a harness↔provider
+    /// pairing. The pairing is the Spawn Menu's job (composite id `claude:kimi`).
+    #[test]
+    fn builtin_provider_accounts_have_no_via_substring_in_id() {
+        // Mechanical invariant: any id containing "via" is encoding a routing
+        // relationship ("this provider reached via that harness") — but the
+        // built-in provider-account table is one row per brand. Pairings
+        // belong in the Spawn Menu as composite ids. See CONTEXT.md
+        // "Usage follows the credential, not the pairing".
+        for b in BUILTIN_PROVIDER_ACCOUNTS {
+            assert!(
+                !b.id.contains("via"),
+                "Built-in provider account id '{}' contains 'via' — this is a \
+                 pairing shorthand, not a First-class Model Provider id. \
+                 Express the pairing as a composite Spawn Option id (e.g. \
+                 'claude:kimi') instead. See CONTEXT.md 'Usage follows the \
+                 credential, not the pairing'.",
+                b.id,
+            );
+        }
+    }
+
+    /// Pin that the companion `kimi-via-claude` id no longer exists in defaults.
+    /// This is the literal user-reported regression: two Kimi cards on the
+    /// Providers page.
+    #[test]
+    fn kimi_via_claude_id_does_not_exist_in_default_provider_accounts() {
+        let exists = default_provider_accounts()
+            .iter()
+            .any(|a| a.id == "kimi-via-claude");
+        assert!(
+            !exists,
+            "kimi-via-claude must not exist as a separate ProviderAccount — \
+             it duplicated the Kimi First-class Model Provider and produced \
+             two Usage Meter cards. Restore `kimi` to its proper keyed/Claude-\
+             compatible posture instead."
+        );
+    }
+
+    /// Pin that the bare `kimi` id IS the First-class Model Provider for the
+    /// Moonshot Kimi LLM endpoint: Claude-compatible, Pay-As-You-Go, with the
+    /// Moonshot base URL and the canonical tier map.
+    #[test]
+    fn kimi_is_first_class_claude_compatible_with_moonshot_endpoint() {
+        let kimi = default_provider_accounts()
+            .into_iter()
+            .find(|a| a.id == "kimi")
+            .expect("kimi must exist as a default provider account");
+
+        assert!(
+            kimi.claude_compatible,
+            "kimi must be Claude-compatible — it is the First-class Model Provider for Moonshot's Anthropic-compatible endpoint"
+        );
+        assert_eq!(kimi.billing_mode, BillingMode::PayAsYouGo);
+        assert_eq!(
+            kimi.base_url.as_deref(),
+            Some("https://api.moonshot.ai/anthropic"),
+            "kimi must publish the Moonshot Anthropic endpoint",
+        );
+        assert_eq!(kimi.model_tiers, kimi_default_tiers());
+
+        // And it must publish both Anthropic + OpenAI surfaces (Codex pairs
+        // via the OpenAI surface too, mirroring MiniMax's first-class shape).
+        let surfaces = first_class_surfaces("kimi");
+        let anthropic = surfaces
+            .iter()
+            .find(|s| s.surface == ApiSurface::Anthropic)
+            .expect("kimi must publish an Anthropic-compatible surface");
+        assert_eq!(anthropic.base_url, "https://api.moonshot.ai/anthropic");
+        assert_eq!(anthropic.model_tiers, kimi_default_tiers());
+        assert!(
+            surfaces.iter().any(|s| s.surface == ApiSurface::OpenAI),
+            "kimi must publish an OpenAI surface for Codex pairing",
+        );
+    }
+
+    /// Pin the one-time migration: a user who picked up PR #1044 has a stored
+    /// `kimi-via-claude` row in `preferences.json`. After collapsing the
+    /// companion, `provider_accounts()` must carry the user's Moonshot
+    /// `api_key` + tier overrides over to the new first-class `kimi` row,
+    /// drop the `kimi-via-claude` row entirely, AND persist the cleaned
+    /// state to disk (so subsequent reads see no companion and don't
+    /// re-migrate every time).
+    #[test]
+    fn provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi() {
+        with_temp_dir(|tmp| {
+            let stored_companion = ProviderAccount {
+                id: "kimi-via-claude".to_string(),
+                name: "Kimi via Claude Code".to_string(),
+                enabled: true,
+                billing_mode: BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("sk-moon-test".to_string()),
+                base_url: Some("https://api.moonshot.ai/anthropic".to_string()),
+                // The opus tier override is the regression target — the prior
+                // implementation compared against `ModelTiers::default()` and
+                // dropped these because the new `kimi` row already carries
+                // `kimi_default_tiers()`. The fix compares against
+                // `kimi_default_tiers()` so the user's stored override wins.
+                model_tiers: ModelTiers {
+                    opus: Some("kimi-k3-preview".to_string()),
+                    ..ModelTiers::default()
+                },
+                models: Vec::new(),
+            };
+            let mut prefs = AppPreferences::default();
+            upsert_provider_account(&mut prefs, stored_companion);
+            save(prefs).unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            let accounts = provider_accounts();
+            assert!(
+                accounts.iter().all(|a| a.id != "kimi-via-claude"),
+                "companion id `kimi-via-claude` must be migrated away",
+            );
+            let kimi = accounts
+                .iter()
+                .find(|a| a.id == "kimi")
+                .expect("first-class `kimi` must be present after migration");
+            assert_eq!(kimi.api_key.as_deref(), Some("sk-moon-test"));
+            assert_eq!(
+                kimi.model_tiers.opus.as_deref(),
+                Some("kimi-k3-preview"),
+                "user's stored tier override must survive the migration — \
+                 compare against kimi_default_tiers() not ModelTiers::default()",
+            );
+
+            // The migration must persist — the on-disk preferences.json no
+            // longer carries the companion id, so subsequent reads see a
+            // clean state and don't re-migrate.
+            let raw = std::fs::read_to_string(tmp.join("preferences.json")).unwrap();
+            assert!(
+                !raw.contains("kimi-via-claude"),
+                "migration must persist — preferences.json still carries the companion id: {raw}",
+            );
         });
     }
 }
