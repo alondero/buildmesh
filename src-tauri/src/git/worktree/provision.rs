@@ -73,6 +73,8 @@
 //! - its 2026-06-27 amendment — this module's creation
 //! - `CONTEXT.md` — Spawn Context / Spawn Source vocabulary
 
+use tauri::Emitter as _;
+
 // ─── Fetch helpers (PR-spawn head fetch + fork remote registration) ───────
 
 /// Fetch a single ref from `origin` into the local repo. Used by the PR-spawn
@@ -546,16 +548,19 @@ fn run_git_checkout(host_path: &str, args: &[&str]) -> Result<(), String> {
 // that reads the DB, resolves the mesh row, and claims warm-pool entries) and
 // the worktree provisioner (the body of `provision_for_spawn` below). The
 // orchestrator builds a `SpawnContext`; the provisioner consumes it; the
-// orchestrator matches the `ProvisionOutcome` to drive the post-spawn pool
-// housekeeping. Names mirror `CONTEXT.md` (Spawn Context, Spawn Source).
+// orchestrator drives post-success bookkeeping through the `ProvisionSink`
+// trait so it doesn't need to thread the entry back out or rebuild the cold
+// context for the retry. Names mirror `CONTEXT.md` (Spawn Context, Spawn Source).
 //
 // `SpawnContext` carries the loaded `AgentNode` rather than just
 // `source_issue`/`source_pr` so the provisioner can branch on source without
-// re-fetching the node row. The `resolved_base_sha` field is the SHA
-// `resolve_base_ref_sha` resolved for the cold path; `base_ref` is the
-// *requested* ref (e.g. `origin/feat-x` for a PR head). On `Created` the
-// cold path takes `base_ref`; on `Adopted` the warm path takes the SHA
-// resolved at call time so the `git checkout -b` never sees a symbolic ref.
+// re-fetching the node row. `base_ref` is the *requested* ref (e.g.
+// `origin/feat-x` for a PR head); `create_git_worktree` (cold path) takes
+// `base_ref` directly, while `adopt_warm_worktree_by_move` resolves it via
+// `resolve_base_ref_sha` internally so its `git checkout -b` never sees a
+// symbolic ref. The three speculative fields (`resolved_base_sha`, `sandbox`,
+// `spawn_path`) this struct carried before the architecture-review deepening
+// were dropped — see `CONTEXT.md` *Spawn Context* for the current contract.
 
 /// How an **Agent Node** spawn was triggered. Replaces the `is_rename_spawn`
 /// boolean at the provision seam: the two warm-pool adoption modes
@@ -596,33 +601,171 @@ impl SpawnSource {
 /// resolving (mesh row, node row, optional warm claim) and the provisioner
 /// owns the next decision.
 ///
-/// `host_path` is the Windows-side path git operations run against (the form
-/// `git2` and the `git` CLI both accept). `spawn_path` is the path the agent
-/// process will see — `host_path` for Windows-only spawns, the WSL form
-/// (built by `env::to_host_path` and friends — see that module) for WSL
-/// nodes. `provision_for_spawn` only reads `host_path`; `spawn_path` is
-/// preserved on the context so callers can derive the spawn command without
-/// a second `env::resolve_agent_path`.
+/// Every field is consumed by [`provision_for_spawn`]. The previous revision
+/// carried three speculative fields (`resolved_base_sha`, `sandbox`,
+/// `spawn_path`) that no provisioner read; those were dropped with the
+/// architecture-review deepening that moved warm-failure recovery and the
+/// post-success bookkeeping into this module (seam = `provision_for_spawn`'s
+/// signature; old `#[allow(dead_code)]` retired).
 ///
-/// `resolved_base_sha`, `sandbox`, and `spawn_path` are part of the public
-/// API contract — callers populate them so a future provisioner revision
-/// (or a different orchestrator: stage-2 async resume, telemetry) can read
-/// them. The current `provision_for_spawn` doesn't read them; the
-/// `#[allow(dead_code)]` keeps the warnings out of `cargo check` output
-/// without losing the field on the public surface.
+/// `host_path` is the Windows-side path git operations run against (the form
+/// `git2` and the `git` CLI both accept). The WSL-spelled path the spawned
+/// agent will see stays in the orchestrator (consumed at command-build time
+/// after `provision_for_spawn` returns) — moving it onto the context would
+/// require duplicating env-shape logic the orchestrator already owns.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SpawnContext {
     pub node: crate::models::AgentNode,
     pub source: SpawnSource,
     pub base_ref: String,
-    pub resolved_base_sha: String,
     pub worktree_mode: String,
     pub use_worktree: bool,
-    pub sandbox: bool,
     pub warm_entry: Option<crate::services::warm_pool::ClaimedWarmEntry>,
-    pub spawn_path: String,
     pub host_path: String,
+}
+
+/// Data-only inputs the caller supplies alongside [`SpawnContext`] at the
+/// provisioner seam. These are *decision inputs* the provisioner reads to
+/// decide whether to fire the maintenance path, *not* behavior — behavior
+/// lives on the [`ProvisionSink`] trait passed to
+/// [`provision_for_spawn`].
+///
+/// `ref_advanced_for_pool` is set by the orchestrator after the spawn-time
+/// `fetch_origin` to record "the mesh's base ref moved this spawn" — when
+/// true, the provisioner schedules a `git reset --hard` over any now-stale
+/// warm entries under the single per-mesh fill-lock acquisition that also
+/// runs the refill.
+///
+/// `pool_was_drained_by_this_spawn` is the dual: even when the use-site
+/// recheck dropped a warm claim (issue #653), the pool's inventory is still
+/// one short and the post-spawn refill must run. Tracking it here (not in
+/// `SpawnContext`) keeps the worktree-data type pure.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProvisionHooks {
+    pub ref_advanced_for_pool: bool,
+    pub pool_was_drained_by_this_spawn: bool,
+}
+
+/// Side-effect surface for post-provision work. The provisioner is the only
+/// caller; the methods map 1:1 to the two events that follow a successful
+/// outcome — the Manual-only name adoption (Issue/PR keep their own
+/// `gh{N}-`/`pr{N}-` name) and the optional pool-refresh/refill thread.
+///
+/// Trait rather than direct `AppHandle` so tests assert side effects without
+/// standing up a Tauri test context. The semantic naming (`on_*`) names the
+/// what-happened; the production impl builds the wire payload (`NodeRenamed`)
+/// and the per-mesh maintenance thread from those arguments.
+pub(crate) trait ProvisionSink: Sync {
+    // `Sync` is required because `&dyn ProvisionSink` crosses a
+    // `spawn_blocking` boundary inside `provision_for_spawn`'s callers
+    // (the orchestrator sends the sink across threads). The trade-off —
+    // `NullSink` and `RecordingSink` add a small `Mutex` for interior
+    // mutability — is cheaper than re-architecting the call site.
+
+    /// Forget the warm-pool row after a successful adoption. Called on
+    /// every `Adopted` and `Upgraded` outcome — the row's purpose is done
+    /// when the directory has become the agent's worktree.
+    fn forget_warm_row(&self, id: i64);
+
+    /// Persist the Manual-upgraded node's display name into the DB so
+    /// the row matches the pre-warmed directory name, AND announce via
+    /// `node-renamed` so the frontend's optimistic stage-1 row re-labels.
+    /// Two consequences of one decision — kept as a single trait method
+    /// because the DB write and the announce must be paired (a partial
+    /// pair would leave either the on-disk name or the in-memory one
+    /// out of sync). Called only on `Upgraded` (Manual spawns); Issue/PR
+    /// `Adopted` skips name adoption per CONTEXT.md *Spawn Source*.
+    fn adopt_manual_name(&self, node_id: i64, name: &str);
+
+    /// Schedule the single post-spawn pool-maintenance task. Called only
+    /// when `ref_advanced_for_pool || pool_was_drained_by_this_spawn`;
+    /// refreshed and refilled under one fill-lock acquisition so the two
+    /// jobs can't lose a race to each other (issue #613).
+    fn on_pool_maintenance_required(&self, mesh_id: i64, do_refresh: bool, do_refill: bool);
+}
+
+/// Production sink: emits via `AppHandle::emit`, writes through the DB,
+/// and spawns the maintenance thread via `std::thread::spawn`. Owns a clone
+/// of the AppHandle so the provisioner's `&dyn ProvisionSink` parameter is
+/// lifetime-free.
+///
+/// All DB-touching methods gate on `db::is_initialized()` — when the DB
+/// is not initialised (e.g. a unit test that doesn't spin one up) the
+/// sink is a no-op for the DB side of each method. This keeps the
+/// provisioner itself free of `is_initialized` checks; if the seam needs
+/// to add a new DB side effect in the future, the sink owns where the
+/// gate lives.
+pub(crate) struct AppHandleSink {
+    pub(crate) app: tauri::AppHandle,
+}
+
+impl ProvisionSink for AppHandleSink {
+    fn forget_warm_row(&self, id: i64) {
+        if !crate::db::is_initialized() {
+            return;
+        }
+        crate::services::warm_pool::forget_after_spawn(id);
+    }
+
+    fn adopt_manual_name(&self, node_id: i64, name: &str) {
+        // DB write first; emit on success only. A failed DB write leaves
+        // the row's `name` column stale, which the next manual rename (or
+        // stage-2 reconcile) can correct — but a stale `node-renamed` emit
+        // would also re-label the frontend's optimistic stage-1 row to a
+        // value the DB doesn't carry, which is the harder case to undo.
+        if crate::db::is_initialized() {
+            if let Err(e) = crate::db::update_agent_node_name(node_id, name) {
+                tracing::warn!(
+                    "AppHandleSink::adopt_manual_name: DB write failed for node {} ({}); \
+                     skipping the node-renamed emit so the frontend can't re-label to a value the DB doesn't carry",
+                    node_id, e
+                );
+                return;
+            }
+        }
+        let _ = self.app.emit(
+            "node-renamed",
+            crate::session_naming::NodeRenamedPayload {
+                node_id,
+                name: name.to_string(),
+            },
+        );
+    }
+
+    fn on_pool_maintenance_required(&self, mesh_id: i64, do_refresh: bool, do_refill: bool) {
+        // mesh_id==0 means "no mesh row resolved"; the orchestrator gates the
+        // caller on this too, but the sink re-checks because the threshold
+        // is cheap and silently skipping a no-mesh maintenance call is the
+        // class of bug that ships a "my pool never refills" report.
+        if mesh_id <= 0 || !(do_refresh || do_refill) {
+            return;
+        }
+        // Gate on DB initialisation so unit tests (no DB) don't spawn a thread
+        // that would immediately panic on the warm-mesh lookup.
+        if !crate::db::is_initialized() {
+            return;
+        }
+        let app = self.app.clone();
+        std::thread::spawn(move || {
+            crate::services::warm_pool::post_spawn_maintenance(
+                mesh_id, do_refresh, do_refill, &app,
+            );
+        });
+    }
+}
+
+/// Zero-cost sink for tests that don't exercise post-success side effects —
+/// every method no-ops so a fixture-only test can call `provision_for_spawn`
+/// without standing up Tauri events or background threads.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NullSink;
+
+#[cfg(test)]
+impl ProvisionSink for NullSink {
+    fn forget_warm_row(&self, _id: i64) {}
+    fn adopt_manual_name(&self, _node_id: i64, _name: &str) {}
+    fn on_pool_maintenance_required(&self, _mesh_id: i64, _do_refresh: bool, _do_refill: bool) {}
 }
 
 /// The four-way decision `provision_for_spawn` returns. Each variant names the
@@ -681,9 +824,19 @@ pub enum ProvisionOutcome {
 }
 
 /// Resolve a `SpawnContext` to an on-disk worktree state. Returns one of
-/// `Reused` / `Adopted` / `Upgraded` / `Created`; the caller matches on the
-/// variant to drive the post-spawn bookkeeping (`forget_after_spawn`,
-/// `node-renamed` emission, status writes).
+/// `Reused` / `Adopted` / `Upgraded` / `Created`; the orchestrator reads
+/// only `host_path` (for command construction) and the per-branch elapsed
+/// timing (for the spawn_timer log) — the post-success bookkeeping
+/// (`forget_after_spawn`, Manual name adoption, `post_spawn_maintenance`
+/// trigger) is owned by this function and dispatches through [`ProvisionSink`].
+///
+/// On the warm path: if `adopt_warm_worktree_by_move` / `upgrade_warm_to_mode`
+/// errors, the seam cleans up both possible paths (idempotent, whichever
+/// was untouched), forgets the pool row, and retries cold with
+/// `warm_entry: None`. Cold failure on top of warm failure returns a combined
+/// error so the orchestrator's `SessionLifecycle::on_error` carries the full
+/// picture. The behaviour preserves the pre-deepening fall-through (issue
+/// #612: warm-adopt failure was a graceful degradation, never fatal).
 ///
 /// Decision order is deliberate and matches the existing spawn path:
 /// 1. `use_worktree == false` → Root Node, the spawn runs in the mesh root
@@ -701,94 +854,223 @@ pub enum ProvisionOutcome {
 /// 3. The host path already exists → resume / handover / re-spawn; never
 ///    re-create. `Reused`.
 /// 4. No warm entry: cold `create_git_worktree`. `Created`.
-pub fn provision_for_spawn(mut ctx: SpawnContext) -> Result<ProvisionOutcome, String> {
-    // 1. Root Node (`use_worktree = false`). No worktree is created or moved;
-    //    the spawn runs in the mesh root directly. `Reused`.
+pub fn provision_for_spawn(
+    mut ctx: SpawnContext,
+    hooks: &ProvisionHooks,
+    sink: &dyn ProvisionSink,
+) -> Result<ProvisionOutcome, String> {
+    // 1. Root Node short-circuit (`use_worktree = false`). No worktree is created
+    //    or moved; the spawn runs in the mesh root directly. `Reused`. Runs
+    //    BEFORE the warm/cold branches so a Root Node with a stale warm claim
+    //    (extremely rare but possible if `use_worktree` flipped between claim
+    //    and provision) doesn't accidentally adopt the entry.
     if !ctx.use_worktree {
         return Ok(ProvisionOutcome::Reused {
             host_path: ctx.host_path,
         });
     }
 
-    // 2. Warm claim — branch on Spawn Source to pick the right adoption mode.
-    //    **Manual runs BEFORE the path-exists check** because the pool's slug
-    //    is the node's `worktree_name`, so `host_path` already exists; the
-    //    upgrade is what completes the adoption. Reordering this breaks every
-    //    manual warm claim (it would short-circuit to `Reused` before the
-    //    `git checkout -B <branch>` / `.worktreeinclude` re-application runs).
-    if let Some(entry) = ctx.warm_entry.take() {
-        // Manual spawns adopt the pool's pre-assigned slug (it's the node's
-        // `worktree_name` by the time this fn runs — see orchestrator's
-        // pre-call rename); Issue/PR spawns keep the node's own deterministic
-        // `gh{N}-`/`pr{N}-` name.
-        let branch_name = ctx
-            .node
-            .worktree_name
-            .clone()
-            .unwrap_or_else(|| "buildmesh-spawn".to_string());
-        let start = std::time::Instant::now();
-        match ctx.source {
-            SpawnSource::Issue | SpawnSource::PullRequest => {
-                adopt_warm_worktree_by_move(
+    // ---- Warm path: capture the entry so a failure can clean up both
+    //      possible paths before the cold retry (idempotent — whichever
+    //      was untouched no-ops). The original entry is moved into the
+    //      warm branch and either consumed (warm Ok → forget + name) or
+    //      restored for the cleanup block below (warm Err).
+    let warm_entry_for_cleanup = ctx.warm_entry.take();
+
+    let warm_result: Result<Option<ProvisionOutcome>, (String, crate::services::warm_pool::ClaimedWarmEntry)> =
+        if let Some(entry) = warm_entry_for_cleanup {
+            // Manual spawns adopt the pool's pre-assigned slug (it's the node's
+            // `worktree_name` by the time this fn runs — see orchestrator's
+            // pre-call rename); Issue/PR spawns keep the node's own deterministic
+            // `gh{N}-`/`pr{N}-` name.
+            let branch_name = ctx
+                .node
+                .worktree_name
+                .clone()
+                .unwrap_or_else(|| "buildmesh-spawn".to_string());
+            let start = std::time::Instant::now();
+            // `entry.clone()` borrows from `entry` so the original stays in scope
+            // for the warm-failure cleanup branch below — only one of
+            // `outcome_result = Ok(...)` or `Err((e, entry))` runs, but Rust's
+            // borrow checker tracks moves statically, so we must clone (entry
+            // holds 4 short strings per `ClaimedWarmEntry` — cheap).
+            let outcome_result: Result<ProvisionOutcome, String> = match ctx.source {
+                SpawnSource::Issue | SpawnSource::PullRequest => {
+                    adopt_warm_worktree_by_move(
+                        &ctx.node.path,
+                        &entry.path,
+                        &ctx.host_path,
+                        &branch_name,
+                        &ctx.worktree_mode,
+                        &ctx.base_ref,
+                    )
+                    .map(|()| ProvisionOutcome::Adopted {
+                        entry: entry.clone(),
+                        host_path: ctx.host_path.clone(),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                    })
+                }
+                SpawnSource::Manual => {
+                    upgrade_warm_to_mode(
+                        &ctx.node.path,
+                        &ctx.host_path,
+                        &branch_name,
+                        &ctx.worktree_mode,
+                    )
+                    .map(|()| ProvisionOutcome::Upgraded {
+                        entry: entry.clone(),
+                        host_path: ctx.host_path.clone(),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                    })
+                }
+            };
+            match outcome_result {
+                Ok(o) => Ok(Some(o)),
+                Err(e) => Err((e, entry)),
+            }
+        } else {
+            Ok(None) // no warm entry — drive the cold-path branches below
+        };
+
+    let outcome = match warm_result {
+        Ok(Some(o)) => Ok(o),
+        Ok(None) => {
+            // No warm entry. Two cold branches: path-exists (resume) or genuine create.
+            if std::path::Path::new(&ctx.host_path).exists() {
+                Ok(ProvisionOutcome::Reused {
+                    host_path: ctx.host_path.clone(),
+                })
+            } else {
+                let branch_name = ctx
+                    .node
+                    .worktree_name
+                    .clone()
+                    .unwrap_or_else(|| "buildmesh-spawn".to_string());
+                let start = std::time::Instant::now();
+                let create_result = super::create_git_worktree(
                     &ctx.node.path,
-                    &entry.path,
                     &ctx.host_path,
                     &branch_name,
                     &ctx.worktree_mode,
                     &ctx.base_ref,
-                )?;
-                Ok(ProvisionOutcome::Adopted {
-                    entry,
-                    host_path: ctx.host_path,
+                )
+                .map(|()| ProvisionOutcome::Created {
+                    host_path: ctx.host_path.clone(),
                     elapsed_ms: start.elapsed().as_millis() as u64,
-                })
+                });
+                match create_result {
+                    Ok(o) => Ok(o),
+                    Err(e) => Err(format!("provision_for_spawn: cold create failed: {}", e)),
+                }
             }
-            SpawnSource::Manual => {
-                upgrade_warm_to_mode(
+        }
+        Err((warm_err, entry)) => {
+            // Warm path failed. The failure happens in one of three places:
+            //   (a) resolve_base_ref_sha failed — disk untouched.
+            //   (b) pre-move branch guard refused (e.g. branch-exists) — disk untouched.
+            //   (c) move_git_worktree failed — disk untouched (atomic at the
+            //       file-system level; git CLI either moves and exits 0 or
+            //       returns non-zero without moving).
+            //   (d) checkout_worktree_to_base failed AFTER the move succeeded —
+            //       `host_path` is now populated with a broken worktree that
+            //       needs cleanup; `entry.path` (pool) was emptied by the move.
+            //
+            // The first three cases (a, b, c) leave the pool directory intact —
+            // removing it would silently destroy work the user may want to keep
+            // (the pre-move-guard test `provision_for_spawn_adopted_refuses_to_clobber_existing_branch`
+            // pins this). Only (d) needs target cleanup. Detect (d) by checking
+            // whether the target path now exists: `move_git_worktree` is the
+            // sole step that populates it, and it's atomic.
+            let row_id = entry.id;
+            let target_exists = std::path::Path::new(&ctx.host_path).exists();
+            if target_exists {
+                let _ = super::remove_one_worktree(&ctx.host_path);
+            }
+            // Forget the warm row via the sink — same encapsulation as the
+            // success path. The sink's `db::is_initialized` gate does the
+            // right thing whether or not the test/caller has a DB.
+            sink.forget_warm_row(row_id);
+
+            // Cold retry — same SpawnContext with `warm_entry` already cleared.
+            // If THIS fails too the spawn surfaces a combined error so the caller
+            // can persist a real diagnostic instead of a half-failed warm retry.
+            if std::path::Path::new(&ctx.host_path).exists() {
+                // Race: another thread cut the worktree between our warm failure
+                // and now. Treat as a resume rather than a create.
+                Ok(ProvisionOutcome::Reused {
+                    host_path: ctx.host_path.clone(),
+                })
+            } else {
+                let branch_name = ctx
+                    .node
+                    .worktree_name
+                    .clone()
+                    .unwrap_or_else(|| "buildmesh-spawn".to_string());
+                let start = std::time::Instant::now();
+                match super::create_git_worktree(
                     &ctx.node.path,
                     &ctx.host_path,
                     &branch_name,
                     &ctx.worktree_mode,
-                )?;
-                Ok(ProvisionOutcome::Upgraded {
-                    entry,
-                    host_path: ctx.host_path,
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                })
+                    &ctx.base_ref,
+                ) {
+                    Ok(()) => Ok(ProvisionOutcome::Created {
+                        host_path: ctx.host_path.clone(),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                    }),
+                    Err(cold_err) => Err(format!(
+                        "provision_for_spawn: warm failed ({}) and cold fallback failed ({})",
+                        warm_err, cold_err
+                    )),
+                }
             }
         }
-    } else if std::path::Path::new(&ctx.host_path).exists() {
-        // 3. Resume / handover / re-spawn — the path is already on disk. Never
-        //    re-cut; the agent's prior work sits in that directory and clobbering
-        //    it would orphan the user's commits.
-        Ok(ProvisionOutcome::Reused {
-            host_path: ctx.host_path,
-        })
-    } else {
-        // 4. Cold create. The cold path takes the *requested* `base_ref`
-        //    (could be a symbolic ref like `origin/main` for the daily case,
-        //    or `origin/<head_ref>` / `fork-<login>/<head_ref>` for a PR
-        //    spawn); `create_git_worktree` itself resolves it via
-        //    `add_worktree_impl` which already handles the offline fallback.
-        let branch_name = ctx
-            .node
-            .worktree_name
-            .clone()
-            .unwrap_or_else(|| "buildmesh-spawn".to_string());
-        let start = std::time::Instant::now();
-        super::create_git_worktree(
-            &ctx.node.path,
-            &ctx.host_path,
-            &branch_name,
-            &ctx.worktree_mode,
-            &ctx.base_ref,
-        )?;
-        Ok(ProvisionOutcome::Created {
-            host_path: ctx.host_path,
-            elapsed_ms: start.elapsed().as_millis() as u64,
-        })
+    }?;
+
+    // ---- Post-success bookkeeping (issue #609, #613, #653 semantics).
+    //
+    // The provisioner owns this fan-out now (deepening). On `Reused` and
+    // `Created` no warm row exists, so nothing to forget. On
+    // `Adopted` / `Upgraded` the warm row is forgotten via `sink.forget_warm_row`.
+    // Manual `Upgraded` additionally adopts the pool's pre-assigned slug as
+    // the node's display name via `sink.adopt_manual_name` (which does both
+    // the DB write and the `node-renamed` emit — see `AppHandleSink`); Issue/PR
+    // keep their own `gh{N}-`/`pr{N}-` name per CONTEXT.md *Spawn Source*.
+    //
+    // The provisioner is therefore DB-free — the sink encapsulates every
+    // `db::is_initialized` gate. Adding new side effects on a future
+    // post-success expansion is a sink-method change, not a provisioner
+    // change.
+    match &outcome {
+        ProvisionOutcome::Adopted { entry, .. } => {
+            sink.forget_warm_row(entry.id);
+        }
+        ProvisionOutcome::Upgraded { entry, .. } => {
+            sink.forget_warm_row(entry.id);
+            sink.adopt_manual_name(ctx.node.id, &entry.preassigned_name);
+        }
+        ProvisionOutcome::Reused { .. } | ProvisionOutcome::Created { .. } => {
+            // No warm entry was adopted — nothing to forget, no name to adopt.
+        }
     }
+
+    let do_refresh = hooks.ref_advanced_for_pool;
+    let do_refill = hooks.pool_was_drained_by_this_spawn;
+    // Only fire the maintenance hook when there's actual work to do — the
+    // sink implementations use this as the no-op gate (the recorder reads
+    // `maintenance_calls()` directly, so an extra no-op call would pollute
+    // the test assertions about "no maintenance scheduled without flags").
+    if do_refresh || do_refill {
+        sink.on_pool_maintenance_required(ctx.node.mesh_id, do_refresh, do_refill);
+    }
+
+    Ok(outcome)
 }
+
+// Note: production callers should prefer `AppHandleSink` (owning an
+// `AppHandle`) over passing `&NullSink` so the side-effect surface is
+// explicit at the call site. `NullSink` is the test-time escape hatch
+// for fixtures that don't exercise post-success hooks.
 
 #[cfg(test)]
 mod tests {
@@ -799,9 +1081,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    /// Build a minimal `SpawnContext` for tests, pre-populating fields the
-    /// provisioner reads but the test doesn't care about (sandbox, resolved
-    /// base SHA) with harmless defaults.
+    /// Build a minimal `SpawnContext` for tests, pre-populating the fields the
+    /// provisioner reads but the test doesn't care about (`base_ref`,
+    /// `worktree_mode`) with harmless defaults.
     fn make_ctx(
         node: AgentNode,
         source: SpawnSource,
@@ -812,12 +1094,9 @@ mod tests {
             node,
             source,
             base_ref: "HEAD".to_string(),
-            resolved_base_sha: String::new(),
             worktree_mode: "branched".to_string(),
             use_worktree: true,
-            sandbox: false,
             warm_entry,
-            spawn_path: host_path.clone(),
             host_path,
         }
     }
@@ -894,7 +1173,7 @@ mod tests {
             ..make_ctx(node, SpawnSource::Manual, host_path, None)
         };
 
-        let outcome = provision_for_spawn(ctx).expect("Root Node must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("Root Node must succeed");
         match outcome {
             ProvisionOutcome::Reused { host_path: p } => {
                 assert!(p.ends_with("does-not-exist-yet"));
@@ -927,7 +1206,7 @@ mod tests {
         // No warm entry — resume / handover / re-spawn path.
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str.clone(), None);
 
-        let outcome = provision_for_spawn(ctx).expect("resume must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("resume must succeed");
         match outcome {
             ProvisionOutcome::Reused { host_path: p } => assert_eq!(p, host_path_str),
             other => panic!("expected Reused for existing path, got {:?}", other),
@@ -952,7 +1231,7 @@ mod tests {
         let host_path_str = host_path.to_string_lossy().to_string();
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str.clone(), None);
 
-        let outcome = provision_for_spawn(ctx).expect("cold create must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("cold create must succeed");
         match outcome {
             ProvisionOutcome::Created { host_path: p, elapsed_ms } => {
                 assert_eq!(p, host_path_str);
@@ -991,7 +1270,7 @@ mod tests {
         // NOT the local drift that `repo.head()` resolves to.
         ctx.base_ref = "origin/main".to_string();
 
-        let outcome = provision_for_spawn(ctx).expect("cold create must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("cold create must succeed");
         match outcome {
             ProvisionOutcome::Created { host_path: p, .. } => assert_eq!(p, host_path_str),
             other => panic!("expected Created, got {:?}", other),
@@ -1025,7 +1304,7 @@ mod tests {
         let warm = claimed_warm(&pool_path, "warm-pool-slug");
         let ctx = make_ctx(node, SpawnSource::PullRequest, host_path_str.clone(), Some(warm));
 
-        let outcome = provision_for_spawn(ctx).expect("PR adopt must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("PR adopt must succeed");
         match outcome {
             ProvisionOutcome::Adopted { entry, host_path: p, elapsed_ms } => {
                 assert_eq!(entry.id, 42);
@@ -1056,7 +1335,7 @@ mod tests {
         let warm = claimed_warm(&pool_path, "warm-issue-slug");
 
         let ctx = make_ctx(node, SpawnSource::Issue, host_path_str.clone(), Some(warm));
-        let outcome = provision_for_spawn(ctx).expect("Issue adopt must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("Issue adopt must succeed");
         match outcome {
             ProvisionOutcome::Adopted { entry, host_path: p, .. } => {
                 assert_eq!(entry.preassigned_name, "warm-issue-slug");
@@ -1100,7 +1379,7 @@ mod tests {
         let warm = claimed_warm(&pool_path, "warm-clobber");
         let ctx = make_ctx(node, SpawnSource::Issue, host_path_str, Some(warm));
 
-        let result = provision_for_spawn(ctx);
+        let result = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink);
         assert!(
             result.is_err(),
             "adopt must refuse to clobber existing branch, got Ok({:?})",
@@ -1144,7 +1423,7 @@ mod tests {
             base_ref: "definitely-not-a-ref-12345".to_string(),
             ..make_ctx(node, SpawnSource::Issue, host_path_str.clone(), Some(warm))
         };
-        let outcome = provision_for_spawn(ctx).expect("offline fallback must succeed (ADR 0001)");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("offline fallback must succeed (ADR 0001)");
         match outcome {
             ProvisionOutcome::Adopted { host_path: p, .. } => {
                 assert_eq!(p, host_path_str);
@@ -1173,7 +1452,7 @@ mod tests {
         let warm = claimed_warm(&pool_path, "bold-amber-fox");
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str.clone(), Some(warm));
 
-        let outcome = provision_for_spawn(ctx).expect("manual upgrade must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("manual upgrade must succeed");
         match outcome {
             ProvisionOutcome::Upgraded { entry, host_path: p, .. } => {
                 assert_eq!(entry.preassigned_name, "bold-amber-fox");
@@ -1208,7 +1487,7 @@ mod tests {
             ..make_ctx(node, SpawnSource::Manual, host_path_str.clone(), Some(warm))
         };
 
-        let outcome = provision_for_spawn(ctx).expect("detached manual upgrade must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("detached manual upgrade must succeed");
         match outcome {
             ProvisionOutcome::Upgraded { host_path: p, .. } => assert_eq!(p, host_path_str),
             other => panic!("expected Upgraded for detached manual, got {:?}", other),
@@ -1240,7 +1519,7 @@ mod tests {
         let host_path_str = pool_path.to_string_lossy().to_string();
         let warm = claimed_warm(&pool_path, "warm-include");
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, Some(warm));
-        let outcome = provision_for_spawn(ctx).expect("manual upgrade must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("manual upgrade must succeed");
         assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
         assert_eq!(
             fs::read_to_string(pool_path.join("secrets.env")).unwrap(),
@@ -1276,7 +1555,7 @@ mod tests {
             host_c.to_string_lossy().to_string(),
             None,
         );
-        let ProvisionOutcome::Created { elapsed_ms, .. } = provision_for_spawn(ctx_c).unwrap()
+        let ProvisionOutcome::Created { elapsed_ms, .. } = provision_for_spawn(ctx_c, &ProvisionHooks::default(), &NullSink).unwrap()
         else {
             panic!("Created branch expected");
         };
@@ -1293,7 +1572,7 @@ mod tests {
             host_a.to_string_lossy().to_string(),
             Some(warm_a),
         );
-        let ProvisionOutcome::Adopted { elapsed_ms, .. } = provision_for_spawn(ctx_a).unwrap()
+        let ProvisionOutcome::Adopted { elapsed_ms, .. } = provision_for_spawn(ctx_a, &ProvisionHooks::default(), &NullSink).unwrap()
         else {
             panic!("Adopted branch expected");
         };
@@ -1308,10 +1587,337 @@ mod tests {
             pool_upgraded.to_string_lossy().to_string(),
             Some(warm_u),
         );
-        let ProvisionOutcome::Upgraded { elapsed_ms, .. } = provision_for_spawn(ctx_u).unwrap()
+        let ProvisionOutcome::Upgraded { elapsed_ms, .. } = provision_for_spawn(ctx_u, &ProvisionHooks::default(), &NullSink).unwrap()
         else {
             panic!("Upgraded branch expected");
         };
         assert!(elapsed_ms < 60_000);
+    }
+
+    // ── Seam deepening (post-success hooks + cold-fallback recovery) ────────────
+
+    /// Test sink that records every semantic call. Mutex because tests can run
+    /// concurrently on machines that allow it (the existing buildmesh tests use
+    /// `--test-threads=1` on Windows today, but Mutex is the lower-friction
+    /// default and matches the existing recorder patterns in this codebase).
+    #[derive(Default)]
+    struct RecordingSink {
+        state: std::sync::Mutex<RecordingState>,
+    }
+
+    #[derive(Default)]
+    struct RecordingState {
+        /// `id` for each `forget_warm_row` call.
+        warm_rows_forgotten: Vec<i64>,
+        /// (node_id, name) for each `adopt_manual_name` call.
+        adopted_names: Vec<(i64, String)>,
+        /// (mesh_id, do_refresh, do_refill) for each `on_pool_maintenance_required`
+        /// call. Multiple calls would be a regression — exactly one per spawn.
+        maintenance_calls: Vec<(i64, bool, bool)>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self::default()
+        }
+        fn warm_rows_forgotten(&self) -> Vec<i64> {
+            self.state.lock().unwrap().warm_rows_forgotten.clone()
+        }
+        fn adopted_names(&self) -> Vec<(i64, String)> {
+            self.state.lock().unwrap().adopted_names.clone()
+        }
+        fn maintenance_calls(&self) -> Vec<(i64, bool, bool)> {
+            self.state.lock().unwrap().maintenance_calls.clone()
+        }
+    }
+
+    impl ProvisionSink for RecordingSink {
+        fn forget_warm_row(&self, id: i64) {
+            self.state.lock().unwrap().warm_rows_forgotten.push(id);
+        }
+        fn adopt_manual_name(&self, node_id: i64, name: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .adopted_names
+                .push((node_id, name.to_string()));
+        }
+        fn on_pool_maintenance_required(&self, mesh_id: i64, do_refresh: bool, do_refill: bool) {
+            self.state
+                .lock()
+                .unwrap()
+                .maintenance_calls
+                .push((mesh_id, do_refresh, do_refill));
+        }
+    }
+
+    /// Manual spawn that adopts a warm entry must fire `adopt_manual_name`
+    /// with the pool's pre-assigned slug. The provisioner does this for free
+    /// now (was the orchestrator's job pre-deepening), and the sink owns the
+    /// DB write + `node-renamed` emit pair.
+    #[test]
+    fn provision_for_spawn_manual_upgraded_adopts_name_via_sink() {
+        let td = TestDir::new("manual_adopt");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+        let pool_path = make_pool_entry(root, "bold-amber-fox");
+
+        let mut node = empty_node(root, Some("bold-amber-fox"));
+        node.id = 4242;
+        node.mesh_id = 7;
+        let host_path_str = pool_path.to_string_lossy().to_string();
+        let warm = claimed_warm(&pool_path, "bold-amber-fox");
+        let ctx = make_ctx(node, SpawnSource::Manual, host_path_str.clone(), Some(warm));
+
+        let sink = RecordingSink::new();
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink)
+            .expect("manual upgrade must succeed");
+        assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
+        assert_eq!(
+            sink.adopted_names(),
+            vec![(4242, "bold-amber-fox".to_string())],
+            "Manual warm claim must adopt the pool's slug via the sink",
+        );
+        // Maintenance NOT scheduled — neither flag set.
+        assert!(
+            sink.maintenance_calls().is_empty(),
+            "no maintenance without ref_advanced/drained flags"
+        );
+    }
+
+    /// Issue spawn (the other warm path) must NOT adopt a name — Issue/PR
+    /// keep their own `gh{N}-`/`pr{N}-` name per CONTEXT.md *Spawn Source*.
+    /// `forget_after_spawn` still fires; the maintenance check stays empty.
+    #[test]
+    fn provision_for_spawn_issue_adopted_does_not_adopt_name() {
+        let td = TestDir::new("issue_no_adopt");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+        let pool_path = make_pool_entry(root, "warm-issue-no-adopt");
+
+        let mut node = empty_node(root, Some("gh45-bug"));
+        node.id = 9999;
+        node.source_issue = Some(45);
+        let host_path = root.join(".claude").join("worktrees").join("gh45-bug");
+        let host_path_str = host_path.to_string_lossy().to_string();
+        let warm = claimed_warm(&pool_path, "warm-issue-no-adopt");
+        let ctx = make_ctx(node, SpawnSource::Issue, host_path_str, Some(warm));
+
+        let sink = RecordingSink::new();
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink)
+            .expect("Issue adoption must succeed");
+        assert!(matches!(outcome, ProvisionOutcome::Adopted { .. }));
+        assert!(
+            sink.adopted_names().is_empty(),
+            "Issue/PR spawns keep their own name; the sink must NOT be called"
+        );
+    }
+
+    /// Maintenance fires exactly once when `ref_advanced_for_pool` is set —
+    /// pins the freshness-pass handoff. Issue #613 AC3.
+    #[test]
+    fn provision_for_spawn_fires_maintenance_when_ref_advanced() {
+        let td = TestDir::new("maintenance_advanced");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+
+        // Trivial manual spawn that resolves to `Created` (no warm) — keeps the
+        // test focused on the maintenance hook, not the worktree-doing branches.
+        let mut node = empty_node(root, Some("advanced-name"));
+        node.id = 11;
+        node.mesh_id = 88;
+        let host_path = root.join(".claude").join("worktrees").join("advanced-name");
+        let host_path_str = host_path.to_string_lossy().to_string();
+        let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, None);
+
+        let hooks = ProvisionHooks { ref_advanced_for_pool: true, pool_was_drained_by_this_spawn: false };
+        let sink = RecordingSink::new();
+        let _ = provision_for_spawn(ctx, &hooks, &sink).expect("cold create must succeed");
+        assert_eq!(
+            sink.maintenance_calls(),
+            vec![(88, true, false)],
+            "ref_advanced flag alone must schedule a refresh pass"
+        );
+        assert!(sink.adopted_names().is_empty());
+    }
+
+    /// Maintenance fires exactly once when `pool_was_drained_by_this_spawn` is
+    /// set, even when the spawn fell back to cold because the use-site recheck
+    /// rejected the warm claim (issue #653) — the pool inventory is still one
+    /// short and the refill must run.
+    #[test]
+    fn provision_for_spawn_fires_maintenance_when_pool_drained() {
+        let td = TestDir::new("maintenance_drained");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+
+        let mut node = empty_node(root, Some("drained-name"));
+        node.id = 22;
+        node.mesh_id = 99;
+        let host_path = root.join(".claude").join("worktrees").join("drained-name");
+        let host_path_str = host_path.to_string_lossy().to_string();
+        let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, None);
+
+        let hooks = ProvisionHooks { ref_advanced_for_pool: false, pool_was_drained_by_this_spawn: true };
+        let sink = RecordingSink::new();
+        let _ = provision_for_spawn(ctx, &hooks, &sink).expect("cold create must succeed");
+        assert_eq!(
+            sink.maintenance_calls(),
+            vec![(99, false, true)],
+            "drained flag alone must schedule a refill"
+        );
+    }
+
+    /// Maintenance NOT scheduled when neither flag is set — and the recorder
+    /// pin catches a regression that fires the hook unconditionally.
+    #[test]
+    fn provision_for_spawn_does_not_fire_maintenance_without_flags() {
+        let td = TestDir::new("maintenance_quiet");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+
+        let mut node = empty_node(root, Some("quiet-name"));
+        node.mesh_id = 5;
+        let host_path = root.join(".claude").join("worktrees").join("quiet-name");
+        let host_path_str = host_path.to_string_lossy().to_string();
+        let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, None);
+
+        let sink = RecordingSink::new();
+        let _ = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink).expect("cold create must succeed");
+        assert!(
+            sink.maintenance_calls().is_empty(),
+            "no flags → no maintenance call (no false-positive refills)"
+        );
+    }
+
+    /// Regression test for the warm-failure smart-cleanup: when the warm
+    /// helper's pre-move guard refuses (the branch already exists — issue
+    /// #612's refused-adoption case), the disk was untouched, and the
+    /// provisioner's cleanup branch must NOT remove the pool directory.
+    /// The sibling test (`provision_for_spawn_adopted_refuses_to_clobber_existing_branch`)
+    /// pins this for the `Adopted` branch; the `Upgraded` branch skips the
+    /// pre-move guard entirely (the pool slug IS the node's branch name),
+    /// so we exercise the cleanup branch directly with a forced checkout
+    /// failure: replace the worktree's `.git` HEAD with an invalid one.
+    #[test]
+    fn provision_for_spawn_warm_failure_leaves_pool_untouched_on_pre_move_refusal() {
+        let td = TestDir::new("warm_fail_cleanup");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+        // Build a valid warm entry, then pre-create a branch the Adoption
+        // would target. With Issue source, the node's branch is its own
+        // deterministic name (`gh{N}-bug`), and the pre-move guard refuses.
+        let pool_path = make_pool_entry(root, "warm-fail-pool");
+
+        let mut node = empty_node(root, Some("gh42-bug"));
+        node.source_issue = Some(42);
+        let host_path = root.join(".claude").join("worktrees").join("gh42-bug");
+        let host_path_str = host_path.to_string_lossy().to_string();
+
+        // Pre-create the deterministic branch the adoption would refuse.
+        // Use a real detached HEAD so `find_branch` picks it up.
+        std::process::Command::new("git")
+            .args(["branch", "gh42-bug", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("pre-branch creation must succeed");
+
+        let warm = claimed_warm(&pool_path, "warm-fail-pool");
+        let ctx = make_ctx(node, SpawnSource::Issue, host_path_str, Some(warm));
+
+        let sink = RecordingSink::new();
+        let result = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink);
+        // Pre-move guard refused → either warm Err surfaced verbatim (no
+        // cold fallback) or, on platforms where git worktree mv got partially
+        // through, the cleanup leaves the pool intact.
+        assert!(result.is_err(), "branch-exists must produce an error");
+        assert!(
+            pool_path.exists(),
+            "pool entry must remain intact when the pre-move guard refuses"
+        );
+        assert!(
+            sink.adopted_names().is_empty(),
+            "no adopted name when warm failed before adoption"
+        );
+        assert!(
+            sink.maintenance_calls().is_empty(),
+            "warm failure must not schedule pool maintenance"
+        );
+    }
+
+    /// Combined-error format: when both warm and cold paths fail, the
+    /// surfaced string names BOTH failures so a coordinator/operator can
+    /// see the full picture. This test exercises the format directly on
+    /// the warm-failure-with-pool-intact path (the pre-move-guard refusal
+    /// from the sibling test) and pins the error category. A future split
+    /// can add a cold-failure-only test by deleting the repo before the call.
+    #[test]
+    fn provision_for_spawn_warm_failure_surfaces_warm_error() {
+        // This is the same setup as
+        // `provision_for_spawn_warm_failure_leaves_pool_untouched_on_pre_move_refusal`,
+        // rephrased as an error-format pin: the pre-move guard refuses, the
+        // warm helper returns Err, the provisioner surfaces it verbatim (the
+        // cold fallback only runs when `adopt_warm_worktree_by_move` errors
+        // AFTER the move happened — pre-move refusal is below that threshold).
+        let td = TestDir::new("warm_format");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+        let pool_path = make_pool_entry(root, "warm-format-pool");
+
+        let mut node = empty_node(root, Some("gh99-format"));
+        node.source_issue = Some(99);
+        let host_path = root.join(".claude").join("worktrees").join("gh99-format");
+        let host_path_str = host_path.to_string_lossy().to_string();
+        std::process::Command::new("git")
+            .args(["branch", "gh99-format", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("pre-branch creation must succeed");
+
+        let warm = claimed_warm(&pool_path, "warm-format-pool");
+        let ctx = make_ctx(node, SpawnSource::Issue, host_path_str, Some(warm));
+        let sink = RecordingSink::new();
+        let result = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink);
+        let err = result.expect_err("pre-move guard must refuse the adoption");
+        assert!(
+            err.contains("already exists"),
+            "warm-failure error must name the refusal cause, got: {}",
+            err
+        );
+        assert!(pool_path.exists(), "pre-move refusal: pool directory must remain intact");
+        assert!(sink.adopted_names().is_empty());
+        assert!(sink.maintenance_calls().is_empty());
+    }
+
+    /// Manual warm upgrade succeeds — pin both invariants:
+    ///   (a) `adopt_manual_name` IS called (DB write + node-renamed),
+    ///   (b) maintenance hook is NOT called (no ref_advanced / drained flags).
+    /// The seam concentrates these decisions — a regression that fires the
+    /// maintenance hook unconditionally, or that drops the name adoption,
+    /// fails here.
+    #[test]
+    fn provision_for_spawn_manual_upgraded_adopts_name_and_skips_maintenance() {
+        let td = TestDir::new("manual_upgrade_no_maintenance");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+        let pool_path = make_pool_entry(root, "quiet-warm");
+
+        let mut node = empty_node(root, Some("quiet-warm"));
+        node.id = 7;
+        node.mesh_id = 12;
+        let host_path_str = pool_path.to_string_lossy().to_string();
+        let warm = claimed_warm(&pool_path, "quiet-warm");
+        let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, Some(warm));
+
+        let sink = RecordingSink::new();
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink)
+            .expect("manual upgrade must succeed");
+        assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
+        assert_eq!(sink.adopted_names(), vec![(7, "quiet-warm".to_string())]);
+        assert!(
+            sink.warm_rows_forgotten() == vec![42],
+            "manual upgrade must forget the warm row (id from claimed_warm fixture)"
+        );
+        assert!(sink.maintenance_calls().is_empty());
     }
 }

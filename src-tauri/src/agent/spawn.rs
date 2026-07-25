@@ -11,8 +11,8 @@ use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
 use crate::git::worktree::provision::{
-    fork_remote_alias, locked_fetch_pr_head, provision_for_spawn, read_origin_ref_sha,
-    ProvisionOutcome, SpawnContext, SpawnSource,
+    fork_remote_alias, locked_fetch_pr_head, read_origin_ref_sha, AppHandleSink,
+    ProvisionHooks, SpawnContext, SpawnSource, provision_for_spawn,
 };
 // The bare fetch helpers (`fetch_single_ref`, `fetch_fork_head`) are
 // re-exported under `#[cfg(test)]` below — production code goes through
@@ -1673,10 +1673,15 @@ pub(crate) async fn spawn_agent_inner(
     };
 
     // 7. Provision the Worktree Node via `provision_for_spawn` (issue #677).
-    //    The 4-way decision (Reused / Adopted / Upgraded / Created) lives
-    //    inside `git::worktree::provision` now; this orchestrator just
-    //    builds the Spawn Context, awaits the call, and matches the
-    //    outcome to drive the post-spawn bookkeeping.
+    //    The seam deepened: the provisioner now owns the four-way decision
+    //    (Reused / Adopted / Upgraded / Created), the warm-failure cold
+    //    fallback, the post-success pool row cleanup (`forget_after_spawn`),
+    //    the Manual name-adoption DB write, and the `post_spawn_maintenance`
+    //    thread trigger. This orchestrator hands it:
+    //      * a SpawnContext (data only),
+    //      * ProvisionHooks (decision inputs: ref-advanced / pool-drained),
+    //      * an AppHandleSink (side-effect surface),
+    //    then awaits the call and propagates the result.
     //
     //    CRITICAL CORRECTNESS:
     //    * `ctx.base_ref` is `worktree_base_ref` (post-fetch for PR/Issue,
@@ -1684,125 +1689,52 @@ pub(crate) async fn spawn_agent_inner(
     //      block — not the original `base_ref` — is what makes every PR
     //      spawn land on the freshly fetched PR head rather than going
     //      cold. For Resume / Root Node it's `base_ref` (no fetch ran).
-    //    * `warm_claimed.take()` moves the claim into the context; the
-    //      post-spawn housekeeping rebuilds it from the outcome's `entry`
-    //      field on `Adopted` / `Upgraded`.
-    //    * `is_rename_spawn` is preserved unchanged — the post-spawn name
-    //      adoption (further below) still reads it.
-    //
-    //    `warm_claimed.take()` moves the claim into the context — but we
-    //    ALSO hold a copy in `warm_entry_for_cleanup` so the error branch
-    //    below can find it for the warm-pool cleanup. Without this second
-    //    handle, the `Err` branch's cleanup is dead code (the move above
-    //    already emptied `warm_claimed`) and the post-spawn `forget_after_spawn`
-    //    never runs on a provision failure. Cloning the entry is cheap (4
-    //    short strings) and only happens once per spawn — the alternative
-    //    of having `provision_for_spawn` return the still-owned entry on
-    //    `Err` would expand the API surface for the rare failure case.
-    let warm_entry_for_cleanup = warm_claimed.take();
+    //    * `warm_claimed.take()` moves the claim into the context; on a warm
+    //      failure the provisioner cleans both possible paths up, forgets the
+    //      row, and re-cuts cold — all internally. This orchestrator no
+    //      longer threads the entry back out.
+    //    * `is_rename_spawn` is preserved unchanged — the pre-provision
+    //      `spawn_worktree_name` resolution still reads it.
     let provision_ctx = SpawnContext {
         node: node.clone(),
         source: SpawnSource::from_node(&node),
         base_ref: worktree_base_ref.clone(),
-        resolved_base_sha: String::new(),
         worktree_mode: worktree_mode.to_string(),
         use_worktree,
-        sandbox,
-        warm_entry: warm_entry_for_cleanup.clone(),
-        spawn_path: resolved.spawn_path.clone(),
+        warm_entry: warm_claimed.take(),
         host_path: resolved.host_path.clone(),
     };
-    timer.checkpoint("before_provision");
-    let provision_result = tokio::task::spawn_blocking(move || provision_for_spawn(provision_ctx))
-        .await
-        .unwrap_or_else(|e| Err(format!("provision_for_spawn task panicked: {}", e)));
-    timer.checkpoint("after_provision");
-    let provision_outcome = match provision_result {
-        Ok(o) => o,
-        Err(e) => {
-            // Provision failed. Two cases:
-            //
-            // (a) We had a warm claim (`warm_entry_for_cleanup` is Some) — the
-            //     warm-path helpers inside `provision_for_spawn` left the pool
-            //     directory in either the pool-path or target-path state (the
-            //     `git worktree move` may have succeeded and the
-            //     `git checkout -b` failed, or vice versa). Remove BOTH paths
-            //     (idempotent on whichever was untouched) and forget the row,
-            //     then FALL THROUGH to a cold create so the spawn still
-            //     succeeds on the cold path — preserves pre-refactor behavior
-            //     where warm-adopt failures were a graceful degradation rather
-            //     than a fatal error (issue #612).
-            // (b) No warm claim — `provision_for_spawn` failed on the cold
-            //     create itself; surface the error.
-            tracing::warn!(
-                "spawn_agent_inner: provision_for_spawn failed ({}); warm_entry_present={}",
-                e,
-                warm_entry_for_cleanup.is_some()
-            );
-            if let Some(entry) = warm_entry_for_cleanup.as_ref() {
-                let pool_path = entry.path.clone();
-                let target_path = resolved.host_path.clone();
-                let row_id = entry.id;
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _ = crate::git::worktree::remove_one_worktree(&target_path);
-                    let _ = crate::git::worktree::remove_one_worktree(&pool_path);
-                })
-                .await;
-                crate::services::warm_pool::forget_after_spawn(row_id);
-                // Retry as cold create. The SpawnContext is rebuilt with
-                // `warm_entry: None` so `provision_for_spawn` takes the
-                // `Created` branch on the no-warm-claim / path-doesn't-exist
-                // path. `pool_was_drained_by_this_spawn` is still true from
-                // the original `try_claim` so the post-spawn refill below
-                // restores the pool inventory after this spawn completes.
-                timer.checkpoint("before_cold_fallback");
-                let cold_ctx = SpawnContext {
-                    node: node.clone(),
-                    source: SpawnSource::from_node(&node),
-                    base_ref: worktree_base_ref.clone(),
-                    resolved_base_sha: String::new(),
-                    worktree_mode: worktree_mode.to_string(),
-                    use_worktree,
-                    sandbox,
-                    warm_entry: None,
-                    spawn_path: resolved.spawn_path.clone(),
-                    host_path: resolved.host_path.clone(),
-                };
-                let cold_result =
-                    tokio::task::spawn_blocking(move || provision_for_spawn(cold_ctx))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(format!("cold-create fallback task panicked: {}", e))
-                        });
-                timer.checkpoint("after_cold_fallback");
-                match cold_result {
-                    Ok(o) => o,
-                    Err(cold_e) => {
-                        let msg = format!(
-                            "spawn_agent_inner: provision_for_spawn failed AND cold fallback failed: \
-                             warm={}, cold={}",
-                            e, cold_e
-                        );
-                        tracing::error!("{}", msg);
-                        return Err(msg);
-                    }
-                }
-            } else {
-                let msg = format!("spawn_agent_inner: provision_for_spawn: {}", e);
-                tracing::error!("{}", msg);
-                return Err(msg);
-            }
-        }
+    let provision_hooks = ProvisionHooks {
+        ref_advanced_for_pool,
+        pool_was_drained_by_this_spawn,
     };
-    // Rebuild `warm_claimed` from the outcome so the post-spawn bookkeeping
-    // (`forget_after_spawn` + name adoption) sees the entry on
-    // Adopted/Upgraded and None on Reused/Created. The Manual `Upgraded`
-    // variant carries the entry whose `preassigned_name` overwrites the
-    // node's stage-1 throwaway slug (the DB write below persists this).
-    if let ProvisionOutcome::Adopted { entry, .. } | ProvisionOutcome::Upgraded { entry, .. } =
-        &provision_outcome
-    {
-        warm_claimed = Some(entry.clone());
+    let provision_sink = AppHandleSink { app: app.clone() };
+    timer.checkpoint("before_provision");
+    let provision_result = tokio::task::spawn_blocking(move || {
+        provision_for_spawn(provision_ctx, &provision_hooks, &provision_sink)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("provision_for_spawn task panicked: {}", e)));
+    timer.checkpoint("after_provision");
+    // The provisioner owns its own post-success bookkeeping (`forget_after_spawn`,
+    // Manual name adoption, `post_spawn_maintenance` thread) — the orchestrator
+    // only needs to know whether the worktree is on disk (Ok) or whether the
+    // provisioner gave up entirely (Err, already combined warm+cold strings).
+    match provision_result {
+        Ok(_outcome) => {}
+        Err(e) => {
+            tracing::error!("spawn_agent_inner: provision_for_spawn failed: {}", e);
+            let sink = session_lifecycle::AppSessionLifecycleSink { app };
+            let _ = session_lifecycle::on_error(&sink, session_id);
+            let _ = app.emit(
+                "node-spawn-failed",
+                crate::commands::agent::NodeSpawnFailedPayload {
+                    node_id: session_id,
+                    error: e.clone(),
+                },
+            );
+            return Err(e);
+        }
     }
 
     // Fix WSL/Windows path mismatches in the worktree's .git file — without
@@ -2017,94 +1949,14 @@ pub(crate) async fn spawn_agent_inner(
         }
     });
 
-    // Warm-pool post-claim housekeeping (issue #609). After the spawn
-    // succeeds we (a) drop the bookkeeping row — the directory now lives
-    // on as the node's worktree so the row's purpose is done — and (b)
-    // fire a background refill so the pool is back at target before the
-    // next spawn. Both are best-effort: a failed delete leaves an orphan
-    // `claimed` row that the next startup reconcile prunes (its `path`
-    // exists, but the `claimed` status means no future claim will pick
-    // it up — it just sits there as harmless bookkeeping until a future
-    // issue adds GC for it); a failed refill is logged and retried on the
-    // next reconcile pass.
-    //
-    // Issue #653: `warm_claimed` is None when the use-site recheck fired
-    // (the spawn fell back to cold), but the pool inventory is still
-    // drained — `pool_was_drained_by_this_spawn` captures that case for
-    // the post-spawn refill trigger. `warm_claimed.is_some()` would
-    // miss the recheck-fired case and leave the pool at target-1.
-    if let Some(entry) = warm_claimed.take() {
-        crate::services::warm_pool::forget_after_spawn(entry.id);
-        // Full name adoption — MANUAL spawns only (issue #609, PRD #608 §3
-        // "Manual Spawns"). The node takes the warm entry's slug as BOTH its
-        // `worktree_name` (so path resolution lands on the pre-warmed
-        // directory) AND its display `name` (so the on-disk directory and the
-        // node name match with zero rename). At stage-1 the node was created
-        // under a throwaway slug; here we overwrite both with the adopted slug.
-        // The slug is a plain `on_spawn` adj-adj-noun, so it's still a
-        // `is_default_name` match — the auto-LLM renamer can override it later
-        // exactly as it would the throwaway slug. The `worktree_name` UPDATE
-        // was already done above (before `register_agent`) so the reader thread
-        // sees the adopted value; only `name` needs an event here.
-        //
-        // Issue/PR claims (`is_rename_spawn`) keep their own `gh{N}-`/`pr{N}-`
-        // name — the pool DIRECTORY was renamed to match the node, not the
-        // reverse — so they skip the name adoption entirely (#612).
-        if !is_rename_spawn {
-            if let Err(e) = db::update_agent_node_name(session_id, &entry.preassigned_name) {
-                tracing::warn!(
-                    "spawn_agent_inner: failed to adopt name={} on node {}: {}",
-                    entry.preassigned_name,
-                    session_id,
-                    e
-                );
-            } else {
-                // Re-label the frontend's optimistic stage-1 row (created under
-                // the throwaway slug) via the same `node-renamed` channel the
-                // manual-rename command uses (agentNodeStore listens for it).
-                let _ = app.emit(
-                    "node-renamed",
-                    crate::session_naming::NodeRenamedPayload {
-                        node_id: session_id,
-                        name: entry.preassigned_name,
-                    },
-                );
-            }
-        }
-    }
-
-    // Single post-spawn pool-maintenance task (issue #613). Runs on its own
-    // thread (it shells out to `git` and re-locks the DB) so it never delays
-    // the spawn caller, and does BOTH jobs under ONE fill-lock acquisition:
-    //   * ref-freshness — `git reset --hard` stale warm entries onto the new
-    //     base SHA, when the spawn-time fetch advanced the ref;
-    //   * refill — top the pool back up to target after this spawn claimed an
-    //     entry.
-    // Combining them means refresh and refill can never lose a fill-lock race
-    // to each other (the previous split into two threads dropped whichever
-    // lost, with no in-session retry — issue #613 review). Fired whenever
-    // either job has work to do.
-    if mesh_id > 0 && (ref_advanced_for_pool || pool_was_drained_by_this_spawn) {
-        let mesh_id_for_pool = mesh_id;
-        let do_refresh = ref_advanced_for_pool;
-        // Issue #653: `pool_was_drained_by_this_spawn` covers the
-        // recheck-fired case where `did_claim_warm` (gated on
-        // `warm_claimed.is_some()`) is false but the pool still needs a
-        // refill. Use the drained flag for the refill trigger, keep
-        // `did_claim_warm` for the name-adoption bookkeeping above (those
-        // are distinct concerns: refill restores inventory; name adoption
-        // only makes sense when the spawn actually adopted the entry).
-        let do_refill = pool_was_drained_by_this_spawn;
-        let app_for_pool = app.clone();
-        std::thread::spawn(move || {
-            crate::services::warm_pool::post_spawn_maintenance(
-                mesh_id_for_pool,
-                do_refresh,
-                do_refill,
-                &app_for_pool,
-            );
-        });
-    }
+    // Warm-pool post-claim housekeeping (issue #609) and the post-spawn
+    // maintenance task (issue #613) live inside `provision_for_spawn` now
+    // — the provisioner owns the warm-failure cold fallback, the warm-row
+    // `forget_after_spawn`, the Manual name adoption (DB write +
+    // `node-renamed` event), and the single thread that runs refresh +
+    // refill under one fill-lock acquisition. This orchestrator just gets
+    // back the final `ProvisionOutcome`; see `git::worktree::provision`
+    // for the seam contract.
 
     // Emit the post-spawn reconcile trigger (issue #332). Async-spawn paths
     // (auto-resume on startup, fresh auto-spawn, handover, etc.) race the
