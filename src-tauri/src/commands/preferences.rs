@@ -2,7 +2,7 @@
 //!
 //! See `crate::preferences` for the persistence layer.
 
-use crate::preferences::{self, AppPreferences, ProviderAccount, ProviderPairing};
+use crate::preferences::{self, AppPreferences, ModelTiers, ProviderAccount, ProviderPairing};
 use tauri::{command, AppHandle, Emitter};
 
 /// Read the persisted buildmesh-wide preferences. Always returns a value —
@@ -84,20 +84,37 @@ pub async fn set_proxied_provider_order(
     Ok(())
 }
 
-/// The effective model-provider account list — code-defined built-ins with the
-/// user's stored overrides merged in (issue #537). The settings UI renders this
-/// rather than the raw `provider_accounts` override list so the built-ins are
-/// always present without the frontend duplicating the default definitions.
+/// The effective model-provider account list — self-auth built-ins plus any
+/// keyed first-class / generic accounts the user has added (ADR-0025).
 #[command]
 pub async fn get_provider_accounts() -> Result<Vec<ProviderAccount>, String> {
     Ok(preferences::provider_accounts())
 }
 
-/// Create or update a model-provider account (issue #537). For a custom
-/// (non-built-in) account this also registers a paired harness profile so the
-/// custom Claude-compatible provider appears in spawn menus — see
-/// [`preferences::upsert_provider_account`]. Invalidates the usage cache so a
-/// changed key/enabled-state is reflected on the next panel refresh.
+/// Keyed first-class catalog templates (MiniMax, Kimi, OpenRouter) for the
+/// Providers-page "Add provider" picker (ADR-0025). The UI filters out ids
+/// already present in [`get_provider_accounts`].
+#[command]
+pub async fn get_keyed_first_class_catalog() -> Result<Vec<ProviderAccount>, String> {
+    Ok(preferences::keyed_first_class_catalog())
+}
+
+/// Attach-form defaults for `(harness_id, provider_id)` — first-class published
+/// endpoint + tiers when available; `None` when the pair is incompatible
+/// (ADR-0025). Does not require a stored pairing.
+#[command]
+pub async fn get_pairing_defaults(
+    harness_id: String,
+    provider_id: String,
+) -> Result<Option<ProviderPairing>, String> {
+    Ok(preferences::pairing_for(&harness_id, &provider_id))
+}
+
+/// Create or update a model-provider account (issue #537 / ADR-0025). For a
+/// custom (non-built-in) account the row is added; spawn-menu visibility
+/// requires an explicit attach under the Harnesses page. Invalidates the
+/// usage cache so a changed key/enabled-state is reflected on the next panel
+/// refresh.
 ///
 /// Emits `provider-list-changed` so frontend consumers (Sidebar spawn menu,
 /// Probe tabs that list provider options) drop their locally-cached provider
@@ -114,10 +131,13 @@ pub async fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -
     Ok(())
 }
 
-/// Remove a stored provider account (and its paired custom harness profile, if
-/// any). Removing a built-in just reverts it to the code-defined default.
-/// Emits `provider-list-changed` for the same cross-component invalidation
-/// reason as [`upsert_provider_account`].
+/// Remove a stored provider account. Removing a self-auth built-in just
+/// reverts it to the code-defined default; keyed-first-class and generic
+/// rows are deleted outright (re-adding them starts from the catalog /
+/// blank). Stored pairings for the removed id are filtered out at spawn
+/// time — detach separately if the goal is hiding the row from the spawn
+/// menu only. Emits `provider-list-changed` for cross-component
+/// invalidation (same reason as [`upsert_provider_account`]).
 #[command]
 pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), String> {
     let mut prefs = preferences::load()?;
@@ -132,10 +152,9 @@ pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), S
 // Proxied Provider pairings (ADR-0016 §4, issue #576)
 // ---------------------------------------------------------------------------
 
-/// The full effective set of **Proxied Provider** pairings — the derived default
-/// Anthropic pairing for every keyed account plus the user's stored
-/// cross-surface/cross-harness pairings. The harness-config page renders this to
-/// show what's attached under each harness (issue #576).
+/// The full effective set of **Proxied Provider** pairings — stored pairings
+/// for proxiable accounts only (ADR-0025). The harness-config page renders this
+/// to show what's attached under each harness (issue #576).
 #[command]
 pub async fn get_provider_pairings() -> Result<Vec<ProviderPairing>, String> {
     Ok(preferences::effective_provider_pairings())
@@ -152,21 +171,62 @@ pub async fn compatible_providers_for_harness(
 }
 
 /// Attach a **Model Provider** to a harness over the harness's surface — the
-/// "Add proxied provider" action (issue #576). The backend derives the pairing
-/// (published first-class endpoint, or the Generic provider's declared one) so
-/// the client never needs the surface→URL map; `api_key`, when present, seeds
-/// the provider's **global** key only if it has none (set-if-absent). Rejects an
-/// incompatible (harness, provider) pair — the same gate the picker enforces.
+/// "Add proxied provider" action (issue #576 / ADR-0025). Starts from
+/// [`preferences::pairing_for`] defaults (first-class published endpoint, or a
+/// surface-only shell for generics), then overlays optional `base_url` /
+/// `model_tiers`. Requires a non-empty `base_url` after overlay (fill from
+/// first-class or supply). `api_key`, when present, seeds the provider's
+/// **global** key only if it has none (set-if-absent).
 #[command]
 pub async fn attach_proxied_provider(
     app: AppHandle,
     harness_id: String,
     provider_id: String,
     api_key: Option<String>,
+    base_url: Option<String>,
+    model_tiers: Option<ModelTiers>,
 ) -> Result<(), String> {
-    let pairing = preferences::pairing_for(&harness_id, &provider_id).ok_or_else(|| {
-        format!("provider '{provider_id}' is not compatible with harness '{harness_id}'")
+    let surface = preferences::harness_surface(&harness_id).ok_or_else(|| {
+        format!("harness '{harness_id}' does not speak a proxy-capable surface")
     })?;
+    let mut pairing = preferences::pairing_for(&harness_id, &provider_id).unwrap_or_else(|| {
+        ProviderPairing {
+            harness_id: harness_id.clone(),
+            provider_id: provider_id.clone(),
+            surface,
+            base_url: None,
+            model_tiers: ModelTiers::default(),
+        }
+    });
+    // Surface-match gate: refuse when the provider doesn't expose this surface.
+    let accounts = preferences::provider_accounts();
+    let account = accounts.iter().find(|a| a.id == provider_id);
+    // Keyed first-class may not be materialised yet — check catalog too.
+    let surfaces = account
+        .map(preferences::provider_surfaces)
+        .or_else(|| {
+            preferences::keyed_first_class_catalog()
+                .into_iter()
+                .find(|a| a.id == provider_id)
+                .map(|a| preferences::provider_surfaces(&a))
+        })
+        .unwrap_or_default();
+    if !surfaces.contains(&surface) {
+        return Err(format!(
+            "provider '{provider_id}' is not compatible with harness '{harness_id}'"
+        ));
+    }
+    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
+        pairing.base_url = Some(url);
+    }
+    if let Some(tiers) = model_tiers {
+        pairing.model_tiers = tiers;
+    }
+    if pairing.base_url.as_deref().is_none_or(|s| s.is_empty()) {
+        return Err(format!(
+            "base_url is required to attach provider '{provider_id}' to harness '{harness_id}'"
+        ));
+    }
     let mut prefs = preferences::load()?;
     if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
         preferences::set_account_key_if_absent(&mut prefs, &provider_id, key);
@@ -178,9 +238,40 @@ pub async fn attach_proxied_provider(
     Ok(())
 }
 
-/// Detach a stored **Proxied Provider** pairing (issue #576). A no-op for a
-/// derived default pairing — the default Claude/Anthropic row is governed by the
-/// account's enabled/keyed state on the Providers page, not here. Emits
+/// Update `base_url` and/or `model_tiers` on an existing stored pairing
+/// (ADR-0025 — Harnesses page inline edit). Errors if no pairing is stored for
+/// the `(harness_id, provider_id)` key.
+#[command]
+pub async fn update_provider_pairing(
+    app: AppHandle,
+    harness_id: String,
+    provider_id: String,
+    base_url: Option<String>,
+    model_tiers: Option<ModelTiers>,
+) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    let pairing = prefs
+        .provider_pairings
+        .iter_mut()
+        .find(|p| p.harness_id == harness_id && p.provider_id == provider_id)
+        .ok_or_else(|| {
+            format!("no stored pairing for harness '{harness_id}' / provider '{provider_id}'")
+        })?;
+    if let Some(url) = base_url {
+        pairing.base_url = if url.is_empty() { None } else { Some(url) };
+    }
+    if let Some(tiers) = model_tiers {
+        pairing.model_tiers = tiers;
+    }
+    if pairing.base_url.as_deref().is_none_or(|s| s.is_empty()) {
+        return Err("base_url must be non-empty".to_string());
+    }
+    preferences::save(prefs)?;
+    let _ = app.emit("provider-list-changed", ());
+    Ok(())
+}
+
+/// Detach a stored **Proxied Provider** pairing (issue #576 / ADR-0025). Emits
 /// `provider-list-changed` so the spawn menu drops the detached row.
 #[command]
 pub async fn remove_provider_pairing(

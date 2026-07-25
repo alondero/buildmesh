@@ -5,11 +5,12 @@
  * `<UsagePanel>`); these tests pin what the Settings card STILL does:
  *
  *   - Enable toggle (writes through `onSave`)
- *   - Remove (custom accounts only; built-ins can only be disabled —
- *     a remove would just revert to the code default)
+ *   - Remove for non-self-auth (keyed first-class + custom); self-auth
+ *     can only be disabled (ADR-0025)
  *   - Two-step Remove confirmation guard, busy gate on in-flight
  *     remove, busy recovery on rejected remove
- *   - Per-tier model fields for Claude-compatible accounts (#567)
+ *   - API key editor for Claude-compatible accounts; billing for
+ *     first-class only. Base URL / model tiers live on Harnesses attach.
  *   - No credential editor for self-authenticating harnesses (#568a)
  *
  * Meter rendering moved to `tests/unit/usage-panel.test.tsx`.
@@ -21,10 +22,8 @@ import userEvent from '@testing-library/user-event';
 import { AccountCard } from '../../src/components/AppSettings/AppSettingsModal';
 import type { ProviderAccount } from '../../src/lib/tauri';
 
-// Mirror the backend's derivation (preferences::is_claude_compatible_id):
-// every account except the three self-authenticating built-ins is
-// Claude-compatible.
-const SELF_AUTH_IDS = ['anthropic', 'codex', 'agy'];
+// Mirror preferences::default_provider_accounts / ADR-0025 self-auth ids.
+const SELF_AUTH_IDS = ['anthropic', 'codex', 'agy', 'grok', 'opencode'];
 
 function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
   const id = over.id ?? 'anthropic';
@@ -35,9 +34,6 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
     billing_mode: 'plan',
     claude_compatible: !SELF_AUTH_IDS.includes(id),
     api_key: null,
-    base_url: null,
-    model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null },
-    models: [],
     ...over,
   };
 }
@@ -53,7 +49,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
     expect(onSave.mock.calls[0][0]).toMatchObject({ id: 'anthropic', enabled: false });
   });
 
-  it('hides Remove for a built-in Claude-compatible account', () => {
+  it('shows Remove for a keyed first-class account (minimax is removable once added)', () => {
     render(
       <AccountCard
         account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
@@ -61,10 +57,9 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         onRemove={vi.fn()}
       />,
     );
-    // Built-ins (Anthropic/Codex/Antigravity/MiniMax/Kimi) can only be disabled —
-    // a "remove" would just revert to the code default, so the action is hidden
-    // regardless of whether the credentials section is expanded.
-    expect(screen.queryByRole('button', { name: /remove/i })).toBeNull();
+    // ADR-0025: keyed first-class (minimax/kimi/openrouter) are removable;
+    // only self-auth built-ins hide Remove.
+    expect(screen.getByRole('button', { name: /^remove minimax$/i })).toBeTruthy();
   });
 
   it('hides Remove for a self-authenticating built-in (Anthropic)', () => {
@@ -81,10 +76,12 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
   it('shows no credential editor for a self-authenticating harness (#568a)', () => {
     render(<AccountCard account={account({ id: 'anthropic' })} onSave={vi.fn()} />);
     // Anthropic/Codex/Antigravity authenticate via their own CLI — no key fields.
+    // Billing is still editable ("Edit billing"), but not credentials.
     expect(screen.queryByRole('button', { name: /edit credentials/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /edit billing/i })).toBeTruthy();
   });
 
-  it('shows per-tier model fields for a Claude-compatible account (#567)', async () => {
+  it('shows API key (not model tiers) for a Claude-compatible account', async () => {
     const user = userEvent.setup();
     render(
       <AccountCard
@@ -93,12 +90,14 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       />,
     );
     await user.click(screen.getByRole('button', { name: /edit credentials/i }));
-    for (const label of [/fable model/i, /opus model/i, /sonnet model/i, /haiku model/i, /small \/ fast model/i, /default model/i]) {
-      expect(screen.getByLabelText(label)).toBeTruthy();
-    }
+    expect(screen.getByLabelText(/kimi api key/i)).toBeTruthy();
+    // Model tiers moved to Harnesses attach (ADR-0025).
+    expect(screen.queryByLabelText(/fable model/i)).toBeNull();
+    expect(screen.queryByLabelText(/opus model/i)).toBeNull();
+    expect(screen.getByText(/base url and model names are set when you attach/i)).toBeTruthy();
   });
 
-  it('passes an edited Fable tier through onSave (ANTHROPIC_DEFAULT_FABLE_MODEL)', async () => {
+  it('passes an edited API key through onSave', async () => {
     const onSave = vi.fn().mockResolvedValue(true);
     const user = userEvent.setup();
     render(
@@ -108,26 +107,26 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       />,
     );
     await user.click(screen.getByRole('button', { name: /edit credentials/i }));
-    await user.type(screen.getByLabelText(/fable model/i), 'kimi-k3');
+    await user.type(screen.getByLabelText(/kimi api key/i), 'sk-kimi');
     await user.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
-    expect(onSave.mock.calls[0][0].model_tiers.fable).toBe('kimi-k3');
+    expect(onSave.mock.calls[0][0].api_key).toBe('sk-kimi');
   });
 
-  it('passes edited model tiers through onSave (#567)', async () => {
+  it('passes billing mode through onSave for a first-class account', async () => {
     const onSave = vi.fn().mockResolvedValue(true);
     const user = userEvent.setup();
     render(
       <AccountCard
-        account={account({ id: 'kimi', name: 'Kimi', billing_mode: 'pay_as_you_go' })}
+        account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
         onSave={onSave}
       />,
     );
     await user.click(screen.getByRole('button', { name: /edit credentials/i }));
-    await user.type(screen.getByLabelText(/opus model/i), 'kimi-k2.6');
+    await user.selectOptions(screen.getByLabelText(/minimax billing mode/i), 'plan');
     await user.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
-    expect(onSave.mock.calls[0][0].model_tiers.opus).toBe('kimi-k2.6');
+    expect(onSave.mock.calls[0][0].billing_mode).toBe('plan');
   });
 
   it('offers Remove for a custom account without expanding credentials', () => {

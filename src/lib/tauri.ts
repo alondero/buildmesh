@@ -38,6 +38,7 @@ import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
 import type { PrFileEntry } from '../types/generated/PrFileEntry';
 import type { ApiSurface } from '../types/generated/ApiSurface';
+import type { ModelTiers } from '../types/generated/ModelTiers';
 import type { ProviderAccount } from '../types/generated/ProviderAccount';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
 import type { ProviderPairing } from '../types/generated/ProviderPairing';
@@ -849,26 +850,27 @@ export const setProxiedProviderOrder = async (
   }
 };
 
-// ── Model provider accounts (issue #537) ───────────────────────────────────
+// ── Model provider accounts (issue #537 / ADR-0025) ─────────────────────────
 //
-// Generated from `crate::preferences::{ProviderAccount, BillingMode}`. A custom
-// (non-built-in) account upsert also registers a paired harness profile backend
-// -side so it appears in spawn menus.
-export type { ProviderAccount, BillingMode };
+// Generated from `crate::preferences::{ProviderAccount, BillingMode}`.
+// Credentials + billing only; endpoint URL and model tiers live on pairings.
+export type { ProviderAccount, BillingMode, ModelTiers };
 
-/** The merged built-in + custom account list the settings UI renders. */
+/** Self-auth built-ins + keyed first-class / generics the user has added. */
 export const getProviderAccounts = () =>
   _invoke<ProviderAccount[]>('get_provider_accounts');
+
+/** Keyed first-class catalog (MiniMax / Kimi / OpenRouter) for Add provider. */
+export const getKeyedFirstClassCatalog = () =>
+  _invoke<ProviderAccount[]>('get_keyed_first_class_catalog');
 
 export const upsertProviderAccount = async (account: ProviderAccount) => {
   try {
     return await _invoke('upsert_provider_account', { account });
   } finally {
-    // A custom account upsert registers a paired harness profile backend-side,
-    // so the spawn-menu catalogue changes — bust the cached provider list. Bust
-    // AFTER the write resolves, not before: a concurrent listProviders() during
-    // the in-flight write would otherwise repopulate the cache with the pre-add
-    // catalogue and leave the new provider missing until the next bust (#534).
+    // ADR-0025: spawn visibility comes from stored pairings + the catalog,
+    // not from account-side pairing registration. Still bust the cache so
+    // the menu drops / shows the row on the next listProviders.
     setProviderListPromise(null);
   }
 };
@@ -877,49 +879,69 @@ export const removeProviderAccount = async (id: string) => {
   try {
     return await _invoke('remove_provider_account', { id });
   } finally {
-    // Removing a custom account drops its paired harness profile — same
-    // bust-after-resolve reasoning as the upsert above (#534).
     setProviderListPromise(null);
   }
 };
 
-// ── Proxied Provider pairings (ADR-0016 §4, issue #576) ────────────────────
+// ── Proxied Provider pairings (ADR-0016 §4 / ADR-0025, issue #576) ──────────
 //
-// The per-pairing half of the harness↔provider config split: a pairing attaches
-// a global-keyed `ProviderAccount` to a harness over a chosen `ApiSurface`, with
-// its own endpoint URL + model-tier remap. The harness-config page reads the
-// effective pairings (derived defaults + stored extras) and offers surface-matched
-// providers to attach. The default Anthropic pairing is derived backend-side, so
-// only user-added cross-surface/cross-harness pairings are persisted.
+// Stored pairings only. API key is global on the provider; base URL + model
+// tiers are per harness×provider pairing (edited on the Harnesses page).
 export type { ApiSurface, ProviderPairing };
 
-/** The effective pairing set (derived default Anthropic pairings + stored
- *  extras) used to render what's attached under each harness. */
+/** Stored pairings for proxiable accounts (spawn menu + harness config). */
 export const getProviderPairings = () =>
   _invoke<ProviderPairing[]>('get_provider_pairings');
 
-/** Providers offered by "Add proxied provider" for `harnessId`, surface-matched
- *  to what that harness speaks. Empty for a native-only harness. */
+/** First-class attach defaults for a (harness, provider) pair, if compatible. */
+export const getPairingDefaults = (harnessId: string, providerId: string) =>
+  _invoke<ProviderPairing | null>('get_pairing_defaults', { harnessId, providerId });
+
+/** Providers offered by "Add proxied provider" for `harnessId`, surface-matched. */
 export const compatibleProvidersForHarness = (harnessId: string) =>
   _invoke<ProviderAccount[]>('compatible_providers_for_harness', { harnessId });
 
-/** Attach a provider to a harness over the harness's surface. The backend
- *  derives the endpoint (published first-class map / Generic declaration), so the
- *  client only names the (harness, provider). `apiKey` seeds the global key
- *  set-if-absent. Busts the cached provider list after the write. */
+/** Attach a provider; client supplies base URL (+ Anthropic model tiers). */
 export const attachProxiedProvider = async (
   harnessId: string,
   providerId: string,
   apiKey: string | null,
+  baseUrl: string | null,
+  modelTiers: ModelTiers | null,
 ) => {
   try {
-    return await _invoke('attach_proxied_provider', { harnessId, providerId, apiKey });
+    return await _invoke('attach_proxied_provider', {
+      harnessId,
+      providerId,
+      apiKey,
+      baseUrl,
+      modelTiers,
+    });
   } finally {
     setProviderListPromise(null);
   }
 };
 
-/** Detach a stored Proxied Provider pairing (no-op for a derived default). */
+/** Edit base URL / model tiers on a stored pairing. */
+export const updateProviderPairing = async (
+  harnessId: string,
+  providerId: string,
+  baseUrl: string | null,
+  modelTiers: ModelTiers | null,
+) => {
+  try {
+    return await _invoke('update_provider_pairing', {
+      harnessId,
+      providerId,
+      baseUrl,
+      modelTiers,
+    });
+  } finally {
+    setProviderListPromise(null);
+  }
+};
+
+/** Detach a stored Proxied Provider pairing. */
 export const removeProviderPairing = async (
   harnessId: string,
   providerId: string,

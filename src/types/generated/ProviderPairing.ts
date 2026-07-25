@@ -4,7 +4,7 @@ import type { ModelTiers } from "./ModelTiers";
 
 /**
  * A **Proxied Provider** pairing — one harness×provider attachment (ADR-0016
- * §4, issue #576).
+ * §4 / ADR-0025, issue #576).
  *
  * This is the *per-pairing* half of the config split: the **API key is global**
  * to the [`ProviderAccount`] (entered once on the Providers page, reused across
@@ -14,12 +14,10 @@ import type { ModelTiers } from "./ModelTiers";
  * (`surface = Anthropic`) and Codex (`surface = OpenAI`), each with its own
  * `base_url` and `model_tiers`.
  *
- * Only **user-added** pairings are persisted in
- * [`AppPreferences::provider_pairings`]; the default Anthropic pairing for a
- * keyed first-class/custom account is *derived* at read time (see
- * [`effective_pairings`]), so existing MiniMax-via-Claude setups keep working
- * with no migration. A stored pairing for the same `(harness_id, provider_id)`
- * overrides the derived default.
+ * Only **stored** pairings exist (ADR-0025) — there is no derived default
+ * Anthropic pairing on key alone. Attach (Harnesses page) materialises a row
+ * in [`AppPreferences::provider_pairings`]; [`effective_pairings`] returns
+ * those stored rows for proxiable accounts.
  *
  * `model_tiers` carries the per-tier Claude alias map for an `Anthropic`-surface
  * pairing; for an `OpenAI`-surface pairing only `model_tiers.default` is

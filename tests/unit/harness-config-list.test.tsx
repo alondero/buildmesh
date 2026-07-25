@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { invoke } from '@tauri-apps/api/core';
 import { HarnessConfigList, reorderProxiedIds } from '../../src/components/AppSettings/HarnessConfigList';
 import type { ProviderAccount, ProviderPairing } from '../../src/lib/tauri';
 
@@ -14,9 +15,6 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
     billing_mode: 'pay_as_you_go',
     claude_compatible: true,
     api_key: 'sk-mm',
-    base_url: null,
-    model_tiers: NO_TIERS,
-    models: [],
     ...over,
   };
 }
@@ -37,14 +35,46 @@ const harnesses = [
   { id: 'codex', label: 'OpenAI Codex' },
 ];
 
+/** Prefill attach form via get_pairing_defaults IPC. */
+function mockPairingDefaults() {
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === 'get_pairing_defaults') {
+      const harnessId = args?.harnessId as string;
+      const providerId = args?.providerId as string;
+      if (harnessId === 'codex') {
+        return Promise.resolve({
+          harness_id: harnessId,
+          provider_id: providerId,
+          surface: 'openai',
+          base_url: 'https://api.example.com/v1',
+          model_tiers: NO_TIERS,
+        });
+      }
+      return Promise.resolve({
+        harness_id: harnessId,
+        provider_id: providerId,
+        surface: 'anthropic',
+        base_url: 'https://api.example.com/anthropic',
+        model_tiers: NO_TIERS,
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+}
+
 describe('HarnessConfigList (issue #576)', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    mockPairingDefaults();
+  });
+
   it('shows attached pairings with their surface and endpoint, grouped by harness', () => {
     render(
       <HarnessConfigList
         harnesses={harnesses}
         compatibleByHarness={{ claude: [account()], codex: [account()] }}
         pairings={[pairing()]}
-        storedKeys={new Set()}
+        storedKeys={new Set(['claude:minimax'])}
         accounts={[account()]}
         onAttach={vi.fn()}
         onDetach={vi.fn()}
@@ -58,20 +88,21 @@ describe('HarnessConfigList (issue #576)', () => {
     expect(within(screen.getByTestId('harness-codex')).getByText(/no proxied providers attached/i)).toBeTruthy();
   });
 
-  it('marks a derived default pairing as managed-on-Providers (no Detach)', () => {
+  it('shows Detach for every stored pairing (no derived-default placeholder)', () => {
+    // ADR-0025: all pairings are stored/detachable — "Default · key on Providers" is gone.
     render(
       <HarnessConfigList
         harnesses={harnesses}
         compatibleByHarness={{ claude: [account()] }}
         pairings={[pairing()]}
-        storedKeys={new Set()} // derived default — not stored
+        storedKeys={new Set(['claude:minimax'])}
         accounts={[account()]}
         onAttach={vi.fn()}
         onDetach={vi.fn()}
       />,
     );
-    expect(screen.getByText(/default · key on providers/i)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /detach/i })).toBeNull();
+    expect(screen.queryByText(/default · key on providers/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /detach minimax from claude code/i })).toBeTruthy();
   });
 
   it('detaches a user-stored pairing', async () => {
@@ -114,7 +145,7 @@ describe('HarnessConfigList (issue #576)', () => {
     expect(optionNames).not.toContain('MiniMax');
   });
 
-  it('attaches a keyed provider without prompting for a key', async () => {
+  it('attaches a keyed provider without prompting for a key (requires base URL)', async () => {
     const onAttach = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
     const deepseek = account({ id: 'deepseek', name: 'DeepSeek', api_key: 'sk-deep' });
@@ -133,8 +164,24 @@ describe('HarnessConfigList (issue #576)', () => {
     await user.selectOptions(screen.getByRole('combobox', { name: /provider to attach/i }), 'deepseek');
     // Already keyed → no key field.
     expect(screen.queryByLabelText(/deepseek api key/i)).toBeNull();
+    // Defaults prefill base URL; wait for getPairingDefaults.
+    await waitFor(() => {
+      expect((screen.getByLabelText(/base url for deepseek/i) as HTMLInputElement).value).toBe(
+        'https://api.example.com/v1',
+      );
+    });
     await user.click(screen.getByRole('button', { name: /^attach$/i }));
-    await waitFor(() => expect(onAttach).toHaveBeenCalledWith('codex', 'deepseek', null));
+    // onAttach(harnessId, providerId, apiKey, baseUrl, modelTiers)
+    // OpenAI surface → modelTiers null.
+    await waitFor(() =>
+      expect(onAttach).toHaveBeenCalledWith(
+        'codex',
+        'deepseek',
+        null,
+        'https://api.example.com/v1',
+        null,
+      ),
+    );
   });
 
   it('requires and forwards an API key when attaching a keyless provider (set-if-absent)', async () => {
@@ -154,12 +201,58 @@ describe('HarnessConfigList (issue #576)', () => {
     );
     await user.click(screen.getByRole('button', { name: /add proxied provider/i }));
     await user.selectOptions(screen.getByRole('combobox', { name: /provider to attach/i }), 'minimax');
+    await waitFor(() => {
+      expect((screen.getByLabelText(/base url for minimax/i) as HTMLInputElement).value).toBe(
+        'https://api.example.com/v1',
+      );
+    });
     // Keyless → Attach is gated until a key is entered.
     const attach = screen.getByRole('button', { name: /^attach$/i }) as HTMLButtonElement;
     expect(attach.disabled).toBe(true);
     await user.type(screen.getByLabelText(/minimax api key/i), 'sk-mm');
     await user.click(attach);
-    await waitFor(() => expect(onAttach).toHaveBeenCalledWith('codex', 'minimax', 'sk-mm'));
+    await waitFor(() =>
+      expect(onAttach).toHaveBeenCalledWith(
+        'codex',
+        'minimax',
+        'sk-mm',
+        'https://api.example.com/v1',
+        null,
+      ),
+    );
+  });
+
+  it('forwards model tiers when attaching on an Anthropic surface', async () => {
+    const onAttach = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const deepseek = account({ id: 'deepseek', name: 'DeepSeek', api_key: 'sk-deep' });
+    render(
+      <HarnessConfigList
+        harnesses={[{ id: 'claude', label: 'Claude Code' }]}
+        compatibleByHarness={{ claude: [deepseek] }}
+        pairings={[]}
+        storedKeys={new Set()}
+        accounts={[deepseek]}
+        onAttach={onAttach}
+        onDetach={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /add proxied provider/i }));
+    await user.selectOptions(screen.getByRole('combobox', { name: /provider to attach/i }), 'deepseek');
+    await waitFor(() => {
+      expect(screen.getByLabelText(/deepseek default model/i)).toBeTruthy();
+    });
+    await user.type(screen.getByLabelText(/deepseek opus model/i), 'deepseek-v3');
+    await user.click(screen.getByRole('button', { name: /^attach$/i }));
+    await waitFor(() => {
+      expect(onAttach).toHaveBeenCalled();
+      const call = onAttach.mock.calls[0];
+      expect(call[0]).toBe('claude');
+      expect(call[1]).toBe('deepseek');
+      expect(call[2]).toBe(null);
+      expect(call[3]).toBe('https://api.example.com/anthropic');
+      expect(call[4]).toMatchObject({ opus: 'deepseek-v3' });
+    });
   });
 });
 
@@ -188,6 +281,11 @@ describe('reorderProxiedIds (issue #577)', () => {
 });
 
 describe('HarnessConfigList — per-harness child reorder (issue #577)', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    mockPairingDefaults();
+  });
+
   it('renders a reorder handle for each stored pairing under a harness', () => {
     render(
       <HarnessConfigList
@@ -214,15 +312,16 @@ describe('HarnessConfigList — per-harness child reorder (issue #577)', () => {
     expect(within(codexCard).getByLabelText(/reorder minimax under openai codex/i)).toBeTruthy();
   });
 
-  it('does NOT render a reorder handle on a derived default pairing', () => {
+  it('renders reorder handles when storedKeys is empty but pairings exist (all detachable fallback)', () => {
+    // ADR-0025: empty stored set with pairings present treats every row as detachable.
     render(
       <HarnessConfigList
         harnesses={harnesses}
         compatibleByHarness={{ claude: [account()], codex: [account()] }}
         pairings={[
-          pairing({ harness_id: 'claude', provider_id: 'minimax' }), // derived default
+          pairing({ harness_id: 'claude', provider_id: 'minimax' }),
         ]}
-        storedKeys={new Set()} // empty → no stored pairings → all rows are derived
+        storedKeys={new Set()}
         accounts={[account()]}
         onAttach={vi.fn()}
         onDetach={vi.fn()}
@@ -230,10 +329,9 @@ describe('HarnessConfigList — per-harness child reorder (issue #577)', () => {
       />,
     );
     const claudeCard = screen.getByTestId('harness-claude');
-    // Default placeholder text is shown instead.
-    expect(within(claudeCard).getByText(/default · key on providers/i)).toBeTruthy();
-    // No reorder handle on the derived row.
-    expect(within(claudeCard).queryByLabelText(/reorder minimax under claude code/i)).toBeNull();
+    expect(within(claudeCard).queryByText(/default · key on providers/i)).toBeNull();
+    expect(within(claudeCard).getByLabelText(/reorder minimax under claude code/i)).toBeTruthy();
+    expect(within(claudeCard).getByRole('button', { name: /detach minimax from claude code/i })).toBeTruthy();
   });
 
   it('cross-harness drag is structurally disallowed — a row lives under exactly one harness card', () => {

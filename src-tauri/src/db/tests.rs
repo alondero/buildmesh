@@ -530,7 +530,7 @@ fn v19_first_class_migration_rewrites_minimax_only() {
 /// migration doc-comment).
 #[test]
 fn v19_custom_account_migration_rewrites_enabled_custom_ids() {
-    use crate::preferences::{BillingMode, ModelTiers, ProviderAccount};
+    use crate::preferences::{BillingMode, ProviderAccount};
 
     let conn = v19_setup_with_legacy_rows();
     let accounts = vec![
@@ -541,9 +541,6 @@ fn v19_custom_account_migration_rewrites_enabled_custom_ids() {
             billing_mode: BillingMode::PayAsYouGo,
             claude_compatible: true,
             api_key: Some("sk-test".to_string()),
-            base_url: Some("https://api.deepseek.com/anthropic".to_string()),
-            model_tiers: ModelTiers::default(),
-            models: Vec::new(),
         },
         // A disabled custom account: NOT rewritten.
         ProviderAccount {
@@ -553,9 +550,6 @@ fn v19_custom_account_migration_rewrites_enabled_custom_ids() {
             billing_mode: BillingMode::PayAsYouGo,
             claude_compatible: true,
             api_key: Some("sk-test".to_string()),
-            base_url: None,
-            model_tiers: ModelTiers::default(),
-            models: Vec::new(),
         },
     ];
     // Add a row for the disabled custom account to test the filter.
@@ -581,7 +575,7 @@ fn v19_custom_account_migration_rewrites_enabled_custom_ids() {
 /// re-runs the safety net on every launch.
 #[test]
 fn v19_custom_account_migration_is_idempotent() {
-    use crate::preferences::{BillingMode, ModelTiers, ProviderAccount};
+    use crate::preferences::{BillingMode, ProviderAccount};
 
     let conn = v19_setup_with_legacy_rows();
     let accounts = vec![ProviderAccount {
@@ -591,9 +585,6 @@ fn v19_custom_account_migration_is_idempotent() {
         billing_mode: BillingMode::PayAsYouGo,
         claude_compatible: true,
         api_key: Some("sk-test".to_string()),
-        base_url: None,
-        model_tiers: ModelTiers::default(),
-        models: Vec::new(),
     }];
 
     crate::db::migrate_agent_node_provider_id_custom_accounts(&conn, &accounts).unwrap();

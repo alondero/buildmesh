@@ -47,21 +47,17 @@ function paneForDirtySite(site: string): SettingsTabId {
   return 'providers';
 }
 
-// Built-ins can only be disabled, never removed (a "remove" just reverts them to
-// the code default), so we hide the Remove action for these ids. Kept in sync with
-// `preferences::default_provider_accounts`.
-const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'grok', 'minimax', 'kimi', 'openrouter'];
+// Self-auth first-class rows always appear and cannot be removed (ADR-0025).
+// Kept in sync with `preferences::default_provider_accounts`.
+const SELF_AUTH_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'grok', 'opencode'];
 
-// The Claude model aliases a Claude-compatible provider can pin (issue #567).
-// `key` is the ProviderAccount.model_tiers field; `label` is the UI caption.
-const MODEL_TIER_FIELDS: { key: keyof ProviderAccount['model_tiers']; label: string }[] = [
-  { key: 'default', label: 'Default model' },
-  { key: 'fable', label: 'Fable' },
-  { key: 'opus', label: 'Opus' },
-  { key: 'sonnet', label: 'Sonnet' },
-  { key: 'haiku', label: 'Haiku' },
-  { key: 'small_fast', label: 'Small / fast' },
-];
+// Keyed first-class catalog ids — removable once added. Sync with
+// `preferences::keyed_first_class_catalog`.
+const KEYED_FIRST_CLASS_IDS = ['minimax', 'kimi', 'openrouter'];
+
+const isSelfAuthId = (id: string) => SELF_AUTH_PROVIDER_IDS.includes(id);
+const isFirstClassId = (id: string) =>
+  SELF_AUTH_PROVIDER_IDS.includes(id) || KEYED_FIRST_CLASS_IDS.includes(id);
 
 export function AccountCard({
   account,
@@ -84,33 +80,18 @@ export function AccountCard({
   const [draft, setDraft] = useState<ProviderAccount>(account);
   const [showCreds, setShowCreds] = useState(false);
   const [busy, setBusy] = useState(false);
-  // Two-step remove: first click flips to a confirm pair, second click fires.
-  // Reset whenever the card re-renders for a different account so a stale
-  // confirm doesn't survive a save-and-reload.
   const [confirmingRemove, setConfirmingRemove] = useState(false);
 
-  // Re-sync the editable draft when the parent reloads accounts (e.g. after save).
   useEffect(() => setDraft(account), [account]);
   useEffect(() => setConfirmingRemove(false), [account.id]);
 
-  // Dirty = any editable field diverges from the saved account. The card is
-  // the only place that knows what was edited; the parent just sees a
-  // boolean. We compare each tier individually rather than JSON.stringify
-  // the whole record — cheaper and clearer about which field is dirty.
+  // Dirty = editable fields diverge from the saved account (API key + billing).
   const isDirty = useMemo(() => {
     if (draft.api_key !== account.api_key) return true;
-    if (draft.base_url !== account.base_url) return true;
     if (draft.billing_mode !== account.billing_mode) return true;
     if (draft.enabled !== account.enabled) return true;
-    for (const k of Object.keys(account.model_tiers) as (keyof ProviderAccount['model_tiers'])[]) {
-      if (draft.model_tiers[k] !== account.model_tiers[k]) return true;
-    }
     return false;
   }, [draft, account]);
-  // Track the last reported value so we only fire onDirtyChange when the
-  // dirty flag actually flips. The parent re-renders a lot, which would
-  // otherwise re-fire the effect (onDirtyChange is a new inline arrow on
-  // each render) and cause spurious setDirtySites calls.
   const lastReportedDirtyRef = useRef<boolean>(false);
   useEffect(() => {
     if (lastReportedDirtyRef.current === isDirty) return;
@@ -118,14 +99,11 @@ export function AccountCard({
     lastReportedDirtyRef.current = isDirty;
   }, [isDirty, onDirtyChange]);
 
-  const isCustom = !BUILTIN_PROVIDER_IDS.includes(account.id);
-  // Self-authenticating harnesses (Anthropic/Codex/Antigravity) hold no creds in
-  // Buildmesh, so they show no credential or model-tier fields (#568a). Only
-  // Claude-compatible keyed providers (MiniMax/Kimi/custom) do.
-  const showCredentials = account.claude_compatible;
-
-  const setTier = (key: keyof ProviderAccount['model_tiers'], value: string) =>
-    setDraft({ ...draft, model_tiers: { ...draft.model_tiers, [key]: value || null } });
+  const removable = !isSelfAuthId(account.id);
+  // Keyed providers show API key; self-auth hold no Buildmesh credentials.
+  const showApiKey = account.claude_compatible;
+  // Billing mode is first-class only (self-auth + keyed catalog).
+  const showBilling = isFirstClassId(account.id);
 
   const toggleEnabled = async (enabled: boolean) => {
     setBusy(true);
@@ -145,16 +123,6 @@ export function AccountCard({
     }
   };
 
-  // Two-step remove: the Yes click must gate on `busy` for the full duration
-  // of the async onRemove, otherwise a fast double-click on Remove fires two
-  // concurrent IPCs and races on setAccounts (the parent's handleRemoveAccount
-  // never sets busy itself — keeping it card-local is simpler than threading
-  // a "removing id" prop through from the modal). Awaiting the parent's
-  // promise also means a failed remove flips the card back to its idle state
-  // instead of leaving the confirming pair stuck open. The catch is a no-op
-  // for state but necessary: without it, the async function's returned
-  // promise rejects, which user.click does NOT rethrow, leaving an
-  // unhandled-rejection warning in the console for every failure path.
   const confirmRemove = async () => {
     if (busy) return;
     setBusy(true);
@@ -162,8 +130,7 @@ export function AccountCard({
     try {
       await onRemove?.(account.id);
     } catch {
-      // The parent (handleRemoveAccount) shows the error toast via its own
-      // catch — we only own busy-state here.
+      // Parent shows the error toast.
     } finally {
       setBusy(false);
     }
@@ -186,7 +153,7 @@ export function AccountCard({
             />
             <span>Enabled</span>
           </label>
-          {isCustom && onRemove && (confirmingRemove ? (
+          {removable && onRemove && (confirmingRemove ? (
             <div className="flex items-center gap-2">
               <span className="text-sm text-status-error">Remove {account.name}?</span>
               <button
@@ -220,72 +187,47 @@ export function AccountCard({
         </div>
       </div>
 
-      {showCredentials && (
+      {(showApiKey || showBilling) && (
         <button
           onClick={() => setShowCreds(v => !v)}
           className="mt-3 text-sm text-accent-cyan hover:text-accent-cyan/80"
         >
-          {showCreds ? 'Hide credentials' : 'Edit credentials'}
+          {showCreds ? 'Hide settings' : (showApiKey ? 'Edit credentials' : 'Edit billing')}
         </button>
       )}
 
-      {showCredentials && showCreds && (
+      {showCreds && (showApiKey || showBilling) && (
         <div className="mt-3 space-y-3">
-          <div>
-            <label className="block text-sm text-text-muted mb-1">API key</label>
-            <input
-              type="password"
-              value={draft.api_key ?? ''}
-              onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
-              placeholder="Enter API key..."
-              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-              aria-label={`${account.name} API key`}
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Base URL</label>
-            <input
-              type="text"
-              value={draft.base_url ?? ''}
-              onChange={e => setDraft({ ...draft, base_url: e.target.value || null })}
-              placeholder="https://api.example.com/anthropic"
-              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-              aria-label={`${account.name} base URL`}
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Models</label>
-            <p className="text-sm text-text-muted mb-2">
-              Which model backs each Claude tier. Background tasks use small / fast.
-            </p>
-            <div className="space-y-2">
-              {MODEL_TIER_FIELDS.map(({ key, label }) => (
-                <div key={key} className="flex items-center gap-3">
-                  <span className="w-28 shrink-0 text-sm text-text-muted">{label}</span>
-                  <input
-                    type="text"
-                    value={draft.model_tiers[key] ?? ''}
-                    onChange={e => setTier(key, e.target.value)}
-                    placeholder="model id"
-                    className="flex-1 min-w-0 bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-                    aria-label={`${account.name} ${label} model`}
-                  />
-                </div>
-              ))}
+          {showApiKey && (
+            <div>
+              <label className="block text-sm text-text-muted mb-1">API key</label>
+              <input
+                type="password"
+                value={draft.api_key ?? ''}
+                onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
+                placeholder="Enter API key..."
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                aria-label={`${account.name} API key`}
+              />
+              <p className="mt-1 text-sm text-text-muted">
+                Base URL and model names are set when you attach this provider under Harnesses.
+              </p>
             </div>
-          </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Billing</label>
-            <select
-              value={draft.billing_mode}
-              onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
-              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-              aria-label={`${account.name} billing mode`}
-            >
-              <option value="plan">Plan / subscription (percentage)</option>
-              <option value="pay_as_you_go">Pay-as-you-go (balance)</option>
-            </select>
-          </div>
+          )}
+          {showBilling && (
+            <div>
+              <label className="block text-sm text-text-muted mb-1">Billing</label>
+              <select
+                value={draft.billing_mode}
+                onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                aria-label={`${account.name} billing mode`}
+              >
+                <option value="plan">Plan / subscription (percentage)</option>
+                <option value="pay_as_you_go">Pay-as-you-go (balance)</option>
+              </select>
+            </div>
+          )}
           <div className="flex gap-3">
             <button
               onClick={saveDraft}
@@ -301,25 +243,29 @@ export function AccountCard({
   );
 }
 
-/** Inline form to create a custom Claude-compatible provider (AC2). */
-export function AddCustomProviderForm({
-  onAdd,
+/** Add a keyed first-class provider from the catalog, or a generic (name + key). */
+export function AddProviderForm({
+  catalog,
+  onAddCatalog,
+  onAddGeneric,
   onCancel,
   onDirtyChange,
 }: {
-  onAdd: (name: string, baseUrl: string, apiKey: string) => Promise<void>;
+  catalog: ProviderAccount[];
+  onAddCatalog: (template: ProviderAccount) => Promise<void>;
+  onAddGeneric: (name: string, apiKey: string) => Promise<void>;
   onCancel: () => void;
-  /** Dirty = any of name / baseUrl / apiKey is non-empty. See issue #730. */
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const [mode, setMode] = useState<'pick' | 'generic'>('pick');
   const [name, setName] = useState('');
-  const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const isDirty = name.trim() !== '' || baseUrl.trim() !== '' || apiKey.trim() !== '';
-  // Only fire on dirty-state FLIPS, not on every parent re-render (see
-  // AccountCard's matching comment for the rationale).
+  const isDirty =
+    mode === 'generic'
+      ? name.trim() !== '' || apiKey.trim() !== ''
+      : false;
   const lastReportedDirtyRef = useRef<boolean>(false);
   useEffect(() => {
     if (lastReportedDirtyRef.current === isDirty) return;
@@ -327,64 +273,119 @@ export function AddCustomProviderForm({
     lastReportedDirtyRef.current = isDirty;
   }, [isDirty, onDirtyChange]);
 
-  const submit = async () => {
+  const addCatalog = async (template: ProviderAccount) => {
     setBusy(true);
     try {
-      await onAdd(name, baseUrl, apiKey);
+      await onAddCatalog(template);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitGeneric = async () => {
+    setBusy(true);
+    try {
+      await onAddGeneric(name, apiKey);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="mt-4 border border-border-subtle rounded-lg p-5 space-y-3">
-      <p className="text-base text-text-secondary">
-        Custom Claude-compatible provider — pairs the <span className="font-mono">claude</span>{' '}
-        harness with your endpoint (e.g. "DeepSeek via Claude Code").
-      </p>
-      <input
-        type="text"
-        value={name}
-        onChange={e => setName(e.target.value)}
-        placeholder="Name (e.g. DeepSeek via Claude Code)"
-        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-        aria-label="Custom provider name"
-      />
-      <input
-        type="text"
-        value={baseUrl}
-        onChange={e => setBaseUrl(e.target.value)}
-        placeholder="Base URL (https://api.deepseek.com/anthropic)"
-        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-        aria-label="Custom provider base URL"
-      />
-      <input
-        type="password"
-        value={apiKey}
-        onChange={e => setApiKey(e.target.value)}
-        placeholder="API key"
-        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-        aria-label="Custom provider API key"
-      />
-      <div className="flex gap-3">
-        <button
-          onClick={submit}
-          // A custom Claude-compatible provider needs all three: without a base
-          // URL + key it can't reach its endpoint, and the spawn menu only shows
-          // keyed providers — a keyless add would save a row that never appears.
-          disabled={busy || !name.trim() || !baseUrl.trim() || !apiKey.trim()}
-          className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
-        >
-          {busy ? 'Adding...' : 'Add provider'}
-        </button>
-        <button
-          onClick={onCancel}
-          disabled={busy}
-          className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
-        >
-          Cancel
-        </button>
-      </div>
+    <div className="mt-4 border border-border-subtle rounded-lg p-5 space-y-3" data-testid="add-provider-form">
+      {mode === 'pick' ? (
+        <>
+          <p className="text-base text-text-secondary">
+            Add a first-class provider, or configure any other provider with a name and API key.
+            Endpoint URL and models are set when you attach it under Harnesses.
+          </p>
+          {catalog.length > 0 && (
+            <ul className="space-y-2">
+              {catalog.map((t) => (
+                <li key={t.id}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => addCatalog(t)}
+                    className="w-full flex items-center gap-3 border border-border-subtle rounded-md px-4 py-3 text-left hover:border-accent-cyan disabled:opacity-50"
+                    aria-label={`Add ${t.name}`}
+                  >
+                    <ProviderIcon providerId={t.id} className="h-5 w-5" />
+                    <span className="text-base text-text-primary">{t.name}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setMode('generic')}
+            className="text-base text-accent-cyan hover:text-accent-cyan/80 disabled:opacity-50"
+          >
+            Other / custom…
+          </button>
+          <div>
+            <button
+              onClick={onCancel}
+              disabled={busy}
+              className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="text-base text-text-secondary">
+            Generic provider — name and API key only. Attach under Harnesses to set base URL
+            (and Claude model tiers when using Claude Code).
+          </p>
+          <input
+            type="text"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Name (e.g. DeepSeek)"
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+            aria-label="Custom provider name"
+          />
+          <input
+            type="password"
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder="API key"
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+            aria-label="Custom provider API key"
+          />
+          <div className="flex gap-3">
+            <button
+              onClick={submitGeneric}
+              disabled={busy || !name.trim() || !apiKey.trim()}
+              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
+            >
+              {busy ? 'Adding...' : 'Add provider'}
+            </button>
+            <button
+              onClick={() => {
+                setMode('pick');
+                setName('');
+                setApiKey('');
+              }}
+              disabled={busy}
+              className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+            >
+              Back
+            </button>
+            <button
+              onClick={onCancel}
+              disabled={busy}
+              className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -401,11 +402,10 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // fetch, the meter-section JSX, and the meters-only Refresh button are
   // gone from here.
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
-  const [addingCustom, setAddingCustom] = useState(false);
-  // Proxied Provider pairings (issue #576). `pairings` is the effective set
-  // (derived defaults + stored extras) shown per harness; `storedPairingKeys`
-  // marks which are user-stored (detachable) vs derived (managed on Providers
-  // page). `compatibleByHarness` drives the surface-matched attach picker.
+  const [keyedCatalog, setKeyedCatalog] = useState<ProviderAccount[]>([]);
+  const [addingProvider, setAddingProvider] = useState(false);
+  // Proxied Provider pairings (ADR-0025): stored only. `storedPairingKeys`
+  // marks detachable rows; `compatibleByHarness` drives the attach picker.
   const [pairings, setPairings] = useState<ProviderPairing[]>([]);
   const [storedPairingKeys, setStoredPairingKeys] = useState<Set<string>>(new Set());
   const [compatibleByHarness, setCompatibleByHarness] = useState<Record<string, ProviderAccount[]>>({});
@@ -459,7 +459,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   );
 
   // Modal-wide dirty aggregator (issue #730). Every child that can be edited
-  // (AccountCard, AddCustomProviderForm, HarnessConfigList) reports via
+  // (AccountCard, AddProviderForm, HarnessConfigList) reports via
   // `onDirtyChange(site, dirty)`; the Set's size feeds the Modal's `dirty`
   // prop so a stray Escape or backdrop click is intercepted by the inline
   // "Discard unsaved changes?" banner. The function-form setDirtySites
@@ -532,16 +532,18 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   useEffect(() => {
     const init = async () => {
       try {
-        const [prefs, providerList, accountList, coord, deviceList, network] = await Promise.all([
+        const [prefs, providerList, accountList, catalog, coord, deviceList, network] = await Promise.all([
           api.getAppPreferences(),
           api.listProviders(),
           api.getProviderAccounts(),
+          api.getKeyedFirstClassCatalog(),
           api.getCoordinatorStatus(),
           api.listDeviceSessions(),
           api.getNetworkStatus(),
         ]);
         setProviders(providerList);
         setAccounts(accountList);
+        setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
         loadPairingData(providerList);
         const stored = prefs.default_provider;
         setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
@@ -630,25 +632,42 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  // Attach a provider to a harness (issue #576). The backend derives the
-  // endpoint from the harness's surface and seeds the global key set-if-absent;
-  // we then reload pairings + the merged accounts/providers so the new row and
-  // any seeded key are reflected. Errors propagate to the card (which keeps its
-  // form open) AND surface a toast here.
+  // Attach a provider to a harness (ADR-0025). Client supplies base URL and
+  // (for Anthropic) model tiers; backend seeds the global key set-if-absent.
   const handleAttachProvider = async (
     harnessId: string,
     providerId: string,
     apiKey: string | null,
+    baseUrl: string | null,
+    modelTiers: api.ModelTiers | null,
   ) => {
     setError(null);
     try {
-      await api.attachProxiedProvider(harnessId, providerId, apiKey);
+      await api.attachProxiedProvider(harnessId, providerId, apiKey, baseUrl, modelTiers);
       const [providerList, accountList] = await Promise.all([
         api.listProviders(),
         api.getProviderAccounts(),
       ]);
       setProviders(providerList);
       setAccounts(accountList);
+      await loadPairingData(providerList);
+    } catch (e) {
+      setError(formatError(e));
+      throw e;
+    }
+  };
+
+  const handleUpdatePairing = async (
+    harnessId: string,
+    providerId: string,
+    baseUrl: string | null,
+    modelTiers: api.ModelTiers | null,
+  ) => {
+    setError(null);
+    try {
+      await api.updateProviderPairing(harnessId, providerId, baseUrl, modelTiers);
+      const providerList = await api.listProviders();
+      setProviders(providerList);
       await loadPairingData(providerList);
     } catch (e) {
       setError(formatError(e));
@@ -873,27 +892,52 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     siteDirtyChange(`account-${id}`, false);
     try {
       await api.removeProviderAccount(id);
-      const [accountList, providerList] = await Promise.all([
+      const [accountList, catalog, providerList] = await Promise.all([
         api.getProviderAccounts(),
+        api.getKeyedFirstClassCatalog(),
         api.listProviders(),
       ]);
       setAccounts(accountList);
+      setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
       setProviders(providerList);
     } catch (e) {
       setError(formatError(e));
     }
   };
 
-  // Create a custom Claude-compatible account (AC2). The backend also registers a
-  // paired harness profile so it shows up in spawn menus. `id` is slugified from
-  // the name; a blank or colliding name is rejected up front.
-  const handleAddCustom = async (name: string, baseUrl: string, apiKey: string) => {
+  const refreshAccountsAndCatalog = async () => {
+    const [accountList, catalog, providerList] = await Promise.all([
+      api.getProviderAccounts(),
+      api.getKeyedFirstClassCatalog(),
+      api.listProviders(),
+    ]);
+    setAccounts(accountList);
+    setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
+    setProviders(providerList);
+    await loadPairingData(providerList);
+  };
+
+  /** Materialise a keyed first-class template from the catalog (ADR-0025). */
+  const handleAddCatalogProvider = async (template: ProviderAccount) => {
+    setError(null);
+    try {
+      await api.upsertProviderAccount({ ...template, enabled: true });
+      siteDirtyChange('add-custom-form', false);
+      setAddingProvider(false);
+      await refreshAccountsAndCatalog();
+    } catch (e) {
+      setError(formatError(e));
+    }
+  };
+
+  /** Create a generic provider — name + API key only (endpoint on attach). */
+  const handleAddGeneric = async (name: string, apiKey: string) => {
     const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
     if (!id) {
       setError('Custom provider needs a name');
       return;
     }
-    if (accounts.some(a => a.id === id)) {
+    if (accounts.some(a => a.id === id) || isSelfAuthId(id) || KEYED_FIRST_CLASS_IDS.includes(id)) {
       setError(`A provider with id "${id}" already exists`);
       return;
     }
@@ -901,22 +945,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       id,
       name: name.trim(),
       enabled: true,
-      // Backend re-derives this from the id; set it so the optimistic local row
-      // shows credential + model-tier fields before the reload lands.
       claude_compatible: true,
       billing_mode: 'pay_as_you_go',
       api_key: apiKey.trim() || null,
-      base_url: baseUrl.trim() || null,
-      model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null },
-      models: [],
     });
-    // Keep the form open (with the user's entries) if the backend rejected it.
     if (ok) {
-      // Clear the dirty site before unmounting — the form's useEffect has no
-      // unmount cleanup, so without this the modal would stay in dirty mode
-      // for the rest of the session (issue #730 code-review catch).
       siteDirtyChange('add-custom-form', false);
-      setAddingCustom(false);
+      setAddingProvider(false);
+      try {
+        const catalog = await api.getKeyedFirstClassCatalog();
+        setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
+      } catch {
+        // non-fatal
+      }
     }
   };
 
@@ -1235,7 +1276,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           <p className="text-base text-text-muted mb-4">
             Proxy a model provider through a harness over a compatible API surface
             (e.g. MiniMax via Claude Code over Anthropic, or via Codex over OpenAI).
-            The provider's API key is global — set it once on the Providers page below.
+            Set the provider&apos;s API key on the Providers page; set base URL and
+            Claude model names here when attaching.
           </p>
           <HarnessConfigList
             harnesses={
@@ -1248,12 +1290,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             storedKeys={storedPairingKeys}
             accounts={accounts}
             onAttach={handleAttachProvider}
+            onUpdate={handleUpdatePairing}
             onDetach={handleDetachProvider}
-            // Issue #577 — per-harness child reorder handler.
             onReorderProxied={handleReorderProxiedProviders}
-            // Prefixed so `paneForDirtySite` can route a harness card's
-            // unsaved edits to the Harnesses nav dot (the list reports raw
-            // harness ids like "claude").
             onDirtyChange={(site, d) => siteDirtyChange(`harness-${site}`, d)}
           />
         </div>
@@ -1267,19 +1306,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         <div>
           <h3 className="text-xl font-semibold text-text-primary mb-2">Providers</h3>
           <p className="text-base text-text-muted mb-4">
-            Enable / disable each model provider and edit its credentials.
-            Usage Meters live on the <span className="font-medium">Usage</span> tab
-            in the side panel — open it from the meter icon in the sidebar header.
-            Keys and URLs are stored locally in <span className="font-mono">preferences.json</span>.
+            Self-auth brands always appear (enable + billing). Add keyed first-class
+            or generic providers for API keys. Base URL and model names are configured
+            when you attach a provider under Harnesses. Usage Meters live on the{' '}
+            <span className="font-medium">Usage</span> tab in the side panel.
           </p>
 
-          {/* Every configured account renders a card here so the user can edit
-              credentials / toggle enable / remove a custom one. The card is a
-              pure config surface — the read-only meters moved to the Usage
-              tab (issue #601). Detection gating (issue #574) only applies to
-              the meters, NOT to the card list: a user must be able to see +
-              configure an undetectable native harness's card before they
-              install it. */}
           <div className="space-y-4">
             {accounts.map(account => (
               <AccountCard
@@ -1292,36 +1324,27 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             ))}
           </div>
 
-          {/* OpenCode OAuth credential surface (issue #969). Sits between the
-              per-provider `AccountCard` list and the "+ Add custom provider"
-              button so it reads as a top-level auth method — different from the
-              API-key cards above (no api_key field; the credential lives in
-              Windows Credential Manager at `opencode:console`). No
-              `siteDirtyChange` — the card manages its own state via
-              `useReducer`; it never dirties the modal. */}
           <div className="pt-6 border-t border-border-subtle space-y-4">
             <OpenCodeAccountCard />
           </div>
 
-          {addingCustom ? (
-            <AddCustomProviderForm
-              onAdd={handleAddCustom}
+          {addingProvider ? (
+            <AddProviderForm
+              catalog={keyedCatalog.filter((t) => !accounts.some((a) => a.id === t.id))}
+              onAddCatalog={handleAddCatalogProvider}
+              onAddGeneric={handleAddGeneric}
               onCancel={() => {
-                // The form's useEffect has no unmount cleanup, so the parent
-                // has to clear the dirty site before unmounting the form.
-                // Otherwise the modal stays in dirty mode for the rest of
-                // the session. Issue #730 code-review catch.
                 siteDirtyChange('add-custom-form', false);
-                setAddingCustom(false);
+                setAddingProvider(false);
               }}
               onDirtyChange={d => siteDirtyChange('add-custom-form', d)}
             />
           ) : (
             <button
-              onClick={() => setAddingCustom(true)}
+              onClick={() => setAddingProvider(true)}
               className="mt-4 text-base text-accent-cyan hover:text-accent-cyan/80"
             >
-              + Add custom provider
+              + Add provider
             </button>
           )}
         </div>

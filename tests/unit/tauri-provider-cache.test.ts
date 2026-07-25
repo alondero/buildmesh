@@ -147,9 +147,6 @@ describe('tauri.ts provider memoisation (#405)', () => {
       billing_mode: 'pay_as_you_go',
       claude_compatible: true,
       api_key: 'k',
-      base_url: 'https://api.moonshot.cn/anthropic',
-      model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null },
-      models: [],
     });
 
     await api.listProviders();

@@ -1,5 +1,5 @@
 /**
- * Integration test for the issue #730 wiring: AccountCard / AddCustomProviderForm
+ * Integration test for the issue #730 wiring: AccountCard / AddProviderForm
  * / HarnessCard each report their dirty state to AppSettingsModal, which feeds
  * the `<Modal dirty={...}>` prop. The Modal then intercepts backdrop-click
  * and Escape with an inline "Discard unsaved changes?" confirm.
@@ -16,8 +16,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 import { openSettingsPane } from '../utils/settings-panes';
 
-const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
-
 function anthropicAccount() {
   return {
     id: 'anthropic',
@@ -29,9 +27,6 @@ function anthropicAccount() {
     // form half-typed test.
     claude_compatible: false,
     api_key: null,
-    base_url: null,
-    model_tiers: NO_TIERS,
-    models: [],
   };
 }
 
@@ -43,9 +38,6 @@ function customKeyedAccount() {
     billing_mode: 'pay_as_you_go' as const,
     claude_compatible: true,
     api_key: null,
-    base_url: null,
-    model_tiers: NO_TIERS,
-    models: [],
   };
 }
 
@@ -53,9 +45,12 @@ function mockBackend(opts: { accounts?: ReturnType<typeof anthropicAccount>[] } 
   const accounts = opts.accounts ?? [anthropicAccount()];
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     switch (cmd) {
-      case 'get_app_preferences': return Promise.resolve({ default_provider: null });
+      case 'get_app_preferences': return Promise.resolve({ default_provider: null, provider_pairings: [] });
       case 'list_providers': return Promise.resolve([]);
       case 'get_provider_accounts': return Promise.resolve(accounts);
+      case 'get_keyed_first_class_catalog': return Promise.resolve([]);
+      case 'get_provider_pairings': return Promise.resolve([]);
+      case 'compatible_providers_for_harness': return Promise.resolve([]);
       case 'get_coordinator_status': return Promise.resolve({ enabled: false, has_token: false });
       case 'list_device_sessions': return Promise.resolve([]);
       case 'get_network_status': return Promise.resolve({ lan_exposure_enabled: false, port: 1992, tls_active: false, exposed_interfaces: [] });
@@ -70,6 +65,12 @@ function getBackdrop(container: HTMLElement) {
   return (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
 }
 
+/** Open Add provider → Other / custom so the name+key form is dirty-trackable. */
+async function openGenericAddForm(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: /^\+ add provider$/i }));
+  await user.click(screen.getByRole('button', { name: /other \/ custom/i }));
+}
+
 describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
   beforeEach(() => vi.mocked(invoke).mockReset());
 
@@ -81,7 +82,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
 
     await screen.findByText('Anthropic / Claude');
     await openSettingsPane('Providers');
-    await user.click(screen.getByRole('button', { name: /add custom provider/i }));
+    await openGenericAddForm(user);
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
     fireEvent.click(getBackdrop(container));
@@ -97,7 +98,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
 
     await screen.findByText('Anthropic / Claude');
     await openSettingsPane('Providers');
-    await user.click(screen.getByRole('button', { name: /add custom provider/i }));
+    await openGenericAddForm(user);
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
     fireEvent.keyDown(window, { key: 'Escape' });
@@ -116,7 +117,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
 
     await screen.findByText('Anthropic / Claude');
     await openSettingsPane('Providers');
-    await user.click(screen.getByRole('button', { name: /add custom provider/i }));
+    await openGenericAddForm(user);
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
     // Verify dirty before cancel.
