@@ -67,25 +67,6 @@ pub struct NodeSpawnFailedPayload {
     pub error: String,
 }
 
-/// Payload of the `autopilot-finishing` Tauri event. Emitted by
-/// [`trigger_finish`] when the user manually enrolls a node in the wrap-up
-/// state machine (the header ✓ button) — the autopilot pipeline then takes
-/// over with the same evaluation/correction loop automated spawns get.
-///
-/// Generated to `src/types/generated/AutopilotFinishingPayload.ts`; the TS
-/// half is imported by `src/stores/agentNodeStore.ts`. `issue` is `None`
-/// for hand-spawned nodes that have no originating GitHub issue — preserved
-/// as a nullable wire field so the existing JSON shape (`"issue": null`) is
-/// backwards-compatible with already-deployed listeners.
-#[derive(Debug, Clone, Serialize, TS)]
-#[ts(export, export_to = "AutopilotFinishingPayload.ts")]
-pub struct AutopilotFinishingPayload {
-    #[ts(as = "i32")]
-    pub node_id: i64,
-    #[ts(as = "Option<i32>")]
-    pub issue: Option<i64>,
-}
-
 // ---------------------------------------------------------------------------
 // Provider listing
 // ---------------------------------------------------------------------------
@@ -618,53 +599,6 @@ pub fn create_issue_node(
     );
 
     Ok(IssueNodeDraft { node, prefill })
-}
-
-/// Manually trigger the Autopilot wrap-up sequence on a live node (issue
-/// #484 / PRD #480 story 15). Injects the same `/finish` prompt the
-/// automated pipeline uses AND enrolls the node in the wrap-up state
-/// machine, so the self-correction loop + PR verification (#485) apply to
-/// hand-started tasks exactly as to auto-spawned ones.
-///
-/// Idempotent-ish: re-triggering resets the node to `finishing` attempt 1
-/// (a deliberate "run the wrap-up again now" affordance).
-#[command]
-pub fn trigger_finish(app: AppHandle, node_id: i64) -> Result<(), String> {
-    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
-        return Err("Node has no live agent process to finish".to_string());
-    }
-    let mesh = db::get_mesh_by_id(node.mesh_id).map_err(|e| e.to_string())?;
-    let action = mesh
-        .autopilot_action_on_success
-        .clone()
-        .unwrap_or_else(|| "draft_pr".to_string());
-
-    // Enroll (or re-arm) the node in the pipeline. `source_issue` may be
-    // absent for hand-spawned nodes — 0 is the "no originating issue"
-    // sentinel the prompt renderer filters out.
-    db::create_autopilot_run(node_id, node.mesh_id, node.source_issue.unwrap_or(0))
-        .map_err(|e| e.to_string())?;
-    db::set_autopilot_run_state(
-        node_id,
-        crate::db::AutopilotRunState::Finishing,
-        Some(1),
-    )
-    .map_err(|e| e.to_string())?;
-    crate::autopilot::evaluator::register(node_id);
-
-    let prompt = crate::autopilot::finish::finish_prompt(node.source_issue, Some(&action));
-    crate::autopilot::pipeline::write_prompt_to_pty(node_id, &prompt, &app)?;
-    crate::autopilot::pipeline::clear_attention_after_injection(node_id, &app);
-    let _ = app.emit(
-        "autopilot-finishing",
-        AutopilotFinishingPayload {
-            node_id,
-            issue: node.source_issue,
-        },
-    );
-    tracing::info!("trigger_finish: injected wrap-up prompt into node {}", node_id);
-    Ok(())
 }
 
 /// One Autopilot-managed node's pipeline position, for the header pill.

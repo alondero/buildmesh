@@ -63,6 +63,26 @@ pub struct AutopilotBlockedPayload {
     pub issue: i64,
 }
 
+/// Payload of the `autopilot-finishing` Tauri event. Emitted when a task is
+/// classified COMPLETED and the wrap-up prompt is injected into the node's
+/// PTY. The frontend listener (`src/stores/agentNodeStore.ts`) uses it to
+/// flip the header pill to the amber "wrap-up" treatment while the self-
+/// correction loop runs.
+///
+/// Generated to `src/types/generated/AutopilotFinishingPayload.ts`; the TS
+/// half is imported by `src/stores/agentNodeStore.ts`. `issue` is `None`
+/// for hand-spawned nodes that have no originating GitHub issue — preserved
+/// as a nullable wire field so the existing JSON shape (`"issue": null`) is
+/// backwards-compatible with already-deployed listeners.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AutopilotFinishingPayload.ts")]
+pub struct AutopilotFinishingPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "Option<i32>")]
+    pub issue: Option<i64>,
+}
+
 /// Payload of the `autopilot-pr-created` Tauri event. Emitted after the
 /// wrap-up verification (#485) is green — the worktree is clean, the branch
 /// pushed, an open PR exists. The frontend marks the node's autopilot pill
@@ -427,10 +447,9 @@ pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
 
 /// After a backend-driven injection the agent is busy again — mirror the
 /// coordinator drive's attention-clear so the UI doesn't keep a stale
-/// "Needs attention" badge on a node Autopilot just drove. `pub(crate)` for
-/// the manual `trigger_finish` command (PRD story 15), which injects the
-/// same wrap-up prompt outside a turn evaluation.
-pub(crate) fn clear_attention_after_injection(node_id: i64, app: &AppHandle) {
+/// "Needs attention" badge on a node Autopilot just drove. Private to
+/// this module — every call site lives alongside it.
+fn clear_attention_after_injection(node_id: i64, app: &AppHandle) {
     crate::attention_autoclear::disarm(node_id);
     // Routes through SessionLifecycle (issue #132); the desktop emit lives
     // in the sink. Mobile broadcast is a separate channel kept here.
@@ -622,7 +641,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                             clear_attention_after_injection(node_id, app);
                             let _ = app.emit(
                                 "autopilot-finishing",
-                                crate::commands::agent::AutopilotFinishingPayload {
+                                AutopilotFinishingPayload {
                                     node_id,
                                     issue: Some(issue_number),
                                 },

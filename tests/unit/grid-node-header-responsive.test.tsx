@@ -416,24 +416,25 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       prMock.mockReturnValue(null);
     });
 
-    it('opens on click and reveals Reveal + Pin + Maximize + Finish + Close items', () => {
+    it('opens on click and reveals Reveal + Pin + Maximize + Close items', () => {
       // The actions are rendered inline above the kebab threshold; below
-      // it, all five fold into the menu so the title isn't squeezed out.
+      // it, all four fold into the menu so the title isn't squeezed out.
       // Kebab item order by DOM position: Open in file explorer (0),
       // Pin/Unpin (1, wayfinder #982 / #985), Maximize/Restore (2),
-      // Finish (3, issue #484), Close (4).
+      // Close (3). The manual Finish item (#484) was removed — wrap-up
+      // is an autopilot-only concern — so the kebab now mirrors the
+      // four inline actions without a Finish slot.
       const { root } = renderHeader(200);
       const trigger = screen.getByLabelText('Agent node actions');
       fireEvent.click(trigger);
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu).toBeTruthy();
-      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(5);
+      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
       const items = menu.querySelectorAll('[role="menuitem"]');
       expect(items[0].textContent).toContain('Open in file explorer');
       expect(items[1].textContent).toContain('Pin node');
       expect(items[2].textContent!.toLowerCase()).toMatch(/maximize|restore grid/);
-      expect(items[3].textContent).toContain('Finish');
-      expect(items[4].textContent).toContain('Close agent node');
+      expect(items[3].textContent).toContain('Close agent node');
       // sanity: the trigger is in the DOM and the menu is its descendant tree
       expect(root.contains(trigger)).toBe(true);
     });
@@ -516,11 +517,12 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu.textContent?.toLowerCase()).toMatch(/restore grid/);
       expect(menu.textContent?.toLowerCase()).not.toMatch(/^.*maximize/);
-      // Still a menu of five actions: Reveal + Pin + Maximize/Restore +
-      // Finish (#484) + Close (the inline buttons fold into the kebab at
-      // this tier too, so the count lives here as well as on the inline
-      // path).
-      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(5);
+      // Still a menu of four actions: Reveal + Pin + Maximize/Restore +
+      // Close. The inline buttons fold into the kebab at this tier too,
+      // so the count lives here as well as on the inline path. (Finish
+      // was removed — autopilot-only concern — so the kebab mirrors the
+      // four remaining inline actions.)
+      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
       // Sanity: render did not unmount.
       expect(root.isConnected).toBe(true);
     });
