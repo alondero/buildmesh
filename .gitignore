@@ -62,6 +62,12 @@ test-results/
 # (e.g. `.tmp-github-diff.txt`, `.tmp-test-diff.txt`). Ephemeral and never
 # intended to ship.
 .tmp-*.txt
+# Superpowers workflow artifacts (plans/, specs/) — session-only output of
+# the Superpowers plugin that drove a single refactor each. The canonical
+# record is the resulting commit/issue; the plan/spec files are breadcrumbs
+# that outlived their purpose. See git history for the design-system,
+# worktree-resume, and remote-access plans that lived here.
+docs/superpowers/
 
 # Claude worktrees and local settings (local only)
 .claude/worktrees/
