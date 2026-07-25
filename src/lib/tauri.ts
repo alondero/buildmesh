@@ -241,12 +241,6 @@ export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
 export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
   _invoke<void>('update_mesh_sandbox', { meshId, sandbox });
 
-/** Manually trigger the Autopilot wrap-up (`/finish`) sequence on a live
- *  node (issue #484, PRD #480 story 15). Enrolls the node in the wrap-up
- *  state machine so the self-correction loop and PR verification apply. */
-export const triggerFinish = (nodeId: number) =>
-  _invoke<void>('trigger_finish', { nodeId });
-
 /** Every live Autopilot run's `(node_id, state)` — the header pill's data.
  *  Fetched alongside the node list in `fetchAgentNodes`. */
 export const listAutopilotRuns = () =>

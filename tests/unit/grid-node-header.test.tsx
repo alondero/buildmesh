@@ -48,9 +48,8 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 // missing / not a directory) are exercised in src-tauri's own tests;
 // here we just assert wiring: the click resolves the path through
 // `getNodeGitPath` and hands it to the IPC layer.
-const { openInFileManagerMock, triggerFinishMock, toggleNodePinnedMock } = vi.hoisted(() => ({
+const { openInFileManagerMock, toggleNodePinnedMock } = vi.hoisted(() => ({
   openInFileManagerMock: vi.fn().mockResolvedValue(undefined),
-  triggerFinishMock: vi.fn().mockResolvedValue(undefined),
   toggleNodePinnedMock: vi.fn(),
 }));
 vi.mock('../../src/lib/tauri', async (importOriginal) => {
@@ -58,7 +57,6 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
   return {
     ...actual,
     openInFileManager: openInFileManagerMock,
-    triggerFinish: triggerFinishMock,
     toggleNodePinned: toggleNodePinnedMock,
   };
 });
@@ -744,33 +742,43 @@ describe('GridNodeHeader autopilot pill', () => {
 // assertion (the invoke effect, not `={noop}` wiring — the JSX
 // silent-extra-prop lesson): clicking the button hands the node id to the
 // `trigger_finish` IPC wrapper.
-describe('GridNodeHeader Finish trigger (#484)', () => {
+/**
+ * Issue #484 originally shipped a manual `/finish` trigger on the agent node
+ * header. The wrap-up sequence is purely an autopilot concern — there is no
+ * value in letting a human re-trigger it on a hand-controlled node — so the
+ * toolbar icon (inline + kebab menu) and the underlying IPC were retired.
+ *
+ * These assertions pin the removal: no button, no menu item, no leftover
+ * `trigger_finish` wiring on the surface. The autopilot's automatic
+ * wrap-up injection (`pipeline.rs`) is a separate code path that still emits
+ * the `autopilot-finishing` event for the pill transition.
+ *
+ * Width detail: `useResizeWidth` initialises at `Infinity`, so the first
+ * render lands in the `xl` tier with `showInlineActions === true` and the
+ * inline trio (reveal-in-explorer + pin + maximise + close) renders inline.
+ * That same code path USED TO render the Finish button here — its absence
+ * after this commit is what we're asserting.
+ */
+describe('GridNodeHeader Finish trigger (removed — autopilot-only concern)', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     summaryMock.mockReturnValue(null);
     prMock.mockReturnValue(null);
-    triggerFinishMock.mockClear();
-    triggerFinishMock.mockResolvedValue(undefined);
   });
 
-  it('clicking Finish invokes trigger_finish with the node id', async () => {
-    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
-    fireEvent.click(getByLabelText('Finish agent node'));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(triggerFinishMock).toHaveBeenCalledWith(NODE.id);
+  it('does not render an inline Finish button at the wide (xl) tier', () => {
+    // xl tier: `useResizeWidth` boots at Infinity, so before the
+    // ResizeObserver fires the inline branch is active. The Finish
+    // button WOULD render here if the wiring were still in place.
+    const { queryByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    expect(queryByLabelText('Finish agent node')).toBeNull();
+    expect(queryByLabelText(/Finish/i)).toBeNull();
   });
 
-  it('swallows a backend rejection (dead node) with console.error', async () => {
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    triggerFinishMock.mockRejectedValueOnce('Node has no live agent process to finish');
-    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
-    fireEvent.click(getByLabelText('Finish agent node'));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(errSpy).toHaveBeenCalledWith(
-      'Failed to trigger finish:',
-      expect.stringContaining('no live agent process'),
-    );
-    errSpy.mockRestore();
-  });
+  // Note: kebab-without-Finish coverage lives in
+  // `grid-node-header-responsive.test.tsx` — that test opens the real
+  // menu via `fireResize(<header>, 200)` and asserts `toHaveLength(4)`
+  // with `items[3]` = "Close agent node". A second assertion here that
+  // never opens the kebab would only re-prove the inline path.
 });

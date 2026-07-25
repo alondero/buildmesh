@@ -15,7 +15,7 @@ import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
 import { FolderOpenIcon } from '../shared/FolderOpenIcon';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { openInFileManager, triggerFinish } from '../../lib/tauri';
+import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 
 interface GridNodeHeaderProps {
@@ -204,19 +204,12 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
       console.error('Failed to open folder in file manager:', err);
     }
   };
-  // Manual `/finish` trigger (issue #484, PRD #480 story 15) — injects the
-  // Autopilot wrap-up prompt (tests, review, commit, push, PR) into this
-  // node's PTY and enrolls it in the self-correction loop. Backend rejects
-  // nodes without a live agent process; surface that as a console line
-  // (same quiet-failure precedent as `handleOpenInExplorer`).
-  const handleFinish = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      await triggerFinish(node.id);
-    } catch (err) {
-      console.error('Failed to trigger finish:', err);
-    }
-  };
+  // (Manual `/finish` trigger — issue #484, PRD #480 story 15 — was here
+  // until this commit. The wrap-up sequence is an autopilot-only concern;
+  // a hand-controlled node has no use for it, so the toolbar button (and
+  // its underlying `trigger_finish` IPC) was removed. The autopilot's
+  // automatic wrap-up injection lives in `src-tauri/src/autopilot/pipeline.rs`
+  // and still emits `autopilot-finishing` for the pill transition.)
 
   const { summary } = useGitSummary(gitPath || null);
   const { pr: openPr } = useOpenPr(node.id, gitPath || null);
@@ -359,20 +352,6 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
           <>
             <button
               type="button"
-              onClick={handleFinish}
-              // Same surface as the explorer/maximize/close trio. The green
-              // hover mirrors the PR chip's success accent — this button's
-              // outcome is "a PR exists".
-              className="w-7 h-7 flex items-center justify-center rounded-md bg-bg-base/60 border border-border-default text-text-primary hover:text-accent-green hover:bg-accent-green/15 hover:border-accent-green/60 transition-colors"
-              title="Finish: run wrap-up (verify, commit, push, PR)"
-              aria-label="Finish agent node"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M20 6 9 17l-5-5" />
-              </svg>
-            </button>
-            <button
-              type="button"
               onClick={handleOpenInExplorer}
               // Surface matches maximise/close (`bg-bg-base/60` + border)
               // so the trio reads as one control group against the mesh
@@ -460,7 +439,6 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             onTogglePin={handleTogglePin}
             onClose={handleClose}
             onOpenInExplorer={handleOpenInExplorer}
-            onFinish={handleFinish}
           />
         )}
       </div>
@@ -495,13 +473,12 @@ interface KebabActionsProps {
   onTogglePin: (e: React.MouseEvent) => void;
   onClose: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
-  onFinish: (e: React.MouseEvent) => void;
 }
 
 const KEBAB_MIN_WIDTH = 160;
 const KEBAB_GAP = 4;
 
-function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer, onFinish }: KebabActionsProps) {
+function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -512,9 +489,10 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
   const menuIdRef = useRef(`grid-node-kebab-menu-${Math.random().toString(36).slice(2, 9)}`);
   const menuId = menuIdRef.current;
   // Reveal-in-explorer joined the existing maximize/close pair (#736);
-  // Finish joined in #484, Pin/Unpin in wayfinder #982 (#985) — arrow
-  // navigation wraps at five.
-  const itemCount = 5;
+  // Pin/Unpin joined in wayfinder #982 (#985). The manual Finish item
+  // (#484) was removed — wrap-up is an autopilot-only concern. Arrow
+  // navigation wraps at four.
+  const itemCount = 4;
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
     setOpen(false);
@@ -685,17 +663,6 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
           </button>
           <button
             ref={(el) => { menuItemRefs.current[3] = el; }}
-            role="menuitem"
-            onClick={(e) => { closeAndReturnFocus(); onFinish(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M20 6 9 17l-5-5" />
-            </svg>
-            Finish (wrap-up &amp; PR)
-          </button>
-          <button
-            ref={(el) => { menuItemRefs.current[4] = el; }}
             role="menuitem"
             onClick={(e) => { closeAndReturnFocus(); onClose(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
