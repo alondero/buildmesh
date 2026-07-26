@@ -11,7 +11,7 @@ The executor binary recipe (e.g. `claude` / `claude.exe`, `codex`, `agy`, `openc
 _Avoid_: Executor, runtime, provider (a harness is *not* a provider — see **Model Provider**).
 
 **Model Provider**:
-The credentials and endpoint a model request is served by (e.g. Anthropic, OpenAI, MiniMax, Kimi, DeepSeek, or a custom base-URL + key). Independent of the **Agent Harness** that runs it; one provider may expose more than one **Compatible API surface**.
+The credentials and billing identity a model request is served by (e.g. Anthropic, OpenAI, MiniMax, Kimi, DeepSeek, or a user-named generic key). Independent of the **Agent Harness** that runs it. Endpoint URL and model-tier remap live on the **Proxied Provider** pairing, not on the provider itself.
 _Avoid_: Backend, service, vendor; account (reserve "account" for the stored `ProviderAccount` config row).
 
 **Compatible API surface**:
@@ -32,7 +32,7 @@ A **Model Provider** Buildmesh ships built-in knowledge of — brand identity (i
 _Avoid_: "built-in" (ambiguous — see Flagged ambiguities), supported provider.
 
 **Generic Model Provider**:
-A user-defined **Model Provider** — a name, a **Compatible API surface** + base URL, an API key, and a model-tier map, with no registry entry. Spawns fine, but has no brand icon (neutral fallback) and **no usage integration** (Buildmesh can't know its billing API), so its Providers-page card shows a "usage not tracked" state rather than an empty gauge.
+A user-defined **Model Provider** — a display name and an API key, with no registry entry. Compatible API surface, base URL, and model-tier remap are chosen per **Proxied Provider** attach (so one credential may attach under Claude Code and under Codex with different endpoints). Spawns fine, but has no brand icon (neutral fallback) and **no usage integration** (Buildmesh can't know its billing API), so its Providers-page card shows a "usage not tracked" state rather than an empty gauge.
 _Avoid_: Custom provider (acceptable synonym), unsupported provider.
 
 **Usage Meter**:
@@ -161,11 +161,11 @@ _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 
 - An **Agent Harness** runs models from a **Model Provider** either natively (a **Native Provider**, owned by the harness) or as a **Proxied Provider** (Buildmesh injects the compatibility shim)
 - A **Proxied Provider** is reachable by a harness only over a **Compatible API surface** both share
-- A **Generic Model Provider** declares exactly **one Compatible API surface**; a **First-class Model Provider** may declare several and so attach across surfaces (e.g. MiniMax to both Claude Code and Codex)
+- A **First-class Model Provider** may publish several Compatible API surfaces and so attach across harnesses (e.g. MiniMax to both Claude Code and Codex); a **Generic Model Provider** picks surface per attach from the target harness
 - A **Model Provider** can be proxied through **zero or more Agent Harnesses** (one spawn-menu entry per pairing). Usage follows the **credential**, not the pairing: proxying *one* credential through several harnesses is still **one Usage Meter**, but a provider may have **several Usage Meters** (e.g. an Anthropic subscription *and* an API wallet)
-- The Providers page shows a **Usage Meter** only when it's relevant to the host: a harness-native subscription meter appears when that **Agent Harness** is **detected/installed** (no API key needed); a keyed provider's meter appears when its key is configured; an uninstalled harness's native meter is never shown
+- The Providers page lists only configured providers: self-auth first-class rows are always present (enable + billing); keyed first-class rows appear after the user adds them from the catalog; generics after the user creates them. A **Usage Meter** still appears on the Usage tab when relevant (harness installed or key set)
 - Every spawn surface (sidebar, Issues/PRs probes, archived-resume, mobile) renders the one **Spawn Menu** as-is — none re-orders or re-derives it; harness order is user-set (Terminal pinned last) and **Proxied Provider** options nest under their **Agent Harness**
-- A **Proxied Provider**'s configuration splits by scope: the **credential (API key)** is **global to the Model Provider** (entered once, reused across pairings), while the chosen **Compatible API surface + endpoint URL + model-tier remap** are **per harness×provider pairing** (one provider may expose several surfaces; each harness speaks only one). A first-class provider publishes its surface→URL map so a pairing only names the surface; a custom provider's URL is typed per pairing.
+- A **Proxied Provider**'s configuration splits by scope: the **credential (API key)** and (for first-class) **billing mode** are **global to the Model Provider**; the **Compatible API surface + endpoint URL + model-tier remap** are **per harness×provider pairing** and are edited only on the Harnesses page. Saving a key never auto-attaches a pairing — attach is explicit. A first-class provider's published surface→URL(+tiers) map prefills the attach form; the stored pairing is the source of truth at spawn
 - A **Mesh** can have one or more **Agent Nodes**
 - A **Mesh** can have **Autopilot** enabled, governed by its **Autopilot Policy**
 - **Autopilot** automatically spawns **Agent Nodes** for matching issues or PRs, enforcing branched worktree mode

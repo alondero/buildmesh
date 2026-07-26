@@ -6,12 +6,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 import type { ProviderAccount } from '../../src/lib/tauri';
 
-const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
-
 function builtinAccounts(): ProviderAccount[] {
   return [
-    { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
-    { id: 'minimax', name: 'MiniMax', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
+    { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null },
+    { id: 'minimax', name: 'MiniMax', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null },
   ];
 }
 
@@ -22,11 +20,20 @@ function mockBackend() {
     calls[cmd] = [...(calls[cmd] ?? []), args];
     switch (cmd) {
       case 'get_app_preferences':
-        return Promise.resolve({ default_provider: null, minimax_api_key: null });
+        return Promise.resolve({ default_provider: null, minimax_api_key: null, provider_pairings: [] });
       case 'list_providers':
         return Promise.resolve([]);
       case 'get_provider_accounts':
         return Promise.resolve(accounts);
+      case 'get_keyed_first_class_catalog':
+        return Promise.resolve([
+          { id: 'kimi', name: 'Kimi', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null },
+          { id: 'openrouter', name: 'OpenRouter', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null },
+        ]);
+      case 'get_provider_pairings':
+        return Promise.resolve([]);
+      case 'compatible_providers_for_harness':
+        return Promise.resolve([]);
       case 'get_provider_meters':
         // The meters endpoint is still called (to keep cache warm) but the
         // meters are no longer RENDERED in the Settings modal — they live on
@@ -90,24 +97,25 @@ describe('Accounts & Usage settings (issue #537)', () => {
     expect(screen.getByText('MiniMax')).toBeTruthy();
   });
 
-  it('creates a custom Claude-compatible provider with a slugified id', async () => {
+  it('creates a custom Claude-compatible provider with a slugified id (name + key only)', async () => {
     // Issue #881 (Settings sub-pane redesign, a9b59dd) — this test
     // exercises the longest path through the modal (mount → find builtins
-    // → tab into Providers pane → click add → fill 3 fields → submit →
+    // → tab into Providers pane → click add → fill fields → submit →
     // assert). Under the parallel `npm run test:unit` schedule the
     // 5 s default `userEvent` budget is occasionally exceeded by the
     // `setup` + `findByText` + `openSettingsPane` chain; bumping to
     // 15 s keeps the parallel run stable without changing the test's
     // semantics. Passes in isolation at ~300 ms.
+    // ADR-0025: generic add is name + API key only; base URL is set on attach.
     const calls = mockBackend();
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
     await screen.findByText('Anthropic / Claude');
     await openSettingsPane('Providers');
 
-    await user.click(screen.getByRole('button', { name: /add custom provider/i }));
+    await user.click(screen.getByRole('button', { name: /add provider/i }));
+    await user.click(screen.getByRole('button', { name: /other \/ custom/i }));
     await user.type(screen.getByLabelText(/custom provider name/i), 'DeepSeek via Claude Code');
-    await user.type(screen.getByLabelText(/custom provider base URL/i), 'https://api.deepseek.com/anthropic');
     await user.type(screen.getByLabelText(/custom provider API key/i), 'sk-deep');
     await user.click(screen.getByRole('button', { name: /add provider/i }));
 
@@ -118,9 +126,12 @@ describe('Accounts & Usage settings (issue #537)', () => {
       name: 'DeepSeek via Claude Code',
       enabled: true,
       billing_mode: 'pay_as_you_go',
-      base_url: 'https://api.deepseek.com/anthropic',
       api_key: 'sk-deep',
+      claude_compatible: true,
     });
+    // base_url / model_tiers no longer on ProviderAccount.
+    expect(sent).not.toHaveProperty('base_url');
+    expect(sent).not.toHaveProperty('model_tiers');
   }, 15000);
 
   // Issue #601 — Usage Meters moved off the Settings modal and onto the

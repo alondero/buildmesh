@@ -48,14 +48,13 @@ provider_accounts: Array<ProviderAccount>,
  */
 harness_order: Array<string>, 
 /**
- * User-added **Proxied Provider** pairings (ADR-0016 §4, issue #576). Each
- * entry attaches a [`ProviderAccount`] to a harness over a chosen
+ * Stored **Proxied Provider** pairings (ADR-0016 §4 / ADR-0025, issue #576).
+ * Each entry attaches a [`ProviderAccount`] to a harness over a chosen
  * **Compatible API surface** with its own endpoint URL + model-tier remap.
- * The default Anthropic pairing for a keyed account is *derived* (see
- * [`effective_pairings`]) and not stored here, so this list holds only the
- * extra surfaces/harnesses the user explicitly attached (e.g. MiniMax via
- * Codex). An additive field — an older `preferences.json` without it loads
- * with an empty list.
+ * Only stored pairings exist — there is no derived default on key alone
+ * (ADR-0025). An additive field — an older `preferences.json` without it
+ * loads with an empty list (legacy account endpoint fields are migrated
+ * into Claude Anthropic pairings on read — see [`migrate_prefs_json`]).
  */
 provider_pairings: Array<ProviderPairing>, 
 /**
@@ -71,6 +70,13 @@ provider_pairings: Array<ProviderPairing>,
  * empty list.
  */
 proxied_provider_order: Array<ProxiedProviderOrder>, 
+/**
+ * One-shot migration gate (ADR-0025). Set after the legacy
+ * `base_url`/`model_tiers`/`models` fields are stripped from accounts and
+ * their values materialised into Claude Anthropic pairings, so future
+ * prefs loads never auto-pair a freshly-keyed account — attach is explicit.
+ */
+ad0025_account_pairings_migrated: boolean, 
 /**
  * The backend that summaries PTY output into a slug (issue #824).
  * Distinct from the node's own provider — auto-rename runs frequently

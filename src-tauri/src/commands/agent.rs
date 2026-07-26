@@ -170,13 +170,10 @@ fn provider_info_for_pairing(
 /// the derivation is the unit-test seam.
 ///
 /// Harness profiles (Terminal + startup-detected Claude/Codex/Antigravity/OpenCode)
-/// come first as native rows, then one **Proxied Provider** row per *effective
-/// pairing* — the derived default Anthropic pairing for every keyed account,
-/// overlaid with the user's stored cross-surface/cross-harness pairings (issue
-/// #576, [`crate::preferences::effective_pairings`]). This is what surfaces a
-/// keyed built-in MiniMax or a custom endpoint *and* an explicitly-attached
-/// MiniMax-via-Codex without a second list to keep in sync; clearing the key or
-/// disabling the account drops every derived/stored row that depends on it.
+/// come first as native rows, then one **Proxied Provider** row per *stored*
+/// pairing for a proxiable account (ADR-0025 / issue #576,
+/// [`crate::preferences::effective_pairings`]). Clearing the key or disabling
+/// the account drops every stored row that depends on it.
 ///
 /// **Dedup semantics** (issue #575 / ADR-0016): the composite id
 /// `<harness>:<provider>` is unique per (harness profile id, account id) pair, so
@@ -199,9 +196,8 @@ fn compose_provider_menu(
         .collect();
     // The Claude Code harness header the derived default pairings group under
     // (shared rule — see `preferences::claude_harness_id_from`).
-    let claude_harness_id = crate::preferences::claude_harness_id_from(&profiles);
-    let effective =
-        crate::preferences::effective_pairings(&accounts, &pairings, &claude_harness_id);
+    let _claude_harness_id = crate::preferences::claude_harness_id_from(&profiles);
+    let effective = crate::preferences::effective_pairings(&accounts, &pairings);
     for pairing in &effective {
         let Some(account) = accounts.iter().find(|a| a.id == pairing.provider_id) else {
             continue;
@@ -1411,9 +1407,6 @@ mod tests {
             billing_mode: crate::preferences::BillingMode::PayAsYouGo,
             claude_compatible: true,
             api_key: Some("sk-mm".to_string()),
-            base_url: Some("https://api.minimax.io/anthropic".to_string()),
-            model_tiers: crate::preferences::ModelTiers::default(),
-            models: Vec::new(),
         };
         let pairing = crate::preferences::ProviderPairing {
             harness_id: "claude".to_string(),
@@ -1458,9 +1451,6 @@ mod tests {
             billing_mode: crate::preferences::BillingMode::PayAsYouGo,
             claude_compatible: true,
             api_key: Some("sk-mm".to_string()),
-            base_url: None,
-            model_tiers: crate::preferences::ModelTiers::default(),
-            models: Vec::new(),
         };
         let pairing = crate::preferences::ProviderPairing {
             harness_id: "codex".to_string(),
@@ -1493,9 +1483,6 @@ mod tests {
             billing_mode: crate::preferences::BillingMode::PayAsYouGo,
             claude_compatible: true,
             api_key: Some("sk-mm".to_string()),
-            base_url: None,
-            model_tiers: crate::preferences::ModelTiers::default(),
-            models: Vec::new(),
         };
         let pairing = crate::preferences::ProviderPairing {
             harness_id: "claude".to_string(),
@@ -1706,7 +1693,8 @@ mod tests {
                 // id is the native Kimi Code harness, self_auth only).
                 acct("moonshot", true, Some("sk-moon")),
             ],
-            vec![],
+            // ADR-0025: menu rows come from stored pairings only.
+            vec![claude_pairing("minimax"), claude_pairing("moonshot")],
             Platform::Windows,
             &[],
             // User dragged Moonshot above MiniMax under Claude.
@@ -1849,30 +1837,33 @@ mod tests {
             billing_mode: crate::preferences::BillingMode::PayAsYouGo,
             claude_compatible: crate::preferences::is_claude_compatible_id(id),
             api_key: key.map(str::to_string),
+        }
+    }
+
+    fn claude_pairing(provider_id: &str) -> crate::preferences::ProviderPairing {
+        crate::preferences::ProviderPairing {
+            harness_id: "claude".to_string(),
+            provider_id: provider_id.to_string(),
+            surface: crate::preferences::ApiSurface::Anthropic,
             base_url: Some("https://api.example.com/anthropic".to_string()),
-            model_tiers: crate::preferences::ModelTiers::default(),
-            models: Vec::new(),
+            model_tiers: crate::preferences::ModelTiers {
+                default: Some("model-a".to_string()),
+                ..crate::preferences::ModelTiers::default()
+            },
         }
     }
 
     #[test]
     fn compose_menu_adds_enabled_keyed_claude_compatible_accounts() {
-        // Issue #575 / ADR-0016: a configured claude_compatible account
-        // surfaces as a Proxied Provider row with the composite id
-        // `<harness>:<provider>`, grouping under the detected Claude
-        // Code harness profile (here `claude`).
-        //
-        // `"moonshot"` stands in for the Kimi Moonshot LLM endpoint
-        // account (the `"kimi"` id is now reserved for the self-auth
-        // native Kimi Code harness, wayfinder #918 — a custom Claude-
-        // compatible account for the LLM endpoint needs a different id).
+        // ADR-0025: a keyed account surfaces as a Proxied Provider row only
+        // when a stored pairing exists (no auto-derived default on key alone).
         let menu = compose_provider_menu(
             vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
             vec![
                 acct("minimax", true, Some("sk-mm")),
                 acct("moonshot", true, Some("sk-moon")),
             ],
-            vec![],
+            vec![claude_pairing("minimax"), claude_pairing("moonshot")],
             Platform::Windows,
             &[],
             // No stored per-harness child order — natural insertion order applies.

@@ -25,12 +25,10 @@ import { UsageTab } from '../../src/components/Probe/UsageTab';
 import { PROVIDER_LIST_CHANGED_EVENT } from '../../src/hooks/useProviderListInvalidation';
 import type { ProviderMeters, ProviderAccount } from '../../src/lib/tauri';
 
-const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
-
 function builtinAccounts(): ProviderAccount[] {
   return [
-    { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
-    { id: 'minimax', name: 'MiniMax', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
+    { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null },
+    { id: 'minimax', name: 'MiniMax', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null },
   ];
 }
 
@@ -82,8 +80,8 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
   it('joins the meter to its account by id and uses the account name', async () => {
     // Two meters, two distinct names — the join is the visual contract.
     const accounts: ProviderAccount[] = [
-      { id: 'anthropic', name: 'Claude (alias-renamed)', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
-      { id: 'minimax', name: 'Minimax Display', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
+      { id: 'anthropic', name: 'Claude (alias-renamed)', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null },
+      { id: 'minimax', name: 'Minimax Display', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null },
     ];
     mockBackend({ accounts });
     render(<UsageTab />);
@@ -107,8 +105,8 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
 
   it('hides the meter for a disabled account', async () => {
     const accounts: ProviderAccount[] = [
-      { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
-      { id: 'minimax', name: 'MiniMax', enabled: false, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
+      { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null },
+      { id: 'minimax', name: 'MiniMax', enabled: false, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null },
     ];
     mockBackend({ accounts });
     render(<UsageTab />);

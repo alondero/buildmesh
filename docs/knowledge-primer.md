@@ -34,17 +34,19 @@ wallet — different billing relationships, same brand). What is forbidden is
 two cards on the Providers page, two fetcher paths, and confusing UI.
 
 **The Spawn Menu is where harness↔provider pairings live.** The Spawn Menu
-derives one Spawn Option per `(harness, provider)` pairing as the composite
-id `<harness>:<provider>` (e.g. `claude:kimi`). Pairings are *not* rows in
-`BUILTIN_PROVIDER_ACCOUNTS` — they are computed by `effective_pairings` from
-the keyed `ProviderAccount`.
+shows one Spawn Option per **stored** `(harness, provider)` pairing as the
+composite id `<harness>:<provider>` (e.g. `claude:kimi`). Pairings are *not*
+rows in `BUILTIN_PROVIDER_ACCOUNTS` — they live in
+`AppPreferences::provider_pairings` and `effective_pairings` returns stored
+rows only (ADR-0025: no auto-derived Claude pairing on key alone). Endpoint
+URL + model tiers live on the pairing (Harnesses page), not the account.
 
 **The two registries are independent.** The brand string may coincide across
 namespaces, but each registry is the single source of its own kind:
 
 | Registry | What it carries | Example for Kimi |
 |---|---|---|
-| `BUILTIN_PROVIDER_ACCOUNTS` (`src-tauri/src/preferences.rs`) | One row per credential/billing identity — keyed/Claude-compatible with `api_key` + `base_url` + `model_tiers` + Usage Meter fetcher wiring. | `id: "kimi", self_auth: false, base_url: "https://api.moonshot.ai/anthropic"` |
+| `BUILTIN_PROVIDER_ACCOUNTS` (`src-tauri/src/preferences.rs`) | One row per credential/billing identity. Self-auth rows always appear via `default_provider_accounts`; keyed first-class (`self_auth: false`) are catalog-only until added (`keyed_first_class_catalog`) — credentials + Usage Meter only. | `id: "kimi", self_auth: false` (endpoint on pairing / `first_class_surfaces`) |
 | `HarnessProfile` + `Provider::Kimi` enum variant + `KIMI` adapter | The Kimi Code CLI Agent Harness — uses `~/.kimi/config.toml` for its own auth; Buildmesh doesn't manage the credential. | `HarnessProfile { id: "kimi", harness: "kimi", binaries: &["kimi"] }` + `KimiAdapter` |
 
 The string `"kimi"` appearing in both is fine because the namespaces are
@@ -55,15 +57,26 @@ credential — that produces two cards, two fetcher paths, and confusing UI.
 **Pinned by tests** (regression net):
 - `builtin_provider_accounts_have_no_via_substring_in_id` (`preferences.rs` tests) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
 - `kimi_via_claude_id_does_not_exist_in_default_provider_accounts` — the literal dual-id bug.
-- `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — the positive shape: keyed/Claude-compatible, Moonshot endpoint, `kimi_default_tiers()`.
+- `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — catalog + `first_class_surfaces` shape (not in defaults).
 - `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi` — one-time migration for users who picked up PR #1044.
+- `default_provider_accounts_are_self_auth_only` / `effective_pairings_stored_only_no_auto_derive` / `migrate_legacy_account_endpoint_into_claude_pairing` — ADR-0025.
 
 **Don't.** Do not add a `kimi-via-claude`-style companion row when restoring
-or re-introducing a First-class Model Provider. Restore the original row to
-its proper keyed/Claude-compatible posture and let the Spawn Menu derive the
-harness pairings. If a credential migration is needed (e.g. a user already
-stored a key against the companion id), carry it over in a one-time read
-migration that persists back to `preferences.json` — don't leave stale data.
+or re-introducing a First-class Model Provider. Keep it in the keyed catalog
+(`self_auth: false`) and let the Harnesses page attach pairings explicitly.
+If a credential migration is needed (e.g. a user already stored a key against
+the companion id), carry it over in a one-time read migration that persists
+back to `preferences.json` — don't leave stale data.
+
+**One-shot migration flag.** A read-migration that *auto-derives* state
+(ADR-0025: pairing rows for legacy keyed accounts with no Claude attach) must
+be gated on a persisted boolean so it runs exactly once per install. Pattern
+in `preferences.rs`: `ad0025_account_pairings_migrated: bool` on
+`AppPreferences` (`#[serde(default)]` so older installs load as `false`),
+set inside `migrate_prefs_json`, then a re-deserialise gate (`serde_json::from_value`
+returning `Err` ⇒ keep the on-disk file intact rather than `unwrap_or_default()`,
+which previously overwrote a partially-unknown prefs file with defaults — a
+silent data-loss path).
 
 ### Terminal Persistence (CRITICAL)
 `TerminalManager` is a **singleton**. xterm.js instances survive React remounts via a hidden container stack. Never call `dispose()` on a terminal unless the agent node is explicitly deleted — see `src/components/Terminal/Terminal.tsx`. Disposing a terminal causes permanent blanking.

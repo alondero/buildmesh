@@ -45,9 +45,6 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
     billing_mode: 'plan',
     claude_compatible: !SELF_AUTH_IDS.includes(id),
     api_key: null,
-    base_url: null,
-    model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null },
-    models: [],
     ...over,
   };
 }
