@@ -15,6 +15,7 @@ import type {
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
+import { isSelfAuthId, isFirstClassId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
 
 interface AppSettingsModalProps {
   onClose: () => void;
@@ -46,18 +47,6 @@ function paneForDirtySite(site: string): SettingsTabId {
   if (site.startsWith('harness-')) return 'harnesses';
   return 'providers';
 }
-
-// Self-auth first-class rows always appear and cannot be removed (ADR-0025).
-// Kept in sync with `preferences::default_provider_accounts`.
-const SELF_AUTH_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'grok', 'opencode'];
-
-// Keyed first-class catalog ids — removable once added. Sync with
-// `preferences::keyed_first_class_catalog`.
-const KEYED_FIRST_CLASS_IDS = ['minimax', 'kimi', 'openrouter'];
-
-const isSelfAuthId = (id: string) => SELF_AUTH_PROVIDER_IDS.includes(id);
-const isFirstClassId = (id: string) =>
-  SELF_AUTH_PROVIDER_IDS.includes(id) || KEYED_FIRST_CLASS_IDS.includes(id);
 
 export function AccountCard({
   account,

@@ -29,13 +29,12 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UsagePanel, UsageBar, BalanceCard } from '../../src/components/AppSettings/UsageRender';
 import type { ProviderAccount, ProviderMeters, ProviderUsage } from '../../src/lib/tauri';
+import { isClaudeCompatibleId } from '../../src/lib/providerClassification';
 
 // Mirror the backend's derivation (preferences::is_claude_compatible_id):
-// every account except the three self-authenticating built-ins is
+// every account except the self-authenticating built-ins is
 // Claude-compatible. Used to drive the "No API key" vs "Not logged in"
 // copy in the "not logged in" branch.
-const SELF_AUTH_IDS = ['anthropic', 'codex', 'agy'];
-
 function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
   const id = over.id ?? 'anthropic';
   return {
@@ -43,7 +42,7 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
     name: 'Anthropic / Claude',
     enabled: true,
     billing_mode: 'plan',
-    claude_compatible: !SELF_AUTH_IDS.includes(id),
+    claude_compatible: isClaudeCompatibleId(id),
     api_key: null,
     ...over,
   };

@@ -21,9 +21,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AccountCard } from '../../src/components/AppSettings/AppSettingsModal';
 import type { ProviderAccount } from '../../src/lib/tauri';
-
-// Mirror preferences::default_provider_accounts / ADR-0025 self-auth ids.
-const SELF_AUTH_IDS = ['anthropic', 'codex', 'agy', 'grok', 'opencode'];
+import { isClaudeCompatibleId } from '../../src/lib/providerClassification';
 
 function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
   const id = over.id ?? 'anthropic';
@@ -32,7 +30,7 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
     name: 'Anthropic / Claude',
     enabled: true,
     billing_mode: 'plan',
-    claude_compatible: !SELF_AUTH_IDS.includes(id),
+    claude_compatible: isClaudeCompatibleId(id),
     api_key: null,
     ...over,
   };
