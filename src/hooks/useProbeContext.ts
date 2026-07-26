@@ -17,11 +17,10 @@
  *   activeNodeId    =  activeNodeId from agentNodeStore (the focused card,
  *                      independent of which mesh the sidebar is on)
  *   activePath      =  when a node is focused, the node's working
- *                      directory (`node.path`, which the backend already
- *                      resolves to the worktree dir for a Worktree Node
- *                      or the mesh root for a Root Node — see
- *                      `env::node_working_path`). When no node is
- *                      focused but a mesh is, the mesh root. Otherwise null.
+ *                      directory (resolved by `getNodeGitPath` from the
+ *                      node's `path` and `worktree_name`, mirroring
+ *                      the Rust `env::node_working_path`). When no node
+ *                      is focused but a mesh is, the mesh root. Otherwise null.
  *   activeMeshPath  =  the mesh row's own path (NOT the focused node's
  *                      worktree). Mesh-scoped tabs (issues, sessions,
  *                      future worktree manager) need the *mesh root* to
@@ -40,6 +39,7 @@
 import { useMemo } from 'react';
 import { useMeshStore } from '../stores/meshStore';
 import { useAgentNodeStore } from '../stores/agentNodeStore';
+import { getNodeGitPath } from '../lib/paths';
 
 export interface ProbeContext {
   activeMeshId: number | null;
@@ -91,12 +91,13 @@ export function useProbeContext(): ProbeContext {
 
     const mesh = meshesById.get(activeMeshId) ?? null;
 
-    // The backend populates `AgentNode.path` with the resolved working
-    // directory (worktree subdir for a Worktree Node, mesh root for a Root
-    // Node). When no node is focused, fall back to the mesh root itself so
-    // the probe's "files" tab still has a place to anchor.
+    // The frontend resolves the working directory from the node's mesh
+    // path and worktree metadata via `getNodeGitPath` (mirrors the
+    // Rust-side `env::node_working_path`). When no node is focused, fall
+    // back to the mesh root itself so the probe's "files" tab still has a
+    // place to anchor.
     const activePath = activeNode
-      ? activeNode.path
+      ? getNodeGitPath(activeNode)
       : mesh?.path ?? null;
 
     // The mesh's own path is independent of any focused worktree. The
