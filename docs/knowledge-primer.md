@@ -68,6 +68,16 @@ If a credential migration is needed (e.g. a user already stored a key against
 the companion id), carry it over in a one-time read migration that persists
 back to `preferences.json` — don't leave stale data.
 
+**One-shot migration flag.** A read-migration that *auto-derives* state
+(ADR-0025: pairing rows for legacy keyed accounts with no Claude attach) must
+be gated on a persisted boolean so it runs exactly once per install. Pattern
+in `preferences.rs`: `ad0025_account_pairings_migrated: bool` on
+`AppPreferences` (`#[serde(default)]` so older installs load as `false`),
+set inside `migrate_prefs_json`, then a re-deserialise gate (`serde_json::from_value`
+returning `Err` ⇒ keep the on-disk file intact rather than `unwrap_or_default()`,
+which previously overwrote a partially-unknown prefs file with defaults — a
+silent data-loss path).
+
 ### Terminal Persistence (CRITICAL)
 `TerminalManager` is a **singleton**. xterm.js instances survive React remounts via a hidden container stack. Never call `dispose()` on a terminal unless the agent node is explicitly deleted — see `src/components/Terminal/Terminal.tsx`. Disposing a terminal causes permanent blanking.
 

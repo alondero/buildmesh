@@ -394,10 +394,18 @@ fn read_from_disk() -> Result<AppPreferences, String> {
         Err(_) => return Ok(AppPreferences::default()),
     };
     let changed = migrate_prefs_json(&mut value);
-    let prefs: AppPreferences = serde_json::from_value(value).unwrap_or_default();
+    // Round-trip the migrated JSON before persisting so a partially-unknown
+    // payload (older field the Rust struct doesn't know about) doesn't get
+    // overwritten by `AppPreferences::default()`. Issue #xxxx: silent
+    // overwrite was a data-loss path.
+    let prefs: AppPreferences = match serde_json::from_value(value.clone()) {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!("preferences::read_from_disk post-migration deserialization failed; skipping persist");
+            return Ok(AppPreferences::default());
+        }
+    };
     if changed {
-        // Persist stripped accounts + any materialised Claude pairings so the
-        // one-shot migration does not re-run on every subsequent read.
         if let Err(e) = write_to_disk(&prefs) {
             tracing::warn!("preferences::read_from_disk migration save failed: {}", e);
         }
@@ -494,6 +502,12 @@ fn migrate_prefs_json(value: &mut serde_json::Value) -> bool {
                 let base_url = legacy_base
                     .or_else(|| published.as_ref().map(|e| e.base_url.clone()))
                     .unwrap_or_default();
+                // ADR-0025: never synthesise a stored pairing whose
+                // `base_url` is null — the attach command requires a non-empty
+                // URL, and a sourced spawn env would route to nowhere.
+                if base_url.is_empty() {
+                    continue;
+                }
                 let model_tiers = legacy_tiers
                     .filter(|t| t.as_object().is_some_and(|o| !o.is_empty()))
                     .unwrap_or_else(|| {
@@ -990,12 +1004,14 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
 // "First-class Model Providers and the single-meter invariant" section
 // in docs/knowledge-primer.md for the full rationale.
 
-/// Whether `id` names a Claude-compatible keyed provider — one that carries an
-/// API key/endpoint, shows credential + model-tier fields in the UI, and can
-/// appear in the spawn menu once configured. Self-authenticating built-ins are
-/// the only exceptions (issue #568). The classification is **derived from
-/// [`BUILTIN_PROVIDER_ACCOUNTS`]** so a new self-auth built-in can't drift
-/// out of sync with the account definition in `default_provider_accounts`.
+/// Whether `id` names a Claude-compatible keyed provider — one that holds a
+/// global **credential** in Buildmesh and can be attached under a proxy-
+/// capable harness once the user explicitly attaches a pairing (ADR-0025).
+/// Self-authenticating built-ins are the only exceptions (issue #568). The
+/// classification is **derived from [`BUILTIN_PROVIDER_ACCOUNTS`]** so a new
+/// self-auth built-in can't drift out of sync with the account definition in
+/// `default_provider_accounts`. Spawn-menu visibility still requires an
+/// explicit attach — see [`effective_pairings`].
 pub fn is_claude_compatible_id(id: &str) -> bool {
     BUILTIN_PROVIDER_ACCOUNTS
         .iter()
@@ -1130,7 +1146,7 @@ fn claude_harness_id() -> String {
 /// The full effective pairing set (stored only, ADR-0025) read from disk —
 /// the harness-config page's "what's attached to each harness" source.
 pub fn effective_provider_pairings() -> Vec<ProviderPairing> {
-    effective_pairings(&provider_accounts(), &provider_pairings(), &claude_harness_id())
+    effective_pairings(&provider_accounts(), &provider_pairings())
 }
 
 /// The **Model Providers** that can be attached to `harness_id` — those whose
@@ -1560,15 +1576,13 @@ pub fn set_proxied_provider_order(harness_id: String, provider_ids: Vec<String>)
     save(prefs)
 }
 
-/// Resolve the **stored** pairing for spawn / env (ADR-0025). No first-class
-/// synthesis — a composite spawn id without a stored attach yields `None`
-/// (empty env). Pure: `surface_of` is unused for the stored path but kept so
-/// call sites share one signature with [`attach_pairing_defaults`].
+/// Resolve the **stored** pairing for spawn / env (ADR-0025). Spawn is
+/// stored-only — a composite spawn id without a stored attach yields `None`
+/// (empty env), so a keyless account never auto-spawns.
 fn resolve_pairing(
     harness_id: &str,
     account: &ProviderAccount,
     stored: &[ProviderPairing],
-    _surface_of: impl Fn(&str) -> Option<ApiSurface>,
 ) -> Option<ProviderPairing> {
     stored
         .iter()
@@ -1586,7 +1600,7 @@ fn attach_pairing_defaults(
     stored: &[ProviderPairing],
     surface_of: impl Fn(&str) -> Option<ApiSurface>,
 ) -> Option<ProviderPairing> {
-    if let Some(p) = resolve_pairing(harness_id, account, stored, |_| None) {
+    if let Some(p) = resolve_pairing(harness_id, account, stored) {
         return Some(p);
     }
     let surface = surface_of(harness_id)?;
@@ -1621,11 +1635,9 @@ fn attach_pairing_defaults(
 /// disk/globals) — the unit-test seam for the menu derivation.
 ///
 /// "Proxiable" = enabled, Claude-compatible, and keyed (non-empty API key).
-/// `claude_harness_id` is retained for call-site compatibility but unused.
 pub(crate) fn effective_pairings(
     accounts: &[ProviderAccount],
     stored: &[ProviderPairing],
-    _claude_harness_id: &str,
 ) -> Vec<ProviderPairing> {
     let keyed = |a: &ProviderAccount| a.api_key.as_deref().is_some_and(|k| !k.is_empty());
     let is_proxiable = |a: &ProviderAccount| a.enabled && a.claude_compatible && keyed(a);
@@ -1647,18 +1659,19 @@ pub(crate) fn effective_pairings(
 ///
 /// Resolution by id shape ([`crate::agent::provider::parse_spawn_option_id`]):
 ///   * **Composite proxied id** (`<harness>:<provider>`, e.g. `claude:minimax`,
-///     `codex:minimax`): resolve the `(harness, provider)` **pairing** (stored
-///     wins; first-class attach defaults from [`first_class_surfaces`]) and
-///     emit env for that pairing's surface — `ANTHROPIC_*` for `Anthropic`,
+///     `codex:minimax`): resolve the `(harness, provider)` **stored pairing**
+///     and emit env for that pairing's surface — `ANTHROPIC_*` for `Anthropic`,
 ///     `OPENAI_*` for `OpenAI` — using the account's **global** API key.
+///     Stored-only — no first-class synthesis without an explicit attach
+///     (so a keyless account never auto-spawns).
 ///   * **Bare id** (`minimax`, a custom account id, or a native harness id):
 ///     look up the bare id as an account and resolve via its stored Claude
 ///     Anthropic pairing + account key (legacy pre-composite node ids).
 ///
-/// Returns empty when no account matches or the pairing carries no endpoint —
-/// the spawn path resets inherited backend vars first (see
-/// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty means
-/// a clean slate, not a leaked override.
+/// Returns empty when no account matches or no stored pairing exists — the
+/// spawn path resets inherited backend vars first (see
+/// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty
+/// means a clean slate, not a leaked override.
 pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
     let (harness_id, provider_id) =
         crate::agent::provider::parse_spawn_option_id(spawn_option_id);
@@ -1669,9 +1682,7 @@ pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
             let Some(account) = accounts.iter().find(|a| a.id == provider_id) else {
                 return Vec::new();
             };
-            let Some(pairing) =
-                resolve_pairing(harness_id, account, &pairings, harness_surface)
-            else {
+            let Some(pairing) = resolve_pairing(harness_id, account, &pairings) else {
                 return Vec::new();
             };
             surface_env(
@@ -1710,7 +1721,7 @@ pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), Strin
             let Some(account) = accounts.iter().find(|a| a.id == pid) else {
                 return Ok(());
             };
-            let pairing = resolve_pairing(harness_id, account, &pairings, harness_surface);
+            let pairing = resolve_pairing(harness_id, account, &pairings);
             (pairing, account.id.clone())
         }
         None => {
@@ -3179,7 +3190,7 @@ mod tests {
                 ..ModelTiers::default()
             },
         }];
-        let got = resolve_pairing("codex", &account, &stored, test_surface_of).unwrap();
+        let got = resolve_pairing("codex", &account, &stored).unwrap();
         assert_eq!(got.base_url.as_deref(), Some("https://custom/v1"));
         assert_eq!(got.model_tiers.default.as_deref(), Some("override"));
     }
@@ -3198,7 +3209,7 @@ mod tests {
                 ..ModelTiers::default()
             },
         }];
-        let got = resolve_pairing("claude", &account, &stored, test_surface_of).unwrap();
+        let got = resolve_pairing("claude", &account, &stored).unwrap();
         assert_eq!(got.base_url.as_deref(), Some("https://custom-proxy.example/anthropic"));
         assert_eq!(got.model_tiers.default.as_deref(), Some("custom-model"));
     }
@@ -3207,7 +3218,7 @@ mod tests {
     fn resolve_pairing_requires_stored_row_for_spawn() {
         // Spawn path: no stored pairing → None (no silent first-class fill).
         let account = keyed_minimax("sk");
-        assert!(resolve_pairing("codex", &account, &[], test_surface_of).is_none());
+        assert!(resolve_pairing("codex", &account, &[]).is_none());
     }
 
     #[test]
@@ -3223,8 +3234,8 @@ mod tests {
         // Generics without stored pairing → None for both surfaces.
         // With a stored OpenAI pairing they can attach OpenAI.
         let account = custom_account("deepseek");
-        assert!(resolve_pairing("claude", &account, &[], test_surface_of).is_none());
-        assert!(resolve_pairing("codex", &account, &[], test_surface_of).is_none());
+        assert!(resolve_pairing("claude", &account, &[]).is_none());
+        assert!(resolve_pairing("codex", &account, &[]).is_none());
         let stored = vec![ProviderPairing {
             harness_id: "codex".into(),
             provider_id: "deepseek".into(),
@@ -3235,7 +3246,7 @@ mod tests {
                 ..ModelTiers::default()
             },
         }];
-        let got = resolve_pairing("codex", &account, &stored, test_surface_of).unwrap();
+        let got = resolve_pairing("codex", &account, &stored).unwrap();
         assert_eq!(got.surface, ApiSurface::OpenAI);
         assert_eq!(got.base_url.as_deref(), Some("https://example.com/v1"));
     }
@@ -3244,7 +3255,7 @@ mod tests {
     fn effective_pairings_stored_only_no_auto_derive() {
         let accounts = vec![keyed_minimax("sk-mm")];
         // Keyed, no stored pairing → empty effective.
-        assert!(effective_pairings(&accounts, &[], "claude").is_empty());
+        assert!(effective_pairings(&accounts, &[]).is_empty());
         let stored = vec![ProviderPairing {
             harness_id: "codex".into(),
             provider_id: "minimax".into(),
@@ -3255,7 +3266,7 @@ mod tests {
                 ..ModelTiers::default()
             },
         }];
-        let pairings = effective_pairings(&accounts, &stored, "claude");
+        let pairings = effective_pairings(&accounts, &stored);
         assert_eq!(pairings.len(), 1);
         assert_eq!(pairings[0].harness_id, "codex");
         assert!(!pairings.iter().any(|p| p.harness_id == "claude"));
@@ -3279,18 +3290,17 @@ mod tests {
                 },
             },
         ];
-        let pairings = effective_pairings(&accounts, &stored, "claude");
+        let pairings = effective_pairings(&accounts, &stored);
         assert!(pairings.iter().any(|p| p.harness_id == "claude" && p.surface == ApiSurface::Anthropic));
         assert!(pairings.iter().any(|p| p.harness_id == "codex" && p.surface == ApiSurface::OpenAI));
         assert_eq!(pairings.len(), 2);
-        // Unkeyed account → no stored pairing surfaces (the kept-around stored
-        // row should still appear; a stored row for a missing/unkeyed account
-        // is filtered by `proxiable_ids`).
+        // A stored row for a missing/unkeyed account is filtered by
+        // `proxiable_ids`, so an unkeyed account → no pairings.
         let unkeyed = vec![ProviderAccount {
             id: "minimax".into(),
             ..keyed_minimax("sk-mm")
         }];
-        assert!(effective_pairings(&unkeyed, &[], "claude").is_empty());
+        assert!(effective_pairings(&unkeyed, &[]).is_empty());
     }
 
     #[test]
@@ -3303,7 +3313,7 @@ mod tests {
             base_url: Some("https://api.minimax.io/v1".into()),
             model_tiers: ModelTiers::default(),
         }];
-        assert!(effective_pairings(&accounts, &stored, "claude").is_empty());
+        assert!(effective_pairings(&accounts, &stored).is_empty());
     }
 
     #[test]
@@ -3338,8 +3348,10 @@ mod tests {
         // pairing. The migration flag has to be set so the legacy migration
         // doesn't auto-pair (which is the only path that did, one-shot).
         with_temp_dir(|_| {
-            let mut prefs = AppPreferences::default();
-            prefs.ad0025_account_pairings_migrated = true;
+            let mut prefs = AppPreferences {
+                ad0025_account_pairings_migrated: true,
+                ..Default::default()
+            };
             upsert_provider_account(&mut prefs, keyed_minimax("sk-mm"));
             save(prefs).unwrap();
             *CACHE.lock().unwrap() = None;
@@ -3784,5 +3796,28 @@ mod tests {
         });
         assert!(!migrate_prefs_json(&mut value));
         assert!(value["provider_pairings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrate_prefs_json_skips_keyed_generic_without_endpoint() {
+        // A keyed+enabled generic with no legacy URL and no first-class
+        // surface must NOT get a null-base_url pairing (the attach command
+        // would reject it as a no-op).
+        let mut value = serde_json::json!({
+            "provider_accounts": [{
+                "id": "deepseek",
+                "name": "DeepSeek",
+                "enabled": true,
+                "billing_mode": "pay_as_you_go",
+                "claude_compatible": true,
+                "api_key": "sk-ds"
+            }],
+            "provider_pairings": []
+        });
+        assert!(migrate_prefs_json(&mut value));
+        assert!(
+            value["provider_pairings"].as_array().unwrap().is_empty(),
+            "keyed generic without an endpoint must not synthesise a pairing"
+        );
     }
 }

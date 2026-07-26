@@ -216,13 +216,13 @@ pub async fn attach_proxied_provider(
             "provider '{provider_id}' is not compatible with harness '{harness_id}'"
         ));
     }
-    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
-        pairing.base_url = Some(url);
+    if let Some(url) = base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        pairing.base_url = Some(url.to_string());
     }
     if let Some(tiers) = model_tiers {
         pairing.model_tiers = tiers;
     }
-    if pairing.base_url.as_deref().is_none_or(|s| s.is_empty()) {
+    if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
         return Err(format!(
             "base_url is required to attach provider '{provider_id}' to harness '{harness_id}'"
         ));
@@ -258,12 +258,13 @@ pub async fn update_provider_pairing(
             format!("no stored pairing for harness '{harness_id}' / provider '{provider_id}'")
         })?;
     if let Some(url) = base_url {
-        pairing.base_url = if url.is_empty() { None } else { Some(url) };
+        let trimmed = url.trim();
+        pairing.base_url = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
     }
     if let Some(tiers) = model_tiers {
         pairing.model_tiers = tiers;
     }
-    if pairing.base_url.as_deref().is_none_or(|s| s.is_empty()) {
+    if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
         return Err("base_url must be non-empty".to_string());
     }
     preferences::save(prefs)?;

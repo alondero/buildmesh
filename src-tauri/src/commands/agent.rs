@@ -196,9 +196,8 @@ fn compose_provider_menu(
         .collect();
     // The Claude Code harness header the derived default pairings group under
     // (shared rule — see `preferences::claude_harness_id_from`).
-    let claude_harness_id = crate::preferences::claude_harness_id_from(&profiles);
-    let effective =
-        crate::preferences::effective_pairings(&accounts, &pairings, &claude_harness_id);
+    let _claude_harness_id = crate::preferences::claude_harness_id_from(&profiles);
+    let effective = crate::preferences::effective_pairings(&accounts, &pairings);
     for pairing in &effective {
         let Some(account) = accounts.iter().find(|a| a.id == pairing.provider_id) else {
             continue;

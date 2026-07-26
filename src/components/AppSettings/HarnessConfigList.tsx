@@ -206,14 +206,14 @@ function HarnessCard({
     lastReportedDirtyRef.current = isDirty;
   }, [isDirty, onDirtyChange]);
 
-  // Prefill base URL + tiers from first-class defaults when the user picks a provider.
+  // Prefill base URL + tiers from first-class defaults when the user picks a
+  // provider. Clear synchronously on selection change so the previous
+  // provider's URL/tiers never bleed into a fresh attach (a stale-URL race).
   useEffect(() => {
-    if (!selected) {
-      setBaseUrl('');
-      setTiers(EMPTY_TIERS);
-      setSurface(null);
-      return;
-    }
+    setBaseUrl('');
+    setTiers(EMPTY_TIERS);
+    setSurface(null);
+    if (!selected) return;
     let cancelled = false;
     (async () => {
       try {
@@ -223,18 +223,9 @@ function HarnessCard({
           setSurface(defaults.surface);
           setBaseUrl(defaults.base_url ?? '');
           setTiers(defaults.model_tiers ?? EMPTY_TIERS);
-        } else if (!cancelled) {
-          // Backend returned null (incompatible) — clear the form.
-          setSurface(null);
-          setBaseUrl('');
-          setTiers(EMPTY_TIERS);
         }
       } catch {
-        if (!cancelled) {
-          setSurface(null);
-          setBaseUrl('');
-          setTiers(EMPTY_TIERS);
-        }
+        // Form stays empty; the user can type a URL.
       }
     })();
     return () => {
