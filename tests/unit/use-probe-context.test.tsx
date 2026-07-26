@@ -9,13 +9,14 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
     id: 1,
     mesh_id: 1,
     name: 'bold-keen-brook',
-    path: '/a/.claude/worktrees/bold-keen-brook',
+    path: '/a',
     branch: 'main',
     env: 'windows',
     provider: 'anthropic',
     status: 'idle',
     created_at: '',
     use_worktree: true,
+    worktree_name: 'bold-keen-brook',
     position: 0,
     ...overrides,
   };
@@ -94,7 +95,7 @@ describe('useProbeContext (issue #373)', () => {
       selectedMeshId: 1,
     });
     useAgentNodeStore.setState({
-      agentNodes: [makeNode({ id: 7, mesh_id: 1, path: '/a/.claude/worktrees/bold-keen-brook' })],
+      agentNodes: [makeNode({ id: 7, mesh_id: 1 })],
       activeNodeId: 7,
     });
     const { result } = renderHook(() => useProbeContext());
@@ -127,8 +128,8 @@ describe('useProbeContext (issue #373)', () => {
     });
     useAgentNodeStore.setState({
       agentNodes: [
-        makeNode({ id: 11, mesh_id: 1, path: '/a/.claude/worktrees/x' }),
-        makeNode({ id: 22, mesh_id: 2, path: '/b/.claude/worktrees/y' }),
+        makeNode({ id: 11, mesh_id: 1, path: '/a', worktree_name: 'x' }),
+        makeNode({ id: 22, mesh_id: 2, path: '/b', worktree_name: 'y' }),
       ],
       activeNodeId: 22,
     });
@@ -156,8 +157,8 @@ describe('useProbeContext (issue #373)', () => {
     });
     useAgentNodeStore.setState({
       agentNodes: [
-        makeNode({ id: 11, mesh_id: 1, path: '/a/.claude/worktrees/x' }),
-        makeNode({ id: 22, mesh_id: 2, path: '/b/.claude/worktrees/y' }),
+        makeNode({ id: 11, mesh_id: 1, path: '/a', worktree_name: 'x' }),
+        makeNode({ id: 22, mesh_id: 2, path: '/b', worktree_name: 'y' }),
       ],
       activeNodeId: 22,
     });
