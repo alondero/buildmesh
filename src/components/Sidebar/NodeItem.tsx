@@ -458,9 +458,8 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
               title={
                 isRegenerateDisabled
                   // Use the raw status name rather than `config.label`
-                  // so `archived` (which falls back to `idle` in
-                  // STATUS_CONFIG) reads as "archived" to the user
-                  // instead of the misleading "idle".
+                  // so the tooltip stays lowercase and consistent with the
+                  // other machine status names (e.g. "while suspended").
                   ? `Regenerate unavailable while ${node.status}`
                   : !hasAlternateProviders
                     ? 'No other providers are available on this mesh'
