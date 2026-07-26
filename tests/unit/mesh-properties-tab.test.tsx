@@ -502,96 +502,32 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(sandboxes).toHaveLength(1);
   });
 
-  // ── Autopilot Policy (issue #481, PRD #480) ─────────────────────────────
+  // ── Regression: Autopilot Policy moved to AutopilotProbeTab (#1013) ─────
+  // The `update_mesh_autopilot` IPC and its four-policy-fields shape were
+  // intentionally moved out of Mesh Properties (ticket #1013, follow-up to
+  // #994). The Mesh Properties tab is no longer the configure surface for
+  // Autopilot Policy — that role lives on `AutopilotProbeTab`. The pre-#1013
+  // behavioural assertions for the old policy section moved with it (see
+  // `autopilot-probe-tab.test.tsx`). The test below pins the regression so a
+  // future change can't silently re-introduce the dual-edit surface.
 
-  it('renders the Autopilot toggle collapsed (policy fields hidden while disabled)', async () => {
+  it('does NOT render Autopilot Policy fields (issue #1013)', async () => {
     await openPropertiesTab();
-    const toggle = (await screen.findByLabelText('Autopilot Mode')) as HTMLInputElement;
-    expect(toggle.type).toBe('checkbox');
-    expect(toggle.checked).toBe(false);
-    // Policy fields must not render while disabled.
+
+    // Master toggle + 4 policy fields, none of which should be in the DOM.
+    // The 'Autopilot Mode' label previously anchored the section's master
+    // toggle; once it's gone, the four policy-field labels follow.
+    expect(screen.queryByLabelText('Autopilot Mode')).toBeNull();
     expect(screen.queryByLabelText('Trigger label')).toBeNull();
     expect(screen.queryByLabelText('Max concurrent autopilot nodes')).toBeNull();
-  });
-
-  it('enabling Autopilot saves the full policy and reveals the policy fields', async () => {
-    const user = userEvent.setup();
-    await openPropertiesTab();
-
-    const toggle = (await screen.findByLabelText('Autopilot Mode')) as HTMLInputElement;
-    await user.click(toggle);
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
-        meshId: 42,
-        enabled: true,
-        triggerLabel: null,
-        concurrencyLimit: 2,
-        provider: null,
-        actionOnSuccess: null,
-      });
-    });
-    // Policy fields appear once enabled.
-    expect(await screen.findByLabelText('Trigger label')).toBeTruthy();
-    expect(screen.getByLabelText('Max concurrent autopilot nodes')).toBeTruthy();
-    expect(screen.getByLabelText('Autopilot provider')).toBeTruthy();
-    expect(screen.getByLabelText('On success')).toBeTruthy();
-  });
-
-  it('preloads a saved Autopilot policy and saves edits to the policy fields', async () => {
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_mesh_properties') {
-        return Promise.resolve({
-          ...MESH_CONFIG,
-          autopilot_enabled: true,
-          autopilot_trigger_label: 'buildmesh:run',
-          autopilot_concurrency_limit: 3,
-          autopilot_provider: 'codex',
-          autopilot_action_on_success: 'draft_pr',
-        });
-      }
-      if (cmd === 'list_providers')
-        return Promise.resolve([
-          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
-          { id: 'codex', label: 'Codex', color: '#000', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
-        ]);
-      if (cmd === 'detect_mesh_project')
-        return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
-      if (cmd === 'detect_ai_context')
-        return Promise.resolve({
-          claude_md_exists: false,
-          agents_md_exists: false,
-          skills_dir_exists: false,
-          skill_count: 0,
-          agents_skills_exists: false,
-        });
-      return Promise.resolve({});
-    });
-    const user = userEvent.setup();
-    await openPropertiesTab();
-
-    const label = (await screen.findByLabelText('Trigger label')) as HTMLInputElement;
-    expect(label.value).toBe('buildmesh:run');
-    const concurrency = screen.getByLabelText(
-      'Max concurrent autopilot nodes'
-    ) as HTMLSelectElement;
-    expect(concurrency.value).toBe('3');
-    const provider = screen.getByLabelText('Autopilot provider') as HTMLSelectElement;
-    expect(provider.value).toBe('codex');
-
-    // Editing the concurrency limit persists the whole policy in one write,
-    // carrying the untouched fields along (atomic-policy contract).
-    await user.selectOptions(concurrency, '5');
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
-        meshId: 42,
-        enabled: true,
-        triggerLabel: 'buildmesh:run',
-        concurrencyLimit: 5,
-        provider: 'codex',
-        actionOnSuccess: 'draft_pr',
-      });
-    });
+    expect(screen.queryByLabelText('Autopilot provider')).toBeNull();
+    expect(screen.queryByLabelText('On success')).toBeNull();
+    // And the atomic IPC never fires from this tab — even on a no-op render.
+    expect(
+      vi.mocked(invoke).mock.calls.some(
+        ([cmd]) => (cmd as string) === 'update_mesh_autopilot'
+      )
+    ).toBe(false);
   });
 
   it('renders nothing when no mesh is selected (the probe shell handles the empty state)', () => {

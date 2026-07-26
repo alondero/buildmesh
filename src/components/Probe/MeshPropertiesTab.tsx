@@ -15,8 +15,16 @@
  *   • Default Claude Code model
  *   • Effort level (low/medium/high/xhigh/max)
  *   • Default provider
+ *   • Sandbox toggle
  *   • Project preset (auto-fill build / run)
  *   • Build / run commands
+ *
+ * Autopilot Policy (trigger label / concurrency / provider override /
+ * on-success action) was removed in ticket #1013 — it lives on the
+ * dedicated `AutopilotProbeTab` (wayfinder map #990 decision #5) and
+ * persists atomically through `update_mesh_autopilot`, the same typed
+ * IPC the legacy Mesh Properties used. The behaviour is identical;
+ * only the render surface and the save call site moved.
  *
  * Reactivity model matches the legacy panel: text fields save on blur,
  * selects and the preset picker save on change. The probe's
@@ -41,7 +49,6 @@ import {
   getAppPreferences,
   getMeshProperties,
   listProviders,
-  updateMeshAutopilot,
   updateMeshColumn,
   updateMeshSandbox,
   type ProviderInfo,
@@ -55,16 +62,6 @@ import {
 import { LoadingState } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
 import { Field } from './Field';
-
-// Autopilot Policy (issue #481, PRD #480) — mirrors the backend's
-// `update_mesh_autopilot` validation: 1..=8 concurrency, known actions.
-const AUTOPILOT_CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8];
-const AUTOPILOT_ACTION_OPTIONS = [
-  { value: 'draft_pr', label: 'Open draft PR (default)' },
-  { value: 'pr', label: 'Open PR ready for review' },
-  { value: 'none', label: 'Push only (no PR)' },
-];
-const DEFAULT_AUTOPILOT_TRIGGER_LABEL = 'buildmesh:run';
 
 const EFFORT_OPTIONS = [
   { value: '', label: 'Not set' },
@@ -98,11 +95,6 @@ export function MeshPropertiesTab() {
     rootRunCommand: '',
     defaultProvider: '',
 sandbox: false,
-    autopilotEnabled: false,
-    autopilotTriggerLabel: '',
-    autopilotConcurrencyLimit: 2,
-    autopilotProvider: '',
-    autopilotActionOnSuccess: '',
   });
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
@@ -234,11 +226,6 @@ sandbox: false,
           rootRunCommand: config.root_run_command ?? '',
           defaultProvider: config.default_provider ?? '',
 sandbox: config.sandbox,
-          autopilotEnabled: config.autopilot_enabled,
-          autopilotTriggerLabel: config.autopilot_trigger_label ?? '',
-          autopilotConcurrencyLimit: config.autopilot_concurrency_limit || 2,
-          autopilotProvider: config.autopilot_provider ?? '',
-          autopilotActionOnSuccess: config.autopilot_action_on_success ?? '',
         });
         setLoading(false);
       })
@@ -392,30 +379,6 @@ sandbox: config.sandbox,
     if (activeMeshId === null) return;
     setForm((p) => ({ ...p, sandbox: value }));
     await wrappedSave(() => updateMeshSandbox(activeMeshId, value));
-  };
-
-  // Autopilot Policy save — the five fields persist atomically through one
-  // typed command, so every control funnels its *next* form state through
-  // this helper (passing the patched object, not reading `form`, avoids
-  // saving a stale closure snapshot). Optimistic like `saveSandbox`.
-  const saveAutopilot = async (next: typeof form) => {
-    if (activeMeshId === null) return;
-    await wrappedSave(() =>
-      updateMeshAutopilot(
-        activeMeshId,
-        next.autopilotEnabled,
-        next.autopilotTriggerLabel.trim() || null,
-        next.autopilotConcurrencyLimit,
-        next.autopilotProvider || null,
-        next.autopilotActionOnSuccess || null
-      )
-    );
-  };
-
-  const patchAutopilot = async (patch: Partial<typeof form>) => {
-    const next = { ...form, ...patch };
-    setForm(next);
-    await saveAutopilot(next);
   };
 
   const applyPreset = async (preset: ProjectPreset) => {
@@ -632,129 +595,13 @@ sandbox: config.sandbox,
             </p>
           </div>
 
-          {/* Autopilot Mode (issue #481, PRD #480). The policy fields only
-              render while enabled — the section stays one quiet checkbox
-              for meshes that never use Autopilot. */}
-          <div className="pt-3 border-t border-border-subtle space-y-3">
-            <label
-              htmlFor="mesh-prop-autopilot"
-              className="flex items-center gap-2 text-xs cursor-pointer"
-            >
-              <input
-                id="mesh-prop-autopilot"
-                type="checkbox"
-                checked={form.autopilotEnabled}
-                onChange={async (e) => {
-                  await patchAutopilot({ autopilotEnabled: e.target.checked });
-                }}
-                className="accent-accent-cyan"
-              />
-              <span className="text-text-primary">Autopilot Mode</span>
-            </label>
-            <p className="text-xs text-text-muted/70 -mt-2">
-              Poll GitHub for labelled issues and auto-spawn isolated agent
-              nodes that implement, verify, and raise a PR.
-            </p>
-
-            {form.autopilotEnabled && (
-              <>
-                <Field label="Trigger label" htmlFor="mesh-prop-autopilot-label">
-                  <input
-                    id="mesh-prop-autopilot-label"
-                    type="text"
-                    value={form.autopilotTriggerLabel}
-                    onChange={(e) =>
-                      setForm((p) => ({ ...p, autopilotTriggerLabel: e.target.value }))
-                    }
-                    onBlur={async (e) => {
-                      if (!mountedRef.current) return;
-                      await saveAutopilot({
-                        ...form,
-                        autopilotTriggerLabel: e.target.value,
-                      });
-                    }}
-                    placeholder={DEFAULT_AUTOPILOT_TRIGGER_LABEL}
-                    className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
-                  />
-                </Field>
-
-                <Field
-                  label="Max concurrent autopilot nodes"
-                  htmlFor="mesh-prop-autopilot-concurrency"
-                >
-                  <select
-                    id="mesh-prop-autopilot-concurrency"
-                    value={form.autopilotConcurrencyLimit}
-                    onChange={async (e) => {
-                      await patchAutopilot({
-                        autopilotConcurrencyLimit: Number(e.target.value),
-                      });
-                    }}
-                    className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
-                  >
-                    {AUTOPILOT_CONCURRENCY_OPTIONS.map((n) => (
-                      <option key={n} value={n}>
-                        {n}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-
-                <Field label="Autopilot provider" htmlFor="mesh-prop-autopilot-provider">
-                  <select
-                    id="mesh-prop-autopilot-provider"
-                    value={form.autopilotProvider}
-                    onChange={async (e) => {
-                      await patchAutopilot({ autopilotProvider: e.target.value });
-                    }}
-                    className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
-                  >
-                    <option value="">&lt;Mesh default&gt;</option>
-                    {groupByHarness(providers).map(([harnessId, group]) => {
-                      if (group.length === 1) {
-                        return (
-                          <option key={group[0].id} value={group[0].id}>
-                            {group[0].label}
-                          </option>
-                        );
-                      }
-                      const native = group.find((p) => !p.is_proxied) ?? group[0];
-                      return (
-                        <optgroup key={harnessId} label={native.label}>
-                          {group.map((p) => (
-                            <option key={p.id} value={p.id}>
-                              {p.is_proxied
-                                ? `  ${p.label} (via ${native.label})`
-                                : p.label}
-                            </option>
-                          ))}
-                        </optgroup>
-                      );
-                    })}
-                  </select>
-                </Field>
-
-                <Field label="On success" htmlFor="mesh-prop-autopilot-action">
-                  <select
-                    id="mesh-prop-autopilot-action"
-                    value={form.autopilotActionOnSuccess || 'draft_pr'}
-                    onChange={async (e) => {
-                      await patchAutopilot({
-                        autopilotActionOnSuccess: e.target.value,
-                      });
-                    }}
-                    className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
-                  >
-                    {AUTOPILOT_ACTION_OPTIONS.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              </>
-            )}
-          </div>
+          {/* Autopilot Mode (issue #481, PRD #480) moved to the
+              dedicated `AutopilotProbeTab` (ticket #1013). Master toggle,
+              trigger label, concurrency limit, provider override, and
+              on-success action now live there alongside the Looping
+              section. The 5 fields persist atomically through
+              `update_mesh_autopilot` — the IPC's behaviour is unchanged,
+              only its call site moved. */}
 
           <Field label="Project preset" htmlFor="mesh-prop-preset">
             <select
