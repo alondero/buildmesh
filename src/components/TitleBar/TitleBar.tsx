@@ -1,28 +1,18 @@
 import { useEffect, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import Wordmark from '../../assets/wordmark.png';
+import { isMac } from '../../lib/platform';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 
 /**
- * TitleBar — bespoke app chrome replacing the native title bar (the window
- * runs with `"decorations": false` in tauri.conf.json). One slim strip,
- * Chrome-style: wordmark left, the ViewModeSwitcher as the in-bar toolbar,
- * settings + remote-access icons ahead of the minimize / maximize / close
- * window controls on the right.
- *
- * Dragging and double-click maximize come from Tauri's injected drag-region
- * script: any mousedown target carrying `data-tauri-drag-region` starts a
- * drag (or toggles maximize on the second click of a double-click). The
- * attribute is therefore spread on the bar, the wordmark and the flexible
- * spacer — but never on the interactive clusters, whose buttons must stay
- * the mousedown target to receive clicks.
- *
- * The modals (App Settings, Remote Access) moved here from the Sidebar
- * header along with their buttons; provider-list refresh on settings
- * changes is covered by the `provider-list-changed` event the modal emits
- * (see `useProviderListInvalidation`).
+ * Bespoke window chrome for the frameless window (`decorations: false`).
+ * macOS draws traffic lights on the LEFT — we can't reuse Tauri's
+ * `titleBarStyle: Overlay` because it requires native decorations, so
+ * the lights are drawn by us. Drag-region placement (per-target, never
+ * on buttons or SVGs) is the load-bearing detail; see the recipe in
+ * `docs/knowledge-primer.md`.
  */
 
 const appWindow = getCurrentWindow();
@@ -127,6 +117,75 @@ function WindowControlButton({ onClick, title, danger, children }: {
   );
 }
 
+/** macOS traffic-light background classes — system palette values for the
+    standard red/yellow/green, matching what `NSWindow` draws natively. */
+const MAC_TRAFFIC_LIGHT_CLASSES = {
+  close: 'bg-[#FF5F57]',
+  minimize: 'bg-[#FEBC2E]',
+  maximize: 'bg-[#28C840]',
+} as const;
+
+/** One of the three macOS traffic lights. 12×12 px coloured circle, with
+    the matching glyph (X / dash / plus) revealed on hover to mirror
+    NSWindow's behaviour. The button itself is the circle (no padding
+    wrapper) so the click target matches the visible affordance — Tauri
+    buttons live in the bar's flex row at `items-center` so vertical
+    centring is inherited from the parent. */
+function MacosTrafficLight({ kind, onClick, ariaLabel }: {
+  kind: keyof typeof MAC_TRAFFIC_LIGHT_CLASSES;
+  onClick: () => void;
+  ariaLabel: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={ariaLabel}
+      aria-label={`${ariaLabel} window`}
+      data-testid={`macos-traffic-${kind}`}
+      className={`group w-3 h-3 rounded-full ${MAC_TRAFFIC_LIGHT_CLASSES[kind]} flex items-center justify-center transition-[filter] hover:brightness-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40`}
+    >
+      <svg
+        viewBox="0 0 8 8"
+        className="w-2 h-2 text-black/70 opacity-0 transition-opacity group-hover:opacity-100"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinecap="round"
+        aria-hidden
+      >
+        {kind === 'close' && (
+          <>
+            <line x1="2" y1="2" x2="6" y2="6" />
+            <line x1="6" y1="2" x2="2" y2="6" />
+          </>
+        )}
+        {kind === 'minimize' && <line x1="2" y1="4" x2="6" y2="4" />}
+        {kind === 'maximize' && (
+          <>
+            <line x1="2" y1="4" x2="6" y2="4" />
+            <line x1="4" y1="2" x2="4" y2="6" />
+          </>
+        )}
+      </svg>
+    </button>
+  );
+}
+
+/** The wordmark <img>, kept as a single source so the macOS and
+    non-macOS branches can't drift on the asset, alt text, or drag-region
+    attribute. */
+function WordmarkImg() {
+  return (
+    <img
+      src={Wordmark}
+      data-tauri-drag-region
+      className="h-5 w-auto"
+      alt="Buildmesh"
+    />
+  );
+}
+
 export function TitleBar() {
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const [remoteAccessOpen, setRemoteAccessOpen] = useState(false);
@@ -164,14 +223,29 @@ export function TitleBar() {
         data-tauri-drag-region
         className="flex items-stretch h-9 shrink-0 bg-bg-surface border-b border-border-subtle select-none"
       >
-        <div data-tauri-drag-region className="flex items-center pl-3 pr-2">
-          <img
-            src={Wordmark}
-            data-tauri-drag-region
-            className="h-5 w-auto"
-            alt="Buildmesh"
-          />
-        </div>
+        {isMac ? (
+          <>
+            <div
+              className="flex items-center gap-2 pl-3 pr-3"
+              data-testid="macos-traffic-lights"
+            >
+              <MacosTrafficLight kind="close" onClick={() => appWindow.close()} ariaLabel="Close" />
+              <MacosTrafficLight kind="minimize" onClick={() => appWindow.minimize()} ariaLabel="Minimize" />
+              <MacosTrafficLight
+                kind="maximize"
+                onClick={handleToggleMaximize}
+                ariaLabel={isMaximized ? 'Restore' : 'Maximize'}
+              />
+            </div>
+            <div data-tauri-drag-region className="flex items-center pr-2">
+              <WordmarkImg />
+            </div>
+          </>
+        ) : (
+          <div data-tauri-drag-region className="flex items-center pl-3 pr-2">
+            <WordmarkImg />
+          </div>
+        )}
 
         <div className="flex items-center">
           <ViewModeSwitcher />
@@ -202,26 +276,30 @@ export function TitleBar() {
           </button>
         </div>
 
-        <div className="w-px h-4 self-center bg-border-subtle mx-1" />
+        {!isMac && (
+          <>
+            <div className="w-px h-4 self-center bg-border-subtle mx-1" />
 
-        <div className="flex items-stretch">
-          <WindowControlButton onClick={() => appWindow.minimize()} title="Minimize">
-            <MinimizeIcon className="w-4 h-4" />
-          </WindowControlButton>
-          <WindowControlButton
-            onClick={handleToggleMaximize}
-            title={isMaximized ? 'Restore' : 'Maximize'}
-          >
-            {isMaximized ? (
-              <RestoreIcon className="w-4 h-4" />
-            ) : (
-              <MaximizeIcon className="w-4 h-4" />
-            )}
-          </WindowControlButton>
-          <WindowControlButton onClick={() => appWindow.close()} title="Close" danger>
-            <CloseIcon className="w-4 h-4" />
-          </WindowControlButton>
-        </div>
+            <div className="flex items-stretch">
+              <WindowControlButton onClick={() => appWindow.minimize()} title="Minimize">
+                <MinimizeIcon className="w-4 h-4" />
+              </WindowControlButton>
+              <WindowControlButton
+                onClick={handleToggleMaximize}
+                title={isMaximized ? 'Restore' : 'Maximize'}
+              >
+                {isMaximized ? (
+                  <RestoreIcon className="w-4 h-4" />
+                ) : (
+                  <MaximizeIcon className="w-4 h-4" />
+                )}
+              </WindowControlButton>
+              <WindowControlButton onClick={() => appWindow.close()} title="Close" danger>
+                <CloseIcon className="w-4 h-4" />
+              </WindowControlButton>
+            </div>
+          </>
+        )}
       </header>
 
       {appSettingsOpen && <AppSettingsModal onClose={() => setAppSettingsOpen(false)} />}
