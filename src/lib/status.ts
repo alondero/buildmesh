@@ -8,7 +8,8 @@ export type SessionStatus =
   | 'awaiting_input'
   | 'error'
   | 'suspended'
-  | 'completed';
+  | 'completed'
+  | 'archived';
 
 // `hex` mirrors the resolved value of each entry's Tailwind `color` token
 // (see the `--color-*` custom properties in `src/App.css`) as a literal
@@ -83,6 +84,16 @@ export const STATUS_CONFIG = {
     dot: '✓',
     label: 'PR opened',
     hex: '#22c55e',
+  },
+  // Issue #788 — an archived node is historical, not actionable work.
+  // Muted grey keeps it distinct from live idle/running nodes in the
+  // desktop sidebar; the Archive probe tab remains the home for these rows.
+  archived: {
+    color: 'text-text-muted',
+    bgColor: 'bg-text-muted',
+    dot: '◌',
+    label: 'Archived',
+    hex: '#7a8492',
   },
 } as const;
 

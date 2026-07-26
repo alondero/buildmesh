@@ -228,7 +228,10 @@ export function Sidebar() {
                       onOpenWorktreesProbe={handleOpenWorktreesProbe}
                       onOpenIssuesProbe={handleOpenIssuesProbe}
                       onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
-                      meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id)}
+                      // Issue #788 — archived nodes live in the Archive probe
+                      // tab, not the actionable sidebar list (mirrors mobile's
+                      // `visibleNodes` filter in src/mobile/screens/NodeList.tsx).
+                      meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id && w.status !== 'archived')}
                       activeNodeId={activeNodeId}
                       setActiveNode={setActiveNode}
                       selectMesh={selectMesh}
