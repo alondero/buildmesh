@@ -20,6 +20,7 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
 import type { LoopStatusDto } from '../../src/types/generated/LoopStatus';
+import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 
 // The Mesh store's `Mesh` is the full generated 14+ field wire type
 // (wayfinder #990 ticket #991 added the six `loop_*` and the
@@ -91,6 +92,15 @@ function mockBackend(
      *  real DB round-trip). Defaults derive from the row + a live-iteration
      *  of none. */
     loopStatus?: Partial<LoopStatusDto>;
+    /** Provider catalogue the issue-driven branch renders via
+     *  `groupByHarness(providers)`. Tests that exercise the new
+     *  policy fields (#1013) opt in by passing an array — the default
+     *  empty array keeps the looping-only path free of optgroups.
+     *  Uses the generated `ProviderInfo` type (re-exported from
+     *  `src/lib/tauri`) — same source the `MeshPropertiesTab`'s
+     *  provider select consumes, so shape drift between tests and
+     *  production code is caught at compile time. */
+    providers?: ProviderInfo[];
   } = {}
 ) {
   let enabled = opts.loopStatus?.enabled ?? row.autopilot_enabled;
@@ -106,6 +116,12 @@ function mockBackend(
         total_iterations: totalIterations,
       };
       return Promise.resolve(dto);
+    }
+    if (cmd === 'list_providers') {
+      // Empty by default — the looping branch never reads the
+      // catalogue; tests that exercise the issue-driven "Autopilot
+      // provider" select opt in via `opts.providers`.
+      return Promise.resolve(opts.providers ?? []);
     }
     if (cmd === 'set_mesh_autopilot_enabled') {
       if (opts.rejectSetEnabled) {
@@ -163,17 +179,20 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
     ).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Issue-Driven' }).getAttribute('aria-pressed')).toBe('true');
 
-    // In issue-driven mode the looping inputs are hidden and the
-    // pointer-to-Mesh-Properties paragraph is in the DOM. We pin a
-    // phrase unique to that paragraph (`Switching this toggle to
-    // Looping is non-destructive`) because the title "Mesh
-    // Properties" appears in both the issue-driven body and the
-    // activity rail's accessible name.
+    // In issue-driven mode (ticket #1013) the body is now the actual
+    // Autopilot Policy form (master toggle + 4 fields), not the prose
+    // pointer that #994 landed pre-#1013. The default fixture has
+    // `autopilot_enabled = false`, so the master checkbox is in the
+    // DOM unchecked and the four policy fields are gated behind it.
+    // Looping controls and the loop-status badge stay hidden so a
+    // future regression that bleed them in is caught here.
+    expect((await screen.findByLabelText(/^Autopilot on/i))?.getAttribute('type')).toBe('checkbox');
+    expect(screen.queryByLabelText('Trigger label')).toBeNull();
+    expect(screen.queryByLabelText('Max concurrent autopilot nodes')).toBeNull();
+    expect(screen.queryByLabelText('Autopilot provider')).toBeNull();
+    expect(screen.queryByLabelText('On success')).toBeNull();
     expect(screen.queryByLabelText(/^Initial prompt/i)).toBeNull();
     expect(screen.queryByTestId('loop-status-badge')).toBeNull();
-    expect(
-      screen.getByText(/Switching this toggle to Looping is non-destructive/i)
-    ).toBeTruthy();
   });
 
   it('switching to Looping writes the full loop config atomically', async () => {
@@ -489,5 +508,253 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
     mockBackend(meshRow());
     render(<ProbePanel />);
     expect(screen.getByRole('button', { name: 'Autopilot' })).toBeTruthy();
+  });
+});
+
+// ── Issue-driven Autopilot Policy (ticket #1013) ─────────────────────────────
+// The four policy columns + master enable flag moved out of
+// `MeshPropertiesTab` and into this tab's issue-driven branch. They
+// persist atomically through `update_mesh_autopilot` (same IPC shape
+// the legacy Mesh Properties used; only the call site changed). The
+// tests below pin that move end-to-end: the form surface, the load
+// pre-population, the save-on-change contract, and the regression
+// that the same controls are NOT also rendered in Mesh Properties.
+describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', () => {
+  // The new tab is the single configure surface for both modes. The
+  // test fixture seeds a known good policy so we don't have to drive
+  // the master checkbox on before every assertion.
+  const ON_ROW = (): MeshRow =>
+    meshRow({
+      autopilot_mode: 'issue_driven',
+      autopilot_enabled: true,
+      autopilot_trigger_label: 'buildmesh:run',
+      autopilot_concurrency_limit: 4,
+      autopilot_provider: 'codex',
+      autopilot_action_on_success: 'pr',
+    });
+
+  it('renders all four policy fields when autopilot is on', async () => {
+    mockBackend(ON_ROW());
+    await openAutopilotTab();
+
+    // The master checkbox shows enabled=true. The four policy fields
+    // render because the gate is open. `Trigger label` carries the
+    // "(default if blank)" hint inline in the `<label>`; RTL's
+    // `getByLabelText` is exact-match by default, so the regex form
+    // (anchored at the start, like the existing looping-section
+    // tests' `/^Initial prompt/i`) is what survives a future hint
+    // rewrite.
+    expect(
+      ((await screen.findByLabelText(/^Autopilot on/i)) as HTMLInputElement).checked
+    ).toBe(true);
+    expect(screen.getByLabelText(/^Trigger label/)).toBeTruthy();
+    expect(screen.getByLabelText('Max concurrent autopilot nodes')).toBeTruthy();
+    expect(screen.getByLabelText('Autopilot provider')).toBeTruthy();
+    expect(screen.getByLabelText('On success')).toBeTruthy();
+  });
+
+  it('preloads the saved policy values into the form', async () => {
+    mockBackend(ON_ROW(), {
+      // Seed a provider catalogue so the `<select value="codex">` finds
+      // a matching `<option value="codex">` — without this, the select
+      // falls back to the `<Mesh default>` option (empty value) and
+      // `provider.value` would read `''`, not the saved `'codex'`.
+      providers: [
+        { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+        { id: 'codex', label: 'Codex', color: '#000', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
+      ],
+    });
+    await openAutopilotTab();
+
+    const trigger = (await screen.findByLabelText(/^Trigger label/)) as HTMLInputElement;
+    expect(trigger.value).toBe('buildmesh:run');
+    const concurrency = screen.getByLabelText(
+      'Max concurrent autopilot nodes'
+    ) as HTMLSelectElement;
+    expect(concurrency.value).toBe('4');
+    const provider = screen.getByLabelText('Autopilot provider') as HTMLSelectElement;
+    expect(provider.value).toBe('codex');
+    const action = screen.getByLabelText('On success') as HTMLSelectElement;
+    expect(action.value).toBe('pr');
+  });
+
+  it('hides the four policy fields when the master toggle is off (default)', async () => {
+    mockBackend(meshRow({ autopilot_enabled: false }));
+    await openAutopilotTab();
+
+    expect(
+      ((await screen.findByLabelText(/^Autopilot on/i)) as HTMLInputElement).checked
+    ).toBe(false);
+    // Fields gated behind the master toggle. queryByLabelText returns
+    // null without throwing — the test asserts the absence.
+    expect(screen.queryByLabelText(/^Trigger label/)).toBeNull();
+    expect(screen.queryByLabelText('Max concurrent autopilot nodes')).toBeNull();
+    expect(screen.queryByLabelText('Autopilot provider')).toBeNull();
+    expect(screen.queryByLabelText('On success')).toBeNull();
+  });
+
+  it('replaces the issue-driven form with the looping form when mode flips to Looping', async () => {
+    mockBackend(ON_ROW());
+    const user = userEvent.setup();
+    await openAutopilotTab();
+
+    // Sanity: issue-driven fields are visible right now.
+    expect(await screen.findByLabelText(/^Trigger label/)).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Looping' }));
+
+    // The mode toggle writes update_mesh_loop_config carrying the
+    // current prompts/caps; the issue-driven fields unmount (they
+    // live inside the issue-driven branch only). The looping branch's
+    // own surfaces mount.
+    expect(screen.queryByLabelText(/^Trigger label/)).toBeNull();
+    expect(screen.queryByLabelText('Max concurrent autopilot nodes')).toBeNull();
+    expect(await screen.findByLabelText(/^Initial prompt/i)).toBeTruthy();
+  });
+
+  it('master on/off flip writes the full policy atomically via update_mesh_autopilot', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'issue_driven',
+        autopilot_enabled: true,
+        autopilot_trigger_label: 'buildmesh:run',
+        autopilot_concurrency_limit: 4,
+        autopilot_provider: 'codex',
+        autopilot_action_on_success: 'pr',
+      })
+    );
+    const user = userEvent.setup();
+    await openAutopilotTab();
+
+    const checkbox = await screen.findByLabelText(/^Autopilot on/i);
+    await user.click(checkbox);
+
+    // Atomic 5-field write (ticket #1013 — the same contract the
+    // pre-#1013 Mesh Properties held): one IPC carries enabled +
+    // all four policy columns so a partial-update can't leave the
+    // policy out of sync with the master enable.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
+        meshId: 42,
+        enabled: false,
+        triggerLabel: 'buildmesh:run',
+        concurrencyLimit: 4,
+        provider: 'codex',
+        actionOnSuccess: 'pr',
+      });
+    });
+  });
+
+  it('trigger label saves on blur via update_mesh_autopilot (atomic 5-field write)', async () => {
+    mockBackend(ON_ROW());
+    const user = userEvent.setup();
+    await openAutopilotTab();
+
+    const input = await screen.findByLabelText(/^Trigger label/);
+    await user.clear(input);
+    await user.type(input, 'buildmesh:rerun');
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        'update_mesh_autopilot',
+        expect.objectContaining({
+          meshId: 42,
+          enabled: true,
+          triggerLabel: 'buildmesh:rerun',
+          // Concurrency / provider / action load from MeshRow unchanged.
+          concurrencyLimit: 4,
+          provider: 'codex',
+          actionOnSuccess: 'pr',
+        })
+      );
+    });
+  });
+
+  it('concurrency / provider / action saves on change via the same atomic IPC', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'issue_driven',
+        autopilot_enabled: true,
+        autopilot_trigger_label: 'buildmesh:run',
+        autopilot_concurrency_limit: 2,
+        autopilot_provider: null,
+        autopilot_action_on_success: 'draft_pr',
+      })
+    );
+    const user = userEvent.setup();
+    await openAutopilotTab();
+
+    // Atomic 5-field contract — every IPC carries ALL policy columns
+    // (enabled + trigger + concurrency + provider + action) so a
+    // partial update can never desync the master enable from the rest
+    // of the policy. Each change below asserts the FULL payload the
+    // contract pins, not just the changed field.
+    await user.selectOptions(
+      screen.getByLabelText('Max concurrent autopilot nodes'),
+      '5'
+    );
+    await waitFor(() => {
+      expect(invoke).toHaveBeenLastCalledWith('update_mesh_autopilot', {
+        meshId: 42,
+        enabled: true,
+        triggerLabel: 'buildmesh:run',
+        concurrencyLimit: 5,
+        provider: null,
+        actionOnSuccess: 'draft_pr',
+      });
+    });
+
+    // A blank provider value is the "<Mesh default>" sentinel; the
+    // IPC carries it as `null` and the backend applies the default.
+    // Untouched fields travel with the change — proving atomicity.
+    await user.selectOptions(screen.getByLabelText('Autopilot provider'), '');
+    await waitFor(() => {
+      expect(invoke).toHaveBeenLastCalledWith('update_mesh_autopilot', {
+        meshId: 42,
+        enabled: true,
+        triggerLabel: 'buildmesh:run',
+        concurrencyLimit: 5,
+        provider: null,
+        actionOnSuccess: 'draft_pr',
+      });
+    });
+
+    await user.selectOptions(screen.getByLabelText('On success'), 'none');
+    await waitFor(() => {
+      expect(invoke).toHaveBeenLastCalledWith('update_mesh_autopilot', {
+        meshId: 42,
+        enabled: true,
+        triggerLabel: 'buildmesh:run',
+        concurrencyLimit: 5,
+        provider: null,
+        actionOnSuccess: 'none',
+      });
+    });
+  });
+
+  it('blank trigger label serialises as null (the poller applies its default)', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'issue_driven',
+        autopilot_enabled: true,
+        autopilot_trigger_label: 'buildmesh:run',
+      })
+    );
+    await openAutopilotTab();
+
+    const input = await screen.findByLabelText(/^Trigger label/);
+    fireEvent.change(input, { target: { value: '   ' } });
+    fireEvent.blur(input);
+
+    // Whitespace-only collapses to null at write time so the backend
+    // isn't asked to store a literal empty string. Matches the
+    // pre-#1013 `saveAutopilot` contract in `MeshPropertiesTab`.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenLastCalledWith(
+        'update_mesh_autopilot',
+        expect.objectContaining({ triggerLabel: null })
+      );
+    });
   });
 });

@@ -31,11 +31,19 @@
  *       own). Issue-driven autopilot always uses a worktree regardless;
  *       looping respects this toggle.
  *
- *   - Issue-driven section: an explanatory paragraph plus a pointer
- *     to Mesh Properties where the trigger label, concurrency limit,
- *     provider, and PR action are still configured (ticket #481).
- *     Migrating those controls here is a future ticket; keeping them
- *     where they are avoids expanding the scope of #994.
+ *   - Issue-driven section (formerly a prose pointer to Mesh Properties
+ *     folded in by ticket #1013): the master `Autopilot on` checkbox
+ *     + four policy columns — trigger label, max concurrent nodes,
+ *     autopilot provider, on-success action. All five columns persist
+ *     atomically through one `update_mesh_autopilot` IPC call (matching
+ *     the pre-#1013 contract from `MeshPropertiesTab`; the command's
+ *     behaviour is unchanged, only its call site moved). The fields
+ *     only render while the master toggle is on, mirroring the prior
+ *     Mesh Properties UX; the four columns persist either way so the
+ *     user can re-enable without losing their configuration. The
+ *     Looping section's Start/Stop still uses the narrow
+ *     `set_mesh_autopilot_enabled` IPC so it can't clobber the issue-
+ *     driven policy columns.
  *
  * Status badge / Start-Pause-Stop (ticket #994 wording)
  * -----------------------------------------------------
@@ -59,12 +67,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useSaveStatus } from '../../hooks/useSaveStatus';
+import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { groupByHarness } from '../../lib/groups';
 import {
   getLoopStatus,
   getMeshProperties,
+  listProviders,
   setMeshAutopilotEnabled,
+  updateMeshAutopilot,
   updateMeshLoopConfig,
   updateMeshUseWorktree,
+  type ProviderInfo,
 } from '../../lib/tauri';
 import type { MeshRow } from '../../types/generated/MeshRow';
 import type { AutopilotMode } from '../../types/generated/AutopilotMode';
@@ -83,6 +96,22 @@ const AUTOPILOT_MODE_OPTIONS: ModeOption[] = [
   { value: 'issue_driven', label: 'Issue-Driven' },
   { value: 'looping', label: 'Looping' },
 ];
+
+// Issue-driven Autopilot Policy (issue #481 / PRD #480, folded out of
+// `MeshPropertiesTab` by ticket #1013). The four fields render in
+// `IssueDrivenSection` of THIS tab (wayfinder map #990 decision #5 —
+// "Looping & Autopilot configuration and status monitoring live in a
+// dedicated tab on the Probe Panel"). Concurrency matches the backend's
+// 1..=8 range enforced by `update_mesh_autopilot`; the action literal
+// matches `commands/mesh_properties::update_mesh_autopilot`'s allowed
+// list (draft_pr / pr / none — plain string, not a generated enum).
+const AUTOPILOT_CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8];
+const AUTOPILOT_ACTION_OPTIONS = [
+  { value: 'draft_pr', label: 'Open draft PR (default)' },
+  { value: 'pr', label: 'Open PR ready for review' },
+  { value: 'none', label: 'Push only (no PR)' },
+];
+const DEFAULT_AUTOPILOT_TRIGGER_LABEL = 'buildmesh:run';
 
 /** Runtime loop status — the badge states reachable in the Start/Stop MVP
  *  (ticket #994). Derived from the backend `LoopStatusDto` via [`toLoopStatus`]:
@@ -155,6 +184,30 @@ const blankLoopForm: AutopilotLoopForm = {
   intervalSeconds: '0',
   consecutiveFailures: '0',
   useWorktree: true,
+};
+
+/** Issue-driven Autopilot Policy form state (issue #481, folded out of
+ *  `MeshPropertiesTab` by ticket #1013). All five fields persist atomically
+ *  via `update_mesh_autopilot` (one IPC write carries them all); the master
+ *  `enabled` flag also writes through this command rather than the narrow
+ *  `set_mesh_autopilot_enabled` so the four policy columns travel with it.
+ *  Blank `triggerLabel` collapses to `null` at write time (the poller's
+ *  default-label fallback applies); an unset `actionOnSuccess` defaults to
+ *  `'draft_pr'` to match the spec's "Open draft PR" wording. */
+interface IssueDrivenForm {
+  enabled: boolean;
+  triggerLabel: string;
+  concurrencyLimit: number;
+  provider: string;
+  actionOnSuccess: string;
+}
+
+const blankIssueDrivenForm: IssueDrivenForm = {
+  enabled: false,
+  triggerLabel: '',
+  concurrencyLimit: 2,
+  provider: '',
+  actionOnSuccess: 'draft_pr',
 };
 
 interface CoerceOk {
@@ -244,6 +297,18 @@ const TEXTAREA_CLASS =
 export function AutopilotProbeTab() {
   const { activeMeshId } = useProbeContext();
   const [form, setForm] = useState<AutopilotLoopForm>(blankLoopForm);
+  // Issue-driven Autopilot Policy form (ticket #1013, moved out of
+  // `MeshPropertiesTab` to keep this tab the single configure surface for
+  // both modes). Persists through `update_mesh_autopilot` (atomic 5-field
+  // write); the loop form's concerns stay separate.
+  const [issueDrivenForm, setIssueDrivenForm] = useState<IssueDrivenForm>(
+    blankIssueDrivenForm
+  );
+  // Provider catalogue for the Issue-driven "Autopilot provider" select.
+  // Fetched once on mount; the `provider-list-changed` event keeps it
+  // honest when Settings edits the catalogue. We don't ship a ProviderInfo
+  // list in the MeshRow — the fetch is unavoidable.
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [loading, setLoading] = useState(true);
   // Runtime loop status for the badge (ticket #994). `null` = not yet
   // fetched (or not in looping mode); the row renders a muted "Checking…"
@@ -274,6 +339,22 @@ export function AutopilotProbeTab() {
   useEffect(() => {
     activeMeshIdRef.current = activeMeshId;
   }, [activeMeshId]);
+
+  // Provider catalogue for the issue-driven "Autopilot provider" select.
+  // Mirrors `MeshPropertiesTab`'s pattern: fetch once on mount; the
+  // `provider-list-changed` event keeps it honest. We deliberately
+  // always fetch (the loop section doesn't need providers, but the
+  // catalogue is tiny and a toggle from `looping` → `issue_driven`
+  // shouldn't pay a stale-state penalty).
+  const refreshProviders = useCallback(() => {
+    listProviders()
+      .then(setProviders)
+      .catch(() => setProviders([]));
+  }, []);
+  useEffect(() => {
+    refreshProviders();
+  }, [refreshProviders]);
+  useProviderListInvalidation(refreshProviders);
 
   /** IPC wrapper. Mirrors `wrappedSave` in `MeshPropertiesTab.tsx`:
    *  drives the SaveIndicator state machine, and on rejection surfaces
@@ -319,6 +400,19 @@ export function AutopilotProbeTab() {
           intervalSeconds: String(row.loop_interval_seconds),
           consecutiveFailures: String(row.loop_consecutive_failures),
           useWorktree: row.use_worktree,
+        });
+        // Issue-driven Autopilot Policy (ticket #1013): the four policy
+        // columns plus `autopilot_enabled` live on this tab now. Blank
+        // trigger-label / provider collapse from `null` → `''` for the
+        // input's `value`; `actionOnSuccess` defaults to `'draft_pr'`
+        // (matching the spec's "Open draft PR" copy) so a fresh mesh
+        // doesn't show an empty select.
+        setIssueDrivenForm({
+          enabled: row.autopilot_enabled,
+          triggerLabel: row.autopilot_trigger_label ?? '',
+          concurrencyLimit: row.autopilot_concurrency_limit || 2,
+          provider: row.autopilot_provider ?? '',
+          actionOnSuccess: row.autopilot_action_on_success ?? 'draft_pr',
         });
         setLoading(false);
       })
@@ -373,6 +467,39 @@ export function AutopilotProbeTab() {
     if (meshId === null) return;
     setForm((p) => ({ ...p, useWorktree: value }));
     await wrappedSave(() => updateMeshUseWorktree(meshId, value));
+  };
+
+  /** Persist the issue-driven Autopilot Policy in one atomic write
+   *  (ticket #1013, moved out of `MeshPropertiesTab`). The five fields
+   *  — `enabled`, `triggerLabel`, `concurrencyLimit`, `provider`,
+   *  `actionOnSuccess` — travel together so a partial-update can't leave
+   *  the policy fields out of sync with the master enable flag. Blank
+   *  `triggerLabel` / `provider` collapse to `null`; an unset
+   *  `actionOnSuccess` defaults to `'draft_pr'` (the spec's chosen
+   *  default action). Optimistic like `saveUseWorktree`. */
+  const saveIssueDriven = async (next: IssueDrivenForm) => {
+    const meshId = activeMeshIdRef.current;
+    if (meshId === null) return;
+    await wrappedSave(() =>
+      updateMeshAutopilot(
+        meshId,
+        next.enabled,
+        next.triggerLabel.trim() || null,
+        next.concurrencyLimit,
+        next.provider || null,
+        next.actionOnSuccess || null
+      )
+    );
+  };
+
+  /** Optimistic patch helper for the issue-driven controls (master
+   *  enable + 4 fields). Sets the next form, then funnels it through
+   *  `saveIssueDriven` so the five columns land atomically. Mirrors the
+   *  loop-section `patchLoopConfig` shape verbatim. */
+  const patchIssueDriven = async (patch: Partial<IssueDrivenForm>) => {
+    const next = { ...issueDrivenForm, ...patch };
+    setIssueDrivenForm(next);
+    await saveIssueDriven(next);
   };
 
   /** Fetch the live loop status and map it onto the badge union. Mesh-switch
@@ -471,7 +598,14 @@ export function AutopilotProbeTab() {
                 mountedRef={mountedRef}
               />
           ) : (
-            <IssueDrivenSection />
+            <IssueDrivenSection
+              form={issueDrivenForm}
+              setForm={setIssueDrivenForm}
+              onSaveIssueDriven={saveIssueDriven}
+              onPatchIssueDriven={patchIssueDriven}
+              providers={providers}
+              mountedRef={mountedRef}
+            />
           )}
         </>
       )}
@@ -739,28 +873,180 @@ function LoopStatusRow({ status, promptBlank, onStart, onStop }: LoopStatusRowPr
   );
 }
 
-function IssueDrivenSection() {
+interface IssueDrivenSectionProps {
+  form: IssueDrivenForm;
+  setForm: React.Dispatch<React.SetStateAction<IssueDrivenForm>>;
+  /** Persist the four policy columns + master enable flag atomically.
+   *  Carries the whole form (the `update_mesh_autopilot` IPC is one
+   *  atomic write — every field travels with the master flag). */
+  onSaveIssueDriven: (next: IssueDrivenForm) => Promise<void>;
+  /** Optimistic patch helper for the simpler controls (master checkbox,
+   *  selects). Sets the next form, then funnels through
+   *  `onSaveIssueDriven`. */
+  onPatchIssueDriven: (patch: Partial<IssueDrivenForm>) => Promise<void>;
+  /** Provider catalogue for the "Autopilot provider" `<select>`. The
+   *  parent fetches once on mount and re-fetches on
+   *  `provider-list-changed`; this prop is read-only here. */
+  providers: ProviderInfo[];
+  mountedRef: React.MutableRefObject<boolean>;
+}
+
+function IssueDrivenSection({
+  form,
+  setForm,
+  onSaveIssueDriven,
+  onPatchIssueDriven,
+  providers,
+  mountedRef,
+}: IssueDrivenSectionProps) {
   return (
-    <div className="space-y-2 text-xs text-text-muted">
-      <p>
+    <div className="space-y-3">
+      {/* One-line intro — the loom sentence that used to live at the
+          top of `MeshPropertiesTab`'s autopilot section. The four
+          fields below carry the actual config; the intro just orients
+          the user on this dedicated tab. */}
+      <p className="text-xs text-text-muted">
         Issue-driven autopilot polls GitHub for labelled issues and
         auto-spawns an Agent Node per issue that implements, verifies,
         and opens a PR.
       </p>
-      <p>
-        Configure its policy — trigger label, concurrency limit,
-        provider override, and post-merge action — under{' '}
-        <span className="text-text-primary">Autopilot Mode</span> in the{' '}
-        <span className="text-text-primary">Mesh Properties</span> tab.
-        Switching this toggle to Looping is non-destructive: the issue-
-        driven policy stays in Mesh Properties until you change or
-        delete it.
-      </p>
-      <p>
-        The two modes share a single mesh — flipping the toggle just
-        switches which controller (issue-driven poller vs looping
-        scheduler) is active for this project.
-      </p>
+
+      {/* Master enable (issue #481). Owns the four policy columns in
+          the same atomic write — unchecking fires
+          `update_mesh_autopilot({ enabled: false, …4 fields })` so
+          both halves stay in sync. Renamed from
+          `MeshPropertiesTab`'s "Autopilot Mode" to avoid clashing
+          with the `Autopilot mode` segmented toggle at the top of
+          this tab. */}
+      <div>
+        <label
+          htmlFor="ap-policy-enabled"
+          className="flex items-center gap-2 text-xs cursor-pointer"
+        >
+          <input
+            id="ap-policy-enabled"
+            type="checkbox"
+            checked={form.enabled}
+            onChange={async (e) => {
+              await onPatchIssueDriven({ enabled: e.target.checked });
+            }}
+            className="accent-accent-cyan"
+          />
+          <span className="text-text-primary">Autopilot on</span>
+        </label>
+        <p className="mt-1 text-xs text-text-muted/70">
+          Turn the issue-driven poller on or off. The policy fields
+          below apply only while this is checked; the four columns
+          persist either way so you can re-enable without losing your
+          configuration.
+        </p>
+      </div>
+
+      {form.enabled && (
+        <>
+          <Field
+            label="Trigger label"
+            htmlFor="ap-policy-trigger-label"
+            hint="default if blank"
+          >
+            <input
+              id="ap-policy-trigger-label"
+              type="text"
+              value={form.triggerLabel}
+              onChange={(e) =>
+                setForm((p) => ({ ...p, triggerLabel: e.target.value }))
+              }
+              onBlur={async (e) => {
+                if (!mountedRef.current) return;
+                await onSaveIssueDriven({
+                  ...form,
+                  triggerLabel: e.target.value,
+                });
+              }}
+              placeholder={DEFAULT_AUTOPILOT_TRIGGER_LABEL}
+              className={CONTROL_CLASS}
+            />
+          </Field>
+
+          <Field
+            label="Max concurrent autopilot nodes"
+            htmlFor="ap-policy-concurrency"
+          >
+            <select
+              id="ap-policy-concurrency"
+              value={form.concurrencyLimit}
+              onChange={async (e) => {
+                await onPatchIssueDriven({
+                  concurrencyLimit: Number(e.target.value),
+                });
+              }}
+              className={CONTROL_CLASS}
+            >
+              {AUTOPILOT_CONCURRENCY_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field
+            label="Autopilot provider"
+            htmlFor="ap-policy-provider"
+          >
+            <select
+              id="ap-policy-provider"
+              value={form.provider}
+              onChange={async (e) => {
+                await onPatchIssueDriven({ provider: e.target.value });
+              }}
+              className={CONTROL_CLASS}
+            >
+              <option value="">&lt;Mesh default&gt;</option>
+              {groupByHarness(providers).map(([harnessId, group]) => {
+                if (group.length === 1) {
+                  return (
+                    <option key={group[0].id} value={group[0].id}>
+                      {group[0].label}
+                    </option>
+                  );
+                }
+                const native = group.find((p) => !p.is_proxied) ?? group[0];
+                return (
+                  <optgroup key={harnessId} label={native.label}>
+                    {group.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.is_proxied
+                          ? `  ${p.label} (via ${native.label})`
+                          : p.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
+            </select>
+          </Field>
+
+          <Field label="On success" htmlFor="ap-policy-action">
+            <select
+              id="ap-policy-action"
+              value={form.actionOnSuccess || 'draft_pr'}
+              onChange={async (e) => {
+                await onPatchIssueDriven({
+                  actionOnSuccess: e.target.value,
+                });
+              }}
+              className={CONTROL_CLASS}
+            >
+              {AUTOPILOT_ACTION_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </>
+      )}
     </div>
   );
 }
