@@ -2275,6 +2275,11 @@ pub fn update_agent_node_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()
     Ok(())
 }
 
+/// Rename IPC only — writes `name` alone and is **not** the spawn-path
+/// slug adoption. The spawn path uses `adopt_manual_pool_slug`, which
+/// writes `name` and `worktree_name` together so the close path's
+/// removal directory cannot drift from the displayed name (#1080).
+/// Mixing the two would reintroduce the bug.
 pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
     let db = get().lock().unwrap();
     db.execute(
@@ -2284,15 +2289,20 @@ pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
     Ok(())
 }
 
-/// Update an agent node's `worktree_name` column. Used by the warm-pool
-/// tracer bullet (issue #609) after a successful claim so the node row
-/// reflects the preassigned slug the pool baked into the directory name.
-/// Idempotent — a no-op if the column already carries the same value.
-pub fn set_agent_node_worktree_name(id: i64, worktree_name: &str) -> SqlResult<()> {
+/// Adopt the pool's pre-assigned slug onto a Manual node. Writes `name`
+/// AND `worktree_name` in one UPDATE — they are two halves of one
+/// adoption, and #1080 was the two halves drifting apart. Issue/PR
+/// spawns keep their own `gh{N}-`/`pr{N}-` identity; their pool dir is
+/// moved to match instead (see `git::worktree::provision`).
+pub fn adopt_manual_pool_slug(id: i64, slug: &str) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    db.execute(
-        "UPDATE agent_nodes SET worktree_name = ?1 WHERE id = ?2",
-        params![worktree_name, id],
+    adopt_manual_pool_slug_inner(&db, id, slug)
+}
+
+fn adopt_manual_pool_slug_inner(conn: &Connection, id: i64, slug: &str) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_nodes SET name = ?1, worktree_name = ?1 WHERE id = ?2",
+        params![slug, id],
     )?;
     Ok(())
 }

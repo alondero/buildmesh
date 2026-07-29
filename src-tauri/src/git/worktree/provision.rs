@@ -667,15 +667,19 @@ pub(crate) trait ProvisionSink: Sync {
     /// when the directory has become the agent's worktree.
     fn forget_warm_row(&self, id: i64);
 
-    /// Persist the Manual-upgraded node's display name into the DB so
-    /// the row matches the pre-warmed directory name, AND announce via
-    /// `node-renamed` so the frontend's optimistic stage-1 row re-labels.
-    /// Two consequences of one decision — kept as a single trait method
-    /// because the DB write and the announce must be paired (a partial
-    /// pair would leave either the on-disk name or the in-memory one
-    /// out of sync). Called only on `Upgraded` (Manual spawns); Issue/PR
-    /// `Adopted` skips name adoption per CONTEXT.md *Spawn Source*.
-    fn adopt_manual_name(&self, node_id: i64, name: &str);
+    /// Adopt the pool's pre-assigned slug onto a Manual node: persist it as
+    /// the row's identity (`name` AND `worktree_name`, one write — see
+    /// `db::adopt_manual_pool_slug`) AND announce via `node-renamed` so the
+    /// frontend's optimistic stage-1 row re-labels. Three consequences of one
+    /// decision — kept as a single trait method because they must be
+    /// atomic-ish: a partial application leaves either the on-disk name, the
+    /// in-memory one, or the close path's removal target out of sync. The
+    /// last of those is what leaked worktrees in #1080.
+    ///
+    /// Called for every Manual spawn that *claimed* a warm entry, whichever
+    /// on-disk outcome it reached; Issue/PR spawns keep their own
+    /// `gh{N}-`/`pr{N}-` identity per CONTEXT.md *Spawn Source*.
+    fn adopt_manual_slug(&self, node_id: i64, slug: &str);
 
     /// Schedule the single post-spawn pool-maintenance task. Called only
     /// when `ref_advanced_for_pool || pool_was_drained_by_this_spawn`;
@@ -707,16 +711,22 @@ impl ProvisionSink for AppHandleSink {
         crate::services::warm_pool::forget_after_spawn(id);
     }
 
-    fn adopt_manual_name(&self, node_id: i64, name: &str) {
+    fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
         // DB write first; emit on success only. A failed DB write leaves
-        // the row's `name` column stale, which the next manual rename (or
+        // the row's identity stale, which the next manual rename (or
         // stage-2 reconcile) can correct — but a stale `node-renamed` emit
         // would also re-label the frontend's optimistic stage-1 row to a
         // value the DB doesn't carry, which is the harder case to undo.
+        //
+        // `adopt_manual_pool_slug` writes `name` and `worktree_name`
+        // together. Do NOT narrow this to a name-only update: the close
+        // path derives its removal directory from `worktree_name`, so a
+        // name-only adoption silently leaks the worktree on every close
+        // (#1080).
         if crate::db::is_initialized() {
-            if let Err(e) = crate::db::update_agent_node_name(node_id, name) {
+            if let Err(e) = crate::db::adopt_manual_pool_slug(node_id, slug) {
                 tracing::warn!(
-                    "AppHandleSink::adopt_manual_name: DB write failed for node {} ({}); \
+                    "AppHandleSink::adopt_manual_slug: DB write failed for node {} ({}); \
                      skipping the node-renamed emit so the frontend can't re-label to a value the DB doesn't carry",
                     node_id, e
                 );
@@ -727,7 +737,7 @@ impl ProvisionSink for AppHandleSink {
             "node-renamed",
             crate::session_naming::NodeRenamedPayload {
                 node_id,
-                name: name.to_string(),
+                name: slug.to_string(),
             },
         );
     }
@@ -764,7 +774,7 @@ pub(crate) struct NullSink;
 #[cfg(test)]
 impl ProvisionSink for NullSink {
     fn forget_warm_row(&self, _id: i64) {}
-    fn adopt_manual_name(&self, _node_id: i64, _name: &str) {}
+    fn adopt_manual_slug(&self, _node_id: i64, _slug: &str) {}
     fn on_pool_maintenance_required(&self, _mesh_id: i64, _do_refresh: bool, _do_refill: bool) {}
 }
 
@@ -876,6 +886,25 @@ pub fn provision_for_spawn(
     //      warm branch and either consumed (warm Ok → forget + name) or
     //      restored for the cleanup block below (warm Err).
     let warm_entry_for_cleanup = ctx.warm_entry.take();
+
+    // Drive adoption from the CLAIM, not the outcome. A Manual warm claim
+    // resolves to `Upgraded` on the happy path, but a warm failure falls
+    // back to a cold create at the same `ctx.host_path` — which is still
+    // the pool-slug directory, because the orchestrator resolved
+    // `host_path` from the claimed slug before calling us. Keying
+    // adoption off `Upgraded` alone would leave the cold-fallback spawn's
+    // row pointing at the stage-1 throwaway slug — the same silent
+    // worktree leak as #1080, just via a rarer path.
+    //
+    // Scope: this extends beyond issue #1080's literal "next to the
+    // existing adoption site" wording — the issue named the `Upgraded`
+    // outcome, not the claim. The extension is intentional: the
+    // cold-fallback is the same bug class. Tracking issue for the
+    // scope line lives in #1080's PR description.
+    let manual_pool_slug: Option<String> = match (&ctx.source, &warm_entry_for_cleanup) {
+        (SpawnSource::Manual, Some(entry)) => Some(entry.preassigned_name.clone()),
+        _ => None,
+    };
 
     let warm_result: Result<Option<ProvisionOutcome>, (String, crate::services::warm_pool::ClaimedWarmEntry)> =
         if let Some(entry) = warm_entry_for_cleanup {
@@ -1027,15 +1056,16 @@ pub fn provision_for_spawn(
         }
     }?;
 
-    // ---- Post-success bookkeeping (issue #609, #613, #653 semantics).
+    // ---- Post-success bookkeeping (issue #609, #613, #653, #1080 semantics).
     //
     // The provisioner owns this fan-out now (deepening). On `Reused` and
-    // `Created` no warm row exists, so nothing to forget. On
-    // `Adopted` / `Upgraded` the warm row is forgotten via `sink.forget_warm_row`.
-    // Manual `Upgraded` additionally adopts the pool's pre-assigned slug as
-    // the node's display name via `sink.adopt_manual_name` (which does both
-    // the DB write and the `node-renamed` emit — see `AppHandleSink`); Issue/PR
-    // keep their own `gh{N}-`/`pr{N}-` name per CONTEXT.md *Spawn Source*.
+    // `Created` no warm row exists to forget, so only the warm outcomes
+    // (`Adopted` / `Upgraded`) call `sink.forget_warm_row`.
+    //
+    // Slug adoption is deliberately NOT part of this match — it is driven by
+    // `manual_pool_slug` (the claim) below, because a Manual claim that fell
+    // back to a cold create still runs in the pool-slug directory and still
+    // needs its row reconciled (#1080).
     //
     // The provisioner is therefore DB-free — the sink encapsulates every
     // `db::is_initialized` gate. Adding new side effects on a future
@@ -1047,11 +1077,19 @@ pub fn provision_for_spawn(
         }
         ProvisionOutcome::Upgraded { entry, .. } => {
             sink.forget_warm_row(entry.id);
-            sink.adopt_manual_name(ctx.node.id, &entry.preassigned_name);
         }
         ProvisionOutcome::Reused { .. } | ProvisionOutcome::Created { .. } => {
-            // No warm entry was adopted — nothing to forget, no name to adopt.
+            // No warm entry was adopted here — nothing to forget. (A warm
+            // failure already forgot its row in the `Err` branch above.)
         }
+    }
+
+    // Reconcile the row's identity with the directory the agent will actually
+    // run in. Issue/PR spawns keep their own `gh{N}-`/`pr{N}-` identity — the
+    // pool directory was moved to match them instead — so `manual_pool_slug`
+    // is `None` for those and this is a no-op.
+    if let Some(slug) = &manual_pool_slug {
+        sink.adopt_manual_slug(ctx.node.id, slug);
     }
 
     let do_refresh = hooks.ref_advanced_for_pool;
@@ -1609,8 +1647,8 @@ mod tests {
     struct RecordingState {
         /// `id` for each `forget_warm_row` call.
         warm_rows_forgotten: Vec<i64>,
-        /// (node_id, name) for each `adopt_manual_name` call.
-        adopted_names: Vec<(i64, String)>,
+        /// (node_id, slug) for each `adopt_manual_slug` call.
+        adopted_slugs: Vec<(i64, String)>,
         /// (mesh_id, do_refresh, do_refill) for each `on_pool_maintenance_required`
         /// call. Multiple calls would be a regression — exactly one per spawn.
         maintenance_calls: Vec<(i64, bool, bool)>,
@@ -1623,8 +1661,8 @@ mod tests {
         fn warm_rows_forgotten(&self) -> Vec<i64> {
             self.state.lock().unwrap().warm_rows_forgotten.clone()
         }
-        fn adopted_names(&self) -> Vec<(i64, String)> {
-            self.state.lock().unwrap().adopted_names.clone()
+        fn adopted_slugs(&self) -> Vec<(i64, String)> {
+            self.state.lock().unwrap().adopted_slugs.clone()
         }
         fn maintenance_calls(&self) -> Vec<(i64, bool, bool)> {
             self.state.lock().unwrap().maintenance_calls.clone()
@@ -1635,12 +1673,12 @@ mod tests {
         fn forget_warm_row(&self, id: i64) {
             self.state.lock().unwrap().warm_rows_forgotten.push(id);
         }
-        fn adopt_manual_name(&self, node_id: i64, name: &str) {
+        fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
             self.state
                 .lock()
                 .unwrap()
-                .adopted_names
-                .push((node_id, name.to_string()));
+                .adopted_slugs
+                .push((node_id, slug.to_string()));
         }
         fn on_pool_maintenance_required(&self, mesh_id: i64, do_refresh: bool, do_refill: bool) {
             self.state
@@ -1651,7 +1689,127 @@ mod tests {
         }
     }
 
-    /// Manual spawn that adopts a warm entry must fire `adopt_manual_name`
+    /// Sink that writes through the real DB, mirroring what `AppHandleSink`
+    /// does for production. Used to assert the spawn path's end-to-end
+    /// contract: a Manual warm-claim spawn persists the pool's pre-assigned
+    /// slug into `agent_nodes.worktree_name` (#1080). The pre-existing
+    /// `provision_for_spawn_manual_upgraded_adopts_name_via_sink` proves
+    /// the sink *call*; this one proves the DB *column*.
+    ///
+    /// Tests using this sink must initialise the global DB via
+    /// `ensure_test_db()` below; otherwise `db::is_initialized()` returns
+    /// false and the write no-ops.
+    struct DbWritingSink;
+    impl ProvisionSink for DbWritingSink {
+        fn forget_warm_row(&self, _id: i64) {}
+        fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
+            crate::db::adopt_manual_pool_slug(node_id, slug)
+                .expect("DB write must succeed in this test");
+        }
+        fn on_pool_maintenance_required(
+            &self,
+            _mesh_id: i64,
+            _do_refresh: bool,
+            _do_refill: bool,
+        ) {
+        }
+    }
+
+    /// One-shot DB init for tests in this module. Pattern lifted from
+    /// `commands::agent::tests::ensure_pr_db`. The first test to call this
+    /// picks a scratch file path under the OS temp dir; later tests share
+    /// that connection via the global `db::DB` OnceCell. Schema is always
+    /// migrated to current `SCHEMA_VERSION`, so the schema is independent
+    /// of the order tests run.
+    fn ensure_test_db() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let p = std::env::temp_dir().join(format!(
+                "buildmesh_provisioner_slug_test_{}.db",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&p);
+            let _ = crate::db::init(&p);
+        });
+    }
+
+    /// End-to-end regression for #1080. A Manual spawn that claims a warm
+    /// pool entry must persist the pool's pre-assigned slug into BOTH
+    /// `agent_nodes.name` and `agent_nodes.worktree_name`. Issue #1080
+    /// was that only `name` got written (via the `adopt_manual_name` sink
+    /// method); `worktree_name` kept the stage-1 throwaway slug and the
+    /// close path then queued a removal directory that never existed,
+    /// silently leaking the real worktree.
+    ///
+    /// The pre-existing `provision_for_spawn_manual_upgraded_adopts_name_via_sink`
+    /// pins the sink call but with `RecordingSink`, which doesn't touch
+    /// the DB. This test uses `DbWritingSink` and queries the row to assert
+    /// the SQL-level invariant the spec asked for.
+    #[test]
+    fn manual_warm_claim_persists_pool_slug_into_agent_node_row() {
+        ensure_test_db();
+
+        let td = TestDir::new("manual_adopt_db");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1
+")]);
+        let pool_path = make_pool_entry(root, "bold-amber-fox");
+
+        // Stage-1 row that `agent_node::create` would have written before
+        // the provisioner ran. Use `create_mesh` (idempotent on path) and
+        // a fresh agent_node id to avoid colliding with other DB-touching
+        // tests that share the process-wide OnceCell.
+        let mesh = crate::db::create_mesh("end_to_end_adopt_test", root.to_str().unwrap())
+            .expect("mesh must be creatable");
+        let mesh_id = mesh.id;
+        let node_id: i64 = {
+            let db = crate::db::get().lock().unwrap();
+            db.execute(
+                "INSERT INTO agent_nodes (mesh_id, name, path, worktree_name)                  VALUES (?1, 'tidy-sorrowful-nautilus', ?2, 'tidy-sorrowful-nautilus')",
+                rusqlite::params![mesh_id, root.to_str().unwrap()],
+            )
+            .unwrap();
+            db.last_insert_rowid()
+        };
+
+        let mut node = empty_node(root, Some("tidy-sorrowful-nautilus"));
+        node.id = node_id;
+        node.mesh_id = mesh_id;
+        let host_path_str = pool_path.to_string_lossy().to_string();
+        let warm = claimed_warm(&pool_path, "bold-amber-fox");
+        let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, Some(warm));
+
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &DbWritingSink)
+            .expect("manual upgrade must succeed");
+        assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
+
+        // Query the agent_nodes row and assert BOTH columns landed on the
+        // pool's pre-assigned slug. Reading only `name` (the way the
+        // pre-existing RecordingSink test implicitly does) would not have
+        // caught #1080 — the bug was that name got written but
+        // worktree_name did not.
+        let (name, worktree_name): (String, Option<String>) = {
+            let db = crate::db::get().lock().unwrap();
+            db.query_row(
+                "SELECT name, worktree_name FROM agent_nodes WHERE id = ?1",
+                rusqlite::params![node_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            name, "bold-amber-fox",
+            "name must adopt the pool's pre-assigned slug"
+        );
+        assert_eq!(
+            worktree_name.as_deref(),
+            Some("bold-amber-fox"),
+            "worktree_name must adopt the pool's pre-assigned slug — otherwise the              close path's removal directory derivation drifts from the on-disk              directory and every close silently leaks the real worktree (#1080)"
+        );
+    }
+
+    /// Manual spawn that adopts a warm entry must fire `adopt_manual_slug`
     /// with the pool's pre-assigned slug. The provisioner does this for free
     /// now (was the orchestrator's job pre-deepening), and the sink owns the
     /// DB write + `node-renamed` emit pair.
@@ -1674,7 +1832,7 @@ mod tests {
             .expect("manual upgrade must succeed");
         assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
         assert_eq!(
-            sink.adopted_names(),
+            sink.adopted_slugs(),
             vec![(4242, "bold-amber-fox".to_string())],
             "Manual warm claim must adopt the pool's slug via the sink",
         );
@@ -1682,6 +1840,42 @@ mod tests {
         assert!(
             sink.maintenance_calls().is_empty(),
             "no maintenance without ref_advanced/drained flags"
+        );
+    }
+
+    /// A Manual spawn with NO warm claim must NOT adopt anything. Its
+    /// `worktree_name` was already correct — stage 1 wrote it and the cold
+    /// create used it — so an adoption here would be a no-op at best and a
+    /// spurious `node-renamed` emit at worst.
+    ///
+    /// This is the guard for the #1080 fix's own failure mode: adoption moved
+    /// from "on the `Upgraded` outcome" to "on a Manual *claim*", and the way
+    /// to get that wrong in the other direction is to make it unconditional.
+    #[test]
+    fn provision_for_spawn_manual_without_warm_claim_does_not_adopt() {
+        let td = TestDir::new("cold_no_adopt");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+
+        let mut node = empty_node(root, Some("stage-one-slug"));
+        node.id = 555;
+        let host_path = root.join(".claude").join("worktrees").join("stage-one-slug");
+        let host_path_str = host_path.to_string_lossy().to_string();
+        // `None` — pool was empty, so this spawn cuts its own worktree.
+        let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, None);
+
+        let sink = RecordingSink::new();
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink)
+            .expect("cold create must succeed");
+        assert!(matches!(outcome, ProvisionOutcome::Created { .. }));
+        assert!(
+            sink.adopted_slugs().is_empty(),
+            "a cold Manual spawn already owns the right slug — adopting would be \
+             a spurious rename (#1080 fix must stay claim-driven, not unconditional)"
+        );
+        assert!(
+            sink.warm_rows_forgotten().is_empty(),
+            "no warm row was claimed, so none may be forgotten"
         );
     }
 
@@ -1708,7 +1902,7 @@ mod tests {
             .expect("Issue adoption must succeed");
         assert!(matches!(outcome, ProvisionOutcome::Adopted { .. }));
         assert!(
-            sink.adopted_names().is_empty(),
+            sink.adopted_slugs().is_empty(),
             "Issue/PR spawns keep their own name; the sink must NOT be called"
         );
     }
@@ -1738,7 +1932,7 @@ mod tests {
             vec![(88, true, false)],
             "ref_advanced flag alone must schedule a refresh pass"
         );
-        assert!(sink.adopted_names().is_empty());
+        assert!(sink.adopted_slugs().is_empty());
     }
 
     /// Maintenance fires exactly once when `pool_was_drained_by_this_spawn` is
@@ -1836,7 +2030,7 @@ mod tests {
             "pool entry must remain intact when the pre-move guard refuses"
         );
         assert!(
-            sink.adopted_names().is_empty(),
+            sink.adopted_slugs().is_empty(),
             "no adopted name when warm failed before adoption"
         );
         assert!(
@@ -1885,12 +2079,12 @@ mod tests {
             err
         );
         assert!(pool_path.exists(), "pre-move refusal: pool directory must remain intact");
-        assert!(sink.adopted_names().is_empty());
+        assert!(sink.adopted_slugs().is_empty());
         assert!(sink.maintenance_calls().is_empty());
     }
 
     /// Manual warm upgrade succeeds — pin both invariants:
-    ///   (a) `adopt_manual_name` IS called (DB write + node-renamed),
+    ///   (a) `adopt_manual_slug` IS called (DB write + node-renamed),
     ///   (b) maintenance hook is NOT called (no ref_advanced / drained flags).
     /// The seam concentrates these decisions — a regression that fires the
     /// maintenance hook unconditionally, or that drops the name adoption,
@@ -1913,7 +2107,7 @@ mod tests {
         let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink)
             .expect("manual upgrade must succeed");
         assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
-        assert_eq!(sink.adopted_names(), vec![(7, "quiet-warm".to_string())]);
+        assert_eq!(sink.adopted_slugs(), vec![(7, "quiet-warm".to_string())]);
         assert!(
             sink.warm_rows_forgotten() == vec![42],
             "manual upgrade must forget the warm row (id from claimed_warm fixture)"
