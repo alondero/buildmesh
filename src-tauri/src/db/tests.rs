@@ -237,6 +237,102 @@ fn delete_pending_removes_only_named_path() {
     assert_eq!(remaining[0].worktree_path, "/repo/b");
 }
 
+// --- Manual warm-pool slug adoption (#1080) ---
+
+/// A Manual warm-pool spawn runs in a directory the *pool* named, not the
+/// throwaway slug stage 1 wrote to the row. Adopting that slug has to land
+/// BOTH halves in one write:
+///
+///   * `name` — the identity the user sees, and
+///   * `worktree_name` — the column the close path derives the removal
+///     directory from (`env::node_worktree_path`).
+///
+/// #1080 leaked a worktree on every close precisely because only `name` was
+/// written. The close path then queued `<mesh>/.claude/worktrees/<stage-1
+/// slug>` — a directory that had never existed — and `remove_worktree_inner`
+/// returns `Ok(())` for a missing path, so the bogus removal was dequeued as
+/// a success while the real worktree stayed on disk. No error, no retry, no
+/// `worktree-cleanup-failed` event.
+///
+/// One UPDATE rather than two calls is deliberate: these are two halves of a
+/// single adoption, and the bug was exactly the two halves drifting apart.
+#[test]
+fn adopting_manual_pool_slug_sets_both_name_and_worktree_name() {
+    let conn = pending_removal_schema();
+    conn.execute(
+        "INSERT INTO agent_nodes (id, mesh_id, name, path, worktree_name) \
+         VALUES (7, 1, 'tidy-sorrowful-nautilus', '/repo', 'tidy-sorrowful-nautilus')",
+        [],
+    )
+    .unwrap();
+
+    crate::db::adopt_manual_pool_slug_inner(&conn, 7, "utopian-repulsive-manatee").unwrap();
+
+    let (name, worktree_name): (String, Option<String>) = conn
+        .query_row(
+            "SELECT name, worktree_name FROM agent_nodes WHERE id = 7",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+
+    assert_eq!(
+        name, "utopian-repulsive-manatee",
+        "the display name must adopt the pool slug so the row matches the directory"
+    );
+    assert_eq!(
+        worktree_name.as_deref(),
+        Some("utopian-repulsive-manatee"),
+        "worktree_name must adopt the pool slug too — the close path derives the \
+         removal directory from this column, so a stale value silently leaks the \
+         real worktree (#1080)"
+    );
+}
+
+/// Adoption must not touch any row but its own. Asserts on the named
+/// row's new state AND on a sibling row's unchanged state — either
+/// alone would let a missing `WHERE id` regression pass.
+#[test]
+fn adopting_manual_pool_slug_touches_only_the_named_row() {
+    let conn = pending_removal_schema();
+    conn.execute(
+        "INSERT INTO agent_nodes (id, mesh_id, name, path, worktree_name)          VALUES (8, 1, 'other-node', '/repo', 'other-slug')",
+        [],
+    )
+    .unwrap();
+
+    // Row 42 is seeded by `pending_removal_schema`.
+    crate::db::adopt_manual_pool_slug_inner(&conn, 42, "claimed-slug").unwrap();
+
+    let (other_name, other_worktree_name): (String, Option<String>) = conn
+        .query_row(
+            "SELECT name, worktree_name FROM agent_nodes WHERE id = 8",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(other_name, "other-node", "sibling name must be untouched");
+    assert_eq!(
+        other_worktree_name.as_deref(),
+        Some("other-slug"),
+        "sibling worktree_name must be untouched"
+    );
+
+    let (name42, worktree_name42): (String, Option<String>) = conn
+        .query_row(
+            "SELECT name, worktree_name FROM agent_nodes WHERE id = 42",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(name42, "claimed-slug", "the named row's name must be adopted");
+    assert_eq!(
+        worktree_name42.as_deref(),
+        Some("claimed-slug"),
+        "the named row's worktree_name must be adopted"
+    );
+}
+
 /// Issue #249 regression pin: a v6 DB (post-`projects`→`meshes` rename,
 /// has `meshes` + `agent_nodes` but no v8+ columns) must upgrade cleanly
 /// to the current schema in one `evolve_to` call. Pre-#249 the v8+

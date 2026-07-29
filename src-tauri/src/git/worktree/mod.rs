@@ -640,7 +640,30 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), String> 
     // An already-gone working directory is nothing to remove. The node may have
     // been gutted by a previous interrupted close (#239); treat it as success so
     // the close can still proceed rather than erroring on a missing repo.
+    //
+    // This return is load-bearing for #239 but it cannot tell "gone because we
+    // removed it" from "this path never existed" — and the second case means
+    // the caller derived the wrong path, so the REAL worktree is still on disk
+    // and is now leaked with no error, no retry and no `worktree-cleanup-failed`
+    // toast. That is exactly how #1080 stayed invisible for two days. We still
+    // return `Ok` (a hard error here would strand the close), but a path whose
+    // parent directory is intact while the path itself is absent is a strong
+    // signal of a derived-path bug rather than a completed delete, so say so
+    // loudly enough to show up in a log scan.
     if !std::path::Path::new(&host_path).exists() {
+        let parent_intact = std::path::Path::new(&host_path)
+            .parent()
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        if parent_intact {
+            tracing::warn!(
+                "remove_worktree_inner: {} does not exist but its parent does — treating as \
+                 already-removed, but this is also what a wrong derived removal path looks \
+                 like (see #1080). If a worktree is leaking, suspect the caller's \
+                 `worktree_name` rather than this function.",
+                host_path
+            );
+        }
         return Ok(());
     }
 

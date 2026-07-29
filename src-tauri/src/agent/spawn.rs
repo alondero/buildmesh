@@ -1843,25 +1843,18 @@ pub(crate) async fn spawn_agent_inner(
     //     arriving then sees `reader_handle = None` and skips the join,
     //     matching the natural-exit test path).
     tracing::info!("spawn_agent_inner: storing agent process for session {}", session_id);
-    // Persist the adopted pool slug as the node's `worktree_name` and `name`
-    // BEFORE registering the agent (issue #609). The PTY reader thread and
-    // any concurrent `agent-spawned` listener fire right after registration,
-    // so doing the UPDATE post-register would let them briefly observe the
-    // throwaway stage-1 slug instead of the adopted pool slug.
+    // Slug adoption (`name` + `worktree_name`) is NOT done here. It belongs to
+    // the provisioner, which applies it via `ProvisionSink::adopt_manual_slug`
+    // before this point — see `git::worktree::provision`.
     //
-    // Manual claims only: an Issue/PR claim (`is_rename_spawn`) kept its own
-    // `gh{N}-`/`pr{N}-` `worktree_name` — the pool directory was moved to
-    // match it — so there is nothing to overwrite (#612).
-    if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
-        if let Err(e) = db::set_agent_node_worktree_name(session_id, &entry.preassigned_name) {
-            tracing::warn!(
-                "spawn_agent_inner: failed to set worktree_name={} on node {}: {}",
-                entry.preassigned_name,
-                session_id,
-                e
-            );
-        }
-    }
+    // This is where a compensating `set_agent_node_worktree_name` used to
+    // live. #1057 moved the claim into `SpawnContext` via
+    // `warm_claimed.take()` a few hundred lines above, which silently made
+    // this block's `Some(entry)` guard unmatchable — `None` is a perfectly
+    // valid value to pattern-test, so nothing failed to compile and no test
+    // covered it. The row kept its stage-1 throwaway slug, and every close
+    // then queued a directory that had never existed (#1080). Do not
+    // reintroduce a second adoption site here: one owner, in the provisioner.
     // One flag instance shared three ways: the registry entry (kill_session
     // sets it), the reader thread (its epilogue reads it), and nothing else.
     let deliberate_kill = Arc::new(AtomicBool::new(false));
