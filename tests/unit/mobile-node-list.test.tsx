@@ -392,6 +392,61 @@ describe("NodeList", () => {
     expect(ghostAvatar.style.background).toBe(hexToRgbString("#555"));
     expect(ghostAvatar.querySelector("img, svg")).toBeNull();
   });
+
+  it("NodeRow keeps the wire icon letter for a custom Proxied account (issue #948)", async () => {
+    // #950 restored the brand marks for every *built-in* provider, but a
+    // custom Claude-compatible Proxied account (`claude:<slug>`) has no
+    // entry in `INLINE_ICONS` / `COLORED_IMAGES` — so its badge fell all
+    // the way through to `ProviderIcon`'s mute dot and dropped the wire
+    // `meta.icon` letter the pre-#328 row used to render. The row must
+    // pass that letter down as `fallbackGlyph`.
+    // `provider_info_for_pairing` (commands/agent.rs) takes a proxied row's
+    // colour + icon from the *executor* adapter, so a custom account on the
+    // `claude` harness ships the Anthropic `#1d7cfc` / `"A"` pair. The glyph
+    // here is `"X"` only so the assertion can't be satisfied by anything
+    // else on the row.
+    mockApi([{ ...makeNode(1, "running"), provider: "claude:custom-account" }], {
+      providers: [
+        {
+          id: "claude:custom-account",
+          label: "My Proxy",
+          color: "#1d7cfc",
+          icon: "X",
+          resumable: true,
+          harness_id: "claude",
+          provider_id: "custom-account",
+          is_proxied: true,
+          group_key: "claude",
+        },
+      ],
+    });
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    // Same race guard as the #328 test — the glyph only reaches the chip
+    // once the live listProviders() payload has resolved.
+    await waitFor(() => {
+      expect(screen.getByTestId("node-1").textContent).toContain("My Proxy");
+    });
+
+    const avatar = screen.getByTestId("node-1").querySelector(
+      '[data-testid="node-avatar"]',
+    ) as HTMLElement;
+    expect(avatar).toBeTruthy();
+    // No brand mark resolves for a custom slug…
+    expect(avatar.querySelector("img, svg")).toBeNull();
+    // …so the wire letter is what fills the chip, over the live colour.
+    expect(avatar.textContent).toBe("X");
+    expect(avatar.style.background).toBe(hexToRgbString("#1d7cfc"));
+  });
 });
 
 // The 3px status rail is the last direct child of a NodeRow button

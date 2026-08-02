@@ -180,6 +180,16 @@ interface ProviderIconProps {
    */
   backgroundColor?: string;
   /**
+   * Single-character glyph to render *instead of* the neutral dot when the
+   * brand-mark lookup misses (issue #948). Custom Claude-compatible Proxied
+   * accounts carry their own slug (`claude:<account>`), so they have no
+   * entry in `INLINE_ICONS` / `COLORED_IMAGES` and used to lose the wire
+   * `meta.icon` letter the pre-#328 mobile `NodeRow` rendered. Callers with
+   * a live `listProviders()` row pass `meta.icon` here; a resolved brand
+   * mark always wins, and an absent/empty glyph keeps the dot.
+   */
+  fallbackGlyph?: string;
+  /**
    * `data-testid` applied to the chip wrapper when `withBackground` is
    * set. Optional — the chip itself is purely presentational.
    */
@@ -193,6 +203,7 @@ export function ProviderIcon({
   withBackground,
   chipSize = 34,
   backgroundColor,
+  fallbackGlyph,
   chipTestId,
 }: ProviderIconProps) {
   const label = title ?? providerId;
@@ -217,6 +228,26 @@ export function ProviderIcon({
           className={className}
           draggable={false}
         />
+      );
+    }
+    // Fallback: the caller's wire glyph when it has one (issue #948 —
+    // custom Proxied accounts have no brand mark but do carry a letter),
+    // otherwise a neutral dot. The glyph's font tracks `chipSize` the way
+    // `borderRadius` does (34→14, 28→11); 14/700 in the 34px chip is the
+    // letter the mobile `NodeRow` shipped before #328.
+    if (fallbackGlyph) {
+      return (
+        <span
+          aria-hidden="true"
+          title={label}
+          style={{
+            fontSize: Math.round(chipSize * 0.41),
+            fontWeight: 700,
+            lineHeight: 1,
+          }}
+        >
+          {fallbackGlyph}
+        </span>
       );
     }
     // Fallback: a neutral dot for unknown providers.

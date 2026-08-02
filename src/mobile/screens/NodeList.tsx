@@ -433,9 +433,14 @@ export function NodeRow({
         // `h-4 w-4` keeps the full-bleed brand marks visually balanced
         // with the sparse monochrome glyphs at the established mobile
         // rhythm (16px icon inside the 34×34 chip).
+        // `fallbackGlyph` feeds the live `meta.icon` letter back in for a
+        // custom Claude-compatible Proxied account (issue #948): its slug
+        // has no brand mark, so without this the row shows a bare dot
+        // where the pre-#328 badge showed the wire letter.
         providerId={node.provider}
         withBackground
         backgroundColor={providerMeta?.color}
+        fallbackGlyph={providerMeta?.icon}
         chipTestId="node-avatar"
         title={providerLabel}
         className="h-4 w-4"
