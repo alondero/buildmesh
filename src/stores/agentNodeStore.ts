@@ -23,6 +23,8 @@ import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
 // through the generic "System" toast pipeline.
 import { addToast } from './toastStore';
 import { useMeshStore } from './meshStore';
+import { getNodeGitPath } from '../lib/paths';
+import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
 // #359), along with the `EnvType`/`Provider`/`SessionStatus` unions it
@@ -255,6 +257,21 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
           set({ activeNodeId: nodeId });
         });
 
+        // Drop the header chips' cached `null` for a node and drive an
+        // immediate refetch. Both `useGitSummary` and `useOpenPr` cache a
+        // freshness stamp that suppresses bus-driven refetches for a
+        // window, so the two events below — the only moments the cached
+        // answer becomes structurally wrong — have to say so explicitly.
+        // See `invalidateNodeCaches` for the full interaction. Issue #1004.
+        // No-op for a node the store has never seen: without the row we
+        // can't derive its git path, and an unseen node has no mounted
+        // header to refresh either.
+        const invalidateCachesForNode = (nodeId: number) => {
+          const node = get().agentNodes.find((s) => s.id === nodeId);
+          if (!node) return;
+          invalidateNodeCaches(nodeId, getNodeGitPath(node));
+        };
+
         // Two-stage spawn completion: the backend emits this when stage-2
         // (`start_node_background`) finishes the slow work and the agent
         // process is up. Flips the node from 'pending' to 'running'.
@@ -265,6 +282,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
               s.id === nodeId ? { ...s, status: 'running' as const } : s
             ),
           }));
+          invalidateCachesForNode(nodeId);
         });
 
         // Autopilot pipeline transitions: patch the pill state in place so
@@ -278,6 +296,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         });
         await listen<AutopilotPrCreatedPayload>('autopilot-pr-created', (event) => {
           patchAutopilotState(event.payload.node_id, 'completed');
+          // The wrap-up just opened a PR, so the chip's cached "no PR"
+          // is wrong — and up to 60s of freshness window stands between
+          // it and the next bus-driven refetch. Issue #1004.
+          invalidateCachesForNode(event.payload.node_id);
         });
         await listen<AutopilotFinishFailedPayload>('autopilot-finish-failed', (event) => {
           patchAutopilotState(event.payload.node_id, 'failed');
