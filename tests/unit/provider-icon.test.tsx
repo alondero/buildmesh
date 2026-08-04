@@ -240,6 +240,93 @@ describe('ProviderIcon', () => {
     expect(largeChip.style.borderRadius).toBe('8px');
   });
 
+  // ----- Issue #948 — `fallbackGlyph` for custom Proxied accounts -----
+  //
+  // A custom Claude-compatible Proxied account (`claude:<slug>`) has no
+  // entry in `INLINE_ICONS` / `COLORED_IMAGES`, so it falls through to the
+  // gray dot — losing the wire `meta.icon` letter the pre-#328 mobile
+  // NodeRow rendered. `fallbackGlyph` lets the caller feed that letter
+  // back in without touching the brand-mark path.
+
+  it('renders fallbackGlyph as chip text when the icon lookup misses', () => {
+    const { container } = render(
+      <ProviderIcon
+        providerId="claude:custom-account"
+        withBackground
+        fallbackGlyph="X"
+        className="h-4 w-4"
+      />,
+    );
+    const chip = container.firstElementChild as HTMLElement;
+    // Gray chip is preserved (no brand colour for a custom slug)…
+    expect(chip.style.background).toBe('rgb(85, 85, 85)'); // #555
+    // …but the wire letter shows through instead of the mute dot.
+    expect(chip.textContent).toBe('X');
+    expect(chip.querySelector('span.bg-text-muted')).toBeNull();
+    expect(chip.querySelector('img, svg')).toBeNull();
+  });
+
+  it('fallbackGlyph never displaces a brand mark', () => {
+    // The glyph is a *fallback*: a provider that resolves to an inline SVG
+    // or a brand image must keep it even when the caller passes a glyph
+    // (the live payload always carries `meta.icon`, so every mobile row
+    // passes one).
+    // (`textContent` is no use here — an inline icon's <title> counts
+    // towards it. The glyph is the only <span> ProviderIcon can emit
+    // alongside a resolved brand mark, so its absence is the assertion.)
+    const { container: inline } = render(
+      <ProviderIcon providerId="claude:kimi" withBackground fallbackGlyph="K" />,
+    );
+    expect(inline.querySelector('svg')).toBeTruthy();
+    expect(inline.querySelector('span')).toBeNull();
+
+    const { container: image } = render(
+      <ProviderIcon providerId="agy" withBackground fallbackGlyph="G" />,
+    );
+    expect(image.querySelector('img')).toBeTruthy();
+    expect(image.querySelector('span')).toBeNull();
+  });
+
+  it('falls back to the mute dot when fallbackGlyph is absent or empty', () => {
+    // `ProviderInfo.icon` is a non-optional string on the wire, so an
+    // adapter that ships `icon: ""` must not render an empty glyph span
+    // where the dot used to be — the row's left edge would lose its
+    // rhythm entirely.
+    for (const glyph of [undefined, '']) {
+      const { container } = render(
+        <ProviderIcon providerId="mystery" withBackground fallbackGlyph={glyph} />,
+      );
+      const chip = container.firstElementChild as HTMLElement;
+      expect(chip.querySelector('span.bg-text-muted')).toBeTruthy();
+      expect(chip.textContent).toBe('');
+    }
+  });
+
+  it('fallbackGlyph keeps the hover tooltip the dot fallback carried', () => {
+    render(
+      <ProviderIcon providerId="claude:custom-account" fallbackGlyph="X" title="My Proxy" />,
+    );
+    expect(screen.getByTitle('My Proxy').textContent).toBe('X');
+  });
+
+  it('fallbackGlyph scales its font with chipSize', () => {
+    // Matches the pre-#328 mobile NodeRow letter (14px/700 in the 34px
+    // chip); the picker's 28px Proxied-child chip gets a proportionally
+    // smaller letter rather than an overflowing one.
+    const { container: large } = render(
+      <ProviderIcon providerId="mystery" withBackground fallbackGlyph="X" />,
+    );
+    const largeGlyph = large.querySelector('span') as HTMLElement;
+    expect(largeGlyph.style.fontSize).toBe('14px');
+    expect(largeGlyph.style.fontWeight).toBe('700');
+
+    const { container: small } = render(
+      <ProviderIcon providerId="mystery" withBackground chipSize={28} fallbackGlyph="X" />,
+    );
+    const smallGlyph = small.querySelector('span') as HTMLElement;
+    expect(smallGlyph.style.fontSize).toBe('11px');
+  });
+
   it('chipSize keeps the brand mark inside the chip (Antigravity PNG at 28px)', () => {
     // The mobile ProviderPicker Proxied-child rows render brand marks
     // in 28px chips. A regression that drops the chipSize prop (or wires
