@@ -307,9 +307,9 @@ describe("NodeList", () => {
   it("NodeRow badge consumes the live listProviders() payload (issue #328)", async () => {
     // The badge's color comes from the live ProviderInfo for the node's
     // provider id (the same lookup that drives the row label). The brand
-    // mark comes from `ProviderIcon`'s `INLINE_ICONS` / `COLORED_IMAGES`
-    // lookup keyed on `providerId`. A regression that re-introduces a
-    // hard-coded map — `PROVIDER_CHIP_COLORS`, `providerIcon`/
+    // mark comes from `ProviderIcon`'s brand registry lookup keyed on
+    // `providerId`. A regression that re-introduces a parallel map —
+    // `providerIcon`/
     // `providerColor`, the deleted `FALLBACK_PROVIDERS`, or a stale
     // cache — would either fail the color match or drop the brand mark
     // in favour of the gray-dot fallback. The fallback case is also
@@ -321,9 +321,8 @@ describe("NodeList", () => {
         // distinctive `#10b981` color and renders the brand mark.
         // (`agy` is the backend adapter id from `UiMeta::id`; the live
         // list mirrors it on `ProviderInfo.id`. `ProviderIcon`'s
-        // `INLINE_ICONS` / `COLORED_IMAGES` maps are keyed off the
-        // adapter id, not the human label, so a regression that drifted
-        // to the label would miss every map and fall through to the
+        // brand registry is keyed off the adapter id, not the human label,
+        // so a regression that drifted to the label would miss and fall through to the
         // gray-dot fallback — exactly the regression this test pins.)
         { ...makeNode(1, "running"), provider: "agy" },
         // Unknown provider id (e.g. a since-removed harness profile) —
@@ -368,8 +367,8 @@ describe("NodeList", () => {
     });
 
     // Live row: chip background is the live hex (jsdom normalises hex → rgb())
-    // and the brand mark is rendered as an <img> (Antigravity is in
-    // `COLORED_IMAGES` because its colour is baked into the PNG).
+    // and the brand mark is rendered as an <img> (Antigravity's colour is
+    // baked into the PNG).
     const liveAvatar = screen.getByTestId("node-1").querySelector(
       '[data-testid="node-avatar"]',
     ) as HTMLElement;
@@ -396,8 +395,8 @@ describe("NodeList", () => {
   it("NodeRow keeps the wire icon letter for a custom Proxied account (issue #948)", async () => {
     // #950 restored the brand marks for every *built-in* provider, but a
     // custom Claude-compatible Proxied account (`claude:<slug>`) has no
-    // entry in `INLINE_ICONS` / `COLORED_IMAGES` — so its badge fell all
-    // the way through to `ProviderIcon`'s mute dot and dropped the wire
+    // registered brand — so its badge fell through to `ProviderIcon`'s
+    // mute dot and dropped the wire
     // `meta.icon` letter the pre-#328 row used to render. The row must
     // pass that letter down as `fallbackGlyph`.
     // `provider_info_for_pairing` (commands/agent.rs) takes a proxied row's
