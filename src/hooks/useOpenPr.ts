@@ -14,8 +14,9 @@ const prClient = createDualKeyCache<number, OpenPr>({
   // GitHub API call — without a freshness window a busy agent burns
   // thousands of requests/hour into the rate limit re-fetching a PR state
   // that changes rarely. 60s caps that at one request per node per minute.
-  // Manual `refresh()` is not gated, so create/merge flows can force an
-  // immediate re-fetch when they wire it up (the v1.1 noted below).
+  // Manual `refresh()`/`invalidate()` are not gated, so buildmesh's own
+  // spawn / create / merge flows force an immediate re-fetch (issues #780,
+  // #1004).
   minRefetchIntervalMs: 60_000,
 });
 
@@ -27,9 +28,10 @@ const prClient = createDualKeyCache<number, OpenPr>({
  * `pr === null`.
  *
  * Cached per nodeId; auto-refetched on `GIT_CHANGED` for the node's git
- * path. The `refresh()` handle is exposed for manual invalidation
- * (e.g. after a PR is created/merged via buildmesh's own flow — wiring
- * that up is a v1.1).
+ * path. The `refresh()` handle is exposed for manual invalidation, and
+ * buildmesh's own PR-state write-paths force a refetch without a mounted
+ * hook via `refreshOpenPrByPath` (merge, issue #780) /
+ * `invalidateOpenPrForNode` (spawn + autopilot wrap-up, issue #1004).
  */
 export function useOpenPr(nodeId: number, gitPath: string | null): {
   pr: OpenPr | null;
@@ -69,5 +71,20 @@ export function useOpenPr(nodeId: number, gitPath: string | null): {
  * Probe Panel derives from `agentNodes` filtered by branch match.
  */
 export function refreshOpenPrByPath(gitPath: string): void {
+  prClient.notifyByPath(gitPath);
+}
+
+/**
+ * Same as `refreshOpenPrByPath`, plus an explicit `invalidate(nodeId)` so
+ * the node's cache entry is dropped even when no `useOpenPr` instance for
+ * it is currently mounted (`notifyByPath` only reaches live subscribers, so
+ * on its own it would leave a stale entry to be served — freshness stamp
+ * intact — the next time the header mounts).
+ *
+ * Callers go through `invalidateNodeCaches` — see that module for why a
+ * fresh spawn and an autopilot wrap-up both need this.
+ */
+export function invalidateOpenPrForNode(nodeId: number, gitPath: string): void {
+  prClient.invalidate(nodeId);
   prClient.notifyByPath(gitPath);
 }

@@ -42,3 +42,22 @@ export function useGitSummary(gitPath: string | null): {
   const summary = data && data.total > 0 ? data : null;
   return { summary, loading, refresh };
 }
+
+/**
+ * Drop the cached git summary for `gitPath` and drive an immediate refetch
+ * in every mounted subscriber of that path, bypassing the 2s
+ * `minRefetchIntervalMs` freshness window.
+ *
+ * `invalidate` covers subscribers that are NOT mounted (their stale entry
+ * would otherwise be served on the next mount, freshness stamp intact);
+ * `notifyByPath` covers the mounted ones, which re-fetch exactly as they
+ * would on a `GIT_CHANGED` event. Mirrors `refreshOpenPrByPath` in
+ * `useOpenPr.ts`.
+ *
+ * Callers go through `invalidateNodeCaches` — see that module for why a
+ * fresh spawn needs this.
+ */
+export function invalidateGitSummaryForPath(gitPath: string): void {
+  summaryClient.invalidate(gitPath);
+  summaryClient.notifyByPath(gitPath);
+}
