@@ -158,6 +158,276 @@ describe('useUIStore', () => {
     });
   });
 
+  describe('Grid Controls (wayfinder #988 / #995)', () => {
+    const KEY = 'buildmesh.grid-controls';
+
+    // What `loadGridControls` / `resetGridControls` fall back to: the grid as
+    // it behaved before #988.
+    const DEFAULTS = {
+      gridSearchQuery: '',
+      gridProviderFilter: null,
+      gridStatusFilter: null,
+      gridSortBy: 'custom',
+      gridSortDirection: 'asc',
+    } as const;
+
+    const stored = () => JSON.parse(localStorage.getItem(KEY) ?? 'null');
+
+    beforeEach(() => {
+      localStorage.removeItem(KEY);
+      useUIStore.setState({ ...DEFAULTS });
+    });
+
+    it('defaults to no filters and the manual (custom) ascending order', () => {
+      const s = useUIStore.getState();
+      expect(s.gridSearchQuery).toBe('');
+      expect(s.gridProviderFilter).toBeNull();
+      expect(s.gridStatusFilter).toBeNull();
+      expect(s.gridSortBy).toBe('custom');
+      expect(s.gridSortDirection).toBe('asc');
+    });
+
+    describe('setters', () => {
+      it('sets the search query', () => {
+        useUIStore.getState().setGridSearchQuery('auth');
+        expect(useUIStore.getState().gridSearchQuery).toBe('auth');
+      });
+
+      it('sets and clears the provider filter', () => {
+        useUIStore.getState().setGridProviderFilter('anthropic');
+        expect(useUIStore.getState().gridProviderFilter).toBe('anthropic');
+        useUIStore.getState().setGridProviderFilter(null);
+        expect(useUIStore.getState().gridProviderFilter).toBeNull();
+      });
+
+      it('accepts a user-defined harness id as the provider filter', () => {
+        // `AgentNode.provider` is an opaque harness/profile id (#535), not the
+        // legacy closed `Provider` enum — a user-defined profile must filter.
+        useUIStore.getState().setGridProviderFilter('my-custom-harness');
+        expect(useUIStore.getState().gridProviderFilter).toBe('my-custom-harness');
+      });
+
+      it('sets and clears the status filter', () => {
+        useUIStore.getState().setGridStatusFilter('awaiting_input');
+        expect(useUIStore.getState().gridStatusFilter).toBe('awaiting_input');
+        useUIStore.getState().setGridStatusFilter(null);
+        expect(useUIStore.getState().gridStatusFilter).toBeNull();
+      });
+
+      it('sets the sort field and direction independently', () => {
+        useUIStore.getState().setGridSortBy('name');
+        useUIStore.getState().setGridSortDirection('desc');
+        expect(useUIStore.getState().gridSortBy).toBe('name');
+        expect(useUIStore.getState().gridSortDirection).toBe('desc');
+      });
+
+      it('leaves the other controls untouched when one changes', () => {
+        useUIStore.getState().setGridSearchQuery('auth');
+        useUIStore.getState().setGridStatusFilter('running');
+        useUIStore.getState().setGridSortBy('created');
+        expect(useUIStore.getState().gridSearchQuery).toBe('auth');
+        expect(useUIStore.getState().gridStatusFilter).toBe('running');
+        expect(useUIStore.getState().gridProviderFilter).toBeNull();
+        expect(useUIStore.getState().gridSortDirection).toBe('asc');
+      });
+
+      it('every setter is idempotent — no subscriber notification on a same-value call', () => {
+        // Mirrors `setViewMode`: the search box fires a setter per keystroke,
+        // and a no-op must not re-render the whole grid.
+        useUIStore.setState({
+          gridSearchQuery: 'auth',
+          gridProviderFilter: 'anthropic',
+          gridStatusFilter: 'running',
+          gridSortBy: 'name',
+          gridSortDirection: 'desc',
+        });
+        let notifyCount = 0;
+        const unsub = useUIStore.subscribe(() => { notifyCount += 1; });
+        useUIStore.getState().setGridSearchQuery('auth');
+        useUIStore.getState().setGridProviderFilter('anthropic');
+        useUIStore.getState().setGridStatusFilter('running');
+        useUIStore.getState().setGridSortBy('name');
+        useUIStore.getState().setGridSortDirection('desc');
+        unsub();
+        expect(notifyCount).toBe(0);
+      });
+    });
+
+    describe('resetGridControls', () => {
+      it('clears every filter and restores the default order', () => {
+        useUIStore.setState({
+          gridSearchQuery: 'auth',
+          gridProviderFilter: 'anthropic',
+          gridStatusFilter: 'error',
+          gridSortBy: 'status',
+          gridSortDirection: 'desc',
+        });
+        useUIStore.getState().resetGridControls();
+        expect(useUIStore.getState().gridSearchQuery).toBe('');
+        expect(useUIStore.getState().gridProviderFilter).toBeNull();
+        expect(useUIStore.getState().gridStatusFilter).toBeNull();
+        expect(useUIStore.getState().gridSortBy).toBe('custom');
+        expect(useUIStore.getState().gridSortDirection).toBe('asc');
+      });
+
+      it('persists the cleared set so the reset survives a restart', () => {
+        useUIStore.getState().setGridSearchQuery('auth');
+        useUIStore.getState().resetGridControls();
+        expect(stored()).toEqual({
+          searchQuery: '',
+          provider: null,
+          status: null,
+          sortBy: 'custom',
+          sortDirection: 'asc',
+        });
+      });
+    });
+
+    describe('persistence (buildmesh.grid-controls)', () => {
+      it('writes the whole control set under a single key', () => {
+        useUIStore.getState().setGridSearchQuery('auth');
+        useUIStore.getState().setGridProviderFilter('minimax');
+        useUIStore.getState().setGridStatusFilter('running');
+        useUIStore.getState().setGridSortBy('name');
+        useUIStore.getState().setGridSortDirection('desc');
+        expect(stored()).toEqual({
+          searchQuery: 'auth',
+          provider: 'minimax',
+          status: 'running',
+          sortBy: 'name',
+          sortDirection: 'desc',
+        });
+      });
+
+      it('does not touch localStorage on a same-value no-op', () => {
+        useUIStore.setState({ gridSortBy: 'name' });
+        localStorage.removeItem(KEY);
+        useUIStore.getState().setGridSortBy('name');
+        expect(localStorage.getItem(KEY)).toBeNull();
+      });
+
+      it('a storage failure does not block the control change', () => {
+        const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+          throw new Error('QuotaExceededError');
+        });
+        try {
+          expect(() => useUIStore.getState().setGridSortBy('status')).not.toThrow();
+          expect(spy).toHaveBeenCalled();
+          expect(useUIStore.getState().gridSortBy).toBe('status');
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    describe('boot (loadGridControls)', () => {
+      // Like the View Mode boot tests above: the loader runs once at
+      // store-module creation, so each case re-imports the store on a fresh
+      // module registry with localStorage pre-seeded.
+      const boot = async () => {
+        vi.resetModules();
+        const fresh = await import('../../src/stores/uiStore');
+        return fresh.useUIStore.getState();
+      };
+
+      it('restores a persisted control set', async () => {
+        localStorage.setItem(KEY, JSON.stringify({
+          searchQuery: 'auth',
+          provider: 'anthropic',
+          status: 'awaiting_input',
+          sortBy: 'created',
+          sortDirection: 'desc',
+        }));
+        const s = await boot();
+        expect(s.gridSearchQuery).toBe('auth');
+        expect(s.gridProviderFilter).toBe('anthropic');
+        expect(s.gridStatusFilter).toBe('awaiting_input');
+        expect(s.gridSortBy).toBe('created');
+        expect(s.gridSortDirection).toBe('desc');
+      });
+
+      it('falls back to the defaults when nothing is stored', async () => {
+        localStorage.removeItem(KEY);
+        const s = await boot();
+        expect(s.gridSearchQuery).toBe('');
+        expect(s.gridProviderFilter).toBeNull();
+        expect(s.gridStatusFilter).toBeNull();
+        expect(s.gridSortBy).toBe('custom');
+        expect(s.gridSortDirection).toBe('asc');
+      });
+
+      it('falls back to the defaults when localStorage is unreadable', async () => {
+        const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+          throw new Error('SecurityError');
+        });
+        try {
+          const s = await boot();
+          expect(spy).toHaveBeenCalled();
+          expect(s.gridSearchQuery).toBe('');
+          expect(s.gridSortBy).toBe('custom');
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('falls back to the defaults on malformed JSON', async () => {
+        localStorage.setItem(KEY, '{not json');
+        const s = await boot();
+        expect(s.gridSortBy).toBe('custom');
+        expect(s.gridSearchQuery).toBe('');
+      });
+
+      it('falls back to the defaults when the payload is not an object', async () => {
+        localStorage.setItem(KEY, '"custom"');
+        const s = await boot();
+        expect(s.gridSortBy).toBe('custom');
+        expect(s.gridStatusFilter).toBeNull();
+      });
+
+      it('drops an unknown status, sort field and direction', async () => {
+        localStorage.setItem(KEY, JSON.stringify({
+          searchQuery: 'auth',
+          provider: 'anthropic',
+          status: 'on_fire',
+          sortBy: 'vibes',
+          sortDirection: 'sideways',
+        }));
+        const s = await boot();
+        // Per-field validation: the valid controls survive alongside the
+        // rejected ones, so one drifted option can't wipe the user's filters.
+        expect(s.gridSearchQuery).toBe('auth');
+        expect(s.gridProviderFilter).toBe('anthropic');
+        expect(s.gridStatusFilter).toBeNull();
+        expect(s.gridSortBy).toBe('custom');
+        expect(s.gridSortDirection).toBe('asc');
+      });
+
+      it('drops non-string search/provider values', async () => {
+        localStorage.setItem(KEY, JSON.stringify({
+          searchQuery: 42,
+          provider: { id: 'anthropic' },
+          sortBy: 'name',
+        }));
+        const s = await boot();
+        expect(s.gridSearchQuery).toBe('');
+        expect(s.gridProviderFilter).toBeNull();
+        expect(s.gridSortBy).toBe('name');
+      });
+
+      it('round-trips a control set through storage', async () => {
+        useUIStore.getState().setGridSearchQuery('deploy');
+        useUIStore.getState().setGridStatusFilter('suspended');
+        useUIStore.getState().setGridSortBy('status');
+        useUIStore.getState().setGridSortDirection('desc');
+        const s = await boot();
+        expect(s.gridSearchQuery).toBe('deploy');
+        expect(s.gridStatusFilter).toBe('suspended');
+        expect(s.gridSortBy).toBe('status');
+        expect(s.gridSortDirection).toBe('desc');
+      });
+    });
+  });
+
   describe('Probe Panel (issue #373)', () => {
     beforeEach(() => {
       useUIStore.setState({
