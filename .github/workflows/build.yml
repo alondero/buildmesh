@@ -6,35 +6,27 @@ on:
   pull_request:
     branches: [main]
 
+# A newer commit on the same PR or branch supersedes an in-flight build. This
+# keeps rapid agent pushes from consuming runners for results nobody can merge.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    # Don't cancel the other platforms when one fails — every PR should
-    # surface all three results so a Linux regression can't hide behind a
-    # passing Windows build. Drives the cross-platform readiness gate
-    # (issue #825).
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+  quality:
+    name: Quality (Linux)
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Tauri 2 on Linux links against webkit2gtk-4.1, librsvg2, libayatana-
-      # appindicator3, libxdo, and uses patchelf for the AppImage; libssl-dev
-      # is needed because `reqwest` (without `rustls-tls`) prefers the
-      # system's OpenSSL. Without these `cargo test` fails to even resolve
-      # the `tauri` build script. macOS bundles its own WebKit/SecureTransport
-      # stack, and Windows images ship everything WebView2 needs, so neither
-      # needs an extra install step.
+      # appindicator3, libxdo, and OpenSSL even when running the Rust tests.
       - name: Install Linux system dependencies
-        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -50,58 +42,38 @@ jobs:
             wget
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: "npm"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          cache: true
 
-      - name: Cache Cargo target
-        uses: actions/cache@v4
+      # Cache the expensive Linux test build once. The platform smoke jobs
+      # deliberately do not persist their target directories, avoiding three
+      # large OS-specific target caches.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: src-tauri/target
-          key: ${{ runner.os }}-target-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-target-
+          workspaces: "src-tauri -> target"
 
       - name: Install frontend dependencies
         run: npm ci
 
-      # Typecheck the frontend against the committed bindings, and build just
-      # the mobile bundle (a Rust test asserts dist/mobile/index.html exists).
-      # The full shippable build runs once via tauri's beforeBuildCommand below,
-      # so we deliberately don't run the whole `npm run build` twice here.
+      # Typecheck the frontend against the committed bindings and build the
+      # mobile bundle required by the Rust tests.
       - name: Typecheck frontend + build mobile bundle
         run: npx tsc --noEmit && npm run build:mobile
 
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.
       - name: Rust tests + regenerate TS bindings
-        run: cargo test
+        run: cargo test --locked
         working-directory: src-tauri
 
       # Fail CI if any code path spawns `git` via bare `Command::new("git")`
-      # or sets `creation_flags` inline — only `process_util::command_no_window(...)`
-      # (which sets CREATE_NO_WINDOW on Windows) is allowed, and that's the only
-      # site permitted to call `.creation_flags(`. Test files are excluded because
-      # `cargo test` owns its own console. Broadened in #690 from services/ + agent/
-      # to all of src-tauri/src/. Issues #665 + #690.
-      #
-      # Uses `find … -exec grep` instead of `rg` so the same script runs on
-      # the Windows Git Bash runner *and* the default shells on ubuntu/macos
-      # runners (where `rg` isn't preinstalled and macOS grep is BSD, lacking
-      # GNU `--include`/`--exclude`). Negligible cost — the tree has ~150 Rust
-      # source files. The trailing `// allow-inline-process-spawn: <reason>`
-      # opt-out uses the same mid-expression comment shape as the antipattern
-      # guard's `// allow-dispose` / `// allow-wsl-path`, but the marker is
-      # honored only by this step's `grep -v` below — local guard-antipatterns
-      # has no matching rule. The opt-out exists for the rare helper inside a
-      # `#[cfg(test)] mod tests { … }` block living in a non-`_tests.rs`
-      # production file (e.g. `services/warm_pool.rs`'s test helpers).
+      # or sets `creation_flags` inline. Only process_util may own those details.
       - name: Verify no inline process-spawn patterns outside process_util (gh665/gh690)
         shell: bash
         run: |
@@ -126,26 +98,49 @@ jobs:
       - name: Check Rust↔TS type bindings are up to date
         shell: bash
         run: |
-          # --intent-to-add surfaces any brand-new binding (a type whose .ts
-          # was never committed) in `git diff`, not just edits to tracked files.
           git add --intent-to-add src/types/generated
           if ! git diff --exit-code -- src/types/generated; then
             echo "::error::Generated TS bindings are out of date. Run 'cargo test' in src-tauri/ and commit the changes under src/types/generated/."
             exit 1
           fi
 
-      - name: Build Tauri app
-        run: npm run tauri build
+  platform-smoke:
+    name: Platform smoke (${{ matrix.os }})
+    needs: quality
+    runs-on: ${{ matrix.os }}
+    # A failure on one operating system must not hide a regression on the
+    # other. Linux compilation and linking are covered by the quality job.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
 
-      - name: Upload artifacts
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
         with:
-          # Per-OS name so all three matrices publish distinct downloads
-          # (`buildmesh-installer-Linux`, `-macOS`, `-Windows`). Note:
-          # `runner.os` is used (not `matrix.os`) — `matrix.os` yields
-          # `ubuntu-latest` / `macos-latest` / `windows-latest`, which would
-          # append `-latest` to the artifact name and break the stable
-          # download URL. Issue #825.
-          name: buildmesh-installer-${{ runner.os }}
-          path: src-tauri/target/release/bundle/**/*
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Keep the Cargo download cache but do not retain an OS-specific target
+      # directory for these smoke builds.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          cache-targets: false
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Compile and link the real Tauri application on each remaining host,
+      # including the frontend beforeBuildCommand, without spending time or
+      # storage on transient installers. Tagged releases remain authoritative.
+      - name: Compile Tauri app without installers
+        run: npm run tauri build -- --debug --no-bundle
