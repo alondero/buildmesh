@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Retain end-to-end installer coverage without packaging every commit.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 # A newer commit on the same PR or branch supersedes an in-flight build. This
 # keeps rapid agent pushes from consuming runners for results nobody can merge.
@@ -107,6 +111,7 @@ jobs:
   platform-smoke:
     name: Platform smoke (${{ matrix.os }})
     needs: quality
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ${{ matrix.os }}
     # A failure on one operating system must not hide a regression on the
     # other. Linux compilation and linking are covered by the quality job.
@@ -144,3 +149,59 @@ jobs:
       # storage on transient installers. Tagged releases remain authoritative.
       - name: Compile Tauri app without installers
         run: npm run tauri build -- --debug --no-bundle
+
+  package-smoke:
+    name: Weekly package smoke (${{ matrix.os }})
+    needs: quality
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Weekly packaging is deliberately cold apart from Cargo downloads. A
+      # one-off smoke check does not justify three persistent target caches.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          cache-targets: false
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Validate that Tauri can still produce every configured native bundle.
+      # Artifacts are intentionally not uploaded; signed tagged releases are
+      # the supported distribution path.
+      - name: Build native installers
+        run: npm run tauri build
