@@ -9,6 +9,12 @@ on:
     tags:
       - "v*"
 
+# Never cancel a release after publishing may have begun. Duplicate runs for
+# the same immutable tag are serialized instead.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -24,36 +30,30 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: "npm"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          cache: true
 
-      - name: Cache Cargo target
-        uses: actions/cache@v4
+      # This is the only persistent Windows target cache: PR smoke builds keep
+      # only Cargo downloads, so three large per-OS target caches do not grow.
+      - name: Cache Rust release build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: src-tauri/target
-          key: ${{ runner.os }}-target-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-target-
+          workspaces: "src-tauri -> target"
 
       - name: Install frontend dependencies
         run: npm ci
 
       # Guard against a `vX.Y.Z` tag pushed without the matching version bump
       # in all three manifests. tauri-action tags the release from
-      # `github.ref_name` but uses the manifests' `version` for
-      # `latest.json`; a mismatch publishes a release whose installer says
-      # one thing and whose feed offers another, so installed clients
-      # silently fail to see the update. Issue #826.
+      # `github.ref_name` but uses the manifests' `version` for `latest.json`.
       - name: Verify tag matches manifest versions
         shell: bash
         run: |
@@ -83,8 +83,8 @@ jobs:
           releaseDraft: true
           prerelease: false
           # Flip createUpdaterArtifacts on for the release build only — the base
-          # tauri.conf.json keeps it off so the per-push build.yml stays green
-          # without needing the signing secret.
+          # tauri.conf.json keeps it off so ordinary CI stays green without the
+          # signing secret.
           args: --config src-tauri/tauri.release.conf.json
           # Generate + upload latest.json (the updater feed the app polls) and
           # the per-artifact .sig signatures. Both default true; pinned for clarity.
