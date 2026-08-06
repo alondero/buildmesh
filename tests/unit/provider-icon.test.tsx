@@ -82,14 +82,13 @@ describe('ProviderIcon', () => {
   //
   // A Proxied Provider row's id is `<harness>:<provider>` (e.g.
   // `claude:minimax`). The harness half names the executor; the provider
-  // half names the brand mark. `INLINE_ICONS` and `COLORED_IMAGES` are
-  // keyed on the *provider* (e.g. `minimax` → `minimaxLogo`), so the
-  // lookup must split on `:` first to render the right logo.
+  // half names the brand mark. The brand registry resolves the *provider*
+  // half (e.g. `minimax`), so the right logo is rendered.
   //
   // User-reported issue: "For First-class Providers I expect that we would
   // use the logo (it's just showing a circle currently)". Pre-fix, the
-  // `INLINE_ICONS[providerId]` lookup at the composite id missed every
-  // map entry and fell through to the gray-dot fallback.
+  // looking up the composite id directly missed the brand and fell through
+  // to the gray-dot fallback.
 
   it('renders the MiniMax brand image for a Proxied row with id "claude:minimax"', () => {
     const { container } = render(
@@ -171,7 +170,7 @@ describe('ProviderIcon', () => {
   // overrides have to compose with the existing brand-mark lookup so the
   // brand PNG/SVG stays in the chip.
 
-  it('backgroundColor overrides the hard-coded PROVIDER_CHIP_COLORS lookup', () => {
+  it('backgroundColor overrides the registered brand colour', () => {
     // Anthropic's hard-coded chip is `#1d7cfc` (Claude blue). The
     // override must win — a regression that re-introduces a parallel
     // colour map (the issue #328 motivation) would silently pick the
@@ -187,14 +186,13 @@ describe('ProviderIcon', () => {
     expect(chip.style.background).toBe('rgb(171, 205, 239)');
   });
 
-  it('backgroundColor falls back to PROVIDER_CHIP_COLORS when not provided', () => {
+  it('backgroundColor falls back to the registered brand colour when not provided', () => {
     // Existing behaviour: no override → use the hard-coded lookup. Pins
     // that the desktop sidebar / probe / settings surfaces (which never
     // pass `backgroundColor`) keep rendering the established colours.
     // (`agy` is the backend adapter id, not the human "Antigravity"
-    // label — `PROVIDER_CHIP_COLORS` and `COLORED_IMAGES` are keyed off
-    // the adapter id, so a regression that drifted to the label would
-    // miss both maps and fall through to `#555`.)
+    // label — the registry is keyed off the adapter id, so a regression
+    // that drifted to the label would miss and fall through to `#555`.)
     const { container } = render(
       <ProviderIcon providerId="agy" withBackground />,
     );
@@ -243,8 +241,8 @@ describe('ProviderIcon', () => {
   // ----- Issue #948 — `fallbackGlyph` for custom Proxied accounts -----
   //
   // A custom Claude-compatible Proxied account (`claude:<slug>`) has no
-  // entry in `INLINE_ICONS` / `COLORED_IMAGES`, so it falls through to the
-  // gray dot — losing the wire `meta.icon` letter the pre-#328 mobile
+  // registered brand, so it falls through to the gray dot — losing the
+  // wire `meta.icon` letter the pre-#328 mobile
   // NodeRow rendered. `fallbackGlyph` lets the caller feed that letter
   // back in without touching the brand-mark path.
 

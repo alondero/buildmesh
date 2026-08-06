@@ -1,28 +1,11 @@
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
-
-/**
- * Tailwind-class map for provider badges (issue #583 cleanup, moved out of
- * `Sidebar/ProviderDropdown.tsx`). Tailwind's purge tool needs static class
- * strings — the backend can't emit these dynamically, and `ProviderInfo.color`
- * (a hex string) is not what the frontend actually renders. Centralised here
- * so the helper below can fill in `color` from `id` without forcing every
- * caller to remember the mapping.
- */
-const PROVIDER_COLOR_CLASS: Record<string, string> = {
-  anthropic: 'bg-blue-500',
-  claude: 'bg-blue-500', // Detected Claude Code profile id (#534).
-  minimax: 'bg-indigo-500',
-  kimi: 'bg-cyan-500',
-  agy: 'bg-emerald-500',
-  opencode: 'bg-amber-500',
-  terminal: 'bg-gray-500',
-};
+import { brandFor } from './brandRegistry';
 
 /** Tailwind class for a provider's badge dot. Kept as a free function so
  *  existing call sites that need a one-off lookup (tests, sparse use)
  *  don't have to instantiate the projection helper. */
 export function colorClassForProvider(providerId: string): string {
-  return PROVIDER_COLOR_CLASS[providerId] ?? 'bg-gray-500';
+  return brandFor(providerId)?.chipClass ?? 'bg-gray-500';
 }
 
 /**

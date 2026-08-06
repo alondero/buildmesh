@@ -158,6 +158,7 @@ describe('mapBackendProviders', () => {
       id: 'claude:minimax',
       is_proxied: true,
       provider_id: 'minimax',
+      color: 'bg-indigo-500',
     });
   });
 
