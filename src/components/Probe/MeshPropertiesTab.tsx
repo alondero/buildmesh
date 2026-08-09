@@ -12,7 +12,7 @@
  *   • Display name (auto-save on blur, syncs the meshStore)
  *   • Directory (read-only — derived from the mesh row)
  *   • AI context portability (delegated to `<AiContextSection>`)
- *   • Default Claude Code model
+ *   • Default harness model
  *   • Effort level (low/medium/high/xhigh/max)
  *   • Default provider
  *   • Sandbox toggle
@@ -475,7 +475,7 @@ sandbox: config.sandbox,
 
           <Field
             label="Model"
-            hint="Claude Code only"
+            hint="Claude Code and Codex"
             htmlFor="mesh-prop-model"
           >
             <input
@@ -494,7 +494,7 @@ sandbox: config.sandbox,
 
           <Field
             label="Effort"
-            hint="Claude Code only"
+            hint="Claude Code and Codex"
             htmlFor="mesh-prop-effort"
           >
             <select

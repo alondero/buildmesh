@@ -12,6 +12,46 @@
 
 use std::collections::HashSet;
 
+#[test]
+fn hook_session_capture_only_fills_a_missing_cli_session_id() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE agent_nodes (
+            id INTEGER PRIMARY KEY,
+            cli_session_id TEXT
+         );
+         INSERT INTO agent_nodes (id, cli_session_id) VALUES
+            (1, NULL),
+            (2, ''),
+            (3, 'already-captured');",
+    )
+    .unwrap();
+
+    assert!(super::set_cli_session_id_if_missing_inner(&conn, 1, "hook-one").unwrap());
+    assert!(super::set_cli_session_id_if_missing_inner(&conn, 2, "hook-two").unwrap());
+    assert!(!super::set_cli_session_id_if_missing_inner(&conn, 3, "stale-hook").unwrap());
+    assert!(!super::set_cli_session_id_if_missing_inner(&conn, 999, "missing-node").unwrap());
+
+    let ids: Vec<Option<String>> = (1..=3)
+        .map(|id| {
+            conn.query_row(
+                "SELECT cli_session_id FROM agent_nodes WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            Some("hook-one".to_string()),
+            Some("hook-two".to_string()),
+            Some("already-captured".to_string()),
+        ]
+    );
+}
+
 // File-level `#[cfg(test)]` is applied by the parent module's
 // `#[cfg(test)] mod tests;` declaration — no inner `mod tests {}` wrapper
 // needed (clippy::module_inception otherwise fires because the file is

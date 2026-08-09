@@ -2547,6 +2547,27 @@ pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     Ok(())
 }
 
+/// Persist a provider-assigned session id without overwriting an id captured
+/// by an earlier, more immediate source. Codex hook callbacks use this as a
+/// structured fallback when PTY output did not expose the UUID (issue #1089).
+pub fn set_cli_session_id_if_missing(id: i64, cli_id: &str) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    set_cli_session_id_if_missing_inner(&db, id, cli_id)
+}
+
+fn set_cli_session_id_if_missing_inner(
+    conn: &Connection,
+    id: i64,
+    cli_id: &str,
+) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = ?1 \
+         WHERE id = ?2 AND (cli_session_id IS NULL OR cli_session_id = '')",
+        params![cli_id, id],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Flip any nodes that cannot be running on startup to `suspended`.
 ///
 /// Covers three states that all mean "we expected this node to be live but
@@ -3447,4 +3468,3 @@ pub struct WarmWorktree {
     pub preassigned_name: String,
     pub base_sha: Option<String>,
 }
-
