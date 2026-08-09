@@ -20,7 +20,9 @@ fn base_flags() -> Vec<String> {
         "danger-full-access".into(),
         // Buildmesh owns the terminal surface and persists its scrollback.
         // Codex's inline mode keeps completed output in that scrollback instead
-        // of confining it to the alternate screen buffer (issue #1089).
+        // of confining it to the alternate screen buffer (issue #1089). This
+        // flag is TUI-only; it must not be carried into a future `codex exec`
+        // recipe because that subcommand rejects it.
         "--no-alt-screen".into(),
         // Run the project-local `.codex/hooks.json` hooks without Codex's
         // interactive workspace-trust review (issue #884) — a headless spawn
@@ -433,6 +435,14 @@ mod tests {
         assert_eq!(
             CODEX.effort_args("xhigh"),
             vec!["-c", "model_reasoning_effort=\"xhigh\""]
+        );
+    }
+
+    #[test]
+    fn effort_config_override_escapes_embedded_quotes() {
+        assert_eq!(
+            CODEX.effort_args("weird\"name"),
+            vec!["-c", r#"model_reasoning_effort="weird\"name""#]
         );
     }
 

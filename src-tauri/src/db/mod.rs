@@ -2541,6 +2541,8 @@ pub fn archive_agent_node(id: i64) -> SqlResult<()> {
     update_agent_node_status(id, SessionStatus::Archived)
 }
 
+/// Update the persisted CLI session id for an agent node. For the fill-only
+/// variant used by attention-hook fallback, see `set_cli_session_id_if_missing`.
 pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     let db = get().lock().unwrap();
     db.execute("UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2", params![cli_id, id])?;
@@ -3468,3 +3470,4 @@ pub struct WarmWorktree {
     pub preassigned_name: String,
     pub base_sha: Option<String>,
 }
+
