@@ -615,6 +615,7 @@ mod tests {
                     "never",
                     "--sandbox",
                     "danger-full-access",
+                    "--no-alt-screen",
                     "--dangerously-bypass-hook-trust",
                 ]
             )
@@ -646,6 +647,7 @@ mod tests {
                     "never",
                     "--sandbox",
                     "danger-full-access",
+                    "--no-alt-screen",
                     "--dangerously-bypass-hook-trust",
                 ]
             )
@@ -654,6 +656,39 @@ mod tests {
             !args.iter().any(|a| a == "--session-id" || a == "ignored"),
             "codex self-assigns; Assign must not add --session-id: {:?}",
             args
+        );
+    }
+
+    #[test]
+    fn codex_mesh_effort_uses_reasoning_config_override() {
+        let cmd = cmd_for(
+            &wsl_resolved(),
+            Provider::Codex,
+            &SessionIdMode::None,
+            SESSION_ID,
+            Some("gpt-5.6-sol"),
+            Some("xhigh"),
+            None,
+            false,
+        );
+
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl(
+                "codex",
+                &[
+                    "--ask-for-approval",
+                    "never",
+                    "--sandbox",
+                    "danger-full-access",
+                    "--no-alt-screen",
+                    "--dangerously-bypass-hook-trust",
+                    "--model",
+                    "gpt-5.6-sol",
+                    "-c",
+                    "model_reasoning_effort=\"xhigh\"",
+                ]
+            )
         );
     }
 

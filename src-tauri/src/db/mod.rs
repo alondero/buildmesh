@@ -2541,10 +2541,33 @@ pub fn archive_agent_node(id: i64) -> SqlResult<()> {
     update_agent_node_status(id, SessionStatus::Archived)
 }
 
+/// Update the persisted CLI session id for an agent node. For the fill-only
+/// variant used by attention-hook fallback, see `set_cli_session_id_if_missing`.
 pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     let db = get().lock().unwrap();
     db.execute("UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2", params![cli_id, id])?;
     Ok(())
+}
+
+/// Persist a provider-assigned session id without overwriting an id captured
+/// by an earlier, more immediate source. Codex hook callbacks use this as a
+/// structured fallback when PTY output did not expose the UUID (issue #1089).
+pub fn set_cli_session_id_if_missing(id: i64, cli_id: &str) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    set_cli_session_id_if_missing_inner(&db, id, cli_id)
+}
+
+fn set_cli_session_id_if_missing_inner(
+    conn: &Connection,
+    id: i64,
+    cli_id: &str,
+) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = ?1 \
+         WHERE id = ?2 AND (cli_session_id IS NULL OR cli_session_id = '')",
+        params![cli_id, id],
+    )?;
+    Ok(changed > 0)
 }
 
 /// Flip any nodes that cannot be running on startup to `suspended`.

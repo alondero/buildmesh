@@ -30,11 +30,20 @@ const MAX_HOOK_BODY: usize = 64 * 1024;
 /// marking attention.
 #[derive(serde::Deserialize, Default)]
 struct HookPayload {
+    session_id: Option<String>,
     hook_event_name: Option<String>,
     transcript_path: Option<String>,
     /// Notification hooks carry the human-readable notification text, e.g.
     /// "Claude needs your permission to use Bash".
     message: Option<String>,
+}
+
+/// Extract the provider-owned UUID from a structured hook callback. An
+/// arbitrary string must never enter `cli_session_id`: resume treats that
+/// column as an executable CLI argument. Codex and Claude both use UUIDs.
+fn hook_session_id(body: &[u8]) -> Option<String> {
+    let id = serde_json::from_slice::<HookPayload>(body).ok()?.session_id?;
+    uuid::Uuid::parse_str(&id).ok().map(|parsed| parsed.to_string())
 }
 
 /// What to do with an incoming attention webhook.
@@ -124,6 +133,26 @@ pub async fn handle_post(
         return;
     };
 
+    // Codex self-assigns its thread id. PTY capture remains the earliest
+    // source, while the hook payload is the exact structured fallback after
+    // the first turn. The conditional DB update prevents a delayed callback
+    // from an old process overwriting the active session (issue #1089).
+    if let Some(cli_session_id) = hook_session_id(&body) {
+        match crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id) {
+            Ok(true) => tracing::info!(
+                "attention webhook captured session ID {} for node {}",
+                cli_session_id,
+                session_id
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                "attention webhook could not persist session ID for node {}: {}",
+                session_id,
+                error
+            ),
+        }
+    }
+
     match decide(&body, crate::services::transcript_reader::count_pending_background_tasks) {
         Decision::Mark => {
             crate::node_turn::publish(session_id, app);
@@ -167,6 +196,26 @@ mod tests {
         // the old always-mark behaviour, never to silence.
         assert_eq!(decide(b"", |_| Some(5)), Decision::Mark);
         assert_eq!(decide(b"not json", |_| Some(5)), Decision::Mark);
+    }
+
+    #[test]
+    fn structured_hook_exposes_canonical_session_uuid() {
+        let body = serde_json::json!({
+            "session_id": "C1234567-89AB-CDEF-0123-456789ABCDEF",
+            "hook_event_name": "Stop",
+        })
+        .to_string();
+        assert_eq!(
+            hook_session_id(body.as_bytes()).as_deref(),
+            Some("c1234567-89ab-cdef-0123-456789abcdef")
+        );
+    }
+
+    #[test]
+    fn missing_malformed_or_non_uuid_session_id_is_ignored() {
+        assert_eq!(hook_session_id(b"{}"), None);
+        assert_eq!(hook_session_id(b"not json"), None);
+        assert_eq!(hook_session_id(br#"{"session_id":"most-recent"}"#), None);
     }
 
     #[test]

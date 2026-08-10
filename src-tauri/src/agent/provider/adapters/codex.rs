@@ -18,6 +18,12 @@ fn base_flags() -> Vec<String> {
         "never".into(),
         "--sandbox".into(),
         "danger-full-access".into(),
+        // Buildmesh owns the terminal surface and persists its scrollback.
+        // Codex's inline mode keeps completed output in that scrollback instead
+        // of confining it to the alternate screen buffer (issue #1089). This
+        // flag is TUI-only; it must not be carried into a future `codex exec`
+        // recipe because that subcommand rejects it.
+        "--no-alt-screen".into(),
         // Run the project-local `.codex/hooks.json` hooks without Codex's
         // interactive workspace-trust review (issue #884) — a headless spawn
         // must never block on a trust prompt, and Buildmesh never edits the
@@ -379,8 +385,14 @@ impl AgentProvider for CodexAdapter {
         vec![]
     }
 
-    fn effort_args(&self, _effort: &str) -> Vec<String> {
-        vec![]
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        // Codex has no dedicated --effort flag, but exposes the same setting
+        // as a stable per-invocation config override. Rust's debug string
+        // representation supplies the quoted/escaped TOML string value.
+        vec![
+            "-c".into(),
+            format!("model_reasoning_effort={effort:?}"),
+        ]
     }
 
     fn prefill_args(&self, text: &str) -> Vec<String> {
@@ -405,6 +417,33 @@ mod tests {
             .spawn_recipe_for_resume(Platform::Windows, "sid-123")
             .expect("codex has a resume recipe");
         assert!(resume.base_args.contains(&bypass), "resume: {:?}", resume.base_args);
+    }
+
+    #[test]
+    fn spawn_recipes_preserve_buildmesh_terminal_scrollback() {
+        let inline = "--no-alt-screen".to_string();
+        let fresh = CODEX.spawn_recipe(Platform::Linux, EnvType::Wsl);
+        assert!(fresh.base_args.contains(&inline), "fresh: {:?}", fresh.base_args);
+        let resume = CODEX
+            .spawn_recipe_for_resume(Platform::Linux, "sid-123")
+            .expect("codex has a resume recipe");
+        assert!(resume.base_args.contains(&inline), "resume: {:?}", resume.base_args);
+    }
+
+    #[test]
+    fn effort_uses_codex_config_override() {
+        assert_eq!(
+            CODEX.effort_args("xhigh"),
+            vec!["-c", "model_reasoning_effort=\"xhigh\""]
+        );
+    }
+
+    #[test]
+    fn effort_config_override_escapes_embedded_quotes() {
+        assert_eq!(
+            CODEX.effort_args("weird\"name"),
+            vec!["-c", r#"model_reasoning_effort="weird\"name""#]
+        );
     }
 
     #[test]
