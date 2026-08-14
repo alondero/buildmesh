@@ -544,9 +544,16 @@ function ProviderPicker({
               style={{ background: "var(--surface-2)" }}
             >
               <ProviderIcon
+                // `fallbackGlyph` feeds the row's own wire letter in for a
+                // harness profile with no brand mark (issue #1086), the same
+                // way `NodeRow` does for a custom Proxied account (#948).
+                // Here the row IS the live `listProviders()` record, so
+                // `native.icon` is the value `NodeRow` has to look up — and
+                // it keeps the chip's glyph on the same source as its colour.
                 providerId={native.id}
                 withBackground
                 backgroundColor={native.color}
+                fallbackGlyph={native.icon}
                 chipTestId={`picker-avatar-${native.id}`}
                 title={native.label}
                 className="h-4 w-4"
@@ -564,10 +571,15 @@ function ProviderPicker({
                 style={{ background: "var(--surface-2)", marginLeft: 18 }}
               >
                 <ProviderIcon
+                  // Same fallback as the header row above (issue #1086) —
+                  // a custom Claude-compatible Proxied account's slug has no
+                  // brand mark, so without this the 28px chip shows a bare
+                  // dot where the row's wire letter belongs.
                   providerId={child.id}
                   withBackground
                   chipSize={28}
                   backgroundColor={child.color}
+                  fallbackGlyph={child.icon}
                   chipTestId={`picker-avatar-${child.id}`}
                   title={child.label}
                   className="h-3.5 w-3.5"
