@@ -24,15 +24,22 @@ const ws3: OpenCodeWorkspace = { id: 'wrk_c', name: 'Gamma' };
 
 const signedOut: State = { kind: 'signedOut' };
 
+// Issue #1101: helpers below are called twice in the same assertion (input
+// state + expected value). A `Date.now()` default makes the two reads land
+// on different milliseconds and flakes `toEqual` (regularly on Windows,
+// where timer granularity is coarse). Pin the clock to a fixed instant so
+// both calls produce identical values by construction.
+const FIXED_NOW_MS = 1_700_000_000_000;
+
 const awaiting = (over: Partial<Extract<State, { kind: 'awaitingActivation' }>> = {}): State => ({
   kind: 'awaitingActivation',
   deviceCode: 'dc_test',
   userCode: 'WXYZ-1234',
   verificationUri: 'https://console.opencode.ai/auth/device?code=WXYZ-1234',
   intervalSecs: 5,
-  expiresAtMs: Date.now() + 600_000,
+  expiresAtMs: FIXED_NOW_MS + 600_000,
   originalExpiresInSecs: 600,
-  startedAtMs: Date.now() - 1000,
+  startedAtMs: FIXED_NOW_MS - 1000,
   ...over,
 });
 
@@ -40,7 +47,7 @@ const signedIn = (over: Partial<Extract<State, { kind: 'signedIn' }>> = {}): Sta
   kind: 'signedIn',
   workspace: ws1,
   workspaces: [ws1, ws2, ws3],
-  accessTokenExpiresAtMs: Date.now() + 600_000,
+  accessTokenExpiresAtMs: FIXED_NOW_MS + 600_000,
   ...over,
 });
 
