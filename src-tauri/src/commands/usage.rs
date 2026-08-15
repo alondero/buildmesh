@@ -9,7 +9,15 @@ use tauri::command;
 /// id isn't here — a **Generic Model Provider** (custom endpoint) — is
 /// configurable but has no usage endpoint, so it renders an explicit "usage not
 /// tracked" state instead.
-const FETCHABLE: [&str; 8] = ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode"];
+///
+/// `openai` joins the keyed tracked set per issue #1109 / ADR-0026: the
+/// Organization Costs API is admin-scoped, so a `sk-proj-…` key degrades
+/// gracefully (logged-in, detail explains) rather than failing the row. The
+/// no-credential gate in [`assemble_meters`] drops the row until the user
+/// stores a key, matching the user contract for keyed providers.
+const FETCHABLE: [&str; 9] = [
+    "anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai",
+];
 
 /// Map a self-authenticating **native** provider account to the harness whose
 /// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
@@ -94,6 +102,7 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
             "minimax" => preferences::minimax_api_key_resolved().is_some_and(|k| !k.is_empty()),
             "kimi" => preferences::kimi_api_key_resolved().is_some_and(|k| !k.is_empty()),
             "openrouter" => preferences::openrouter_api_key_resolved().is_some_and(|k| !k.is_empty()),
+            "openai" => preferences::openai_api_key_resolved().is_some_and(|k| !k.is_empty()),
             // Custom (Generic) Claude-compatible providers store the key on
             // the account itself — no legacy flat field.
             other => accounts
@@ -103,7 +112,7 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
                 .is_some_and(|k| !k.is_empty()),
         }
     };
-    for id in ["minimax", "kimi", "openrouter"] {
+    for id in ["minimax", "kimi", "openrouter", "openai"] {
         if has_key(id) {
             configured.insert(id.to_string());
         }
@@ -250,6 +259,16 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
         ),
         "grok" => usage::grok_usage(),
         "opencode" => usage::opencode_usage(),
+        // OpenAI — keyed, no legacy flat field. Empty string lets
+        // `openai_usage` surface its own "No API key configured" message
+        // (mirrors Kimi/OpenRouter). The configured-key gate in
+        // `assemble_meters` then drops the row so a fresh user doesn't see a
+        // "Not logged in" card before they've added a key.
+        "openai" => usage::openai_usage(
+            preferences::openai_api_key_resolved()
+                .as_deref()
+                .unwrap_or(""),
+        ),
         other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
     };
 
@@ -374,7 +393,7 @@ mod tests {
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode"] {
+        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.

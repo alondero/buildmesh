@@ -1052,6 +1052,12 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "opencode",  name: "OpenCode",             self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
+    // OpenAI Platform API — keyed by an `sk-admin-…` (org spend) or
+    // `sk-proj-…` (graceful degradation: org costs 401, project keys still
+    // work for inference). See ADR-0026 / issue #1109. No first-class
+    // inference surface here — the row exists for the Usage Meter only;
+    // OpenAI inference goes through the Codex harness.
+    BuiltInProviderAccount { id: "openai",    name: "OpenAI Platform",       self_auth: false },
 ];
 
 // One row per credential/billing identity. Pairings live in the Spawn Menu
@@ -1534,6 +1540,20 @@ pub fn openrouter_api_key_resolved() -> Option<String> {
     merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
         .into_iter()
         .find(|a| a.id == "openrouter")
+        .and_then(|a| a.api_key)
+        .filter(|v| !v.is_empty())
+}
+
+/// Resolve the effective OpenAI Platform API key from the merged provider-
+/// accounts list (issue #1109, ADR-0026). New keyed id — no legacy flat
+/// field; identical lookup shape to [`kimi_api_key_resolved`] but kept
+/// separate so the future legacy-fallback seam stays one symbol per
+/// provider. Empty strings collapse to `None` so a half-cleared config
+/// doesn't surface as a logged-out row.
+pub fn openai_api_key_resolved() -> Option<String> {
+    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
+        .into_iter()
+        .find(|a| a.id == "openai")
         .and_then(|a| a.api_key)
         .filter(|v| !v.is_empty())
 }
@@ -2887,8 +2907,14 @@ mod tests {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
         assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode"]);
         let catalog_ids: Vec<_> = keyed_first_class_catalog().into_iter().map(|a| a.id).collect();
-        assert_eq!(catalog_ids, vec!["kimi", "minimax", "openrouter"]);
-        for id in &["kimi", "minimax", "openrouter"] {
+        // `openai` joins the keyed catalog in issue #1109 / ADR-0026 — its
+        // /v1/organization/costs fetcher is admin-scoped, so the row is
+        // keyed (user-supplied `sk-admin-…` or `sk-proj-…`) rather than
+        // self-auth. PayAsYouGo because the costs API reports monthly spend.
+        // Order matches `BUILTIN_PROVIDER_ACCOUNTS` insertion order (the
+        // catalog is `filter(!self_auth)` over the source list).
+        assert_eq!(catalog_ids, vec!["kimi", "minimax", "openrouter", "openai"]);
+        for id in &["kimi", "minimax", "openrouter", "openai"] {
             let a = keyed_first_class_catalog()
                 .into_iter()
                 .find(|a| a.id == *id)
