@@ -71,10 +71,16 @@ export default function App() {
 
   const prSheetRef = useRef(prSheet);
   prSheetRef.current = prSheet;
+  // Recovery is a transition, not an event. The guard makes concurrent 401s
+  // share one clear-and-connect transition, while the version invalidates
+  // callbacks retained by screens that were unmounted during recovery.
+  const authRecoveryRef = useRef(false);
+  const recoveryVersionRef = useRef(0);
 
   // Forward navigation pushes a history entry so back gestures walk back
   // through screens instead of leaving the app entirely.
   const navigate = useCallback((next: Screen) => {
+    if (authRecoveryRef.current) return;
     window.history.pushState({ bm: true }, "");
     setScreen(next);
   }, []);
@@ -120,14 +126,33 @@ export default function App() {
   }, []);
 
   const handleAuthFailed = useCallback(() => {
+    if (authRecoveryRef.current) return;
+    authRecoveryRef.current = true;
+    recoveryVersionRef.current += 1;
     clearStoredToken();
     setAuthNotice("Connection expired — scan the QR code again to reconnect.");
+    prSheetRef.current = null;
+    setPrSheet(null);
+    setPrCreatedUrl(null);
+    setOffline(false);
     setScreen({ kind: "connect" });
   }, []);
 
   const openPrSheet = useCallback((node: AgentNode, branch: string) => {
+    if (authRecoveryRef.current) return;
     window.history.pushState({ bm: true }, "");
     setPrSheet({ node, branch });
+  }, []);
+
+  const activeRecoveryVersion = recoveryVersionRef.current;
+  const handleAuthFailedForActiveScreen = useCallback(() => {
+    if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+    handleAuthFailed();
+  }, [activeRecoveryVersion, handleAuthFailed]);
+  const handleConnected = useCallback(() => {
+    authRecoveryRef.current = false;
+    setAuthNotice(null);
+    setScreen({ kind: "list" });
   }, []);
 
   return (
@@ -135,17 +160,29 @@ export default function App() {
       {screen.kind === "connect" && (
         <Connect
           notice={authNotice}
-          onConnected={() => setScreen({ kind: "list" })}
+          onConnected={handleConnected}
         />
       )}
       {screen.kind === "list" && (
         <NodeList
           key={listKey}
-          onOpenNode={(node) => navigate({ kind: "terminal", node })}
-          onOpenAgentNodes={(mesh) => navigate({ kind: "sessions", mesh })}
-          onOpenIssues={(mesh) => navigate({ kind: "issues", mesh })}
-          onOffline={() => setOffline(true)}
-          onAuthFailed={handleAuthFailed}
+          onOpenNode={(node) => {
+            if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+            navigate({ kind: "terminal", node });
+          }}
+          onOpenAgentNodes={(mesh) => {
+            if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+            navigate({ kind: "sessions", mesh });
+          }}
+          onOpenIssues={(mesh) => {
+            if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+            navigate({ kind: "issues", mesh });
+          }}
+          onOffline={() => {
+            if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+            setOffline(true);
+          }}
+          onAuthFailed={handleAuthFailedForActiveScreen}
         />
       )}
       {screen.kind === "terminal" && (
@@ -157,10 +194,11 @@ export default function App() {
           <TerminalScreen
             node={screen.node}
             onBack={goBack}
-            onAuthFailed={handleAuthFailed}
-            onOpenChanges={() =>
-              navigate({ kind: "changes", node: screen.node })
-            }
+            onAuthFailed={handleAuthFailedForActiveScreen}
+            onOpenChanges={() => {
+              if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+              navigate({ kind: "changes", node: screen.node });
+            }}
           />
         </Suspense>
       )}
@@ -169,10 +207,15 @@ export default function App() {
           <ChangesScreen
             node={screen.node}
             onBack={goBack}
-            onOpenDiff={(filePath) =>
-              navigate({ kind: "diff", node: screen.node, filePath })
-            }
-            onOpenPr={(branch) => openPrSheet(screen.node, branch)}
+            onOpenDiff={(filePath) => {
+              if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+              navigate({ kind: "diff", node: screen.node, filePath });
+            }}
+            onOpenPr={(branch) => {
+              if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+              openPrSheet(screen.node, branch);
+            }}
+            onAuthFailed={handleAuthFailedForActiveScreen}
           />
         </Suspense>
       )}
@@ -182,6 +225,7 @@ export default function App() {
             node={screen.node}
             filePath={screen.filePath}
             onBack={goBack}
+            onAuthFailed={handleAuthFailedForActiveScreen}
           />
         </Suspense>
       )}
@@ -190,7 +234,11 @@ export default function App() {
           <ArchivedNodesScreen
             mesh={screen.mesh}
             onBack={goBack}
-            onResumed={(node) => setScreen({ kind: "terminal", node })}
+            onResumed={(node) => {
+              if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+              setScreen({ kind: "terminal", node });
+            }}
+            onAuthFailed={handleAuthFailedForActiveScreen}
           />
         </Suspense>
       )}
@@ -199,7 +247,11 @@ export default function App() {
           <IssuesScreen
             mesh={screen.mesh}
             onBack={goBack}
-            onSpawned={(node) => setScreen({ kind: "terminal", node })}
+            onSpawned={(node) => {
+              if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+              setScreen({ kind: "terminal", node });
+            }}
+            onAuthFailed={handleAuthFailedForActiveScreen}
           />
         </Suspense>
       )}
@@ -209,7 +261,9 @@ export default function App() {
             meshId={prSheet.node.mesh_id}
             currentBranch={prSheet.branch}
             onClose={goBack}
+            onAuthFailed={handleAuthFailedForActiveScreen}
             onCreated={(url) => {
+              if (activeRecoveryVersion !== recoveryVersionRef.current) return;
               setPrCreatedUrl(url);
               window.history.back(); // pops the sheet's history entry
             }}

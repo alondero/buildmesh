@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AgentNode,
   Mesh,
@@ -57,13 +57,20 @@ export default function NodeList({
   const [creating, setCreating] = useState<number | null>(null);
   const [meshActions, setMeshActions] = useState<Mesh | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
       const [m, n] = await Promise.all([listMeshes(), listNodes()]);
+      if (!mountedRef.current) return;
       setMeshes(m);
       setNodes(n);
     } catch (e) {
+      if (!mountedRef.current) return;
       // A 401 means the token was revoked/expired — bounce to Connect
       // instead of claiming the desktop is offline.
       if (isAuthError(e)) onAuthFailed();
@@ -86,9 +93,14 @@ export default function NodeList({
   // even if the request 401s or the server hasn't woken up yet.
   useEffect(() => {
     listProviders()
-      .then((p) => p.length > 0 && setProviders(p))
-      .catch(() => {});
-  }, []);
+      .then((p) => {
+        if (mountedRef.current && p.length > 0) setProviders(p);
+      })
+      .catch((e) => {
+        if (!mountedRef.current) return;
+        if (isAuthError(e)) onAuthFailed();
+      });
+  }, [onAuthFailed]);
 
   const handleCreate = async (meshId: number, providerId: string) => {
     setPickerMeshId(null);
@@ -96,10 +108,16 @@ export default function NodeList({
     setError(null);
     try {
       const node = await createNode({ mesh_id: meshId, provider: providerId });
+      if (!mountedRef.current) return;
       setCreating(null);
       onOpenNode(node);
     } catch (e) {
+      if (!mountedRef.current) return;
       setCreating(null);
+      if (isAuthError(e)) {
+        onAuthFailed();
+        return;
+      }
       setError((e as Error).message);
     }
   };

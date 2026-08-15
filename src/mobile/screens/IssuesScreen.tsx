@@ -5,6 +5,7 @@ import {
   Mesh,
   listIssues,
   spawnFromIssue,
+  isAuthError,
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
@@ -13,11 +14,17 @@ type Props = {
   mesh: Mesh;
   onBack: () => void;
   onSpawned: (node: AgentNode) => void;
+  onAuthFailed?: () => void;
 };
 
 const BODY_PREVIEW_LIMIT = 600;
 
-export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
+export default function IssuesScreen({
+  mesh,
+  onBack,
+  onSpawned,
+  onAuthFailed,
+}: Props) {
   const [issues, setIssues] = useState<GitHubIssue[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyIssue, setBusyIssue] = useState<number | null>(null);
@@ -34,9 +41,13 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
       })
       .catch((e) => {
         if (signal.aborted) return;
+        if (isAuthError(e)) {
+          onAuthFailed?.();
+          return;
+        }
         setError((e as Error).message);
       });
-  }, [mesh.id]);
+  }, [mesh.id, onAuthFailed]);
 
   const spawn = async (issue: GitHubIssue) => {
     setBusyIssue(issue.number);
@@ -47,6 +58,10 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
       onSpawned(node);
     } catch (e) {
       setBusyIssue(null);
+      if (isAuthError(e)) {
+        onAuthFailed?.();
+        return;
+      }
       setError((e as Error).message);
     }
   };

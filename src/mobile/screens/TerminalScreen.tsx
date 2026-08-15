@@ -34,6 +34,8 @@ export default function TerminalScreen({
   const reconnectTimerRef = useRef<number | null>(null);
   const countdownRef = useRef<number | null>(null);
   const closedByUserRef = useRef(false);
+  const authFailedRef = useRef(false);
+  const connectInFlightRef = useRef(false);
 
   const [reconnectIn, setReconnectIn] = useState<number | null>(null);
   // Issue #552: a 429 from the mint (server rate-cap; see api.ts) is shown
@@ -229,7 +231,27 @@ export default function TerminalScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [node.id]);
 
-  async function connect() {
+  function handleAuthFailure() {
+    if (authFailedRef.current) return;
+    authFailedRef.current = true;
+    closedByUserRef.current = true;
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (countdownRef.current !== null) {
+      window.clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    setReconnectIn(null);
+    onAuthFailed?.();
+  }
+
+  async function connect(authProbe = false) {
+    if (connectInFlightRef.current || closedByUserRef.current || authFailedRef.current) {
+      return;
+    }
+    connectInFlightRef.current = true;
     // Mint a fresh single-use WS ticket (issue #500) before opening the socket.
     let url: string;
     try {
@@ -239,7 +261,8 @@ export default function TerminalScreen({
       // would just re-mint and re-fail forever, so bounce to Connect instead.
       // Any other failure is a transient connect error → normal backoff.
       if (isAuthError(e)) {
-        onAuthFailed?.();
+        connectInFlightRef.current = false;
+        handleAuthFailure();
         return;
       }
       // Issue #552: a 429 that survives the helper's one-shot back-off
@@ -252,22 +275,29 @@ export default function TerminalScreen({
         // scheduleReconnect(), so this never enters the 1/2/4/8/16s ladder
         // and the user is not woken by a fake "Connection lost" banner.
         setRateLimited(true);
+        connectInFlightRef.current = false;
         return;
       }
+      connectInFlightRef.current = false;
       scheduleReconnect();
       return;
     }
     // The component may have unmounted while awaiting the ticket.
-    if (closedByUserRef.current) return;
+    if (closedByUserRef.current || authFailedRef.current) {
+      connectInFlightRef.current = false;
+      return;
+    }
     let ws: WebSocket;
     try {
       ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
     } catch {
+      connectInFlightRef.current = false;
       scheduleReconnect();
       return;
     }
     wsRef.current = ws;
+    connectInFlightRef.current = false;
 
     // A single socket's failure must charge the backoff counter exactly
     // once. Browsers fire BOTH `error` and `close` for the same failure
@@ -277,8 +307,10 @@ export default function TerminalScreen({
     // user expects — exactly the "fails while backgrounded and gives up"
     // symptom from issue #806.
     let reconnectScheduled = false;
+    let socketOpened = false;
 
     ws.onopen = () => {
+      socketOpened = true;
       reconnectAttemptRef.current = 0;
       setReconnectIn(null);
       setRateLimited(false);
@@ -300,17 +332,23 @@ export default function TerminalScreen({
       }
     };
 
-    ws.onclose = () => {
+    const onSocketFailure = () => {
       if (closedByUserRef.current || reconnectScheduled) return;
       reconnectScheduled = true;
-      scheduleReconnect();
+      // A failed handshake carries the server's 401/403 as the HTTP upgrade
+      // response, which browsers expose only as error/close. Mint once
+      // immediately so an expired cookie reaches the auth recovery path
+      // instead of waiting through the reconnect ladder. Once that probe has
+      // been made, ordinary network failures use the visible backoff.
+      if (!socketOpened && !authProbe) {
+        void connect(true);
+      } else {
+        scheduleReconnect();
+      }
     };
 
-    ws.onerror = () => {
-      if (closedByUserRef.current || reconnectScheduled) return;
-      reconnectScheduled = true;
-      scheduleReconnect();
-    };
+    ws.onclose = onSocketFailure;
+    ws.onerror = onSocketFailure;
   }
 
   function scheduleReconnect() {
@@ -342,7 +380,7 @@ export default function TerminalScreen({
       }
       reconnectTimerRef.current = null;
       setReconnectIn(null);
-      connect();
+      connect(true);
     }, delayMs);
   }
 

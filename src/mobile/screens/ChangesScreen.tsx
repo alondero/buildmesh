@@ -7,6 +7,7 @@ import {
   gitBranch,
   gitStatus,
   gitSummary,
+  isAuthError,
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
@@ -16,6 +17,7 @@ type Props = {
   onBack: () => void;
   onOpenDiff: (filePath: string) => void;
   onOpenPr: (currentBranch: string) => void;
+  onAuthFailed?: () => void;
 };
 
 export default function ChangesScreen({
@@ -23,6 +25,7 @@ export default function ChangesScreen({
   onBack,
   onOpenDiff,
   onOpenPr,
+  onAuthFailed,
 }: Props) {
   const [status, setStatus] = useState<GitStatusEntry[] | null>(null);
   const [summary, setSummary] = useState<GitSummary | null>(null);
@@ -39,8 +42,16 @@ export default function ChangesScreen({
     Promise.all([
       gitStatus(node.id),
       gitSummary(node.id),
-      gitBranch(node.id).then((b) => b.branch).catch(() => ""),
-      ghAuthOk().catch(() => false),
+      gitBranch(node.id)
+        .then((b) => b.branch)
+        .catch((e) => {
+          if (isAuthError(e)) throw e;
+          return "";
+        }),
+      ghAuthOk().catch((e) => {
+        if (isAuthError(e)) throw e;
+        return false;
+      }),
     ])
       .then(([s, sum, br, gh]) => {
         if (signal.aborted) return;
@@ -51,9 +62,13 @@ export default function ChangesScreen({
       })
       .catch((e) => {
         if (signal.aborted) return;
+        if (isAuthError(e)) {
+          onAuthFailed?.();
+          return;
+        }
         setError((e as Error).message);
       });
-  }, [node.id, reloadKey]);
+  }, [node.id, onAuthFailed, reloadKey]);
 
   return (
     <div data-testid="changes-screen" className="screen">

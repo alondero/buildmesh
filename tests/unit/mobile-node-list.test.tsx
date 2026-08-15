@@ -7,7 +7,7 @@
  * hardcoded fallback, so newly-configured harnesses reach mobile.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import NodeList from "../../src/mobile/screens/NodeList";
 import type {
   AgentNode,
@@ -208,6 +208,161 @@ describe("NodeList", () => {
       expect(onAuthFailed).toHaveBeenCalled();
     });
     expect(onOffline).not.toHaveBeenCalled();
+  });
+
+  it.each([404, 500])(
+    "keeps the normal offline state for a non-auth %s response",
+    async (status) => {
+      mockApi([], { status });
+      const onOffline = vi.fn();
+      const onAuthFailed = vi.fn();
+
+      render(
+        <NodeList
+          onOpenNode={noop}
+          onOpenAgentNodes={noop}
+          onOpenIssues={noop}
+          onOffline={onOffline}
+          onAuthFailed={onAuthFailed}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(onOffline).toHaveBeenCalled();
+      });
+      expect(onAuthFailed).not.toHaveBeenCalled();
+    },
+  );
+
+  it("routes an auth failure during the 5-second poll to onAuthFailed", async () => {
+    vi.useFakeTimers();
+    let nodeListCalls = 0;
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        nodeListCalls += 1;
+        if (nodeListCalls > 1) return { ok: false, status: 401, json: async () => ({ error: "expired" }) };
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/providers")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "events" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetch);
+    const onAuthFailed = vi.fn();
+
+    try {
+      render(
+        <NodeList
+          onOpenNode={noop}
+          onOpenAgentNodes={noop}
+          onOpenIssues={noop}
+          onOffline={noop}
+          onAuthFailed={onAuthFailed}
+        />,
+      );
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId("node-list")).toBeTruthy();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(onAuthFailed).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("routes an auth failure from the background provider refresh to onAuthFailed", async () => {
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/providers")) {
+        return { ok: false, status: 401, json: async () => ({ error: "expired" }) };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/nodes")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "events" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetch);
+    const onAuthFailed = vi.fn();
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={onAuthFailed}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("node-list")).toBeTruthy());
+    await waitFor(() => expect(onAuthFailed).toHaveBeenCalledTimes(1));
+  });
+
+  it("routes an expired create-node request to onAuthFailed", async () => {
+    const provider: Provider = {
+      id: "claude",
+      label: "Claude Code",
+      color: "#1d7cfc",
+      icon: "A",
+      resumable: true,
+      harness_id: "claude",
+      provider_id: null,
+      is_proxied: false,
+      group_key: "claude",
+    };
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes/create")) {
+        return { ok: false, status: 401, json: async () => ({ error: "expired" }) };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/nodes")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/providers")) {
+        return { ok: true, status: 200, json: async () => [provider] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "events" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetch);
+    const onAuthFailed = vi.fn();
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={onAuthFailed}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("new-node-1"));
+    fireEvent.click(await screen.findByTestId("provider-claude"));
+
+    await waitFor(() => expect(onAuthFailed).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("create-error")).toBeNull();
   });
 
   it("treats a network failure as offline", async () => {
