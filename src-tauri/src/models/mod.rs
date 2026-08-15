@@ -65,6 +65,9 @@ pub enum Provider {
     /// Moonshot AI's Kimi Code CLI — interactive TUI-based coding agent.
     /// See `agent::provider::adapters::kimi` (wayfinder #918).
     Kimi,
+    /// MiniMax Code CLI — interactive TUI-based coding agent.
+    /// See `agent::provider::adapters::mcode`.
+    Mcode,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -81,6 +84,7 @@ impl Provider {
             Provider::Codex,
             Provider::Grok,
             Provider::Kimi,
+            Provider::Mcode,
             Provider::Terminal,
         ]
     }
@@ -103,6 +107,7 @@ impl Provider {
             "codex" => Provider::Codex,
             "grok" => Provider::Grok,
             "kimi" => Provider::Kimi,
+            "mcode" | "minimax-code" => Provider::Mcode,
             "terminal" => Provider::Terminal,
             // "minimax" is no longer a first-class executor: it is Claude Code
             // with a swapped backend, configured as a harness profile whose
@@ -133,6 +138,7 @@ impl Provider {
             Provider::Codex => &adapters::CODEX,
             Provider::Grok => &adapters::GROK,
             Provider::Kimi => &adapters::KIMI,
+            Provider::Mcode => &adapters::MCODE,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -147,6 +153,7 @@ impl std::fmt::Display for Provider {
             Provider::Codex => write!(f, "codex"),
             Provider::Grok => write!(f, "grok"),
             Provider::Kimi => write!(f, "kimi"),
+            Provider::Mcode => write!(f, "mcode"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }
@@ -1277,6 +1284,9 @@ mod tests {
         assert!(Provider::Kimi.adapter().supports_resume());
         assert!(Provider::Kimi.adapter().supports_model_override());
         assert!(!Provider::Kimi.adapter().requires_attention_hook());
+        assert!(Provider::Mcode.adapter().supports_resume());
+        assert!(Provider::Mcode.adapter().supports_model_override());
+        assert!(!Provider::Mcode.adapter().requires_attention_hook());
     }
 
     /// The "produces a readable transcript" capability (#317) — the Claude-backed
@@ -1296,6 +1306,7 @@ mod tests {
         // Kimi Code (#918) — reader wiring is the follow-up; capability
         // claim is honest at `false` until then.
         assert!(!Provider::Kimi.adapter().produces_readable_transcript());
+        assert!(!Provider::Mcode.adapter().produces_readable_transcript());
         assert!(!Provider::Agy.adapter().produces_readable_transcript());
         assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
         assert!(!Provider::Terminal.adapter().produces_readable_transcript());
@@ -1334,6 +1345,7 @@ mod tests {
         assert_eq!(Provider::from_db_str("AGY"), Provider::Agy);
         assert_eq!(Provider::from_db_str("OpenCode"), Provider::OpenCode);
         assert_eq!(Provider::from_db_str("Codex"), Provider::Codex);
+        assert_eq!(Provider::from_db_str("Mcode"), Provider::Mcode);
     }
 
     /// Hard cutover (issue #538): "minimax" is no longer a first-class executor.
@@ -1361,6 +1373,15 @@ mod tests {
         assert_eq!(Provider::from_db_str("kimi"), Provider::Kimi);
         assert_eq!(Provider::from_db_str("Kimi"), Provider::Kimi);
         assert_eq!(Provider::from_db_str("KIMI"), Provider::Kimi);
+    }
+
+    /// MiniMax Code CLI (`mcode`) is a native binary executor on PATH as `mcode`.
+    #[test]
+    fn provider_from_db_str_mcode_resolves_to_native_harness() {
+        assert_eq!(Provider::from_db_str("mcode"), Provider::Mcode);
+        assert_eq!(Provider::from_db_str("Mcode"), Provider::Mcode);
+        assert_eq!(Provider::from_db_str("MCODE"), Provider::Mcode);
+        assert_eq!(Provider::from_db_str("minimax-code"), Provider::Mcode);
     }
 
     /// Whitespace around the value shouldn't break matching either — a
@@ -1457,6 +1478,7 @@ mod tests {
         assert_eq!(format!("{}", Provider::Codex), "codex");
         assert_eq!(format!("{}", Provider::Grok), "grok");
         assert_eq!(format!("{}", Provider::Kimi), "kimi");
+        assert_eq!(format!("{}", Provider::Mcode), "mcode");
         assert_eq!(format!("{}", Provider::Terminal), "terminal");
     }
 
