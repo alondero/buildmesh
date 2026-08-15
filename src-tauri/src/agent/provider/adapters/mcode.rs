@@ -13,15 +13,24 @@
 //!
 //! **Model override** uses `-m <model-id>` / `--model <model-id>`.
 //!
-//! **Shell wrapping**: `mcode` is a native binary / bundled runtime on all
-//! platforms (not a `.cmd` shim), so `WindowsShell::Direct` is correct everywhere —
-//! matching the AGY, Grok, and Kimi adapter patterns.
+//! **Shell wrapping**: `mcode` is distributed as a `.cmd` batch shim on
+//! Windows (`mcode.cmd`), which `CreateProcess` won't run directly; the recipe
+//! wraps with `WindowsShell::Cmd` -> `cmd.exe /c mcode …` on Windows. On macOS /
+//! Linux it is an executable on PATH so `WindowsShell::Direct` is used.
 
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 
 pub struct McodeAdapter;
 pub static MCODE: McodeAdapter = McodeAdapter;
+
+/// Per-platform shell selection. Mirrors the OpenCode / Antigravity pattern.
+fn shell_for(platform: Platform) -> WindowsShell {
+    match platform {
+        Platform::Macos | Platform::Linux => WindowsShell::Direct,
+        Platform::Windows => WindowsShell::Cmd,
+    }
+}
 
 impl AgentProvider for McodeAdapter {
     fn id(&self) -> &'static str {
@@ -36,11 +45,11 @@ impl AgentProvider for McodeAdapter {
         }
     }
 
-    fn spawn_recipe(&self, _platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+    fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         SpawnRecipe {
             binary: "mcode",
             base_args: vec![],
-            windows_shell: WindowsShell::Direct,
+            windows_shell: shell_for(platform),
         }
     }
 
@@ -105,8 +114,8 @@ mod tests {
     }
 
     #[test]
-    fn spawn_recipe_direct_on_all_platforms() {
-        for platform in [Platform::Windows, Platform::Linux, Platform::Macos] {
+    fn spawn_recipe_direct_on_macos_and_linux() {
+        for platform in [Platform::Linux, Platform::Macos] {
             let recipe = MCODE.spawn_recipe(platform, EnvType::Windows);
             assert_eq!(recipe.binary, "mcode");
             assert!(recipe.base_args.is_empty());
@@ -117,6 +126,18 @@ mod tests {
                 recipe.windows_shell
             );
         }
+    }
+
+    #[test]
+    fn spawn_recipe_cmd_on_windows() {
+        let recipe = MCODE.spawn_recipe(Platform::Windows, EnvType::Windows);
+        assert_eq!(recipe.binary, "mcode");
+        assert!(recipe.base_args.is_empty());
+        assert!(
+            matches!(recipe.windows_shell, WindowsShell::Cmd),
+            "Windows must use WindowsShell::Cmd for the .cmd shim — got {:?}",
+            recipe.windows_shell
+        );
     }
 
     #[test]
