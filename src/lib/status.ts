@@ -1,16 +1,5 @@
 import type { FileDiffStatus } from './tauri';
 
-export type SessionStatus =
-  | 'pending'
-  | 'spawning'
-  | 'running'
-  | 'idle'
-  | 'awaiting_input'
-  | 'error'
-  | 'suspended'
-  | 'completed'
-  | 'archived';
-
 // `hex` mirrors the resolved value of each entry's Tailwind `color` token
 // (see the `--color-*` custom properties in `src/App.css`) as a literal
 // hex string. Desktop consumes `color`/`bgColor`/`dot` directly as Tailwind
