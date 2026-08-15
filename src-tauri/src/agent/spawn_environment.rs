@@ -60,14 +60,20 @@ fn format_powershell_command(binary: &str, args: &[String]) -> String {
 pub fn wrap(
     recipe: SpawnRecipe,
     env_type: EnvType,
+    wsl_distro: Option<&str>,
+    executable_override: Option<&str>,
     spawn_path: &str,
     session_id: i64,
     sandbox: bool,
 ) -> CommandBuilder {
+    let executable = executable_override.unwrap_or(recipe.binary);
     let mut cmd = if env_type == EnvType::Wsl {
         tracing::info!("spawn_environment: building WSL command via wsl.exe");
         let mut c = CommandBuilder::new("wsl.exe");
-        c.args(["--cd", spawn_path, "--", recipe.binary]);
+        if let Some(distro) = wsl_distro {
+            c.args(["-d", distro]);
+        }
+        c.args(["--cd", spawn_path, "--", executable]);
         c.args(recipe.base_args);
         c
     } else if cfg!(target_os = "macos") {
@@ -88,7 +94,7 @@ pub fn wrap(
                 Ok(c) => {
                     tracing::info!(
                         "spawn_environment: building sandboxed macOS command (sandbox-exec) for {}",
-                        recipe.binary
+                        executable
                     );
                     c
                 }
@@ -100,14 +106,14 @@ pub fn wrap(
                         e,
                         recipe.binary
                     );
-                    let mut c = CommandBuilder::new(recipe.binary);
+                    let mut c = CommandBuilder::new(executable);
                     c.args(recipe.base_args);
                     c
                 }
             }
         } else {
-            tracing::info!("spawn_environment: building macOS command for {}", recipe.binary);
-            let mut c = CommandBuilder::new(recipe.binary);
+            tracing::info!("spawn_environment: building macOS command for {}", executable);
+            let mut c = CommandBuilder::new(executable);
             c.args(recipe.base_args);
             c
         }
@@ -116,7 +122,7 @@ pub fn wrap(
             WindowsShell::PowerShell => {
                 tracing::info!(
                     "spawn_environment: building Windows powershell.exe for {}",
-                    recipe.binary
+                    executable
                 );
                 // Build a PowerShell script that calls the binary with each arg
                 // single-quoted, then Base64/UTF-16LE encode it for
@@ -124,7 +130,7 @@ pub fn wrap(
                 // (e.g. handover prefills containing `1. ...` numbered lists or
                 // backticks) would otherwise be parsed as separate PowerShell
                 // statements after newline boundaries.
-                let cmd_str = format_powershell_command(recipe.binary, &recipe.base_args);
+                let cmd_str = format_powershell_command(executable, &recipe.base_args);
                 let encoded = encode_for_powershell(&cmd_str);
                 let mut c = CommandBuilder::new("powershell.exe");
                 // -NoProfile skips loading the user's PowerShell profile, which
@@ -139,16 +145,16 @@ pub fn wrap(
             WindowsShell::Cmd => {
                 tracing::info!(
                     "spawn_environment: building Windows cmd.exe /c for {}",
-                    recipe.binary
+                    executable
                 );
                 let mut c = CommandBuilder::new("cmd.exe");
-                c.args(["/c", recipe.binary]);
+                c.args(["/c", executable]);
                 c.args(recipe.base_args);
                 c
             }
             WindowsShell::Direct => {
-                tracing::info!("spawn_environment: building direct Windows spawn for {}", recipe.binary);
-                let mut c = CommandBuilder::new(recipe.binary);
+                tracing::info!("spawn_environment: building direct Windows spawn for {}", executable);
+                let mut c = CommandBuilder::new(executable);
                 c.args(recipe.base_args);
                 c
             }

@@ -17,7 +17,13 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import * as api from '../../lib/tauri';
-import type { ProviderAccount, ProviderPairing, ApiSurface, ModelTiers } from '../../lib/tauri';
+import type {
+  ProviderAccount,
+  ProviderPairing,
+  PairingVerification,
+  ApiSurface,
+  ModelTiers,
+} from '../../lib/tauri';
 
 /** A harness that can host Proxied Providers (speaks a Compatible API surface). */
 export interface ProxyHarness {
@@ -71,17 +77,22 @@ export function HarnessConfigList({
   harnesses,
   compatibleByHarness,
   pairings,
+  verifications = [],
+  supportsWsl = true,
   storedKeys,
   accounts,
   onAttach,
   onUpdate,
   onDetach,
+  onVerify = async () => {},
   onReorderProxied,
   onDirtyChange,
 }: {
   harnesses: ProxyHarness[];
   compatibleByHarness: Record<string, ProviderAccount[]>;
   pairings: ProviderPairing[];
+  verifications?: PairingVerification[];
+  supportsWsl?: boolean;
   storedKeys: Set<string>;
   accounts: ProviderAccount[];
   onAttach: (
@@ -98,6 +109,7 @@ export function HarnessConfigList({
     modelTiers: ModelTiers | null,
   ) => Promise<void>;
   onDetach: (harnessId: string, providerId: string) => Promise<void>;
+  onVerify?: (harnessId: string, providerId: string, envType: api.EnvType) => Promise<void>;
   onReorderProxied?: (harnessId: string, providerIds: string[]) => void;
   onDirtyChange?: (harnessId: string, dirty: boolean) => void;
 }) {
@@ -129,12 +141,15 @@ export function HarnessConfigList({
           harness={harness}
           compatible={compatibleByHarness[harness.id] ?? []}
           pairings={pairings.filter((p) => p.harness_id === harness.id)}
+          verifications={verifications.filter((v) => v.harness_id === harness.id)}
+          supportsWsl={supportsWsl}
           storedKeys={storedKeys}
           accountName={accountName}
           isKeyed={isKeyed}
           onAttach={onAttach}
           onUpdate={onUpdate}
           onDetach={onDetach}
+          onVerify={onVerify}
           onReorderProxied={onReorderProxied}
           onDirtyChange={onDirtyChange ? (d) => onDirtyChange(harness.id, d) : undefined}
         />
@@ -147,18 +162,23 @@ function HarnessCard({
   harness,
   compatible,
   pairings,
+  verifications,
+  supportsWsl,
   storedKeys,
   accountName,
   isKeyed,
   onAttach,
   onUpdate,
   onDetach,
+  onVerify,
   onReorderProxied,
   onDirtyChange,
 }: {
   harness: ProxyHarness;
   compatible: ProviderAccount[];
   pairings: ProviderPairing[];
+  verifications: PairingVerification[];
+  supportsWsl: boolean;
   storedKeys: Set<string>;
   accountName: (id: string) => string;
   isKeyed: (id: string) => boolean;
@@ -176,6 +196,7 @@ function HarnessCard({
     modelTiers: ModelTiers | null,
   ) => Promise<void>;
   onDetach: (harnessId: string, providerId: string) => Promise<void>;
+  onVerify: (harnessId: string, providerId: string, envType: api.EnvType) => Promise<void>;
   onReorderProxied?: (harnessId: string, providerIds: string[]) => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
@@ -192,6 +213,7 @@ function HarnessCard({
   const offerable = compatible.filter((a) => !attachedIds.has(a.id));
   const needsKey = selected !== '' && !isKeyed(selected);
   const showTiers = surface === 'anthropic';
+  const modelFields = showTiers ? MODEL_TIER_FIELDS : MODEL_TIER_FIELDS.slice(0, 1);
 
   const isDirty =
     adding &&
@@ -251,7 +273,7 @@ function HarnessCard({
         selected,
         needsKey ? key.trim() || null : null,
         baseUrl.trim(),
-        showTiers ? tiers : null,
+        surface ? tiers : null,
       );
       reset();
     } catch {
@@ -317,6 +339,8 @@ function HarnessCard({
                   <ProxiedChildRow
                     key={p.provider_id}
                     pairing={p}
+                    verifications={verifications.filter((v) => v.provider_id === p.provider_id)}
+                    supportsWsl={supportsWsl}
                     harnessLabel={harness.label}
                     detachable={detachable}
                     editing={editingId === p.provider_id}
@@ -331,6 +355,7 @@ function HarnessCard({
                         : undefined
                     }
                     onDetach={detach}
+                    onVerify={(envType) => onVerify(harness.id, p.provider_id, envType)}
                     accountName={accountName}
                     busy={busy}
                   />
@@ -390,14 +415,16 @@ function HarnessCard({
                       aria-label={`Base URL for ${accountName(selected)} under ${harness.label}`}
                     />
                   </div>
-                  {showTiers && (
+                  {surface && (
                     <div>
                       <label className="block text-sm text-text-muted mb-1">Models</label>
                       <p className="text-sm text-text-muted mb-2">
-                        Which model backs each Claude tier. Background tasks use small / fast.
+                        {surface === 'openai'
+                          ? 'Codex uses one explicit Responses model.'
+                          : 'Which model backs each Claude tier. Background tasks use small / fast.'}
                       </p>
                       <div className="space-y-2">
-                        {MODEL_TIER_FIELDS.map(({ key: tk, label }) => (
+                        {modelFields.map(({ key: tk, label }) => (
                           <div key={tk} className="flex items-center gap-3">
                             <span className="w-28 shrink-0 text-sm text-text-muted">{label}</span>
                             <input
@@ -422,6 +449,7 @@ function HarnessCard({
                     busy ||
                     !selected ||
                     !baseUrl.trim() ||
+                    (surface === 'openai' && !tiers.default?.trim()) ||
                     (needsKey && !key.trim())
                   }
                   className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
@@ -453,6 +481,8 @@ function HarnessCard({
 
 function ProxiedChildRow({
   pairing,
+  verifications,
+  supportsWsl,
   harnessLabel,
   detachable,
   editing,
@@ -460,10 +490,13 @@ function ProxiedChildRow({
   onCancelEdit,
   onSaveEdit,
   onDetach,
+  onVerify,
   accountName,
   busy,
 }: {
   pairing: ProviderPairing;
+  verifications: PairingVerification[];
+  supportsWsl: boolean;
   harnessLabel: string;
   detachable: boolean;
   editing: boolean;
@@ -471,6 +504,7 @@ function ProxiedChildRow({
   onCancelEdit: () => void;
   onSaveEdit?: (baseUrl: string | null, modelTiers: ModelTiers | null) => Promise<void>;
   onDetach: (providerId: string) => void;
+  onVerify: (envType: api.EnvType) => Promise<void>;
   accountName: (id: string) => string;
   busy: boolean;
 }) {
@@ -485,6 +519,7 @@ function ProxiedChildRow({
   const [editUrl, setEditUrl] = useState(pairing.base_url ?? '');
   const [editTiers, setEditTiers] = useState<ModelTiers>(pairing.model_tiers ?? EMPTY_TIERS);
   const [saving, setSaving] = useState(false);
+  const [verifying, setVerifying] = useState<api.EnvType | null>(null);
 
   useEffect(() => {
     if (editing) {
@@ -495,18 +530,41 @@ function ProxiedChildRow({
 
   const handleProps = detachable && !editing ? { ...attributes, ...listeners } : {};
   const showTiers = pairing.surface === 'anthropic';
+  const modelFields = showTiers ? MODEL_TIER_FIELDS : MODEL_TIER_FIELDS.slice(0, 1);
 
   const saveEdit = async () => {
     if (!onSaveEdit || !editUrl.trim()) return;
     setSaving(true);
     try {
-      await onSaveEdit(editUrl.trim(), showTiers ? editTiers : null);
+      await onSaveEdit(editUrl.trim(), editTiers);
     } catch {
       // Parent surfaces error.
     } finally {
       setSaving(false);
     }
   };
+
+  const verify = async (envType: api.EnvType) => {
+    setVerifying(envType);
+    try {
+      await onVerify(envType);
+    } finally {
+      setVerifying(null);
+    }
+  };
+
+  const statusLabel = (verification?: PairingVerification) => verification?.status === 'stale'
+    ? 'Reverification required'
+    : verification?.status === 'failed'
+      ? 'Verification failed'
+      : verification?.status === 'unsupported'
+        ? 'Unsupported'
+        : verification?.status === 'verified'
+          ? 'Verified'
+          : 'Verifying';
+  const displayedVerifications = pairing.surface === 'openai'
+    ? verifications
+    : verifications.slice(0, 1);
 
   return (
     <li
@@ -544,9 +602,47 @@ function ProxiedChildRow({
           {!editing && pairing.base_url && (
             <div className="text-sm text-text-secondary truncate font-mono">{pairing.base_url}</div>
           )}
+          {!editing && (
+            <div className="text-sm mt-1 space-y-1">
+              {displayedVerifications.map((verification) => (
+                <div key={verification.runtime}>
+                  {pairing.surface === 'openai' && (
+                    <span className="mr-2 text-text-muted">
+                      {verification.runtime.startsWith('wsl:') || verification.runtime === 'wsl'
+                        ? 'WSL'
+                        : 'Native'}
+                    </span>
+                  )}
+                  <span className={verification.status === 'verified' ? 'text-status-success' : 'text-status-warning'}>
+                    {statusLabel(verification)}
+                  </span>
+                  {verification.reason && (
+                    <span className="ml-2 text-text-muted">{verification.reason}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         {detachable && !editing && (
           <>
+            {pairing.surface === 'openai' && (
+              <div className="flex gap-1">
+                {(supportsWsl ? ['windows', 'wsl'] as const : ['windows'] as const).map((envType) => (
+                  <button
+                    key={envType}
+                    onClick={() => verify(envType)}
+                    disabled={busy || verifying !== null}
+                    className="px-2 py-1 text-sm text-accent-cyan hover:text-accent-cyan/80 disabled:opacity-50"
+                    aria-label={`Verify ${envType === 'wsl' ? 'WSL' : 'native'} ${accountName(pairing.provider_id)} under ${harnessLabel}`}
+                  >
+                    {verifying === envType
+                      ? 'Verifying…'
+                      : envType === 'wsl' ? 'Verify WSL' : 'Verify native'}
+                  </button>
+                ))}
+              </div>
+            )}
             {onSaveEdit && (
               <button
                 onClick={onStartEdit}
@@ -581,9 +677,8 @@ function ProxiedChildRow({
               aria-label={`Edit base URL for ${accountName(pairing.provider_id)}`}
             />
           </div>
-          {showTiers && (
-            <div className="space-y-2">
-              {MODEL_TIER_FIELDS.map(({ key: tk, label }) => (
+          <div className="space-y-2">
+              {modelFields.map(({ key: tk, label }) => (
                 <div key={tk} className="flex items-center gap-3">
                   <span className="w-28 shrink-0 text-sm text-text-muted">{label}</span>
                   <input
@@ -597,12 +692,11 @@ function ProxiedChildRow({
                   />
                 </div>
               ))}
-            </div>
-          )}
+          </div>
           <div className="flex gap-3">
             <button
               onClick={saveEdit}
-              disabled={saving || !editUrl.trim()}
+              disabled={saving || !editUrl.trim() || !editTiers.default?.trim()}
               className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
             >
               {saving ? 'Saving…' : 'Save'}

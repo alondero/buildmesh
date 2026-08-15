@@ -1,6 +1,11 @@
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
+use base64::Engine;
+use once_cell::sync::Lazy;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub struct CodexAdapter;
 pub static CODEX: CodexAdapter = CodexAdapter;
@@ -53,181 +58,473 @@ fn hook_command(platform: Platform) -> String {
     }
 }
 
-/// Translate `backend_env` `OPENAI_BASE_URL` / `OPENAI_MODEL` into the
-/// codex profile name a **Proxied Provider** spawn should load (issue #599).
-///
-/// Live probing of `codex-cli 0.144.0` established the canonical contract:
-/// - `OPENAI_API_KEY` is honoured as an env var (regression-pinned via
-///   `auth.credentials` reporting it under `auth env vars present`).
-/// - `OPENAI_BASE_URL` / `OPENAI_MODEL` are **silently ignored** as env vars
-///   even when exported — `codex doctor --json` reports
-///   `endpoint: wss://api.openai.com/v1/<redacted>` regardless of what was
-///   in `OPENAI_BASE_URL`.
-/// - Custom (non-`openai`) `model_providers.<name>` entries **must** live in
-///   `~/.codex/config.toml` — `-c key=value` overrides only validate against
-///   known providers; `-p <name>` (profile layering) is the supported way
-///   to inject a custom provider at runtime, reading
-///   `$CODEX_HOME/<name>.config.toml` on top of the user's main config.
-///
-/// The fix therefore:
-/// 1. Returns `Some(profile_name, base_url, model)` from this helper when
-///    `backend_env` carries a non-empty `OPENAI_BASE_URL` (the marker for a
-///    Codex Proxied Provider pairing).
-/// 2. Spawn path writes the matching `<profile_name>.config.toml`
-///    idempotently via [`ensure_proxy_profile`] (idempotent: the hash names
-///    only one file per `(base_url, model)` pair; a pair change gets a new
-///    name, so we never overwrite unrelated pairing configs).
-/// 3. Spawn path adds `-p <profile_name>` to the codex CLI args.
-///
-/// Returns `None` for **native Codex** (`backend_env` carries no
-/// `OPENAI_BASE_URL`, which is the marker that the spawn is *not* a Proxied
-/// Provider pairing) — a bare `codex` harness spawn emits no extra flag,
-/// byte-identical to the pre-#599 path. A partially-filled pairing (no
-/// `base_url`) is also `None`, matching `openai_surface_env`'s half-fill
-/// behaviour: emitting `-p` with an empty `model_providers.<...>.base_url=""
-/// would route the spawn at an empty endpoint, which is exactly the
-/// silent-leak bug this helper exists to close.
-///
-/// The return struct carries `base_url` + `model` alongside the profile name
-/// so the spawn path doesn't have to re-scan `backend_env` — that re-scan
-/// was previously a duplication risk: a different scan could in principle
-/// find an empty or absent value and write `base_url = ""` to the profile
-/// config, exactly the silent-leak class this helper exists to close.
-pub(crate) fn proxy_pair(backend_env: &[(String, String)]) -> Option<ProxyPair<'_>> {
-    let find = |key: &str| -> Option<&str> {
-        backend_env
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-            .filter(|s| !s.is_empty())
-    };
-    let base_url = find("OPENAI_BASE_URL")?;
-    let model = find("OPENAI_MODEL");
+pub const PROXY_CREDENTIAL_ENV: &str = "BUILDMESH_CODEX_PROVIDER_KEY";
+pub const MIN_PROXY_CODEX_VERSION: (u32, u32, u32) = (0, 144, 0);
 
-    // Stable, build-local profile name. `DefaultHasher` (SipHasher13) is
-    // deterministic within a binary — the profile name is only used to
-    // namespace TOML keys within a single codex invocation, so cross-build
-    // stability is unnecessary. 16 hex chars (~64 bits) makes collisions
-    // vanishingly unlikely across the user's likely pairing set. The
-    // base_url is the primary input; we hash the model too (when set) so a
-    // future Kimi/MiniMax model-flag story (two pairings to the same
-    // endpoint with different `OPENAI_MODEL` values) gets isolated profiles.
-    let profile_name = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        base_url.hash(&mut hasher);
-        if let Some(m) = model {
-            '\0'.hash(&mut hasher);
-            m.hash(&mut hasher);
-        }
-        format!("bm{:x}", hasher.finish())
-    };
-    Some(ProxyPair {
-        profile_name,
-        base_url,
-        model,
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexInstall {
+    pub executable: String,
+    pub version: String,
+    pub runtime_identity: String,
+    pub codex_home: String,
+    pub wsl_distro: Option<String>,
 }
 
-/// The resolved per-pairing data a Codex Proxied Provider spawn needs.
-/// `model` is `None` when the pairing didn't pin a model — the
-/// `[model_providers.<name>]` block writes without a `model = "…"` line so
-/// the user's own `~/.codex/config.toml` model default stays in force.
-pub(crate) struct ProxyPair<'a> {
-    pub profile_name: String,
-    pub base_url: &'a str,
-    pub model: Option<&'a str>,
+static PROFILE_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static CLI_CAPABILITY_CACHE: Lazy<Mutex<HashSet<String>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
+pub fn runtime_identity(env_type: EnvType) -> &'static str {
+    match env_type {
+        EnvType::Wsl => "wsl",
+        EnvType::Windows if cfg!(target_os = "windows") => "native-windows",
+        EnvType::Windows if cfg!(target_os = "macos") => "native-macos",
+        EnvType::Windows => "native-linux",
+    }
 }
 
-/// `-p <profile_name>` flag pair, ready to `.extend(recipe.base_args)` from
-/// the spawn path. Pure: profile-name validity is [`proxy_profile_name`]'s
-/// job; this helper is a one-line adapter that ensures the flag pair is
-/// emitted in the documented order (`-p` first, then the name).
-pub(crate) fn proxy_p_flag(profile_name: &str) -> Vec<String> {
-    vec!["-p".into(), profile_name.into()]
+fn wsl_runtime_identity(distro: &str, codex_home: &str) -> String {
+    format!("wsl:{distro}:{codex_home}")
 }
 
-/// Resolve the directory Codex reads profiles from (`-p <name>` looks up
-/// `<coxehome>/<name>.config.toml`). Order matches Codex's own lookup:
-///   1. `$CODEX_HOME` (explicit override)
-///   2. `%USERPROFILE%\.codex` on Windows, `$HOME/.codex` elsewhere
-///
-/// Exposed as a separate helper so tests can drive `ensure_proxy_profile`
-/// against a temp dir without touching the real env (cross-platform
-/// `std::env::set_var`/`remove_var` is partially supported and racy on
-/// Windows, so a parameterised helper is the deterministic unit-test seam).
-fn resolve_coxehome() -> Option<std::path::PathBuf> {
-    std::env::var_os("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            let env_var = if cfg!(target_os = "windows") {
-                "USERPROFILE"
-            } else {
-                "HOME"
-            };
-            std::env::var_os(env_var).map(|p| std::path::PathBuf::from(p).join(".codex"))
-        })
+pub fn stable_profile_name(harness_id: &str, provider_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(harness_id.as_bytes());
+    digest.update([0]);
+    digest.update(provider_id.as_bytes());
+    format!("buildmesh_{}", &hex::encode(digest.finalize())[..16])
 }
 
-/// Idempotently write `<coxehome>/<profile_name>.config.toml` carrying the
-/// `[model_providers.<profile_name>]` entry that routes codex to the proxied
-/// endpoint. CodeX's `-p <name>` flag layers the file on top of the user's
-/// `~/.codex/config.toml` at startup, so we never have to round-trip the
-/// user's existing config — the profile is purely additive.
-///
-/// `coxehome_for_test` lets tests point at a tmp dir (production callers pass
-/// `None`, so the function uses the env-derived directory via
-/// [`resolve_coxehome`]).
-///
-/// Returns `Ok(())` early when the file already exists: a re-spawn with the
-/// same `(base_url, model)` pair hashes to the same name, and the file's
-/// content only depends on those inputs (no timestamps, no random data).
-/// The user can also hand-edit the file between spawns; we don't fight that.
-///
-/// Returns `Err` when `$CODEX_HOME`/`~/.codex` can't be located — the spawn
-/// then proceeds without `-p` (logged), which restores the pre-#599 fall-back
-/// of "codex ignores our OPENAI_BASE_URL and targets OpenAI's real endpoint".
-/// Better than a hard spawn failure: at least the user's spawn runs, with a
-/// warning that the pairing isn't routed correctly.
-pub(crate) fn ensure_proxy_profile(
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serializing a Rust string cannot fail")
+}
+
+pub fn render_proxy_profile(
     profile_name: &str,
+    provider_display_name: &str,
     base_url: &str,
-    model: Option<&str>,
-    coxehome_for_test: Option<&std::path::Path>,
-) -> Result<(), String> {
-    let coxehome = match coxehome_for_test {
-        Some(p) => p.to_path_buf(),
-        None => resolve_coxehome().ok_or_else(|| {
-            "could not locate CODEX_HOME or user home for proxy profile write".to_string()
-        })?,
+) -> String {
+    let profile = toml_string(profile_name);
+    format!(
+        "model_provider = {profile}\n\n[model_providers.{profile_name}]\nname = {}\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"{PROXY_CREDENTIAL_ENV}\"\nrequires_openai_auth = false\n",
+        toml_string(&format!("Buildmesh: {provider_display_name}")),
+        toml_string(base_url),
+    )
+}
+
+fn native_codex_home_from(
+    codex_home: Option<std::ffi::OsString>,
+    user_home: Option<std::ffi::OsString>,
+) -> Result<std::path::PathBuf, String> {
+    codex_home
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| user_home.map(|p| std::path::PathBuf::from(p).join(".codex")))
+        .ok_or_else(|| "could not resolve the runtime Codex home".to_string())
+}
+
+fn native_codex_home() -> Result<std::path::PathBuf, String> {
+    let user_home_key = if cfg!(target_os = "windows") { "USERPROFILE" } else { "HOME" };
+    native_codex_home_from(
+        std::env::var_os("CODEX_HOME"),
+        std::env::var_os(user_home_key),
+    )
+}
+
+fn is_owned_legacy_profile(path: &Path, content: &str) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
     };
-    std::fs::create_dir_all(&coxehome)
-        .map_err(|e| format!("failed to create codex home dir: {e}"))?;
-    let path = coxehome.join(format!("{profile_name}.config.toml"));
-    if path.exists() {
-        // Idempotent re-spawn: pairing signature unchanged → identical hash →
-        // identical filename → skip the write. A user who edited the file by
-        // hand has signalled intent; respect it.
+    let Some(profile_name) = file_name.strip_suffix(".config.toml") else {
+        return false;
+    };
+    let Some(hash) = profile_name.strip_prefix("bm") else {
+        return false;
+    };
+    if hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
+        return false;
+    }
+
+    let mut lines = content.lines();
+    let mut first = lines.next();
+    if first.is_some_and(|line| line.starts_with("model = \"") && line.ends_with('"')) {
+        first = lines.next();
+    }
+    first == Some(&format!("model_provider = \"{profile_name}\""))
+        && lines.next() == Some("")
+        && lines.next() == Some(&format!("[model_providers.{profile_name}]"))
+        && lines.next() == Some(&format!("name = \"Buildmesh proxy {profile_name}\""))
+        && lines
+            .next()
+            .is_some_and(|line| line.starts_with("base_url = \"") && line.ends_with('"'))
+        && lines.next() == Some("env_key = \"OPENAI_API_KEY\"")
+        && lines.next() == Some("requires_openai_auth = true")
+        && lines.next().is_none()
+}
+
+fn cleanup_owned_legacy_profiles(home: &Path) {
+    let Ok(entries) = std::fs::read_dir(home) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if is_owned_legacy_profile(&path, &content) {
+            if let Err(error) = std::fs::remove_file(&path) {
+                tracing::warn!("failed to remove owned legacy Codex profile {:?}: {error}", path);
+            }
+        }
+    }
+}
+
+fn materialize_native_profile_at(
+    home: &Path,
+    profile_name: &str,
+    content: &str,
+) -> Result<(), String> {
+    let _guard = PROFILE_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    std::fs::create_dir_all(&home)
+        .map_err(|e| format!("failed to create Codex home {}: {e}", home.display()))?;
+    let target = home.join(format!("{profile_name}.config.toml"));
+    if std::fs::read_to_string(&target).ok().as_deref() == Some(content) {
+        cleanup_owned_legacy_profiles(home);
         return Ok(());
     }
-    let model_line = model
-        .map(|m| format!("model = \"{m}\"\n"))
-        .unwrap_or_default();
-    let content = format!(
-        r#"{model_line}model_provider = "{profile_name}"
-
-[model_providers.{profile_name}]
-name = "Buildmesh proxy {profile_name}"
-base_url = "{base_url}"
-env_key = "OPENAI_API_KEY"
-requires_openai_auth = true
-"#
-    );
-    std::fs::write(&path, content)
-        .map_err(|e| format!("failed to write proxy profile {}: {e}", path.display()))?;
-    tracing::info!("spawn_agent: wrote codex proxy profile {:?}", path);
+    let mut temp = tempfile::NamedTempFile::new_in(&home)
+        .map_err(|e| format!("failed to create temporary Codex profile: {e}"))?;
+    use std::io::Write;
+    temp.write_all(content.as_bytes())
+        .and_then(|_| temp.as_file().sync_all())
+        .map_err(|e| format!("failed to write temporary Codex profile: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to restrict Codex profile permissions: {e}"))?;
+    }
+    temp.persist(&target)
+        .map_err(|e| format!("failed to atomically replace {}: {}", target.display(), e.error))?;
+    cleanup_owned_legacy_profiles(home);
     Ok(())
+}
+
+const WSL_PROFILE_SCRIPT: &str = r#"set -eu
+d="${BUILDMESH_CODEX_PROFILE_HOME:?}"
+mkdir -p "$d"
+chmod 700 "$d" 2>/dev/null || true
+target="$d/${BUILDMESH_CODEX_PROFILE_NAME:?}.config.toml"
+tmp="$d/.${BUILDMESH_CODEX_PROFILE_NAME}.$$.tmp"
+printf %s "${BUILDMESH_CODEX_PROFILE_CONTENT:?}" | base64 -d > "$tmp"
+chmod 600 "$tmp"
+if [ -f "$target" ] && cmp -s "$tmp" "$target"; then rm -f "$tmp"; else mv -f "$tmp" "$target"; fi
+for legacy in "$d"/bm*.config.toml; do
+  [ -f "$legacy" ] || continue
+  file=${legacy##*/}; profile=${file%.config.toml}; hash=${profile#bm}
+  [ ${#hash} -eq 16 ] || continue
+  case "$hash" in *[!0-9a-f]*) continue ;; esac
+  if awk -v p="$profile" '
+    NR == 1 && /^model = ".*"$/ { next }
+    { n++; line[n] = $0 }
+    END {
+      ok = n == 7 &&
+        line[1] == "model_provider = \"" p "\"" &&
+        line[2] == "" &&
+        line[3] == "[model_providers." p "]" &&
+        line[4] == "name = \"Buildmesh proxy " p "\"" &&
+        line[5] ~ /^base_url = ".*"$/ &&
+        line[6] == "env_key = \"OPENAI_API_KEY\"" &&
+        line[7] == "requires_openai_auth = true"
+      exit !ok
+    }' "$legacy"; then rm -f "$legacy"; fi
+done"#;
+const WSL_CODEX_HOME_SCRIPT: &str = "printf %s \"${CODEX_HOME:-$HOME/.codex}\"";
+
+fn materialize_wsl_profile(
+    distro: &str,
+    codex_home: &str,
+    profile_name: &str,
+    content: &str,
+) -> Result<(), String> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+    let mut command = crate::process_util::command_no_window("wsl.exe");
+    command.args(["-d", distro, "--exec", "sh", "-c", WSL_PROFILE_SCRIPT]);
+    const PROFILE_HOME_ENV: &str = "BUILDMESH_CODEX_PROFILE_HOME";
+    const PROFILE_NAME_ENV: &str = "BUILDMESH_CODEX_PROFILE_NAME";
+    const PROFILE_CONTENT_ENV: &str = "BUILDMESH_CODEX_PROFILE_CONTENT";
+    let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+    for name in [PROFILE_HOME_ENV, PROFILE_NAME_ENV, PROFILE_CONTENT_ENV] {
+        if !wslenv
+            .split(':')
+            .any(|part| part.split('/').next() == Some(name))
+        {
+            if !wslenv.is_empty() {
+                wslenv.push(':');
+            }
+            wslenv.push_str(name);
+        }
+    }
+    command
+        .env(PROFILE_HOME_ENV, codex_home)
+        .env(PROFILE_NAME_ENV, profile_name)
+        .env(PROFILE_CONTENT_ENV, encoded)
+        .env("WSLENV", wslenv);
+    let status = command
+        .status()
+        .map_err(|e| format!("failed to materialize WSL Codex profile: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("WSL Codex profile materialization exited with {status}"))
+    }
+}
+
+fn wslenv_with_codex_home(existing: &str) -> String {
+    if existing
+        .split(':')
+        .any(|part| part.split('/').next() == Some("CODEX_HOME"))
+    {
+        return existing.to_string();
+    }
+    if existing.is_empty() {
+        "CODEX_HOME/u".into()
+    } else {
+        format!("{existing}:CODEX_HOME/u")
+    }
+}
+
+pub fn materialize_proxy_profile(
+    env_type: EnvType,
+    install: &CodexInstall,
+    profile_name: &str,
+    provider_display_name: &str,
+    base_url: &str,
+) -> Result<(), String> {
+    let content = render_proxy_profile(profile_name, provider_display_name, base_url);
+    match env_type {
+        EnvType::Wsl => {
+            // WSL and native profile writes are serialized through the same
+            // process lock; each target is then replaced atomically.
+            let _guard = PROFILE_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let distro = install
+                .wsl_distro
+                .as_deref()
+                .ok_or_else(|| "verified WSL distribution identity is missing".to_string())?;
+            materialize_wsl_profile(distro, &install.codex_home, profile_name, &content)
+        }
+        EnvType::Windows => {
+            materialize_native_profile_at(Path::new(&install.codex_home), profile_name, &content)
+        }
+    }
+}
+
+fn parse_version(output: &str) -> Option<(u32, u32, u32, String)> {
+    let token = output
+        .split_whitespace()
+        .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))?;
+    let normalized = token.split('-').next()?;
+    let mut parts = normalized.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch, normalized.to_string()))
+}
+
+fn validate_proxy_cli_help(fresh_help: &str, resume_help: &str) -> Result<(), String> {
+    for (invocation, help) in [("fresh", fresh_help), ("resume", resume_help)] {
+        let missing = ["--profile", "--model"]
+            .into_iter()
+            .filter(|flag| !help.contains(flag))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "Codex {invocation} invocation does not support required proxy flags: {}",
+                missing.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn codex_output(
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+    args: &[&str],
+) -> Result<std::process::Output, String> {
+    let mut command = if env_type == EnvType::Wsl {
+        let mut command = crate::process_util::command_no_window("wsl.exe");
+        command.args([
+            "-d",
+            wsl_distro.ok_or_else(|| "WSL distribution identity is unavailable".to_string())?,
+            "--exec",
+            "codex",
+        ]);
+        if std::env::var_os("CODEX_HOME").is_some() {
+            command.env(
+                "WSLENV",
+                wslenv_with_codex_home(&std::env::var("WSLENV").unwrap_or_default()),
+            );
+        }
+        command
+    } else if cfg!(target_os = "windows") {
+        // npm installs Codex as a `.cmd` shim. `std::process::Command` cannot
+        // execute batch files directly on Windows, so capability probes use
+        // the same non-interactive cmd relay as other shim-backed providers.
+        let mut command = crate::process_util::command_no_window("cmd.exe");
+        command.args(["/d", "/c", "codex"]);
+        command
+    } else {
+        crate::process_util::command_no_window("codex")
+    };
+    command
+        .args(args)
+        .output()
+        .map_err(|e| format!("Codex executable is unavailable: {e}"))
+}
+
+fn successful_help(
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+    args: &[&str],
+    label: &str,
+) -> Result<String, String> {
+    let output = codex_output(env_type, wsl_distro, args)?;
+    if !output.status.success() {
+        return Err(format!("Codex {label} capability check failed"));
+    }
+    Ok(format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, String> {
+    let wsl_distro = if env_type == EnvType::Wsl {
+        Some(
+            crate::env::detect_default_wsl_distro()
+                .ok_or_else(|| "default WSL distribution is unavailable".to_string())?,
+        )
+    } else {
+        None
+    };
+    let output = codex_output(env_type, wsl_distro.as_deref(), &["--version"])?;
+    if !output.status.success() {
+        return Err("Codex version check failed".into());
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let (major, minor, patch, version) = parse_version(&raw)
+        .ok_or_else(|| format!("could not parse Codex version from {:?}", raw.trim()))?;
+    if (major, minor, patch) < MIN_PROXY_CODEX_VERSION {
+        return Err(format!(
+            "proxied Codex requires codex-cli >= 0.144.0; found {version}"
+        ));
+    }
+    let executable = if env_type == EnvType::Wsl {
+        let out = crate::process_util::command_no_window("wsl.exe")
+            .args([
+                "-d",
+                wsl_distro.as_deref().expect("WSL distribution was resolved"),
+                "--exec",
+                "sh",
+                "-c",
+                "command -v codex",
+            ])
+            .output()
+            .map_err(|e| format!("failed to locate WSL Codex executable: {e}"))?;
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    } else {
+        let locator = if cfg!(target_os = "windows") {
+            "where.exe"
+        } else {
+            "which"
+        };
+        let out = crate::process_util::command_no_window(locator)
+            .arg("codex")
+            .output()
+            .map_err(|e| format!("failed to locate Codex executable: {e}"))?;
+        let candidates = String::from_utf8_lossy(&out.stdout);
+        if cfg!(target_os = "windows") {
+            candidates
+                .lines()
+                .map(str::trim)
+                .find(|path| {
+                    [".exe", ".cmd", ".bat", ".com"]
+                        .iter()
+                        .any(|extension| path.to_ascii_lowercase().ends_with(extension))
+                })
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            candidates.lines().next().unwrap_or_default().trim().to_string()
+        }
+    };
+    if executable.is_empty() {
+        return Err("Codex executable identity is unavailable".into());
+    }
+    let codex_home = if let Some(distro) = wsl_distro.as_deref() {
+        let mut command = crate::process_util::command_no_window("wsl.exe");
+        command.args([
+            "-d",
+            distro,
+            "--exec",
+            "sh",
+            "-c",
+            WSL_CODEX_HOME_SCRIPT,
+        ]);
+        if std::env::var_os("CODEX_HOME").is_some() {
+            command.env(
+                "WSLENV",
+                wslenv_with_codex_home(&std::env::var("WSLENV").unwrap_or_default()),
+            );
+        }
+        let output = command
+            .output()
+            .map_err(|e| format!("failed to resolve WSL Codex home: {e}"))?;
+        let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() || home.is_empty() {
+            return Err("WSL Codex home identity is unavailable".into());
+        }
+        home
+    } else {
+        native_codex_home()?.to_string_lossy().into_owned()
+    };
+    let runtime = if let Some(distro) = wsl_distro.as_deref() {
+        wsl_runtime_identity(distro, &codex_home)
+    } else {
+        runtime_identity(env_type).to_string()
+    };
+    let capability_key = format!(
+        "{}\0{}\0{}",
+        runtime, executable, version
+    );
+    let capabilities_are_cached = CLI_CAPABILITY_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(&capability_key);
+    if !capabilities_are_cached {
+        let fresh_help = successful_help(env_type, wsl_distro.as_deref(), &["--help"], "fresh")?;
+        let resume_help = successful_help(
+            env_type,
+            wsl_distro.as_deref(),
+            &["resume", "--help"],
+            "resume",
+        )?;
+        validate_proxy_cli_help(&fresh_help, &resume_help)?;
+        CLI_CAPABILITY_CACHE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(capability_key);
+    }
+    Ok(CodexInstall {
+        executable,
+        version,
+        runtime_identity: runtime,
+        codex_home,
+        wsl_distro,
+    })
 }
 
 /// Ensure `<project>/.codex/config.toml` enables the hooks feature
@@ -405,6 +702,344 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[test]
+    fn stable_profile_identity_survives_endpoint_and_model_edits() {
+        let before = stable_profile_name("codex", "minimax");
+        let after = stable_profile_name("codex", "minimax");
+        assert_eq!(before, after);
+        assert!(before.starts_with("buildmesh_"));
+        assert_ne!(before, stable_profile_name("codex", "another-provider"));
+    }
+
+    #[test]
+    fn codex_home_resolution_honours_explicit_and_default_locations() {
+        let explicit = native_codex_home_from(
+            Some(std::ffi::OsString::from("/custom/codex")),
+            Some(std::ffi::OsString::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(explicit, std::path::PathBuf::from("/custom/codex"));
+        let default = native_codex_home_from(
+            None,
+            Some(std::ffi::OsString::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(default, std::path::PathBuf::from("/home/user/.codex"));
+        assert!(native_codex_home_from(None, None).is_err());
+    }
+
+    #[test]
+    fn wsl_codex_home_uses_default_and_propagates_explicit_override_once() {
+        assert!(WSL_CODEX_HOME_SCRIPT.contains("${CODEX_HOME:-$HOME/.codex}"));
+        assert_eq!(wslenv_with_codex_home(""), "CODEX_HOME/u");
+        assert_eq!(
+            wslenv_with_codex_home("SSH_AUTH_SOCK/up"),
+            "SSH_AUTH_SOCK/up:CODEX_HOME/u"
+        );
+        assert_eq!(
+            wslenv_with_codex_home("CODEX_HOME/u:SSH_AUTH_SOCK/up"),
+            "CODEX_HOME/u:SSH_AUTH_SOCK/up"
+        );
+        assert_ne!(
+            wsl_runtime_identity("Ubuntu", "/home/user/.codex"),
+            wsl_runtime_identity("Debian", "/home/user/.codex")
+        );
+        assert_ne!(
+            wsl_runtime_identity("Ubuntu", "/home/user/.codex"),
+            wsl_runtime_identity("Ubuntu", "/custom/codex")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a local WSL distribution"]
+    fn wsl_profile_materializes_in_default_and_explicit_codex_home() {
+        let distro = crate::env::detect_default_wsl_distro().expect("WSL distribution");
+        let default_home = crate::process_util::command_no_window("wsl.exe")
+            .args(["-d", &distro, "--exec", "sh", "-c", WSL_CODEX_HOME_SCRIPT])
+            .env_remove("CODEX_HOME")
+            .output()
+            .unwrap();
+        assert!(default_home.status.success());
+        let default_home = String::from_utf8_lossy(&default_home.stdout).trim().to_string();
+        assert!(!default_home.is_empty());
+        let explicit_home = format!("/tmp/buildmesh-codex-profile-test-{}", std::process::id());
+
+        for (index, home) in [default_home, explicit_home.clone()].into_iter().enumerate() {
+            let profile = format!("buildmesh_wsl_contract_{}_{}", std::process::id(), index);
+            let install = CodexInstall {
+                executable: "/usr/bin/codex".into(),
+                version: "test".into(),
+                runtime_identity: wsl_runtime_identity(&distro, &home),
+                codex_home: home.clone(),
+                wsl_distro: Some(distro.clone()),
+            };
+            let expected = render_proxy_profile(&profile, "WSL contract", "https://example.invalid/v1");
+            materialize_proxy_profile(
+                EnvType::Wsl,
+                &install,
+                &profile,
+                "WSL contract",
+                "https://example.invalid/v1",
+            )
+            .unwrap();
+            let output = crate::process_util::command_no_window("wsl.exe")
+                .args([
+                    "-d", &distro, "--exec", "sh", "-c", "cat \"$1/$2.config.toml\"",
+                    "buildmesh-test", &home, &profile,
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+            let _ = crate::process_util::command_no_window("wsl.exe")
+                .args([
+                    "-d", &distro, "--exec", "sh", "-c",
+                    "rm -f \"$1/$2.config.toml\"", "buildmesh-test", &home, &profile,
+                ])
+                .status();
+        }
+        let _ = crate::process_util::command_no_window("wsl.exe")
+            .args(["-d", &distro, "--exec", "rmdir", &explicit_home])
+            .status();
+    }
+
+    #[test]
+    fn proxy_profile_is_exact_secret_free_and_toml_escaped() {
+        let rendered = render_proxy_profile(
+            "buildmesh_1234",
+            "Provider \"quoted\"",
+            "https://example.com/v1/\"quoted\"",
+        );
+        assert_eq!(
+            rendered,
+            "model_provider = \"buildmesh_1234\"\n\n[model_providers.buildmesh_1234]\nname = \"Buildmesh: Provider \\\"quoted\\\"\"\nbase_url = \"https://example.com/v1/\\\"quoted\\\"\"\nwire_api = \"responses\"\nenv_key = \"BUILDMESH_CODEX_PROVIDER_KEY\"\nrequires_openai_auth = false\n"
+        );
+        assert!(!rendered.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn supported_version_floor_is_strict() {
+        assert_eq!(parse_version("codex-cli 0.144.0").unwrap().0, 0);
+        let old = parse_version("codex-cli 0.143.9").unwrap();
+        assert!((old.0, old.1, old.2) < MIN_PROXY_CODEX_VERSION);
+        assert!(parse_version("custom build").is_none());
+    }
+
+    #[test]
+    fn proxy_cli_requires_profile_and_model_for_fresh_and_resume() {
+        let complete = "Usage: codex [OPTIONS]\n  --profile <NAME>\n  --model <MODEL>";
+        assert!(validate_proxy_cli_help(complete, complete).is_ok());
+        let error = validate_proxy_cli_help(complete, "Usage: codex resume").unwrap_err();
+        assert!(error.contains("resume"));
+        assert!(error.contains("--profile"));
+        assert!(error.contains("--model"));
+    }
+
+    /// Opt-in real-CLI profile-routing check. CI installs the exact version
+    /// named in `.github/workflows/build.yml` before selecting this test.
+    #[test]
+    #[ignore = "requires the pinned Codex CLI installed by workflow_dispatch"]
+    fn pinned_codex_cli_loads_profile_for_fresh_and_resume() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let cold_start = std::time::Instant::now();
+        let mut install = discover_supported_install(EnvType::Windows).unwrap();
+        assert_eq!(install.version, "0.147.0");
+        assert!(cold_start.elapsed() < std::time::Duration::from_secs(5));
+
+        let temp = TempDir::new().unwrap();
+        install.codex_home = temp.path().to_string_lossy().into_owned();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let read = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&request);
+                    let Some(header_end) = text.find("\r\n\r\n") else { continue };
+                    let length = text[..header_end]
+                        .lines()
+                        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_string))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + length { break; }
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with("POST /v1/responses HTTP/1.1"), "{request}");
+                assert!(request.to_ascii_lowercase().contains("authorization: bearer pinned-secret"));
+                assert!(request.contains("\"model\":\"MiniMax-M3\""));
+                let response_id = format!("resp_{}", index + 1);
+                let message_id = format!("msg_{}", index + 1);
+                let completed = serde_json::json!({
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": 1_700_000_000,
+                    "status": "completed",
+                    "error": null,
+                    "incomplete_details": null,
+                    "instructions": null,
+                    "max_output_tokens": null,
+                    "model": "MiniMax-M3",
+                    "output": [{
+                        "id": message_id,
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type":"output_text","text":"verified","annotations":[]}]
+                    }],
+                    "parallel_tool_calls": false,
+                    "previous_response_id": null,
+                    "reasoning": {"effort":"medium","summary":null},
+                    "store": false,
+                    "temperature": null,
+                    "text": {"format":{"type":"text"}},
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "top_p": null,
+                    "truncation": "disabled",
+                    "usage": {"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2},
+                    "user": null,
+                    "metadata": {}
+                });
+                let body = format!(
+                    "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"{message_id}\",\"output_index\":0,\"content_index\":0,\"delta\":\"verified\"}}\n\ndata: {}\n\n",
+                    serde_json::json!({"type":"response.completed","response":completed})
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let profile = "buildmesh_pinned_contract";
+        materialize_proxy_profile(
+            EnvType::Windows,
+            &install,
+            profile,
+            "Pinned fake Responses",
+            &endpoint,
+        )
+        .unwrap();
+        let run = |args: &[&str]| {
+            let mut command = if cfg!(windows) {
+                let mut command = std::process::Command::new("cmd.exe");
+                command.args(["/d", "/c", &install.executable]);
+                command
+            } else {
+                std::process::Command::new(&install.executable)
+            };
+            command
+                .args(args)
+                .current_dir(temp.path())
+                .env("CODEX_HOME", temp.path())
+                .env(PROXY_CREDENTIAL_ENV, "pinned-secret")
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("OPENAI_BASE_URL")
+                .output()
+                .unwrap()
+        };
+        let fresh = run(&[
+            "--profile", profile, "--model", "MiniMax-M3", "exec",
+            "--skip-git-repo-check", "reply with verified",
+        ]);
+        assert!(fresh.status.success(), "{}", String::from_utf8_lossy(&fresh.stderr));
+        let resume = run(&[
+            "--profile", profile, "--model", "MiniMax-M3", "exec", "resume",
+            "--last", "--skip-git-repo-check", "reply with verified again",
+        ]);
+        assert!(resume.status.success(), "{}", String::from_utf8_lossy(&resume.stderr));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn native_profile_repairs_stale_content_and_preserves_user_config() {
+        let home = TempDir::new().unwrap();
+        let user_config = home.path().join("config.toml");
+        std::fs::write(&user_config, "model = \"user-choice\"\n").unwrap();
+        let profile = "buildmesh_1234";
+        let target = home.path().join(format!("{profile}.config.toml"));
+        std::fs::write(&target, "edited = true\n").unwrap();
+        let expected = render_proxy_profile(profile, "MiniMax", "https://api.minimax.io/v1");
+
+        materialize_native_profile_at(home.path(), profile, &expected).unwrap();
+        assert_eq!(std::fs::read_to_string(target).unwrap(), expected);
+        assert_eq!(std::fs::read_to_string(user_config).unwrap(), "model = \"user-choice\"\n");
+    }
+
+    #[test]
+    fn profile_materialization_fails_closed_when_home_is_not_a_directory() {
+        let temp = TempDir::new().unwrap();
+        let invalid_home = temp.path().join("codex-home-file");
+        std::fs::write(&invalid_home, "occupied").unwrap();
+        let error = materialize_native_profile_at(
+            &invalid_home,
+            "buildmesh_1234",
+            "model_provider = \"buildmesh_1234\"\n",
+        )
+        .unwrap_err();
+        assert!(error.contains("create Codex home"));
+        assert_eq!(std::fs::read_to_string(invalid_home).unwrap(), "occupied");
+    }
+
+    #[test]
+    fn concurrent_profile_materialization_is_deterministic() {
+        let home = TempDir::new().unwrap();
+        let home_path = home.path().to_path_buf();
+        let profile = "buildmesh_concurrent";
+        let expected = render_proxy_profile(profile, "MiniMax", "https://api.minimax.io/v1");
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let home_path = home_path.clone();
+            let expected = expected.clone();
+            workers.push(std::thread::spawn(move || {
+                materialize_native_profile_at(&home_path, profile, &expected)
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(format!("{profile}.config.toml"))).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn legacy_cleanup_requires_both_owned_name_and_exact_shape() {
+        let home = TempDir::new().unwrap();
+        let legacy_name = "bm1234567890abcdef";
+        let owned = home.path().join(format!("{legacy_name}.config.toml"));
+        let suspicious = home.path().join("bmabcdefabcdefabcd.config.toml");
+        let user = home.path().join("bm-user.config.toml");
+        std::fs::write(
+            &owned,
+            format!("model_provider = \"{legacy_name}\"\n\n[model_providers.{legacy_name}]\nname = \"Buildmesh proxy {legacy_name}\"\nbase_url = \"https://legacy.example/v1\"\nenv_key = \"OPENAI_API_KEY\"\nrequires_openai_auth = true\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            &suspicious,
+            "name = \"Buildmesh proxy bmabcdefabcdefabcd\"\nenv_key = \"OPENAI_API_KEY\"\nrequires_openai_auth = true\nuser_setting = true\n",
+        )
+        .unwrap();
+        std::fs::write(&user, "name = \"my profile\"\n").unwrap();
+        let expected = render_proxy_profile("buildmesh_new", "MiniMax", "https://example.com/v1");
+
+        materialize_native_profile_at(home.path(), "buildmesh_new", &expected).unwrap();
+        assert!(!owned.exists());
+        assert!(suspicious.exists());
+        assert!(user.exists());
+    }
+
     /// Local hooks only run headlessly with the trust bypass (issue #884) —
     /// both the fresh and resume spawn paths must carry the flag, or Codex
     /// blocks on an interactive workspace-review prompt.
@@ -579,206 +1214,4 @@ mod tests {
         }
     }
 
-    // ─── Issue #599: Codex proxy profile plumbing ────────────────────────────
-
-    /// Native Codex has no `OPENAI_BASE_URL` in its `backend_env` — the
-    /// translator must return `None`, byte-identical to the pre-#599 path
-    /// (regression-pinned).
-    #[test]
-    fn proxy_pair_none_for_native_codex() {
-        let env: Vec<(String, String)> = vec![];
-        assert!(
-            proxy_pair(&env).is_none(),
-            "empty env → None (native Codex)"
-        );
-
-        // Even if other OPENAI_* leak into the env (e.g. an unrelated process
-        // export), the marker key is `OPENAI_BASE_URL` — without it the
-        // translator must not emit any flag.
-        let env = vec![("OPENAI_API_KEY".into(), "sk-foo".into())];
-        assert!(
-            proxy_pair(&env).is_none(),
-            "OPENAI_API_KEY alone is not a proxy marker"
-        );
-    }
-
-    /// A partially-filled pairing (no `OPENAI_BASE_URL`) must NOT emit a
-    /// profile name — codex would interpret the empty `base_url` as a real
-    /// (broken) endpoint, exactly the silent-leak bug this helper exists to
-    /// close. Matches `openai_surface_env`'s half-fill behaviour.
-    #[test]
-    fn proxy_pair_none_for_blank_base_url() {
-        let env = vec![("OPENAI_BASE_URL".into(), String::new())];
-        assert!(
-            proxy_pair(&env).is_none(),
-            "blank OPENAI_BASE_URL must not produce a profile name (would route to an empty endpoint)"
-        );
-
-        // `OPENAI_MODEL` alone (no `OPENAI_BASE_URL`) is also None — model
-        // without an endpoint is meaningless for codex.
-        let env = vec![("OPENAI_MODEL".into(), "some-model".into())];
-        assert!(
-            proxy_pair(&env).is_none(),
-            "OPENAI_MODEL without OPENAI_BASE_URL must not produce a profile name"
-        );
-    }
-
-    /// Full pairing → a stable `ProxyPair` with the resolved `base_url` and
-    /// `model` carried through (so the spawn path doesn't re-scan
-    /// `backend_env` and risk inconsistency). The `profile_name` is
-    /// `bm` + 16 hex chars; two calls with the same inputs must yield the
-    /// same name (idempotent — a re-spawn reuses the existing on-disk
-    /// profile, no churn).
-    #[test]
-    fn proxy_pair_stable_for_full_pairing() {
-        let env = vec![
-            ("OPENAI_BASE_URL".into(), "https://api.minimax.io/v1".into()),
-            ("OPENAI_API_KEY".into(), "sk-mm".into()),
-            ("OPENAI_MODEL".into(), "MiniMax-M3[1m]".into()),
-        ];
-        let pair = proxy_pair(&env).expect("full pairing → Some");
-        let name = &pair.profile_name;
-        assert!(
-            name.starts_with("bm") && name.len() == 18 && name[2..].chars().all(|c| c.is_ascii_hexdigit()),
-            "profile_name must be `bm` + 16 hex chars (got {name:?})"
-        );
-        assert_eq!(pair.base_url, "https://api.minimax.io/v1");
-        assert_eq!(pair.model, Some("MiniMax-M3[1m]"));
-        let again = proxy_pair(&env).expect("full pairing is deterministic");
-        assert_eq!(
-            name, &again.profile_name,
-            "proxy_pair must be deterministic for identical inputs"
-        );
-    }
-
-    /// Different `base_url` or `model` must yield different profile names —
-    /// codex namespaces the `[model_providers.<name>]` table by name, so a
-    /// collision would let a Kimi spawn inherit a MiniMax URL (or vice-versa).
-    /// 16 hex chars (≈ 64 bits of entropy) makes natural collisions
-    /// vanishingly unlikely; this test pins that *intentional* inputs (same
-    /// model, different endpoint) produce *distinct* profile names.
-    #[test]
-    fn proxy_pair_distinct_per_endpoint() {
-        let env_a = vec![(
-            "OPENAI_BASE_URL".into(),
-            "https://api.minimax.io/v1".into(),
-        )];
-        let env_b = vec![(
-            "OPENAI_BASE_URL".into(),
-            "https://api.moonshot.ai/v1".into(),
-        )];
-        let name_a = proxy_pair(&env_a).unwrap().profile_name;
-        let name_b = proxy_pair(&env_b).unwrap().profile_name;
-        assert_ne!(
-            name_a, name_b,
-            "different base_urls must hash to different profile names (got {name_a:?} == {name_b:?})"
-        );
-    }
-
-    /// The model variant of the same base_url must also yield a distinct
-    /// profile — two pairings sharing an endpoint but different models
-    /// (e.g. a future Kimi model-flag story) get isolated TOML tables.
-    #[test]
-    fn proxy_pair_distinct_per_model() {
-        let env_a = vec![
-            ("OPENAI_BASE_URL".into(), "https://api.minimax.io/v1".into()),
-            ("OPENAI_MODEL".into(), "MiniMax-M3[1m]".into()),
-        ];
-        let env_b = vec![
-            ("OPENAI_BASE_URL".into(), "https://api.minimax.io/v1".into()),
-            ("OPENAI_MODEL".into(), "MiniMax-M2.7".into()),
-        ];
-        let name_a = proxy_pair(&env_a).unwrap().profile_name;
-        let name_b = proxy_pair(&env_b).unwrap().profile_name;
-        assert_ne!(
-            name_a, name_b,
-            "different models at the same endpoint must get isolated profile names"
-        );
-    }
-
-    /// `-p <name>` flag pair — the spawn-time addition the codex runtime
-    /// expects (regression-pinned so a future refactor doesn't drop the `-p`
-    /// and silently re-introduce the silent-OpenAI-routing bug).
-    #[test]
-    fn proxy_p_flag_is_dash_p_name() {
-        assert_eq!(proxy_p_flag("bm1234567890abcdef"), ["-p", "bm1234567890abcdef"]);
-    }
-
-    /// `ensure_proxy_profile` is the I/O side of the translation: idempotent
-    /// on identical inputs (file already there → no re-write), and writes
-    /// the canonical `[model_providers.<name>]` TOML block codex consumes.
-    /// Pointed at a temp dir via the `coxehome_for_test` parameter so the
-    /// host's `~/.codex/` stays clean — mutating `CODEX_HOME` / `HOME` via
-    /// `std::env::set_var` is partially supported and racy on Windows.
-    #[test]
-    fn ensure_proxy_profile_is_idempotent_and_writes_canonical_toml() {
-        let temp = TempDir::new().unwrap();
-        ensure_proxy_profile(
-            "bme2btest_minimax",
-            "https://api.minimax.io/v1",
-            Some("MiniMax-M3[1m]"),
-            Some(temp.path()),
-        )
-        .expect("first call writes the file");
-
-        let path = temp.path().join("bme2btest_minimax.config.toml");
-        let content = std::fs::read_to_string(&path).expect("file written");
-        assert!(content.contains(r#"model_provider = "bme2btest_minimax""#), "{content}");
-        assert!(
-            content.contains(r#"[model_providers.bme2btest_minimax]"#),
-            "{content}"
-        );
-        assert!(
-            content.contains(r#"base_url = "https://api.minimax.io/v1""#),
-            "{content}"
-        );
-        assert!(content.contains(r#"env_key = "OPENAI_API_KEY""#), "{content}");
-        assert!(content.contains("requires_openai_auth = true"), "{content}");
-        assert!(content.contains(r#"name = "Buildmesh proxy bme2btest_minimax""#), "{content}");
-        assert!(content.contains(r#"model = "MiniMax-M3[1m]""#), "{content}");
-
-        // Idempotency: a second call must NOT rewrite (preserves any
-        // hand-edits the user made between spawns).
-        let first_content = content.clone();
-        ensure_proxy_profile(
-            "bme2btest_minimax",
-            "https://api.minimax.io/v1",
-            Some("MiniMax-M3[1m]"),
-            Some(temp.path()),
-        )
-        .expect("second call is a no-op");
-        let second_content = std::fs::read_to_string(&path).expect("file unchanged");
-        assert_eq!(
-            first_content, second_content,
-            "ensure_proxy_profile must be idempotent (file content unchanged on re-call)"
-        );
-    }
-
-    /// Missing model → no `model = "..."` line is written (so the user's
-    /// own `~/.codex/config.toml` model default wins). The
-    /// `[model_providers.<name>]` block still writes, since the base_url +
-    /// env_key are the only required fields for routing.
-    #[test]
-    fn ensure_proxy_profile_omits_model_line_when_model_absent() {
-        let temp = TempDir::new().unwrap();
-        ensure_proxy_profile(
-            "bme2btest_no_model",
-            "https://example.com/v1",
-            None,
-            Some(temp.path()),
-        )
-        .expect("no-model call still writes");
-        let content = std::fs::read_to_string(
-            temp.path().join("bme2btest_no_model.config.toml"),
-        )
-        .expect("file written");
-        assert!(
-            !content.contains("model = "),
-            "absent model must not write a model= line; got: {content}"
-        );
-        assert!(
-            content.contains(r#"base_url = "https://example.com/v1""#),
-            "{content}"
-        );
-    }
 }

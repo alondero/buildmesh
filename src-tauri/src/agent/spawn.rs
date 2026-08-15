@@ -479,6 +479,31 @@ pub fn build_spawn_command(
     prefill: Option<&str>,
     sandbox: bool,
 ) -> CommandBuilder {
+    build_spawn_command_prepared(
+        resolved,
+        provider_enum,
+        &crate::agent::launch_routing::PreparedLaunchRouting::environment(backend_env),
+        session_id_mode,
+        session_id,
+        model_override,
+        effort_override,
+        prefill,
+        sandbox,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_spawn_command_prepared(
+    resolved: &env::ResolvedPath,
+    provider_enum: Provider,
+    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
+    session_id_mode: &SessionIdMode,
+    session_id: i64,
+    model_override: Option<&str>,
+    effort_override: Option<&str>,
+    prefill: Option<&str>,
+    sandbox: bool,
+) -> CommandBuilder {
     let adapter = provider_enum.adapter();
     let platform = if resolved.env_type == EnvType::Wsl {
         Platform::Linux
@@ -525,6 +550,20 @@ pub fn build_spawn_command(
         }
     }
 
+    if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
+        profile_name,
+        descriptor,
+        ..
+    } = routing
+    {
+        recipe.base_args.extend([
+            "--profile".into(),
+            profile_name.clone(),
+            "--model".into(),
+            descriptor.model_id.clone(),
+        ]);
+    }
+
     if adapter.supports_prefill() {
         if let Some(text) = prefill.filter(|s| !s.is_empty()) {
             let normalized = normalize_prefill_newlines(text);
@@ -532,47 +571,24 @@ pub fn build_spawn_command(
         }
     }
 
-    // Codex ignores `OPENAI_BASE_URL` / `OPENAI_MODEL` env vars (issue #599,
-    // live-verified against `codex-cli 0.144.0`). The supported way to route
-    // codex to a custom OpenAI-compatible endpoint is a per-pairing profile
-    // config at `$CODEX_HOME/<name>.config.toml` layered with `-p <name>`.
-    // `proxy_pair` returns `Some` only for Proxied Provider pairings (the
-    // `OPENAI_BASE_URL` env marker) so native Codex is untouched — and it
-    // returns the resolved `(base_url, model)` alongside the profile name so
-    // this site doesn't have to re-scan `backend_env` (which would risk
-    // inconsistency between scan results).
-    if matches!(provider_enum, Provider::Codex) {
-        if let Some(pair) =
-            crate::agent::provider::adapters::codex::proxy_pair(backend_env)
-        {
-            if let Err(e) =
-                crate::agent::provider::adapters::codex::ensure_proxy_profile(
-                    &pair.profile_name,
-                    pair.base_url,
-                    pair.model,
-                    None,
-                )
-            {
-                // The user still gets a Codex spawn (their own auth), just
-                // without the proxied routing. Warn so a stuck "why is my
-                // Codex still hitting api.openai.com?" gets a hit in the log.
-                tracing::warn!(
-                    "spawn_agent: codex proxy profile write failed; falling back to native endpoint: {e}"
-                );
-            } else {
-                tracing::info!(
-                    "spawn_agent: codex proxy profile applied (profile={})",
-                    pair.profile_name
-                );
-                recipe.base_args.extend(
-                    crate::agent::provider::adapters::codex::proxy_p_flag(&pair.profile_name),
-                );
-            }
+    // Routing has already been prepared and verified by the caller. Command
+    // construction remains pure: it only applies explicit profile/model args
+    // and the child-scoped credential below.
+    let (wsl_distro, executable_override) = match routing {
+        crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy { install, .. } => {
+            (install.wsl_distro.as_deref(), Some(install.executable.as_str()))
         }
-    }
-
-    let mut cmd =
-        spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id, sandbox);
+        _ => (None, None),
+    };
+    let mut cmd = spawn_environment::wrap(
+        recipe,
+        resolved.env_type,
+        wsl_distro,
+        executable_override,
+        &resolved.spawn_path,
+        session_id,
+        sandbox,
+    );
 
     // Reset the claude backend env vars cwrap would have `unset` before
     // `exec claude`, so a value inherited from buildmesh's own environment can't
@@ -591,6 +607,12 @@ pub fn build_spawn_command(
     // base URL, API token, model) resolved by the caller from the node's paired
     // provider account. Empty for the built-in Anthropic subscription and the
     // native-binary providers.
+    let backend_env = match routing {
+        crate::agent::launch_routing::PreparedLaunchRouting::Environment(values) => {
+            values.as_slice()
+        }
+        _ => &[],
+    };
     if !backend_env.is_empty() {
         for (k, v) in backend_env {
             cmd.env(k, v);
@@ -613,6 +635,45 @@ pub fn build_spawn_command(
                 }
             }
             if !wslenv.is_empty() {
+                cmd.env("WSLENV", wslenv);
+            }
+        }
+    }
+    if matches!(provider_enum, Provider::Codex) {
+        let key = crate::agent::provider::adapters::codex::PROXY_CREDENTIAL_ENV;
+        cmd.env_remove(key);
+        if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
+            credential_reference,
+            credential,
+            ..
+        } = routing
+        {
+            debug_assert_eq!(credential_reference, key);
+            // A verified profile authenticates exclusively through its
+            // pairing-scoped reference. Generic OpenAI variables inherited by
+            // Buildmesh must not become an alternate credential/endpoint.
+            cmd.env_remove("OPENAI_API_KEY");
+            cmd.env_remove("OPENAI_BASE_URL");
+            cmd.env(credential_reference, credential);
+            if resolved.env_type == EnvType::Wsl {
+                let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+                if !wslenv.split(':').any(|part| part.split('/').next() == Some(key)) {
+                    if !wslenv.is_empty() {
+                        wslenv.push(':');
+                    }
+                    wslenv.push_str(key);
+                    wslenv.push_str("/u");
+                }
+                if std::env::var_os("CODEX_HOME").is_some()
+                    && !wslenv
+                        .split(':')
+                        .any(|part| part.split('/').next() == Some("CODEX_HOME"))
+                {
+                    if !wslenv.is_empty() {
+                        wslenv.push(':');
+                    }
+                    wslenv.push_str("CODEX_HOME/u");
+                }
                 cmd.env("WSLENV", wslenv);
             }
         }
@@ -1749,21 +1810,39 @@ pub(crate) async fn spawn_agent_inner(
     //       (issue #498). The sandbox path owns its ConPTY spawn but returns the
     //       same `Child`/`MasterPty` trait objects, so everything downstream
     //       (Job Object containment, reader thread, resize, kill) is identical.
-    // The node's stored `provider` is the harness-profile id; resolve its paired
-    // model-provider account into the `ANTHROPIC_*` backend env (issue #538). A
-    // built-in/absent account yields an empty list → vanilla claude on the
-    // Anthropic subscription.
-    let backend_env = crate::preferences::resolve_provider_env(&node.provider);
-    // Custom-endpoint tiers preflight — refuses to spawn if a Claude-compatible
-    // third-party (OpenRouter, Generic) is configured without a primary model,
-    // which would otherwise silently 400 in the spawned `claude` (the binary
-    // sends its hardcoded `claude-*` default; OpenRouter wants `provider/model`).
-    crate::preferences::preflight_resolve_provider_env(&node.provider)
-        .map_err(|e| format!("spawn preflight failed: {}", e))?;
-    let cmd = build_spawn_command(
+    timer.checkpoint("before_provider_preflight");
+    let routing_harness_id = node.provider.clone();
+    let routing_resolved = resolved.clone();
+    let routing = match crate::commands::run_blocking("prepare_provider_routing", move || {
+        crate::agent::launch_routing::prepare(&routing_harness_id, provider, &routing_resolved)
+    })
+    .await
+    {
+        Ok(routing) => routing,
+        Err(error) => {
+            // Verification failures are fail-closed. Schedule a runtime-specific
+            // refresh so a later launch can proceed without a settings round-trip.
+            if provider == Provider::Codex {
+                if let Ok(Some((pairing, _))) =
+                    crate::preferences::resolve_stored_pairing_and_account(&node.provider)
+                {
+                    crate::commands::preferences::schedule_pairing_verification_for_runtime(
+                        app.clone(),
+                        pairing.harness_id,
+                        pairing.provider_id,
+                        resolved.env_type,
+                    );
+                }
+            }
+            timer.checkpoint("provider_preflight_failed");
+            return Err(format!("spawn preflight failed: {error}"));
+        }
+    };
+    timer.checkpoint("after_provider_preflight");
+    let cmd = build_spawn_command_prepared(
         &resolved,
         provider,
-        &backend_env,
+        &routing,
         &session_id_mode,
         session_id,
         model_override,

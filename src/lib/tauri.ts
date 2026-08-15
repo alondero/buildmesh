@@ -12,6 +12,7 @@ import type { BillingMode } from '../types/generated/BillingMode';
 import type { BranchInfo } from '../types/generated/BranchInfo';
 import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
 import type { DeviceSession } from '../types/generated/DeviceSession';
+import type { EnvType } from '../types/generated/EnvType';
 import type { DiffHunk } from '../types/generated/DiffHunk';
 import type { DiffLine } from '../types/generated/DiffLine';
 import type { DiffResult } from '../types/generated/DiffResult';
@@ -42,6 +43,7 @@ import type { ModelTiers } from '../types/generated/ModelTiers';
 import type { ProviderAccount } from '../types/generated/ProviderAccount';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
 import type { ProviderPairing } from '../types/generated/ProviderPairing';
+import type { PairingVerification } from '../types/generated/PairingVerification';
 import type { ProviderMeters } from '../types/generated/ProviderMeters';
 import type { ProviderUsage } from '../types/generated/ProviderUsage';
 import type { RealizedBind } from '../types/generated/RealizedBind';
@@ -887,11 +889,20 @@ export const removeProviderAccount = async (id: string) => {
 //
 // Stored pairings only. API key is global on the provider; base URL + model
 // tiers are per harness×provider pairing (edited on the Harnesses page).
-export type { ApiSurface, ProviderPairing };
+export type { ApiSurface, EnvType, ProviderPairing, PairingVerification };
 
 /** Stored pairings for proxiable accounts (spawn menu + harness config). */
 export const getProviderPairings = () =>
   _invoke<ProviderPairing[]>('get_provider_pairings');
+
+export const getPairingVerifications = (envType: EnvType = 'windows') =>
+  _invoke<PairingVerification[]>('get_pairing_verifications', { envType });
+
+export const verifyProviderPairing = (
+  harnessId: string,
+  providerId: string,
+  envType: EnvType = 'windows',
+) => _invoke<PairingVerification>('verify_provider_pairing', { harnessId, providerId, envType });
 
 /** First-class attach defaults for a (harness, provider) pair, if compatible. */
 export const getPairingDefaults = (harnessId: string, providerId: string) =>

@@ -108,6 +108,18 @@ jobs:
             exit 1
           fi
 
+      # Manual runs additionally exercise the real CLI contract at a known
+      # version. Regular PRs stay hermetic and use deterministic help-parser
+      # coverage in the Rust suite.
+      - name: Install pinned Codex CLI for proxy contract smoke
+        if: github.event_name == 'workflow_dispatch'
+        run: npm install --global @openai/codex@0.147.0
+
+      - name: Verify pinned Codex profile routing on fresh and resume
+        if: github.event_name == 'workflow_dispatch'
+        run: cargo test --locked pinned_codex_cli_loads_profile_for_fresh_and_resume -- --ignored
+        working-directory: src-tauri
+
   platform-smoke:
     name: Platform smoke (${{ matrix.os }})
     needs: quality
@@ -149,6 +161,22 @@ jobs:
       # storage on transient installers. Tagged releases remain authoritative.
       - name: Compile Tauri app without installers
         run: npm run tauri build -- --debug --no-bundle
+
+  wsl-profile-smoke:
+    name: WSL Codex profile contract (opt-in)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify default and explicit WSL Codex homes
+        run: cargo test --locked wsl_profile_materializes_in_default_and_explicit_codex_home -- --ignored
+        working-directory: src-tauri
 
   package-smoke:
     name: Weekly package smoke (${{ matrix.os }})

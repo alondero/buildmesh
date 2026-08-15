@@ -7,9 +7,8 @@
 /// have no business occupying the bounded tokio worker pool: enough of them
 /// stuck at once starves it and every other async command (agent keystrokes,
 /// further probes) stops being polled — the overnight-freeze failure mode.
-/// Each such command is split into a plain-sync core (`*_blocking`, still
-/// callable directly by the mobile HTTP routes, which run their own accept
-/// loop) plus a thin `#[command] async fn` wrapper that threads the core
+/// Each such command is split into a plain-sync core (`*_blocking`) plus an
+/// async caller (Tauri command or mobile HTTP route) that threads the core
 /// through here. Mirrors the `spawn_blocking` usage in `usage.rs` /
 /// `agent_node.rs`.
 pub(crate) async fn run_blocking<T, F>(label: &'static str, f: F) -> Result<T, String>

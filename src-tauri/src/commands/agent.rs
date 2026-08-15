@@ -214,10 +214,51 @@ fn compose_provider_menu(
 /// Returns the list of agent providers available on this host platform.
 /// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
+    let accounts = crate::preferences::provider_accounts();
+    let configured_pairings = crate::preferences::provider_pairings();
+    let needs_codex = configured_pairings
+        .iter()
+        .any(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI);
+    let native_codex = needs_codex
+        .then(|| {
+            crate::agent::provider::adapters::codex::discover_supported_install(
+                crate::models::EnvType::Windows,
+            )
+        })
+        .and_then(Result::ok);
+    let wsl_codex = needs_codex
+        .then(|| {
+            crate::agent::provider::adapters::codex::discover_supported_install(
+                crate::models::EnvType::Wsl,
+            )
+        })
+        .and_then(Result::ok);
+    let pairings = configured_pairings
+        .into_iter()
+        .filter(|pairing| {
+            accounts
+                .iter()
+                .find(|account| account.id == pairing.provider_id)
+                .is_some_and(|account| {
+                    crate::services::provider_verification::launchable_on_runtime(
+                        pairing,
+                        account,
+                        crate::models::EnvType::Windows,
+                        native_codex.as_ref(),
+                    )
+                        || crate::services::provider_verification::launchable_on_runtime(
+                            pairing,
+                            account,
+                            crate::models::EnvType::Wsl,
+                            wsl_codex.as_ref(),
+                        )
+                })
+        })
+        .collect();
     compose_provider_menu(
         crate::preferences::harness_profiles(),
-        crate::preferences::provider_accounts(),
-        crate::preferences::provider_pairings(),
+        accounts,
+        pairings,
         Platform::current(),
         &crate::preferences::harness_order(),
         &crate::preferences::proxied_provider_order(),
@@ -321,7 +362,13 @@ fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]) -> Vec<Pr
 
 #[command]
 pub async fn list_providers() -> Vec<ProviderInfo> {
-    available_providers()
+    match crate::commands::run_blocking("list_providers", || Ok(available_providers())).await {
+        Ok(providers) => providers,
+        Err(error) => {
+            tracing::warn!("failed to derive provider menu: {error}");
+            Vec::new()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

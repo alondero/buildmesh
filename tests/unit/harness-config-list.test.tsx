@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { HarnessConfigList, reorderProxiedIds } from '../../src/components/AppSettings/HarnessConfigList';
-import type { ProviderAccount, ProviderPairing } from '../../src/lib/tauri';
+import type { PairingVerification, ProviderAccount, ProviderPairing } from '../../src/lib/tauri';
 
 const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
 
@@ -30,6 +30,25 @@ function pairing(over: Partial<ProviderPairing> = {}): ProviderPairing {
   };
 }
 
+function verification(over: Partial<PairingVerification> = {}): PairingVerification {
+  return {
+    harness_id: 'codex',
+    provider_id: 'minimax',
+    pairing_signature: 'signature',
+    endpoint: 'https://api.minimax.io/v1',
+    model_id: 'MiniMax-M3',
+    auth_mode: 'bearer_env',
+    runtime: 'native-windows',
+    executable: 'codex',
+    codex_version: '0.144.0',
+    capability_result: { compatible: true, reason: null },
+    status: 'verified',
+    verified_at: '2026-08-15T10:00:00Z',
+    reason: null,
+    ...over,
+  };
+}
+
 const harnesses = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
@@ -47,7 +66,7 @@ function mockPairingDefaults() {
           provider_id: providerId,
           surface: 'openai',
           base_url: 'https://api.example.com/v1',
-          model_tiers: NO_TIERS,
+          model_tiers: { ...NO_TIERS, default: 'test-responses-model' },
         });
       }
       return Promise.resolve({
@@ -123,6 +142,44 @@ describe('HarnessConfigList (issue #576)', () => {
     await waitFor(() => expect(onDetach).toHaveBeenCalledWith('codex', 'minimax'));
   });
 
+  it('shows actionable verification state and allows manual reverification', async () => {
+    const onVerify = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <HarnessConfigList
+        harnesses={[{ id: 'codex', label: 'OpenAI Codex' }]}
+        compatibleByHarness={{ codex: [account()] }}
+        pairings={[
+          pairing({
+            harness_id: 'codex',
+            surface: 'openai',
+            base_url: 'https://api.minimax.io/v1',
+            model_tiers: { ...NO_TIERS, default: 'MiniMax-M3' },
+          }),
+        ]}
+        verifications={[
+          verification({
+            status: 'stale',
+            reason: 'routing inputs changed; verify the pairing again',
+          }),
+          verification({ runtime: 'wsl', status: 'verified' }),
+        ]}
+        storedKeys={new Set(['codex:minimax'])}
+        accounts={[account()]}
+        onAttach={vi.fn()}
+        onDetach={vi.fn()}
+        onVerify={onVerify}
+      />,
+    );
+
+    expect(screen.getByText('Reverification required')).toBeTruthy();
+    expect(screen.getByText(/routing inputs changed/i)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /verify native minimax under openai codex/i }));
+    await waitFor(() => expect(onVerify).toHaveBeenCalledWith('codex', 'minimax', 'windows'));
+    await user.click(screen.getByRole('button', { name: /verify wsl minimax under openai codex/i }));
+    await waitFor(() => expect(onVerify).toHaveBeenCalledWith('codex', 'minimax', 'wsl'));
+  });
+
   it('offers only compatible providers not already attached', async () => {
     const user = userEvent.setup();
     const deepseek = account({ id: 'deepseek', name: 'DeepSeek' });
@@ -179,7 +236,7 @@ describe('HarnessConfigList (issue #576)', () => {
         'deepseek',
         null,
         'https://api.example.com/v1',
-        null,
+        { ...NO_TIERS, default: 'test-responses-model' },
       ),
     );
   });
@@ -217,7 +274,7 @@ describe('HarnessConfigList (issue #576)', () => {
         'minimax',
         'sk-mm',
         'https://api.example.com/v1',
-        null,
+        { ...NO_TIERS, default: 'test-responses-model' },
       ),
     );
   });

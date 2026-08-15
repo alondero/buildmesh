@@ -67,7 +67,7 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
     // the `windows_shell` branch on Windows; on Unix that branch falls through
     // to a direct spawn of the binary, which is what we want for `/bin/sh`.
     let cwd = std::env::current_dir().unwrap();
-    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, &cwd.to_string_lossy(), session_id, false);
+    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, None, None, &cwd.to_string_lossy(), session_id, false);
 
     // Stage markers (visible with --nocapture) so a hang in the ConPTY stack
     // points at the exact call rather than reading as a silent stall.
@@ -292,6 +292,8 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
     let cmd = spawn_environment::wrap(
         recipe,
         EnvType::Windows,
+        None,
+        None,
         &cwd.to_string_lossy(),
         session_id,
         false,
@@ -389,6 +391,8 @@ fn windows_kill_session_closes_master() {
     let cmd = spawn_environment::wrap(
         recipe,
         EnvType::Windows,
+        None,
+        None,
         &cwd.to_string_lossy(),
         session_id,
         false,
@@ -508,6 +512,8 @@ fn windows_natural_child_exit_unblocks_reader_via_watcher() {
     let cmd = spawn_environment::wrap(
         recipe,
         EnvType::Windows,
+        None,
+        None,
         &cwd.to_string_lossy(),
         session_id,
         false,
@@ -584,7 +590,7 @@ fn windows_pi_interactive_tui() {
     
     let session_id = -915_4201;
     let cwd = std::env::current_dir().unwrap();
-    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, &cwd.to_string_lossy(), session_id, false);
+    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, None, None, &cwd.to_string_lossy(), session_id, false);
 
     eprintln!("[pty-test {session_id}] opening pty pair");
     let pair = open_pty_pair(24, 80).expect("open pty pair");
@@ -683,7 +689,7 @@ fn wsl_pi_interactive_tui() {
     
     let session_id = -915_4202;
     let cwd = "/home";
-    let cmd = spawn_environment::wrap(recipe, EnvType::Wsl, cwd, session_id, false);
+    let cmd = spawn_environment::wrap(recipe, EnvType::Wsl, None, None, cwd, session_id, false);
 
     eprintln!("[pty-test {session_id}] opening pty pair");
     let pair = open_pty_pair(24, 80).expect("open pty pair");
@@ -760,4 +766,3 @@ fn wsl_pi_interactive_tui() {
     PROCESS_REGISTRY.remove(&session_id);
     reader_handle.join().expect("reader thread joins");
 }
-

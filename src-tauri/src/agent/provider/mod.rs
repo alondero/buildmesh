@@ -5,6 +5,7 @@
 //! needs to know to launch and supervise an agent.
 
 pub mod adapters;
+pub mod compatibility;
 pub mod provider_conf;
 
 use crate::models::EnvType;

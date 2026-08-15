@@ -560,6 +560,8 @@ mod tests {
         let cmd = spawn_environment::wrap(
             recipe,
             EnvType::Windows,
+            None,
+            None,
             &cwd.to_string_lossy(),
             -915_4002,
             false,
@@ -624,6 +626,8 @@ mod tests {
         let cmd = spawn_environment::wrap(
             recipe,
             EnvType::Windows,
+            None,
+            None,
             &cwd.to_string_lossy(),
             -915_4001,
             false,

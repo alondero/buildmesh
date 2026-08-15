@@ -2,7 +2,9 @@
 //!
 //! See `crate::preferences` for the persistence layer.
 
-use crate::preferences::{self, AppPreferences, ModelTiers, ProviderAccount, ProviderPairing};
+use crate::preferences::{
+    self, AppPreferences, ModelTiers, PairingVerification, ProviderAccount, ProviderPairing,
+};
 use tauri::{command, AppHandle, Emitter};
 
 /// Read the persisted buildmesh-wide preferences. Always returns a value —
@@ -123,11 +125,23 @@ pub async fn get_pairing_defaults(
 /// components with their own `providerData` state need an explicit signal.
 #[command]
 pub async fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -> Result<(), String> {
+    let account_id = account.id.clone();
     let mut prefs = preferences::load()?;
     preferences::upsert_provider_account(&mut prefs, account);
+    let codex_harnesses: Vec<String> = prefs
+        .provider_pairings
+        .iter()
+        .filter(|pairing| {
+            pairing.provider_id == account_id && pairing.surface == preferences::ApiSurface::OpenAI
+        })
+        .map(|pairing| pairing.harness_id.clone())
+        .collect();
     preferences::save(prefs)?;
     crate::services::usage::invalidate_cache();
     let _ = app.emit("provider-list-changed", ());
+    for harness_id in codex_harnesses {
+        schedule_pairing_verification(app.clone(), harness_id, account_id.clone());
+    }
     Ok(())
 }
 
@@ -158,6 +172,77 @@ pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), S
 #[command]
 pub async fn get_provider_pairings() -> Result<Vec<ProviderPairing>, String> {
     Ok(preferences::effective_provider_pairings())
+}
+
+#[command]
+pub async fn get_pairing_verifications(
+    env_type: Option<crate::models::EnvType>,
+) -> Result<Vec<PairingVerification>, String> {
+    let env_type = env_type.unwrap_or(crate::models::EnvType::Windows);
+    crate::commands::run_blocking("get_pairing_verifications", move || {
+        Ok(crate::services::provider_verification::current_statuses(
+            env_type,
+        ))
+    })
+    .await
+}
+
+#[command]
+pub async fn verify_provider_pairing(
+    app: AppHandle,
+    harness_id: String,
+    provider_id: String,
+    env_type: Option<crate::models::EnvType>,
+) -> Result<PairingVerification, String> {
+    let env_type = env_type.unwrap_or(crate::models::EnvType::Windows);
+    let record = crate::commands::run_blocking("verify_provider_pairing", move || {
+        crate::services::provider_verification::verify_pairing_blocking(
+            &harness_id,
+            &provider_id,
+            env_type,
+        )
+    })
+    .await?;
+    let _ = app.emit("pairing-verification-changed", &record);
+    let _ = app.emit("provider-list-changed", ());
+    Ok(record)
+}
+
+pub(crate) fn schedule_pairing_verification(
+    app: AppHandle,
+    harness_id: String,
+    provider_id: String,
+) {
+    for env_type in [crate::models::EnvType::Windows, crate::models::EnvType::Wsl] {
+        schedule_pairing_verification_for_runtime(
+            app.clone(),
+            harness_id.clone(),
+            provider_id.clone(),
+            env_type,
+        );
+    }
+}
+
+pub(crate) fn schedule_pairing_verification_for_runtime(
+    app: AppHandle,
+    harness_id: String,
+    provider_id: String,
+    env_type: crate::models::EnvType,
+) {
+    tauri::async_runtime::spawn(async move {
+        let result = crate::commands::run_blocking("verify_provider_pairing", move || {
+            crate::services::provider_verification::verify_pairing_blocking(
+                &harness_id,
+                &provider_id,
+                env_type,
+            )
+        })
+        .await;
+        if let Ok(record) = result {
+            let _ = app.emit("pairing-verification-changed", record);
+            let _ = app.emit("provider-list-changed", ());
+        }
+    });
 }
 
 /// The **Model Providers** offered by "Add proxied provider" under `harness_id`,
@@ -227,6 +312,12 @@ pub async fn attach_proxied_provider(
             "base_url is required to attach provider '{provider_id}' to harness '{harness_id}'"
         ));
     }
+    let compatibility = preferences::pairing_compatibility(&pairing);
+    if !compatibility.compatible {
+        return Err(compatibility
+            .reason
+            .unwrap_or_else(|| "pairing does not satisfy the harness capability contract".into()));
+    }
     let mut prefs = preferences::load()?;
     if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
         preferences::set_account_key_if_absent(&mut prefs, &provider_id, key);
@@ -235,6 +326,9 @@ pub async fn attach_proxied_provider(
     preferences::save(prefs)?;
     crate::services::usage::invalidate_cache();
     let _ = app.emit("provider-list-changed", ());
+    if surface == preferences::ApiSurface::OpenAI {
+        schedule_pairing_verification(app.clone(), harness_id, provider_id);
+    }
     Ok(())
 }
 
@@ -267,8 +361,12 @@ pub async fn update_provider_pairing(
     if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
         return Err("base_url must be non-empty".to_string());
     }
+    let should_verify = pairing.surface == preferences::ApiSurface::OpenAI;
     preferences::save(prefs)?;
     let _ = app.emit("provider-list-changed", ());
+    if should_verify {
+        schedule_pairing_verification(app.clone(), harness_id, provider_id);
+    }
     Ok(())
 }
 
