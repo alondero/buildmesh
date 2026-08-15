@@ -5,10 +5,16 @@
 
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
+// `Datelike` powers the month-start computation in
+// [`current_month_start_epoch`] (spec §3.1). `Timelike` is only used by the
+// test mod for `current_month_start_epoch_is_first_of_utc_month` and is
+// imported in the test scope rather than here to keep the production
+// imports minimal.
+use chrono::Datelike;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 // `tracing` is the codebase-wide diagnostic log channel (`warm_pool`,
@@ -138,25 +144,109 @@ fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
-/// Codex stores its auth under `$CODEX_HOME` (which points *at* the dir),
-/// defaulting to `~/.codex`.
-fn codex_home() -> PathBuf {
-    env::var("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".codex"))
-}
-
 fn anthropic_cred_path() -> PathBuf {
     home_dir().join(".claude").join(".credentials.json")
 }
 
-fn codex_auth_path() -> PathBuf {
-    codex_home().join("auth.json")
+/// Build the ordered list of candidate Codex auth.json paths (issue #1108,
+/// spec §2.2). Priority:
+///
+/// 1. `$CODEX_HOME/auth.json` if set and non-empty.
+/// 2. `<home>/.codex/auth.json` (Windows host default).
+/// 3. WSL fallback (Windows host only): the default-WSL-distro UNC form of
+///    `/home/<USERNAME>/.codex/auth.json`, built via `env::to_host_path` so
+///    the UNC string never escapes the `host_path` module.
+///
+/// Resolution is strictly passive: the candidates are returned; the caller
+/// walks them in order. We never wake a sleeping WSL distro — if the UNC read
+/// fails, we move on to the next candidate.
+fn discover_codex_auth_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // 1. CODEX_HOME override (spec §2.2 #1).
+    if let Ok(codex_home) = env::var("CODEX_HOME") {
+        if !codex_home.is_empty() {
+            paths.push(PathBuf::from(codex_home).join("auth.json"));
+        }
+    }
+
+    // 2. Windows host default (spec §2.2 #2). Same path is correct on Unix
+    // hosts (`~/.codex/auth.json`), so the function is host-agnostic.
+    paths.push(home_dir().join(".codex").join("auth.json"));
+
+    // 3. WSL fallback (Windows host only, spec §2.2 #3). We use the Windows
+    // USERNAME env var as the WSL username — matches the default
+    // `wsl.exe` install where WSL user == Windows user. A user with a
+    // mismatched WSL username can override via CODEX_HOME (priority #1).
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(username) = env::var("USERNAME").ok().filter(|s| !s.is_empty()) {
+            let wsl_linux_path = format!("/home/{}/.codex/auth.json", username);
+            let host_path = crate::env::to_host_path(&wsl_linux_path);
+            if host_path != wsl_linux_path {
+                paths.push(PathBuf::from(host_path));
+            }
+        }
+    }
+
+    paths
 }
 
-#[derive(Deserialize)]
-struct OAuthCred {
+/// One Codex auth-file credential pair: the bearer token plus the optional
+/// `ChatGPT-Account-Id` header value the upstream `/wham/usage` endpoint
+/// expects for multi-account subscriptions (issue #1108, spec §2.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexAuthCredentials {
+    pub access_token: String,
+    pub account_id: Option<String>,
+}
+
+/// Top-level Codex auth file schema. Spec §2.3 — handles both legacy
+/// top-level tokens and the nested `tokens` envelope some Codex CLI versions
+/// emit. Both shapes are kept optional so a missing field is just absence.
+#[derive(Deserialize, Debug)]
+struct CodexAuthFile {
+    #[serde(default)]
     access_token: Option<String>,
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    tokens: Option<CodexNestedTokens>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CodexNestedTokens {
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
+impl CodexAuthFile {
+    /// Pull the bearer + optional account_id out of either shape. Top-level
+    /// wins over nested; an empty string is treated as missing so a logged-
+    /// out Codex CLI (which writes `"access_token": ""`) returns `None`
+    /// rather than a bogus token.
+    fn extract_credentials(&self) -> Option<CodexAuthCredentials> {
+        let non_empty = |s: &Option<String>| s.as_deref().filter(|v| !v.is_empty()).map(str::to_owned);
+
+        if let Some(token) = non_empty(&self.access_token) {
+            return Some(CodexAuthCredentials {
+                access_token: token,
+                account_id: non_empty(&self.account_id),
+            });
+        }
+        if let Some(nested) = &self.tokens {
+            if let Some(token) = non_empty(&nested.access_token) {
+                let nested_id = non_empty(&nested.account_id);
+                return Some(CodexAuthCredentials {
+                    access_token: token,
+                    account_id: nested_id.or_else(|| non_empty(&self.account_id)),
+                });
+            }
+        }
+        None
+    }
 }
 
 #[derive(Deserialize)]
@@ -181,12 +271,41 @@ fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
         .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
-/// Reads Codex's credentials JSON which has access_token at the top level.
-fn read_codex_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let cred: OAuthCred =
-        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.access_token.ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
+/// Reads Codex's credentials JSON which has access_token at the top level
+/// (legacy) OR nested inside a `tokens` envelope (spec §2.3). Returns both
+/// the bearer token and the optional `ChatGPT-Account-Id` so the live probe
+/// can forward the header.
+fn read_codex_auth_file(path: &Path) -> Result<CodexAuthCredentials, UsageError> {
+    let content = fs::read_to_string(path)
+        .map_err(|_| UsageError::NoCredential(path.to_string_lossy().to_string()))?;
+    let cred: CodexAuthFile = serde_json::from_str(&content)
+        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    cred.extract_credentials()
+        .ok_or_else(|| UsageError::NoCredential(path.to_string_lossy().to_string()))
+}
+
+/// Walk the candidate list and return the first readable Codex credentials
+/// along with the path they came from. The returned path is used for the
+/// `logged_out` error message so the UI can show the user where we looked.
+/// Pure: takes an explicit candidate list so tests don't need to mutate
+/// `$CODEX_HOME` or `$USERPROFILE` across the process.
+fn read_codex_credentials(candidates: &[PathBuf]) -> Result<(PathBuf, CodexAuthCredentials), UsageError> {
+    let first = candidates.first().cloned().unwrap_or_default();
+    for path in candidates {
+        if path.exists() {
+            match read_codex_auth_file(path) {
+                Ok(creds) => return Ok((path.clone(), creds)),
+                Err(UsageError::Shape(e)) => {
+                    // Malformed auth file — surface immediately rather than
+                    // silently trying the next candidate. A bad JSON shape
+                    // isn't fixed by reading a different file.
+                    return Err(UsageError::Shape(e));
+                }
+                Err(_) => continue, // NoCredential → try next path
+            }
+        }
+    }
+    Err(UsageError::NoCredential(first.to_string_lossy().to_string()))
 }
 
 #[derive(Deserialize)]
@@ -342,57 +461,205 @@ pub fn anthropic_usage() -> ProviderUsage {
     )
 }
 
-fn parse_codex_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
-    #[derive(Deserialize)]
-    struct Resp {
-        #[serde(default)]
-        primary: Option<CodexWindow>,
-        #[serde(default)]
-        secondary: Option<CodexWindow>,
-    }
-    #[derive(Deserialize)]
-    struct CodexWindow {
-        #[serde(rename = "usedPercent")]
-        used_percent: Option<f64>,
-        #[serde(rename = "resetsAt")]
-        resets_at: Option<String>,
-        #[serde(default)]
-        label: Option<String>,
-    }
+// ─── Codex CLI (`codex`) subscription quotas ───────────────────────────
+//
+// The Codex CLI (ChatGPT Plus/Team/Pro) stores its OAuth token at
+// `~/.codex/auth.json` (override with `$CODEX_HOME`). When authenticated via
+// ChatGPT, it polls `GET https://chatgpt.com/backend-api/wham/usage` for
+// rolling rate-limit consumption + reset timestamps (issue #1108, spec
+// §2.1–2.5).
+//
+// Spec invariants:
+//   - **Passive read-only.** The fetcher never writes `auth.json` or invokes
+//     OAuth refresh grants. On 401/403 the response is `logged_out` with a
+//     CLI re-auth hint so the user knows exactly how to recover.
+//   - **Consumption on the wire.** `UsageWindow.used_percent` stays
+//     0.0–100.0; remaining-percentage phrasing is derived in `detail`.
+//   - **Dynamic window labels.** 18 000 s → `"5-hour"`, 604 800 s →
+//     `"Weekly"`, with `"{N}h"` / `"{N}d"` / `"{N}s"` fallbacks for
+//     non-standard second intervals.
 
-    let resp: Resp = serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
-
-    let mut windows = vec![];
-    if let Some(p) = resp.primary {
-        windows.push(UsageWindow {
-            label: p.label.unwrap_or_else(|| "5-hour".to_string()),
-            used_percent: p.used_percent,
-            resets_at: p.resets_at,
-        });
-    }
-    if let Some(s) = resp.secondary {
-        windows.push(UsageWindow {
-            label: s.label.unwrap_or_else(|| "Weekly".to_string()),
-            used_percent: s.used_percent,
-            resets_at: s.resets_at,
-        });
-    }
-    Ok(windows)
+/// One window inside the Codex `/wham/usage` payload. The upstream API
+/// returns Unix epoch seconds for `resetAt` — converted to RFC3339 in the
+/// wire layer. `limitWindowSeconds` drives the dynamic label resolution
+/// (see [`format_codex_window_label`]).
+///
+/// Field names are snake_case per spec §2.4 (the upstream payload schema
+/// shown in the spec); the Buildmesh wire contract is camelCase per §4.1
+/// (`UsageWindow.usedPercent` / `resetsAt`). No `#[serde(rename)]` here on
+/// purpose — the conversion from snake_case `used_percent` to the wire's
+/// camelCase `usedPercent` happens via [`UsageWindow`]'s own serde rename.
+#[derive(Deserialize, Debug)]
+struct CodexRateWindow {
+    used_percent: Option<f64>,
+    limit_window_seconds: Option<i64>,
+    reset_at: Option<i64>,
 }
 
+#[derive(Deserialize, Debug)]
+struct CodexRateLimits {
+    primary_window: Option<CodexRateWindow>,
+    secondary_window: Option<CodexRateWindow>,
+    #[serde(default)]
+    additional_rate_limits: Vec<CodexRateWindow>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CodexUsageResp {
+    #[serde(default)]
+    rate_limit: Option<CodexRateLimits>,
+}
+
+/// Map an upstream window duration in seconds to the user-facing label
+/// (spec §2.5). Hard-coded names for the two tiers Codex currently reports;
+/// anything else falls back to a friendly `"{N}h"` / `"{N}d"` / `"{N}s"`
+/// format so a new tier the upstream adds tomorrow still renders legibly
+/// instead of an empty label.
+fn format_codex_window_label(seconds: i64) -> String {
+    match seconds {
+        18_000 => "5-hour".to_string(),
+        604_800 => "Weekly".to_string(),
+        86_400 => "24h".to_string(),
+        3_600 => "1-hour".to_string(),
+        s if s > 0 && s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s > 0 && s % 3_600 == 0 => format!("{}h", s / 3_600),
+        s => format!("{}s", s),
+    }
+}
+
+/// Parse the Codex `/wham/usage` payload (spec §2.4) into the wire contract.
+/// Returns `(windows, detail)` where `detail` carries the user-facing
+/// remaining-percentage phrasing when at least one window is present.
+///
+/// Windows with `used_percent == None` are filtered (a window without a
+/// percentage is shape-malformed, not "0% used"). An empty-but-present
+/// `rate_limit` object surfaces the `"No active Codex rate-limit windows"`
+/// detail so the UI doesn't render an empty state for a malformed reply.
+fn parse_codex_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
+    let resp: CodexUsageResp =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+    let rate_limit = resp.rate_limit.ok_or_else(|| {
+        UsageError::Shape("missing rate_limit object in Codex response".to_string())
+    })?;
+
+    let mut windows = Vec::new();
+    let mut highest_used: Option<f64> = None;
+    let push = |w: CodexRateWindow, windows: &mut Vec<UsageWindow>, highest: &mut Option<f64>| {
+        if let Some(used) = w.used_percent {
+            let label = w
+                .limit_window_seconds
+                .map(format_codex_window_label)
+                .unwrap_or_else(|| "5-hour".to_string());
+            let resets_at = w
+                .reset_at
+                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.to_rfc3339()));
+            if highest.is_none_or(|h| used > h) {
+                *highest = Some(used);
+            }
+            windows.push(UsageWindow {
+                label,
+                used_percent: Some(used),
+                resets_at,
+            });
+        }
+    };
+
+    if let Some(p) = rate_limit.primary_window {
+        push(p, &mut windows, &mut highest_used);
+    }
+    if let Some(s) = rate_limit.secondary_window {
+        push(s, &mut windows, &mut highest_used);
+    }
+    for additional in rate_limit.additional_rate_limits {
+        push(additional, &mut windows, &mut highest_used);
+    }
+
+    let detail = if windows.is_empty() {
+        Some("No active Codex rate-limit windows".to_string())
+    } else {
+        // Headline phrasing uses the highest-used window (typically the most
+        // pressed quota). `100.0 - used` switches consumption → remaining on
+        // the UI side per the wire-contract normalization invariant (spec §4).
+        highest_used.map(|u| format!("{:.1}% remaining", (100.0 - u).max(0.0)))
+    };
+    Ok((windows, detail))
+}
+
+/// Public Codex fetcher. Walks the discovery list, hits the ChatGPT quota
+/// endpoint, and reports the wire contract.
 pub fn codex_usage() -> ProviderUsage {
-    let token = match read_codex_token(codex_auth_path()) {
-        Ok(t) => t,
+    let candidates = discover_codex_auth_paths();
+    codex_usage_with_paths(&candidates, "https://chatgpt.com/backend-api/wham/usage")
+}
+
+/// Test seam: pass an explicit candidate list + endpoint so the WSL fallback
+/// and the live HTTP round-trip can be exercised in isolation. The public
+/// [`codex_usage`] is a one-line wrapper around this with the production URL.
+fn codex_usage_with_paths(candidates: &[PathBuf], live_url: &str) -> ProviderUsage {
+    let creds = match read_codex_credentials(candidates) {
+        Ok((_, c)) => c,
         Err(e) => return logged_out("codex", e.to_string()),
     };
-    fetch_usage(
-        "codex",
-        |c| {
-            c.get("https://chatgpt.com/backend-api/wham/usage")
-                .header("Authorization", format!("Bearer {}", token))
+
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+        Ok(c) => c,
+        Err(e) => return unavailable("codex", format!("Client error: {}", e)),
+    };
+
+    let token = creds.access_token;
+    let account_id = creds.account_id;
+    let mut req = client
+        .get(live_url)
+        .header("Authorization", format!("Bearer {}", token));
+    if let Some(account_id) = account_id.as_deref() {
+        // Multi-account subscriptions require the `ChatGPT-Account-Id`
+        // header (spec §2.1); single-account auth files omit the field.
+        req = req.header("ChatGPT-Account-Id", account_id.to_string());
+    }
+
+    let resp = match req.send() {
+        Ok(r) => r,
+        Err(e) => return unavailable("codex", format!("Request failed: {}", e)),
+    };
+
+    let status = resp.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        // Token expired / revoked: prompt CLI re-auth per spec §2.1
+        // ("Run 'codex' in terminal to log in"). `logged_out` flips
+        // `logged_in = false` so the UI surfaces the re-auth affordance.
+        return logged_out(
+            "codex",
+            "Codex session expired — run 'codex' in your terminal to log in".to_string(),
+        );
+    }
+    if status.as_u16() == 429 {
+        return unavailable(
+            "codex",
+            "Rate limited — usage data temporarily unavailable".to_string(),
+        );
+    }
+    if !status.is_success() {
+        return unavailable(
+            "codex",
+            format!("API error {}: usage endpoint failed", status.as_u16()),
+        );
+    }
+
+    let body = match resp.text() {
+        Ok(b) => b,
+        Err(e) => return unavailable("codex", format!("Failed to read response: {}", e)),
+    };
+    match parse_codex_response(&body) {
+        Ok((windows, detail)) => ProviderUsage {
+            provider: "codex".to_string(),
+            logged_in: true,
+            windows,
+            balance: None,
+            detail,
+            error: None,
         },
-        |body| Ok((parse_codex_response(body)?, None)),
-    )
+        Err(e) => unavailable("codex", format!("Failed to parse response: {}", e)),
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -624,6 +891,229 @@ pub fn kimi_usage(api_key: &str) -> ProviderUsage {
             error: None,
         },
         Err(e) => unavailable("kimi", format!("Failed to parse response: {}", e)),
+    }
+}
+
+// ─── OpenAI Platform API (`openai`) ────────────────────────────────────────────
+//
+// OpenAI offers no public real-time wallet/credit-balance endpoint for either
+// Admin or Project API keys — the only spend data is the **Organization
+// Costs** API (`GET /v1/organization/costs`), which is admin-scoped
+// (`sk-admin-…` keys only). Standard Project keys (`sk-proj-…`) return
+// `401 Unauthorized` / `403 Forbidden` on that endpoint (issue #1109,
+// spec §3).
+//
+// Degradation matrix (spec §3.2):
+//
+//   | Key Type     | Costs endpoint   | ProviderUsage                              |
+//   |--------------|------------------|--------------------------------------------|
+//   | Admin Key    | 200 + cost body  | logged_in=true, balance=Some(...)          |
+//   | Project Key  | 401/403          | logged_in=true, balance=None, detail=Some  |
+//   | Invalid Key  | 401 on /models   | logged_in=false, error="Invalid API key"   |
+//
+// We probe `/v1/models` first to distinguish the third case (invalid key)
+// from the second (project key, which also fails on costs but works on
+// inference). The two-round-trip overhead is amortized by the in-process
+// 5-min usage cache (the same seam `opencode_usage_impl` uses for #957).
+
+#[derive(Deserialize, Debug)]
+struct OpenAiAmount {
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
+    currency: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiCostResult {
+    #[serde(default)]
+    amount: Option<OpenAiAmount>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiCostBucket {
+    #[serde(default)]
+    results: Vec<OpenAiCostResult>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiCostResp {
+    // Required (no `#[serde(default)]`) so a malformed body — one that lacks
+    // the `data` field — fails loudly with `Shape` instead of silently
+    // reporting zero monthly spend. Mirrors `MinimaxResp.model_remains`
+    // (#537) and `OpenCodeBillingResp.windows` (#957).
+    data: Vec<OpenAiCostBucket>,
+}
+
+/// Parse the `/v1/organization/costs` body into a [`BillingBalance`]. Sums
+/// every USD `amount.value` across all buckets on the page. OpenAI currently
+/// bills only in USD so the currency filter is future-proofing — a multi-
+/// currency org would surface `monthly_spend` in USD only and ignore other
+/// amounts (preserves the wire invariant that `currency` is `"USD"`).
+///
+/// A missing `data` field is a shape error (the field is required by the
+/// documented contract); an empty `data` array is a valid "no spend yet this
+/// month" reply and yields `monthly_spend = 0.0`.
+fn parse_openai_costs_response(body: &str) -> Result<BillingBalance, UsageError> {
+    let resp: OpenAiCostResp =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+    let mut total: f64 = 0.0;
+    for bucket in resp.data {
+        for result in bucket.results {
+            if let Some(amount) = result.amount {
+                let is_usd = amount
+                    .currency
+                    .as_deref()
+                    .map(|c| c.eq_ignore_ascii_case("usd"))
+                    .unwrap_or(true); // absent = USD by current OpenAI contract
+                if is_usd {
+                    if let Some(value) = amount.value {
+                        total += value;
+                    }
+                }
+            }
+        }
+    }
+    Ok(BillingBalance {
+        // OpenAI has no wallet/balance surface on this endpoint — only spend.
+        // `remaining` is set to 0.0 so the JSON shape is well-formed; the
+        // <UsagePanel> renders `monthly_spend` as the headline figure.
+        remaining: 0.0,
+        monthly_spend: Some(total),
+        currency: "USD".to_string(),
+    })
+}
+
+/// Compute the Unix epoch seconds for the start of the current UTC calendar
+/// month. Used to bound the `/v1/organization/costs` query to the billing
+/// period. Returns 0 as a defensive fallback when the current date can't be
+/// normalized — rare, but keeps the URL well-formed rather than producing
+/// `?start_time=-1`.
+fn current_month_start_epoch() -> i64 {
+    let now = chrono::Utc::now();
+    let month_start = now
+        .date_naive()
+        .with_day(1)
+        .unwrap_or_else(|| now.date_naive())
+        .and_hms_opt(0, 0, 0)
+        .unwrap_or_else(|| now.naive_utc());
+    month_start.and_utc().timestamp().max(0)
+}
+
+/// Public OpenAI fetcher. Wired into `commands::usage::cached_or_fetch` so
+/// the keyed-provider panel polls it on the same cadence as the other keyed
+/// fetchers.
+pub fn openai_usage(api_key: &str) -> ProviderUsage {
+    openai_usage_with_base_url(api_key, "https://api.openai.com/v1")
+}
+
+/// Test seam: pass an explicit base URL so a loopback `tiny_http` server can
+/// stand in for the production endpoint in mocked HTTP tests (issue #971
+/// pattern).
+fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
+    if api_key.is_empty() {
+        return logged_out("openai", "No API key configured".to_string());
+    }
+
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+        Ok(c) => c,
+        Err(e) => return unavailable("openai", format!("Client error: {}", e)),
+    };
+
+    let auth = format!("Bearer {}", api_key);
+
+    // ── Step 1: inference check via `/v1/models` ────────────────────────
+    //
+    // Validates that the key works AT ALL before attempting the admin-only
+    // costs endpoint. This is the discriminator that lets us tell a project
+    // key (which fails 401/403 on costs but works on inference) from a
+    // truly invalid/revoked key (which fails on both). Spec §3.2.
+    match client
+        .get(format!("{}/models", base_url))
+        .header("Authorization", auth.clone())
+        .send()
+    {
+        Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
+            return logged_out("openai", "Invalid API key".to_string());
+        }
+        Ok(r) if r.status().as_u16() == 429 => {
+            return unavailable(
+                "openai",
+                "Rate limited — usage data temporarily unavailable".to_string(),
+            );
+        }
+        Ok(r) if !r.status().is_success() => {
+            let code = r.status().as_u16();
+            return unavailable(
+                "openai",
+                format!("API error {}: inference check failed", code),
+            );
+        }
+        Ok(_) => {} // 2xx — proceed to costs probe
+        Err(e) => return unavailable("openai", format!("Inference check failed: {}", e)),
+    }
+
+    // ── Step 2: organization costs (admin-scoped) ───────────────────────
+    let start_time = current_month_start_epoch();
+    let url = format!(
+        "{}/organization/costs?start_time={}&bucket_width=1d",
+        base_url, start_time
+    );
+    let resp = match client
+        .get(&url)
+        .header("Authorization", auth)
+        .send()
+    {
+        Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
+            // Project key — graceful degradation. The key is valid for
+            // inference; we just can't reach the admin endpoint. Spec §3.2:
+            // logged_in=true, balance=None, detail explains the gap. The
+            // `error` field stays None so the UI doesn't render the red
+            // "fetch failed" affordance — the user is logged in, they just
+            // need an admin key for spend.
+            return ProviderUsage {
+                provider: "openai".to_string(),
+                logged_in: true,
+                windows: Vec::new(),
+                balance: None,
+                detail: Some(
+                    "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)"
+                        .to_string(),
+                ),
+                error: None,
+            };
+        }
+        Ok(r) if r.status().as_u16() == 429 => {
+            return unavailable(
+                "openai",
+                "Rate limited — usage data temporarily unavailable".to_string(),
+            );
+        }
+        Ok(r) if !r.status().is_success() => {
+            let code = r.status().as_u16();
+            return unavailable(
+                "openai",
+                format!("API error {}: costs query failed", code),
+            );
+        }
+        Ok(r) => r,
+        Err(e) => return unavailable("openai", format!("Costs query failed: {}", e)),
+    };
+
+    let body = match resp.text() {
+        Ok(b) => b,
+        Err(e) => return unavailable("openai", format!("Failed to read response: {}", e)),
+    };
+    match parse_openai_costs_response(&body) {
+        Ok(balance) => ProviderUsage {
+            provider: "openai".to_string(),
+            logged_in: true,
+            windows: Vec::new(),
+            balance: Some(balance),
+            detail: None,
+            error: None,
+        },
+        Err(e) => unavailable("openai", format!("Failed to parse costs response: {}", e)),
     }
 }
 
@@ -1767,6 +2257,7 @@ pub fn invalidate_provider_cache(provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -1790,19 +2281,766 @@ mod tests {
 
     #[test]
     fn parse_codex_response_valid() {
-        let json = r#"{"primary":{"usedPercent":30.0,"resetsAt":"2026-05-30T12:00:00Z","label":"5-hour"},"secondary":{"usedPercent":10.0,"resetsAt":"2026-06-01T00:00:00Z","label":"Weekly"}}"#;
-        let windows = parse_codex_response(json).unwrap();
+        // Pinned fixture per spec §2.4: `rate_limit.primaryWindow` +
+        // `secondaryWindow` with `usedPercent`, `limitWindowSeconds` (dynamic
+        // label), and Unix-epoch `resetAt` that the parser converts to
+        // RFC3339. `detail` carries the remaining-percentage phrasing.
+        let json = r#"{
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 18.5,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1755288000
+                },
+                "secondary_window": {
+                    "used_percent": 42.0,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1755892800
+                },
+                "additional_rate_limits": []
+            }
+        }"#;
+        let (windows, detail) = parse_codex_response(json).unwrap();
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[0].used_percent, Some(18.5));
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2025-08-15T20:00:00+00:00"));
         assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[1].used_percent, Some(42.0));
+        // Highest-used window drives the detail phrasing (spec §4 wire
+        // normalization: 100.0 - used = remaining).
+        assert_eq!(detail.as_deref(), Some("58.0% remaining"));
     }
 
     #[test]
-    fn parse_codex_response_minimal() {
-        let json = r#"{"primary":{"usedPercent":50.0}}"#;
-        let windows = parse_codex_response(json).unwrap();
+    fn parse_codex_response_minimal_primary_only() {
+        // Minimal valid payload: just `primary_window` with no other fields.
+        // The default `5-hour` label kicks in when `limit_window_seconds`
+        // is absent.
+        let json = r#"{"rate_limit":{"primary_window":{"used_percent":50.0}}}"#;
+        let (windows, detail) = parse_codex_response(json).unwrap();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[0].used_percent, Some(50.0));
+        assert!(windows[0].resets_at.is_none());
+        assert_eq!(detail.as_deref(), Some("50.0% remaining"));
+    }
+
+    #[test]
+    fn parse_codex_response_additional_rate_limits_are_included() {
+        // Spec §2.5: `additionalRateLimits` is an opt-in list for tiers the
+        // upstream adds. They're appended after primary + secondary so the
+        // order is stable.
+        let json = r#"{
+            "rate_limit": {
+                "primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000},
+                "secondary_window": {"used_percent": 20.0, "limit_window_seconds": 604800},
+                "additional_rate_limits": [
+                    {"used_percent": 30.0, "limit_window_seconds": 86400}
+                ]
+            }
+        }"#;
+        let (windows, detail) = parse_codex_response(json).unwrap();
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[2].label, "24h");
+        assert_eq!(windows[2].used_percent, Some(30.0));
+        // Highest-used drives detail (30% → 70% remaining).
+        assert_eq!(detail.as_deref(), Some("70.0% remaining"));
+    }
+
+    #[test]
+    fn parse_codex_response_dynamic_label_fallback_formats_hours_and_days() {
+        // Spec §2.5: any non-standard `limit_window_seconds` falls back to a
+        // `"{N}h"` / `"{N}d"` friendly label rather than going blank.
+        assert_eq!(format_codex_window_label(3600), "1-hour");
+        assert_eq!(format_codex_window_label(7200), "2h");
+        assert_eq!(format_codex_window_label(86400), "24h");
+        assert_eq!(format_codex_window_label(172800), "2d");
+        assert_eq!(format_codex_window_label(2592000), "30d");
+        // Non-aligned second count gets a `"{N}s"` literal so an upstream
+        // oddity doesn't render an empty label.
+        assert_eq!(format_codex_window_label(12345), "12345s");
+    }
+
+    #[test]
+    fn parse_codex_response_missing_rate_limit_is_shape_error() {
+        // A body without the `rate_limit` object is malformed — must fail
+        // loudly rather than silently returning zero windows (spec §5 wire
+        // invariant: missing data ≠ empty data).
+        let err = parse_codex_response(r#"{"foo":"bar"}"#).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+    }
+
+    #[test]
+    fn parse_codex_response_filters_windows_without_used_percent() {
+        // A window with no `used_percent` is malformed (spec §5: 0.0–100.0
+        // consumption is required); filtered rather than silently surfaced
+        // as a "5-hour: (no data)" row.
+        let json = r#"{
+            "rate_limit": {
+                "primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000},
+                "secondary_window": {"limit_window_seconds": 604800}
+            }
+        }"#;
+        let (windows, detail) = parse_codex_response(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(detail.as_deref(), Some("90.0% remaining"));
+    }
+
+    #[test]
+    fn parse_codex_response_all_windows_filtered_reports_detail() {
+        // All windows lack `used_percent` → empty `windows` + the
+        // user-facing "no active windows" detail rather than a Shape error
+        // (the shape IS valid, just every window is incomplete).
+        let json = r#"{
+            "rate_limit": {
+                "primary_window": {"limit_window_seconds": 18000},
+                "secondary_window": {"limit_window_seconds": 604800}
+            }
+        }"#;
+        let (windows, detail) = parse_codex_response(json).unwrap();
+        assert!(windows.is_empty());
+        assert_eq!(detail.as_deref(), Some("No active Codex rate-limit windows"));
+    }
+
+    #[test]
+    fn parse_codex_response_unix_epoch_reset_at_becomes_rfc3339() {
+        // The upstream returns Unix epoch seconds in `resetAt`. The wire
+        // contract is RFC3339 (matches Anthropic / Kimi / OpenCode) so the
+        // parser converts before populating `resets_at`.
+        let json = r#"{
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 25.0,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1735689600
+                }
+            }
+        }"#;
+        let (windows, _) = parse_codex_response(json).unwrap();
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2025-01-01T00:00:00+00:00"));
+    }
+
+    // ── Codex auth-file parser (spec §2.3) ───────────────────────────────
+
+    #[test]
+    fn read_codex_auth_file_legacy_top_level_token() {
+        // Most common shape: `access_token` at the root, no `tokens` envelope.
+        let dir = std::env::temp_dir().join(format!(
+            "codex_legacy_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        fs::write(
+            &path,
+            r#"{"access_token":"sk-test-legacy","account_id":"acc-123"}"#,
+        )
+        .unwrap();
+        let creds = read_codex_auth_file(&path).unwrap();
+        assert_eq!(creds.access_token, "sk-test-legacy");
+        assert_eq!(creds.account_id.as_deref(), Some("acc-123"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_codex_auth_file_nested_tokens_envelope() {
+        // Spec §2.3 alternative shape: token nested inside `tokens`.
+        // Nested `account_id` wins over the top-level one when present.
+        let dir = std::env::temp_dir().join(format!(
+            "codex_nested_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        fs::write(
+            &path,
+            r#"{
+                "OPENAI_API_KEY": null,
+                "tokens": {
+                    "access_token": "sk-test-nested",
+                    "account_id": "acc-nested",
+                    "refresh_token": "rt-x",
+                    "id_token": "id-x"
+                }
+            }"#,
+        )
+        .unwrap();
+        let creds = read_codex_auth_file(&path).unwrap();
+        assert_eq!(creds.access_token, "sk-test-nested");
+        assert_eq!(creds.account_id.as_deref(), Some("acc-nested"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_codex_auth_file_empty_token_is_no_credential() {
+        // A logged-out Codex CLI writes `"access_token": ""`. We treat this
+        // as missing (NoCredential) rather than handing a blank bearer to
+        // reqwest (which would 401 the live probe for the wrong reason).
+        let dir = std::env::temp_dir().join(format!(
+            "codex_empty_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        fs::write(&path, r#"{"access_token":""}"#).unwrap();
+        let err = read_codex_auth_file(&path).unwrap_err();
+        assert!(matches!(err, UsageError::NoCredential(_)), "got {err:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_codex_auth_file_missing_file_is_no_credential() {
+        let path = std::env::temp_dir().join("definitely_does_not_exist_codex_auth.json");
+        let _ = fs::remove_file(&path);
+        let err = read_codex_auth_file(&path).unwrap_err();
+        assert!(matches!(err, UsageError::NoCredential(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn read_codex_credentials_walks_priority_and_returns_first_match() {
+        // First valid candidate wins. A 2-path list where the first exists
+        // but is unreadable (NoCredential) advances to the second.
+        let dir = std::env::temp_dir().join(format!(
+            "codex_walk_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty.json");
+        fs::write(&empty, r#"{"access_token":""}"#).unwrap();
+        let real = dir.join("real.json");
+        fs::write(&real, r#"{"access_token":"sk-real"}"#).unwrap();
+
+        let (path, creds) = read_codex_credentials(&[empty.clone(), real.clone()]).unwrap();
+        assert_eq!(path, real);
+        assert_eq!(creds.access_token, "sk-real");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_codex_credentials_propagates_shape_error() {
+        // A malformed auth.json MUST short-circuit (Shape error) rather than
+        // silently trying the next candidate — a bad JSON shape isn't fixed
+        // by reading a different file.
+        let dir = std::env::temp_dir().join(format!(
+            "codex_shape_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("broken.json");
+        fs::write(&broken, r#"{ not valid json"#).unwrap();
+        let next = dir.join("next.json");
+        fs::write(&next, r#"{"access_token":"sk-next"}"#).unwrap();
+
+        let err = read_codex_credentials(&[broken, next]).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)), "got {err:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Codex live-probe mocked HTTP integration (spec §5) ───────────────
+
+    /// Minimal `tiny_http` loopback dispatcher — mirrors the pattern from
+    /// `services::opencode_oauth::tests::spawn_loopback` (#967). The Codex
+    /// live endpoint is a single GET (`/wham/usage`) so this is a simpler
+    /// shape than the opencode refresh-on-401 matrix.
+    fn codex_live_loopback(handler: impl Fn(tiny_http::Request) + Send + 'static) -> u16 {
+        use std::thread;
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback");
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(std::net::SocketAddr::V4(v4)) => v4.port(),
+            other => panic!("expected v4 loopback, got {other:?}"),
+        };
+        thread::spawn(move || {
+            for request in server.incoming_requests() {
+                handler(request);
+            }
+        });
+        port
+    }
+
+    fn codex_temp_home() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "codex_home_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const CODEX_USAGE_BODY: &str = r#"{
+        "rate_limit": {
+            "primary_window":   {"used_percent": 18.5, "limit_window_seconds": 18000, "reset_at": 1755288000},
+            "secondary_window": {"used_percent": 42.0, "limit_window_seconds": 604800, "reset_at": 1755892800}
+        }
+    }"#;
+
+    #[test]
+    fn codex_usage_with_paths_happy_path_returns_windows() {
+        // The headline happy path: valid auth.json → 200 → wire contract.
+        let home = codex_temp_home();
+        let auth_path = home.join("auth.json");
+        fs::write(&auth_path, r#"{"access_token":"sk-test-ok"}"#).unwrap();
+        let candidates = vec![auth_path];
+
+        let port = codex_live_loopback(move |req| {
+            let _ = req.respond(tiny_http::Response::from_string(CODEX_USAGE_BODY));
+        });
+        let url = format!("http://127.0.0.1:{port}/wham/usage");
+
+        let usage = codex_usage_with_paths(&candidates, &url);
+        assert_eq!(usage.provider, "codex");
+        assert!(usage.logged_in);
+        assert!(usage.error.is_none());
+        assert_eq!(usage.windows.len(), 2);
+        assert_eq!(usage.windows[0].label, "5-hour");
+        assert_eq!(usage.windows[0].used_percent, Some(18.5));
+        assert_eq!(usage.detail.as_deref(), Some("58.0% remaining"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_usage_with_paths_sends_account_id_header_when_present() {
+        // Spec §2.1: `ChatGPT-Account-Id` is forwarded when the auth file
+        // carries an `account_id` so multi-account subscriptions are routed
+        // correctly. The header absence on single-account auth is exercised
+        // by the happy-path test above (no `account_id` field).
+        let home = codex_temp_home();
+        let auth_path = home.join("auth.json");
+        fs::write(
+            &auth_path,
+            r#"{"access_token":"sk-test","account_id":"acc-xyz"}"#,
+        )
+        .unwrap();
+        let candidates = vec![auth_path];
+
+        let observed_header = Arc::new(std::sync::Mutex::new(String::new()));
+        let observed_header_t = observed_header.clone();
+        let port = codex_live_loopback(move |req| {
+            let acct = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("ChatGPT-Account-Id"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            *observed_header_t.lock().unwrap() = acct;
+            let _ = req.respond(tiny_http::Response::from_string(CODEX_USAGE_BODY));
+        });
+        let url = format!("http://127.0.0.1:{port}/wham/usage");
+
+        let usage = codex_usage_with_paths(&candidates, &url);
+        assert!(usage.logged_in);
+        assert_eq!(*observed_header.lock().unwrap(), "acc-xyz");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_usage_with_paths_401_returns_logged_out_with_remediation() {
+        // Spec §5 / User Story #8: an expired token transitions to
+        // `logged_in = false` with an actionable re-auth hint, NOT a raw
+        // "API error 401". This is the headline test that pins the
+        // remediation message.
+        let home = codex_temp_home();
+        let auth_path = home.join("auth.json");
+        fs::write(&auth_path, r#"{"access_token":"sk-expired"}"#).unwrap();
+        let candidates = vec![auth_path];
+
+        let port = codex_live_loopback(move |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string(r#"{"error":"session expired"}"#)
+                    .with_status_code(401),
+            );
+        });
+        let url = format!("http://127.0.0.1:{port}/wham/usage");
+
+        let usage = codex_usage_with_paths(&candidates, &url);
+        assert!(!usage.logged_in);
+        let err = usage.error.unwrap_or_default();
+        assert!(
+            err.contains("codex") && err.contains("terminal"),
+            "remediation message must mention `codex` and `terminal`, got: {err:?}"
+        );
+        assert!(usage.windows.is_empty());
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_usage_with_paths_403_returns_logged_out_with_remediation() {
+        // 403 (Forbidden) collapses with 401 to the same logged-out branch —
+        // an account-revoked token behaves identically to an expired one
+        // from the user's perspective.
+        let home = codex_temp_home();
+        let auth_path = home.join("auth.json");
+        fs::write(&auth_path, r#"{"access_token":"sk-revoked"}"#).unwrap();
+        let candidates = vec![auth_path];
+
+        let port = codex_live_loopback(move |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string(r#"{}"#).with_status_code(403),
+            );
+        });
+        let url = format!("http://127.0.0.1:{port}/wham/usage");
+
+        let usage = codex_usage_with_paths(&candidates, &url);
+        assert!(!usage.logged_in);
+        assert!(usage
+            .error
+            .as_deref()
+            .map(|e| e.contains("terminal"))
+            .unwrap_or(false));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_usage_with_paths_429_preserves_logged_in_and_surfaces_unavailable() {
+        // Spec §5: network timeouts and rate limits preserve logged-in
+        // status. A 429 returns `unavailable()` (logged_in=true, error=Some)
+        // so the UI renders a temporary-availability notice without
+        // triggering the re-auth affordance.
+        let home = codex_temp_home();
+        let auth_path = home.join("auth.json");
+        fs::write(&auth_path, r#"{"access_token":"sk-test"}"#).unwrap();
+        let candidates = vec![auth_path];
+
+        let port = codex_live_loopback(move |req| {
+            let _ = req.respond(tiny_http::Response::empty(429));
+        });
+        let url = format!("http://127.0.0.1:{port}/wham/usage");
+
+        let usage = codex_usage_with_paths(&candidates, &url);
+        assert!(usage.logged_in);
+        assert!(usage.error.as_deref().map(|e| e.contains("Rate limited")).unwrap_or(false));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_usage_with_paths_no_credential_returns_logged_out() {
+        // No auth.json on disk → logged_out with the first candidate path
+        // surfaced in the error so the user knows where we looked.
+        let home = codex_temp_home();
+        let candidates = vec![home.join(".codex").join("auth.json")];
+
+        let usage = codex_usage_with_paths(&candidates, "http://127.0.0.1:1/wham/usage");
+        assert!(!usage.logged_in);
+        assert!(usage.error.is_some());
+        assert!(usage.windows.is_empty());
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_usage_with_paths_malformed_body_returns_unavailable() {
+        // A 200 with garbage JSON: shape error → unavailable (logged_in=true).
+        let home = codex_temp_home();
+        let auth_path = home.join("auth.json");
+        fs::write(&auth_path, r#"{"access_token":"sk-test"}"#).unwrap();
+        let candidates = vec![auth_path];
+
+        let port = codex_live_loopback(move |req| {
+            let _ = req.respond(tiny_http::Response::from_string("not json"));
+        });
+        let url = format!("http://127.0.0.1:{port}/wham/usage");
+
+        let usage = codex_usage_with_paths(&candidates, &url);
+        assert!(usage.logged_in);
+        assert!(usage.error.as_deref().map(|e| e.contains("parse")).unwrap_or(false));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // ── OpenAI costs response parser (spec §3) ────────────────────────────
+
+    #[test]
+    fn parse_openai_costs_response_sums_daily_buckets() {
+        // Pinned fixture for the OpenAI `/v1/organization/costs` shape.
+        // Two days, two results each; sums to 7.25 USD across the month.
+        let json = r#"{
+            "object": "page",
+            "data": [
+                {
+                    "object": "bucket",
+                    "start_time": 1751328000,
+                    "end_time": 1751414400,
+                    "results": [
+                        {"object":"organization.cost.result","amount":{"value":1.5,"currency":"usd"},"line_item":null,"project_id":null,"organization_id":"org-x"},
+                        {"object":"organization.cost.result","amount":{"value":2.25,"currency":"usd"},"line_item":null,"project_id":null,"organization_id":"org-x"}
+                    ]
+                },
+                {
+                    "object": "bucket",
+                    "start_time": 1751414400,
+                    "end_time": 1751500800,
+                    "results": [
+                        {"object":"organization.cost.result","amount":{"value":3.5,"currency":"USD"},"line_item":null,"project_id":null,"organization_id":"org-x"}
+                    ]
+                }
+            ],
+            "has_more": false,
+            "next_page": null
+        }"#;
+        let balance = parse_openai_costs_response(json).unwrap();
+        assert_eq!(balance.remaining, 0.0);
+        assert_eq!(balance.monthly_spend, Some(7.25));
+        assert_eq!(balance.currency, "USD");
+    }
+
+    #[test]
+    fn parse_openai_costs_response_empty_data_is_zero_spend() {
+        // No spend this month is a valid response: `data: []` and zero
+        // monthly_spend. NOT a shape error.
+        let balance = parse_openai_costs_response(r#"{"data":[]}"#).unwrap();
+        assert_eq!(balance.monthly_spend, Some(0.0));
+        assert_eq!(balance.currency, "USD");
+    }
+
+    #[test]
+    fn parse_openai_costs_response_filters_non_usd_currency() {
+        // Forward-compat: a multi-currency org would have non-USD amounts;
+        // we ignore them so the USD headline is consistent.
+        let json = r#"{
+            "data": [{
+                "results": [
+                    {"amount": {"value": 5.0, "currency": "usd"}},
+                    {"amount": {"value": 99.0, "currency": "eur"}}
+                ]
+            }]
+        }"#;
+        let balance = parse_openai_costs_response(json).unwrap();
+        assert_eq!(balance.monthly_spend, Some(5.0));
+    }
+
+    #[test]
+    fn parse_openai_costs_response_missing_data_is_shape_error() {
+        // Required field — a body without `data` is malformed. OpenAI
+        // always returns the field even on an empty month.
+        let err = parse_openai_costs_response(r#"{"object":"page"}"#).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn current_month_start_epoch_is_first_of_utc_month() {
+        // The start_time query parameter must be the first second of the
+        // current UTC month, not a rolling 30-day window. Spot-check the
+        // month-day boundary: the value is always day=1 at 00:00:00 UTC.
+        let epoch = current_month_start_epoch();
+        let dt = chrono::DateTime::from_timestamp(epoch, 0).expect("valid epoch");
+        assert_eq!(dt.day(), 1, "month start must be day 1, got day {}", dt.day());
+        assert_eq!(dt.hour(), 0);
+        assert_eq!(dt.minute(), 0);
+        assert_eq!(dt.second(), 0);
+    }
+
+    // ── OpenAI live-probe mocked HTTP integration (spec §3.2) ────────────
+
+    fn openai_temp_home() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "openai_test_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const OPENAI_COSTS_BODY: &str = r#"{
+        "object": "page",
+        "data": [
+            {
+                "object": "bucket",
+                "start_time": 1751328000,
+                "end_time": 1751414400,
+                "results": [
+                    {"amount": {"value": 12.5, "currency": "usd"}}
+                ]
+            }
+        ],
+        "has_more": false
+    }"#;
+
+    const OPENAI_MODELS_BODY: &str = r#"{
+        "object": "list",
+        "data": [{"id": "gpt-4o", "object": "model"}]
+    }"#;
+
+    #[test]
+    fn openai_usage_with_admin_key_returns_monthly_spend() {
+        // Headline happy path: inference check (200) → costs (200) →
+        // BillingBalance with `monthly_spend`. `logged_in = true`, no
+        // error, no degradation detail.
+        let port = {
+            use std::thread;
+            let server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback");
+            let p = match server.server_addr() {
+                tiny_http::ListenAddr::IP(std::net::SocketAddr::V4(v4)) => v4.port(),
+                other => panic!("expected v4 loopback, got {other:?}"),
+            };
+            thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    let body = match req.url() {
+                        url if url.ends_with("/models") => OPENAI_MODELS_BODY,
+                        url if url.contains("/organization/costs") => OPENAI_COSTS_BODY,
+                        _ => "{}",
+                    };
+                    let _ = req.respond(tiny_http::Response::from_string(body));
+                }
+            });
+            p
+        };
+        let base = format!("http://127.0.0.1:{port}");
+
+        let usage = openai_usage_with_base_url("sk-admin-test", &base);
+        assert_eq!(usage.provider, "openai");
+        assert!(usage.logged_in);
+        assert!(usage.error.is_none());
+        let balance = usage.balance.expect("admin key must populate balance");
+        assert_eq!(balance.monthly_spend, Some(12.5));
+        assert_eq!(balance.currency, "USD");
+        assert!(usage.detail.is_none());
+        let _ = fs::remove_dir_all(openai_temp_home());
+    }
+
+    #[test]
+    fn openai_usage_with_project_key_gracefully_degrades() {
+        // Spec §3.2 / User Story #11: a `sk-proj-…` key passes the
+        // inference check (200 on /v1/models) but 403s on
+        // /v1/organization/costs. The result is `logged_in = true` with a
+        // detail string explaining the gap — NOT a logged-out state, so
+        // the user's agents keep running.
+        let port = {
+            use std::thread;
+            let server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback");
+            let p = match server.server_addr() {
+                tiny_http::ListenAddr::IP(std::net::SocketAddr::V4(v4)) => v4.port(),
+                other => panic!("expected v4 loopback, got {other:?}"),
+            };
+            thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    match req.url() {
+                        url if url.ends_with("/models") => {
+                            let _ = req.respond(tiny_http::Response::from_string(OPENAI_MODELS_BODY));
+                        }
+                        url if url.contains("/organization/costs") => {
+                            let _ = req.respond(
+                                tiny_http::Response::from_string(r#"{"error":"insufficient permissions"}"#)
+                                    .with_status_code(403),
+                            );
+                        }
+                        _ => {
+                            let _ = req.respond(
+                                tiny_http::Response::from_string("{}").with_status_code(404),
+                            );
+                        }
+                    }
+                }
+            });
+            p
+        };
+        let base = format!("http://127.0.0.1:{port}");
+
+        let usage = openai_usage_with_base_url("sk-proj-test", &base);
+        assert_eq!(usage.provider, "openai");
+        assert!(usage.logged_in, "project key on org costs must NOT log out");
+        assert!(usage.error.is_none(), "degradation must not carry an error");
+        assert!(usage.balance.is_none(), "no balance when costs 403");
+        let detail = usage.detail.expect("degradation detail must be set");
+        assert!(
+            detail.contains("Organization Admin") && detail.contains("sk-admin"),
+            "detail must explain the org-admin requirement, got: {detail:?}"
+        );
+        let _ = fs::remove_dir_all(openai_temp_home());
+    }
+
+    #[test]
+    fn openai_usage_with_invalid_key_returns_logged_out() {
+        // Spec §3.2 / User Story #12: a revoked/invalid key 401s on the
+        // inference check. The result is `logged_in = false` so the UI
+        // surfaces the re-enter-key affordance. The two-round-trip probe
+        // is what distinguishes this from the project-key degradation case.
+        let port = {
+            use std::thread;
+            let server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback");
+            let p = match server.server_addr() {
+                tiny_http::ListenAddr::IP(std::net::SocketAddr::V4(v4)) => v4.port(),
+                other => panic!("expected v4 loopback, got {other:?}"),
+            };
+            thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    let _ = req.respond(
+                        tiny_http::Response::from_string(r#"{"error":"invalid_api_key"}"#)
+                            .with_status_code(401),
+                    );
+                }
+            });
+            p
+        };
+        let base = format!("http://127.0.0.1:{port}");
+
+        let usage = openai_usage_with_base_url("sk-bad", &base);
+        assert_eq!(usage.provider, "openai");
+        assert!(!usage.logged_in);
+        assert_eq!(usage.error.as_deref(), Some("Invalid API key"));
+        assert!(usage.balance.is_none());
+        assert!(usage.detail.is_none());
+        let _ = fs::remove_dir_all(openai_temp_home());
+    }
+
+    #[test]
+    fn openai_usage_with_empty_key_returns_logged_out() {
+        // Mirror `kimi_usage("")` / `openrouter_usage("")`: the
+        // configured-key gate should catch a missing key, but the fetcher
+        // still defends with a logged-out message so a misconfigured call
+        // surfaces "no key" instead of a confusing 401.
+        let usage = openai_usage_with_base_url("", "http://127.0.0.1:1");
+        assert!(!usage.logged_in);
+        assert_eq!(usage.provider, "openai");
+        assert!(usage.error.as_deref().map(|e| e.contains("No API key")).unwrap_or(false));
+        assert!(usage.balance.is_none());
+    }
+
+    #[test]
+    fn openai_usage_with_429_on_inference_returns_unavailable() {
+        // Rate-limit on the inference probe preserves `logged_in = true`
+        // (we don't know the key is bad — could be transient).
+        let port = {
+            use std::thread;
+            let server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback");
+            let p = match server.server_addr() {
+                tiny_http::ListenAddr::IP(std::net::SocketAddr::V4(v4)) => v4.port(),
+                other => panic!("expected v4 loopback, got {other:?}"),
+            };
+            thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    let _ = req.respond(tiny_http::Response::empty(429));
+                }
+            });
+            p
+        };
+        let base = format!("http://127.0.0.1:{port}");
+
+        let usage = openai_usage_with_base_url("sk-test", &base);
+        assert!(usage.logged_in, "429 must not flip to logged_out");
+        assert!(usage.error.as_deref().map(|e| e.contains("Rate limited")).unwrap_or(false));
+        let _ = fs::remove_dir_all(openai_temp_home());
     }
 
     #[test]
@@ -1977,19 +3215,6 @@ mod tests {
 
         let token = read_anthropic_token(file_path.clone()).unwrap();
         assert_eq!(token, "sk-ant-oat01-testtoken123");
-
-        std::fs::remove_file(file_path).unwrap();
-    }
-
-    #[test]
-    fn test_read_codex_token_valid() {
-        let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_codex_cred.json");
-        let content = r#"{"access_token":"test-codex-access-token-456"}"#;
-        std::fs::write(&file_path, content).unwrap();
-
-        let token = read_codex_token(file_path.clone()).unwrap();
-        assert_eq!(token, "test-codex-access-token-456");
 
         std::fs::remove_file(file_path).unwrap();
     }

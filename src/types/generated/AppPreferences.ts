@@ -62,7 +62,7 @@ provider_pairings: Array<ProviderPairing>,
  * Reconstructable, non-secret verification results for exact proxied
  * endpoint/model/runtime/Codex combinations (issue #1098).
  */
-pairing_verifications: Array<PairingVerification>,
+pairing_verifications: Array<PairingVerification>, 
 /**
  * User-chosen order of the **Proxied Provider** children under each
  * harness (issue #577). One [`ProxiedProviderOrder`] per harness the
