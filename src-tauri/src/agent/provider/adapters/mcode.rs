@@ -78,7 +78,7 @@ impl AgentProvider for McodeAdapter {
     }
 
     fn resume_args(&self, id: &str) -> Vec<String> {
-        vec!["--resume".into(), id.into()]
+        vec!["--session".into(), id.into()]
     }
 
     fn model_args(&self, model: &str) -> Vec<String> {
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn resume_args_format() {
         let args = MCODE.resume_args("abc-123");
-        assert_eq!(args, vec!["--resume", "abc-123"]);
+        assert_eq!(args, vec!["--session", "abc-123"]);
     }
 
     #[test]

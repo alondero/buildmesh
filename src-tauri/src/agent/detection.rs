@@ -88,7 +88,7 @@ const DETECTABLE: &[Detectable] = &[
         name: "MiniMax Code",
         harness: "mcode",
         binaries: &["mcode"],
-        config_dirs: &[".mcode"],
+        config_dirs: &[".mcode", ".minimax-code"],
     },
 ];
 
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["kimi"]);
     }
 
-    /// MiniMax Code CLI (`mcode`) ships `~/.mcode/` for config alongside the `mcode` binary.
+    /// MiniMax Code CLI (`mcode`) ships `~/.mcode/` or `~/.minimax-code/` for config alongside the `mcode` binary.
     #[test]
     fn mcode_config_dir_alone_counts_as_installed() {
         let path_dirs = dirs(&["/usr/bin"]);
@@ -269,6 +269,10 @@ mod tests {
         let exists = fake_fs(&["/home/me/.mcode"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
         assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["mcode"]);
+
+        let exists_alt = fake_fs(&["/home/me/.minimax-code"]);
+        let profiles_alt = detect_profiles(&path_dirs, &[""], Some(&home), &exists_alt);
+        assert_eq!(profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["mcode"]);
     }
 
     #[test]
