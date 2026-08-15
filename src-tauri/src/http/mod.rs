@@ -1704,7 +1704,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         }
         let body = match path_without_query.as_str() {
             "/api/nodes" => routes::nodes::list_json(),
-            "/api/providers" => routes::providers::list_json(),
+            "/api/providers" => routes::providers::list_json().await,
             "/api/meshes" => routes::meshes::list_json(),
             _ => r#"{"error":"not found"}"#.to_string(),
         };

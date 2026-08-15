@@ -9,6 +9,7 @@ pub mod github;
 pub mod mesh;
 pub mod opencode_oauth;
 pub mod pool_worker;
+pub mod provider_verification;
 pub mod sync_lock;
 pub mod transcript_reader;
 pub mod usage;

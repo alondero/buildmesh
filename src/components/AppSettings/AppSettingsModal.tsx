@@ -1,5 +1,6 @@
 import { formatError } from '../../lib/errorUtils';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
 import { OpenCodeAccountCard } from './OpenCodeAccountCard';
@@ -9,6 +10,7 @@ import type {
   ProviderInfo,
   ProviderAccount,
   ProviderPairing,
+  PairingVerification,
   DeviceSession,
   RealizedBind,
 } from '../../lib/tauri';
@@ -16,12 +18,18 @@ import { optimisticToggle } from '../../lib/optimisticToggle';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { isSelfAuthId, isFirstClassId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
+import { isWindows } from '../../lib/platform';
 
 interface AppSettingsModalProps {
   onClose: () => void;
 }
 
 const NO_OVERRIDE = '__no_override__';
+
+async function getHostPairingVerifications(): Promise<PairingVerification[]> {
+  const runtimes: api.EnvType[] = isWindows ? ['windows', 'wsl'] : ['windows'];
+  return (await Promise.all(runtimes.map((runtime) => api.getPairingVerifications(runtime)))).flat();
+}
 
 /** The Settings sub-panes. One long scroll of unrelated sections outgrew
  *  itself; each pane groups settings by concern (behaviour defaults /
@@ -396,6 +404,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // Proxied Provider pairings (ADR-0025): stored only. `storedPairingKeys`
   // marks detachable rows; `compatibleByHarness` drives the attach picker.
   const [pairings, setPairings] = useState<ProviderPairing[]>([]);
+  const [pairingVerifications, setPairingVerifications] = useState<PairingVerification[]>([]);
   const [storedPairingKeys, setStoredPairingKeys] = useState<Set<string>>(new Set());
   const [compatibleByHarness, setCompatibleByHarness] = useState<Record<string, ProviderAccount[]>>({});
   const [coordEnabled, setCoordEnabled] = useState(false);
@@ -599,13 +608,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // settles, and re-run after an attach/detach.
   const loadPairingData = async (providerList: ProviderInfo[]) => {
     try {
-      const [effective, prefs] = await Promise.all([
+      const [effective, prefs, verifications] = await Promise.all([
         api.getProviderPairings(),
         api.getAppPreferences(),
+        getHostPairingVerifications(),
       ]);
       // Defensive: the real backend always returns arrays, but a malformed
       // response shouldn't crash the settings modal.
       setPairings(Array.isArray(effective) ? effective : []);
+      setPairingVerifications(Array.isArray(verifications) ? verifications : []);
       const stored = prefs.provider_pairings ?? [];
       setStoredPairingKeys(new Set(stored.map((p) => `${p.harness_id}:${p.provider_id}`)));
       const nativeHarnesses = providerList.filter((p) => !p.is_proxied && p.id !== 'terminal');
@@ -620,6 +631,16 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       console.error('Failed to load pairing data:', e);
     }
   };
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen('pairing-verification-changed', () => {
+      void getHostPairingVerifications().then(setPairingVerifications);
+    }).then((stop) => {
+      unlisten = stop;
+    });
+    return () => unlisten?.();
+  }, []);
 
   // Attach a provider to a harness (ADR-0025). Client supplies base URL and
   // (for Anthropic) model tiers; backend seeds the global key set-if-absent.
@@ -673,6 +694,22 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       await loadPairingData(providerList);
     } catch (e) {
       setError(formatError(e));
+      throw e;
+    }
+  };
+
+  const handleVerifyPairing = async (
+    harnessId: string,
+    providerId: string,
+    envType: api.EnvType,
+  ) => {
+    setError(null);
+    try {
+      await api.verifyProviderPairing(harnessId, providerId, envType);
+      setPairingVerifications(await getHostPairingVerifications());
+    } catch (e) {
+      setError(formatError(e));
+      setPairingVerifications(await getHostPairingVerifications().catch(() => []));
       throw e;
     }
   };
@@ -1276,11 +1313,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             }
             compatibleByHarness={compatibleByHarness}
             pairings={pairings}
+            verifications={pairingVerifications}
+            supportsWsl={isWindows}
             storedKeys={storedPairingKeys}
             accounts={accounts}
             onAttach={handleAttachProvider}
             onUpdate={handleUpdatePairing}
             onDetach={handleDetachProvider}
+            onVerify={handleVerifyPairing}
             onReorderProxied={handleReorderProxiedProviders}
             onDirtyChange={(site, d) => siteDirtyChange(`harness-${site}`, d)}
           />

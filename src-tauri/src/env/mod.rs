@@ -152,6 +152,15 @@ mod tests {
     // type into the `crate::env` public surface — not desired.)
     use crate::models::AgentNode;
 
+    #[test]
+    fn parses_default_wsl_distribution_from_star_marker() {
+        let listing = "  NAME              STATE           VERSION\n* Ubuntu            Running         2\n  Debian            Stopped         2\n";
+        assert_eq!(
+            environment::parse_wsl_distro_list(listing).as_deref(),
+            Some("Ubuntu")
+        );
+    }
+
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
     #[test]

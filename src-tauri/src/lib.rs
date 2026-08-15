@@ -154,6 +154,16 @@ pub fn run() {
             // list, which requires `APP_DATA_DIR` to be set. See
             // `db::migrate_agent_node_provider_id_custom_accounts` (issue #575).
             preferences::init(app_dir.clone());
+            for pairing in preferences::provider_pairings()
+                .into_iter()
+                .filter(|pairing| pairing.surface == preferences::ApiSurface::OpenAI)
+            {
+                commands::preferences::schedule_pairing_verification(
+                    app.handle().clone(),
+                    pairing.harness_id,
+                    pairing.provider_id,
+                );
+            }
 
             // v19 Spawn Option composite-id migration, custom-account block
             // (issue #575). The first-class block ('minimax'/'kimi') already
@@ -438,6 +448,8 @@ pub fn run() {
             commands::preferences::upsert_provider_account,
             commands::preferences::remove_provider_account,
             commands::preferences::get_provider_pairings,
+            commands::preferences::get_pairing_verifications,
+            commands::preferences::verify_provider_pairing,
             commands::preferences::get_pairing_defaults,
             commands::preferences::compatible_providers_for_harness,
             commands::preferences::attach_proxied_provider,

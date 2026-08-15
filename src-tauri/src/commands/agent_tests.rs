@@ -18,9 +18,14 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::spawn::{build_spawn_command, SessionIdMode};
+    use crate::agent::launch_routing::PreparedLaunchRouting;
+    use crate::agent::spawn::{
+        build_spawn_command, build_spawn_command_prepared, open_pty_pair, spawn_child,
+        SessionIdMode,
+    };
     use crate::env::ResolvedPath;
     use crate::models::{EnvType, Provider};
+    use crate::preferences::{PairingVerification, PairingVerificationStatus};
 
     const SPAWN_PATH: &str = "/home/user/repo/.claude/worktrees/wt-1";
     const SESSION_ID: i64 = 42;
@@ -32,6 +37,116 @@ mod tests {
             raw_path: SPAWN_PATH.to_string(),
             env_type: EnvType::Wsl,
         }
+    }
+
+    fn codex_proxy(profile_name: &str, credential: &str) -> PreparedLaunchRouting {
+        let descriptor = crate::agent::provider::compatibility::EndpointModelDescriptor {
+            provider_id: "minimax".into(),
+            endpoint: "https://api.minimax.io/v1".into(),
+            wire_api: crate::agent::provider::compatibility::WireApi::Responses,
+            model_id: "MiniMax-M3".into(),
+            capabilities: crate::agent::provider::compatibility::complete_agent_capabilities(),
+            auth_modes: vec![
+                crate::agent::provider::compatibility::ProviderAuthMode::BearerEnv,
+            ],
+            context_window: None,
+            reasoning_effort: None,
+        };
+        PreparedLaunchRouting::CodexProxy {
+            harness_id: "codex".into(),
+            provider_id: "minimax".into(),
+            profile_name: profile_name.into(),
+            verification: PairingVerification {
+                harness_id: "codex".into(),
+                provider_id: "minimax".into(),
+                pairing_signature: "test-signature".into(),
+                endpoint: descriptor.endpoint.clone(),
+                model_id: descriptor.model_id.clone(),
+                auth_mode: crate::agent::provider::compatibility::ProviderAuthMode::BearerEnv,
+                runtime: "wsl:Ubuntu:/home/user/.codex".into(),
+                executable: "/usr/bin/codex".into(),
+                codex_version: "0.144.0".into(),
+                capability_result: crate::agent::provider::compatibility::CompatibilityDecision {
+                    compatible: true,
+                    reason: None,
+                },
+                status: PairingVerificationStatus::Verified,
+                verified_at: Some(chrono::Utc::now()),
+                reason: None,
+            },
+            descriptor,
+            runtime: EnvType::Wsl,
+            install: crate::agent::provider::adapters::codex::CodexInstall {
+                executable: "/usr/bin/codex".into(),
+                version: "0.144.0".into(),
+                runtime_identity: "wsl:Ubuntu:/home/user/.codex".into(),
+                codex_home: "/home/user/.codex".into(),
+                wsl_distro: Some("Ubuntu".into()),
+            },
+            credential_reference: "BUILDMESH_CODEX_PROVIDER_KEY".into(),
+            credential: credential.into(),
+        }
+    }
+
+    fn compile_fake_codex(temp: &tempfile::TempDir) -> std::path::PathBuf {
+        let source = temp.path().join("fake_codex.rs");
+        std::fs::write(
+            &source,
+            r#"fn main() {
+    let log = std::env::var_os("FAKE_CODEX_LOG").expect("FAKE_CODEX_LOG");
+    let args = std::env::args().skip(1).collect::<Vec<_>>().join("\n");
+    let credential = std::env::var("BUILDMESH_CODEX_PROVIDER_KEY").unwrap_or_default();
+    let inherited_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    let inherited_url = std::env::var("OPENAI_BASE_URL").unwrap_or_default();
+    std::fs::write(log, format!("ARGS\n{args}\nCREDENTIAL\n{credential}\nOPENAI_KEY\n{inherited_key}\nOPENAI_URL\n{inherited_url}\n")).unwrap();
+}"#,
+        )
+        .unwrap();
+        let executable = temp
+            .path()
+            .join(if cfg!(windows) { "fake-codex.exe" } else { "fake-codex" });
+        let status = std::process::Command::new("rustc")
+            .args([
+                source.as_os_str(),
+                std::ffi::OsStr::new("-o"),
+                executable.as_os_str(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        executable
+    }
+
+    fn native_fake_proxy(executable: &std::path::Path, credential: &str) -> PreparedLaunchRouting {
+        let mut routing = codex_proxy("buildmesh_fake", credential);
+        let PreparedLaunchRouting::CodexProxy {
+            verification,
+            runtime,
+            install,
+            ..
+        } = &mut routing
+        else {
+            unreachable!()
+        };
+        let executable = executable.to_string_lossy().into_owned();
+        verification.runtime = "native-test".into();
+        verification.executable = executable.clone();
+        *runtime = EnvType::Windows;
+        *install = crate::agent::provider::adapters::codex::CodexInstall {
+            executable,
+            version: "0.147.0".into(),
+            runtime_identity: "native-test".into(),
+            codex_home: temp_codex_home_for_test(),
+            wsl_distro: None,
+        };
+        routing
+    }
+
+    fn temp_codex_home_for_test() -> String {
+        std::env::temp_dir()
+            .join("buildmesh-unused-fake-codex-home")
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Windows-native (non-WSL) resolution — the path where claude-backed
@@ -232,6 +347,152 @@ mod tests {
         );
         assert!(env_of(&cmd, "ANTHROPIC_BASE_URL").is_none());
         assert!(env_of(&cmd, "ANTHROPIC_AUTH_TOKEN").is_none());
+    }
+
+    #[test]
+    fn verified_codex_proxy_applies_profile_model_and_scoped_credential_on_fresh_and_resume() {
+        let routing = codex_proxy("buildmesh_1234", "sentinel-secret");
+        let debug = format!("{routing:?}");
+        assert!(!debug.contains("sentinel-secret"));
+        assert!(debug.contains("BUILDMESH_CODEX_PROVIDER_KEY"));
+        for mode in [
+            SessionIdMode::None,
+            SessionIdMode::Resume("codex-session".into()),
+        ] {
+            let cmd = build_spawn_command_prepared(
+                &wsl_resolved(),
+                Provider::Codex,
+                &routing,
+                &mode,
+                SESSION_ID,
+                None,
+                None,
+                None,
+                false,
+            );
+            let args = argv(&cmd);
+            assert_eq!(
+                &args[..7],
+                [
+                    "wsl.exe",
+                    "-d",
+                    "Ubuntu",
+                    "--cd",
+                    SPAWN_PATH,
+                    "--",
+                    "/usr/bin/codex",
+                ]
+            );
+            assert!(args.windows(2).any(|pair| pair == ["--profile", "buildmesh_1234"]));
+            assert!(args.windows(2).any(|pair| pair == ["--model", "MiniMax-M3"]));
+            assert_eq!(
+                env_of(&cmd, "BUILDMESH_CODEX_PROVIDER_KEY").as_deref(),
+                Some("sentinel-secret")
+            );
+            assert!(env_of(&cmd, "OPENAI_API_KEY").is_none());
+        }
+    }
+
+    #[test]
+    fn native_codex_receives_no_proxy_routing() {
+        let cmd = build_spawn_command_prepared(
+            &wsl_resolved(),
+            Provider::Codex,
+            &PreparedLaunchRouting::Native,
+            &SessionIdMode::None,
+            SESSION_ID,
+            None,
+            None,
+            None,
+            false,
+        );
+        let args = argv(&cmd);
+        assert!(!args.iter().any(|arg| arg == "--profile"));
+        assert!(!args.iter().any(|arg| arg == "--model"));
+        assert!(env_of(&cmd, "BUILDMESH_CODEX_PROVIDER_KEY").is_none());
+    }
+
+    #[test]
+    fn proxied_codex_credentials_are_isolated_per_command() {
+        let command_for = |profile: &str, credential: &str| {
+            build_spawn_command_prepared(
+                &wsl_resolved(),
+                Provider::Codex,
+                &codex_proxy(profile, credential),
+                &SessionIdMode::None,
+                SESSION_ID,
+                None,
+                None,
+                None,
+                false,
+            )
+        };
+        let first = command_for("buildmesh_first", "first-secret");
+        let second = command_for("buildmesh_second", "second-secret");
+
+        assert_eq!(
+            env_of(&first, "BUILDMESH_CODEX_PROVIDER_KEY").as_deref(),
+            Some("first-secret")
+        );
+        assert_eq!(
+            env_of(&second, "BUILDMESH_CODEX_PROVIDER_KEY").as_deref(),
+            Some("second-secret")
+        );
+        assert!(!argv(&first).iter().any(|arg| arg.contains("second-secret")));
+        assert!(!argv(&second).iter().any(|arg| arg.contains("first-secret")));
+    }
+
+    #[test]
+    fn prepared_proxy_executes_exact_fake_codex_for_fresh_and_resume() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let executable = compile_fake_codex(&temp);
+        let path = temp.path().to_string_lossy().into_owned();
+        let resolved = ResolvedPath {
+            host_path: path.clone(),
+            spawn_path: path.clone(),
+            raw_path: path,
+            env_type: EnvType::Windows,
+        };
+
+        for (index, mode) in [
+            SessionIdMode::None,
+            SessionIdMode::Resume("resume-session".into()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let routing = native_fake_proxy(&executable, &format!("credential-{index}"));
+            let mut command = build_spawn_command_prepared(
+                &resolved,
+                Provider::Codex,
+                &routing,
+                &mode,
+                -915_4300 - index as i64,
+                None,
+                None,
+                None,
+                false,
+            );
+            let log = temp.path().join(format!("invocation-{index}.log"));
+            command.env("FAKE_CODEX_LOG", &log);
+            let pair = open_pty_pair(24, 80).unwrap();
+            let mut child = spawn_child(&pair, command).unwrap();
+            drop(pair.slave);
+            assert!(child.wait().unwrap().success());
+            drop(pair.master);
+
+            let invocation = std::fs::read_to_string(log).unwrap();
+            assert!(invocation.contains("--profile\nbuildmesh_fake"));
+            assert!(invocation.contains("--model\nMiniMax-M3"));
+            assert!(invocation.contains(&format!("CREDENTIAL\ncredential-{index}")));
+            assert!(invocation.contains("OPENAI_KEY\n\n"));
+            assert!(invocation.contains("OPENAI_URL\n\n"));
+            if index == 0 {
+                assert!(!invocation.contains("resume-session"));
+            } else {
+                assert!(invocation.contains("resume\nresume-session"));
+            }
+        }
     }
 
     /// Model + effort overrides are appended (in that order) for a provider that

@@ -8,6 +8,10 @@
 //! fallback (`anthropic` for providers).
 
 use crate::models::Provider;
+use crate::agent::provider::compatibility::{
+    self, CompatibilityDecision, EndpointModelDescriptor, ProviderAuthMode, WireApi,
+};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -199,6 +203,39 @@ pub struct ProviderPairing {
     pub model_tiers: ModelTiers,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "PairingVerificationStatus.ts")]
+pub enum PairingVerificationStatus {
+    #[default]
+    Pending,
+    Verified,
+    Failed,
+    Stale,
+    Unsupported,
+}
+
+/// Non-secret proof that an exact pairing/runtime/Codex installation passed
+/// the Responses agent-loop verification (issue #1098).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "PairingVerification.ts")]
+pub struct PairingVerification {
+    pub harness_id: String,
+    pub provider_id: String,
+    pub pairing_signature: String,
+    pub endpoint: String,
+    pub model_id: String,
+    pub auth_mode: ProviderAuthMode,
+    pub runtime: String,
+    pub executable: String,
+    pub codex_version: String,
+    #[serde(default)]
+    pub capability_result: CompatibilityDecision,
+    pub status: PairingVerificationStatus,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub reason: Option<String>,
+}
+
 /// A first-class provider's published endpoint for one **Compatible API
 /// surface** — the surface→URL(+default model map) the attach flow reads so a
 /// pairing only has to *name* the surface (ADR-0016 §4). Not persisted; returned
@@ -296,6 +333,10 @@ pub struct AppPreferences {
     /// into Claude Anthropic pairings on read — see [`migrate_prefs_json`]).
     #[serde(default)]
     pub provider_pairings: Vec<ProviderPairing>,
+    /// Reconstructable, non-secret verification results for exact proxied
+    /// endpoint/model/runtime/Codex combinations (issue #1098).
+    #[serde(default)]
+    pub pairing_verifications: Vec<PairingVerification>,
     /// User-chosen order of the **Proxied Provider** children under each
     /// harness (issue #577). One [`ProxiedProviderOrder`] per harness the
     /// user has reordered; a harness without an entry keeps its natural
@@ -348,6 +389,7 @@ static APP_DATA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// In-process cache, refreshed on every write. Reads consult the file only if
 /// the cache is empty (first read).
 static CACHE: Mutex<Option<AppPreferences>> = Mutex::new(None);
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init(app_data_dir: PathBuf) {
     *APP_DATA_DIR.lock().unwrap_or_else(|p| p.into_inner()) = Some(app_data_dir);
@@ -653,6 +695,7 @@ fn migrate_kimi_companion_json(root: &mut serde_json::Map<String, serde_json::Va
 }
 
 fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
+    let _write_guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = preferences_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -660,8 +703,20 @@ fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(prefs)
         .map_err(|e| format!("failed to serialize preferences: {}", e))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("failed to write preferences.json: {}", e))
+    let parent = path
+        .parent()
+        .ok_or_else(|| "preferences path has no parent directory".to_string())?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("failed to create temporary preferences file: {e}"))?;
+    use std::io::Write;
+    temporary
+        .write_all(json.as_bytes())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|e| format!("failed to write temporary preferences file: {e}"))?;
+    temporary
+        .persist(&path)
+        .map_err(|e| format!("failed to atomically replace preferences.json: {}", e.error))?;
+    Ok(())
 }
 
 /// Load preferences, populating the in-process cache on first call.
@@ -677,8 +732,8 @@ pub fn load() -> Result<AppPreferences, String> {
 
 /// Persist preferences to disk and refresh the cache.
 pub fn save(prefs: AppPreferences) -> Result<(), String> {
+    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     write_to_disk(&prefs)?;
-    let mut guard = CACHE.lock().unwrap();
     *guard = Some(prefs);
     Ok(())
 }
@@ -1030,10 +1085,9 @@ pub fn is_claude_compatible_id(id: &str) -> bool {
 /// Generic providers) — a Generic provider instead *declares* its single
 /// surface+URL at creation, stored directly on its [`ProviderPairing`].
 ///
-/// **OpenAI-surface URLs are best-effort and unverified on this host** (no
-/// `codex` binary + provider OpenAI key to exercise them, issue #576); the
-/// Anthropic-surface URLs match the long-standing Claude Code account defaults and
-/// are exercised end-to-end. Live Codex verification is tracked as a follow-up.
+/// Catalog metadata is only an attach candidate. Codex pairings remain
+/// unavailable until the exact endpoint/model/runtime context passes live
+/// Responses verification.
 pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
     // OpenAI surface only consumes `default` (→ OPENAI_MODEL); the other tiers
     // are left unset since Codex takes a single model.
@@ -1051,29 +1105,16 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
             SurfaceEndpoint {
                 surface: ApiSurface::OpenAI,
                 base_url: "https://api.minimax.io/v1".to_string(),
-                model_tiers: openai_tiers("MiniMax-M3[1m]"),
+                model_tiers: openai_tiers("MiniMax-M3"),
             },
         ],
-        // Kimi (Moonshot) — Anthropic-compatible Claude Code pairing surface
-        // plus an OpenAI Codex surface, both tier-mapped via
-        // `kimi_default_tiers()` (Anthropic) / `openai_tiers("kimi-k3")`
-        // (Codex, strong-model default). Mirrors the MiniMax precedent.
-        //
-        // OpenRouter is registered separately below (Anthropic-skin only).
+        // Direct Kimi Open Platform is Chat Completions-only, so only its
+        // Anthropic-compatible Claude Code surface is offered.
         "kimi" => vec![
             SurfaceEndpoint {
                 surface: ApiSurface::Anthropic,
                 base_url: "https://api.moonshot.ai/anthropic".to_string(),
                 model_tiers: kimi_default_tiers(),
-            },
-            SurfaceEndpoint {
-                surface: ApiSurface::OpenAI,
-                // Codex takes a single model — the strongest pick (kimi-k3,
-                // matching the Anthropic `default` / Opus tier). Mirrors the
-                // MiniMax precedent (`openai_tiers("MiniMax-M3[1m]")`) where
-                // the Codex-side default rides on the strong model.
-                base_url: "https://api.moonshot.ai/v1".to_string(),
-                model_tiers: openai_tiers("kimi-k3"),
             },
         ],
         // OpenRouter Anthropic Skin — Anthropic-only by scope decision (empty
@@ -1125,6 +1166,108 @@ pub fn provider_surfaces(account: &ProviderAccount) -> Vec<ApiSurface> {
     }
 }
 
+/// Atomically mutate the latest cached preference value and persist it while
+/// serialising competing read-modify-write operations.
+pub fn update(mutator: impl FnOnce(&mut AppPreferences)) -> Result<AppPreferences, String> {
+    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_none() {
+        *guard = Some(read_from_disk()?);
+    }
+    let mut candidate = guard
+        .as_ref()
+        .expect("preferences cache was initialized")
+        .clone();
+    mutator(&mut candidate);
+    // Publish the new cached value only after the durable atomic replacement
+    // succeeds. A failed write must not manufacture an in-memory verification
+    // record that launch preflight could mistake for persisted proof.
+    write_to_disk(&candidate)?;
+    *guard = Some(candidate.clone());
+    Ok(candidate)
+}
+
+/// Reconstruct the exact endpoint/model descriptor from persisted pairing
+/// state. `ApiSurface::OpenAI` is deliberately not proof of Responses
+/// compatibility: known Kimi rows are classified as Chat Completions, and
+/// MiniMax's retired `[1m]` alias is left capability-incomplete.
+pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDescriptor {
+    let endpoint = pairing.base_url.as_deref().unwrap_or("").trim().to_string();
+    let model_id = pairing
+        .model_tiers
+        .default
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let (wire_api, capabilities) = match pairing.surface {
+        ApiSurface::Anthropic => (
+            WireApi::AnthropicMessages,
+            compatibility::complete_agent_capabilities(),
+        ),
+        ApiSurface::OpenAI if pairing.provider_id == "kimi" => (
+            WireApi::ChatCompletions,
+            compatibility::complete_agent_capabilities(),
+        ),
+        ApiSurface::OpenAI
+            if pairing.provider_id == "minimax" && model_id != "MiniMax-M3" =>
+        {
+            (WireApi::Responses, Default::default())
+        }
+        ApiSurface::OpenAI => (
+            WireApi::Responses,
+            compatibility::complete_agent_capabilities(),
+        ),
+    };
+    EndpointModelDescriptor {
+        provider_id: pairing.provider_id.clone(),
+        endpoint,
+        wire_api,
+        model_id,
+        capabilities,
+        auth_modes: vec![ProviderAuthMode::BearerEnv],
+        context_window: None,
+        reasoning_effort: None,
+    }
+}
+
+/// One matcher drives attach eligibility, verification, spawn-menu visibility,
+/// and the final backend preflight.
+pub fn pairing_compatibility(pairing: &ProviderPairing) -> CompatibilityDecision {
+    let descriptor = endpoint_model_descriptor(pairing);
+    let requirements = match pairing.surface {
+        ApiSurface::Anthropic => compatibility::claude_requirements(),
+        ApiSurface::OpenAI => compatibility::codex_requirements(),
+    };
+    let mut decision = compatibility::match_descriptor(&descriptor, &requirements);
+    if decision.compatible && descriptor.endpoint.is_empty() {
+        decision.compatible = false;
+        decision.reason = Some("endpoint is required".into());
+    }
+    if decision.compatible && descriptor.model_id.is_empty() {
+        decision.compatible = false;
+        decision.reason = Some("explicit model is required".into());
+    }
+    if pairing.provider_id == "minimax"
+        && pairing.surface == ApiSurface::OpenAI
+        && descriptor.model_id != "MiniMax-M3"
+    {
+        decision.compatible = false;
+        decision.reason = Some(
+            "MiniMax Codex pairings require the current Responses model ID 'MiniMax-M3'"
+                .into(),
+        );
+    }
+    decision
+}
+
+fn pairing_can_potentially_match(pairing: &ProviderPairing) -> bool {
+    let mut candidate = pairing.clone();
+    if candidate.model_tiers.default.as_deref().is_none_or(str::is_empty) {
+        candidate.model_tiers.default = Some("model-selected-during-attach".into());
+    }
+    pairing_compatibility(&candidate).compatible
+}
+
 /// The Claude Code harness id the derived default Anthropic pairings group under
 /// — the first `anthropic`-backed profile, else the literal `"claude"` (which
 /// still resolves to the Anthropic executor). Pure; the single source of this
@@ -1158,9 +1301,16 @@ pub fn compatible_providers_for_harness(harness_id: &str) -> Vec<ProviderAccount
     let Some(surface) = harness_surface(harness_id) else {
         return Vec::new();
     };
+    let stored = provider_pairings();
     provider_accounts()
         .into_iter()
-        .filter(|a| provider_surfaces(a).contains(&surface))
+        .filter(|account| {
+            if !provider_surfaces(account).contains(&surface) {
+                return false;
+            }
+            attach_pairing_defaults(harness_id, account, &stored, |_| Some(surface))
+                .is_some_and(|pairing| pairing_can_potentially_match(&pairing))
+        })
         .collect()
 }
 
@@ -1590,6 +1740,24 @@ fn resolve_pairing(
         .cloned()
 }
 
+pub fn resolve_stored_pairing_and_account(
+    spawn_option_id: &str,
+) -> Result<Option<(ProviderPairing, ProviderAccount)>, String> {
+    let (harness_id, provider_id) =
+        crate::agent::provider::parse_spawn_option_id(spawn_option_id);
+    let Some(provider_id) = provider_id else {
+        return Ok(None);
+    };
+    let accounts = provider_accounts();
+    let account = accounts
+        .into_iter()
+        .find(|account| account.id == provider_id)
+        .ok_or_else(|| format!("provider account '{provider_id}' is missing"))?;
+    let pairing = resolve_pairing(harness_id, &account, &provider_pairings())
+        .ok_or_else(|| format!("pairing '{harness_id}:{provider_id}' is missing"))?;
+    Ok(Some((pairing, account)))
+}
+
 /// Attach-form defaults for `(harness, provider)`: stored pairing wins, else
 /// first-class published endpoint for the harness surface. Generics without a
 /// stored pairing return a surface-only shell (`base_url = None`) so the UI
@@ -2009,6 +2177,23 @@ mod tests {
             assert_eq!(prefs, AppPreferences::default());
             assert_eq!(prefs.default_provider, None);
         });
+    }
+
+    #[test]
+    fn failed_update_does_not_publish_candidate_to_cache() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let app_data_file = test_dir();
+        std::fs::write(&app_data_file, "not a directory").unwrap();
+        init_for_tests(app_data_file.clone());
+
+        assert_eq!(load().unwrap().default_provider, None);
+        let error = update(|prefs| prefs.default_provider = Some("must-not-leak".into()))
+            .unwrap_err();
+        assert!(error.contains("app data dir") || error.contains("temporary preferences"));
+        assert_eq!(load().unwrap().default_provider, None);
+
+        reset_for_tests();
+        std::fs::remove_file(app_data_file).unwrap();
     }
 
     #[test]
@@ -3039,7 +3224,7 @@ mod tests {
         assert_eq!(by(ApiSurface::Anthropic).base_url, "https://api.minimax.io/anthropic");
         assert_eq!(by(ApiSurface::Anthropic).model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
         assert_eq!(by(ApiSurface::OpenAI).base_url, "https://api.minimax.io/v1");
-        assert_eq!(by(ApiSurface::OpenAI).model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
+        assert_eq!(by(ApiSurface::OpenAI).model_tiers.default.as_deref(), Some("MiniMax-M3"));
         assert!(first_class_surfaces("deepseek").is_empty());
         assert!(first_class_surfaces("anthropic").is_empty());
         // OpenRouter is Anthropic-only with empty tiers.
@@ -3651,9 +3836,63 @@ mod tests {
         assert_eq!(anthropic.base_url, "https://api.moonshot.ai/anthropic");
         assert_eq!(anthropic.model_tiers, kimi_default_tiers());
         assert!(
-            surfaces.iter().any(|s| s.surface == ApiSurface::OpenAI),
-            "kimi must publish an OpenAI surface for Codex pairing",
+            !surfaces.iter().any(|s| s.surface == ApiSurface::OpenAI),
+            "direct Kimi is Chat Completions-only and must not be offered to Codex",
         );
+    }
+
+    #[test]
+    fn concurrent_updates_do_not_lose_results_or_leave_temporary_files() {
+        with_temp_dir(|directory| {
+            save(AppPreferences::default()).unwrap();
+            let workers = (0..16)
+                .map(|index| {
+                    std::thread::spawn(move || {
+                        update(|prefs| prefs.harness_order.push(format!("worker-{index}")))
+                            .unwrap();
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                worker.join().unwrap();
+            }
+            let prefs = load().unwrap();
+            assert_eq!(prefs.harness_order.len(), 16);
+            assert!((0..16).all(|index| prefs.harness_order.contains(&format!("worker-{index}"))));
+            assert_eq!(
+                std::fs::read_dir(directory)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp"))
+                    .count(),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn codex_compatibility_rejects_kimi_chat_and_unverified_minimax_alias() {
+        let mut pairing = ProviderPairing {
+            harness_id: "codex".into(),
+            provider_id: "kimi".into(),
+            surface: ApiSurface::OpenAI,
+            base_url: Some("https://api.moonshot.ai/v1".into()),
+            model_tiers: ModelTiers {
+                default: Some("kimi-k3".into()),
+                ..Default::default()
+            },
+        };
+        assert!(!pairing_compatibility(&pairing).compatible);
+
+        pairing.provider_id = "minimax".into();
+        pairing.base_url = Some("https://api.minimax.io/v1".into());
+        pairing.model_tiers.default = Some("MiniMax-M3[1m]".into());
+        let decision = pairing_compatibility(&pairing);
+        assert!(!decision.compatible);
+        assert!(decision.reason.unwrap().contains("MiniMax-M3"));
+
+        pairing.model_tiers.default = Some("MiniMax-M3".into());
+        assert!(pairing_compatibility(&pairing).compatible);
     }
 
     #[test]

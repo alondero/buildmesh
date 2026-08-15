@@ -26,30 +26,47 @@ use crate::process_util::command_no_window;
 // ── WSL distro lookup ──────────────────────────────────────────────────────
 
 /// The default WSL distro name (e.g., "Ubuntu"), cached after first detection
-static DETECTED_DISTRO: Lazy<Option<String>> = Lazy::new(get_default_wsl_distro_impl);
+static DETECTED_DISTRO: Lazy<Option<String>> = Lazy::new(detect_default_wsl_distro);
 
 /// Get the default WSL distro name by parsing `wsl.exe -l -v` output.
 /// Returns the distro marked as (default) or the first one if none marked.
-fn get_default_wsl_distro_impl() -> Option<String> {
+pub(crate) fn detect_default_wsl_distro() -> Option<String> {
     let output = command_no_window("wsl.exe")
         .args(["-l", "-v"])
         .output()
         .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.contains('(') && line.contains("Default") {
-            // Line format: "  Ubuntu    Active          2"
-            return line.split_whitespace().next().map(|s| s.to_string());
-        }
-    }
-    // No default marked, use first distro
-    stdout
+    let stdout = if output.stdout.iter().skip(1).step_by(2).any(|byte| *byte == 0) {
+        let units = output
+            .stdout
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    parse_wsl_distro_list(&stdout)
+}
+
+pub(super) fn parse_wsl_distro_list(stdout: &str) -> Option<String> {
+    let rows = stdout
         .lines()
-        .skip(1) // skip header
-        .find(|l| !l.trim().is_empty())
-        .and_then(|l| l.split_whitespace().next())
-        .map(|s| s.to_string())
+        .skip(1)
+        .map(|line| line.trim_matches('\0').trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    rows.iter()
+        .find_map(|line| {
+            line.strip_prefix('*')
+                .map(str::trim_start)
+                .and_then(|line| line.split_whitespace().next())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            rows.first()
+                .and_then(|line| line.split_whitespace().next())
+                .map(str::to_string)
+        })
 }
 
 /// Get the cached default WSL distro name
@@ -253,4 +270,3 @@ pub fn codex_dir() -> PathBuf {
         }
     }
 }
-
