@@ -70,6 +70,9 @@ jobs:
       - name: Typecheck frontend + build mobile bundle
         run: npx tsc --noEmit && npm run build:mobile
 
+      - name: Run vitest unit suite (scripts/check.ps1 unit logic, Linux-portable)
+        run: npx vitest run --pool=threads tests/unit
+
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.
       - name: Rust tests + regenerate TS bindings
