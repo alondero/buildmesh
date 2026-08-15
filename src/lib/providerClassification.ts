@@ -16,7 +16,7 @@ export const SELF_AUTH_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'grok', 'ope
 // Keyed first-class catalog ids — removable once added. Sync with
 // `preferences::keyed_first_class_catalog` / `BUILTIN_PROVIDER_ACCOUNTS`
 // (self_auth: false rows).
-export const KEYED_FIRST_CLASS_IDS = ['minimax', 'kimi', 'openrouter'];
+export const KEYED_FIRST_CLASS_IDS = ['minimax', 'kimi', 'openai', 'openrouter'];
 
 export const isSelfAuthId = (id: string): boolean => SELF_AUTH_PROVIDER_IDS.includes(id);
 

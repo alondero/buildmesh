@@ -71,7 +71,7 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     mockBackend();
     render(<UsageTab />);
     // Bars + balance from the fixture both surface.
-    expect(await screen.findByText('42.0%')).toBeTruthy();
+    expect(await screen.findByText('58.0% remaining')).toBeTruthy();
     expect(screen.getByText('USD 12.34')).toBeTruthy();
     expect(screen.getByText('Anthropic / Claude')).toBeTruthy();
     expect(screen.getByText('MiniMax')).toBeTruthy();

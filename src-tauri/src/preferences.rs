@@ -255,7 +255,7 @@ pub struct SurfaceEndpoint {
 ///
 /// Self-auth built-ins (anthropic, codex, agy, grok, opencode) always appear via
 /// [`default_provider_accounts`]. Keyed first-class providers (minimax, kimi,
-/// openrouter) live in [`BUILTIN_PROVIDER_ACCOUNTS`] but are only materialised
+/// openai, openrouter) live in [`BUILTIN_PROVIDER_ACCOUNTS`] but are only materialised
 /// when the user adds them from [`keyed_first_class_catalog`]. Users may also
 /// add custom Claude-compatible accounts (name + API key).
 ///
@@ -1051,6 +1051,7 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "kimi",      name: "Moonshot / Kimi",       self_auth: false },
     BuiltInProviderAccount { id: "opencode",  name: "OpenCode",             self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
+    BuiltInProviderAccount { id: "openai",    name: "OpenAI",                self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
 ];
 
@@ -1123,6 +1124,11 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
             surface: ApiSurface::Anthropic,
             base_url: "https://openrouter.ai/api".to_string(),
             model_tiers: ModelTiers::default(),
+        }],
+        "openai" => vec![SurfaceEndpoint {
+            surface: ApiSurface::OpenAI,
+            base_url: "https://api.openai.com/v1".to_string(),
+            model_tiers: openai_tiers("gpt-4o-mini"),
         }],
         _ => Vec::new(),
     }
@@ -1333,7 +1339,7 @@ pub fn pairing_for(harness_id: &str, provider_id: &str) -> Option<ProviderPairin
 /// The code-defined model-provider accounts that always exist regardless of what
 /// `preferences.json` stores (ADR-0025). **Self-auth built-ins only** —
 /// anthropic, codex, agy, grok, opencode. Keyed first-class providers
-/// (minimax, kimi, openrouter) are absent until the user adds them from
+/// (minimax, kimi, openai, openrouter) are absent until the user adds them from
 /// [`keyed_first_class_catalog`]; they still live in [`BUILTIN_PROVIDER_ACCOUNTS`]
 /// with `self_auth: false` for classification and catalog materialisation.
 ///
@@ -1355,7 +1361,7 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
 }
 
 /// Catalog of keyed first-class provider templates for the UI "Add provider"
-/// picker (ADR-0025): minimax, kimi, openrouter. Each row is credentials-only
+/// picker (ADR-0025): minimax, kimi, openai, openrouter. Each row is credentials-only
 /// (`api_key: None`, `enabled: true`, `claude_compatible: true`). The UI offers
 /// only those not already present in the effective account list.
 pub fn keyed_first_class_catalog() -> Vec<ProviderAccount> {
@@ -1738,6 +1744,17 @@ fn resolve_pairing(
         .iter()
         .find(|p| p.harness_id == harness_id && p.provider_id == account.id)
         .cloned()
+}
+
+/// Resolve the effective OpenAI Platform API key from the merged provider
+/// accounts. The key is used only for read-only model validation and monthly
+/// organization-cost queries; agent execution has its own credential routing.
+pub fn openai_api_key_resolved() -> Option<String> {
+    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
+        .into_iter()
+        .find(|a| a.id == "openai")
+        .and_then(|a| a.api_key)
+        .filter(|v| !v.is_empty())
 }
 
 pub fn resolve_stored_pairing_and_account(
@@ -2887,8 +2904,8 @@ mod tests {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
         assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode"]);
         let catalog_ids: Vec<_> = keyed_first_class_catalog().into_iter().map(|a| a.id).collect();
-        assert_eq!(catalog_ids, vec!["kimi", "minimax", "openrouter"]);
-        for id in &["kimi", "minimax", "openrouter"] {
+        assert_eq!(catalog_ids, vec!["kimi", "minimax", "openai", "openrouter"]);
+        for id in &["kimi", "minimax", "openai", "openrouter"] {
             let a = keyed_first_class_catalog()
                 .into_iter()
                 .find(|a| a.id == *id)

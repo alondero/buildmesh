@@ -138,25 +138,48 @@ fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
-/// Codex stores its auth under `$CODEX_HOME` (which points *at* the dir),
-/// defaulting to `~/.codex`.
-fn codex_home() -> PathBuf {
-    env::var("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".codex"))
-}
-
 fn anthropic_cred_path() -> PathBuf {
     home_dir().join(".claude").join(".credentials.json")
 }
 
-fn codex_auth_path() -> PathBuf {
-    codex_home().join("auth.json")
+#[derive(Debug, Clone)]
+struct CodexCredentials {
+    access_token: String,
+    account_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct OAuthCred {
+#[derive(Deserialize, Debug)]
+struct CodexNestedTokens {
     access_token: Option<String>,
+    account_id: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CodexAuthFile {
+    access_token: Option<String>,
+    account_id: Option<String>,
+    tokens: Option<CodexNestedTokens>,
+}
+
+impl CodexAuthFile {
+    fn extract_credentials(self) -> Option<CodexCredentials> {
+        if let Some(token) = self.access_token.filter(|token| !token.is_empty()) {
+            return Some(CodexCredentials {
+                access_token: token,
+                account_id: self.account_id,
+            });
+        }
+
+        self.tokens.and_then(|nested| {
+            nested
+                .access_token
+                .filter(|token| !token.is_empty())
+                .map(|access_token| CodexCredentials {
+                    access_token,
+                    account_id: nested.account_id.or(self.account_id),
+                })
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -181,12 +204,71 @@ fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
         .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
-/// Reads Codex's credentials JSON which has access_token at the top level.
-fn read_codex_token(path: PathBuf) -> Result<String, UsageError> {
+/// Reads Codex's credentials JSON without refreshing or rewriting it.
+fn read_codex_credentials(path: PathBuf) -> Result<CodexCredentials, UsageError> {
     let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let cred: OAuthCred =
+    let cred: CodexAuthFile =
         serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.access_token.ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
+    cred.extract_credentials()
+        .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
+}
+
+/// Compatibility helper for the older test seam; production callers need the
+/// optional ChatGPT account id as well as the bearer token.
+fn read_codex_token(path: PathBuf) -> Result<String, UsageError> {
+    read_codex_credentials(path).map(|credentials| credentials.access_token)
+}
+
+fn wsl_codex_auth_path() -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+
+    let distro = crate::env::get_default_wsl_distro()?;
+    let output = crate::process_util::command_no_window("wsl.exe")
+        .args(["-d", &distro, "--exec", "sh", "-c", "printf %s \"${CODEX_HOME:-$HOME/.codex}\""])
+        .env_remove("CODEX_HOME")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(crate::env::to_host_path(&format!("{home}/auth.json"))))
+}
+
+fn codex_auth_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let override_path = env::var("CODEX_HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(|home| PathBuf::from(home).join("auth.json"));
+    if let Some(path) = override_path {
+        paths.push(path);
+    }
+
+    paths.push(home_dir().join(".codex").join("auth.json"));
+    if let Some(path) = wsl_codex_auth_path() {
+        if !paths.iter().any(|candidate| candidate == &path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn discover_codex_credentials() -> Result<CodexCredentials, UsageError> {
+    let mut last_error = None;
+    for path in codex_auth_paths() {
+        match read_codex_credentials(path) {
+            Ok(credentials) => return Ok(credentials),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| UsageError::NoCredential("Codex auth.json".into())))
 }
 
 #[derive(Deserialize)]
@@ -244,7 +326,7 @@ fn fetch_usage(
     build_request: impl FnOnce(&Client) -> RequestBuilder,
     parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
 ) -> ProviderUsage {
-    let client = match Client::builder().build() {
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
         Ok(c) => c,
         Err(e) => return unavailable(provider, format!("Client error: {}", e)),
     };
@@ -342,56 +424,323 @@ pub fn anthropic_usage() -> ProviderUsage {
     )
 }
 
+#[derive(Deserialize, Debug)]
+struct CodexRateWindow {
+    #[serde(alias = "usedPercent")]
+    used_percent: Option<f64>,
+    limit_window_seconds: Option<i64>,
+    reset_at: Option<i64>,
+    #[serde(alias = "resetsAt")]
+    resets_at: Option<String>,
+    label: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CodexRateLimit {
+    primary_window: Option<CodexRateWindow>,
+    secondary_window: Option<CodexRateWindow>,
+    #[serde(default)]
+    additional_rate_limits: Vec<CodexRateWindow>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CodexUsageResponse {
+    rate_limit: Option<CodexRateLimit>,
+    primary: Option<CodexRateWindow>,
+    secondary: Option<CodexRateWindow>,
+}
+
+fn codex_window_label(duration_seconds: Option<i64>, fallback: Option<String>) -> String {
+    if let Some(label) = fallback.filter(|label| !label.is_empty()) {
+        return label;
+    }
+    match duration_seconds {
+        Some(18_000) => "5-hour".to_string(),
+        Some(604_800) => "Weekly".to_string(),
+        Some(seconds) if seconds > 0 && seconds % 3_600 == 0 && seconds <= 86_400 => {
+            format!("{}h", seconds / 3_600)
+        }
+        Some(seconds) if seconds > 0 && seconds % 86_400 == 0 => format!("{}d", seconds / 86_400),
+        Some(seconds) if seconds > 0 && seconds % 3_600 == 0 => format!("{}h", seconds / 3_600),
+        Some(seconds) if seconds > 0 => format!("{}s", seconds),
+        _ => "Usage".to_string(),
+    }
+}
+
+fn codex_reset_at(window: &CodexRateWindow) -> Option<String> {
+    window
+        .reset_at
+        .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
+        .map(|date| date.to_rfc3339())
+        .or_else(|| window.resets_at.clone())
+}
+
+fn codex_usage_window(window: CodexRateWindow) -> UsageWindow {
+    let label = codex_window_label(window.limit_window_seconds, window.label.clone());
+    let resets_at = codex_reset_at(&window);
+    UsageWindow {
+        label,
+        used_percent: window.used_percent.map(|percent| percent.clamp(0.0, 100.0)),
+        resets_at,
+    }
+}
+
 fn parse_codex_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
-    #[derive(Deserialize)]
-    struct Resp {
-        #[serde(default)]
-        primary: Option<CodexWindow>,
-        #[serde(default)]
-        secondary: Option<CodexWindow>,
-    }
-    #[derive(Deserialize)]
-    struct CodexWindow {
-        #[serde(rename = "usedPercent")]
-        used_percent: Option<f64>,
-        #[serde(rename = "resetsAt")]
-        resets_at: Option<String>,
-        #[serde(default)]
-        label: Option<String>,
-    }
+    let resp: CodexUsageResponse = serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+    let mut windows = Vec::new();
 
-    let resp: Resp = serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
-
-    let mut windows = vec![];
-    if let Some(p) = resp.primary {
-        windows.push(UsageWindow {
-            label: p.label.unwrap_or_else(|| "5-hour".to_string()),
-            used_percent: p.used_percent,
-            resets_at: p.resets_at,
-        });
-    }
-    if let Some(s) = resp.secondary {
-        windows.push(UsageWindow {
-            label: s.label.unwrap_or_else(|| "Weekly".to_string()),
-            used_percent: s.used_percent,
-            resets_at: s.resets_at,
-        });
+    if let Some(rate_limit) = resp.rate_limit {
+        if let Some(primary) = rate_limit.primary_window {
+            windows.push(codex_usage_window(primary));
+        }
+        if let Some(secondary) = rate_limit.secondary_window {
+            windows.push(codex_usage_window(secondary));
+        }
+        windows.extend(rate_limit.additional_rate_limits.into_iter().map(codex_usage_window));
+    } else {
+        if let Some(primary) = resp.primary {
+            let mut primary = primary;
+            primary.label = primary.label.or_else(|| Some("5-hour".to_string()));
+            windows.push(codex_usage_window(primary));
+        }
+        if let Some(secondary) = resp.secondary {
+            let mut secondary = secondary;
+            secondary.label = secondary.label.or_else(|| Some("Weekly".to_string()));
+            windows.push(codex_usage_window(secondary));
+        }
     }
     Ok(windows)
 }
 
-pub fn codex_usage() -> ProviderUsage {
-    let token = match read_codex_token(codex_auth_path()) {
-        Ok(t) => t,
-        Err(e) => return logged_out("codex", e.to_string()),
+fn format_reset_countdown(resets_at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let reset = chrono::DateTime::parse_from_rfc3339(resets_at).ok()?.with_timezone(&chrono::Utc);
+    let seconds = (reset - now).num_seconds();
+    if seconds <= 0 {
+        return Some("now".to_string());
+    }
+    let total_minutes = (seconds + 59) / 60;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    if hours > 0 {
+        Some(format!("{}h {}m", hours, minutes))
+    } else {
+        Some(format!("{}m", minutes.max(1)))
+    }
+}
+
+fn codex_detail(windows: &[UsageWindow], now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let summaries: Vec<String> = windows
+        .iter()
+        .filter_map(|window| {
+            let remaining = window.used_percent.map(|used| 100.0 - used)?;
+            let reset = window.resets_at.as_deref().and_then(|reset| format_reset_countdown(reset, now));
+            Some(match reset {
+                Some(reset) => format!("{remaining:.1}% remaining · resets in {reset}"),
+                None => format!("{remaining:.1}% remaining"),
+            })
+        })
+        .collect();
+    (!summaries.is_empty()).then(|| summaries.join(" · "))
+}
+
+fn codex_usage_from_credentials(credentials: CodexCredentials, endpoint: &str) -> ProviderUsage {
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+        Ok(client) => client,
+        Err(error) => return unavailable("codex", format!("Client error: {error}")),
     };
-    fetch_usage(
-        "codex",
-        |c| {
-            c.get("https://chatgpt.com/backend-api/wham/usage")
-                .header("Authorization", format!("Bearer {}", token))
+    let mut request = client
+        .get(endpoint)
+        .header("Authorization", format!("Bearer {}", credentials.access_token))
+        .header("User-Agent", format!("buildmesh/{}", env!("CARGO_PKG_VERSION")));
+    if let Some(account_id) = credentials.account_id {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+
+    match request.send() {
+        Ok(response) if response.status() == 401 || response.status() == 403 => logged_out(
+            "codex",
+            "Codex session expired — run `codex` in a terminal to log in".to_string(),
+        ),
+        Ok(response) if response.status() == 429 => unavailable(
+            "codex",
+            "Rate limited — usage data temporarily unavailable".to_string(),
+        ),
+        Ok(response) if !response.status().is_success() => unavailable(
+            "codex",
+            format!("API error {}: {}", response.status().as_u16(), response.text().unwrap_or_default()),
+        ),
+        Ok(response) => {
+            let body = response.text().unwrap_or_default();
+            match parse_codex_response(&body) {
+                Ok(windows) => ProviderUsage {
+                    provider: "codex".to_string(),
+                    logged_in: true,
+                    detail: codex_detail(&windows, chrono::Utc::now()),
+                    windows,
+                    balance: None,
+                    error: None,
+                },
+                Err(error) => unavailable("codex", format!("Failed to parse response: {error}")),
+            }
+        }
+        Err(error) => unavailable("codex", format!("Request failed: {error}")),
+    }
+}
+
+pub fn codex_usage() -> ProviderUsage {
+    match discover_codex_credentials() {
+        Ok(credentials) => codex_usage_from_credentials(
+            credentials,
+            "https://chatgpt.com/backend-api/wham/usage",
+        ),
+        Err(_) => logged_out(
+            "codex",
+            "No Codex CLI credentials found; run `codex` in a terminal to log in".to_string(),
+        ),
+    }
+}
+
+const OPENAI_ADMIN_KEY_DETAIL: &str =
+    "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)";
+
+#[derive(Deserialize, Debug)]
+struct OpenAiCostAmount {
+    value: Option<f64>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiCostResult {
+    amount: Option<OpenAiCostAmount>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiCostBucket {
+    #[serde(default)]
+    results: Vec<OpenAiCostResult>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiCostsResponse {
+    data: Vec<OpenAiCostBucket>,
+}
+
+fn parse_openai_costs(body: &str) -> Result<f64, UsageError> {
+    let response: OpenAiCostsResponse =
+        serde_json::from_str(body).map_err(|error| UsageError::Shape(error.to_string()))?;
+    Ok(response
+        .data
+        .into_iter()
+        .flat_map(|bucket| bucket.results)
+        .filter_map(|result| result.amount.and_then(|amount| amount.value))
+        .sum())
+}
+
+fn is_openai_project_key(api_key: &str) -> bool {
+    api_key.starts_with("sk-proj-")
+}
+
+fn is_openai_admin_key(api_key: &str) -> bool {
+    api_key.starts_with("sk-admin-")
+}
+
+fn openai_billing_unavailable(provider: &str) -> ProviderUsage {
+    ProviderUsage {
+        provider: provider.to_string(),
+        logged_in: true,
+        windows: Vec::new(),
+        balance: None,
+        detail: Some(OPENAI_ADMIN_KEY_DETAIL.to_string()),
+        error: None,
+    }
+}
+
+fn openai_month_start(now: chrono::DateTime<chrono::Utc>) -> i64 {
+    use chrono::{Datelike, TimeZone};
+    chrono::Utc
+        .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+        .single()
+        .expect("valid UTC month start")
+        .timestamp()
+}
+
+fn openai_usage_from_endpoints(
+    api_key: &str,
+    models_endpoint: &str,
+    costs_endpoint: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ProviderUsage {
+    if api_key.is_empty() {
+        return logged_out("openai", "No API key configured".to_string());
+    }
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+        Ok(client) => client,
+        Err(error) => return unavailable("openai", format!("Client error: {error}")),
+    };
+
+    let inference = match client.get(models_endpoint).bearer_auth(api_key).send() {
+        Ok(response) => response,
+        Err(error) => return unavailable("openai", format!("Request failed: {error}")),
+    };
+    if inference.status() == 401 || inference.status() == 403 {
+        return logged_out("openai", "Invalid API key".to_string());
+    }
+    if !inference.status().is_success() {
+        return unavailable(
+            "openai",
+            format!("API error {}: {}", inference.status().as_u16(), inference.text().unwrap_or_default()),
+        );
+    }
+
+    let costs_url = reqwest::Url::parse(costs_endpoint)
+        .map(|mut url| {
+            url.query_pairs_mut()
+                .append_pair("start_time", &openai_month_start(now).to_string())
+                .append_pair("bucket_width", "1d");
+            url
+        });
+    let costs_url = match costs_url {
+        Ok(url) => url,
+        Err(error) => return unavailable("openai", format!("Invalid costs endpoint: {error}")),
+    };
+    let costs = match client.get(costs_url).bearer_auth(api_key).send() {
+        Ok(response) => response,
+        Err(error) => return unavailable("openai", format!("Request failed: {error}")),
+    };
+    if (costs.status() == 401 || costs.status() == 403) && !is_openai_admin_key(api_key) {
+        return openai_billing_unavailable("openai");
+    }
+    if costs.status() == 429 {
+        return unavailable("openai", "Rate limited — usage data temporarily unavailable".to_string());
+    }
+    if !costs.status().is_success() {
+        return unavailable(
+            "openai",
+            format!("API error {}: {}", costs.status().as_u16(), costs.text().unwrap_or_default()),
+        );
+    }
+    match parse_openai_costs(&costs.text().unwrap_or_default()) {
+        Ok(spend) => ProviderUsage {
+            provider: "openai".to_string(),
+            logged_in: true,
+            windows: Vec::new(),
+            balance: Some(BillingBalance {
+                remaining: 0.0,
+                monthly_spend: Some(spend),
+                currency: "USD".to_string(),
+            }),
+            detail: None,
+            error: None,
         },
-        |body| Ok((parse_codex_response(body)?, None)),
+        Err(error) => unavailable("openai", format!("Failed to parse response: {error}")),
+    }
+}
+
+pub fn openai_usage(api_key: &str) -> ProviderUsage {
+    openai_usage_from_endpoints(
+        api_key,
+        "https://api.openai.com/v1/models",
+        "https://api.openai.com/v1/organization/costs",
+        chrono::Utc::now(),
     )
 }
 
@@ -1806,6 +2155,89 @@ mod tests {
     }
 
     #[test]
+    fn parse_codex_rate_limit_response_maps_duration_and_epoch_reset() {
+        let json = r#"{
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 18.5,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1755288000
+                },
+                "secondary_window": {
+                    "used_percent": 42.0,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1755892800
+                },
+                "additional_rate_limits": [
+                    {"used_percent": 5.0, "limit_window_seconds": 86400, "reset_at": 1755374400}
+                ]
+            }
+        }"#;
+
+        let windows = parse_codex_response(json).unwrap();
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[0].used_percent, Some(18.5));
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2025-08-15T20:00:00+00:00"));
+        assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[2].label, "24h");
+    }
+
+    #[test]
+    fn codex_detail_reports_remaining_percentage_and_countdown() {
+        let now = chrono::DateTime::parse_from_rfc3339("2025-08-15T16:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let windows = vec![UsageWindow {
+            label: "5-hour".into(),
+            used_percent: Some(18.5),
+            resets_at: Some("2025-08-15T18:40:00Z".into()),
+        }];
+
+        assert_eq!(
+            codex_detail(&windows, now).as_deref(),
+            Some("81.5% remaining · resets in 2h 40m")
+        );
+    }
+
+    #[test]
+    fn read_codex_credentials_supports_nested_tokens_and_account_id_fallback() {
+        let path = std::env::temp_dir().join(format!("buildmesh-codex-auth-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"account_id":"acct-root","tokens":{"access_token":"nested-token"}}"#,
+        )
+        .unwrap();
+
+        let credentials = read_codex_credentials(path.clone()).unwrap();
+        assert_eq!(credentials.access_token, "nested-token");
+        assert_eq!(credentials.account_id.as_deref(), Some("acct-root"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_openai_costs_sums_all_daily_results() {
+        let json = r#"{
+            "data": [
+                {"results": [{"amount": {"value": 1.25}}, {"amount": {"value": 0.75}}]},
+                {"results": [{"amount": {"value": 3.0}}]}
+            ]
+        }"#;
+
+        assert_eq!(parse_openai_costs(json).unwrap(), 5.0);
+    }
+
+    #[test]
+    fn openai_project_billing_forbidden_is_graceful() {
+        assert!(is_openai_project_key("sk-proj-example"));
+        assert!(!is_openai_project_key("sk-admin-example"));
+        let usage = openai_billing_unavailable("openai");
+        assert!(usage.logged_in);
+        assert!(usage.error.is_none());
+        assert_eq!(usage.detail.as_deref(), Some(OPENAI_ADMIN_KEY_DETAIL));
+    }
+
+    #[test]
     fn parse_minimax_response_valid() {
         // Live response shape as of 2026-06-01: wrapper is `model_remains` (not
         // `category_remains`), items carry `model_name` instead of
@@ -2847,6 +3279,77 @@ mod tests {
         port
     }
 
+    #[test]
+    fn codex_usage_expired_token_is_logged_out_with_cli_remediation() {
+        let port = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::from_string("expired").with_status_code(401));
+        });
+        let usage = codex_usage_from_credentials(
+            CodexCredentials {
+                access_token: "expired-token".into(),
+                account_id: Some("acct-1".into()),
+            },
+            &format!("http://127.0.0.1:{port}/usage"),
+        );
+
+        assert!(!usage.logged_in);
+        assert_eq!(
+            usage.error.as_deref(),
+            Some("Codex session expired — run `codex` in a terminal to log in")
+        );
+    }
+
+    #[test]
+    fn openai_admin_usage_aggregates_current_month_costs() {
+        let port = spawn_loopback(2, |req| {
+            if req.url() == "/v1/models" {
+                let _ = req.respond(tiny_http::Response::from_string("{}"));
+            } else {
+                assert!(req.url().contains("start_time="));
+                assert!(req.url().contains("bucket_width=1d"));
+                let body = r#"{"data":[{"results":[{"amount":{"value":1.25}},{"amount":{"value":0.75}}]}]}"#;
+                let _ = req.respond(tiny_http::Response::from_string(body));
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let now = chrono::DateTime::parse_from_rfc3339("2025-08-15T16:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let usage = openai_usage_from_endpoints(
+            "sk-admin-test",
+            &format!("{base}/v1/models"),
+            &format!("{base}/v1/organization/costs"),
+            now,
+        );
+
+        assert!(usage.logged_in);
+        assert_eq!(usage.balance.unwrap().monthly_spend, Some(2.0));
+        assert!(usage.error.is_none());
+    }
+
+    #[test]
+    fn openai_project_usage_keeps_login_healthy_when_cost_scope_is_forbidden() {
+        let port = spawn_loopback(2, |req| {
+            if req.url() == "/v1/models" {
+                let _ = req.respond(tiny_http::Response::from_string("{}"));
+            } else {
+                let _ = req.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let usage = openai_usage_from_endpoints(
+            "sk-proj-test",
+            &format!("{base}/v1/models"),
+            &format!("{base}/v1/organization/costs"),
+            chrono::Utc::now(),
+        );
+
+        assert!(usage.logged_in);
+        assert!(usage.balance.is_none());
+        assert!(usage.error.is_none());
+        assert_eq!(usage.detail.as_deref(), Some(OPENAI_ADMIN_KEY_DETAIL));
+    }
+
     /// Builds a temp home with a `auth.json` + `opencode.db` so the
     /// SQLite fallback has something to render. The session row seeds
     /// the 5-hour window at 50% — the SQLite fallback tests assert this
@@ -3246,4 +3749,3 @@ mod tests {
         let _ = fs::remove_dir_all(&temp);
     }
 }
-

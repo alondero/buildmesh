@@ -9,7 +9,7 @@ use tauri::command;
 /// id isn't here — a **Generic Model Provider** (custom endpoint) — is
 /// configurable but has no usage endpoint, so it renders an explicit "usage not
 /// tracked" state instead.
-const FETCHABLE: [&str; 8] = ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode"];
+const FETCHABLE: [&str; 9] = ["anthropic", "codex", "minimax", "agy", "kimi", "openai", "openrouter", "grok", "opencode"];
 
 /// Map a self-authenticating **native** provider account to the harness whose
 /// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
@@ -42,7 +42,7 @@ fn harness_detected(harness_id: &str, profiles: &[HarnessProfile]) -> bool {
 /// #574, detection-gated). A **native** provider appears only when its harness is
 /// installed — it self-authenticates, so no key is needed and an uninstalled
 /// harness is never shown (e.g. no Codex card on a box without Codex). A **keyed**
-/// provider (first-class MiniMax/Kimi/OpenRouter or a Generic custom endpoint)
+/// provider (first-class MiniMax/Kimi/OpenAI/OpenRouter or a Generic custom endpoint)
 /// always has a card so its credential editor and enable toggle stay reachable.
 /// The Kimi Code CLI Agent Harness itself doesn't appear as a provider card —
 /// it's a Harness, registered in `HarnessProfile` / `Provider::Kimi` /
@@ -93,6 +93,7 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
         match id {
             "minimax" => preferences::minimax_api_key_resolved().is_some_and(|k| !k.is_empty()),
             "kimi" => preferences::kimi_api_key_resolved().is_some_and(|k| !k.is_empty()),
+            "openai" => preferences::openai_api_key_resolved().is_some_and(|k| !k.is_empty()),
             "openrouter" => preferences::openrouter_api_key_resolved().is_some_and(|k| !k.is_empty()),
             // Custom (Generic) Claude-compatible providers store the key on
             // the account itself — no legacy flat field.
@@ -103,7 +104,7 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
                 .is_some_and(|k| !k.is_empty()),
         }
     };
-    for id in ["minimax", "kimi", "openrouter"] {
+    for id in ["minimax", "kimi", "openai", "openrouter"] {
         if has_key(id) {
             configured.insert(id.to_string());
         }
@@ -199,7 +200,10 @@ fn assemble_meters(
             // credential on disk" with acceptable accuracy; we still
             // honour configured_keys for any future keyed native flows.
             let usage = usages.get(&a.id)?;
-            if !usage.logged_in && !configured_keys.contains(&a.id) {
+            let credential_rejected = usage.error.as_deref().is_some_and(|error| {
+                error.contains("session expired") || error == "Invalid API key"
+            });
+            if !usage.logged_in && !configured_keys.contains(&a.id) && !credential_rejected {
                 return None;
             }
             Some(ProviderMeters {
@@ -248,6 +252,9 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
                 .as_deref()
                 .unwrap_or(""),
         ),
+        "openai" => usage::openai_usage(
+            preferences::openai_api_key_resolved().as_deref().unwrap_or(""),
+        ),
         "grok" => usage::grok_usage(),
         "opencode" => usage::opencode_usage(),
         other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
@@ -267,7 +274,7 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
     let accounts = preferences::provider_accounts();
     let ids = poll_ids(&accounts, &profiles);
     // Resolve once which keyed providers have a credential configured —
-    // threaded into the gate so a 401/403 from Kimi/OpenRouter doesn't
+    // threaded into the gate so a 401/403 from Kimi/OpenAI/OpenRouter doesn't
     // silently hide the row (see `assemble_meters` docstring).
     let configured_keys = configured_keyed_providers(&accounts);
 
@@ -374,7 +381,7 @@ mod tests {
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode"] {
+        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openai", "openrouter", "grok", "opencode"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.
@@ -391,6 +398,7 @@ mod tests {
             account("codex", true),     // tracked but harness undetected → out
             account("minimax", true),   // enabled keyed tracked → in
             account("kimi", true),      // enabled keyed tracked → in (wallet meter)
+            account("openai", true),    // enabled keyed tracked → in (monthly spend)
             // OpenRouter joins the tracked keyed set — opt-in via missing key
             // (defaults to enabled, but `account_visible` lets it through; the
             // fetcher's empty-key path returns `logged_out` until the user adds
@@ -400,7 +408,7 @@ mod tests {
         ];
         assert_eq!(
             poll_ids(&accounts, &claude),
-            vec!["anthropic", "minimax", "kimi", "openrouter"]
+            vec!["anthropic", "minimax", "kimi", "openai", "openrouter"]
         );
     }
 
@@ -530,6 +538,31 @@ mod tests {
             rows.is_empty(),
             "native providers without credentials must be dropped, got: {rows:?}"
         );
+    }
+
+    #[test]
+    fn assemble_meters_keeps_codex_row_when_session_expired() {
+        let profiles = vec![profile("codex", "codex")];
+        let expired = ProviderUsage {
+            provider: "codex".into(),
+            logged_in: false,
+            windows: Vec::new(),
+            balance: None,
+            detail: None,
+            error: Some("Codex session expired — run `codex` in a terminal to log in".into()),
+        };
+        let mut usages = HashMap::new();
+        usages.insert("codex".into(), expired);
+
+        let rows = assemble_meters(
+            &[account("codex", true)],
+            &profiles,
+            &usages,
+            &HashSet::new(),
+        );
+
+        assert_eq!(rows.len(), 1, "an expired but present Codex session needs remediation UI");
+        assert_eq!(rows[0].usage.as_ref().unwrap().error.as_deref(), Some("Codex session expired — run `codex` in a terminal to log in"));
     }
 
     #[test]

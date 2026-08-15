@@ -33,8 +33,9 @@ import { ProviderIcon } from '../Providers/ProviderIcon';
  *  instead of the roomier Settings-modal scale they were ported from. */
 export function UsageBar({ window }: { window: UsageWindow }) {
   const percent = window.usedPercent ?? 0;
+  const remaining = Math.max(0, 100 - percent);
   const color = percent > 80 ? 'bg-status-error' : percent > 60 ? 'bg-status-warning' : 'bg-accent-cyan';
-  const display = window.usedPercent != null ? `${percent.toFixed(1)}%` : 'N/A';
+  const display = window.usedPercent != null ? `${remaining.toFixed(1)}% remaining` : 'N/A';
   return (
     <div className="mt-2 first:mt-0">
       <div className="flex justify-between items-baseline gap-2 text-xs mb-1">
@@ -48,10 +49,25 @@ export function UsageBar({ window }: { window: UsageWindow }) {
         />
       </div>
       {window.resetsAt && (
-        <p className="text-2xs text-text-muted mt-1">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
+        <p className="text-2xs text-text-muted mt-1">
+          Resets in {formatResetCountdown(window.resetsAt)}
+        </p>
       )}
     </div>
   );
+}
+
+function formatResetCountdown(resetsAt: string): string {
+  const seconds = Math.ceil((new Date(resetsAt).getTime() - Date.now()) / 1000);
+  if (!Number.isFinite(seconds) || seconds <= 0) return 'now';
+  const totalMinutes = Math.ceil(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0) {
+    const minutePart = minutes === 0 ? '' : ` ${minutes}m`;
+    return `${hours}h${minutePart}`;
+  }
+  return `${Math.max(1, minutes)}m`;
 }
 
 /** Cash-balance view for a pay-as-you-go account (issue #537). */
@@ -117,11 +133,20 @@ export function UsagePanel({
     // provider; if it doesn't, surface a neutral placeholder.
     if (!meter.usage) return <p className="text-xs text-text-muted">Unable to load usage data</p>;
     if (!meter.usage.loggedIn) {
+      const missingCredential = !meter.usage.error
+        || meter.usage.error.startsWith('No API key')
+        || meter.usage.error.startsWith('No credential');
       return (
         <div>
-          <p className="text-xs text-status-warning">{keyed ? 'No API key' : 'Not logged in'}</p>
+          <p className={`text-xs ${missingCredential ? 'text-status-warning' : 'text-status-error'}`}>
+            {missingCredential ? keyed ? 'No API key' : 'Not logged in' : meter.usage.error}
+          </p>
           <p className="text-2xs text-text-muted mt-1">
-            {keyed ? `Enter an API key for ${account.name} above` : `Run the ${account.name} CLI login first`}
+            {keyed
+              ? `Enter an API key for ${account.name} above`
+              : account.id === 'codex'
+                ? 'Run codex in a terminal to log in'
+                : `Run the ${account.name} CLI login first`}
           </p>
         </div>
       );

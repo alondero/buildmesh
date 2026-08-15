@@ -57,15 +57,15 @@ function meter(over: Partial<ProviderMeters> = {}): ProviderMeters {
 }
 
 describe('UsageBar (extracted, was on AccountCard)', () => {
-  it('renders 0% used as a real figure, not N/A', () => {
+  it('renders 100% remaining as a real figure, not N/A', () => {
     render(<UsageBar window={{ label: 'Claude Sonnet 4.6 (Thinking)', usedPercent: 0, resetsAt: null }} />);
-    expect(screen.getByText('0.0%')).toBeTruthy();
+    expect(screen.getByText('100.0% remaining')).toBeTruthy();
     expect(screen.queryByText('N/A')).toBeNull();
   });
 
   it('renders a known non-zero percentage', () => {
     render(<UsageBar window={{ label: 'Gemini 3.5 Flash (Medium)', usedPercent: 20, resetsAt: null }} />);
-    expect(screen.getByText('20.0%')).toBeTruthy();
+    expect(screen.getByText('80.0% remaining')).toBeTruthy();
   });
 
   it('shows N/A only when usedPercent is genuinely unknown (null)', () => {
@@ -98,7 +98,7 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
         meter={meter({ usage: usage({ windows: [{ label: '5-hour', usedPercent: 41, resetsAt: null }] }) })}
       />,
     );
-    expect(screen.getByText('41.0%')).toBeTruthy();
+    expect(screen.getByText('59.0% remaining')).toBeTruthy();
     expect(screen.queryByText('Balance remaining')).toBeNull();
   });
 
@@ -113,7 +113,7 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
       />,
     );
     expect(screen.getByText('USD 12.34')).toBeTruthy();
-    expect(screen.queryByText(/%$/)).toBeNull();
+    expect(screen.queryByText(/% remaining$/)).toBeNull();
   });
 
   it('shows "No usage data" when a logged-in account has no meters yet', () => {
@@ -140,7 +140,7 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
         })}
       />,
     );
-    expect(screen.getByText('41.0%')).toBeTruthy();
+    expect(screen.getByText('59.0% remaining')).toBeTruthy();
     expect(screen.getByText('USD 12.34')).toBeTruthy();
   });
 
@@ -198,6 +198,19 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
       />,
     );
     expect(screen.getByText('Token expired')).toBeTruthy();
+  });
+
+  it('surfaces an invalid API key error even when the provider is logged out', () => {
+    render(
+      <UsagePanel
+        account={account({ id: 'openai', name: 'OpenAI' })}
+        meter={meter({
+          provider: 'openai',
+          usage: usage({ provider: 'openai', loggedIn: false, error: 'Invalid API key' }),
+        })}
+      />,
+    );
+    expect(screen.getByText('Invalid API key')).toBeTruthy();
   });
 
   it('shows the provider name next to the meter (the glance contract)', () => {
