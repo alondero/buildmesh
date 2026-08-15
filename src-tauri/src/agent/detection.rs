@@ -83,6 +83,13 @@ const DETECTABLE: &[Detectable] = &[
         binaries: &["kimi"],
         config_dirs: &[".kimi"],
     },
+    Detectable {
+        id: "mcode",
+        name: "MiniMax Code",
+        harness: "mcode",
+        binaries: &["mcode"],
+        config_dirs: &[".mcode", ".minimax-code"],
+    },
 ];
 
 /// True if `binary` (plus any of `exts`) exists in one of the `path_dirs`.
@@ -254,6 +261,20 @@ mod tests {
         assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["kimi"]);
     }
 
+    /// MiniMax Code CLI (`mcode`) ships `~/.mcode/` or `~/.minimax-code/` for config alongside the `mcode` binary.
+    #[test]
+    fn mcode_config_dir_alone_counts_as_installed() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.mcode"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["mcode"]);
+
+        let exists_alt = fake_fs(&["/home/me/.minimax-code"]);
+        let profiles_alt = detect_profiles(&path_dirs, &[""], Some(&home), &exists_alt);
+        assert_eq!(profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["mcode"]);
+    }
+
     #[test]
     fn agy_has_no_config_dir_so_needs_the_binary() {
         // Antigravity declares no config dir, so a stray home dir can't conjure
@@ -277,6 +298,7 @@ mod tests {
             "/bin/opencode",
             "/bin/grok",
             "/bin/kimi",
+            "/bin/mcode",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -290,6 +312,7 @@ mod tests {
                 "opencode" => assert_eq!(provider, Provider::OpenCode),
                 "grok" => assert_eq!(provider, Provider::Grok),
                 "kimi" => assert_eq!(provider, Provider::Kimi),
+                "mcode" => assert_eq!(provider, Provider::Mcode),
                 other => panic!("unexpected detected id {other}"),
             }
         }

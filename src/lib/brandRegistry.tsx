@@ -84,7 +84,7 @@ type BrandRegistration = Brand & { readonly aliases?: readonly string[] };
 // currentColor can follow the surface where ProviderIcon is rendered.
 const BRANDS: readonly BrandRegistration[] = [
   { id: 'anthropic', aliases: ['claude'], icon: { kind: 'inline', component: ClaudeCodeIcon }, chipHex: '#1d7cfc', chipClass: 'bg-blue-500' },
-  { id: 'minimax', icon: { kind: 'image', src: minimaxLogo }, chipHex: '#6366f1', chipClass: 'bg-indigo-500' },
+  { id: 'minimax', aliases: ['mcode'], icon: { kind: 'image', src: minimaxLogo }, chipHex: '#6366f1', chipClass: 'bg-indigo-500' },
   { id: 'kimi', icon: { kind: 'inline', component: KimiIcon }, chipHex: '#00c4c4', chipClass: 'bg-cyan-500' },
   { id: 'agy', icon: { kind: 'image', src: antigravityLogo }, chipHex: '#10b981', chipClass: 'bg-emerald-500' },
   { id: 'opencode', icon: { kind: 'inline', component: OpenCodeIcon }, chipHex: '#f59e0b', chipClass: 'bg-amber-500' },
