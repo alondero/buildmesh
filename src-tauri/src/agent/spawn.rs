@@ -1096,25 +1096,47 @@ pub(crate) async fn spawn_with_intent(
                     "cannot resume node {}: no CLI session ID is stored",
                     node.id
                 );
+                // Startup resume with no cli_session_id: there is nothing
+                // for us to resume. DO NOT write Idle -- that was the
+                // silent-drop bug that stranded Suspended OpenCode /
+                // Terminal nodes with no UI recovery affordance.
+                // Leaving the status as Suspended means the user can
+                // click the new Resume button in the sidebar / header
+                // to retry with ResumeCause::Explicit. The
+                // auto_resume_agent_nodes caller in commands/agent.rs
+                // queries db::list_suspended_nodes so the row is
+                // always already Suspended here; the prior on_idle
+                // was redundant at best and silently destructive.
                 if matches!(cause, ResumeCause::Startup) {
-                    let sink = session_lifecycle::AppSessionLifecycleSink { app };
-                    session_lifecycle::on_idle(&sink, node.id).ok();
                     return Ok(SpawnOutcome::Skipped(node));
                 }
                 return Err(message);
             };
 
+            // Startup resume but the adapter declines (OpenCode,
+            // Terminal -- they have no --resume flag and no
+            // auto-resume). DO NOT write Idle (same rationale as
+            // the cli_session_id-missing branch above): the node
+            // stays Suspended so the user's new Resume button can
+            // retry later, or the node can be regenerated to a
+            // different provider. The Explicit branch
+            // (ResumeCause::Explicit from user-driven Resume /
+            // Regenerate) is not affected -- it falls through to
+            // the supports_resume() check removed below.
             if matches!(cause, ResumeCause::Startup) && !adapter.auto_resume_on_startup() {
-                let sink = session_lifecycle::AppSessionLifecycleSink { app };
-                session_lifecycle::on_idle(&sink, node.id).ok();
                 return Ok(SpawnOutcome::Skipped(node));
             }
-            if !adapter.supports_resume() {
-                return Err(format!(
-                    "cannot resume node {}: provider '{}' does not support resume",
-                    node.id, node.provider
-                ));
-            }
+            // Adapter cannot honour a resume arg (OpenCode,
+            // Terminal -- no --resume flag). Fall through to
+            // resume = None, which routes the spawn via the _ =>
+            // None arm below into SpawnIntent::Fresh semantics.
+            // Same philosophy as decide_resume returning None on
+            // cross-harness: the captured cli_session_id is
+            // preserved in the DB so a future Regenerate to a
+            // resumable harness can still pick it up. Without
+            // this, the user-driven Resume button on a Suspended
+            // OpenCode node would surface a toast instead of
+            // starting fresh on the same worktree.
             Some(cli_session_id)
         }
         _ => None,

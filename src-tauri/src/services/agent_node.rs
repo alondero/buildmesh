@@ -437,25 +437,49 @@ fn process_removals(
 
 /// Validate that a node's status is eligible for regeneration.
 ///
-/// Allowed: `Idle`, `AwaitingInput`, `Error`, `Running` — the node has
-/// a process (live or recently-live) we can kill and replace.
+/// Allowed: `Idle`, `AwaitingInput`, `Error`, `Running`, `Suspended` —
+/// the node is in a state we can either kill-and-replace or, in the
+/// `Suspended` case, just respawn (no live process to kill). The
+/// orchestrator (see `regenerate` step 3) branches on `Suspended` to
+/// skip the unconditional `kill_agent` call.
 /// Rejected: `Spawning` / `Pending` (another spawn is in flight) and
-/// `Archived` / `Suspended` (the node is closed or awaiting app-
-/// restart resume).
+/// `Archived` (the node is closed-but-historical).
 ///
 /// Extracted from the #775 spec (step 2) so the orchestrator and the
-/// tests share one source of truth.
+/// tests share one source of truth. `Suspended` was added so the
+/// Regenerate picker can also act as a "Resume" entry for Suspended
+/// nodes — those have no live process to kill (crash-recovery was
+/// killed on app exit; autopilot-gate never spawned). The kill-skip
+/// branch in `regenerate` prevents `kill_agent_blocking`'s
+/// unconditional `on_idle` tail (commands/agent.rs:1172) from
+/// clobbering Suspended→Idle before the new spawn lands.
 pub fn validate_status_eligible(status: SessionStatus) -> Result<(), String> {
     match status {
         SessionStatus::Idle
         | SessionStatus::AwaitingInput
         | SessionStatus::Error
-        | SessionStatus::Running => Ok(()),
+        | SessionStatus::Running
+        | SessionStatus::Suspended => Ok(()),
         _ => Err(format!(
-            "regenerate unavailable: node is in {} state (must be idle, awaiting_input, error, or running)",
+            "regenerate unavailable: node is in {} state (must be idle, awaiting_input, error, running, or suspended)",
             status.to_db_str()
         )),
     }
+}
+
+/// Whether the [`regenerate`] orchestrator should skip its pre-spawn
+/// `kill_agent` call. True when the node has no live process to
+/// terminate; `kill_agent_blocking`'s tail calls
+/// `session_lifecycle::on_idle` which unconditionally writes `Idle`
+/// (commands/agent.rs:1172), and for a Suspended node that write
+/// would clobber Suspended→Idle BEFORE the new spawn lands.
+///
+/// Pure — extracted from `regenerate` so the rule is unit-testable
+/// without Tauri or a real DB. Keep the helper narrow: only `Suspended`
+/// qualifies today. Future "skip" states (e.g. an `Archived` revival)
+/// would be added here with a corresponding test.
+pub fn should_skip_kill_for_regenerate(status: SessionStatus) -> bool {
+    matches!(status, SessionStatus::Suspended)
 }
 
 /// Decide whether to pass the existing `cli_session_id` to the new
@@ -526,26 +550,35 @@ pub async fn regenerate(
         return Err(AgentNodeError::Status(e));
     }
 
-    // 3. Kill the live process. `kill_agent` is idempotent — a no-op
-    //    when no process is registered, and it also resets session-
-    //    naming buffers (`session_naming::reset_buffers` internally)
-    //    and clears HTTP scrollback, matching the frontend's "kill"
-    //    path.
+    // 3. Kill the live process ONLY when one is registered.
+    //    `kill_agent` is idempotent — a no-op when no process is
+    //    registered — but its tail (commands/agent.rs:1172) calls
+    //    `session_lifecycle::on_idle`, which unconditionally writes
+    //    `Idle`. For a Suspended node (no live process — the agent
+    //    was killed on app exit, or never started in the
+    //    autopilot-gate case) that write would clobber Suspended→Idle
+    //    BEFORE the new spawn lands. `should_skip_kill_for_regenerate`
+    //    keeps the rule local to this orchestrator — do NOT modify
+    //    `kill_agent` (it's used by `close_node`, the spawn stale-
+    //    process reaper at spawn.rs:1228, and `auto_resume_*`; its
+    //    `on_idle` is correct for actual kills).
     //
-    //    The explicit call is load-bearing: `spawn_agent_inner`'s
-    //    `is_agent_already_running` short-circuit at spawn.rs:743
-    //    returns early without killing or respawning if a process
-    //    is still registered, which would leave the OLD process
-    //    alive with the NEW provider in the DB. `spawn_agent_inner`
-    //    re-kills at its own step 2 (spawn.rs:751) but only after
-    //    that short-circuit doesn't fire.
+    //    The explicit kill IS load-bearing for non-Suspended nodes:
+    //    `spawn_agent_inner`'s `is_agent_already_running` short-circuit
+    //    at spawn.rs:743 returns early without killing or respawning
+    //    if a process is still registered, which would leave the OLD
+    //    process alive with the NEW provider in the DB.
+    //    `spawn_agent_inner` re-kills at its own step 2 (spawn.rs:751)
+    //    but only after that short-circuit doesn't fire.
     //
     //    Errors are ignored: `kill_agent` returns Err only from the
     //    trailing `SessionLifecycle::on_kill(.., Idle)` (issue #132) —
     //    the registry side effects (`kill_session` + `remove`) are
     //    already in place. The new spawn sets the status correctly
     //    anyway.
-    let _ = crate::commands::agent::kill_agent(node_id).await;
+    if !should_skip_kill_for_regenerate(node.status) {
+        let _ = crate::commands::agent::kill_agent(node_id).await;
+    }
 
     // 4. Update the `provider` column. The next `spawn_agent_inner`
     //    call reads `node.provider` for backend env resolution
@@ -1039,21 +1072,33 @@ mod tests {
     // -----------------------------------------------------------------------
     // Regenerate (issue #775) — validation + resume-decision surface.
     //
-    // The two pure helpers (`validate_status_eligible`, `decide_resume`) own
-    // the new logic. The async `regenerate` orchestrator is exercised end-
-    // to-end via the Playwright e2e suite and the manual smoke test, so the
-    // unit tests here stay focused on the rules the orchestrator composes.
+    // The three pure helpers (`validate_status_eligible`,
+    // `should_skip_kill_for_regenerate`, `decide_resume`) own the new
+    // logic. The async `regenerate` orchestrator is exercised end-to-end
+    // via the Playwright e2e suite and the manual smoke test, so the
+    // unit tests here stay focused on the rules the orchestrator
+    // composes.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn validate_status_eligible_allows_running_idle_awaiting_error() {
-        // The four "process is or was running" states — these are the
-        // cases where a kill + respawn makes sense.
+    fn validate_status_eligible_allows_running_idle_awaiting_error_suspended() {
+        // The five states the regenerate orchestrator accepts:
+        //   * Running / Idle / AwaitingInput / Error — "process is or
+        //     was running", so kill + respawn makes sense.
+        //   * Suspended — no live process to kill; the orchestrator
+        //     branches on `should_skip_kill_for_regenerate` to avoid
+        //     the unconditional `on_idle` tail of `kill_agent`
+        //     (commands/agent.rs:1172) clobbering Suspended→Idle
+        //     before the new spawn lands. The frontend gates the
+        //     user-driven Resume affordance on `cli_session_id` non-
+        //     empty to keep the autopilot-gate case (Suspended +
+        //     NULL session id) from surfacing a confusing toast.
         for status in [
             SessionStatus::Running,
             SessionStatus::Idle,
             SessionStatus::AwaitingInput,
             SessionStatus::Error,
+            SessionStatus::Suspended,
         ] {
             assert!(
                 validate_status_eligible(status).is_ok(),
@@ -1064,13 +1109,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_status_eligible_rejects_spawning_pending_archived_suspended() {
-        // The four "no process to swap" states — reject at the boundary.
+    fn validate_status_eligible_rejects_spawning_pending_archived() {
+        // The three "no process to swap" states — reject at the
+        // boundary. `Suspended` moved to the allowed list (see the
+        // matching positive test above) when user-driven recovery for
+        // Suspended nodes shipped.
         for status in [
             SessionStatus::Spawning,
             SessionStatus::Pending,
             SessionStatus::Archived,
-            SessionStatus::Suspended,
         ] {
             assert!(
                 validate_status_eligible(status).is_err(),
@@ -1089,6 +1136,38 @@ mod tests {
             err.contains("spawning"),
             "error must mention the rejected status, got: {err}",
         );
+    }
+
+    #[test]
+    fn should_skip_kill_for_regenerate_only_true_for_suspended() {
+        // The kill-skip branch is the load-bearing pairing with
+        // `validate_status_eligible` accepting Suspended — without it,
+        // the unconditional `on_idle` tail of `kill_agent_blocking`
+        // would clobber Suspended→Idle before the new spawn lands.
+        assert!(
+            should_skip_kill_for_regenerate(SessionStatus::Suspended),
+            "Suspended must skip the kill (no live process to terminate)"
+        );
+        for status in [
+            SessionStatus::Idle,
+            SessionStatus::AwaitingInput,
+            SessionStatus::Error,
+            SessionStatus::Running,
+        ] {
+            assert!(
+                !should_skip_kill_for_regenerate(status),
+                "{status:?} must NOT skip the kill (live or recently-live process)",
+            );
+        }
+        // Sanity: Spawning / Pending / Archived never reach the
+        // orchestrator's step 3 (validate_status_eligible rejects
+        // them), so the skip rule is intentionally undefined for them.
+        // The helper still returns a deterministic value — pinned here
+        // so a future refactor doesn't accidentally expand the skip
+        // set without a test witness.
+        assert!(!should_skip_kill_for_regenerate(SessionStatus::Spawning));
+        assert!(!should_skip_kill_for_regenerate(SessionStatus::Pending));
+        assert!(!should_skip_kill_for_regenerate(SessionStatus::Archived));
     }
 
     #[test]

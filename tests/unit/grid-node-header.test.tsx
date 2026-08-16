@@ -782,3 +782,92 @@ describe('GridNodeHeader Finish trigger (removed — autopilot-only concern)', (
   // with `items[3]` = "Close agent node". A second assertion here that
   // never opens the kebab would only re-prove the inline path.
 });
+
+// ---------------------------------------------------------------------------
+// User-driven Resume affordance — mirrors the sidebar NodeItem's `showResume`.
+// The same `cli_session_id` gate keeps autopilot-gate Suspended rows (no
+// session id) from surfacing a confusing "no CLI session ID is stored"
+// toast on click. The kebab's fifth item is covered separately by the
+// responsive-tier test (which resizes to `slim` and asserts the menu row).
+// ---------------------------------------------------------------------------
+
+describe('GridNodeHeader resume affordance', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({
+      agentNodes: [NODE],
+      activeNodeId: NODE.id,
+    });
+    useMeshStore.setState({
+      meshesById: new Map([[MESH.id, MESH]]),
+      selectedMeshId: MESH.id,
+    });
+    summaryMock.mockReset();
+    prMock.mockReset();
+    openUrlMock.mockClear();
+  });
+
+  it('renders an inline Resume button when Suspended AND cli_session_id is set', () => {
+    const node = {
+      ...NODE,
+      status: 'suspended' as const,
+      cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+    };
+    useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: node.id });
+    const { getByTestId } = render(<GridNodeHeader node={node} onBuildRun={vi.fn()} />);
+    expect(getByTestId('grid-resume-button')).toBeTruthy();
+  });
+
+  it('does NOT render a Resume button when Suspended but cli_session_id is null (autopilot gate)', () => {
+    // Autopilot-gate Suspended rows are parked at creation with no
+    // session id — the autopilot's own "Approve Sandbox Run" action
+    // is the recovery surface there. Same gate as the sidebar
+    // NodeItem's `showResume` (see its docblock).
+    const node = { ...NODE, status: 'suspended' as const, cli_session_id: null };
+    useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: node.id });
+    const { queryByTestId } = render(<GridNodeHeader node={node} onBuildRun={vi.fn()} />);
+    expect(queryByTestId('grid-resume-button')).toBeNull();
+  });
+
+  it('clicking the inline Resume button invokes spawn_agent via the store', async () => {
+    // Mirrors the sidebar NodeItem's Resume click test
+    // (`node-item-restart-button.test.tsx`) — the inline Resume button
+    // re-attempts the same `--resume` the failed auto-resume tried.
+    // The store's `spawnAgent` reads `cli_session_id` from the row and
+    // passes it as the `resume` arg.
+    const node = {
+      ...NODE,
+      status: 'suspended' as const,
+      cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+    };
+    const spawnAgentMock = vi.fn().mockResolvedValue(undefined);
+    useAgentNodeStore.setState({
+      agentNodes: [node],
+      activeNodeId: node.id,
+      spawnAgent: spawnAgentMock,
+    });
+    const { getByTestId } = render(<GridNodeHeader node={node} onBuildRun={vi.fn()} />);
+    fireEvent.click(getByTestId('grid-resume-button'));
+    await Promise.resolve();
+    expect(spawnAgentMock).toHaveBeenCalledWith(node.id, node.provider);
+  });
+
+  it('does NOT render a Resume button for non-Suspended statuses regardless of cli_session_id', () => {
+    // Sanity: the gate is status-specific. A running / error / idle
+    // node with a stored session id must not show the affordance —
+    // the existing Restart / Regenerate flows cover those statuses.
+    for (const status of ['running', 'idle', 'awaiting_input', 'error', 'archived'] as const) {
+      const node = {
+        ...NODE,
+        status,
+        cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+      };
+      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: node.id });
+      const { queryByTestId, unmount } = render(<GridNodeHeader node={node} onBuildRun={vi.fn()} />);
+      expect(
+        queryByTestId('grid-resume-button'),
+        `Resume must not render for status=${status}`,
+      ).toBeNull();
+      unmount();
+    }
+  });
+});

@@ -2,6 +2,7 @@ import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
+import { canResumeSuspendedNode } from '../../lib/suspended';
 import type { SessionStatus } from '../../types/generated/SessionStatus';
 import { getMeshColor } from '../../lib/meshColors';
 import type { SpawnOption } from '../../lib/groups';
@@ -14,14 +15,18 @@ import { useClickOutside } from '../../hooks/useClickOutside';
 // Issue #776 — Regenerate is the entry point for the new "restart this
 // node" flow wired up in ticket 03 of #774. We disable it (rather than
 // hide it) for statuses where a fresh `spawn_agent` IPC would race the
-// in-flight spawn or, in the `archived`/`suspended` cases, the backend
-// would reject it. Greyed-out is more discoverable than hidden and lets
-// the tooltip explain *why* the action is unavailable.
+// in-flight spawn or the backend would reject it. Greyed-out is more
+// discoverable than hidden and lets the tooltip explain *why* the
+// action is unavailable. `suspended` was removed from this list when
+// user-driven recovery for Suspended nodes shipped — the Regenerate
+// picker now reuses the existing `decide_resume` rule (same harness
+// + `cli_session_id` → resume; else fresh), and the orchestrator
+// branches on `should_skip_kill_for_regenerate` to avoid the
+// unconditional `on_idle` tail clobbering Suspended→Idle.
 const REGENERATE_DISABLED_STATUSES: readonly SessionStatus[] = [
   'spawning',
   'pending',
   'archived',
-  'suspended',
 ];
 
 interface NodeItemProps {
@@ -59,6 +64,23 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // spawnAgent passes `cli_session_id` as the resume argument, so a
   // click re-attempts the same --resume the failed auto-resume tried.
   const showRestart = node.status === 'error';
+
+  // Same status (`Suspended`) covers two cases that need different
+  // affordances:
+  //   1. Crash-recovery resume — the agent DID run, captured a
+  //      `cli_session_id`, and was parked by `recover_from_crash`
+  //      (`session_lifecycle.rs`). The Resume button re-attempts the
+  //      resume via `spawn_agent`.
+  //   2. Autopilot gate (`autopilot::GateDecision::RequireApproval`) —
+  //      the node was parked at creation, no agent ever ran, so
+  //      `cli_session_id` is NULL. The autopilot's own "Approve
+  //      Sandbox Run" action is the recovery surface; a generic
+  //      Resume click here would surface "no CLI session ID is
+  //      stored" as a toast.
+  // The data column (`cli_session_id`) is the disambiguator — see the
+  // shared `canResumeSuspendedNode` helper for the predicate source of
+  // truth (used by both `NodeItem` and `GridNodeHeader`).
+  const showResume = canResumeSuspendedNode(node);
 
   // Issue #776 — right-click context menu (Regenerate entry point).
   // Mirrors the MeshItem menu infrastructure (issue #735): the menu
@@ -375,6 +397,34 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           className="text-text-muted hover:text-status-warning text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
           title="Restart agent"
           aria-label={`Restart ${node.name}`}
+        >
+          ↻
+        </button>
+      )}
+      {showResume && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            // `spawnAgent` reads `cli_session_id` from the store row and
+            // passes it as the `resume` arg. For adapters that don't
+            // support resume (OpenCode, Terminal) the backend now falls
+            // through to Fresh (spawn.rs:supports_resume fall-through)
+            // instead of erroring; for adapters that DO, the captured
+            // `cli_session_id` is honoured.
+            spawnAgent(node.id, node.provider).catch((err) => {
+              console.error('[NodeItem] Resume failed:', err);
+            });
+          }}
+          // Mirrors the inline Restart button's hover/focus surface so
+          // the two affordances feel like siblings; the violet accent
+          // matches the Suspended status dot so a user hovering a
+          // Suspended-vs-error row gets a colour cue tied to the
+          // status.
+          className="text-text-muted hover:text-accent-violet text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
+          title="Resume agent"
+          aria-label={`Resume ${node.name}`}
+          data-testid="resume-button"
         >
           ↻
         </button>
