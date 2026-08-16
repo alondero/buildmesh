@@ -436,6 +436,19 @@ pub fn recover_from_crash() -> Result<usize, String> {
     db::mark_running_nodes_suspended().map_err(|e| e.to_string())
 }
 
+/// Exit-time sweep — runs once on `RunEvent::ExitRequested`. Mark every
+/// `Running` node `Suspended` so a future startup can offer to resume
+/// it. Sibling to [`recover_from_crash`]; same one-line DB call inside,
+/// distinct name so the trigger (graceful shutdown vs crash) stays
+/// distinguishable in logs and history (issue #949).
+///
+/// Not a per-node transition, so it doesn't take the sink — the
+/// frontend treats a sudden `Suspended` batch identically to the
+/// startup-recovery case.
+pub fn on_exit_sweep() -> Result<usize, String> {
+    db::mark_running_nodes_suspended().map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
