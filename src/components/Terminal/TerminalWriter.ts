@@ -82,26 +82,6 @@ function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined): void {
 }
 
 /**
- * True iff every byte in `data` is ASCII (< 0x80). Used for the
- * `(unused)` strict-ASCII fast-path; replaced by `isFastPathSafe`
- * below to also cover small complete UTF-8 sequences. Kept exported
- * via the test surface so callers can assert the strict-ASCII behaviour
- * independently of the broader safety predicate.
- */
-function isAsciiPayload(data: TerminalWriteData): boolean {
-  if (typeof data === 'string') {
-    for (let i = 0; i < data.length; i++) {
-      if (data.charCodeAt(i) > 0x7f) return false;
-    }
-    return true;
-  }
-  for (let i = 0; i < data.byteLength; i++) {
-    if (data[i] > 0x7f) return false;
-  }
-  return true;
-}
-
-/**
  * True iff `data` is safe to write directly to xterm without going
  * through the buffered rAF flush. The safety criterion is "no partial
  * UTF-8 codepoint at the chunk boundary", because the agent's PTY

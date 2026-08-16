@@ -314,10 +314,12 @@ describe('TerminalWriter', () => {
     // keystroke echo. Interactive single-byte writes (the dominant cost in
     // the progressive-latency bug) bypass rAF and go straight to xterm so
     // the visible state lands on xterm's next frame, not our next frame +
-    // xterm's next frame. Burst output (>4 bytes) still falls back to rAF
-    // batching so a verbose log dump stays at one xterm write per frame.
+    // xterm's next frame. Burst output (> INTERACTIVE_FAST_PATH_BYTES bytes)
+    // still falls back to rAF batching so a verbose log dump stays at one
+    // xterm write per frame.
     //
-    // The fast path is ASCII-only (see `isAsciiPayload` in TerminalWriter.ts).
+    // Complete UTF-8 byte sequences and JavaScript strings are safe for the
+    // fast path. An incomplete byte sequence still falls back to rAF batching.
     // A multi-byte UTF-8 codepoint can arrive split across two PTY chunks —
     // writing the partial sequence directly would corrupt the character.
     // Keystroke echoes are virtually always ASCII, so the guard doesn't
