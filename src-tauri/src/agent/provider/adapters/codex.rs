@@ -185,14 +185,14 @@ fn materialize_native_profile_at(
     content: &str,
 ) -> Result<(), String> {
     let _guard = PROFILE_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    std::fs::create_dir_all(home)
+    std::fs::create_dir_all(&home)
         .map_err(|e| format!("failed to create Codex home {}: {e}", home.display()))?;
     let target = home.join(format!("{profile_name}.config.toml"));
     if std::fs::read_to_string(&target).ok().as_deref() == Some(content) {
         cleanup_owned_legacy_profiles(home);
         return Ok(());
     }
-    let mut temp = tempfile::NamedTempFile::new_in(home)
+    let mut temp = tempfile::NamedTempFile::new_in(&home)
         .map_err(|e| format!("failed to create temporary Codex profile: {e}"))?;
     use std::io::Write;
     temp.write_all(content.as_bytes())

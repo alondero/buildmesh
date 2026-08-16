@@ -42,14 +42,19 @@ describe('TerminalWriter', () => {
       const writeFn = vi.fn();
       writer.register(1, writeFn);
 
-      writer.append(1, 'hello');
-      writer.append(1, ' world');
+      // Use rAF-sized chunks so the writer takes the rAF path. The
+      // interactive fast path (issue #1122) flushes the first chunk
+      // immediately and would bypass the buffer entirely.
+      const first = 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1);
+      const second = 'y'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1);
+      writer.append(1, first);
+      writer.append(1, second);
       expect(writeFn).not.toHaveBeenCalled();
-      expect(writer.pendingBytes(1)).toBe(11);
+      expect(writer.pendingBytes(1)).toBe(first.length + second.length);
 
       flush();
       expect(writeFn).toHaveBeenCalledOnce();
-      expect(writeFn).toHaveBeenCalledWith('hello world');
+      expect(writeFn).toHaveBeenCalledWith(first + second);
     });
 
     it('buffers byte chunks without stringifying them', () => {
@@ -175,7 +180,8 @@ describe('TerminalWriter', () => {
       const writeFn1 = vi.fn();
       const writeFn2 = vi.fn();
       writer.register(1, writeFn1);
-      writer.append(1, 'old data');
+      // rAF-sized chunk so the writer doesn't take the fast path.
+      writer.append(1, 'r'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
 
       writer.unregister(1);
       writer.register(1, writeFn2);
@@ -348,10 +354,82 @@ describe('TerminalWriter', () => {
       expect(scheduledCallbacks).toHaveLength(1);
     });
 
-    it('falls back to rAF for a small string containing non-ASCII', () => {
+    it('falls back to rAF for a small non-ASCII byte chunk (incomplete UTF-8 sequence)', () => {
+      // Widened the fast path to handle complete UTF-8 sequences AND
+      // any JS string (which is atomic from xterm's perspective). A
+      // JS string `'a£'` is NOT incomplete — `isFastPathSafe` for
+      // strings returns true unconditionally. The byte-chunk case is
+      // where the partial-codepoint guard still matters: a `Uint8Array`
+      // whose tail is mid-sequence must defer to rAF so the next
+      // chunk can be merged.
       const writeFn = vi.fn();
       writer.register(1, writeFn);
-      writer.append(1, 'a£');
+      // 2 bytes of a 3-byte UTF-8 sequence (start of ▀ U+2580).
+      writer.append(1, new Uint8Array([0xe2, 0x96]));
+      expect(writeFn).not.toHaveBeenCalled();
+      expect(scheduledCallbacks).toHaveLength(1);
+    });
+
+    it('writes a complete UTF-8 sequence byte chunk directly (issue #1122 widening)', () => {
+      // Widened from the strict-ASCII-only fast path: a complete
+      // multi-byte UTF-8 sequence within the byte limit takes the
+      // fast path because the chunk has no partial codepoint at the
+      // boundary. ▀ U+2580 = 0xE2 0x96 0x80 — a 3-byte sequence that
+      // arrives whole.
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      writer.append(1, new Uint8Array([0xe2, 0x96, 0x80]));
+      expect(writeFn).toHaveBeenCalledTimes(1);
+      expect(writeFn.mock.calls[0][0]).toBeInstanceOf(Uint8Array);
+      expect(scheduledCallbacks).toHaveLength(0);
+    });
+
+    it('writes a multi-codepoint UTF-8 JS string directly (atom-safe strings)', () => {
+      // JS strings are atomic from xterm's perspective (the renderer
+      // handles surrogate pairs internally), so any string is safe —
+      // including non-ASCII. The 16-byte fast-path cap is checked
+      // against `byteLength` (the heuristic `data.length` matches
+      // the byte count for JS strings only when all chars are ASCII,
+      // so the cap is conservative for non-ASCII strings). This test
+      // verifies a 4-char non-ASCII string takes the fast path
+      // (4-char JS string is well within the 16-byte cap once
+      // counted via the actual byte length).
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      writer.append(1, 'a£€');
+      expect(writeFn).toHaveBeenCalledTimes(1);
+      expect(writeFn).toHaveBeenCalledWith('a£€');
+      expect(scheduledCallbacks).toHaveLength(0);
+    });
+
+    it('falls back to rAF for a partial UTF-8 sequence at chunk boundary', () => {
+      // 2 bytes of a 3-byte UTF-8 sequence. The chunk ends mid-
+      // codepoint — the next chunk (continuation bytes) will
+      // complete it. Defer to rAF so chunks can be merged.
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      writer.append(1, new Uint8Array([0xe2, 0x96]));
+      expect(writeFn).not.toHaveBeenCalled();
+      expect(scheduledCallbacks).toHaveLength(1);
+    });
+
+    it('writes a 16-byte ASCII chunk directly (upper bound of fast path)', () => {
+      // At the boundary: 16 bytes is exactly the cap. ASCII is safe
+      // (no codepoint spans more than one byte), so the fast path
+      // applies.
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      const payload = 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES);
+      writer.append(1, payload);
+      expect(writeFn).toHaveBeenCalledWith(payload);
+      expect(scheduledCallbacks).toHaveLength(0);
+    });
+
+    it('falls back to rAF for a 17-byte ASCII chunk (just over the cap)', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      const payload = 'y'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1);
+      writer.append(1, payload);
       expect(writeFn).not.toHaveBeenCalled();
       expect(scheduledCallbacks).toHaveLength(1);
     });
@@ -359,10 +437,14 @@ describe('TerminalWriter', () => {
     it('still coalesces over-sized bursts into one rAF-driven write', () => {
       const writeFn = vi.fn();
       writer.register(1, writeFn);
-      // 100 short lines of agent output — each one is small in isolation
-      // but they pile up to a multi-KB burst. The writer must batch.
+      // 100 lines of agent output — each one is sized to exceed the
+      // 16-byte interactive fast path so the writer takes the rAF
+      // path on the first chunk. The fast path would flush each
+      // chunk directly (the bug we're guarding against), defeating
+      // the batching that this regression test pins.
+      const line = 'build line: ' + 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES) + '\n';
       for (let i = 0; i < 100; i++) {
-        writer.append(1, `line ${i}\n`);
+        writer.append(1, line);
       }
       expect(writeFn).not.toHaveBeenCalled();
       expect(scheduledCallbacks).toHaveLength(1);

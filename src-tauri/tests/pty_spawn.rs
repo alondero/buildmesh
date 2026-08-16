@@ -19,7 +19,7 @@
 //! `cmd.exe /c` batch wrapping (ee6472f).
 
 use std::collections::VecDeque;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +28,27 @@ use buildmesh_lib::agent::provider::{SpawnRecipe, WindowsShell};
 use buildmesh_lib::agent::spawn::{open_pty_pair, pump_pty_output, spawn_child};
 use buildmesh_lib::agent::spawn_environment;
 use buildmesh_lib::models::EnvType;
+
+/// Issue #1122: stand up the dedicated PTY writer thread + channel for
+/// the test fixture. The dedicated writer is what production
+/// `register_agent` now installs; without mirroring it here, the
+/// tests would fail to compile because `AgentProcess` no longer has
+/// a `writer: Arc<Mutex<Box<dyn Write>>>` field. The thread drains
+/// the channel and writes bytes to the underlying PTY writer until
+/// the sender is dropped (test exit or `PROCESS_REGISTRY.remove`).
+fn make_test_writer_thread(
+    writer: Box<dyn Write + Send>,
+) -> (std::sync::mpsc::SyncSender<Vec<u8>>, std::thread::JoinHandle<()>) {
+    let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+    let handle = std::thread::spawn(move || {
+        let mut writer = writer;
+        while let Ok(bytes) = writer_rx.recv() {
+            let _ = writer.write_all(&bytes);
+            let _ = writer.flush();
+        }
+    });
+    (writer_tx, handle)
+}
 
 struct ChunkedReader {
     chunks: VecDeque<Vec<u8>>,
@@ -84,11 +105,13 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
     drop(pair.slave);
 
     let reader_alive = Arc::new(AtomicBool::new(true));
+    let (writer_tx, writer_handle) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
-            writer: Arc::new(Mutex::new(writer)),
+            writer_tx,
+            writer_handle: Mutex::new(Some(writer_handle)),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
             deliberate_kill: Arc::new(AtomicBool::new(false)),
@@ -320,7 +343,15 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
         session_id,
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
-            writer: Arc::new(Mutex::new(writer)),
+            // Issue #1122: writer is consumed by `make_test_writer_thread`
+            // to set up the dedicated writer thread + channel. The
+            // returned `(writer_tx, writer_handle)` is destructured
+            // into the AgentProcess fields below.
+            writer_tx: {
+                let (tx, _h) = make_test_writer_thread(writer);
+                tx
+            },
+            writer_handle: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
             deliberate_kill: Arc::new(AtomicBool::new(false)),
@@ -416,7 +447,15 @@ fn windows_kill_session_closes_master() {
         session_id,
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
-            writer: Arc::new(Mutex::new(writer)),
+            // Issue #1122: writer is consumed by `make_test_writer_thread`
+            // to set up the dedicated writer thread + channel. The
+            // returned `(writer_tx, writer_handle)` is destructured
+            // into the AgentProcess fields below.
+            writer_tx: {
+                let (tx, _h) = make_test_writer_thread(writer);
+                tx
+            },
+            writer_handle: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
             deliberate_kill: Arc::new(AtomicBool::new(false)),
@@ -608,7 +647,15 @@ fn windows_pi_interactive_tui() {
         session_id,
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
-            writer: Arc::new(Mutex::new(writer)),
+            // Issue #1122: writer is consumed by `make_test_writer_thread`
+            // to set up the dedicated writer thread + channel. The
+            // returned `(writer_tx, writer_handle)` is destructured
+            // into the AgentProcess fields below.
+            writer_tx: {
+                let (tx, _h) = make_test_writer_thread(writer);
+                tx
+            },
+            writer_handle: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
             deliberate_kill: Arc::new(AtomicBool::new(false)),
@@ -652,9 +699,11 @@ fn windows_pi_interactive_tui() {
     eprintln!("[pty-test {session_id}] writing input");
     {
         let entry = PROCESS_REGISTRY.get(&session_id).expect("entry registered");
-        let mut writer_guard = entry.writer.lock().unwrap();
-        writer_guard.write_all(b"a").expect("write to pty");
-        writer_guard.flush().expect("flush pty");
+        // Issue #1122: write goes through the dedicated writer thread's
+        // channel rather than a Mutex<Box<dyn Write>>. The test only
+        // cares that the bytes reach the PTY — the channel write is
+        // non-blocking and the writer thread drains immediately.
+        entry.writer_tx.send(b"a".to_vec()).expect("send to writer");
     }
 
     // Wait for the input to be echoed or processed
@@ -707,7 +756,15 @@ fn wsl_pi_interactive_tui() {
         session_id,
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
-            writer: Arc::new(Mutex::new(writer)),
+            // Issue #1122: writer is consumed by `make_test_writer_thread`
+            // to set up the dedicated writer thread + channel. The
+            // returned `(writer_tx, writer_handle)` is destructured
+            // into the AgentProcess fields below.
+            writer_tx: {
+                let (tx, _h) = make_test_writer_thread(writer);
+                tx
+            },
+            writer_handle: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
             deliberate_kill: Arc::new(AtomicBool::new(false)),
@@ -751,9 +808,11 @@ fn wsl_pi_interactive_tui() {
     eprintln!("[pty-test {session_id}] writing input to WSL");
     {
         let entry = PROCESS_REGISTRY.get(&session_id).expect("entry registered");
-        let mut writer_guard = entry.writer.lock().unwrap();
-        writer_guard.write_all(b"a").expect("write to pty");
-        writer_guard.flush().expect("flush pty");
+        // Issue #1122: write goes through the dedicated writer thread's
+        // channel rather than a Mutex<Box<dyn Write>>. The test only
+        // cares that the bytes reach the PTY — the channel write is
+        // non-blocking and the writer thread drains immediately.
+        entry.writer_tx.send(b"a".to_vec()).expect("send to writer");
     }
 
     // Wait for the input to be echoed or processed

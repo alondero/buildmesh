@@ -2,7 +2,6 @@
 
 use crate::pty::PtyRegistry;
 use portable_pty::{Child, MasterPty};
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -10,7 +9,21 @@ use std::thread::JoinHandle;
 /// A live agent PTY process handle.
 pub struct AgentProcess {
     pub child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
-    pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Issue #1122: dedicated PTY writer channel. The async Tauri
+    /// command `write_to_agent` enqueues bytes here with a non-blocking
+    /// `try_send`; a dedicated OS thread (one per agent) owns the
+    /// underlying `Box<dyn Write + Send>` and drains the channel with
+    /// blocking `write_all`+`flush`. The previous `Arc<Mutex<Box<dyn
+    /// Write>>>` design held the mutex during the actual write — a full
+    /// ConPTY pipe could park the async runtime for the entire write
+    /// duration, reintroducing the latency this PR is meant to fix.
+    /// `SyncSender` is bounded so a stuck agent doesn't grow memory
+    /// without limit; full sends are dropped with a warn-level log.
+    pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    /// Handle to the dedicated writer thread. `kill_session` joins it
+    /// with a bounded timeout so the close path can never hang the UI
+    /// on a wedged writer (mirror of the `reader_handle` contract).
+    pub writer_handle: Mutex<Option<JoinHandle<()>>>,
     /// PTY master. Wrapped in `Option` so `kill_session` can `take()` it
     /// out to drop the underlying pseudoconsole — on Windows ConPTY the
     /// master read pipe does not EOF on child exit, so the only way to
@@ -91,6 +104,16 @@ impl AgentProcess {
     pub fn set_reader_handle(&self, handle: std::thread::JoinHandle<()>) {
         *self.reader_handle.lock().unwrap() = Some(handle);
     }
+
+    /// Stash the dedicated PTY writer thread's `JoinHandle` on the
+    /// registry entry. Mirrors `set_reader_handle` — the window between
+    /// insert and this setter is benign because a `kill_session` arriving
+    /// in that window sees `writer_handle = None` and skips the join
+    /// (the thread is detached when the registry entry drops, and the
+    /// channel close will terminate its loop).
+    pub fn set_writer_handle(&self, handle: std::thread::JoinHandle<()>) {
+        *self.writer_handle.lock().unwrap() = Some(handle);
+    }
 }
 
 /// Trait abstracting the process registry methods needed by http_server.
@@ -119,18 +142,48 @@ impl AgentProcessRegistry {
 
     pub fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
         let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
-        let mut writer = agent.writer.lock().unwrap();
-        writer.write_all(data).map_err(|e| e.to_string())?;
-        writer.flush().map_err(|e| e.to_string())?;
+        // Issue #1122: non-blocking enqueue. The actual `write_all`+`flush`
+        // happens on a dedicated OS thread (one per agent) that owns the
+        // underlying `Box<dyn Write + Send>`. The previous design held
+        // `agent.writer` mutex through the actual write — a full ConPTY
+        // pipe could park the async runtime for the entire write duration,
+        // reintroducing the latency this PR is meant to fix. With this
+        // channel split, the Tauri command does at most one bounded
+        // `try_send` per keystroke and returns immediately.
+        //
+        // `try_send` (not `send`) so a stuck agent can't back-pressure
+        // the async runtime. A full channel means the writer thread is
+        // still draining a slow PTY; we drop the new bytes with a warn
+        // (the user can re-type). Bound is 64 entries × ~tens of bytes
+        // — a few KB of in-flight data, well within the PTY pipe buffer.
+        match agent.writer_tx.try_send(data.to_vec()) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    session_id,
+                    "PTY writer channel full; dropping {} bytes (agent is slow to consume the PTY)",
+                    data.len()
+                );
+                // Drop the bytes and still return Ok — the user can re-type;
+                // failing the call would surface as a confusing "Agent not
+                // running" toast and silently lose keystrokes.
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                // The writer thread has exited (kill_session has run and
+                // the registry entry is mid-removal). Signal the caller
+                // the same way the old code did on a pipe failure.
+                return Err("Agent not running".to_string());
+            }
+        }
         // Mark THIS MESH as active so the background warm-pool worker holds
         // off its idle refills for this mesh's pool while the user is typing
         // into the terminal (issue #613 AC2; issue #634 scopes the activity
         // per-mesh so typing into mesh A's terminal doesn't prevent mesh B's
-        // pool from being refilled). Recorded after a successful write so a
-        // failed PTY write doesn't count as activity.
+        // pool from being refilled). Recorded after a successful enqueue so
+        // a dropped (full-channel) write doesn't count as activity.
         crate::services::pool_worker::note_activity_for_mesh(agent.mesh_id);
         // Emit the `first_user_input` checkpoint exactly once per session.
-        // We do this AFTER a successful write+flush so a failed PTY write
+        // We do this AFTER a successful enqueue so a failed PTY write
         // (broken pipe, etc.) does NOT claim "user input accepted". The
         // helper is the only place the flag flips and the log line fires —
         // see its doc comment for the atomic contract and the
@@ -253,6 +306,18 @@ impl AgentProcessRegistry {
             //    `JoinHandle::drop` docs), so we never leak a process or
             //    wedge the close path.
             if let Some(handle) = agent.reader_handle.lock().unwrap().take() {
+                join_with_timeout(handle, std::time::Duration::from_secs(2));
+            }
+
+            // 5. Issue #1122: drop the dedicated writer thread. The channel
+            //    sender is in `agent.writer_tx`; when the registry entry is
+            //    dropped (after `kill_session` returns), the sender drops,
+            //    the channel closes, and the writer thread's `recv()` returns
+            //    Err — its loop exits. We additionally drop the handle here
+            //    so the close-path symmetry mirrors the reader join; if the
+            //    writer thread is mid-write on a dying PTY, the bounded join
+            //    protects the UI from a wedged worker.
+            if let Some(handle) = agent.writer_handle.lock().unwrap().take() {
                 join_with_timeout(handle, std::time::Duration::from_secs(2));
             }
         }
@@ -573,11 +638,25 @@ mod tests {
 
         let deliberate_kill = Arc::new(AtomicBool::new(false));
         let registry = AgentProcessRegistry::new();
+        // Issue #1122: stand up the dedicated writer thread + channel
+        // before inserting, mirroring the production `register_agent`
+        // ordering. The test only asserts `deliberate_kill` propagation,
+        // not the writer thread behaviour, but the registry now requires
+        // the channel field to be present.
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        let writer_thread = std::thread::spawn(move || {
+            let mut writer = writer;
+            while let Ok(bytes) = writer_rx.recv() {
+                let _ = writer.write_all(&bytes);
+                let _ = writer.flush();
+            }
+        });
         registry.insert(
             -915_4002,
             AgentProcess {
                 child: Arc::new(Mutex::new(child)),
-                writer: Arc::new(Mutex::new(writer)),
+                writer_tx,
+                writer_handle: Mutex::new(Some(writer_thread)),
                 master: Arc::new(Mutex::new(Some(pair.master))),
                 reader_alive: Arc::new(AtomicBool::new(true)),
                 deliberate_kill: deliberate_kill.clone(),

@@ -822,6 +822,56 @@ pub fn is_agent_already_running(session_id: &i64) -> bool {
 /// `record_first_input_if_first` (via `AgentProcess.spawn_start`) to
 /// timestamp the `first_user_input` log line against the same reference
 /// as every other `spawn_timing:` checkpoint.
+/// Issue #1122: per-agent dedicated PTY writer thread. The thread
+/// owns the `Box<dyn Write + Send>` exclusively (no mutex on the
+/// hot path) and drains a `std::sync::mpsc::SyncSender` channel that
+/// `AgentProcessRegistry::write_bytes` enqueues bytes into from the
+/// async runtime. The thread exits when the channel closes (sender
+/// dropped) or when the underlying write returns an error (broken
+/// pipe — the channel is then disconnected, subsequent `try_send`s
+/// return `Disconnected`, and `write_bytes` surfaces "Agent not
+/// running" to the caller).
+fn pty_writer_thread(
+    session_id: i64,
+    mut writer: Box<dyn std::io::Write + Send>,
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    while let Ok(bytes) = rx.recv() {
+        if let Err(e) = writer.write_all(&bytes) {
+            tracing::warn!(
+                session_id,
+                "PTY writer thread exiting on write error: {e}"
+            );
+            return;
+        }
+        if let Err(e) = writer.flush() {
+            tracing::warn!(
+                session_id,
+                "PTY writer thread exiting on flush error: {e}"
+            );
+            return;
+        }
+    }
+    // Channel closed cleanly (kill_session dropped the sender). The
+    // writer's `Drop` closes the underlying PTY pipe, so the agent's
+    // stdin EOFs and the agent CLI exits cleanly.
+    tracing::debug!(
+        session_id,
+        "PTY writer thread exiting (channel closed)"
+    );
+}
+
+/// Capacity of the bounded `SyncSender` channel between the async
+/// Tauri command and the dedicated PTY writer thread. 64 entries ×
+/// ~tens of bytes per entry is a few KB of in-flight data — comfortably
+/// within the PTY pipe buffer (64 KB on Linux, similar on Windows
+/// ConPTY) yet bounded enough that a stuck agent can't grow memory
+/// without limit. A full channel surfaces as a `warn!` log and the
+/// bytes are dropped (the user can re-type); the alternative — blocking
+/// the async runtime on a full bounded channel — would defeat the
+/// whole reason the dedicated thread exists.
+const PTY_WRITER_CHANNEL_CAPACITY: usize = 64;
+
 #[allow(clippy::too_many_arguments)]
 fn register_agent(
     session_id: i64,
@@ -834,11 +884,25 @@ fn register_agent(
     mesh_id: i64,
     deliberate_kill: Arc<AtomicBool>,
 ) {
+    // Issue #1122: spawn the dedicated PTY writer thread and stand up
+    // the bounded channel *before* the registry `insert` so a concurrent
+    // `write_bytes` call (visible the moment the entry exists) can never
+    // race against a missing channel. The writer thread owns the
+    // `Box<dyn Write + Send>` exclusively; the registry holds the
+    // sender side.
+    let (writer_tx, writer_rx) =
+        std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_WRITER_CHANNEL_CAPACITY);
+    let writer_handle = std::thread::Builder::new()
+        .name(format!("pty-writer-{session_id}"))
+        .spawn(move || pty_writer_thread(session_id, writer, writer_rx))
+        .expect("failed to spawn PTY writer thread");
+
     PROCESS_REGISTRY.insert(
         session_id,
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
-            writer: Arc::new(Mutex::new(writer)),
+            writer_tx,
+            writer_handle: Mutex::new(Some(writer_handle)),
             // Wrap the master in `Some` so `kill_session` can `take()` it
             // out to drop the pseudoconsole (issue #300).
             master: Arc::new(Mutex::new(Some(master))),

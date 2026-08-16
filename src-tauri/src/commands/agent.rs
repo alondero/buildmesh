@@ -2583,24 +2583,3 @@ mod tests {
     }
 }
 
-// Issue #1122 sanity check: the refactor split
-/// `write_to_agent_blocking` into a fast-path PTY-write core
-/// (called on the async runtime) and a slow-path DB signal core
-/// (`write_to_agent_signal_blocking`, called via `run_blocking`).
-/// The split lives in `commands::agent`; this module-level test
-/// verifies the slow-path helper is reachable from the crate so
-/// future mobile HTTP routes can use it without re-introducing
-/// the combined entry point. Type-only check — the helper requires
-/// an initialized DB to actually run, which is the integration
-/// test concern.
-#[cfg(test)]
-#[allow(dead_code)]
-fn _signal_blocking_is_reachable_from_crate() {
-    fn _check(sid: i64) -> Result<bool, String> {
-        crate::commands::agent::write_to_agent_signal_blocking(sid)
-    }
-    // Suppress unused warning without running the body (which would
-    // require a DB fixture). The pure existence of `_check` confirms
-    // the helper's signature is reachable from the crate.
-    let _ = std::mem::size_of_val(&_check);
-}

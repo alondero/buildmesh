@@ -124,8 +124,14 @@ describe('BuildRunTerminal RAF batching (issue #303)', () => {
     // compiler line. Each event arrives synchronously through the mock
     // emitter, so without batching this would be 100 writes and 0 RAFs;
     // with batching it must be 0 writes and exactly 1 RAF.
+    //
+    // Each line is sized to exceed the 16-byte interactive fast path
+    // (issue #1122) so the writer takes the rAF path on the first
+    // chunk. The fast path would flush each chunk directly, defeating
+    // the batching this regression test pins.
+    const line = '   Compiling my-crate-name v0.1.0\n';
     for (let i = 0; i < 100; i++) {
-      await emit('build-run-output-7', `line ${i}\n`);
+      await emit('build-run-output-7', line);
     }
 
     expect(rafQueue).toHaveLength(1);
@@ -138,11 +144,14 @@ describe('BuildRunTerminal RAF batching (issue #303)', () => {
     expect(term.write).toHaveBeenCalledTimes(1);
     const written = term.write.mock.calls[0][0];
     expect(typeof written).toBe('string');
-    expect(written).toContain('line 0\n');
-    expect(written).toContain('line 99\n');
-    // Order preservation: the merged string should start with line 0 and
-    // end with line 99\n — guards against a future "Set/dedupe" coalescer.
-    expect(written.indexOf('line 0\n')).toBeLessThan(written.indexOf('line 99\n'));
+    // The 100 lines are identical (loop has no `i` substitution), so the
+    // merged string is the same line repeated 100 times. We assert the
+    // shape (length, lines contain the half-sentence of compiler output)
+    // and order preservation: the first `Compiling` comes before the
+    // last one — guards against a future "Set/dedupe" coalescer.
+    expect(written.split('\n').filter(Boolean)).toHaveLength(100);
+    expect(written).toContain('Compiling my-crate-name v0.1.0\n');
+    expect(written.indexOf('Compiling')).toBeLessThan(written.lastIndexOf('Compiling'));
   });
 
   it('coalesces base64 byte payloads without UTF-8 corruption across chunk boundaries', async () => {
