@@ -1,18 +1,6 @@
 import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
-import { listen } from '@tauri-apps/api/event';
-import type { AttentionNeededPayload } from '../types/generated/AttentionNeededPayload';
-import type { AttentionClearedPayload } from '../types/generated/AttentionClearedPayload';
-import type { NodeRenamedPayload } from '../types/generated/NodeRenamedPayload';
-import type { NodeCreatedPayload } from '../types/generated/NodeCreatedPayload';
-import type { NodeActivatedPayload } from '../types/generated/NodeActivatedPayload';
-import type { NodeSpawnCompletedPayload } from '../types/generated/NodeSpawnCompletedPayload';
-import type { NodeSpawnFailedPayload } from '../types/generated/NodeSpawnFailedPayload';
-import type { AutopilotFinishingPayload } from '../types/generated/AutopilotFinishingPayload';
-import type { AutopilotPrCreatedPayload } from '../types/generated/AutopilotPrCreatedPayload';
-import type { AutopilotFinishFailedPayload } from '../types/generated/AutopilotFinishFailedPayload';
-import type { AutopilotNodeClosedPayload } from '../types/generated/AutopilotNodeClosedPayload';
 import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
 import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
@@ -23,8 +11,12 @@ import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
 // through the generic "System" toast pipeline.
 import { addToast } from './toastStore';
 import { useMeshStore } from './meshStore';
-import { getNodeGitPath } from '../lib/paths';
-import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
+// Issue #1054 — the event-driven half of the store moved to a typed
+// listeners module (`agentNodeListeners.ts`); the optimistic-with-
+// rollback pattern that `renameAgentNode` / `setNodePinned` /
+// `toggleNodePinned` hand-rolled is now a generic helper.
+import { withOptimistic, type OptimisticSurface } from '../lib/optimistic';
+import { attachAgentNodeListeners } from './agentNodeListeners';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
 // #359), along with the `EnvType`/`Provider`/`SessionStatus` unions it
@@ -37,6 +29,26 @@ import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
 import type { AgentNode } from '../types/generated/AgentNode';
 import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
 export type { AgentNode };
+
+// Issue #1054 — cross-store reach, kept narrow on purpose
+// --------------------------------------------------------
+// The proposal's third leg ("replace cross-store writes with typed
+// message-passing") was considered and deferred: every other cross-
+// store reach in the repo follows the same `.getState().action(...)`
+// / imperative-wrapper convention, and the test injection points
+// already in place (vi.mock for addToast; setWorktreeCloseActionResolverForTests;
+// useMeshStore.setState in tests) provide the isolation a message bus
+// would otherwise buy. Adding a second indirection here would add a
+// new abstraction layer for no testability gain.
+//
+// The remaining four reach-throughs (one site each):
+//   * useMeshStore.getState().selectMesh   — selectProviderForMesh (issue #283 invariant)
+//   * requestWorktreeCloseAction            — deleteAgentNode Phase 1 safety prompt
+//   * addToast                              — deleteAgentNode Phase 2 failure (issue #1001)
+//   * disposeTerminal                       — deleteAgentNode success path (issue #647)
+// Any future refactor that needs to replace one of these with a bus
+// call can do so in-place; the listener module already shows the
+// "typed dispatch surface" pattern that would scale.
 
 /// Apply a mesh's re-positioned nodes optimistically and persist them. The
 /// updated nodes replace that mesh's entries; the whole array is re-sorted by
@@ -151,6 +163,15 @@ interface AgentNodeState {
   killAgent: (nodeId: number) => Promise<void>;
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
   writeToAgent: (nodeId: number, data: string) => Promise<void>;
+  // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
+  // The listener module never reaches into `set`/`get` directly; it
+  // dispatches through these actions (plus `fetchAgentNodes` /
+  // `setActiveNode` from the public surface). Each action is a
+  // one-liner that the store can also expose to other callers if a
+  // future refactor needs the same seam.
+  patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
+  patchAutopilotState: (id: number, state: AutopilotRunState) => void;
+  findAgentNode: (id: number) => AgentNode | undefined;
   initAttentionListeners: () => Promise<void>;
   /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
   /// after `delayMs`. Replaces any existing schedule for the node — only one
@@ -159,7 +180,20 @@ interface AgentNodeState {
   cancelSchedule: (nodeId: number) => void;
 }
 
-export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
+export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
+  // Issue #1054 — shared `OptimisticSurface` for the three sites
+  // (`renameAgentNode`, `setNodePinned`, `toggleNodePinned`) that
+  // route through `withOptimistic`. Built once per `create()` call so
+  // the closures capture the right `set`/`get`. Functional updater
+  // only — matches the helper's contract and Zustand's `set(updater)`
+  // shape.
+  const optimisticSurface: OptimisticSurface = {
+    getAgentNodes: () => get().agentNodes,
+    setAgentNodes: (updater) =>
+      set((state) => ({ agentNodes: updater(state.agentNodes) })),
+    setError: (error) => set({ error }),
+  };
+  return {
   agentNodes: [],
   autopilotStates: {},
   activeNodeId: null,
@@ -197,6 +231,21 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     }
   },
 
+  // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
+  // One-liners that the listeners dispatch through; also exposed on the
+  // public surface in case future code wants the same seam.
+  patchAgentNode: (id, patch) => {
+    set((state) => ({
+      agentNodes: state.agentNodes.map((s) =>
+        s.id === id ? { ...s, ...patch } : s
+      ),
+    }));
+  },
+  patchAutopilotState: (id, state) => {
+    set((s) => ({ autopilotStates: { ...s.autopilotStates, [id]: state } }));
+  },
+  findAgentNode: (id) => get().agentNodes.find((s) => s.id === id),
+
   ...(() => {
     let listenersAttached = false;
     return {
@@ -204,126 +253,21 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         if (listenersAttached) return;
         listenersAttached = true;
 
-        // `attention-needed` / `attention-cleared` are the external AttentionHook
-        // protocol — the `session_id` payload key is the wire contract with
-        // already-deployed agent hooks (CONTEXT.md ambiguity #1 says this stays
-        // as "session" intentionally). Map to the internal `node_id` alias for
-        // vocabulary consistency inside the store.
-        await listen<AttentionNeededPayload>('attention-needed', (event) => {
-          const nodeId = event.payload.session_id;
-          set((state) => ({
-            agentNodes: state.agentNodes.map((s) =>
-              s.id === nodeId ? { ...s, status: 'awaiting_input' as const } : s
-            ),
-          }));
-        });
-
-        await listen<AttentionClearedPayload>('attention-cleared', (event) => {
-          const nodeId = event.payload.session_id;
-          set((state) => ({
-            agentNodes: state.agentNodes.map((s) =>
-              s.id === nodeId ? { ...s, status: 'running' as const } : s
-            ),
-          }));
-        });
-
-        // `node-renamed` is the internal event emitted by `rename_agent_node`
-        // (renamed from `session-renamed` in issue #490). The payload key
-        // follows: `node_id`, not `session_id`.
-        await listen<NodeRenamedPayload>('node-renamed', (event) => {
-          const { node_id: nodeId, name } = event.payload;
-          set((state) => ({
-            agentNodes: state.agentNodes.map((s) =>
-              s.id === nodeId ? { ...s, name } : s
-            ),
-          }));
-        });
-
-        // Listen for node-created events. Two sources emit this:
-        //   1. The two-stage desktop spawn flow: `create_issue_node` emits it
-        //      after creating the `pending` node, so the sidebar picks up the
-        //      new node before stage-2 (start_node_background) finishes.
-        //   2. The HTTP-based E2E test server, which creates nodes out of band.
-        // In both cases the cleanest recovery is to refetch the full list — the
-        // row is already committed by the time the event fires, so we can never
-        // lose a node by racing the IPC.
-        await listen<NodeCreatedPayload>('node-created', async () => {
-          await get().fetchAgentNodes();
-        });
-
-        // Listen for node-activated events from test server (HTTP-based E2E tests)
-        await listen<NodeActivatedPayload>('node-activated', (event) => {
-          const nodeId = event.payload.node_id;
-          set({ activeNodeId: nodeId });
-        });
-
-        // Drop the header chips' cached `null` for a node and drive an
-        // immediate refetch. Both `useGitSummary` and `useOpenPr` cache a
-        // freshness stamp that suppresses bus-driven refetches for a
-        // window, so the two events below — the only moments the cached
-        // answer becomes structurally wrong — have to say so explicitly.
-        // See `invalidateNodeCaches` for the full interaction. Issue #1004.
-        // No-op for a node the store has never seen: without the row we
-        // can't derive its git path, and an unseen node has no mounted
-        // header to refresh either.
-        const invalidateCachesForNode = (nodeId: number) => {
-          const node = get().agentNodes.find((s) => s.id === nodeId);
-          if (!node) return;
-          invalidateNodeCaches(nodeId, getNodeGitPath(node));
-        };
-
-        // Two-stage spawn completion: the backend emits this when stage-2
-        // (`start_node_background`) finishes the slow work and the agent
-        // process is up. Flips the node from 'pending' to 'running'.
-        await listen<NodeSpawnCompletedPayload>('node-spawn-completed', (event) => {
-          const nodeId = event.payload.node_id;
-          set((state) => ({
-            agentNodes: state.agentNodes.map((s) =>
-              s.id === nodeId ? { ...s, status: 'running' as const } : s
-            ),
-          }));
-          invalidateCachesForNode(nodeId);
-        });
-
-        // Autopilot pipeline transitions: patch the pill state in place so
-        // the header tracks the run without waiting for the next full
-        // refetch (App.tsx separately refetches on the completion/failure
-        // events to pick up the node's own status change).
-        const patchAutopilotState = (nodeId: number, state: AutopilotRunState) =>
-          set((s) => ({ autopilotStates: { ...s.autopilotStates, [nodeId]: state } }));
-        await listen<AutopilotFinishingPayload>('autopilot-finishing', (event) => {
-          patchAutopilotState(event.payload.node_id, 'finishing');
-        });
-        await listen<AutopilotPrCreatedPayload>('autopilot-pr-created', (event) => {
-          patchAutopilotState(event.payload.node_id, 'completed');
-          // The wrap-up just opened a PR, so the chip's cached "no PR"
-          // is wrong — and up to 60s of freshness window stands between
-          // it and the next bus-driven refetch. Issue #1004.
-          invalidateCachesForNode(event.payload.node_id);
-        });
-        await listen<AutopilotFinishFailedPayload>('autopilot-finish-failed', (event) => {
-          patchAutopilotState(event.payload.node_id, 'failed');
-        });
-        // Merged-PR auto-close: the backend archived the node (NOT deleted);
-        // refetch so the card leaves the grid. We deliberately do NOT dispose
-        // the terminal — archive keeps the row, branch, and scrollback alive
-        // for the Archive tab, and the terminal-persistence rule says only a
-        // node-delete may dispose. `TerminalManager` is a singleton; the
-        // instance survives the refetch.
-        await listen<AutopilotNodeClosedPayload>('autopilot-node-closed', async () => {
-          await get().fetchAgentNodes();
-        });
-
-        // Two-stage spawn failure: backend already updated the node's DB
-        // status to 'error' before emitting — we mirror it in the store so
-        // the sidebar/title-bar renders the red badge without a refetch.
-        await listen<NodeSpawnFailedPayload>('node-spawn-failed', (event) => {
-          const nodeId = event.payload.node_id;
-          set((state) => ({
-            agentNodes: state.agentNodes.map((s) =>
-              s.id === nodeId ? { ...s, status: 'error' as const } : s
-            ),
-          }));
+        // Issue #1054 — the event-listener body moved to
+        // `agentNodeListeners.ts`. The module owns the event-name →
+        // action map; this site is now a one-line delegate. The
+        // listener's returned unlisten handle is intentionally not
+        // stored — the closure-guarded `listenersAttached` flag mirrors
+        // the pre-refactor behaviour (React StrictMode's double-mount
+        // short-circuits at the guard) and there is no component that
+        // needs to detach the listeners (the store lives for the
+        // lifetime of the webview).
+        await attachAgentNodeListeners({
+          fetchAgentNodes: get().fetchAgentNodes,
+          setActiveNode: get().setActiveNode,
+          patchAgentNode: get().patchAgentNode,
+          patchAutopilotState: get().patchAutopilotState,
+          findAgentNode: get().findAgentNode,
         });
       },
     };
@@ -488,100 +432,59 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   },
 
   renameAgentNode: async (id, name) => {
+    // Issue #1054 — precheck matches the pre-refactor behaviour: a
+    // missing node is a silent no-op, not a throw. (The two pin
+    // actions throw; the rename path was always a quiet return.)
     const prior = get().agentNodes.find(s => s.id === id);
     if (!prior) return;
     // Optimistic update so the UI reflects the new name before the
     // round-trip. The backend emits `node-renamed` on success, which
-    // is a no-op for us (already matches) and keeps other windows in sync.
-    set((state) => ({
-      agentNodes: state.agentNodes.map(s =>
-        s.id === id ? { ...s, name } : s
-      ),
-    }));
-    try {
-      await api.renameAgentNode(id, name);
-    } catch (e) {
-      // Roll back the optimistic update so the UI shows the prior name
-      // again. The user can retry or fix the input.
-      set((state) => ({
-        agentNodes: state.agentNodes.map(s =>
-          s.id === id ? { ...s, name: prior.name } : s
-        ),
-        error: formatError(e),
-      }));
-      throw e;
-    }
+    // is a no-op for us (already matches) and keeps other windows in
+    // sync. We do NOT adopt the mutation's resolved value (rename
+    // returns `void`) — that would race against the `node-renamed`
+    // listener that arrives separately.
+    await withOptimistic({
+      surface: optimisticSurface,
+      nodeId: id,
+      optimisticPatch: { name },
+      mutation: () => api.renameAgentNode(id, name),
+    });
   },
 
   setNodePinned: async (nodeId, pinned) => {
-    const prior = get().agentNodes.find(s => s.id === nodeId);
-    if (!prior) {
-      throw new Error(`setNodePinned: node ${nodeId} is not loaded`);
-    }
     // Optimistic patch so the Pinned Grid view re-renders instantly on
     // a click. The backend's returned `AgentNode` is the source of truth
     // — a future refactor that mutates other columns on the way back
-    // would otherwise be invisible. On rejection we revert only the
-    // `is_pinned` column to its pre-call value, so a concurrent update
-    // to any other column (e.g. status from the orchestrator) is
-    // preserved (matches the optimistic-rollback pattern in
-    // `renameAgentNode`, but with narrower scope so we don't clobber
-    // unrelated concurrent writes).
-    set((state) => ({
-      agentNodes: state.agentNodes.map(s =>
-        s.id === nodeId ? { ...s, is_pinned: pinned } : s
-      ),
-    }));
-    try {
-      const updated = await api.setNodePinned(nodeId, pinned);
-      set((state) => ({
-        agentNodes: state.agentNodes.map(s =>
-          s.id === nodeId ? updated : s
-        ),
-      }));
-      return updated;
-    } catch (e) {
-      set((state) => ({
-        agentNodes: state.agentNodes.map(s =>
-          s.id === nodeId ? { ...s, is_pinned: prior.is_pinned } : s
-        ),
-        error: formatError(e),
-      }));
-      throw e;
-    }
+    // would otherwise be invisible. On rejection `withOptimistic`
+    // reverts only the `is_pinned` column to its pre-call value, so a
+    // concurrent update to any other column (e.g. status from the
+    // orchestrator) is preserved.
+    return withOptimistic({
+      surface: optimisticSurface,
+      nodeId,
+      optimisticPatch: { is_pinned: pinned },
+      mutation: () => api.setNodePinned(nodeId, pinned),
+      adoptResult: (updated) => updated,
+    });
   },
 
   toggleNodePinned: async (nodeId) => {
+    // Optimistic flip — the visible state is `!prior.is_pinned` until
+    // the backend confirms. Same source-of-truth-from-response pattern
+    // as `setNodePinned`. Compute the flipped value up front so
+    // `withOptimistic` has a single `optimisticPatch` to roll back;
+    // the helper's `prior` capture handles the "node not loaded" throw.
     const prior = get().agentNodes.find(s => s.id === nodeId);
     if (!prior) {
       throw new Error(`toggleNodePinned: node ${nodeId} is not loaded`);
     }
-    // Optimistic flip — the visible state is `!prior.is_pinned` until
-    // the backend confirms. Same source-of-truth-from-response pattern
-    // as `setNodePinned`; on rejection we revert `is_pinned` only (not
-    // the whole entry) so concurrent writes to other columns survive.
-    set((state) => ({
-      agentNodes: state.agentNodes.map(s =>
-        s.id === nodeId ? { ...s, is_pinned: !s.is_pinned } : s
-      ),
-    }));
-    try {
-      const updated = await api.toggleNodePinned(nodeId);
-      set((state) => ({
-        agentNodes: state.agentNodes.map(s =>
-          s.id === nodeId ? updated : s
-        ),
-      }));
-      return updated;
-    } catch (e) {
-      set((state) => ({
-        agentNodes: state.agentNodes.map(s =>
-          s.id === nodeId ? { ...s, is_pinned: prior.is_pinned } : s
-        ),
-        error: formatError(e),
-      }));
-      throw e;
-    }
+    return withOptimistic({
+      surface: optimisticSurface,
+      nodeId,
+      optimisticPatch: { is_pinned: !prior.is_pinned },
+      mutation: () => api.toggleNodePinned(nodeId),
+      adoptResult: (updated) => updated,
+    });
   },
 
   // Drag-to-reorder: move `nodeId` to flat `insertIndex` within its own mesh's
@@ -747,4 +650,5 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       return { schedules: next };
     });
   },
-}));
+  };
+});
