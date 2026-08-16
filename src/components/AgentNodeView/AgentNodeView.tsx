@@ -10,7 +10,8 @@ import { terminalManager } from '../Terminal/Terminal';
 import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
-import { scopeNodesForMode, resolveSingleNode } from '../../lib/viewModes';
+import { resolveSingleNode } from '../../lib/viewModes';
+import { deriveVisibleNodes } from './gridControls';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { NodeCard, type BuildRunState } from './NodeCard';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
@@ -254,15 +255,34 @@ export function AgentNodeView() {
   const exitSingleMode = useUIStore(state => state.exitSingleMode);
   const probeOpen = useUIStore(state => state.probeOpen);
   const activeDiffFile = useUIStore(state => state.activeDiffFile);
+  const gridSearchQuery = useUIStore(state => state.gridSearchQuery);
+  const gridProviderFilter = useUIStore(state => state.gridProviderFilter);
+  const gridStatusFilter = useUIStore(state => state.gridStatusFilter);
+  const gridSortBy = useUIStore(state => state.gridSortBy);
+  const gridSortDirection = useUIStore(state => state.gridSortDirection);
   const [openBuildRun, setOpenBuildRun] = useState<BuildRunState>(null);
 
   // The ordered nodes the active grid mode renders. 'single' is not a grid
   // mode — it renders `singleNode` below instead, so its list stays empty.
   const visibleNodes = useMemo(
-    () => (viewMode === 'single'
-      ? []
-      : scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId)),
-    [viewMode, agentNodes, selectedMeshId, activeNodeId],
+    () => deriveVisibleNodes(
+      viewMode,
+      agentNodes,
+      selectedMeshId,
+      activeNodeId,
+      { gridSearchQuery, gridProviderFilter, gridStatusFilter, gridSortBy, gridSortDirection },
+    ),
+    [
+      viewMode,
+      agentNodes,
+      selectedMeshId,
+      activeNodeId,
+      gridSearchQuery,
+      gridProviderFilter,
+      gridStatusFilter,
+      gridSortBy,
+      gridSortDirection,
+    ],
   );
 
   // The node Single mode solos: the active node regardless of mesh scope
@@ -360,6 +380,7 @@ export function AgentNodeView() {
     () => (activeDragNodeId == null ? null : agentNodes.find(n => n.id === activeDragNodeId) ?? null),
     [activeDragNodeId, agentNodes],
   );
+  const dragEnabled = viewMode !== 'pinned' && gridSortBy === 'custom';
 
   const intentFromEvent = (e: DragMoveEvent | DragEndEvent): DropIntent => {
     const data = e.active.data.current as { nodeId: number; meshId: number } | undefined;
@@ -377,6 +398,7 @@ export function AgentNodeView() {
   };
 
   const handleDragStart = (e: DragStartEvent) => {
+    if (!dragEnabled) return;
     const data = e.active.data.current as { nodeId: number; meshId: number } | undefined;
     if (!data) return;
     activatorXRef.current = (e.activatorEvent as PointerEvent).clientX ?? 0;
@@ -385,6 +407,10 @@ export function AgentNodeView() {
   };
 
   const handleDragMove = (e: DragMoveEvent) => {
+    if (!dragEnabled) {
+      setDropIntent(null);
+      return;
+    }
     setDropIntent(intentFromEvent(e));
   };
 
@@ -393,6 +419,7 @@ export function AgentNodeView() {
     const intent = intentFromEvent(e);
     setActiveDragNodeId(null);
     setDropIntent(null);
+    if (!dragEnabled) return;
     if (!data || !intent) return;
     if (intent.kind === 'swap') {
       swapAgentNodes(data.nodeId, intent.targetNodeId);
@@ -458,7 +485,7 @@ export function AgentNodeView() {
               onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
               buildRunOpen={openBuildRun}
               setBuildRunOpen={setOpenBuildRun}
-              draggable={viewMode !== 'pinned'}
+              draggable={dragEnabled}
             />
           ) : (
             <GridSplitter
@@ -466,7 +493,7 @@ export function AgentNodeView() {
               onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
               buildRunOpen={openBuildRun}
               setBuildRunOpen={setOpenBuildRun}
-              draggable={viewMode !== 'pinned'}
+              draggable={dragEnabled}
             />
           )}
         </div>
