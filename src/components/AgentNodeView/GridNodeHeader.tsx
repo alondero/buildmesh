@@ -9,6 +9,7 @@ import { useResizeWidth } from '../../hooks/useResizeWidth';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
+import { canResumeSuspendedNode } from '../../lib/suspended';
 import { getMeshColor } from '../../lib/meshColors';
 import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
 import { ProviderIcon } from '../Providers/ProviderIcon';
@@ -124,6 +125,14 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   // local pin state of its own.
   const toggleNodePinned = useAgentNodeStore(state => state.toggleNodePinned);
   const renameAgentNode = useAgentNodeStore(state => state.renameAgentNode);
+  // Resume (user-driven recovery for Suspended nodes) — mirrors the
+  // sidebar NodeItem's inline Resume button. The store action reads
+  // `cli_session_id` from the row and passes it as the `resume` arg;
+  // for adapters that don't honour resume (OpenCode, Terminal) the
+  // backend falls through to Fresh. The visibility gate (`canResume`)
+  // is the same predicate as the sidebar's `showResume` — autopilot-
+  // gate Suspended rows (no `cli_session_id`) get NO affordance here.
+  const spawnAgent = useAgentNodeStore((state) => state.spawnAgent);
   // The chip's click focuses the node before opening the probe — the
   // `AgentChangesTab` reads `useProbeContext().activeNodeId` to pick
   // which node's review to render, so without this the user could land
@@ -190,7 +199,23 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
     void toggleNodePinned(node.id).catch(() => {});
   };
 
+  // Resume (user-driven recovery for Suspended nodes). Same rationale
+  // as `handleTogglePin` for the silent-catch. The `resume-failed`
+  // Tauri event surfaces an App toast on failure
+  // (`src/App.tsx:419-424`), so the catch only suppresses unhandled-
+  // rejection noise.
+  const handleResume = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    void spawnAgent(node.id, node.provider).catch(() => {});
+  };
+
   const gitPath = getNodeGitPath(node);
+
+  // Same predicate as the sidebar NodeItem's `showResume` — the
+  // shared `canResumeSuspendedNode` helper keeps both surfaces in
+  // lockstep (a Suspended OpenCode node shows the Resume affordance
+  // in both places, never just one).
+  const canResume = canResumeSuspendedNode(node);
 
   // Silent on failure — worktree rows can go stale between renders and a
   // toast storm on every click is worse UX than a quiet console line.
@@ -350,6 +375,25 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         {showInlineActions ? (
           <>
+            {/* Suspended → Resume affordance (user-driven recovery for
+                orphaned nodes). Placed at the start of the inline trio
+                so the recovery action is the leftmost / most discoverable
+                control when the row IS suspended; the existing trio
+                (Reveal / Pin / Maximize / Close) keeps its order otherwise.
+                The violet accent mirrors the Suspended status dot — same
+                colour cue as the sidebar NodeItem's Resume button. */}
+            {canResume && (
+              <button
+                type="button"
+                onClick={handleResume}
+                className="w-7 h-7 flex items-center justify-center rounded-md bg-bg-base/60 border border-border-default text-text-primary hover:text-accent-violet hover:bg-accent-violet/15 hover:border-accent-violet/60 transition-colors text-base leading-none"
+                title="Resume agent"
+                aria-label="Resume agent"
+                data-testid="grid-resume-button"
+              >
+                <span aria-hidden="true">↻</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handleOpenInExplorer}
@@ -439,6 +483,8 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             onTogglePin={handleTogglePin}
             onClose={handleClose}
             onOpenInExplorer={handleOpenInExplorer}
+            canResume={canResume}
+            onResume={handleResume}
           />
         )}
       </div>
@@ -473,12 +519,21 @@ interface KebabActionsProps {
   onTogglePin: (e: React.MouseEvent) => void;
   onClose: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
+  // Resume (user-driven recovery for Suspended nodes) — added when the
+  // fifth kebab item shipped. Rendered as a menu row that only renders
+  // when `canResume` is true; passed through here so the kebab can
+  // render it without duplicating the visibility predicate. Without
+  // this gate the kebab would always show five items regardless of
+  // status, breaking the `toHaveLength(4)` assertions in the
+  // responsive-tier test for non-Suspended nodes.
+  canResume: boolean;
+  onResume: (e: React.MouseEvent) => void;
 }
 
 const KEBAB_MIN_WIDTH = 160;
 const KEBAB_GAP = 4;
 
-function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer }: KebabActionsProps) {
+function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer, canResume, onResume }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -490,9 +545,15 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
   const menuId = menuIdRef.current;
   // Reveal-in-explorer joined the existing maximize/close pair (#736);
   // Pin/Unpin joined in wayfinder #982 (#985). The manual Finish item
-  // (#484) was removed — wrap-up is an autopilot-only concern. Arrow
-  // navigation wraps at four.
-  const itemCount = 4;
+  // (#484) was removed — wrap-up is an autopilot-only concern. The
+  // Resume item joined for user-driven recovery of Suspended nodes —
+  // rendered conditionally on `canResume` so the menu's row count
+  // matches the parent header's visibility gate (4 items when no
+  // recovery is available, 5 when the node is Suspended with a stored
+  // `cli_session_id`). Arrow navigation wraps at the live count so
+  // ArrowDown at the bottom of a 4-item menu doesn't focus a
+  // phantom 5th slot whose ref was never assigned.
+  const itemCount = canResume ? 5 : 4;
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
     setOpen(false);
@@ -670,6 +731,18 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
             <span className="text-text-muted" aria-hidden="true">×</span>
             Close agent node
           </button>
+          {canResume && (
+            <button
+              ref={(el) => { menuItemRefs.current[4] = el; }}
+              role="menuitem"
+              onClick={(e) => { closeAndReturnFocus(); onResume(e); }}
+              data-testid="grid-resume-button"
+              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            >
+              <span className="text-accent-violet" aria-hidden="true">↻</span>
+              Resume agent
+            </button>
+          )}
         </div>
       )}
     </>

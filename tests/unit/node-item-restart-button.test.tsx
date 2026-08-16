@@ -68,9 +68,26 @@ describe('NodeItem restart button', () => {
     expect(screen.queryByTitle('Restart agent')).toBeNull();
   });
 
-  it('does NOT render a Restart button when the node is suspended', () => {
-    renderNode(makeNode({ status: 'suspended' }));
-    expect(screen.queryByTitle('Restart agent')).toBeNull();
+  it('renders a Resume button when the node is suspended AND has a cli_session_id', () => {
+    // The Resume affordance is the user-driven recovery for Suspended
+    // nodes — a Suspended node with a captured `cli_session_id` (the
+    // crash-recovery / app-exit case) can be brought back by re-
+    // attempting the same `--resume` the failed auto-resume tried.
+    renderNode(makeNode({
+      status: 'suspended',
+      cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+    }));
+    expect(screen.getByTitle('Resume agent')).toBeTruthy();
+  });
+
+  it('does NOT render a Resume button when the node is suspended but has no cli_session_id (autopilot gate)', () => {
+    // Autopilot-gate Suspended rows are parked at creation with no
+    // session id — the autopilot's own "Approve Sandbox Run" action
+    // is the recovery surface there. Surfacing a Resume button that
+    // would just surface a "no CLI session ID is stored" toast is a
+    // worse UX than no affordance.
+    renderNode(makeNode({ status: 'suspended', cli_session_id: null }));
+    expect(screen.queryByTitle('Resume agent')).toBeNull();
   });
 
   it('does NOT render a Restart button when the node is idle', () => {
@@ -109,6 +126,45 @@ describe('NodeItem restart button', () => {
     const onSelect = vi.fn();
     renderNode(makeNode({ status: 'error' }), onSelect);
     fireEvent.click(screen.getByTitle('Restart agent'));
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('clicking Resume invokes spawn_agent with the stored cli_session_id so the resume re-attempts', async () => {
+    // The Resume button re-attempts the same `--resume` the failed
+    // auto-resume tried. Mirrors the Restart click test (line 81-101)
+    // — both call `spawn_agent` with `resume: <cli_session_id>`. For
+    // adapters that don't honour resume (OpenCode, Terminal) the
+    // backend now falls through to Fresh; the IPC contract here is
+    // unchanged (the fall-through is internal to `spawn_with_intent`).
+    mockInvoke.mockResolvedValueOnce(undefined);
+    const node = makeNode({
+      status: 'suspended',
+      cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+    });
+    useAgentNodeStore.setState({ agentNodes: [node] });
+    renderNode(node);
+    fireEvent.click(screen.getByTitle('Resume agent'));
+    await Promise.resolve();
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'spawn_agent',
+      expect.objectContaining({
+        sessionId: 42,
+        provider: 'anthropic',
+        resume: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+      }),
+    );
+  });
+
+  it('clicking Resume does NOT also fire the row onSelect (stopPropagation guard)', () => {
+    // Same propagation contract as the Restart button — pinning it for
+    // the Resume affordance so a future refactor can't silently
+    // regress it.
+    const onSelect = vi.fn();
+    renderNode(makeNode({
+      status: 'suspended',
+      cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+    }), onSelect);
+    fireEvent.click(screen.getByTitle('Resume agent'));
     expect(onSelect).not.toHaveBeenCalled();
   });
 });

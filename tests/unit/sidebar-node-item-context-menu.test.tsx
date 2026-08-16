@@ -286,7 +286,6 @@ describe('NodeItem context menu (issue #776)', () => {
       ['spawning'],
       ['pending'],
       ['archived'],
-      ['suspended'],
     ] as const)('renders Regenerate as disabled when status is "%s"', (status) => {
       renderNode(makeNode({ status }), alternateProvider);
       openContextMenu();
@@ -300,7 +299,7 @@ describe('NodeItem context menu (issue #776)', () => {
       expect(item.getAttribute('title')).toMatch(new RegExp(`while ${status}\\b`, 'i'));
     });
 
-    it.each(['running', 'idle', 'awaiting_input', 'error'] as const)(
+    it.each(['running', 'idle', 'awaiting_input', 'error', 'suspended'] as const)(
       'renders Regenerate as enabled when status is "%s"',
       (status) => {
         renderNode(makeNode({ status }), alternateProvider);
