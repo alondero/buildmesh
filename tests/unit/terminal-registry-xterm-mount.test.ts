@@ -91,6 +91,13 @@ vi.mock('@xterm/addon-web-links', () => ({
   WebLinksAddon: class { dispose = vi.fn(); constructor(_h?: unknown) {} },
 }));
 
+vi.mock('@xterm/addon-webgl', () => ({
+  // Issue #1122: WebGL addon is loaded on every terminal. The mock exposes
+  // `onContextLoss` so the production loader's fallback handler can subscribe
+  // without throwing.
+  WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); },
+}));
+
 const XTERM_MOUNT_PATTERN =
   /^spawn_timing: session=-?\d+ checkpoint=xterm_mount elapsed=\d+ms$/;
 

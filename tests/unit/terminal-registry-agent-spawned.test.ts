@@ -116,6 +116,13 @@ vi.mock('@xterm/addon-web-links', () => ({
   WebLinksAddon: class { dispose = vi.fn(); constructor(_h?: unknown) {} },
 }));
 
+vi.mock('@xterm/addon-webgl', () => ({
+  // Issue #1122: WebGL addon is loaded on every terminal. The mock exposes
+  // `onContextLoss` so the production loader's fallback handler can subscribe
+  // without throwing.
+  WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); },
+}));
+
 function emitAgentSpawned(nodeId: number, rows: number, cols: number) {
   const callbacks = eventCallbacks.get('agent-spawned');
   if (!callbacks) throw new Error('no listener registered for agent-spawned');

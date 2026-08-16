@@ -139,6 +139,17 @@ vi.mock('@xterm/addon-unicode11', () => {
   return { Unicode11Addon: MockUnicode11Addon };
 });
 
+vi.mock('@xterm/addon-webgl', () => {
+  // Issue #1122: WebGL addon is loaded on every terminal. The mock has to
+  // expose `onContextLoss` (an event listener registration) so the
+  // production loader's fallback handler can subscribe without throwing.
+  class MockWebglAddon {
+    dispose = vi.fn();
+    onContextLoss = vi.fn();
+  }
+  return { WebglAddon: MockWebglAddon };
+});
+
 describe('TerminalRegistry', () => {
   let registry: TerminalRegistry;
 
