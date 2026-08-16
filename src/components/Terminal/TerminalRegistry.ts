@@ -84,6 +84,16 @@ type WebglHandle =
  * keystroke once the scrollback spans thousands of lines, because TUI
  * cursor positioning forces style recalcs across the HTML <span> tree.
  * WebGL renders via a texture atlas and is constant-time per cell.
+ *
+ * **Canvas fallback chain (intentionally DOM-only).** The issue's
+ * implementation plan asked for an intermediate CanvasAddon tier
+ * between WebGL and DOM; xterm.js v6 **removed the canvas renderer
+ * entirely** (release notes: "Remove the canvas renderer — no longer
+ * exists, use the DOM renderer or WebGL"). The pinned `@xterm/addon-webgl
+ * ^0.19.0` is the only v6-compatible alternative, so the v6 fallback
+ * chain is WebGL → DOM. Bumping to a future addon major would need to
+ * revisit this — the issue spec named the chain as "CanvasAddon or
+ * DOM" precisely because CanvasAddon was the v5 fallback.
  */
 function loadWebglRenderer(
   term: Terminal,
@@ -147,10 +157,13 @@ function loadWebglRenderer(
       }
     });
   } catch (err) {
-    // Older addons returned the event itself rather than a subscribable
-    // function; if so, the listener wasn't registered and we'll get no
-    // recovery — but the addon still works for the steady state.
-    console.warn(`[TerminalRegistry] WebGL context-loss subscription unavailable for node ${nodeId}`, err);
+    // Pinned `@xterm/addon-webgl ^0.19.0` — `onContextLoss` is a
+    // callable `IEvent<void>`. If a future bump changes the shape,
+    // this catch is the only thing keeping the steady-state from
+    // crashing; the `console.error` (not `console.warn`) signals
+    // "unexpected, take notice" so a Triage reader notices the
+    // pinned-version assumption broke.
+    console.error(`[TerminalRegistry] WebGL context-loss subscription failed for node ${nodeId}`, err);
   }
 
   return { kind: 'webgl', addon, contextLossListener: contextLossListener ?? { dispose: () => {} } };
@@ -250,6 +263,16 @@ export class TerminalRegistry {
     if (!inst.opened) {
       inst.opened = true;
       inst.term.open(container);
+      // Activate the WebGL renderer on the first attach, after the
+      // canvas exists (the addon's `activate` builds a WebGL2 context
+      // against the rendered canvas, so the canvas must be live).
+      // Re-attach (workspace focus flip, fluid-grid pane swap) skips
+      // this — the WebGL addon survives across attaches, so loading
+      // it again would either no-op (same addon instance) or
+      // double-allocate GPU resources.
+      inst.webglHandle = loadWebglRenderer(inst.term, nodeId, (fresh) => {
+        inst.webglHandle = fresh;
+      });
     } else {
       const termEl = inst.term.element;
       if (termEl && termEl.parentElement !== container) {
@@ -440,27 +463,29 @@ export class TerminalRegistry {
       // ⚠ U+26A0) — see loadUnicode11Widths.ts for the rationale.
       loadUnicode11Widths(term);
 
-      // Hardware-accelerated rendering. Must happen AFTER every other addon
-      // is loaded but BEFORE `term.open` (in attachToDOM) so the WebGL
-      // renderer is the one that paints the first frame. The helper stays
-      // on xterm.js's DOM renderer if WebGL2 is unavailable or activation
-      // throws — see loadWebglRenderer for the fallback contract.
+      // Hardware-accelerated rendering is wired up in `attachToDOM`,
+      // AFTER `term.open(container)` runs and the underlying canvas
+      // exists. The WebglAddon would defer activation via
+      // `onWillOpen` if called pre-open (its `activate` checks
+      // `terminal.element` and re-arms itself on the first
+      // `onWillOpen` event), but relying on that internal deferral
+      // is fragile — a future addon release could tighten the
+      // check and start throwing. Loading after `open()` makes the
+      // contract local to the registry: the canvas exists, the
+      // WebGL context can be created, no race.
       //
-      // The setter closure lets a context-loss recovery swap the stored
-      // handle in place; the instance object is constructed *before* the
-      // call so the closure captures `instance` by reference (not by
-      // value) and updates its `webglHandle` field in place when a
-      // recovery fires. This is the only way to keep the registry's
-      // stored handle in sync with the live addon across multiple GPU
-      // context losses — a `const` field would freeze the registry on
-      // the original (now disposed) handle.
+      // The instance is constructed with a placeholder DOM handle;
+      // `attachToDOM` calls `loadWebglRenderer` on the fresh-open
+      // path and updates the field in place (with a setter closure
+      // so context-loss recovery can also swap the handle in place).
       const instance: TerminalInstance = {
         term,
         fitAddon,
         serializeAddon,
         searchAddon,
-        // Placeholder — overwritten below by the WebGL loader, and
-        // potentially rewritten again by a context-loss recovery.
+        // Placeholder — overwritten by the WebGL loader in
+        // `attachToDOM` on the fresh-open path, and potentially
+        // rewritten again by a context-loss recovery.
         webglHandle: { kind: 'dom' },
         unlisten: () => {},
         opened: false,
@@ -468,9 +493,6 @@ export class TerminalRegistry {
         attachedContainer: null,
         onFindRequest: null,
       };
-      instance.webglHandle = loadWebglRenderer(term, nodeId, (fresh) => {
-        instance.webglHandle = fresh;
-      });
 
       this.writer.register(nodeId, (data) => term.write(data));
       this.fontSizeManager.register(nodeId, term, () => measureAndFit(instance));

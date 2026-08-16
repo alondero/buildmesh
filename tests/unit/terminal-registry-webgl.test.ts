@@ -162,16 +162,27 @@ describe('TerminalRegistry WebGL renderer (issue #1122)', () => {
     warnSpy.mockRestore();
   });
 
+  // The WebGL loader runs on the FRESH-OPEN path of `attachToDOM`
+  // (after `term.open(container)`), not in `getOrCreate`. Each test
+  // that exercises the loaded addon therefore has to call
+  // `registry.attach(...)` — mirroring the production flow where
+  // `AgentTerminal` renders the pane, then xterm mounts in the DOM.
+  const attachTerminal = async (nodeId: number) => {
+    const inst = await registry.getOrCreate(nodeId);
+    await registry.attach(nodeId, document.createElement('div'));
+    return inst!;
+  };
+
   it('attaches the WebGL addon when WebGL2 is available', async () => {
-    const inst = await registry.getOrCreate(1);
-    expect(inst!.webglHandle.kind).toBe('webgl');
+    const inst = await attachTerminal(1);
+    expect(inst.webglHandle.kind).toBe('webgl');
     expect(constructorCalls).toBe(1);
   });
 
   it('falls back to the DOM renderer when the WebGL constructor throws', async () => {
     constructorThrow = true;
-    const inst = await registry.getOrCreate(1);
-    expect(inst!.webglHandle.kind).toBe('dom');
+    const inst = await attachTerminal(1);
+    expect(inst.webglHandle.kind).toBe('dom');
     // The user-visible "renderer is the default" log line gives a Triage
     // reader a smoking gun on a host where WebGL was just disabled —
     // assert the log fires, and the message names the node.
@@ -183,8 +194,8 @@ describe('TerminalRegistry WebGL renderer (issue #1122)', () => {
 
   it('falls back to the DOM renderer when WebGL activate throws', async () => {
     activateThrow = true;
-    const inst = await registry.getOrCreate(1);
-    expect(inst!.webglHandle.kind).toBe('dom');
+    const inst = await attachTerminal(1);
+    expect(inst.webglHandle.kind).toBe('dom');
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('WebGL activate failed for node 1'),
       expect.anything(),
@@ -192,9 +203,9 @@ describe('TerminalRegistry WebGL renderer (issue #1122)', () => {
   });
 
   it('disposes the addon when the terminal is disposed', async () => {
-    const inst = await registry.getOrCreate(1);
-    expect(inst!.webglHandle.kind).toBe('webgl');
-    const addon = inst!.webglHandle.kind === 'webgl' ? inst!.webglHandle.addon : null;
+    const inst = await attachTerminal(1);
+    expect(inst.webglHandle.kind).toBe('webgl');
+    const addon = inst.webglHandle.kind === 'webgl' ? inst.webglHandle.addon : null;
     registry.dispose(1);
     // Disposing twice (the registry calls dispose + a potential re-dispose
     // from the context-loss path) must not throw — the recovery path
@@ -207,9 +218,9 @@ describe('TerminalRegistry WebGL renderer (issue #1122)', () => {
   });
 
   it('recovers from a WebGL context loss by re-attaching the addon', async () => {
-    const inst = await registry.getOrCreate(1);
-    expect(inst!.webglHandle.kind).toBe('webgl');
-    const originalAddon = inst!.webglHandle.kind === 'webgl' ? inst!.webglHandle.addon : null;
+    const inst = await attachTerminal(1);
+    expect(inst.webglHandle.kind).toBe('webgl');
+    const originalAddon = inst.webglHandle.kind === 'webgl' ? inst.webglHandle.addon : null;
     const beforeCalls = constructorCalls;
     const beforeListeners = listeners.length;
 
@@ -235,7 +246,7 @@ describe('TerminalRegistry WebGL renderer (issue #1122)', () => {
     // would operate on a torn-down handle. The fix swaps the stored
     // handle in place, so `inst.webglHandle` is now the NEW live
     // addon's handle — not the disposed one.
-    const fresh = inst!.webglHandle;
+    const fresh = inst.webglHandle;
     expect(fresh.kind).toBe('webgl');
     if (fresh.kind === 'webgl' && originalAddon) {
       expect(fresh.addon).not.toBe(originalAddon);
@@ -251,25 +262,25 @@ describe('TerminalRegistry WebGL renderer (issue #1122)', () => {
     // registry held the torn-down handle and the second listener was
     // a no-op (or threw on the disposed addon's emitter), so a flaky
     // GPU would freeze the terminal instead of recovering again.
-    const inst = await registry.getOrCreate(1);
-    const firstAddon = inst!.webglHandle.kind === 'webgl' ? inst!.webglHandle.addon : null;
+    const inst = await attachTerminal(1);
+    const firstAddon = inst.webglHandle.kind === 'webgl' ? inst.webglHandle.addon : null;
 
     // First context loss.
     listeners[0]();
-    const secondAddon = inst!.webglHandle.kind === 'webgl' ? inst!.webglHandle.addon : null;
+    const secondAddon = inst.webglHandle.kind === 'webgl' ? inst.webglHandle.addon : null;
     expect(secondAddon).not.toBe(firstAddon);
 
     // Second context loss — the recovered handle has its own live
     // listener, so this still fires a fresh recovery.
     listeners[0]();
-    const thirdAddon = inst!.webglHandle.kind === 'webgl' ? inst!.webglHandle.addon : null;
+    const thirdAddon = inst.webglHandle.kind === 'webgl' ? inst.webglHandle.addon : null;
     expect(thirdAddon).not.toBe(secondAddon);
     expect(secondAddon!.dispose).toHaveBeenCalled();
   });
 
   it('stays on the DOM renderer when context-loss re-attach fails', async () => {
-    const inst = await registry.getOrCreate(1);
-    expect(inst!.webglHandle.kind).toBe('webgl');
+    const inst = await attachTerminal(1);
+    expect(inst.webglHandle.kind).toBe('webgl');
 
     // Flip the constructor to fail BEFORE the context loss fires so the
     // recovery path lands on the DOM branch.
@@ -283,5 +294,25 @@ describe('TerminalRegistry WebGL renderer (issue #1122)', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('WebGL re-attach failed for node 1'),
     );
+  });
+
+  it('does NOT load WebGL on getOrCreate (PR review contract)', async () => {
+    // Issue #1122 PR review: a PR that pre-loaded WebGL via
+    // `term.loadAddon(addon)` before `term.open(container)` would
+    // either (a) trip the addon's `onWillOpen` deferral in older
+    // versions, or (b) throw outright if the addon tightens its
+    // pre-open check. The fix moved the WebGL load to
+    // `attachToDOM` — verify the contract here.
+    const beforeCalls = constructorCalls;
+    const inst = await registry.getOrCreate(1);
+    // `getOrCreate` must NOT have called the addon constructor yet.
+    expect(constructorCalls).toBe(beforeCalls);
+    expect(inst.webglHandle.kind).toBe('dom');
+
+    // `attach` is where the WebGL load happens — after this, the
+    // constructor count ticks up and the handle flips to webgl.
+    await registry.attach(1, document.createElement('div'));
+    expect(constructorCalls).toBe(beforeCalls + 1);
+    expect(inst.webglHandle.kind).toBe('webgl');
   });
 });

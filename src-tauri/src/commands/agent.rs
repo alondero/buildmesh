@@ -1102,9 +1102,8 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
 /// exchange. None of these park on I/O for the small payloads a single
 /// keystroke produces. Issue #1122 measured keystroke latency dropping
 /// from "queued behind git probes" to "in-process" once this seam was
-/// carved out — the slow path is the old [`write_to_agent_blocking`],
-/// kept for mobile HTTP and tests that want a single self-contained
-/// sync core.
+/// carved out — the slow path is [`write_to_agent_attention_only_blocking`]
+/// below.
 ///
 /// A failed PTY write must NOT claim "user input accepted" — the reader
 /// thread's exit-detector would see no signal for the dead child, and
@@ -1132,9 +1131,10 @@ pub(crate) fn write_to_agent_fastpath(
 /// keeping them off the async runtime preserves the Command Threading
 /// convention from the knowledge primer.
 ///
-/// Kept separate from [`write_to_agent_blocking`] (which still does the
-/// full PTY + DB sequence) so the async command's two paths stay
-/// orthogonal: the fast path owns the PTY write, this owns the DB work.
+/// The two-path split (fast path owns the PTY write, slow path owns
+/// the DB work) is what lets a raw keystroke skip `run_blocking`
+/// entirely; the slow path only runs when the fast path observed a
+/// newline. See [`write_to_agent_fastpath`] for the fast half.
 fn write_to_agent_attention_only_blocking(session_id: i64) -> Result<bool, String> {
     if should_skip_attention_signals(session_id) {
         return Ok(false);
