@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import NodeList from "../../src/mobile/screens/NodeList";
 import type {
   AgentNode,
@@ -117,6 +118,30 @@ describe("NodeList", () => {
     // under its mesh bucket (regression for the duplicate-row bug, #807).
     expect(screen.getAllByTestId("node-3")).toHaveLength(1);
     // Running node renders normally.
+    expect(screen.getByTestId("node-1")).toBeTruthy();
+  });
+
+  it("resolves the initial list when mounted through the production StrictMode wrapper", async () => {
+    // This kills the cleanup-only mounted guard mutation: React StrictMode
+    // re-runs effects without recreating refs, so cleanup must not leave the
+    // committed component permanently marked as unmounted.
+    mockApi([makeNode(1, "running")]);
+
+    render(
+      <StrictMode>
+        <NodeList
+          onOpenNode={noop}
+          onOpenAgentNodes={noop}
+          onOpenIssues={noop}
+          onOffline={noop}
+          onAuthFailed={noop}
+        />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("node-list")).not.toBeNull();
+    });
     expect(screen.getByTestId("node-1")).toBeTruthy();
   });
 
