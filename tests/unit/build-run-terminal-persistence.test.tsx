@@ -86,6 +86,13 @@ vi.mock('@xterm/xterm', () => {
   return { Terminal: TrackedTerminal };
 });
 
+vi.mock('@xterm/addon-webgl', () => ({
+  // Issue #1122: WebGL addon is loaded on every terminal. The mock exposes
+  // `onContextLoss` so the production loader's fallback handler can subscribe
+  // without throwing.
+  WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); },
+}));
+
 // Imports AFTER the mock override above so the registry picks up the
 // tracked Terminal constructor.
 import { buildRunTerminalManager } from '../../src/components/Terminal/BuildRunTerminalRegistry';

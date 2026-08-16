@@ -16,6 +16,23 @@ type SchedulerFn = (cb: () => void) => void;
  */
 export const MAX_PENDING_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Maximum payload size that takes the interactive fast path (issue #1122).
+ * A single-byte keystroke echo lands here: the writer ships it straight to
+ * xterm without queuing a `requestAnimationFrame`. Going through rAF would
+ * stack on top of xterm's own internal render-rAF, adding one full frame
+ * of latency per keystroke that becomes visible as "typing feels sluggish"
+ * after a long session. 4 bytes is enough for one ASCII char + a 3-byte
+ * UTF-8 sequence (most CLI box-drawing yields are <4 bytes per chunk from
+ * the agent's echo).
+ *
+ * Past this size we fall back to rAF batching so a verbose build log dump
+ * or a flood of agent output coalesces into one xterm write per frame,
+ * avoiding the 100-writes-per-frame storm that the importer of this file
+ * originally solved (issue #303).
+ */
+export const INTERACTIVE_FAST_PATH_BYTES = 4;
+
 interface BufferEntry {
   chunks: TerminalWriteData[];
   pendingBytes: number;
@@ -52,6 +69,39 @@ function coalesceChunks(chunks: TerminalWriteData[]): TerminalWriteData[] {
   return chunks;
 }
 
+function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined): void {
+  if (entry.chunks.length === 0 || !writeFn) return;
+  const chunks = coalesceChunks(entry.chunks);
+  entry.chunks = [];
+  entry.pendingBytes = 0;
+  for (const chunk of chunks) {
+    writeFn(chunk);
+  }
+}
+
+/**
+ * True iff every byte in `data` is ASCII (< 0x80). The interactive fast
+ * path is restricted to ASCII because a multi-byte UTF-8 codepoint can
+ * arrive split across two PTY chunks (the agent's `pump_pty_output`
+ * push boundary is the byte chunk from `read()`, not a codepoint
+ * boundary). Letting a partial UTF-8 sequence write directly to xterm
+ * would corrupt the character — the split chunk test in
+ * `tests/unit/build-run-terminal-raf-batching.test.tsx` pins this.
+ * ASCII is safe by definition: no codepoint spans more than one byte.
+ */
+function isAsciiPayload(data: TerminalWriteData): boolean {
+  if (typeof data === 'string') {
+    for (let i = 0; i < data.length; i++) {
+      if (data.charCodeAt(i) > 0x7f) return false;
+    }
+    return true;
+  }
+  for (let i = 0; i < data.byteLength; i++) {
+    if (data[i] > 0x7f) return false;
+  }
+  return true;
+}
+
 export class TerminalWriter {
   private entries = new Map<number, BufferEntry>();
   private writeFns = new Map<number, WriteFn>();
@@ -83,6 +133,31 @@ export class TerminalWriter {
       const dropped = entry.chunks.shift()!;
       entry.pendingBytes -= byteLength(dropped);
     }
+    // Fast path: a single small ASCII interactive echo (issue #1122)
+    // goes straight to xterm. Without this, the chain is
+    //   `agent-output` event → TerminalWriter rAF → term.write →
+    //   xterm's own internal render-rAF → visible
+    // and the user's keystroke waits two frames before drawing. The
+    // direct write still goes through xterm's render rAF (we can't
+    // avoid that), but we skip our rAF — the visible state lands on
+    // xterm's next frame, which is the same frame the user would have
+    // gotten if the writer didn't exist at all.
+    //
+    // ASCII-only is enforced (see `isAsciiPayload`) because a multi-byte
+    // UTF-8 codepoint can arrive split across two chunks from the PTY
+    // reader — letting the partial sequence write directly would corrupt
+    // the character. Keystroke echoes are virtually always ASCII (the
+    // agent's readline echoes character-by-character), so the ASCII
+    // guard does not regress the interactive latency win in practice.
+    if (
+      entry.pendingBytes <= INTERACTIVE_FAST_PATH_BYTES &&
+      entry.chunks.length === 1 &&
+      !entry.frameRequested &&
+      isAsciiPayload(data)
+    ) {
+      flushEntry(entry, this.writeFns.get(nodeId));
+      return;
+    }
     this.scheduleFlush(nodeId, entry);
   }
 
@@ -91,14 +166,8 @@ export class TerminalWriter {
     entry.frameRequested = true;
     this.scheduler(() => {
       const current = this.entries.get(nodeId);
-      if (current === entry && entry.chunks.length > 0) {
-        const writeFn = this.writeFns.get(nodeId);
-        const chunks = coalesceChunks(entry.chunks);
-        entry.chunks = [];
-        entry.pendingBytes = 0;
-        for (const chunk of chunks) {
-          writeFn?.(chunk);
-        }
+      if (current === entry) {
+        flushEntry(current, this.writeFns.get(nodeId));
       }
       entry.frameRequested = false;
     });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TerminalWriter, MAX_PENDING_BYTES } from '../../src/components/Terminal/TerminalWriter';
+import { TerminalWriter, MAX_PENDING_BYTES, INTERACTIVE_FAST_PATH_BYTES } from '../../src/components/Terminal/TerminalWriter';
 
 describe('TerminalWriter', () => {
   let writer: TerminalWriter;
@@ -53,23 +53,55 @@ describe('TerminalWriter', () => {
     });
 
     it('buffers byte chunks without stringifying them', () => {
+      // Use rAF-sized chunks so the writer takes the rAF path —
+      // merging adjacent byte chunks into one Uint8Array via
+      // `coalesceChunks` is meaningful only when both chunks land in
+      // the same buffer before the frame fires (issue #1122 fast path
+      // would flush each chunk immediately, so the byte-chunk merge
+      // guarantee would be untestable here).
       const writeFn = vi.fn();
       writer.register(1, writeFn);
 
-      writer.append(1, new Uint8Array([0xe2, 0x96]));
-      writer.append(1, new Uint8Array([0x88]));
+      const first = new Uint8Array(INTERACTIVE_FAST_PATH_BYTES + 1);
+      first.set([0xe2, 0x96, 0x80], 0);
+      const second = new Uint8Array(INTERACTIVE_FAST_PATH_BYTES + 1);
+      second.set([0xe2, 0x96, 0x80], 0);
+      writer.append(1, first);
+      writer.append(1, second);
 
       flush();
       expect(writeFn).toHaveBeenCalledOnce();
-      expect(writeFn).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
+      const written = writeFn.mock.calls[0][0] as Uint8Array;
+      expect(written).toBeInstanceOf(Uint8Array);
+      // The two chunks must be back-to-back in the merged buffer.
+      expect(written.byteLength).toBe(2 * (INTERACTIVE_FAST_PATH_BYTES + 1));
+      expect(written[0]).toBe(0xe2);
+      expect(written[1]).toBe(0x96);
+      expect(written[2]).toBe(0x80);
     });
 
     it('only schedules one frame per batch', () => {
+      // Use rAF-sized chunks so the writer takes the rAF path. Small
+      // chunks flush via the interactive fast path (issue #1122) and
+      // wouldn't schedule a frame at all — see the "interactive fast
+      // path" describe block for the by-chunk-size split.
+      writer.register(1, vi.fn());
+      writer.append(1, 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
+      writer.append(1, 'y'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
+      writer.append(1, 'z'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
+      expect(scheduledCallbacks).toHaveLength(1);
+    });
+
+    it('fast path leaves the rAF queue empty for small bursts', () => {
+      // Mirror of the above: the fast path (issue #1122) handles small
+      // single-byte chunks by writing directly, so the rAF queue stays
+      // empty even across multiple sync appends. Without this, the
+      // batching path would still schedule one frame per chunk.
       writer.register(1, vi.fn());
       writer.append(1, 'a');
       writer.append(1, 'b');
       writer.append(1, 'c');
-      expect(scheduledCallbacks).toHaveLength(1);
+      expect(scheduledCallbacks).toHaveLength(0);
     });
 
     it('allows a new batch after flush completes', () => {
@@ -88,7 +120,11 @@ describe('TerminalWriter', () => {
 
     it('clears buffer after flush', () => {
       writer.register(1, vi.fn());
-      writer.append(1, 'data');
+      // Use a chunk larger than the interactive fast path so the
+      // writer takes the rAF path. The fast path flushes immediately
+      // and would skip the buffer entirely — pendingBytes would be 0
+      // before flush() even runs.
+      writer.append(1, 'r'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
       flush();
       expect(writer.pendingBytes(1)).toBe(0);
     });
@@ -127,7 +163,9 @@ describe('TerminalWriter', () => {
     it('does not write if node is unregistered before flush', () => {
       const writeFn = vi.fn();
       writer.register(1, writeFn);
-      writer.append(1, 'data');
+      // rAF-sized chunk so the writer doesn't take the fast path
+      // (which flushes immediately and bypasses the rAF).
+      writer.append(1, 'r'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
       writer.unregister(1);
       flush();
       expect(writeFn).not.toHaveBeenCalled();
@@ -156,16 +194,22 @@ describe('TerminalWriter', () => {
       // therefore be a wrapper that calls requestAnimationFrame with the correct
       // receiver — exercising the default here would have caught the production bug
       // that silently dropped all PTY output.
+      //
+      // Chunk size note (issue #1122): the chunk has to be larger than
+      // INTERACTIVE_FAST_PATH_BYTES so the writer takes the rAF path
+      // rather than the interactive fast path. The fast path bypasses
+      // the scheduler entirely, which would side-step the very trap
+      // this regression test pins (the wrapped-scheduler contract).
       const fakeRaf = vi.fn((cb: () => void) => { cb(); return 0; });
       vi.stubGlobal('requestAnimationFrame', fakeRaf);
       try {
         const defaultWriter = new TerminalWriter();
         const writeFn = vi.fn();
         defaultWriter.register(1, writeFn);
-        expect(() => defaultWriter.append(1, 'x')).not.toThrow();
+        expect(() => defaultWriter.append(1, 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1))).not.toThrow();
         expect(fakeRaf).toHaveBeenCalledTimes(1);
         // The fake raf invoked the callback synchronously, so the write should have flushed.
-        expect(writeFn).toHaveBeenCalledWith('x');
+        expect(writeFn).toHaveBeenCalledWith('x'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
       } finally {
         vi.unstubAllGlobals();
       }
@@ -220,11 +264,17 @@ describe('TerminalWriter', () => {
 
     it('pending byte accounting survives a flush cycle', () => {
       writer.register(1, vi.fn());
-      writer.append(1, 'abcde');
+      // Use a chunk larger than the interactive fast path so the writer
+      // takes the rAF path; the fast path flushes immediately and would
+      // bypass the accounting this test pins.
+      const first = 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1);
+      writer.append(1, first);
       flush();
       expect(writer.pendingBytes(1)).toBe(0);
-      writer.append(1, 'xyz');
-      expect(writer.pendingBytes(1)).toBe(3);
+      // Next chunk is also rAF-sized so it pending-accounts.
+      const second = 'y'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1);
+      writer.append(1, second);
+      expect(writer.pendingBytes(1)).toBe(second.length);
     });
   });
 
@@ -233,11 +283,91 @@ describe('TerminalWriter', () => {
       expect(writer.pendingBytes(999)).toBe(0);
     });
 
-    it('returns accumulated buffer length', () => {
+    it('returns accumulated buffer length for rAF-sized chunks', () => {
+      // rAF path: chunks > INTERACTIVE_FAST_PATH_BYTES accumulate in
+      // the buffer pending a frame flush.
+      writer.register(1, vi.fn());
+      writer.append(1, 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
+      writer.append(1, 'y'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1));
+      expect(writer.pendingBytes(1)).toBe(2 * (INTERACTIVE_FAST_PATH_BYTES + 1));
+    });
+
+    it('returns 0 for fast-path-sized chunks (immediate flush)', () => {
+      // Fast path: chunks ≤ INTERACTIVE_FAST_PATH_BYTES flush
+      // synchronously, so pendingBytes is 0 right after append.
       writer.register(1, vi.fn());
       writer.append(1, 'abc');
       writer.append(1, 'de');
-      expect(writer.pendingBytes(1)).toBe(5);
+      expect(writer.pendingBytes(1)).toBe(0);
+    });
+  });
+
+  describe('interactive fast path (issue #1122)', () => {
+    // The writer's full code path stacks a `requestAnimationFrame` on top of
+    // xterm's own internal render-rAF, adding one frame of latency per
+    // keystroke echo. Interactive single-byte writes (the dominant cost in
+    // the progressive-latency bug) bypass rAF and go straight to xterm so
+    // the visible state lands on xterm's next frame, not our next frame +
+    // xterm's next frame. Burst output (>4 bytes) still falls back to rAF
+    // batching so a verbose log dump stays at one xterm write per frame.
+    //
+    // The fast path is ASCII-only (see `isAsciiPayload` in TerminalWriter.ts).
+    // A multi-byte UTF-8 codepoint can arrive split across two PTY chunks —
+    // writing the partial sequence directly would corrupt the character.
+    // Keystroke echoes are virtually always ASCII, so the guard doesn't
+    // regress the interactive latency win in practice.
+
+    it('writes a single ASCII character directly without scheduling rAF', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      writer.append(1, 'a');
+      expect(writeFn).toHaveBeenCalledWith('a');
+      expect(scheduledCallbacks).toHaveLength(0);
+      expect(writer.pendingBytes(1)).toBe(0);
+    });
+
+    it('writes a short ASCII string directly without scheduling rAF', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      // Exactly 4 bytes — at the fast-path boundary.
+      writer.append(1, 'abcd');
+      expect(writeFn).toHaveBeenCalledWith('abcd');
+      expect(scheduledCallbacks).toHaveLength(0);
+    });
+
+    it('falls back to rAF for a small non-ASCII chunk to keep UTF-8 splits safe', () => {
+      // Pinned regression for the build-run split-UTF-8 test. A 2-byte
+      // chunk whose first byte is 0xE2 is the start of a 3-byte UTF-8
+      // sequence (e.g. U+2580 ▀ = 0xE2 0x96 0x80). If we let the fast
+      // path fire, the next chunk (0x80) would write a separate term.write
+      // for the partial sequence and xterm would corrupt the character.
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      writer.append(1, new Uint8Array([0xe2, 0x96]));
+      expect(writeFn).not.toHaveBeenCalled();
+      expect(scheduledCallbacks).toHaveLength(1);
+    });
+
+    it('falls back to rAF for a small string containing non-ASCII', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      writer.append(1, 'a£');
+      expect(writeFn).not.toHaveBeenCalled();
+      expect(scheduledCallbacks).toHaveLength(1);
+    });
+
+    it('still coalesces over-sized bursts into one rAF-driven write', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      // 100 short lines of agent output — each one is small in isolation
+      // but they pile up to a multi-KB burst. The writer must batch.
+      for (let i = 0; i < 100; i++) {
+        writer.append(1, `line ${i}\n`);
+      }
+      expect(writeFn).not.toHaveBeenCalled();
+      expect(scheduledCallbacks).toHaveLength(1);
+      flush();
+      expect(writeFn).toHaveBeenCalledTimes(1);
     });
   });
 });

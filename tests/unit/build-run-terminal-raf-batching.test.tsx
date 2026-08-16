@@ -64,6 +64,13 @@ vi.mock('@xterm/xterm', () => {
   return { Terminal: MockTerminal };
 });
 
+vi.mock('@xterm/addon-webgl', () => ({
+  // Issue #1122: WebGL addon is loaded on every terminal. The mock exposes
+  // `onContextLoss` so the production loader's fallback handler can subscribe
+  // without throwing.
+  WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); },
+}));
+
 // jsdom doesn't ship ResizeObserver and the component instantiates one
 // unconditionally inside the effect; this no-op keeps render() from throwing.
 globalThis.ResizeObserver = class {

@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import * as api from '../../lib/tauri';
 import { createTerminalOptions } from './terminalConfig';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
+import { loadWebglRenderer } from './loadWebglRenderer';
 import { TerminalWriter } from './TerminalWriter';
 import { decodeBase64Bytes } from '../../lib/base64';
 import type { BuildRunOutputPayload } from '../../types/generated/BuildRunOutputPayload';
@@ -365,6 +366,11 @@ export class BuildRunTerminalRegistry {
       // shear box-drawing borders (xterm defaults to Unicode 6 widths).
       // createTerminalOptions sets allowProposedApi, which this addon requires.
       loadUnicode11Widths(term);
+      // Issue #1122: attach the WebGL renderer for the same reason as the
+      // agent terminal — without it, the build-run pane slows to 30-60ms
+      // per frame after a long `cargo build -v` or `npm install` dumps
+      // thousands of styled lines into the scrollback.
+      loadWebglRenderer(term);
 
       // Per-instance writer (NOT the shared registry writer — see class
       // header comment about key namespace collision).

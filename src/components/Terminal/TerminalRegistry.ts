@@ -18,6 +18,7 @@ import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
 import { FontSizeManager } from './FontSizeManager';
 import { ThemeManager } from './ThemeManager';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
+import { loadWebglRenderer } from './loadWebglRenderer';
 import { decodeBase64Bytes } from '../../lib/base64';
 import { setTheme, type ThemeName } from '../../lib/theme';
 
@@ -320,6 +321,17 @@ export class TerminalRegistry {
       // upstream @xterm/addon-unicode11 ships with the wrong width (notably
       // ⚠ U+26A0) — see loadUnicode11Widths.ts for the rationale.
       loadUnicode11Widths(term);
+      // Issue #1122: attach the WebGL renderer. Without this, xterm falls
+      // back to the DOM renderer, which recreates a `<span>` per cell on
+      // every redraw. After thousands of lines of ANSI-styled scrollback
+      // accumulate, the per-keystroke cursor positioning escapes force a
+      // full reflow across hundreds of thousands of spans, and the render
+      // frame climbs from <2ms to 30-60ms+. The WebGL renderer draws the
+      // whole grid to a single canvas, collapsing that to O(1) glyph
+      // uploads. Falls back to the DOM renderer on context loss or when
+      // WebGL is unavailable (no GPU, headless, remote desktop) — see
+      // loadWebglRenderer.ts for the fallback ladder.
+      loadWebglRenderer(term);
 
       const instance: TerminalInstance = {
         term,
