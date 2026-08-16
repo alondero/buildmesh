@@ -1060,65 +1060,93 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
 
 #[command]
 pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
-    // Offload to the blocking pool — the PTY write (`write_all` + `flush`,
-    // can park on a full pipe) plus a DB read + UPDATE in the same body
-    // would otherwise pin a Tauri async worker for the full call. See the
-    // [`crate::commands::run_blocking`] seam (introduced for GitHub/git
-    // probes in #761) for the convention.
-    let should_signal =
-        crate::commands::run_blocking("write_to_agent", move || {
-            write_to_agent_blocking(session_id, data)
-        })
-        .await?;
-    if should_signal {
-        // Route through the SessionLifecycle sink so all `attention-cleared`
-        // emits pass through one owner — matches the invariant in
-        // `session_lifecycle.rs` that no caller emits lifecycle events
-        // directly. (`on_attention_cleared` would also write `Running`
-        // status, which `write_to_agent` intentionally doesn't — user
-        // input doesn't by itself mark the node as no longer awaiting.)
-        let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
-        sink.emit_attention_cleared(session_id);
+    // Issue #1122: every keystroke in an agent TUI used to go through
+    // `run_blocking` (== `spawn_blocking`). The blocking pool is shared
+    // with git probes, mesh syncs, directory listings, and warm-pool
+    // refills — under load, every keystroke would queue behind those
+    // heavy tasks and the TUI felt progressively laggier. Split the
+    // call into a PTY-only fast path that runs inline on the async
+    // runtime, and a DB-only slow path that still uses `run_blocking` for
+    // the newline-triggered status flip.
+    let has_newline = write_to_agent_fastpath(session_id, &data)?;
+    if has_newline {
+        let should_signal =
+            crate::commands::run_blocking("write_to_agent_attention", move || {
+                write_to_agent_attention_only_blocking(session_id)
+            })
+            .await?;
+        if should_signal {
+            // Route through the SessionLifecycle sink so all
+            // `attention-cleared` emits pass through one owner — matches
+            // the invariant in `session_lifecycle.rs` that no caller
+            // emits lifecycle events directly. (`on_attention_cleared`
+            // would also write `Running` status, which `write_to_agent`
+            // intentionally doesn't — user input doesn't by itself mark
+            // the node as no longer awaiting.)
+            let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
+            sink.emit_attention_cleared(session_id);
+        }
     }
     Ok(())
 }
 
-/// Sync core for [`write_to_agent`]. Offloaded to the blocking pool by the
-/// async wrapper above; kept `pub(crate)` so the mobile HTTP routes under
-/// `src/http/` can call it directly when an equivalent endpoint is added
-/// (the same forward-compat reason every other `*_blocking` core here is
-/// `pub(crate)`). Returns `Ok(true)` when the caller should emit
-/// `attention-cleared`.
+/// Fast-path core for [`write_to_agent`]: writes `data` to the agent's
+/// PTY stdin and disarms the attention-autoclear timer. Returns `true`
+/// when `data` contains a newline or carriage return — the signal that
+/// the caller should run the slow-path (DB) follow-up.
 ///
-/// PTY write happens first; a failed write must NOT claim "user input
-/// accepted" — the reader thread's exit-detector would see no signal for
-/// the dead child, and the status flip would land on a session that
-/// never received the byte.
-pub(crate) fn write_to_agent_blocking(
+/// Runs **inline on the async runtime, no `spawn_blocking`**, because
+/// the work is bounded: the writer lock is a `std::sync::Mutex` on a
+/// non-blocking PTY pipe, `note_activity_for_mesh` is a single map
+/// entry, and `record_first_input_if_first` is an atomic compare-
+/// exchange. None of these park on I/O for the small payloads a single
+/// keystroke produces. Issue #1122 measured keystroke latency dropping
+/// from "queued behind git probes" to "in-process" once this seam was
+/// carved out — the slow path is the old [`write_to_agent_blocking`],
+/// kept for mobile HTTP and tests that want a single self-contained
+/// sync core.
+///
+/// A failed PTY write must NOT claim "user input accepted" — the reader
+/// thread's exit-detector would see no signal for the dead child, and
+/// the status flip would land on a session that never received the byte.
+pub(crate) fn write_to_agent_fastpath(
     session_id: i64,
-    data: String,
+    data: &str,
 ) -> Result<bool, String> {
     PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
-    // Any accepted keystroke means the user is engaged with this node — the
-    // stale-mark hypothesis behind auto-clear (issue #878) no longer holds,
-    // and the keystroke's own echo must not count toward the resume burst.
+    // Any accepted keystroke means the user is engaged with this node —
+    // the stale-mark hypothesis behind auto-clear (issue #878) no longer
+    // holds, and the keystroke's own echo must not count toward the
+    // resume burst.
     crate::attention_autoclear::disarm(session_id);
-    let should_signal = data.bytes().any(|b| b == b'\n' || b == b'\r')
-        && !should_skip_attention_signals(session_id);
-    if should_signal {
-        // Status write routes through SessionLifecycle (issue #132). The
-        // sink here is `DbOnlySink` because the blocking core has no
-        // `AppHandle`; the corresponding `attention-cleared` emit is the
-        // caller's responsibility (the `should_signal` flag tells the
-        // caller to emit, preserving the original behaviour where the
-        // emit lived in the async wrapper).
-        session_lifecycle::on_attention_cleared(
-            &session_lifecycle::DbOnlySink,
-            session_id,
-        )
-        .ok();
+    Ok(data.bytes().any(|b| b == b'\n' || b == b'\r'))
+}
+
+/// Slow-path DB core for [`write_to_agent`]. Called only when the
+/// fast-path observed a newline/carriage-return; at that point the PTY
+/// write has already landed so this body is DB-only. Returns `Ok(true)`
+/// when the caller should emit `attention-cleared`.
+///
+/// Offloaded to the blocking pool because both `should_skip_attention_signals`
+/// (DB read) and `on_attention_cleared` (DB write) take the DB mutex —
+/// keeping them off the async runtime preserves the Command Threading
+/// convention from the knowledge primer.
+///
+/// Kept separate from [`write_to_agent_blocking`] (which still does the
+/// full PTY + DB sequence) so the async command's two paths stay
+/// orthogonal: the fast path owns the PTY write, this owns the DB work.
+fn write_to_agent_attention_only_blocking(session_id: i64) -> Result<bool, String> {
+    if should_skip_attention_signals(session_id) {
+        return Ok(false);
     }
-    Ok(should_signal)
+    // Status write routes through SessionLifecycle (issue #132). The
+    // sink here is `DbOnlySink` because the blocking core has no
+    // `AppHandle`; the corresponding `attention-cleared` emit is the
+    // caller's responsibility (the `should_signal` flag tells the caller
+    // to emit, preserving the original behaviour where the emit lived in
+    // the async wrapper).
+    session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id).ok();
+    Ok(true)
 }
 
 /// Returns true if a newline in `write_to_agent` should NOT flip the
@@ -2515,19 +2543,36 @@ mod tests {
         );
     }
 
-    // Regression test for the sync core: an unregistered session must short-
-    // circuit on the PTY write before the DB read. Without the `?` ordering
-    // the unit-test DB-not-initialised panic surfaces as a test failure.
-    // The full PTY-write + DB-update path needs a registered agent
-    // (real `portable_pty` handles) and is covered by integration tests.
+    // Issue #1122: the async `write_to_agent` command was refactored to
+    // split into a PTY-only fast path (inline on the async runtime) and a
+    // DB-only slow path (offloaded to the blocking pool). The fast path
+    // is the only piece of the keystroke pipeline a unit test can hit
+    // without a registered agent — it surfaces the same "Agent not
+    // running" error as the slow path when the session isn't there, and
+    // the newline-detection branch is pure (no DB) so we can pin it
+    // without a portable_pty fixture.
 
     #[test]
-    fn write_to_agent_blocking_unknown_session_short_circuits_before_db() {
-        let result = write_to_agent_blocking(999_999_999, "x".to_string());
+    fn write_to_agent_fastpath_unknown_session_short_circuits() {
+        // Regression: an unregistered session must short-circuit on the
+        // PTY write before any DB read. Without the `?` ordering the
+        // unit-test DB-not-initialised panic surfaces as a test failure.
+        // The full PTY-write + DB-update path needs a registered agent
+        // (real `portable_pty` handles) and is covered by integration
+        // tests.
+        let result = write_to_agent_fastpath(999_999_999, "x");
         let err = result.expect_err("unknown session must surface an error");
         assert!(
             err.contains("Agent not running"),
             "expected 'Agent not running' error, got {err:?}"
         );
     }
+
+    // The slow-path DB core (`write_to_agent_attention_only_blocking`) is
+    // NOT unit-tested here: it calls `db::get_agent_node_by_id` and
+    // `session_lifecycle::on_attention_cleared`, both of which panic on
+    // "database not initialized" when the test DB is absent. The slow
+    // path is only ever reached AFTER `write_to_agent_fastpath` returned
+    // `Ok(true)` for a known session, so an unknown-session unit test
+    // would be testing a path that can't run in production.
 }

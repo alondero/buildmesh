@@ -72,21 +72,21 @@ globalThis.ResizeObserver = class {
   disconnect() {}
 } as unknown as typeof ResizeObserver;
 
-describe('BuildRunTerminal RAF batching (issue #303)', () => {
-  let rafQueue: Array<() => void>;
+describe('BuildRunTerminal coalescing (issue #303, #1122)', () => {
+  let flushQueue: Array<() => void>;
 
   beforeEach(() => {
     terminalInstances.length = 0;
-    rafQueue = [];
-    // Capture every requestAnimationFrame callback so the test owns the
-    // flush moment. The TerminalWriter's default scheduler is
-    // `(cb) => requestAnimationFrame(cb)` (wrapped to dodge the WebView2
-    // "Illegal invocation" trap — see terminal-writer.test.ts), so stubbing
-    // the global here is what reaches the writer that BuildRunTerminal owns
-    // privately.
-    vi.stubGlobal('requestAnimationFrame', (cb: () => void) => {
-      rafQueue.push(cb);
-      return 0;
+    flushQueue = [];
+    // Capture every scheduled callback so the test owns the flush moment.
+    // Issue #1122 changed the TerminalWriter default from
+    // `requestAnimationFrame` to `queueMicrotask` (lower first-flush
+    // latency — microtask fires before paint, rAF stacked on top of
+    // xterm's own rAF-based render debouncing). The coalescing contract
+    // is unchanged: a burst of synchronous events still produces one
+    // scheduled callback that flushes them all in order.
+    vi.stubGlobal('queueMicrotask', (cb: () => void) => {
+      flushQueue.push(cb);
     });
   });
 
@@ -108,25 +108,26 @@ describe('BuildRunTerminal RAF batching (issue #303)', () => {
     });
 
     const term = terminalInstances[0];
-    // Discard banner writes and any incidental resize-observer RAFs so the
-    // assertions below see only storm-induced activity.
+    // Discard banner writes and any incidental resize-observer flushes
+    // so the assertions below see only storm-induced activity.
     term.write.mockClear();
-    rafQueue.length = 0;
+    flushQueue.length = 0;
 
     // 100 lines is the shape of `cargo build -v` mid-flight — one event per
     // compiler line. Each event arrives synchronously through the mock
-    // emitter, so without batching this would be 100 writes and 0 RAFs;
-    // with batching it must be 0 writes and exactly 1 RAF.
+    // emitter, so without batching this would be 100 writes and 0
+    // scheduled flushes; with batching it must be 0 writes and exactly 1
+    // scheduled flush.
     for (let i = 0; i < 100; i++) {
       await emit('build-run-output-7', `line ${i}\n`);
     }
 
-    expect(rafQueue).toHaveLength(1);
+    expect(flushQueue).toHaveLength(1);
     expect(term.write).not.toHaveBeenCalled();
 
-    // Run the single scheduled frame; the writer should flush a coalesced
+    // Run the single scheduled flush; the writer should flush a coalesced
     // string carrying every line in order.
-    rafQueue.shift()!();
+    flushQueue.shift()!();
 
     expect(term.write).toHaveBeenCalledTimes(1);
     const written = term.write.mock.calls[0][0];
@@ -147,7 +148,7 @@ describe('BuildRunTerminal RAF batching (issue #303)', () => {
 
     const term = terminalInstances[0];
     term.write.mockClear();
-    rafQueue.length = 0;
+    flushQueue.length = 0;
 
     // Split a single UTF-8 codepoint across two events: ▀ U+2580 = 0xE2 0x96 0x80.
     // Asserts that the writer's `coalesceChunks` merges adjacent byte chunks
@@ -155,17 +156,17 @@ describe('BuildRunTerminal RAF batching (issue #303)', () => {
     // invariant that makes split-codepoint reassembly work downstream —
     // xterm-side UTF-8 decoding isn't exercised here because xterm is mocked
     // (a real xterm would happily reassemble the merged bytes; the unit of
-    // work this PR owns is "don't drop or reorder bytes between RAFs").
+    // work this PR owns is "don't drop or reorder bytes between flushes").
     const b64 = (bytes: number[]) =>
       globalThis.btoa(String.fromCharCode(...bytes));
 
     await emit('build-run-output-8', { data: b64([0xe2, 0x96]) });
     await emit('build-run-output-8', { data: b64([0x80]) });
 
-    expect(rafQueue).toHaveLength(1);
+    expect(flushQueue).toHaveLength(1);
     expect(term.write).not.toHaveBeenCalled();
 
-    rafQueue.shift()!();
+    flushQueue.shift()!();
 
     expect(term.write).toHaveBeenCalledTimes(1);
     const written = term.write.mock.calls[0][0];

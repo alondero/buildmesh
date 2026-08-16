@@ -139,6 +139,25 @@ vi.mock('@xterm/addon-unicode11', () => {
   return { Unicode11Addon: MockUnicode11Addon };
 });
 
+// Issue #1122: the real `@xterm/addon-webgl` constructor pulls in
+// `vs/base/common/lifecycle` which throws under jsdom ("Cannot read
+// properties of undefined (reading 'bind')"). Mock it so the registry's
+// existing tests stay green independent of the real addon's jsdom
+// compatibility. The WebGL-specific behaviour (fallback on
+// constructor/activate throw, context-loss recovery) is covered in
+// `terminal-registry-webgl.test.ts` with a richer mock.
+vi.mock('@xterm/addon-webgl', () => {
+  class MockWebglAddon {
+    dispose = vi.fn();
+    onContextLoss = vi.fn().mockReturnValue({ dispose: () => {} });
+    activate(_terminal: unknown): void {
+      // No-op — the WebGL-specific tests drive the throw / recovery
+      // paths via a separate, more invasive mock.
+    }
+  }
+  return { WebglAddon: MockWebglAddon };
+});
+
 describe('TerminalRegistry', () => {
   let registry: TerminalRegistry;
 

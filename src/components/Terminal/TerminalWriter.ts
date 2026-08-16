@@ -5,14 +5,17 @@ type SchedulerFn = (cb: () => void) => void;
 
 /**
  * Cap on unflushed bytes buffered per node. The flush scheduler is
- * requestAnimationFrame, which Chromium suspends while the window is hidden
- * or minimized — so with agents streaming output overnight the pending
- * buffer would otherwise grow without bound, and restoring the window would
- * feed the whole backlog to xterm in one freeze-inducing write. 4 MiB
- * comfortably exceeds what xterm's 10k-line scrollback can retain, so
- * dropping older chunks past the cap loses nothing the user could scroll
- * back to. Full-screen agent TUIs redraw on their next frame, which repairs
- * any escape sequence a drop may have severed.
+ * `queueMicrotask`, which fires at the next microtask checkpoint (well
+ * before the next paint) — so for interactive keystroke echoes the buffer
+ * never has to wait a full frame. With agents streaming output overnight,
+ * a microtask that fires every tick is just as safe as rAF (microtasks
+ * can't starve the event loop — V8 enforces a microtask checkpoint after
+ * each macrotask), and 4 MiB is the upper bound the writer allows to
+ * accumulate before dropping the oldest chunks. 4 MiB comfortably exceeds
+ * what xterm's 10k-line scrollback can retain, so dropping older chunks
+ * past the cap loses nothing the user could scroll back to. Full-screen
+ * agent TUIs redraw on their next frame, which repairs any escape
+ * sequence a drop may have severed.
  */
 export const MAX_PENDING_BYTES = 4 * 1024 * 1024;
 
@@ -57,7 +60,16 @@ export class TerminalWriter {
   private writeFns = new Map<number, WriteFn>();
   private scheduler: SchedulerFn;
 
-  constructor(scheduler: SchedulerFn = (cb) => requestAnimationFrame(cb)) {
+  // Issue #1122: the previous default (`requestAnimationFrame`) stacked
+  // on top of xterm.js's own internal rAF-based render debouncing, so an
+  // interactive keystroke echo sat in two animation frames before it
+  // painted (≈32ms at 60Hz, more on a busy event loop). Microtasks run
+  // at the next microtask checkpoint, which fires before the next paint
+  // — and the `frameRequested` guard in `scheduleFlush` keeps the
+  // coalescing semantics identical to the rAF version, so continuous
+  // bursts still get one flush per batch (the first batch in a quiet
+  // period just lands one frame earlier).
+  constructor(scheduler: SchedulerFn = (cb) => queueMicrotask(cb)) {
     this.scheduler = scheduler;
   }
 

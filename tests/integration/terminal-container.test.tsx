@@ -172,6 +172,19 @@ describe('TerminalManager', () => {
 // Event Listener Tests
 // ============================================================
 describe('Event Listener Integration', () => {
+  // Issue #1122: TerminalWriter's default flush scheduler changed from
+  // `requestAnimationFrame` to `queueMicrotask` (lower first-flush
+  // latency). rAF is driven by `vi.runAllTimers()`, but microtasks
+  // need an explicit microtask-checkpoint flush. Awaiting a resolved
+  // promise drains the microtask queue without also advancing other
+  // timers, so we can call it after `vi.runAllTimers()` to flush
+  // whichever scheduler the writer is using.
+  const flushScheduledWork = async (): Promise<void> => {
+    vi.runAllTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
   beforeEach(() => {
     mockListeners.clear();
     vi.clearAllMocks();
@@ -194,8 +207,7 @@ describe('Event Listener Integration', () => {
     const listeners = mockListeners.get('agent-output');
     listeners?.forEach(cb => cb({ payload: { session_id: 1, line: 'Hello\n' } }));
 
-    // Flush the requestAnimationFrame that scheduleFlush uses
-    vi.runAllTimers();
+    await flushScheduledWork();
 
     expect(writeSpy).toHaveBeenCalledWith('Hello\n');
   });
@@ -210,7 +222,7 @@ describe('Event Listener Integration', () => {
       cb({ payload: { session_id: 1, data: '4paI' } })
     );
 
-    vi.runAllTimers();
+    await flushScheduledWork();
 
     expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
   });
@@ -229,7 +241,7 @@ describe('Event Listener Integration', () => {
       cb({ payload: { session_id: 1, line: 'From session 1\n' } })
     );
 
-    vi.runAllTimers();
+    await flushScheduledWork();
 
     expect(write1Spy).toHaveBeenCalledWith('From session 1\n');
     expect(write2Spy).not.toHaveBeenCalled();

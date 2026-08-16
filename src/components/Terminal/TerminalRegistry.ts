@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import type { AgentOutputPayload } from '../../types/generated/AgentOutputPayload';
 import type { AgentSpawnedPayload } from '../../types/generated/AgentSpawnedPayload';
@@ -26,6 +27,7 @@ export interface TerminalInstance {
   fitAddon: FitAddon;
   serializeAddon: SerializeAddon;
   searchAddon: SearchAddon;
+  webglHandle: WebglHandle;
   unlisten: UnlistenFn;
   opened: boolean;
   resizeObserver: ResizeObserver | null;
@@ -47,6 +49,111 @@ function measureAndFit(inst: TerminalInstance): void {
   const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
   charSizeService?.measure();
   inst.fitAddon.fit();
+}
+
+/**
+ * Result of attempting to attach a hardware-accelerated renderer to a
+ * terminal. `webgl` carries the live addon + the context-loss subscriber
+ * the registry needs to keep alive for the lifetime of the terminal; `dom`
+ * means the addon constructor or `activate` rejected and xterm.js's default
+ * DOM renderer stays in place (issue #1122 acceptance criterion: clean
+ * fallback when WebGL is unavailable).
+ */
+type WebglHandle =
+  | { kind: 'webgl'; addon: WebglAddon; contextLossListener: { dispose: () => void } }
+  | { kind: 'dom' };
+
+/**
+ * Try to attach `@xterm/addon-webgl` to `term`. The terminal is rendered
+ * by xterm.js's fallback DOM renderer until the addon activates, so a
+ * failure here is invisible to the user — the only cost is staying on the
+ * slower renderer. On a future context-loss event the addon is disposed
+ * and re-attached once; if the re-attach also fails we log a warning and
+ * stay on DOM for the lifetime of the terminal.
+ *
+ * The `setHandle` callback is the wire that lets a context-loss recovery
+ * update the registry's stored handle. Without it the recovered addon's
+ * `contextLossListener` would be unreferenced (the registry still holds
+ * the disposed handle) and a second context-loss event would leak the
+ * new addon's subscription — the registry's `dispose()` would also
+ * operate on a torn-down handle. The callback runs synchronously inside
+ * the context-loss handler, so the registry sees the swap before the
+ * next paint.
+ *
+ * Issue #1122: the DOM renderer degrades from <2ms to 30-60ms+ per
+ * keystroke once the scrollback spans thousands of lines, because TUI
+ * cursor positioning forces style recalcs across the HTML <span> tree.
+ * WebGL renders via a texture atlas and is constant-time per cell.
+ */
+function loadWebglRenderer(
+  term: Terminal,
+  nodeId: number,
+  setHandle: (handle: WebglHandle) => void,
+): WebglHandle {
+  let addon: WebglAddon;
+  try {
+    addon = new WebglAddon();
+  } catch (err) {
+    // The constructor throws when WebGL2 is unsupported (Safari < 16, or
+    // a host with WebGL disabled at the OS level). Stay on DOM — the
+    // primary renderer is the fastest one we can get.
+    console.warn(`[TerminalRegistry] WebGL unavailable for node ${nodeId}; falling back to DOM renderer`, err);
+    return { kind: 'dom' };
+  }
+
+  try {
+    term.loadAddon(addon);
+  } catch (err) {
+    // `loadAddon` defers to the addon's `activate`, which throws when it
+    // can't build a WebGL2 context on the rendered canvas. Same outcome
+    // as a constructor throw: stay on DOM.
+    console.warn(`[TerminalRegistry] WebGL activate failed for node ${nodeId}; falling back to DOM renderer`, err);
+    addon.dispose();
+    return { kind: 'dom' };
+  }
+
+  // Context loss (driver crash, tab backgrounded past the GPU timeout,
+  // user disables hardware acceleration) needs to fall back to DOM rather
+  // than freeze the terminal. xterm.js disposes the active renderer when
+  // the WebGL addon disposes itself, so the same path that originally
+  // installed WebGL (above) re-installs it; if that retry also fails
+  // (e.g. the driver really is gone) the terminal stays on DOM.
+  let contextLossListener: { dispose: () => void } | null = null;
+  try {
+    contextLossListener = addon.onContextLoss(() => {
+      console.warn(`[TerminalRegistry] WebGL context lost for node ${nodeId}; attempting re-attach`);
+      // Dispose THIS handle's listener and addon so the closure is
+      // released before the recursive call replaces the handle in the
+      // registry. Without this, the old addon's `Emitter` subscription
+      // (and the listener closure capturing it) would leak for the
+      // lifetime of the registry.
+      try {
+        contextLossListener?.dispose();
+      } catch {
+        // Already disposed — safe to ignore.
+      }
+      try {
+        addon.dispose();
+      } catch {
+        // Already disposed — safe to ignore.
+      }
+      const recovered = loadWebglRenderer(term, nodeId, setHandle);
+      // Publish the swap to the registry so its stored handle matches
+      // the live addon — `dispose()` will clean up the recovered
+      // handle, not the torn-down one.
+      setHandle(recovered);
+      if (recovered.kind === 'dom') {
+        console.warn(`[TerminalRegistry] WebGL re-attach failed for node ${nodeId}; staying on DOM renderer`);
+      }
+    });
+  } catch (err) {
+    // Older addons returned the event itself rather than a subscribable
+    // function; if so, the listener wasn't registered and we'll get no
+    // recovery — but the addon still works for the steady state.
+    console.warn(`[TerminalRegistry] WebGL context-loss subscription unavailable for node ${nodeId}`, err);
+  }
+
+  return { kind: 'webgl', addon, contextLossListener: contextLossListener ?? { dispose: () => {} } };
 }
 
 export class TerminalRegistry {
@@ -258,6 +365,18 @@ export class TerminalRegistry {
         instance.resizeObserver.disconnect();
       }
       instance.unlisten();
+      // Dispose the WebGL addon BEFORE the terminal. The addon's disposer
+      // restores xterm's default DOM renderer; calling it after
+      // `instance.term.dispose()` would be a no-op against a torn-down
+      // terminal and the addon would leak its `Disposable` subscriptions.
+      if (instance.webglHandle.kind === 'webgl') {
+        instance.webglHandle.contextLossListener.dispose();
+        try {
+          instance.webglHandle.addon.dispose();
+        } catch {
+          // Already disposed by a context-loss path — safe to ignore.
+        }
+      }
       instance.term.dispose(); // allow-dispose — keyed by deleted-node IPC, the registry's only legit dispose path
       this.instances.delete(nodeId);
       this.writer.unregister(nodeId);
@@ -321,17 +440,37 @@ export class TerminalRegistry {
       // ⚠ U+26A0) — see loadUnicode11Widths.ts for the rationale.
       loadUnicode11Widths(term);
 
+      // Hardware-accelerated rendering. Must happen AFTER every other addon
+      // is loaded but BEFORE `term.open` (in attachToDOM) so the WebGL
+      // renderer is the one that paints the first frame. The helper stays
+      // on xterm.js's DOM renderer if WebGL2 is unavailable or activation
+      // throws — see loadWebglRenderer for the fallback contract.
+      //
+      // The setter closure lets a context-loss recovery swap the stored
+      // handle in place; the instance object is constructed *before* the
+      // call so the closure captures `instance` by reference (not by
+      // value) and updates its `webglHandle` field in place when a
+      // recovery fires. This is the only way to keep the registry's
+      // stored handle in sync with the live addon across multiple GPU
+      // context losses — a `const` field would freeze the registry on
+      // the original (now disposed) handle.
       const instance: TerminalInstance = {
         term,
         fitAddon,
         serializeAddon,
         searchAddon,
+        // Placeholder — overwritten below by the WebGL loader, and
+        // potentially rewritten again by a context-loss recovery.
+        webglHandle: { kind: 'dom' },
         unlisten: () => {},
         opened: false,
         resizeObserver: null,
         attachedContainer: null,
         onFindRequest: null,
       };
+      instance.webglHandle = loadWebglRenderer(term, nodeId, (fresh) => {
+        instance.webglHandle = fresh;
+      });
 
       this.writer.register(nodeId, (data) => term.write(data));
       this.fontSizeManager.register(nodeId, term, () => measureAndFit(instance));

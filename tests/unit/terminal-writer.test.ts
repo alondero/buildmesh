@@ -153,18 +153,21 @@ describe('TerminalWriter', () => {
       // Regression: the default scheduler used to be `requestAnimationFrame` directly,
       // which in Chromium/WebView2 throws "Illegal invocation" when called as
       // `this.scheduler(cb)` because `this` is no longer `window`. The default must
-      // therefore be a wrapper that calls requestAnimationFrame with the correct
+      // therefore be a wrapper that calls the scheduling API with the correct
       // receiver — exercising the default here would have caught the production bug
-      // that silently dropped all PTY output.
-      const fakeRaf = vi.fn((cb: () => void) => { cb(); return 0; });
-      vi.stubGlobal('requestAnimationFrame', fakeRaf);
+      // that silently dropped all PTY output. Issue #1122 switched the default to
+      // `queueMicrotask` for lower first-flush latency; the wrapper invariant still
+      // holds.
+      const fakeMicrotask = vi.fn((cb: () => void) => { cb(); });
+      vi.stubGlobal('queueMicrotask', fakeMicrotask);
       try {
         const defaultWriter = new TerminalWriter();
         const writeFn = vi.fn();
         defaultWriter.register(1, writeFn);
         expect(() => defaultWriter.append(1, 'x')).not.toThrow();
-        expect(fakeRaf).toHaveBeenCalledTimes(1);
-        // The fake raf invoked the callback synchronously, so the write should have flushed.
+        expect(fakeMicrotask).toHaveBeenCalledTimes(1);
+        // The fake microtask invoked the callback synchronously, so the write
+        // should have flushed.
         expect(writeFn).toHaveBeenCalledWith('x');
       } finally {
         vi.unstubAllGlobals();
@@ -238,6 +241,86 @@ describe('TerminalWriter', () => {
       writer.append(1, 'abc');
       writer.append(1, 'de');
       expect(writer.pendingBytes(1)).toBe(5);
+    });
+  });
+
+  describe('first-flush latency (issue #1122)', () => {
+    // Phase 3 of the issue: TerminalWriter used to defer every flush to
+    // `requestAnimationFrame`, which stacked on top of xterm.js's own
+    // internal rAF-based render debouncing. An interactive keystroke
+    // echo sat in two animation frames before it painted (≈32ms at
+    // 60Hz). The default scheduler is now a microtask, which fires at
+    // the next microtask checkpoint — strictly before the next paint.
+    // The `frameRequested` guard still coalesces burst output into a
+    // single flush; the only thing that changed is the timing of the
+    // *first* flush in a quiet period.
+
+    it('coalesces burst output into a single scheduled flush', () => {
+      // A microtask burst (e.g. agent streaming a 100-line response) must
+      // NOT fire a flush per write — the rAF-style coalescing contract
+      // is preserved by the `frameRequested` guard, which prevents
+      // re-arming while a flush is in flight.
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      for (let i = 0; i < 10; i++) {
+        writer.append(1, `chunk-${i}`);
+      }
+      // All 10 appends happened in the same synchronous turn, so only
+      // one scheduler callback is queued.
+      expect(scheduledCallbacks).toHaveLength(1);
+
+      flush();
+      // The single scheduled callback flushed all 10 chunks in one
+      // write call (the coalescer joins strings).
+      expect(writeFn).toHaveBeenCalledTimes(1);
+      expect(writeFn).toHaveBeenCalledWith(
+        'chunk-0chunk-1chunk-2chunk-3chunk-4chunk-5chunk-6chunk-7chunk-8chunk-9',
+      );
+    });
+
+    it('queues a new flush after the previous one completes', () => {
+      // A second burst AFTER the first flush must schedule a fresh
+      // callback — the `frameRequested` guard clears on flush, so the
+      // contract "one schedule per batch" is symmetric for the next
+      // batch. Without the clear, every subsequent append in a quiet
+      // period would no-op and the terminal would freeze.
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+
+      writer.append(1, 'first');
+      flush();
+      expect(scheduledCallbacks).toHaveLength(0);
+      expect(writeFn).toHaveBeenCalledTimes(1);
+
+      writer.append(1, 'second');
+      expect(scheduledCallbacks).toHaveLength(1);
+      flush();
+      expect(writeFn).toHaveBeenCalledTimes(2);
+      expect(writeFn).toHaveBeenLastCalledWith('second');
+    });
+
+    it('first write after a quiet period triggers exactly one schedule', () => {
+      // The latency win is for the FIRST write of a new batch: a single
+      // keystroke echo should schedule one microtask and not be held
+      // back by an already-armed rAF. This test pins that invariant —
+      // if a future refactor accidentally re-arms the scheduler on
+      // every append, the assertion catches the regression.
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      writer.append(1, 'a');
+      writer.append(1, 'b');
+      // Same microtask turn — guard prevents re-arming.
+      expect(scheduledCallbacks).toHaveLength(1);
+
+      flush();
+      // Quiet period — the next append is a fresh batch and arms a new
+      // callback exactly once.
+      writer.append(1, 'c');
+      expect(scheduledCallbacks).toHaveLength(1);
+      flush();
+      expect(writeFn).toHaveBeenCalledTimes(2);
+      expect(writeFn.mock.calls[0][0]).toBe('ab');
+      expect(writeFn.mock.calls[1][0]).toBe('c');
     });
   });
 });
