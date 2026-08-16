@@ -173,6 +173,17 @@ function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequ
   });
 }
 
+// Issue #1066 — the merge button only appears after the mergeability probe
+// resolves (`useAsyncEffect` -> `get_prs_mergeability` -> `setMergeability`
+// -> re-render). Under full-suite load (160 files concurrent, jsdom), the
+// React scheduler's batching can stretch that to 1.5–2s, well past
+// `@testing-library`'s default 1000ms `findByRole` timeout. 5s is the
+// budget we extend to everywhere — well below the real component's 9s
+// retry budget (1 initial + 3 retries at 1.5s/3s/4.5s, see
+// `GitPullRequestsTab.tsx` `MAX_MERGEABILITY_ATTEMPTS`/`BASE_RETRY_DELAY_MS`),
+// so the test can never green-bar a production timeout.
+const MERGE_BTN_FIND_TIMEOUT_MS = 5000;
+
 describe('GitPullRequestsTab', () => {
   beforeEach(() => {
     // `mockReset` (not `mockClear`) wipes both call history AND any
@@ -251,7 +262,13 @@ describe('GitPullRequestsTab', () => {
     // PR 201 is clean — its row gets an enabled Merge button once the
     // mergeability probe resolves. The button is now icon-only (git-merge
     // SVG) so the accessible name comes from the aria-label.
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    // The merge button appears only after the mergeability probe resolves.
+    // See `MERGE_BTN_FIND_TIMEOUT_MS` above for why the explicit timeout.
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
     await userEvent.click(mergeBtn);
 
     // First click reveals the inline confirm — no merge IPC yet.
@@ -308,7 +325,13 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    // The merge button appears only after the mergeability probe resolves.
+    // See `MERGE_BTN_FIND_TIMEOUT_MS` above for why the explicit timeout.
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
     await userEvent.click(mergeBtn);
     const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
     await userEvent.click(confirmBtn);
@@ -355,7 +378,13 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    // The merge button appears only after the mergeability probe resolves.
+    // See `MERGE_BTN_FIND_TIMEOUT_MS` above for why the explicit timeout.
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
     await userEvent.click(mergeBtn);
     const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
     await userEvent.click(confirmBtn);
@@ -375,7 +404,13 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    // The merge button appears only after the mergeability probe resolves.
+    // See `MERGE_BTN_FIND_TIMEOUT_MS` above for why the explicit timeout.
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
     await userEvent.click(mergeBtn);
     const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
     await userEvent.click(confirmBtn);
@@ -416,7 +451,13 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    // The merge button appears only after the mergeability probe resolves.
+    // See `MERGE_BTN_FIND_TIMEOUT_MS` above for why the explicit timeout.
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
     await userEvent.click(mergeBtn);
     const cancelBtn = await screen.findByRole('button', { name: /cancel merge/i });
     await userEvent.click(cancelBtn);
@@ -435,16 +476,29 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    // The merge button appears only after the mergeability probe resolves.
+    // See `MERGE_BTN_FIND_TIMEOUT_MS` above for why the explicit timeout.
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
     await userEvent.click(mergeBtn);
 
     const cancelBtn = await screen.findByRole('button', { name: /cancel merge/i });
     await userEvent.click(cancelBtn);
 
     // No merge IPC after cancellation, and the original Merge button
-    // re-appears (confirm state cleared).
+    // re-appears (confirm state cleared). See `MERGE_BTN_FIND_TIMEOUT_MS`
+    // above for why the explicit timeout is needed.
     expect(invoke).not.toHaveBeenCalledWith('merge_pr', expect.anything());
-    expect(await screen.findByRole('button', { name: 'Merge pull request #201' })).toBeTruthy();
+    expect(
+      await screen.findByRole(
+        'button',
+        { name: 'Merge pull request #201' },
+        { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+      ),
+    ).toBeTruthy();
   });
 
   it('flags a conflicting PR as non-mergeable (no merge button)', async () => {
@@ -1242,7 +1296,13 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    // The merge button appears only after the mergeability probe resolves.
+    // See `MERGE_BTN_FIND_TIMEOUT_MS` above for why the explicit timeout.
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
     await userEvent.click(mergeBtn);
     // First click reveals the confirm state; second click (Confirm) fires merge_pr.
     const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
@@ -1348,7 +1408,13 @@ describe('GitPullRequestsTab', () => {
 
     // Wait for PR 201 to be both rendered AND mergeable so the Merge
     // button exists in its initial (non-confirm) state.
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    // The merge button appears only after the mergeability probe resolves.
+    // See `MERGE_BTN_FIND_TIMEOUT_MS` above for why the explicit timeout.
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
     const viewBtn = await screen.findByRole('button', { name: 'View changes in PR #201' });
 
     // Icon-only: no visible text. Inner text of the button is empty.
