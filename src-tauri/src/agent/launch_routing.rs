@@ -6,6 +6,14 @@ use crate::models::Provider;
 use crate::preferences;
 
 #[derive(Clone, PartialEq, Eq)]
+// `CodexProxy` is intentionally the largest variant (~600 bytes — carries the
+// resolved install + verification + credential strings) while `Native` and
+// `Environment` are tiny. Boxing the big variant would force an allocation
+// on every `Native`/`Environment` resolution for the common Claude-Code path,
+// which dominates this enum in practice. The size difference is structural —
+// the enum exists *because* Codex's prepare phase carries more state — so we
+// accept the lint rather than pay the indirection cost.
+#[allow(clippy::large_enum_variant)]
 pub enum PreparedLaunchRouting {
     Native,
     Environment(Vec<(String, String)>),
