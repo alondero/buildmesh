@@ -53,17 +53,6 @@ class FakeWebSocket {
   }
 }
 
-// Keep isAuthError real; stub only the ticket mint so connect() resolves a URL.
-vi.mock("../../src/mobile/api", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/mobile/api")>();
-  return {
-    ...actual,
-    terminalWsUrl: vi.fn().mockResolvedValue("ws://test/ws/terminal/1?ticket=x"),
-  };
-});
-
-import { terminalWsUrl } from "../../src/mobile/api";
-
 const node: AgentNode = {
   id: 1,
   mesh_id: 1,
@@ -82,6 +71,14 @@ describe("TerminalScreen reconnect on foreground/online", () => {
   beforeEach(() => {
     sockets = [];
     vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ ticket: "x" }),
+      }),
+    );
   });
 
   afterEach(() => {
@@ -100,7 +97,7 @@ describe("TerminalScreen reconnect on foreground/online", () => {
 
   it("reconnects a dropped socket when the document is foregrounded", async () => {
     const utils = await mountAndConnect();
-    expect(terminalWsUrl).toHaveBeenCalledTimes(1);
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
 
     // Socket dies (as it would while backgrounded).
     act(() => sockets[0].simulateDrop());
@@ -110,7 +107,7 @@ describe("TerminalScreen reconnect on foreground/online", () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
     await waitFor(() => expect(sockets.length).toBe(2));
-    expect(terminalWsUrl).toHaveBeenCalledTimes(2);
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
 
     utils.unmount();
   });
@@ -129,7 +126,7 @@ describe("TerminalScreen reconnect on foreground/online", () => {
 
   it("leaves a healthy open socket alone on foreground (no redundant reconnect)", async () => {
     const utils = await mountAndConnect();
-    expect(terminalWsUrl).toHaveBeenCalledTimes(1);
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
 
     // Still OPEN — a tab switch back must not tear down the live connection.
     act(() => {
@@ -138,7 +135,7 @@ describe("TerminalScreen reconnect on foreground/online", () => {
     // Give any stray async reconnect a chance to fire before asserting.
     await Promise.resolve();
     expect(sockets.length).toBe(1);
-    expect(terminalWsUrl).toHaveBeenCalledTimes(1);
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
 
     utils.unmount();
   });
@@ -231,8 +228,7 @@ describe("TerminalScreen reconnect on foreground/online", () => {
 
   it("removes the foreground/online listeners on unmount", async () => {
     const utils = await mountAndConnect();
-    const initialCalls = (terminalWsUrl as ReturnType<typeof vi.fn>).mock
-      .calls.length;
+    const initialCalls = (fetch as ReturnType<typeof vi.fn>).mock.calls.length;
 
     utils.unmount();
 
@@ -246,6 +242,80 @@ describe("TerminalScreen reconnect on foreground/online", () => {
     });
     // Allow any stray microtask to flush.
     await Promise.resolve();
-    expect(terminalWsUrl).toHaveBeenCalledTimes(initialCalls);
+    expect(fetch).toHaveBeenCalledTimes(initialCalls);
   });
+
+  it.each(["close", "error"] as const)(
+    "recovers auth when an unopened ticket socket fires %s",
+    async (event) => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ ticket: "initial" }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 401,
+          json: async () => ({ error: "expired" }),
+        });
+      vi.stubGlobal("fetch", fetch);
+      const onAuthFailed = vi.fn();
+      const utils = render(
+        <TerminalScreen node={node} onBack={noop} onAuthFailed={onAuthFailed} />,
+      );
+      await waitFor(() => expect(sockets.length).toBe(1));
+
+      act(() => {
+        if (event === "close") sockets[0].simulateDrop();
+        else sockets[0].simulateError();
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(onAuthFailed).toHaveBeenCalledTimes(1);
+      expect(document.querySelector('[data-testid="reconnect-overlay"]')).toBeNull();
+      utils.unmount();
+    },
+  );
+
+  it("keeps the reconnect error state for a network failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network")));
+    const onAuthFailed = vi.fn();
+    const utils = render(
+      <TerminalScreen node={node} onBack={noop} onAuthFailed={onAuthFailed} />,
+    );
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="reconnect-overlay"]')).toBeTruthy();
+    });
+    expect(onAuthFailed).not.toHaveBeenCalled();
+    utils.unmount();
+  });
+
+  it.each([404, 500])(
+    "keeps the reconnect error state for a non-auth %s ticket response",
+    async (status) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status,
+          json: async () => ({ error: `ticket ${status}` }),
+        }),
+      );
+      const onAuthFailed = vi.fn();
+      const utils = render(
+        <TerminalScreen node={node} onBack={noop} onAuthFailed={onAuthFailed} />,
+      );
+
+      await waitFor(() => {
+        expect(document.querySelector('[data-testid="reconnect-overlay"]')).toBeTruthy();
+      });
+      expect(onAuthFailed).not.toHaveBeenCalled();
+      utils.unmount();
+    },
+  );
 });

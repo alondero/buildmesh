@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createPr } from "../api";
+import { createPr, isAuthError } from "../api";
 import { Sheet } from "../ui";
 
 type Props = {
@@ -7,6 +7,7 @@ type Props = {
   currentBranch: string;
   onClose: () => void;
   onCreated: (url: string) => void;
+  onAuthFailed?: () => void;
 };
 
 export default function CreatePrSheet({
@@ -14,6 +15,7 @@ export default function CreatePrSheet({
   currentBranch,
   onClose,
   onCreated,
+  onAuthFailed,
 }: Props) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -34,6 +36,10 @@ export default function CreatePrSheet({
       onCreated(url);
     } catch (e) {
       setSubmitting(false);
+      if (isAuthError(e)) {
+        onAuthFailed?.();
+        return;
+      }
       setError((e as Error).message);
     }
   };

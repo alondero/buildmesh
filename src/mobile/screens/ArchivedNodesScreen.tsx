@@ -5,6 +5,7 @@ import {
   Mesh,
   discoverAgentNodes,
   importAndResume,
+  isAuthError,
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
@@ -14,6 +15,7 @@ type Props = {
   mesh: Mesh;
   onBack: () => void;
   onResumed: (node: AgentNode) => void;
+  onAuthFailed?: () => void;
 };
 
 /// Newest activity first; nodes without a timestamp sink to the bottom.
@@ -23,7 +25,12 @@ export function sortAgentNodes(nodes: ArchivedAgentNode[]): ArchivedAgentNode[] 
   );
 }
 
-export default function ArchivedNodesScreen({ mesh, onBack, onResumed }: Props) {
+export default function ArchivedNodesScreen({
+  mesh,
+  onBack,
+  onResumed,
+  onAuthFailed,
+}: Props) {
   const [nodes, setNodes] = useState<ArchivedAgentNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -41,9 +48,13 @@ export default function ArchivedNodesScreen({ mesh, onBack, onResumed }: Props) 
       })
       .catch((e) => {
         if (signal.aborted) return;
+        if (isAuthError(e)) {
+          onAuthFailed?.();
+          return;
+        }
         setError((e as Error).message);
       });
-  }, [mesh.id]);
+  }, [mesh.id, onAuthFailed]);
 
   const resume = async (s: ArchivedAgentNode) => {
     setBusyId(s.session_id);
@@ -54,6 +65,10 @@ export default function ArchivedNodesScreen({ mesh, onBack, onResumed }: Props) 
       onResumed(node);
     } catch (e) {
       setBusyId(null);
+      if (isAuthError(e)) {
+        onAuthFailed?.();
+        return;
+      }
       setError((e as Error).message);
     }
   };

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AgentNode, DiffHunk, DiffResult, diffFile } from "../api";
+import { AgentNode, DiffHunk, DiffResult, diffFile, isAuthError } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 
@@ -7,12 +7,18 @@ type Props = {
   node: AgentNode;
   filePath: string;
   onBack: () => void;
+  onAuthFailed?: () => void;
 };
 
 // Unified-diff rendering on mobile: side-by-side is unreadable on a phone,
 // so we synthesize a single column of -/+/  lines from the per-side hunks
 // returned by the backend's commands::diff::diff_file_against_head.
-export default function DiffScreen({ node, filePath, onBack }: Props) {
+export default function DiffScreen({
+  node,
+  filePath,
+  onBack,
+  onAuthFailed,
+}: Props) {
   const [diff, setDiff] = useState<DiffResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,9 +30,13 @@ export default function DiffScreen({ node, filePath, onBack }: Props) {
       })
       .catch((e) => {
         if (signal.aborted) return;
+        if (isAuthError(e)) {
+          onAuthFailed?.();
+          return;
+        }
         setError((e as Error).message);
       });
-  }, [node.id, filePath]);
+  }, [node.id, filePath, onAuthFailed]);
 
   return (
     <div data-testid="diff-screen" className="screen">
