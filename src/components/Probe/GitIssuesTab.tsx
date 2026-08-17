@@ -68,6 +68,7 @@ import { ProbeRow } from './ProbeRow';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
+import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   EmptyState,
   ErrorState,
@@ -122,6 +123,12 @@ export function GitIssuesTab() {
   //      of truth (`issues[i].labels`) shows through after.
   const [pendingToggle, setPendingToggle] = useState<Set<number>>(() => new Set());
   const [optimisticLabels, setOptimisticLabels] = useState<Map<number, string[]>>(() => new Map());
+  // Issue #1140 (T2.3) — destructive 'remove' used to call
+  // `window.confirm`, which is the native browser chrome and breaks
+  // the app's design language. Lift the gate into a ConfirmDialog so
+  // the prompt matches WorktreeManager's delete confirm. `add` is
+  // idempotent on GitHub so it skips the dialog entirely.
+  const [confirmRemoveFor, setConfirmRemoveFor] = useState<number | null>(null);
   // Bump to force the load effect to re-run on a manual Refresh click
   // (issue #813 — Git Issues/PRs/Archive previously had no manual
   // refresh button). Mirrors the pattern `GitPullRequestsTab` already
@@ -270,13 +277,16 @@ export function GitIssuesTab() {
     }
   };
 
-  // Trigger-label toggle handler (issue #979). The Issues Probe shows a
+// Trigger-label toggle handler (issue #979). The Issues Probe shows a
   // green check / neutral slot below the Spawn button for the mesh's
   // configured autopilot trigger label; clicking it adds or removes
   // the label on GitHub. The flow mirrors the optimistic-UI pattern
   // (decision #3 in the locked design):
   //
-  //   1. Confirm on remove (it's destructive-ish); add is idempotent.
+  //   1. Confirm on remove (it's destructive-ish) — issue #1140 (T2.3)
+  //      uses the shared `ConfirmDialog` instead of `window.confirm` so
+  //      the prompt matches WorktreeManager's delete confirm. Add is
+  //      idempotent on GitHub so it skips the dialog entirely.
   //   2. Flip the issue's labels in `optimisticLabels` so the badge
   //      re-renders without waiting for the IPC.
   //   3. Call `setIssueLabel`. On success, clear pending — the next
@@ -292,16 +302,25 @@ export function GitIssuesTab() {
   // — create it on GitHub first" — exactly the remediation message
   // we want the user to see.
 
-  const handleToggleLabel = async (issue: GitHubIssue, triggerLabel: string, action: 'add' | 'remove') => {
+  // Click entry point from the row's badge. Add flows straight into
+  // the IPC; remove opens a ConfirmDialog that calls back into
+  // `applyLabelToggle` once the user opts in.
+  const handleToggleLabel = (issue: GitHubIssue, triggerLabel: string, action: 'add' | 'remove') => {
     if (activeMeshId === null) return;
     if (pendingToggle.has(issue.number)) return;
-
-    // Remove is destructive-ish — the user has to opt in. Add is
-    // idempotent on GitHub so it's a free action.
     if (action === 'remove') {
-      const ok = window.confirm(`Remove the "${triggerLabel}" label from issue #${issue.number}?`);
-      if (!ok) return;
+      setConfirmRemoveFor(issue.number);
+      return;
     }
+    void applyLabelToggle(issue, triggerLabel, 'add');
+  };
+
+  const applyLabelToggle = async (
+    issue: GitHubIssue,
+    triggerLabel: string,
+    action: 'add' | 'remove',
+  ) => {
+    if (activeMeshId === null) return;
 
     // Optimistic flip — write the override BEFORE the IPC so the badge
     // re-renders instantly. Source-of-truth `issue.labels` is untouched
@@ -325,8 +344,8 @@ export function GitIssuesTab() {
     try {
       await setIssueLabel(activeMeshId, issue.number, triggerLabel, action);
       // Success: the optimistic override stays until the next list
-      // refresh overwrites it. We DO NOT mutate `issues` directly —
-      // the source of truth is GitHub, refreshed by `getRepoIssues`.
+      // refresh. We DO NOT mutate `issues` directly — the source
+      // of truth is GitHub, refreshed by `getRepoIssues`.
       // The override is the rendered source until that lands.
     } catch (e) {
       // Revert: drop the override so `issue.labels` shows through again.
@@ -397,7 +416,15 @@ export function GitIssuesTab() {
         ) : issues.length === 0 ? (
           <EmptyState label="No open issues" />
         ) : (
-          <div className="space-y-1">
+          <>
+            {/* Result count line — issue #1140 (T1.3). One-glance
+                sense of scale; rendered above the list when there is
+                a list. The EmptyState label above carries the
+                zero-count message. */}
+            <p className="text-2xs text-text-muted px-1 pb-2">
+              {issues.length} open issue{issues.length === 1 ? '' : 's'}
+            </p>
+            <div className="space-y-1">
             {issues.map(issue => {
               const isExpanded = expanded.isExpanded(issue.number);
               return (
@@ -488,7 +515,7 @@ export function GitIssuesTab() {
                               <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
                               <line x1="4" y1="22" x2="4" y2="15" />
                             </svg>
-                            <span className="text-2xs font-medium leading-none">
+                            <span className="text-xs font-medium leading-none">
                               Blocked by #{firstBlocker}
                             </span>
                           </button>
@@ -567,7 +594,7 @@ export function GitIssuesTab() {
                                   </>
                                 )}
                               </svg>
-                              <span className="text-2xs font-medium leading-none">
+                              <span className="text-xs font-medium leading-none">
                                 {present ? '✓' : '+'} {triggerLabel}
                               </span>
                             </button>
@@ -579,9 +606,27 @@ export function GitIssuesTab() {
                 />
               );
             })}
-          </div>
+            </div>
+          </>
         )}
       </ProbeTabBody>
+      {confirmRemoveFor !== null && (() => {
+        const issue = issues.find((i) => i.number === confirmRemoveFor);
+        if (!issue || !triggerLabel) return null;
+        return (
+          <ConfirmDialog
+            tone="primary"
+            title={`Remove "${triggerLabel}" label from #${issue.number}?`}
+            message={`This removes the "${triggerLabel}" label on GitHub for this issue. You can re-apply it later from the same toggle.`}
+            confirmLabel="Remove label"
+            onCancel={() => setConfirmRemoveFor(null)}
+            onConfirm={() => {
+              setConfirmRemoveFor(null);
+              void applyLabelToggle(issue, triggerLabel, 'remove');
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }

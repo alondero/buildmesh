@@ -81,11 +81,13 @@ import { ProbeRow } from './ProbeRow';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
+import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   EmptyState,
   ErrorState,
   LoadingState,
   RefreshControl,
+  Spinner,
 } from '../shared/Spinner';
 
 type StateFilter = 'open' | 'closed';
@@ -162,40 +164,7 @@ function FileTextIcon({ className }: { className?: string }) {
   );
 }
 
-function CheckIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.25"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
 
-function XIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.25"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <line x1="18" y1="6" x2="6" y2="18" />
-      <line x1="6" y1="6" x2="18" y2="18" />
-    </svg>
-  );
-}
 
 /**
  * Turn a PR + its (maybe-missing) mergeability into a display status.
@@ -637,11 +606,18 @@ export function GitPullRequestsTab() {
         ) : prs.length === 0 ? (
           <EmptyState label={`No ${stateFilter} pull requests`} />
         ) : (
-          <div className="space-y-1">
+          <>
+            {/* Result count line — issue #1140 (T1.3). One-glance
+                sense of scale; only renders when there is a list
+                (the EmptyState label above carries the zero-count
+                message). */}
+            <p className="text-2xs text-text-muted px-1 pb-2">
+              {prs.length} {stateFilter} pull request{prs.length === 1 ? '' : 's'}
+            </p>
+            <div className="space-y-1">
             {prs.map((pr) => {
               const status = deriveMergeStatus(pr, mergeability[pr.number]);
               const isMerging = merging === pr.number;
-              const isConfirming = confirming === pr.number;
               const rowError = mergeError[pr.number];
               const isSpawning = spawning === pr.number;
               const isDropdownOpen = openDropdown === pr.number;
@@ -673,41 +649,20 @@ export function GitPullRequestsTab() {
                           (git-merge SVG) reclaims the 360px dock from
                           button text. `aria-label` carries the PR number
                           for screen readers; `title` is the hover tooltip.
-                          In the confirm state we swap to a green check +
-                          muted x — same colour semantics the text version
-                          used (green = go, muted = dismiss). The Confirm
-                          button is intentionally larger than Cancel via
-                          `px-2.5` (vs `p-1.5`) so the eye lands on the
-                          safe-looking affirmative. */}
+                          In the confirm state we now open the shared
+                          `<ConfirmDialog>` (issue #1140, T2.2) so the
+                          irreversible squash-merge is gated by a real
+                          dialog rather than an inline button swap. */}
                       {stateFilter === 'open' && (
                         <div
                           className="shrink-0 flex items-center gap-1"
                           onMouseDown={(e) => e.stopPropagation()}
                         >
                           {isMerging ? (
-                            <span className="px-2 py-1 text-xs text-text-muted">Merging...</span>
-                          ) : isConfirming ? (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => handleMerge(pr)}
-                                aria-label={`Confirm squash merge of pull request #${pr.number}`}
-                                title="Confirm squash merge"
-                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
-                              >
-                                <CheckIcon className="w-3.5 h-3.5" />
-                                <span>Confirm</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirming(null)}
-                                aria-label={`Cancel merge of pull request #${pr.number}`}
-                                title="Cancel"
-                                className="p-1.5 rounded-md text-text-muted hover:text-text-secondary hover:bg-bg-card transition-colors"
-                              >
-                                <XIcon className="w-3.5 h-3.5" />
-                              </button>
-                            </>
+                            <span className="px-2 py-1 text-xs text-text-muted inline-flex items-center gap-1.5">
+                              <Spinner className="w-3 h-3" />
+                              Merging...
+                            </span>
                           ) : status.kind === 'mergeable' ? (
                             <button
                               type="button"
@@ -720,7 +675,17 @@ export function GitPullRequestsTab() {
                               <GitMergeIcon className="w-3.5 h-3.5" />
                             </button>
                           ) : status.kind === 'checking' ? (
-                            <span className="px-2 py-1 text-2xs text-text-muted animate-pulse">Checking…</span>
+                            // Issue #1140 (T3.1) — replace the
+                            // indeterminate `animate-pulse` with an
+                            // explicit spinner chip. The text label
+                            // stays so the existing findByText /
+                            // getAllByText assertions in the PR test
+                            // suite (which count `Checking…` rows)
+                            // keep passing.
+                            <span className="px-2 py-1 text-2xs text-text-muted inline-flex items-center gap-1.5">
+                              <Spinner className="w-3 h-3" />
+                              <span>Checking…</span>
+                            </span>
                           ) : (
                             <span className="px-2 py-1 text-2xs rounded bg-bg-card text-text-muted" title="This pull request can't be merged">{/* allow-bare-rounded */}
                               {status.label}
@@ -809,9 +774,28 @@ export function GitPullRequestsTab() {
                 />
               );
             })}
-          </div>
+            </div>
+          </>
         )}
       </ProbeTabBody>
+      {confirming !== null && (() => {
+        // Issue #1140 (T2.2) — replace the inline merge-confirm
+        // button swap with the shared `<ConfirmDialog>` so the
+        // irreversible squash-merge is gated by the same component
+        // the rest of the app uses (WorktreeManager, NodeItem).
+        const pr = prs.find((p) => p.number === confirming);
+        if (!pr) return null;
+        return (
+          <ConfirmDialog
+            tone="danger"
+            title={`Squash merge PR #${pr.number}?`}
+            message={`This squash-merges pull request #${pr.number} ("${pr.title}") and deletes the ${pr.head_ref || 'head'} branch on origin. This action is irreversible.`}
+            confirmLabel="Squash merge"
+            onCancel={() => setConfirming(null)}
+            onConfirm={() => handleMerge(pr)}
+          />
+        );
+      })()}
     </div>
   );
 }

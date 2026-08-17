@@ -11,6 +11,13 @@
  * modal's backdrop / header / Escape handler and renders the same
  * search input + list + split-resume button in the probe's 360px body.
  *
+ * Issue #1140 — the rows now go through the shared `ProbeRow`
+ * primitive so Archive matches Issues/PRs structurally (chevron
+ * reserved for expandable rows; Archive omits the chevron + body
+ * because there's no expand target; branch/worktree/time metadata
+ * rides in `metaSlot`). Toolbar canonicalised: RefreshControl in
+ * `children` (left), matching Issues/PRs.
+ *
  * Resume flow
  * -----------
  * The primary "Resume" button uses the mesh's resolved default provider
@@ -68,6 +75,7 @@ import {
 } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
+import { ProbeRow } from './ProbeRow';
 import { mapBackendProviders } from '../../lib/groups';
 import { formatRelativeAge } from '../../lib/time';
 
@@ -127,8 +135,6 @@ export function ArchivedNodesTab() {
   // The mirror of the existing GitIssuesTab / GitPullRequestsTab
   // `reloadKey` pattern — bumping aborts the previous effect's signal
   // (useAsyncEffect) and refetches.
-  // Bump to refetch on manual Refresh (issue #813 added the Refresh
-  // affordance to this tab).
   const [reloadKey, setReloadKey] = useState(0);
   // Fetch providers once at mount. Platform filtering is enforced
   // server-side; the `resumable` flag comes straight from the backend
@@ -256,18 +262,16 @@ export function ArchivedNodesTab() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Search + manual Refresh share one row so the prior
-          "search full-width / refresh elsewhere" jump on tab
-          switch doesn't reappear. */}
-      <ProbeToolbar
-        trailing={
-          <RefreshControl
-            onRefresh={() => setReloadKey((k) => k + 1)}
-            isRefreshing={loading && sessions.length > 0}
-            ariaLabel="Refresh archived sessions"
-          />
-        }
-      >
+      {/* Toolbar canonicalised (issue #1140): RefreshControl is the
+          left-most child (matching Issues/PRs); the search input
+          follows and grows to fill. No `trailing` slot — Archive has
+          no GitHub-link or open/closed toggle to pin to the right. */}
+      <ProbeToolbar>
+        <RefreshControl
+          onRefresh={() => setReloadKey((k) => k + 1)}
+          isRefreshing={loading && sessions.length > 0}
+          ariaLabel="Refresh archived sessions"
+        />
         <input
           type="text"
           value={search}
@@ -289,64 +293,80 @@ export function ArchivedNodesTab() {
             label={sessions.length === 0 ? 'No previous sessions found' : 'No matches'}
           />
         ) : (
-          <div className="space-y-1">
-            {filtered.map(session => (
-              <div
-                key={session.session_id}
-                className="flex items-center gap-2 px-2 py-2 rounded-md hover:bg-bg-card transition-colors"
-              >
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-text-primary truncate">{session.first_message}</div>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    {session.branch && (
-                      <span className="text-2xs text-accent-cyan font-mono">{session.branch}</span>
-                    )}
-                    {session.worktree_name && (
-                      <span className="text-2xs text-accent-violet font-mono">{session.worktree_name}</span>
-                    )}
-                    {session.timestamp && (
-                      <span className="text-2xs text-text-secondary">{timeAgo(session.timestamp)}</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Split Resume Menu cluster — ADR-0016 §2 / issue #813.
-                    Primary label "Resume" + session-id key land the
-                    archived-resume flow on the same `<SpawnButtonCluster>`
-                    as Issues/PRs/Sidebar. `getDefaultProvider` is
-                    undefined when `activeMeshId === null` so the cluster
-                    skips its tooltip fetch (the click path still works
-                    via `handleDefaultResume`'s own null guard). */}
-                <div
-                  className="shrink-0"
-                  onMouseDown={e => e.stopPropagation()}
-                >
-                  <SpawnButtonCluster
-                    providers={resumableProviders}
-                    meshId={session.session_id}
-                    isOpen={openDropdown === session.session_id}
-                    primaryLabel="Resume"
-                    busyLabel="Resuming…"
-                    primaryAriaLabel="Resume session"
-                    onToggleDropdown={() =>
-                      setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)
-                    }
-                    onSpawnDefault={() => handleDefaultResume(session)}
-                    onSelectProvider={(providerId) => handleResume(session, providerId)}
-                    disabled={resuming !== null}
-                    isSpawning={resuming === session.session_id}
-                    // The store's `getDefaultProvider` requires a
-                    // non-null mesh id; the cluster calls this from
-                    // hover/focus to populate its tooltip. Drop the
-                    // tooltip affordance when the probe hasn't focused
-                    // a mesh yet (the Resume buttons stay clickable —
-                    // `handleDefaultResume` has its own null guard).
-                    getDefaultProvider={activeMeshId !== null ? () => getDefaultProvider(activeMeshId) : undefined}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
+          <>
+            {/* Result count line — issue #1140 (T1.3). Mirrors the
+                same affordance on Issues/PRs so the dock gives a
+                one-glance sense of scale; only renders when the
+                list is non-empty (the EmptyState label below carries
+                the zero-count message). Pluralised lazily. */}
+            <p className="text-2xs text-text-muted px-1 pb-2">
+              {filtered.length} session{filtered.length === 1 ? '' : 's'}
+            </p>
+            <div className="space-y-1">
+              {filtered.map(session => (
+                <ProbeRow
+                  key={session.session_id}
+                  dataAttr="archive"
+                  rowKey={session.session_id}
+                  title={session.first_message}
+                  url=""
+                  iconAriaLabel="Open archived session"
+                  isExpanded={false}
+                  onToggle={() => { /* archive rows have no body */ }}
+                  body={null}
+                  metaSlot={
+                    <div className="flex items-center gap-2 mt-0.5 text-xs">
+                      {session.branch && (
+                        <span className="text-accent-cyan font-mono">{session.branch}</span>
+                      )}
+                      {session.worktree_name && (
+                        <span className="text-text-secondary font-mono">{session.worktree_name}</span>
+                      )}
+                      {session.timestamp && (
+                        <span className="text-text-secondary">{timeAgo(session.timestamp)}</span>
+                      )}
+                    </div>
+                  }
+                  rightSlot={
+                    // Split Resume Menu cluster — ADR-0016 §2 / issue #813.
+                    // Primary label "Resume" + session-id key land the
+                    // archived-resume flow on the same `<SpawnButtonCluster>`
+                    // as Issues/PRs/Sidebar. `getDefaultProvider` is
+                    // undefined when `activeMeshId === null` so the cluster
+                    // skips its tooltip fetch (the click path still works
+                    // via `handleDefaultResume`'s own null guard).
+                    <div
+                      className="shrink-0"
+                      onMouseDown={e => e.stopPropagation()}
+                    >
+                      <SpawnButtonCluster
+                        providers={resumableProviders}
+                        meshId={session.session_id}
+                        isOpen={openDropdown === session.session_id}
+                        primaryLabel="Resume"
+                        busyLabel="Resuming…"
+                        primaryAriaLabel="Resume session"
+                        onToggleDropdown={() =>
+                          setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)
+                        }
+                        onSpawnDefault={() => handleDefaultResume(session)}
+                        onSelectProvider={(providerId) => handleResume(session, providerId)}
+                        disabled={resuming !== null}
+                        isSpawning={resuming === session.session_id}
+                        // The store's `getDefaultProvider` requires a
+                        // non-null mesh id; the cluster calls this from
+                        // hover/focus to populate its tooltip. Drop the
+                        // tooltip affordance when the probe hasn't focused
+                        // a mesh yet (the Resume buttons stay clickable —
+                        // `handleDefaultResume` has its own null guard).
+                        getDefaultProvider={activeMeshId !== null ? () => getDefaultProvider(activeMeshId) : undefined}
+                      />
+                    </div>
+                  }
+                />
+              ))}
+            </div>
+          </>
         )}
       </ProbeTabBody>
     </div>

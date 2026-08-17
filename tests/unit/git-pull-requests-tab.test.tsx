@@ -273,7 +273,7 @@ describe('GitPullRequestsTab', () => {
 
     // First click reveals the inline confirm — no merge IPC yet.
     expect(invoke).not.toHaveBeenCalledWith('merge_pr', expect.anything());
-    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    const confirmBtn = await screen.findByRole('button', { name: 'Squash merge' });
     await userEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -333,7 +333,7 @@ describe('GitPullRequestsTab', () => {
       { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
     );
     await userEvent.click(mergeBtn);
-    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    const confirmBtn = await screen.findByRole('button', { name: 'Squash merge' });
     await userEvent.click(confirmBtn);
 
     // The merge flow must invalidate the cache for the matching node's
@@ -386,7 +386,7 @@ describe('GitPullRequestsTab', () => {
       { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
     );
     await userEvent.click(mergeBtn);
-    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    const confirmBtn = await screen.findByRole('button', { name: 'Squash merge' });
     await userEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -412,7 +412,7 @@ describe('GitPullRequestsTab', () => {
       { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
     );
     await userEvent.click(mergeBtn);
-    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    const confirmBtn = await screen.findByRole('button', { name: 'Squash merge' });
     await userEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -459,7 +459,7 @@ describe('GitPullRequestsTab', () => {
       { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
     );
     await userEvent.click(mergeBtn);
-    const cancelBtn = await screen.findByRole('button', { name: /cancel merge/i });
+    const cancelBtn = await screen.findByRole('button', { name: 'Cancel' });
     await userEvent.click(cancelBtn);
 
     // No merge IPC after cancellation.
@@ -485,7 +485,7 @@ describe('GitPullRequestsTab', () => {
     );
     await userEvent.click(mergeBtn);
 
-    const cancelBtn = await screen.findByRole('button', { name: /cancel merge/i });
+    const cancelBtn = await screen.findByRole('button', { name: 'Cancel' });
     await userEvent.click(cancelBtn);
 
     // No merge IPC after cancellation, and the original Merge button
@@ -1305,7 +1305,7 @@ describe('GitPullRequestsTab', () => {
     );
     await userEvent.click(mergeBtn);
     // First click reveals the confirm state; second click (Confirm) fires merge_pr.
-    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    const confirmBtn = await screen.findByRole('button', { name: 'Squash merge' });
     await userEvent.click(confirmBtn);
 
     expect(openUrlMock).not.toHaveBeenCalled();

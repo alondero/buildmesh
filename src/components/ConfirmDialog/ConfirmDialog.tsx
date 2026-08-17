@@ -4,11 +4,31 @@ interface ConfirmDialogProps {
   title: string;
   message: string;
   confirmLabel?: string;
+  /**
+   * Visual treatment of the confirm button. `'danger'` is the
+   * historical default — red, signalling an irreversible or
+   * destructive action (delete node, delete mesh property, etc.).
+   * `'primary'` renders the cyan accent and is used by flows that
+   * are confirmable but not strictly destructive (squash merge,
+   * removing a GitHub label that can be re-applied).
+   */
+  tone?: 'danger' | 'primary';
   onConfirm: () => void;
   onCancel: () => void;
 }
 
-export function ConfirmDialog({ title, message, confirmLabel = 'Delete', onConfirm, onCancel }: ConfirmDialogProps) {
+export function ConfirmDialog({
+  title,
+  message,
+  confirmLabel = 'Delete',
+  tone = 'danger',
+  onConfirm,
+  onCancel,
+}: ConfirmDialogProps) {
+  const confirmClass =
+    tone === 'primary'
+      ? 'bg-accent-cyan/80 hover:bg-accent-cyan text-text-inverse'
+      : 'bg-status-error/80 hover:bg-status-error text-white';
   return (
     <Modal onClose={onCancel} labelledBy="confirm-dialog-title" maxWidth="max-w-sm">
       <h2 id="confirm-dialog-title" className="text-sm font-semibold text-text-primary mb-2">{title}</h2>
@@ -24,7 +44,7 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Delete', onConfi
         <button
           type="button"
           onClick={onConfirm}
-          className="px-3 py-1.5 text-xs text-white bg-status-error/80 hover:bg-status-error rounded-md transition-colors"
+          className={`px-3 py-1.5 text-xs rounded-md transition-colors ${confirmClass}`}
         >
           {confirmLabel}
         </button>

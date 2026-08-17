@@ -918,9 +918,10 @@ describe('GitIssuesTab (#378)', () => {
   });
 
   it('clicks the present badge + confirms → calls set_issue_label with action=remove', async () => {
-    // The window.confirm prompt is the destructive-action gate. We
-    // stub it to accept here so the click flows into the IPC.
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    // The destructive-action gate. Issue #1140 (T2.3) replaced the
+    // legacy `window.confirm` with the shared `<ConfirmDialog>` so
+    // the prompt matches WorktreeManager's delete confirm. The flow
+    // opens the dialog on click and the user confirms via its button.
     mockBackend({
       issues: [
         {
@@ -941,7 +942,9 @@ describe('GitIssuesTab (#378)', () => {
     );
     await userEvent.click(badge);
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    const confirmBtn = await screen.findByRole('button', { name: 'Remove label' });
+    await userEvent.click(confirmBtn);
+
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('set_issue_label', {
         meshId: 42,
@@ -950,14 +953,14 @@ describe('GitIssuesTab (#378)', () => {
         action: 'remove',
       });
     });
-    confirmSpy.mockRestore();
   });
 
   it('cancels the confirm on remove → no IPC, no state change', async () => {
     // The destructive-action gate's whole point: a click that the user
     // didn't mean must not reach the network. Verify the IPC is silent
-    // and the badge stays in the present state.
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    // and the badge stays in the present state. Issue #1140 (T2.3)
+    // replaced `window.confirm` with the shared `<ConfirmDialog>`;
+    // Cancel maps to the dialog's Cancel button.
     mockBackend({
       issues: [
         {
@@ -978,13 +981,14 @@ describe('GitIssuesTab (#378)', () => {
     );
     await userEvent.click(badge);
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    const cancelBtn = await screen.findByRole('button', { name: 'Cancel' });
+    await userEvent.click(cancelBtn);
+
     expect(invoke).not.toHaveBeenCalledWith('set_issue_label', expect.anything());
     // The badge is still in the present state — no flip happened.
     expect(
       screen.queryByLabelText('Remove buildmesh:run label from issue #101'),
     ).toBeTruthy();
-    confirmSpy.mockRestore();
   });
 
   it('reverts + calls addToast when set_issue_label rejects', async () => {
