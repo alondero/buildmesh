@@ -1,10 +1,24 @@
-//! Agent process registry — thread-safe storage for live PTY handles.
+//! Agent process registry — thread-safe storage for live PTY handles, plus
+//! the Tauri command surface that orchestrates a live registry entry
+//! (kill_agent / write_to_agent / resize_agent / send_to_agent / debug_*).
+//!
+//! Issue #1052 deepens `agent::process` from a low-level handle-store into
+//! the deep module owning the full process-lifecycle surface (previously
+//! scattered across `commands::agent`'s ~2,400-line file). `commands::agent`
+//! now contains only the spawn-orchestration Tauri wrappers and the
+//! prefill/wire-type helpers; `agent::provider_menu` (sibling module) owns
+//! the Spawn Menu derivation that previously lived next to the lifecycle
+//! commands in the same 2,400-line `commands::agent` file.
 
+use crate::agent::session_lifecycle::{self, SessionLifecycleSink as _};
+use crate::db;
 use crate::pty::PtyRegistry;
 use portable_pty::{Child, MasterPty};
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use tauri::{command, AppHandle};
 
 /// A live agent PTY process handle.
 pub struct AgentProcess {
@@ -737,5 +751,310 @@ mod tests {
         // The watcher self-terminates after taking the master; this
         // join is best-effort and just keeps the test process clean.
         let _ = watcher.join();
+    }
+
+    // -----------------------------------------------------------------------
+    // provider_is_plain_terminal attention-signal tests (issue #535 / #550)
+    //
+    // These pin the per-provider attention-cleared gating without driving
+    // `write_to_agent`'s full PTY path. A plain terminal's Enter is just
+    // shell input — flipping status to `Running` would render a spurious
+    // cyan badge for a shell sitting at a prompt, so we skip the
+    // `attention-cleared` emit (and the `Running` status flip) for
+    // Terminal-typed nodes.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn plain_terminal_provider_skips_attention_signals() {
+        // The "terminal" harness id resolves to the plain-shell executor.
+        assert!(provider_is_plain_terminal("terminal"));
+    }
+
+    #[test]
+    fn llm_providers_do_emit_attention_signals() {
+        // Every non-terminal harness id resolves to an LLM executor, so none skip
+        // attention signals. "minimax"/"kimi" are legacy ids that now resolve to
+        // the Anthropic executor (still an LLM, still not plain-terminal).
+        for id in ["anthropic", "minimax", "kimi", "agy", "opencode", "codex"] {
+            assert!(
+                !provider_is_plain_terminal(id),
+                "LLM provider {id:?} should not skip attention signals"
+            );
+        }
+    }
+
+    /// Regression test for the sync core: an unregistered session must short-
+    /// circuit on the PTY write before the DB read. Without the `?` ordering
+    /// the unit-test DB-not-initialised panic surfaces as a test failure.
+    /// The full PTY-write + DB-update path needs a registered agent
+    /// (real `portable_pty` handles) and is covered by integration tests.
+    #[test]
+    fn write_to_agent_blocking_unknown_session_short_circuits_before_db() {
+        let result = write_to_agent_blocking(999_999_999, "x".to_string());
+        let err = result.expect_err("unknown session must surface an error");
+        assert!(
+            err.contains("Agent not running"),
+            "expected 'Agent not running' error, got {err:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tauri command surface — process lifecycle home
+//
+// `commands::agent::kill_agent / resize_agent / write_to_agent / send_to_agent /
+//  is_agent_running / debug_list_agents / debug_crash_snapshot` moved here as
+// part of issue #1052 (extract process-lifecycle home) and are now
+// `agent::process::kill_agent` etc. The deep module owns
+// the full surface so a Tauri command-registration update in `lib.rs` is the
+// only seam changes the move requires. `commands::agent::spawn_agent`,
+// `create_issue_node`, `create_pr_node`, `spawn_issue_agent`,
+// `spawn_handover_agent`, `auto_resume_agent_nodes`, `list_autopilot_runs`
+// stay in `commands::agent` — those are spawn orchestration, the legitimate
+// role of the commands layer.
+//
+// Sync cores are `pub(crate)` so production call sites in other modules
+// (`services/agent_node.rs:580`, `agent/spawn.rs:1314`) and the test handle in
+// `commands/test.rs:367` can reach them via `agent::process::kill_agent`
+// directly — the dependency arrow now points at the deep module rather than
+// the transport-named commands layer.
+// ---------------------------------------------------------------------------
+
+/// Kill all running agent processes. Used during graceful shutdown.
+/// Renamed from `kill_all_agents` for naming consistency with the existing
+/// `kill_session` (registry-level primitive) — the rename lands in the same
+/// PR so callers and the lib.rs shutdown handler update at once.
+pub fn kill_all_sessions() {
+    for id in PROCESS_REGISTRY.session_ids() {
+        PROCESS_REGISTRY.kill_session(id);
+        PROCESS_REGISTRY.remove(&id);
+        crate::http_server::clear_scrollback(id);
+        tracing::info!("kill_all_sessions: killed agent for session {}", id);
+    }
+}
+
+#[command]
+pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), String> {
+    PROCESS_REGISTRY.resize_pty(session_id, cols, rows)
+}
+
+#[command]
+pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
+    // Issue #1122 (progressive text entry latency).
+    //
+    // The previous implementation offloaded the entire body — PTY write
+    // + disarm + DB read + DB write — onto `spawn_blocking` for every
+    // keystroke. The blocking pool is shared with git/diff/GitHub probes;
+    // at peak, a single queued probe could park 10-50ms of keystroke
+    // latency, and the symptom surfaced as the whole TUI feeling sluggish
+    // after a long session.
+    //
+    // Split the body into a fast path and a slow path instead:
+    //
+    // 1. Fast path: PTY write + autoclear disarm. Both are short,
+    //    non-blocking (Mutex<Box<dyn Write>> + in-memory map lookup) and
+    //    never hold a lock across an `.await`, so they go on the async
+    //    runtime. Every keystroke — letters, arrows, backspace, paste —
+    //    takes this path.
+    // 2. Slow path: only when the data contains a newline / carriage
+    //    return (the user pressed Enter, pasted a multi-line buffer, or
+    //    sent a Ctrl-M). Then we ask the DB whether the node is a plain
+    //    shell (no LLM attention to clear) and, if not, record the
+    //    attention-cleared transition. The DB work goes through
+    //    `spawn_blocking` because it's IO-bound and the convention
+    //    (added by #761) keeps `reqwest`/rusqlite off the async worker
+    //    pool.
+    //
+    // The PTY write happens *first* even on the slow path — a failed
+    // write must not claim "user input accepted", otherwise the
+    // post-exit detector would see no signal for the dead child and the
+    // status flip would land on a session that never received the byte.
+    let contains_newline = data.bytes().any(|b| b == b'\n' || b == b'\r');
+    PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
+    // Any accepted keystroke means the user is engaged with this node —
+    // the stale-mark hypothesis behind auto-clear (issue #878) no longer
+    // holds, and the keystroke's own echo must not count toward the
+    // resume burst.
+    crate::attention_autoclear::disarm(session_id);
+    if !contains_newline {
+        return Ok(());
+    }
+    let should_signal = crate::commands::run_blocking(
+        "write_to_agent_signal",
+        move || write_to_agent_signal_blocking(session_id),
+    )
+    .await?;
+    if should_signal {
+        // Route through the SessionLifecycle sink so all `attention-cleared`
+        // emits pass through one owner — matches the invariant in
+        // `session_lifecycle.rs` that no caller emits lifecycle events
+        // directly. (`on_attention_cleared` would also write `Running`
+        // status, which `write_to_agent` intentionally doesn't — user
+        // input doesn't by itself mark the node as no longer awaiting.)
+        let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
+        sink.emit_attention_cleared(session_id);
+    }
+    Ok(())
+}
+
+/// Slow-path DB work for [`write_to_agent`]. The PTY write and autoclear
+/// disarm already ran on the async runtime by the time this is called;
+/// only the attention-cleared transition is left, and that requires a DB
+/// read (to skip plain-shell providers) and a DB write (to flip status
+/// out of `AwaitingInput`). Returns `Ok(true)` when the caller should
+/// emit `attention-cleared`.
+///
+/// The read is here because plain-shell providers have no LLM attention
+/// state to clear — a shell's Enter is just shell input, and flipping
+/// status to `Running` would render a spurious "Running" badge for a
+/// shell sitting at a prompt (issue #535).
+pub(crate) fn write_to_agent_signal_blocking(session_id: i64) -> Result<bool, String> {
+    if should_skip_attention_signals(session_id) {
+        return Ok(false);
+    }
+    // Status write routes through SessionLifecycle (issue #132). The
+    // sink here is `DbOnlySink` because the blocking core has no
+    // `AppHandle`; the corresponding `attention-cleared` emit is the
+    // caller's responsibility (the `should_signal` flag tells the
+    // caller to emit, preserving the original behaviour where the
+    // emit lived in the async wrapper).
+    session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id)
+        .ok();
+    Ok(true)
+}
+
+/// Sync core for [`write_to_agent`] — **legacy combined entry point**
+/// retained for the existing test suite and for any future mobile HTTP
+/// route that wants to mirror the identical behaviour in one call. New
+/// IPC callers should use [`write_to_agent`] directly (which splits the
+/// fast PTY write from the slow DB work) — issue #1122.
+///
+/// PTY write happens first; a failed write must NOT claim "user input
+/// accepted" — the reader thread's exit-detector would see no signal for
+/// the dead child, and the status flip would land on a session that
+/// never received the byte.
+#[cfg(test)]
+pub(crate) fn write_to_agent_blocking(
+    session_id: i64,
+    data: String,
+) -> Result<bool, String> {
+    PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
+    crate::attention_autoclear::disarm(session_id);
+    let should_signal = data.bytes().any(|b| b == b'\n' || b == b'\r')
+        && !should_skip_attention_signals(session_id);
+    if should_signal {
+        session_lifecycle::on_attention_cleared(
+            &session_lifecycle::DbOnlySink,
+            session_id,
+        )
+        .ok();
+    }
+    Ok(should_signal)
+}
+
+/// Returns true if a newline in `write_to_agent` should NOT flip the
+/// node to `Running` and should NOT emit `attention-cleared`. A plain
+/// terminal's "Enter" is just shell input — the node has no LLM
+/// attention state to clear, and flipping status would render a
+/// spurious cyan "Running" badge for a shell sitting at a prompt.
+pub(super) fn should_skip_attention_signals(session_id: i64) -> bool {
+    db::get_agent_node_by_id(session_id)
+        .ok()
+        .map(|n| provider_is_plain_terminal(&n.provider))
+        .unwrap_or(false)
+}
+
+/// Whether the stored harness id resolves to a plain shell. Resolving through
+/// the harness profile (not just the legacy enum) ensures a node spawned via
+/// the **Terminal profile** still skips LLM attention signals (issue #535).
+pub(super) fn provider_is_plain_terminal(provider: &str) -> bool {
+    crate::preferences::resolve_harness_provider(provider)
+        .adapter()
+        .is_plain_terminal()
+}
+
+#[command]
+pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Result<(), String> {
+    write_to_agent(app, session_id, format!("{}\n", input)).await
+}
+
+#[command]
+pub async fn kill_agent(session_id: i64) -> Result<(), String> {
+    // Offload to the blocking pool: `kill_session` shells out to
+    // `taskkill /F /T` on Windows (a synchronous `.output()` wait) and then
+    // joins the PTY reader thread with a bounded 2s timeout — up to several
+    // seconds parked on a Tauri async worker per call. This command runs on
+    // every node close AND at step 2 of every spawn (`spawn_agent_inner`
+    // kills stale processes first), so leaving it inline is exactly the
+    // pool-starvation class from the Command Threading convention.
+    crate::commands::run_blocking("kill_agent", move || kill_agent_blocking(session_id)).await
+}
+
+/// Sync core for [`kill_agent`] — see the `*_blocking` + `run_blocking`
+/// convention in `commands/mod.rs`.
+pub(crate) fn kill_agent_blocking(session_id: i64) -> Result<(), String> {
+    crate::session_naming::reset_buffers(session_id);
+    PROCESS_REGISTRY.kill_session(session_id);
+    PROCESS_REGISTRY.remove(&session_id);
+    crate::http_server::clear_scrollback(session_id);
+    // Routes through SessionLifecycle (issue #132). `DbOnlySink` because
+    // the blocking core has no `AppHandle` — kill is silent on the
+    // attention channel anyway (no `attention-cleared` emit here).
+    session_lifecycle::on_idle(&session_lifecycle::DbOnlySink, session_id)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[command]
+pub async fn is_agent_running(session_id: i64) -> bool {
+    PROCESS_REGISTRY.is_alive(&session_id)
+}
+
+// ---------------------------------------------------------------------------
+// Debug
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct AgentDebugState {
+    pub session_id: i64,
+    pub is_alive: bool,
+}
+
+#[command]
+pub async fn debug_list_agents() -> Vec<AgentDebugState> {
+    PROCESS_REGISTRY
+        .session_ids()
+        .into_iter()
+        .map(|id| AgentDebugState {
+            session_id: id,
+            is_alive: PROCESS_REGISTRY.is_alive(&id),
+        })
+        .collect()
+}
+
+/// Snapshot of all relevant state at the time of a crash, for post-mortem diagnosis.
+/// Call this via invoke('debug_crash_snapshot') immediately after a crash to get
+/// a consistent view of what the backend was doing.
+#[derive(Serialize)]
+pub struct CrashSnapshot {
+    pub process_registry_ids: Vec<i64>,
+    pub session_count: usize,
+    pub renamed_sessions: usize,
+    pub buffers_size_bytes: usize,
+    pub turn_counters_entries: usize,
+}
+
+#[command]
+pub async fn debug_crash_snapshot() -> CrashSnapshot {
+    let process_ids = PROCESS_REGISTRY.session_ids();
+    let session_count = db::list_agent_nodes().map(|s| s.len()).unwrap_or(0);
+    let buffers_size = crate::session_naming::buffers_size_bytes();
+
+    CrashSnapshot {
+        process_registry_ids: process_ids,
+        session_count,
+        renamed_sessions: 0,
+        buffers_size_bytes: buffers_size,
+        turn_counters_entries: 0,
     }
 }

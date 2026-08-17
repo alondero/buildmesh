@@ -364,7 +364,7 @@ fn handle_spawn_handover_agent(args: &serde_json::Value, app: AppHandle) -> Stri
 fn handle_kill_agent(args: &serde_json::Value) -> String {
     let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let result = tauri::async_runtime::block_on(crate::commands::agent::kill_agent(node_id));
+    let result = tauri::async_runtime::block_on(crate::agent::process::kill_agent(node_id));
 
     match result {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id })),

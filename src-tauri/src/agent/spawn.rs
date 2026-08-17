@@ -1386,7 +1386,7 @@ pub(crate) async fn spawn_agent_inner(
 
     // 2. Kill any stale process for this session
     tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
-    crate::commands::agent::kill_agent(session_id).await.ok();
+    crate::agent::process::kill_agent(session_id).await.ok();
 
     // 3. Get node and resolve paths (skip DB read if caller provided the node)
     let node = match preloaded_node {

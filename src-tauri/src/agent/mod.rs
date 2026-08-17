@@ -2,8 +2,14 @@
 //!
 //! Organized into focused modules:
 //! - `detection.rs` — startup scan of `PATH`/config dirs for installed harnesses
-//! - `process.rs` — `AgentProcess` and `AgentProcessRegistry` (PTY handle storage)
+//! - `process.rs` — process-lifecycle home: `AgentProcess`/`AgentProcessRegistry`
+//!   storage plus the Tauri commands (`kill_agent`, `write_to_agent`,
+//!   `resize_agent`, `send_to_agent`, `is_agent_running`, `debug_*`) that
+//!   orchestrate a live registry entry.
 //! - `provider/` — `AgentProvider` trait and per-provider adapters
+//! - `provider_menu.rs` — Spawn Menu composition (`compose_provider_menu`,
+//!   `order_providers`, `order_proxied_children`, `available_providers`,
+//!   `list_providers` Tauri command)
 //! - `sandbox.rs` — macOS Seatbelt profile generation + `sandbox-exec` wrapping
 //! - `session_lifecycle.rs` — single owner of state transitions (issue #132)
 //! - `spawn.rs` — `spawn_agent_inner` orchestrating the above
@@ -15,6 +21,7 @@ pub mod detection;
 pub mod process;
 pub mod provider;
 pub mod launch_routing;
+pub mod provider_menu;
 pub mod sandbox;
 pub mod session_lifecycle;
 pub mod spawn;

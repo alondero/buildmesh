@@ -483,16 +483,19 @@ pub fn run() {
             // to produce the data: URL Safari intercepts.
             commands::network::get_root_cert_mobileconfig,
             // Agent
+            // Process-lifecycle Tauri commands (issue #1052) live in
+            // `agent::process`; the rest are spawn orchestration owned by
+            // `commands::agent`.
             commands::agent::spawn_agent,
-            commands::agent::resize_agent,
-            commands::agent::kill_agent,
-            commands::agent::is_agent_running,
-            commands::agent::debug_list_agents,
-            commands::agent::send_to_agent,
-            commands::agent::write_to_agent,
+            agent::process::resize_agent,
+            agent::process::kill_agent,
+            agent::process::is_agent_running,
+            agent::process::debug_list_agents,
+            agent::process::send_to_agent,
+            agent::process::write_to_agent,
             commands::agent::auto_resume_agent_nodes,
-            commands::agent::debug_crash_snapshot,
-            commands::agent::list_providers,
+            agent::process::debug_crash_snapshot,
+            agent::provider_menu::list_providers,
             commands::agent::spawn_issue_agent,
             commands::agent::spawn_handover_agent,
             commands::agent::create_issue_node,
@@ -635,7 +638,7 @@ pub fn run() {
                 if let Err(e) = crate::agent::session_lifecycle::on_exit_sweep() {
                     tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
                 }
-                commands::agent::kill_all_agents();
+                agent::process::kill_all_sessions();
             }
         });
 }
