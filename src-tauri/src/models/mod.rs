@@ -1393,16 +1393,24 @@ mod tests {
         assert_eq!(Provider::from_db_str("\tcodex\n"), Provider::Codex);
     }
 
-    /// Capture-target for tracing events emitted inside `from_db_str`.
-    /// `tracing-subscriber`'s `MakeWriter` impl that appends to a shared
-    /// `Vec<u8>`, so each test can grep the captured output for the
-    /// expected log line.
-    #[derive(Clone, Default)]
-    struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    // Per-thread capture buffer for tracing events emitted inside
+    // `from_db_str`. `thread_local!` (rather than a per-test
+    // `Arc<Mutex<Vec<u8>>>`) guarantees events from other test threads
+    // can't bleed into this thread's buffer under parallel `cargo test` —
+    // issue #1007. The buffer persists across tests scheduled on the same
+    // OS thread, so `capture_warnings` drains it on entry.
+    thread_local! {
+        static WARN_BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
 
-    impl Write for VecWriter {
+    /// `MakeWriter` that appends to the thread-local `WARN_BUFFER`. A unit
+    /// struct because there's nothing to clone — the address lives in the
+    /// `thread_local!`.
+    struct ThreadLocalWriter;
+
+    impl Write for ThreadLocalWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            WARN_BUFFER.with(|cell| cell.borrow_mut().extend_from_slice(buf));
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -1410,31 +1418,33 @@ mod tests {
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
-        type Writer = VecWriter;
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+        type Writer = ThreadLocalWriter;
         fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
+            ThreadLocalWriter
         }
     }
 
     /// Run `body` under a subscriber that captures WARN-level tracing events
-    /// into a fresh `Vec<u8>`, returning the captured string. Used by the
-    /// `provider_from_db_str_*_warning` tests to assert on log output.
+    /// into the thread-local `WARN_BUFFER`, returning the captured string.
+    /// Used by the `provider_from_db_str_*_warning` tests to assert on log
+    /// output.
     fn capture_warnings<F: FnOnce()>(body: F) -> String {
-        let buf = VecWriter::default();
-        let buf_for_assert = buf.clone();
+        // Drain in case a prior test on this OS thread left bytes behind.
+        WARN_BUFFER.with(|cell| cell.borrow_mut().clear());
+
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf)
+            .with_writer(ThreadLocalWriter)
             .with_max_level(tracing::Level::WARN)
             .with_ansi(false)
             .finish();
 
         tracing::subscriber::with_default(subscriber, body);
 
-        // Clone into a local so the MutexGuard drops at end of `.clone()`,
-        // not at end of block — otherwise the lock outlives the return value.
-        let bytes = buf_for_assert.0.lock().unwrap().clone();
-        String::from_utf8(bytes).unwrap()
+        let result = String::from_utf8(WARN_BUFFER.with(|cell| cell.borrow().clone())).unwrap();
+        // Tidy up so the buffer doesn't accumulate across tests on this OS thread.
+        WARN_BUFFER.with(|cell| cell.borrow_mut().clear());
+        result
     }
 
     /// Issue #297: a misspelled provider id in `preferences.json` (e.g.
@@ -1468,6 +1478,56 @@ mod tests {
             "expected no warn! for known (case-insensitive) value, got: {}",
             captured
         );
+    }
+
+    /// Regression test for #1007: the previous `VecWriter` (with per-test
+    /// `Arc<Mutex<Vec<u8>>>`) allowed events from other test threads to
+    /// bleed into the capture buffer under parallel `cargo test`. This test
+    /// runs `capture_warnings` on 16 threads simultaneously via a `Barrier`
+    /// and asserts each thread's captured output contains ONLY its own
+    /// marker — under `ThreadLocalWriter` this passes deterministically.
+    ///
+    /// Markers use fixed-width zero-padded suffixes (`_00`…`_15`) so that
+    /// `_1` cannot be a substring of `_10`…`_15` (a false positive that
+    /// bit the first version of this test).
+    #[test]
+    fn capture_warnings_isolates_buffers_per_thread() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        const THREADS: usize = 16;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::with_capacity(THREADS);
+        for t in 0..THREADS {
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let marker = format!("capture_warnings_thread_marker_{t:02}");
+                barrier.wait();
+                capture_warnings(|| {
+                    tracing::warn!("{marker}");
+                })
+            }));
+        }
+        let results: Vec<String> = handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread panicked"))
+            .collect();
+        for (t, captured) in results.iter().enumerate() {
+            let my_marker = format!("capture_warnings_thread_marker_{t:02}");
+            assert!(
+                captured.contains(&my_marker),
+                "thread {t} must see its own marker, got: {captured}"
+            );
+            for other in 0..THREADS {
+                if other == t {
+                    continue;
+                }
+                let other_marker = format!("capture_warnings_thread_marker_{other:02}");
+                assert!(
+                    !captured.contains(&other_marker),
+                    "thread {t} saw thread {other}'s marker — cross-thread bleed: {captured}"
+                );
+            }
+        }
     }
 
     #[test]

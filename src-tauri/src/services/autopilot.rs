@@ -1012,6 +1012,39 @@ fn spawn_autopilot_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    // Per-thread capture buffer for `tracing::info!` events emitted inside
+    // `blocked_by_filter_emits_log_once_on_first_observation_silently_after`.
+    // `thread_local!` (rather than a per-test `Arc<Mutex<Vec<u8>>>`) guarantees
+    // events from other test threads can't bleed into this thread's buffer
+    // under parallel `cargo test` — issue #1007. The buffer persists across
+    // tests scheduled on the same OS thread, so the test drains it on entry.
+    thread_local! {
+        static INFO_BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// `MakeWriter` that appends to the thread-local `INFO_BUFFER`. A unit
+    /// struct because there's nothing to clone — the address lives in the
+    /// `thread_local!`.
+    struct ThreadLocalWriter;
+
+    impl Write for ThreadLocalWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            INFO_BUFFER.with(|cell| cell.borrow_mut().extend_from_slice(buf));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+        type Writer = ThreadLocalWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            ThreadLocalWriter
+        }
+    }
 
     /// Frozen wall-clock anchor for the loop-decision tests. `now`
     /// needs to be a fixed point so the duration comparisons stay
@@ -1221,31 +1254,15 @@ mod tests {
         // exact behaviour the planner will exhibit at runtime — a
         // regression in the `if mark_blocked_logged(...)` wiring would
         // fail this test.
-        use std::io::Write;
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
+        //
+        // `ThreadLocalWriter` writes to a `thread_local!` buffer — issue
+        // #1007 closed a parallel-test flake where the previous
+        // `VecWriter(Arc<Mutex<Vec<u8>>>)` allowed events from other test
+        // threads to bleed into this test's capture buffer.
+        INFO_BUFFER.with(|cell| cell.borrow_mut().clear());
 
-        #[derive(Clone)]
-        struct VecWriter(Arc<Mutex<Vec<u8>>>);
-        impl Write for VecWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for VecWriter {
-            type Writer = VecWriter;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(VecWriter(captured.clone()))
+            .with_writer(ThreadLocalWriter)
             .with_ansi(false)
             .without_time()
             .with_target(false)
@@ -1294,8 +1311,10 @@ mod tests {
         // Tidy: leave LOGGED_BLOCKS as we found it.
         LOGGED_BLOCKS.lock().unwrap().remove(&pair);
 
-        let logs = String::from_utf8(captured.lock().unwrap().clone())
+        let logs = String::from_utf8(INFO_BUFFER.with(|cell| cell.borrow().clone()))
             .expect("captured log buffer is utf-8");
+        // Tidy: don't leave our bytes around for the next test on this OS thread.
+        INFO_BUFFER.with(|cell| cell.borrow_mut().clear());
         let autopilot_lines: Vec<&str> = logs
             .lines()
             .filter(|l| l.contains("autopilot:"))
