@@ -319,7 +319,7 @@ pub struct AppPreferences {
     pub provider_accounts: Vec<ProviderAccount>,
     /// User-chosen order of the spawn-menu harness rows, as a list of row ids
     /// (issue #573 / ADR-0016). `Terminal` is excluded — it's always forced to
-    /// the bottom by `commands::agent::order_providers`. A row whose id isn't
+    /// the bottom by `agent::provider_menu::order_providers`. A row whose id isn't
     /// listed (a newly-detected harness) appends after the listed ones; an
     /// uninstalled harness keeps its saved slot here until it reappears.
     #[serde(default)]
@@ -901,7 +901,7 @@ pub fn harness_profiles() -> Vec<HarnessProfile> {
 }
 
 /// The user's stored spawn-menu harness order — a list of row ids applied by
-/// `commands::agent::order_providers` (issue #573). Empty when never set, in
+/// `agent::provider_menu::order_providers` (issue #573). Empty when never set, in
 /// which case the menu keeps its natural derivation order (Terminal still last).
 /// A load failure is logged and treated as "no stored order".
 pub fn harness_order() -> Vec<String> {
@@ -1277,7 +1277,7 @@ fn pairing_can_potentially_match(pairing: &ProviderPairing) -> bool {
 /// The Claude Code harness id the derived default Anthropic pairings group under
 /// — the first `anthropic`-backed profile, else the literal `"claude"` (which
 /// still resolves to the Anthropic executor). Pure; the single source of this
-/// rule so the menu (`commands::agent::compose_provider_menu`) and the pairing
+/// rule so the menu (`agent::provider_menu::compose_provider_menu`) and the pairing
 /// resolver can't derive it differently.
 pub(crate) fn claude_harness_id_from(profiles: &[HarnessProfile]) -> String {
     profiles
@@ -1562,7 +1562,7 @@ pub fn openai_api_key_resolved() -> Option<String> {
 /// `prefs` so the command layer stays a thin load→mutate→save.
 ///
 /// No longer materializes a paired [`HarnessProfile`]: the spawn menu is now
-/// *derived* from the accounts list (see `commands::agent::compose_provider_menu`),
+/// *derived* from the accounts list (see `agent::provider_menu::compose_provider_menu`),
 /// so an enabled, keyed, Claude-compatible account — built-in MiniMax or a
 /// custom endpoint alike — appears automatically, and clearing its key or
 /// disabling it removes it with no second list to keep in sync (issue #568).

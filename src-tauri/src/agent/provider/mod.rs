@@ -177,7 +177,7 @@ pub fn parse_spawn_option_id(id: &str) -> (&str, Option<&str>) {
 /// native launch, e.g. clicking "Claude Code" boots Claude Code with its
 /// own subscription) or an Agent Harness paired with a **Proxied Provider**
 /// (a Claude-Code-backed row like "MiniMax via Claude Code"). The single
-/// backend-derived list (`commands::agent::available_providers`) is rendered
+/// backend-derived list (`agent::provider_menu::available_providers`) is rendered
 /// as-is on every spawn surface (sidebar, Issues/PRs probes, archived-resume,
 /// mobile).
 ///

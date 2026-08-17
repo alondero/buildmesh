@@ -1126,6 +1126,64 @@ fn start_reader(
 }
 
 // ---------------------------------------------------------------------------
+// Resume decision surface (issue #949 / PR #1121)
+// ---------------------------------------------------------------------------
+
+/// Pure decision for "given the stored CLI session id, the resume cause,
+/// and whether the adapter auto-resumes on startup, what should
+/// `spawn_with_intent` do?". The Skip variants are the regression-pin
+/// for issue #949: a future refactor that re-introduces an `on_idle`
+/// call inside the Skip arms fails review by virtue of the decision
+/// being a single enum variant.
+///
+/// Empty-string defense: legacy writes can leave an empty string in
+/// `agent_nodes.cli_session_id`. `db::list_suspended_nodes`'s SQL
+/// `IS NOT NULL` filter only catches NULL, so the empty case is
+/// defended here.
+pub(crate) fn decide_startup_resume(
+    cli_session_id: Option<&str>,
+    cause: ResumeCause,
+    auto_resume_on_startup: bool,
+) -> ResumeSkipDecision {
+    let stored = cli_session_id.filter(|s| !s.is_empty());
+    match (cause, stored) {
+        (ResumeCause::Startup, None) => ResumeSkipDecision::SkipSuspended,
+        (_, None) => ResumeSkipDecision::NoSessionId,
+        (ResumeCause::Startup, Some(_id)) if !auto_resume_on_startup => {
+            ResumeSkipDecision::SkipAdapterDeclines
+        }
+        (_, Some(id)) => ResumeSkipDecision::Proceed(id.to_string()),
+    }
+}
+
+/// Decision surface for the Startup resume-skip path (issue #949 /
+/// PR #1121). See [`decide_startup_resume`] for the full rationale —
+/// in short: every `Skip*` variant MUST be paired with a
+/// `SpawnOutcome::Skipped(node)` return path that does NOT call any
+/// `sink.write_status`. The node stays `Suspended` so the user's
+/// Resume / Regenerate affordances remain reachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResumeSkipDecision {
+    /// The Startup resume is not viable (missing or empty
+    /// `cli_session_id`); return `SpawnOutcome::Skipped(node)` without
+    /// touching `agent_nodes.status`. The node stays `Suspended`.
+    SkipSuspended,
+    /// The Startup resume is not viable because the adapter declines
+    /// (`auto_resume_on_startup() == false`); return
+    /// `SpawnOutcome::Skipped(node)` without touching
+    /// `agent_nodes.status`. The node stays `Suspended`.
+    SkipAdapterDeclines,
+    /// The Explicit (user-driven) resume is not viable because there
+    /// is no captured session id; the caller surfaces this as an
+    /// `Err`. Distinct from `SkipSuspended` because the user expects
+    /// an error toast, not a silent no-op.
+    NoSessionId,
+    /// The resume IS viable; the caller continues the spawn flow and
+    /// the captured `cli_session_id` is returned.
+    Proceed(String),
+}
+
+// ---------------------------------------------------------------------------
 // Public Tauri command interface
 // ---------------------------------------------------------------------------
 
@@ -1135,6 +1193,22 @@ fn start_reader(
 /// identity. Callers only select the reason for starting it and the initial
 /// terminal size; low-level `SpawnOptions` stays inside this module while
 /// existing callers migrate to the intent seam.
+///
+/// ## Resume-skip decision (issue #949, PR #1121)
+///
+/// `spawn_with_intent` previously wrote `Idle` for every Startup-resume
+/// branch it couldn't honour, which silently dropped Suspended nodes with
+/// no UI recovery affordance. The fix was to short-circuit these branches
+/// to `SpawnOutcome::Skipped` WITHOUT touching `agent_nodes.status` —
+/// leaving them as `Suspended` so the user can drive the new Resume /
+/// Regenerate affordances.
+///
+/// [`decide_startup_resume`] is the testable surface of that contract:
+/// it takes only the three facts the decision depends on (the stored
+/// `cli_session_id`, the cause, and whether the adapter auto-resumes on
+/// startup) and returns the decided outcome. The Skip variants in
+/// particular must NEVER trigger a sink write — the regression test in
+/// `mod tests` pins the decision matrix.
 pub(crate) async fn spawn_with_intent(
     app: &tauri::AppHandle,
     request: SpawnRequest,
@@ -1151,15 +1225,12 @@ pub(crate) async fn spawn_with_intent(
 
     let resume = match &intent {
         SpawnIntent::Resume { cause } => {
-            let Some(cli_session_id) = node
-                .cli_session_id
-                .clone()
-                .filter(|id| !id.is_empty())
-            else {
-                let message = format!(
-                    "cannot resume node {}: no CLI session ID is stored",
-                    node.id
-                );
+            let decision = decide_startup_resume(
+                node.cli_session_id.as_deref(),
+                *cause,
+                adapter.auto_resume_on_startup(),
+            );
+            match decision {
                 // Startup resume with no cli_session_id: there is nothing
                 // for us to resume. DO NOT write Idle -- that was the
                 // silent-drop bug that stranded Suspended OpenCode /
@@ -1171,37 +1242,41 @@ pub(crate) async fn spawn_with_intent(
                 // queries db::list_suspended_nodes so the row is
                 // always already Suspended here; the prior on_idle
                 // was redundant at best and silently destructive.
-                if matches!(cause, ResumeCause::Startup) {
+                ResumeSkipDecision::SkipSuspended
+                // Startup resume but the adapter declines (OpenCode,
+                // Terminal -- they have no --resume flag and no
+                // auto-resume). DO NOT write Idle (same rationale as
+                // the cli_session_id-missing branch above): the node
+                // stays Suspended so the user's new Resume button can
+                // retry later, or the node can be regenerated to a
+                // different provider. The Explicit branch
+                // (ResumeCause::Explicit from user-driven Resume /
+                // Regenerate) is not affected -- the explicit user's
+                // expectation is that we try the captured session id
+                // via `supports_resume()`, not that we silently skip.
+                | ResumeSkipDecision::SkipAdapterDeclines => {
                     return Ok(SpawnOutcome::Skipped(node));
                 }
-                return Err(message);
-            };
-
-            // Startup resume but the adapter declines (OpenCode,
-            // Terminal -- they have no --resume flag and no
-            // auto-resume). DO NOT write Idle (same rationale as
-            // the cli_session_id-missing branch above): the node
-            // stays Suspended so the user's new Resume button can
-            // retry later, or the node can be regenerated to a
-            // different provider. The Explicit branch
-            // (ResumeCause::Explicit from user-driven Resume /
-            // Regenerate) is not affected -- it falls through to
-            // the supports_resume() check removed below.
-            if matches!(cause, ResumeCause::Startup) && !adapter.auto_resume_on_startup() {
-                return Ok(SpawnOutcome::Skipped(node));
+                ResumeSkipDecision::NoSessionId => {
+                    return Err(format!(
+                        "cannot resume node {}: no CLI session ID is stored",
+                        node.id
+                    ));
+                }
+                // Adapter cannot honour a resume arg (OpenCode,
+                // Terminal -- no --resume flag) under an Explicit
+                // cause: fall through to resume = None, which routes
+                // the spawn via the _ => None arm below into
+                // SpawnIntent::Fresh semantics. Same philosophy as
+                // decide_resume returning None on cross-harness: the
+                // captured cli_session_id is preserved in the DB so
+                // a future Regenerate to a resumable harness can
+                // still pick it up. Without this, the user-driven
+                // Resume button on a Suspended OpenCode node would
+                // surface a toast instead of starting fresh on the
+                // same worktree.
+                ResumeSkipDecision::Proceed(id) => Some(id),
             }
-            // Adapter cannot honour a resume arg (OpenCode,
-            // Terminal -- no --resume flag). Fall through to
-            // resume = None, which routes the spawn via the _ =>
-            // None arm below into SpawnIntent::Fresh semantics.
-            // Same philosophy as decide_resume returning None on
-            // cross-harness: the captured cli_session_id is
-            // preserved in the DB so a future Regenerate to a
-            // resumable harness can still pick it up. Without
-            // this, the user-driven Resume button on a Suspended
-            // OpenCode node would surface a toast instead of
-            // starting fresh on the same worktree.
-            Some(cli_session_id)
         }
         _ => None,
     };
@@ -1311,7 +1386,7 @@ pub(crate) async fn spawn_agent_inner(
 
     // 2. Kill any stale process for this session
     tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
-    crate::commands::agent::kill_agent(session_id).await.ok();
+    crate::agent::process::kill_agent(session_id).await.ok();
 
     // 3. Get node and resolve paths (skip DB read if caller provided the node)
     let node = match preloaded_node {
@@ -3932,5 +4007,71 @@ mod tests {
 https://github.com/alondero/buildmesh/issues/247"
             )
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Resume-skip decision surface (issue #949 regression).
+    //
+    // Pins the PR #1121 fix: when a Startup resume is not viable, the
+    // caller must NOT write `Idle` to `agent_nodes.status` — the node
+    // stays `Suspended` so the user's Resume / Regenerate affordances
+    // remain reachable. `decide_startup_resume` is the single source of
+    // truth for that contract; `spawn_with_intent`'s Skip arms call no
+    // sink. A future refactor that re-introduces an `on_idle` write here
+    // fails review by virtue of the decision being a single enum variant.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decide_startup_resume_no_session_id_is_skipped() {
+        let d = decide_startup_resume(None, ResumeCause::Startup, true);
+        assert_eq!(d, ResumeSkipDecision::SkipSuspended);
+    }
+
+    #[test]
+    fn decide_startup_resume_empty_session_id_is_skipped() {
+        // Empty-string defense — `db::list_suspended_nodes`'s SQL filter
+        // only catches NULL; legacy writes could leave an empty string
+        // behind, so the empty case must be filtered here.
+        let d = decide_startup_resume(Some(""), ResumeCause::Startup, true);
+        assert_eq!(d, ResumeSkipDecision::SkipSuspended);
+    }
+
+    #[test]
+    fn decide_startup_resume_when_adapter_declines_is_skipped() {
+        let d = decide_startup_resume(
+            Some("uuid"),
+            ResumeCause::Startup,
+            false, // OpenCode, Terminal — no --resume flag, no auto-resume
+        );
+        assert_eq!(
+            d,
+            ResumeSkipDecision::SkipAdapterDeclines,
+            "OpenCode/Terminal Startup resume must skip without writing Idle"
+        );
+    }
+
+    #[test]
+    fn decide_startup_resume_explicit_no_session_id_is_an_error() {
+        // User clicked Resume on a node that never captured a session id.
+        // This is a hard error — surfacing it is the user-driven recovery
+        // path; the orchestrator-side Startup path silently skips.
+        let d = decide_startup_resume(None, ResumeCause::Explicit, true);
+        assert_eq!(d, ResumeSkipDecision::NoSessionId);
+    }
+
+    #[test]
+    fn decide_startup_resume_explicit_with_session_id_proceeds() {
+        let d = decide_startup_resume(
+            Some("uuid-7"),
+            ResumeCause::Explicit,
+            false, // explicit cause is unaffected by auto_resume_on_startup
+        );
+        assert_eq!(d, ResumeSkipDecision::Proceed("uuid-7".to_string()));
+    }
+
+    #[test]
+    fn decide_startup_resume_startup_with_session_id_and_adapter_accepts_proceeds() {
+        let d = decide_startup_resume(Some("uuid-7"), ResumeCause::Startup, true);
+        assert_eq!(d, ResumeSkipDecision::Proceed("uuid-7".to_string()));
     }
 }

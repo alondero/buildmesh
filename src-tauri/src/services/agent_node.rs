@@ -577,7 +577,7 @@ pub async fn regenerate(
     //    already in place. The new spawn sets the status correctly
     //    anyway.
     if !should_skip_kill_for_regenerate(node.status) {
-        let _ = crate::commands::agent::kill_agent(node_id).await;
+        let _ = crate::agent::process::kill_agent(node_id).await;
     }
 
     // 4. Update the `provider` column. The next `spawn_agent_inner`

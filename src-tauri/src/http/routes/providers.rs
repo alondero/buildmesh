@@ -1,6 +1,6 @@
 //! `GET /api/providers` — list providers available on this host.
 
-use crate::commands::agent::available_providers;
+use crate::agent::provider_menu::available_providers;
 
 pub async fn list_json() -> String {
     let providers = crate::commands::run_blocking("http_list_providers", || {

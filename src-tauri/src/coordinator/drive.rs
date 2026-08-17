@@ -195,7 +195,7 @@ impl<T: DriveTarget> AgentDriver for PtyDriver<T> {
         // A plain terminal has no LLM attention state to clear; flipping it to
         // Running would paint a spurious "Running" badge on a shell sitting at a
         // prompt. This mirrors the desktop write path's
-        // `commands::agent::should_skip_attention_signals` guard.
+        // `agent::process::should_skip_attention_signals` guard.
         if !self.target.is_plain_terminal(node_id) {
             self.target.clear_attention(node_id);
         }

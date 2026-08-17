@@ -132,7 +132,7 @@ mod tests {
 
     /// `available_on` must list every platform OpenCode runs on. Pre-#827
     /// macOS was missing, so the spawn-menu composer in
-    /// `commands::agent::available_providers` filtered OpenCode out for a
+    /// `agent::provider_menu::available_providers` filtered OpenCode out for a
     /// macOS user even when the binary was detected at startup. Pin the exact
     /// set (not just membership) so a future "while we're here" addition
     /// forces an explicit test update — matches the equivalent assertion on
