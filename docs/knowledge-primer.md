@@ -226,7 +226,7 @@ Session IDs are **assigned, not captured**, for providers we control (Anthropic,
 `session_naming.rs` captures PTY output and auto-names agent nodes via LLM summarisation (slug-based, e.g. `fix-auth-flow`). Buffering is gated: `on_output` only starts collecting after the first `on_turn` (first idle-prompt webhook) fires, so the Claude Code startup chrome — banner, "Bypass Permissions" warning, plugin/skill listing — is discarded before it can reach the LLM. The rename runs async one turn later, against clean post-startup content.
 
 ### Crash Recovery on Startup
-`lib.rs:46-54` marks any agent nodes still showing `Running` status as `Suspended` during app startup, since a crash means no live process exists. These are then auto-resumed via `auto_resume_nodes` on the frontend's first draw.
+`session_lifecycle::recover_from_crash()` (called from `lib.rs` setup) marks any agent nodes still showing `Running` status as `Suspended` during app startup, since a crash means no live process exists. These are then auto-resumed via `auto_resume_nodes` on the frontend's first draw. A second sweep, `session_lifecycle::on_exit_sweep()`, runs from the `RunEvent::ExitRequested` callback to handle the graceful-shutdown case the same way; both wrappers live inside the `SessionLifecycle` module so the "exactly one place writes `agent_nodes.status` for suspend sweeps" invariant holds (issue #949, issue #132).
 
 ### auto_resume_nodes
 On app restart, the frontend calls `auto_resume_nodes` which iterates all `Suspended` agent nodes with a `cli_session_id` and calls `spawn_agent_inner` with `SessionIdMode::Resume`. Only Anthropic and Minimax (cwrap providers) are auto-resumed — Antigravity and OpenCode skip this path and go directly to `Idle`.

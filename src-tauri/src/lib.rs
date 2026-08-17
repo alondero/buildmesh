@@ -624,7 +624,15 @@ pub fn run() {
         .run(|_app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = &event {
                 tracing::info!("App exit requested, marking running sessions as suspended");
-                if let Err(e) = db::mark_running_nodes_suspended() {
+                // Routes through SessionLifecycle (issue #132, #949) —
+                // single owner of every `agent_nodes.status` write,
+                // including the exit-time suspend sweep. `on_exit_sweep()`
+                // wraps `db::mark_running_nodes_suspended()` exactly the
+                // same way `recover_from_crash()` does for the startup
+                // path; the wrappers are named separately so the trigger
+                // (crash vs graceful shutdown) stays distinguishable in
+                // logs and history.
+                if let Err(e) = crate::agent::session_lifecycle::on_exit_sweep() {
                     tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
                 }
                 commands::agent::kill_all_agents();
