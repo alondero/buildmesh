@@ -1448,16 +1448,19 @@ pub(crate) fn resolve_spawn_config(
     mesh_model: Option<&str>,
     mesh_effort: Option<&str>,
     app_default: Option<&crate::preferences::HarnessConfigValue>,
+    mesh_override: Option<&crate::preferences::HarnessConfigValue>,
 ) -> crate::agent::capabilities::ResolvedAgentConfig {
+    let _ = (mesh_model, mesh_effort);
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
     crate::agent::capabilities::resolve_agent_config(
         &capabilities,
         cascade_inputs_for(
             explicit_model,
             explicit_effort,
-            mesh_model,
-            mesh_effort,
+            None,
+            None,
             app_default,
+            mesh_override,
         ),
     )
 }
@@ -2133,25 +2136,30 @@ pub(crate) async fn spawn_agent_inner(
     };
     timer.checkpoint("after_provider_preflight");
     // Resolve configuration values through the per-field cascade (issue
-    // #1149 prefactor; #1150 / #1148 fills the application slot). The
-    // resolver applies the capability mask, so `build_spawn_command`
-    // receives values the harness actually accepts — unsupported values
-    // never reach the harness process regardless of which layer supplied
-    // them. The application slot reads the latest in-process preferences
-    // cache (no disk read on the spawn hot path); the validator already
-    // removed any value the harness couldn't accept at save time, so the
-    // resolver's mask here is the second-and-final gate.
+    // #1149 prefactor; #1150 fills the application slot; #1151 fills the
+    // per-Mesh override slot). The resolver applies the capability mask,
+    // so `build_spawn_command` receives values the harness actually accepts
+    // — unsupported values never reach the harness process regardless of
+    // which layer supplied them. The application slot reads the latest
+    // in-process preferences cache (no disk read on the spawn hot path);
+    // the validator already removed any value the harness couldn't accept
+    // at save time, so the resolver's mask here is the second-and-final gate.
     //
     // `node.provider` for a Proxied Provider row is the composite id
     // `"<harness>:<provider>"` (e.g. `"claude:minimax"`, `"codex:minimax"`).
-    // The application-defaults map is keyed by the harness *profile* id
-    // (the half before the first `:`), so a raw lookup would miss every
-    // Proxied spawn — failing AC #12 ("Native and Proxied Provider Spawn
-    // Options consume the same application-default layer"). Split the
-    // composite id through `parse_spawn_option_id` before the lookup so
-    // native and Proxied rows hit the same map key.
+    // The per-Mesh override map and the application-defaults map are both
+    // keyed by the harness *profile* id (the half before the first `:`),
+    // so a raw lookup would miss every Proxied spawn — failing AC #12
+    // ("Native and Proxied Provider Spawn Options consume the same
+    // application-default layer"). Split the composite id through
+    // `parse_spawn_option_id` before both lookups so native and Proxied
+    // rows hit the same map key.
     let (harness_id_for_default, _) =
         crate::agent::provider::parse_spawn_option_id(&node.provider);
+    let mesh_override = crate::db::get_mesh_harness_overrides(node.mesh_id)
+        .ok()
+        .flatten()
+        .and_then(|m| m.get(harness_id_for_default).cloned());
     let app_default = match crate::preferences::load() {
         Ok(prefs) => crate::preferences::harness_default_for(&prefs, harness_id_for_default),
         Err(e) => {
@@ -2165,9 +2173,16 @@ pub(crate) async fn spawn_agent_inner(
         provider,
         explicit_model.as_deref(),
         explicit_effort.as_deref(),
-        mesh_model,
-        mesh_effort,
+        // Legacy `meshes.model` / `meshes.effort` columns are physically
+        // present for positional row compatibility but are no longer
+        // read as active spawn configuration — the v33 one-shot
+        // migration copied any non-empty legacy values into the
+        // `claude` override entry of the new map (issue #1151 acceptance
+        // criteria 6). On a healthy v33+ DB this slot is always `None`.
+        None,
+        None,
         app_default.as_ref(),
+        mesh_override.as_ref(),
     );
     let cmd = build_spawn_command_prepared(
         &resolved,

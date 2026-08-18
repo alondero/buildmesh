@@ -41,18 +41,23 @@ import { useProviderListInvalidation } from '../../hooks/useProviderListInvalida
 import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
+import { MeshOverridesSection } from './MeshOverridesSection';
 import { SaveIndicator } from '../shared/SaveIndicator';
 import { groupByHarness } from '../../lib/groups';
 import {
   checkGhAuth,
+  clearMeshHarnessOverrides,
   detectMeshProject,
   getAppPreferences,
   getMeshProperties,
   listProviders,
+  removeMeshHarnessOverride,
   updateMeshColumn,
   updateMeshSandbox,
+  upsertMeshHarnessOverride,
   type ProviderInfo,
 } from '../../lib/tauri';
+import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import {
   PROJECT_PRESETS,
   resolvePreset,
@@ -62,15 +67,6 @@ import {
 import { LoadingState } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
 import { Field } from './Field';
-
-const EFFORT_OPTIONS = [
-  { value: '', label: 'Not set' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'XHigh' },
-  { value: 'max', label: 'Max' },
-];
 
 export function MeshPropertiesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
@@ -87,15 +83,19 @@ export function MeshPropertiesTab() {
 
   const [form, setForm] = useState({
     name: '',
-    model: '',
-    effort: '',
     buildCommand: '',
     runCommand: '',
     rootBuildCommand: '',
     rootRunCommand: '',
     defaultProvider: '',
-sandbox: false,
+    sandbox: false,
   });
+  // Per-Mesh harness overrides (issue #1151 / slice 2 of #1148). The
+  // legacy `meshes.model` / `meshes.effort` columns are no longer read as
+  // active configuration — the new sparse map is the user-facing surface.
+  const [harnessOverrides, setHarnessOverrides] = useState<
+    Record<string, HarnessConfigValue>
+  >({});
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
   // App-wide default provider id (from preferences.json). Drives the
@@ -218,15 +218,14 @@ sandbox: false,
         const resolvedName = config.name || mesh?.name || folderName;
         setForm({
           name: resolvedName,
-          model: config.model ?? '',
-          effort: config.effort ?? '',
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
           rootBuildCommand: config.root_build_command ?? '',
           rootRunCommand: config.root_run_command ?? '',
           defaultProvider: config.default_provider ?? '',
-sandbox: config.sandbox,
+          sandbox: config.sandbox,
         });
+        setHarnessOverrides(config.harness_overrides ?? {});
         setLoading(false);
       })
       .catch(() => {
@@ -333,16 +332,6 @@ sandbox: config.sandbox,
     await wrappedSave(() => updateMeshName(activeMeshId, name));
   };
 
-  const saveModel = async (value: string) => {
-    if (activeMeshId === null) return;
-    await wrappedSave(() => updateMeshColumn(activeMeshId, 'model', value || ''));
-  };
-
-  const saveEffort = async (value: string) => {
-    if (activeMeshId === null || !value) return;
-    await wrappedSave(() => updateMeshColumn(activeMeshId, 'effort', value));
-  };
-
   const saveBuildCommand = async (value: string) => {
     if (activeMeshId === null) return;
     await wrappedSave(() => updateMeshColumn(activeMeshId, 'build_command', value));
@@ -369,6 +358,102 @@ sandbox: config.sandbox,
     if (activeMeshId === null) return;
     await wrappedSave(() => updateMeshColumn(activeMeshId, 'default_provider', value));
   };
+
+  // ── Per-Mesh harness overrides (issue #1151 / slice 2 of #1148) ─────────
+  //
+  // The legacy `model` / `effort` columns remain physically present for
+  // upgrade compatibility but are no longer read as active configuration.
+  // The new sparse map is the user-facing surface — the section component
+  // owns the per-harness draft state; the parent owns the optimistic save
+  // lifecycle and the diagnostic banner. The IPC surface re-uses the
+  // shared `HarnessConfigValue` + capability-derived validation from
+  // `preferences::validate_harness_default` so unknown ids / out-of-vocab
+  // effort values are rejected at the write boundary.
+
+  const overrideUpsert = useCallback(
+    async (harnessId: string, value: HarnessConfigValue): Promise<boolean> => {
+      if (activeMeshId === null) return false;
+      // Capture the mesh id at the moment the IPC starts so a stale
+      // rejection on a slow save doesn't surface the error on a different
+      // mesh the user is now viewing (review finding #1 — same pattern
+      // as `wrappedSave`).
+      const saveMeshId = activeMeshId;
+      saveStatus.start();
+      try {
+        await upsertMeshHarnessOverride(activeMeshId, harnessId, value);
+        if (activeMeshIdRef.current !== saveMeshId) return true;
+        // Optimistic update — the IPC rejects unknown ids / out-of-vocab
+        // effort, so a successful write is the source of truth.
+        setHarnessOverrides((prev) => {
+          const isEmpty = value.model === null && value.effort === null;
+          if (isEmpty) {
+            const { [harnessId]: _removed, ...rest } = prev;
+            return rest;
+          }
+          return { ...prev, [harnessId]: value };
+        });
+        saveStatus.success();
+        return true;
+      } catch (e) {
+        if (activeMeshIdRef.current !== saveMeshId) {
+          console.error('Mesh harness override save failed after mesh switch:', e);
+          return false;
+        }
+        console.error('Mesh harness override save failed:', e);
+        saveStatus.fail(e);
+        return false;
+      }
+    },
+    [activeMeshId, saveStatus],
+  );
+
+  const overrideReset = useCallback(
+    async (harnessId: string): Promise<boolean> => {
+      if (activeMeshId === null) return false;
+      const saveMeshId = activeMeshId;
+      saveStatus.start();
+      try {
+        await removeMeshHarnessOverride(activeMeshId, harnessId);
+        if (activeMeshIdRef.current !== saveMeshId) return true;
+        setHarnessOverrides((prev) => {
+          const { [harnessId]: _removed, ...rest } = prev;
+          return rest;
+        });
+        saveStatus.success();
+        return true;
+      } catch (e) {
+        if (activeMeshIdRef.current !== saveMeshId) {
+          console.error('Mesh harness override reset failed after mesh switch:', e);
+          return false;
+        }
+        console.error('Mesh harness override reset failed:', e);
+        saveStatus.fail(e);
+        return false;
+      }
+    },
+    [activeMeshId, saveStatus],
+  );
+
+  const overrideResetAll = useCallback(async (): Promise<boolean> => {
+    if (activeMeshId === null) return false;
+    const saveMeshId = activeMeshId;
+    saveStatus.start();
+    try {
+      await clearMeshHarnessOverrides(activeMeshId);
+      if (activeMeshIdRef.current !== saveMeshId) return true;
+      setHarnessOverrides({});
+      saveStatus.success();
+      return true;
+    } catch (e) {
+      if (activeMeshIdRef.current !== saveMeshId) {
+        console.error('Mesh harness overrides reset-all failed after mesh switch:', e);
+        return false;
+      }
+      console.error('Mesh harness overrides reset-all failed:', e);
+      saveStatus.fail(e);
+      return false;
+    }
+  }, [activeMeshId, saveStatus]);
 
 // Sandbox toggle (#497 / #498). Optimistic, matching the "do not revert on
   // failure" rule of the other binary controls — reverting a checkbox the user
@@ -473,46 +558,20 @@ sandbox: config.sandbox,
             isAuthenticated={isGhAuthenticated}
           />
 
-          <Field
-            label="Model"
-            hint="Claude Code and Codex"
-            htmlFor="mesh-prop-model"
-          >
-            <input
-              id="mesh-prop-model"
-              type="text"
-              value={form.model}
-              onChange={(e) => setForm((p) => ({ ...p, model: e.target.value }))}
-              onBlur={async (e) => {
-                if (!mountedRef.current) return;
-                await saveModel(e.target.value);
-              }}
-              placeholder="e.g., opus-4, sonnet-4"
-              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
-            />
-          </Field>
-
-          <Field
-            label="Effort"
-            hint="Claude Code and Codex"
-            htmlFor="mesh-prop-effort"
-          >
-            <select
-              id="mesh-prop-effort"
-              value={form.effort}
-              onChange={async (e) => {
-                setForm((p) => ({ ...p, effort: e.target.value }));
-                await saveEffort(e.target.value);
-              }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
-            >
-              {EFFORT_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </Field>
+          {/* Per-Mesh harness overrides (issue #1151 / slice 2 of #1148).
+              Replaces the legacy Model + Effort fields with a sparse
+              override list. The cascade order at the spawn seam is now:
+              explicit > mesh_override > mesh (legacy) > application >
+              native. The legacy Mesh-wide model/effort columns remain
+              physically present for compatibility but are no longer
+              read as active configuration. */}
+          <MeshOverridesSection
+            providers={providers}
+            overrides={harnessOverrides}
+            onChange={overrideUpsert}
+            onReset={overrideReset}
+            onResetAll={overrideResetAll}
+          />
 
           <Field label="Default provider" htmlFor="mesh-prop-provider">
             <select

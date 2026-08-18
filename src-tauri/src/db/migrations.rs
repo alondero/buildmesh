@@ -76,7 +76,17 @@ use rusqlite::{Connection, Result as SqlResult, params};
 
 /// The schema version this build expects. Bumped per PR whenever a new
 /// migration entry is added to [`all_column_specs`].
-pub(crate) const SCHEMA_VERSION: u32 = 32;
+///
+/// v33 — Per-Mesh harness overrides (issue #1151 / slice 2 of #1148):
+/// adds the `meshes.harness_overrides` JSON column (sparse map keyed by
+/// stable harness id → [`crate::preferences::HarnessConfigValue`]) and
+/// the one-shot backfill that migrates non-empty legacy `meshes.model`
+/// / `meshes.effort` values into a `claude` (Claude Code) override entry.
+/// The legacy columns remain physically present for positional / upgrade
+/// compatibility but are no longer read as active configuration after
+/// the spawn resolver wires the new `mesh_override` layer (issue #1148
+/// cascade order: explicit > mesh override > application > native).
+pub(crate) const SCHEMA_VERSION: u32 = 33;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -271,6 +281,22 @@ const SPECS: &[ColumnSpec] = &[
     ColumnSpec { version: 30, table: "meshes", column: "loop_max_iterations", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
     ColumnSpec { version: 30, table: "meshes", column: "loop_interval_seconds", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
     ColumnSpec { version: 30, table: "meshes", column: "loop_consecutive_failures", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
+    // v33 — Per-Mesh harness overrides (issue #1151 / slice 2 of #1148).
+    // NON-NULL with an empty-object default so the read path never has to
+    // handle a NULL: every pre-v33 row reads back as `{}` (the migration
+    // below also runs `UPDATE ... SET harness_overrides = '{}'` defensively,
+    // but the COALESCE(.,'{}') shields the read path during the brief
+    // window between ALTER-add and backfill). The JSON shape is a sparse
+    // map keyed by stable harness id (e.g. `"claude"`, `"codex"`,
+    // `"agy"`) → `{"model": "opus-4-1", "effort": "high"}`. Mirrors the
+    // application-level `AppPreferences.harness_defaults` map (issue #1150)
+    // and reuses the same `HarnessConfigValue` wire type. A missing key
+    // means "inherit" (no override); an empty `{model: null, effort: null}`
+    // value is unreachable because the CRUD command removes the entry
+    // when the post-validation value is empty. The legacy `model` /
+    // `effort` columns remain physically present for positional row
+    // integrity but are no longer read by the spawn resolver.
+    ColumnSpec { version: 33, table: "meshes", column: "harness_overrides", type_with_default: "TEXT NOT NULL DEFAULT '{}'", read_default: ReadDefault::CoalesceText("{}") },
 
     // ============================================================
     // agent_nodes
@@ -393,7 +419,69 @@ const ONE_SHOT_BACKFILLS: &[OneShotBackfill] = &[
               WHERE COALESCE(pre_spawn_pool_size, 0) = 0 \
                 AND COALESCE(use_worktree, 1) = 1",
     },
+    // v33 — Per-Mesh harness overrides legacy migration (issue #1151 /
+    // slice 2 of #1148 / acceptance criteria 22-23). One-shot per DB:
+    // copies non-empty legacy `meshes.model` / `meshes.effort` values into
+    // a `claude` (Claude Code) entry in the new `harness_overrides` JSON
+    // map. The cascade after this migration lands is:
+    //   explicit > mesh override > application default > native
+    // so a non-empty legacy Mesh setting translates to a sparse Claude
+    // Code override today — equivalent behaviour for the only harness
+    // that supported model/effort at the v32 cut-off (Claude Code, Codex
+    // got `-c model_reasoning_effort` later).
+    //
+    // Skip rules (each pinned by acceptance criteria 22-23):
+    //   * Both legacy values empty / whitespace-only → no override created.
+    //     The user's "no preferences" mesh stays a "no exclusions" mesh.
+    //   * Existing non-empty `claude` override entry → do NOT overwrite.
+    //     A power user may have hand-edited the JSON column before the
+    //     migration ran. The `_idempotent_guard` predicate
+    //     `json_extract(harness_overrides, '$.claude') IS NULL` covers
+    //     both a missing key and an explicit `null` value.
+    //
+    // Idempotent: gated on a `mesh_harness_overrides_migrated_v33`
+    // `app_settings` flag (NOT the `schema_version` bump) so the SQL
+    // re-runs iff a prior attempt crashed before the flag was written
+    // (crash-safe per the `pool_default_backfill_v24` precedent). The
+    // flag is written in `run_one_shot` AFTER the SQL commits, so the
+    // JSON parsing failure surfaces as a real error rather than a
+    // silent skip — the JSON column is set above by the column-add
+    // pass to a non-NULL `{}`, so `json_extract` always succeeds.
+    //
+    // The legacy Mesh.settings.json mirror is intentionally NOT touched —
+    // the schema never mirrored model/effort there, so there is no
+    // filesystem side-effect to roll back.
+    OneShotBackfill {
+        version: 33,
+        flag: "mesh_harness_overrides_migrated_v33",
+        params: &[],
+        // The body is exported as `V33_BACKFILL_SQL` so the test
+        // fixtures in `db::harness_overrides_tests` can call the same
+        // SQL verbatim through a hand-rolled v32 schema — keeping the
+        // test pins tight against accidental column-reorder / predicate
+        // edits without copy-pasting the body across five tests.
+        sql: V33_BACKFILL_SQL,
+    },
 ];
+
+/// The v33 one-shot backfill SQL. Mirrored as the `OneShotBackfill`
+/// entry above so the test fixtures can drive the same statement verbatim
+/// against hand-rolled v32 schemas (issue #1151 acceptance criteria 23-25).
+pub(crate) const V33_BACKFILL_SQL: &str = "UPDATE meshes \
+         SET harness_overrides = json_patch( \
+             COALESCE(harness_overrides, '{}'), \
+             json_object( \
+                 'claude', json_object( \
+                     'model', CASE WHEN TRIM(COALESCE(model, '')) = '' \
+                                      THEN NULL ELSE TRIM(model) END, \
+                     'effort', CASE WHEN TRIM(COALESCE(effort, '')) = '' \
+                                       THEN NULL ELSE TRIM(effort) END \
+                 ) \
+             ) \
+         ) \
+         WHERE (TRIM(COALESCE(model, '')) != '' \
+                OR TRIM(COALESCE(effort, '')) != '') \
+           AND json_extract(harness_overrides, '$.claude') IS NULL";
 
 /// Always-run idempotent steps. See [`AlwaysStep`].
 const ALWAYS_STEPS: &[AlwaysStep] = &[

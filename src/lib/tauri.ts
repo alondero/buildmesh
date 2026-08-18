@@ -836,6 +836,40 @@ export const setHarnessDefault = (
 export const clearHarnessDefault = (profileId: string) =>
   _invoke('clear_harness_default', { profileId });
 
+// ── Per-Mesh harness overrides (issue #1151 / slice 2 of #1148) ─────────────
+//
+// Sparse map keyed by stable harness profile id, scoped to a single Mesh.
+// The cascade order at the spawn seam is now:
+//   explicit > mesh_override > mesh (legacy) > application > native
+// (the legacy `meshes.model` / `meshes.effort` columns remain physically
+// present for positional compatibility but are no longer read as active
+// configuration after the v33 migration). The Mesh Properties tab uses
+// these three commands for the per-harness override list — Add / Edit /
+// Reset-all affordances. The harness-id and effort-vocabulary rules are
+// shared with `setHarnessDefault` — the backend validates against the
+// harness's capability descriptor at the write boundary.
+
+/** Upsert one harness's Mesh override. An empty post-validation value
+ *  removes the sparse map entry rather than storing `{model: null,
+ *  effort: null}`. */
+export const upsertMeshHarnessOverride = (
+  meshId: number,
+  harnessId: string,
+  value: HarnessConfigValue,
+) => _invoke('upsert_mesh_harness_override', { meshId, harnessId, value });
+
+/** Remove one harness's Mesh override. Idempotent — clearing an already-
+ *  cleared harness is a no-op so the UI's "Reset" affordance never errors. */
+export const removeMeshHarnessOverride = (meshId: number, harnessId: string) =>
+  _invoke('remove_mesh_harness_override', { meshId, harnessId });
+
+/** Reset every entry in the mesh's `harness_overrides` map — the secondary
+ *  "Reset all" bulk action on the Mesh Properties tab. Idempotent on a
+ *  mesh that has no overrides. Does NOT touch the application-level
+ *  defaults map — the mesh simply inherits every application default. */
+export const clearMeshHarnessOverrides = (meshId: number) =>
+  _invoke('clear_mesh_harness_overrides', { meshId });
+
 export const setMinimaxApiKey = (key: string | null) =>
   _invoke('set_minimax_api_key', { key });
 
