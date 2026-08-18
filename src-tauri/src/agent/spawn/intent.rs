@@ -12,6 +12,17 @@ pub(crate) struct TerminalSize {
     pub(crate) cols: u16,
 }
 
+/// Default terminal dimensions (24×80) for the per-spawn UI affordance.
+/// Centralised here so the constructor at [`SpawnRequest::new`] and every
+/// call site that doesn't need caller-supplied dimensions share the same
+/// source of truth (issue #1157). Pinned by the unit test
+/// `terminal_size_default_is_24x80`.
+impl Default for TerminalSize {
+    fn default() -> Self {
+        Self { rows: 24, cols: 80 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GitHubWorkContext {
     pub(crate) owner: String,
@@ -98,6 +109,44 @@ pub(crate) struct SpawnRequest {
     pub(crate) explicit: ExplicitSpawnOverrides,
 }
 
+impl SpawnRequest {
+    /// Build a `SpawnRequest` with empty layer-1 overrides (issue #1157).
+    /// Centralises the boilerplate every transport site was duplicating
+    /// (the `TerminalSize { rows: 24, cols: 80 }` literal and the
+    /// `explicit: Default::default()` line) so future layer-1 wiring —
+    /// any transport that actually has a per-spawn override to apply —
+    /// reaches for [`Self::with_explicit`] rather than re-declaring the
+    /// struct literal. The contract — `explicit` is `Default::default()`
+    /// on construction — is regression-pinned by
+    /// `spawn_request_new_sets_explicit_default` in `spawn::tests`.
+    pub(crate) fn new(
+        node_id: i64,
+        intent: SpawnIntent,
+        terminal_size: TerminalSize,
+    ) -> Self {
+        Self {
+            node_id,
+            intent,
+            terminal_size,
+            explicit: ExplicitSpawnOverrides::default(),
+        }
+    }
+
+    /// Builder for the cascade layer-1 (explicit) override slot. The
+    /// consuming-self signature lets call sites chain
+    /// `SpawnRequest::new(...).with_explicit(...)` without an
+    /// intermediate `let mut`. No current call site uses this — every
+    /// spawn today inherits the mesh row + application default through
+    /// the cascade — but it documents the future-facing API for the
+    /// layer-1 feature and is exercised by the integration test
+    /// `spawn_request_explicit_wins_at_resolver` (issue #1155 AC #4).
+    #[allow(dead_code)] // no production call site yet — exercised by `mod tests`
+    pub(crate) fn with_explicit(mut self, explicit: ExplicitSpawnOverrides) -> Self {
+        self.explicit = explicit;
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum SpawnOutcome {
     Started(AgentNode),
@@ -145,5 +194,15 @@ mod tests {
 https://github.com/alondero/buildmesh/issues/247"
             )
         );
+    }
+
+    /// Pin the default terminal dimensions (issue #1157). The constructor
+    /// at [`SpawnRequest::new`] and every call site that doesn't need
+    /// caller-supplied dimensions rely on this being 24×80 — a future
+    /// change would silently shift every manual/auto-spawn's initial
+    /// terminal render.
+    #[test]
+    fn terminal_size_default_is_24x80() {
+        assert_eq!(TerminalSize::default(), TerminalSize { rows: 24, cols: 80 });
     }
 }

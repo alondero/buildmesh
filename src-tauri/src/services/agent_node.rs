@@ -603,16 +603,7 @@ pub async fn regenerate(
 
     spawn_with_intent(
         app,
-        SpawnRequest {
-            node_id,
-            intent,
-            terminal_size: TerminalSize { rows: 24, cols: 80 },
-            // Issue #1155 — `regenerate_agent_node` swaps the harness
-            // and inherits whatever the prior node's Mesh row stored;
-            // layer 1 stays empty so the cascade falls through to
-            // mesh → application → native.
-            explicit: Default::default(),
-        },
+        SpawnRequest::new(node_id, intent, TerminalSize::default()),
     )
     .await
     .map_err(AgentNodeError::Backend)?;

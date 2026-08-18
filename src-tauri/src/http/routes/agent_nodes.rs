@@ -137,21 +137,16 @@ pub async fn import_and_resume(
 
     if let Err(e) = crate::agent::spawn::spawn_with_intent(
         app,
-        crate::agent::spawn::SpawnRequest {
-            node_id: node.id,
-            intent: crate::agent::spawn::SpawnIntent::Resume {
+        crate::agent::spawn::SpawnRequest::new(
+            node.id,
+            crate::agent::spawn::SpawnIntent::Resume {
                 cause: crate::agent::spawn::ResumeCause::Explicit,
             },
-            terminal_size: crate::agent::spawn::TerminalSize {
+            crate::agent::spawn::TerminalSize {
                 rows: req.rows,
                 cols: req.cols,
             },
-            // Issue #1155 — the mobile `import_and_resume` route
-            // doesn't accept an explicit model/effort body field yet;
-            // layer 1 stays empty so the cascade falls through to mesh
-            // → application → native.
-            explicit: Default::default(),
-        },
+        ),
     )
     .await
     {
