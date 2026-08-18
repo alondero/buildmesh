@@ -37,6 +37,23 @@ function provider(id: string, label: string): ProviderInfo {
     provider_id: null,
     is_proxied: false,
     group_key: id,
+    // Issue #1149 / #1150 — capability descriptor is required on the
+    // wire. The theme test doesn't exercise harness defaults, so an
+    // "all false" descriptor (no configurable defaults) is enough to
+    // mount the modal without crashing the harness-defaults section.
+    capabilities: {
+      harness_id: id,
+      supports_resume: false,
+      auto_resume_on_startup: false,
+      requires_attention_hook: false,
+      produces_readable_transcript: false,
+      supports_model_override: false,
+      supports_effort_override: false,
+      supports_prefill: false,
+      is_plain_terminal: id === 'terminal',
+      effort_control: { kind: 'none' },
+      available_on: ['windows'],
+    },
   };
 }
 

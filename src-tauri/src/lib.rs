@@ -455,6 +455,11 @@ pub fn run() {
             commands::preferences::attach_proxied_provider,
             commands::preferences::update_provider_pairing,
             commands::preferences::remove_provider_pairing,
+            // Application-level Agent Harness defaults (issue #1150 / #1148):
+            // sparse map keyed by stable harness profile id, validated
+            // against the capability descriptor (issue #1148 AC #5).
+            commands::preferences::set_harness_default,
+            commands::preferences::clear_harness_default,
             // Coordinator read API (ADR-0008)
             commands::coordinator::get_coordinator_status,
             commands::coordinator::set_coordinator_api_enabled,

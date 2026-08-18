@@ -3,7 +3,8 @@
 //! See `crate::preferences` for the persistence layer.
 
 use crate::preferences::{
-    self, AppPreferences, ModelTiers, PairingVerification, ProviderAccount, ProviderPairing,
+    self, AppPreferences, HarnessConfigValue, ModelTiers, PairingVerification, ProviderAccount,
+    ProviderPairing,
 };
 use tauri::{command, AppHandle, Emitter};
 
@@ -383,4 +384,57 @@ pub async fn remove_provider_pairing(
     preferences::save(prefs)?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Application-level Agent Harness defaults (issue #1150 / #1148)
+// ---------------------------------------------------------------------------
+
+/// Upsert the **application-level default** for one Agent Harness (issue
+/// #1150 / #1148 step 2). Validates `value` against the harness's capability
+/// descriptor (issue #1148 AC #5):
+///
+/// * Unknown harness id → `Err("unknown harness id …")`.
+/// * Effort value outside the harness's `EffortControlKind::allowed` vocabulary
+///   → `Err("effort … is not allowed for harness …")`.
+/// * Harness without effort control → the effort field is dropped before
+///   storage (the capability mask applies here, not just at the resolver).
+///
+/// If `value` carries no fields after normalisation (every field blank), the
+/// sparse map entry is **removed** rather than stored as `{model: None,
+/// effort: None}` (issue #1148 AC #6: "Blank values are normalized to
+/// absent, and an empty harness configuration removes its sparse entry").
+///
+/// Writes through the existing `load → mutate → save` path so the in-process
+/// cache refreshes on a successful save — subsequent spawns see the new
+/// default without restart. Does NOT touch the DB and does NOT nest a
+/// preferences mutex inside an existing lock (issue #1148 acceptance
+/// criteria 4: "Do not introduce nested preference or database locks").
+///
+/// `profile_id` is the Spawn-Menu row id (built-ins like `"claude"`,
+/// `"codex"`, `"agy"`, plus user-defined custom profiles). The seam
+/// resolves it through [`preferences::resolve_harness_provider`] so a custom
+/// Claude-compatible profile (`"deepseek-via-claude"`) maps to the Anthropic
+/// capability descriptor.
+#[command]
+pub async fn set_harness_default(
+    profile_id: String,
+    value: HarnessConfigValue,
+) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    preferences::upsert_harness_default(&mut prefs, &profile_id, value)?;
+    preferences::save(prefs)
+}
+
+/// Remove the **application-level default** for one Agent Harness (issue
+/// #1150 / #1148 step 2). Idempotent — clearing a harness that had no
+/// stored default is a no-op (so the UI's "Reset" affordance never errors).
+/// The resolver then falls through to "no application override" for that
+/// harness (native behaviour). Writes through the same cache-refreshing
+/// path as [`set_harness_default`].
+#[command]
+pub async fn clear_harness_default(profile_id: String) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    preferences::remove_harness_default(&mut prefs, &profile_id);
+    preferences::save(prefs)
 }
