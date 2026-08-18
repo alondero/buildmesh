@@ -199,6 +199,11 @@ mod tests {
     /// selection. The `ANTHROPIC_*` injection from a custom provider account has
     /// its own focused tests (`*_injects_backend_env`). Keeps the bulk of the
     /// suite terse while still exercising the real composition function.
+    ///
+    /// Model + effort run through the per-field cascade (issue #1149): the
+    /// resolver masks unsupported values before they reach
+    /// `build_spawn_command`. Tests that want to verify the resolver
+    /// itself use [`crate::agent::capabilities`] directly.
     #[allow(clippy::too_many_arguments)]
     fn cmd_for(
         resolved: &ResolvedPath,
@@ -210,7 +215,23 @@ mod tests {
         prefill: Option<&str>,
         sandbox: bool,
     ) -> portable_pty::CommandBuilder {
-        build_spawn_command(resolved, provider, &[], mode, session_id, model, effort, prefill, sandbox)
+        let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
+        let config = crate::agent::capabilities::resolve_agent_config(
+            &capabilities,
+            crate::agent::capabilities::AgentConfigInputs {
+                model: crate::agent::capabilities::FieldInputs {
+                    explicit: model,
+                    mesh: None,
+                    application: None,
+                },
+                effort: crate::agent::capabilities::FieldInputs {
+                    explicit: effort,
+                    mesh: None,
+                    application: None,
+                },
+            },
+        );
+        build_spawn_command(resolved, provider, &[], mode, session_id, &config, prefill, sandbox)
     }
 
     /// Assigning a fresh session id appends `--session-id <uuid>` after the
@@ -301,8 +322,7 @@ mod tests {
             &backend_env,
             &SessionIdMode::Assign("mm-1".to_string()),
             SESSION_ID,
-            None,
-            None,
+            &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
         );
@@ -340,8 +360,7 @@ mod tests {
             &[],
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
         );
@@ -365,8 +384,7 @@ mod tests {
                 &routing,
                 &mode,
                 SESSION_ID,
-                None,
-                None,
+                &crate::agent::capabilities::ResolvedAgentConfig::default(),
                 None,
                 false,
             );
@@ -401,8 +419,7 @@ mod tests {
             &PreparedLaunchRouting::Native,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
         );
@@ -421,8 +438,7 @@ mod tests {
                 &codex_proxy(profile, credential),
                 &SessionIdMode::None,
                 SESSION_ID,
-                None,
-                None,
+                &crate::agent::capabilities::ResolvedAgentConfig::default(),
                 None,
                 false,
             )
@@ -468,8 +484,7 @@ mod tests {
                 &routing,
                 &mode,
                 -915_4300 - index as i64,
-                None,
-                None,
+                &crate::agent::capabilities::ResolvedAgentConfig::default(),
                 None,
                 false,
             );
@@ -663,8 +678,7 @@ mod tests {
             &backend_env,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
         );
@@ -803,6 +817,11 @@ mod tests {
             &SessionIdMode::None,
             SESSION_ID,
             Some("opus"),
+            // Agy has no effort control; the capability mask drops this
+            // value before it reaches the process. Pinning the absence of
+            // `--effort` here is the regression test for issue #1149
+            // acceptance criteria 6 ("Unsupported model or effort values
+            // never reach a harness process").
             Some("high"),
             Some("prefill text"),
             false,
@@ -817,12 +836,15 @@ mod tests {
                     "--dangerously-skip-permissions",
                     "--model",
                     "opus",
-                    "--effort",
-                    "high",
                     "--prompt-interactive",
                     "prefill text"
                 ]
             )
+        );
+        assert!(
+            !args.iter().any(|a| a == "--effort"),
+            "Agy's capability mask must drop effort values; got argv = {:?}",
+            args
         );
     }
 

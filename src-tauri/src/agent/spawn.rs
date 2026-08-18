@@ -467,6 +467,14 @@ fn normalize_prefill_newlines(text: &str) -> String {
 /// Passed in (rather than resolved here) so this
 /// function stays a pure composition of its inputs — no disk / preferences-cache
 /// access — and the env injection can be unit-tested with an explicit list.
+///
+/// `config` carries the **already-resolved, capability-masked** model and
+/// effort values (issue #1149). The caller runs
+/// [`crate::agent::capabilities::resolve_agent_config`] with the harness's
+/// capability descriptor and the per-field cascade inputs; this function
+/// forwards the resolved values verbatim and never re-consults capability
+/// flags. Empty / whitespace inputs and unsupported values are masked before
+/// they reach here.
 #[allow(clippy::too_many_arguments)]
 pub fn build_spawn_command(
     resolved: &env::ResolvedPath,
@@ -474,8 +482,7 @@ pub fn build_spawn_command(
     backend_env: &[(String, String)],
     session_id_mode: &SessionIdMode,
     session_id: i64,
-    model_override: Option<&str>,
-    effort_override: Option<&str>,
+    config: &crate::agent::capabilities::ResolvedAgentConfig,
     prefill: Option<&str>,
     sandbox: bool,
 ) -> CommandBuilder {
@@ -485,8 +492,7 @@ pub fn build_spawn_command(
         &crate::agent::launch_routing::PreparedLaunchRouting::environment(backend_env),
         session_id_mode,
         session_id,
-        model_override,
-        effort_override,
+        config,
         prefill,
         sandbox,
     )
@@ -499,8 +505,7 @@ pub fn build_spawn_command_prepared(
     routing: &crate::agent::launch_routing::PreparedLaunchRouting,
     session_id_mode: &SessionIdMode,
     session_id: i64,
-    model_override: Option<&str>,
-    effort_override: Option<&str>,
+    config: &crate::agent::capabilities::ResolvedAgentConfig,
     prefill: Option<&str>,
     sandbox: bool,
 ) -> CommandBuilder {
@@ -541,13 +546,15 @@ pub fn build_spawn_command_prepared(
         SessionIdMode::None => base_recipe(),
     };
 
-    if adapter.supports_model_override() {
-        if let Some(model) = model_override.filter(|s| !s.is_empty()) {
-            recipe.base_args.extend(adapter.model_args(model));
-        }
-        if let Some(effort) = effort_override.filter(|s| !s.is_empty()) {
-            recipe.base_args.extend(adapter.effort_args(effort));
-        }
+    // The resolver already applied the capability mask; `Some` here means
+    // the harness accepts this control AND the value is in its vocabulary
+    // (issue #1149 acceptance criteria 6, 7, 9). The mask is the single
+    // guarantee that unsupported values never reach a harness process.
+    if let Some(model) = config.model.as_deref().filter(|s| !s.is_empty()) {
+        recipe.base_args.extend(adapter.model_args(model));
+    }
+    if let Some(effort) = config.effort.as_deref().filter(|s| !s.is_empty()) {
+        recipe.base_args.extend(adapter.effort_args(effort));
     }
 
     if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
@@ -1424,8 +1431,8 @@ pub(crate) async fn spawn_agent_inner(
     // 5. Read mesh row for use_worktree / model / effort / worktree_mode
     let row = env::mesh_row(&std::path::PathBuf::from(&node.path));
     let use_worktree = row.as_ref().map(|r| r.use_worktree).unwrap_or(true);
-    let model_override = row.as_ref().and_then(|r| r.model.as_deref());
-    let effort_override = row.as_ref().and_then(|r| r.effort.as_deref());
+    let mesh_model = row.as_ref().and_then(|r| r.model.as_deref());
+    let mesh_effort = row.as_ref().and_then(|r| r.effort.as_deref());
     // OS-level sandbox toggle (macOS Seatbelt #497, Windows AppContainer #498).
     // Off by default; the per-OS spawn policy is decided in `spawn_environment::wrap`
     // and `crate::sandbox::spawn::spawn_sandboxed`.
@@ -2000,14 +2007,33 @@ pub(crate) async fn spawn_agent_inner(
         }
     };
     timer.checkpoint("after_provider_preflight");
+    // Resolve configuration values through the per-field cascade (issue #1149).
+    // Today only the Mesh slot is populated; #1148 fills the application slot.
+    // The resolver applies the capability mask, so `build_spawn_command`
+    // receives values the harness actually accepts.
+    let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
+    let resolved_config = crate::agent::capabilities::resolve_agent_config(
+        &capabilities,
+        crate::agent::capabilities::AgentConfigInputs {
+            model: crate::agent::capabilities::FieldInputs {
+                explicit: None,
+                mesh: mesh_model,
+                application: None,
+            },
+            effort: crate::agent::capabilities::FieldInputs {
+                explicit: None,
+                mesh: mesh_effort,
+                application: None,
+            },
+        },
+    );
     let cmd = build_spawn_command_prepared(
         &resolved,
         provider,
         &routing,
         &session_id_mode,
         session_id,
-        model_override,
-        effort_override,
+        &resolved_config,
         prefill.as_deref(),
         sandbox,
     );

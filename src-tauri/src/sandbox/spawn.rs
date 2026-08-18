@@ -533,8 +533,7 @@ mod tests {
             &[], // no per-profile backend env (built-in Anthropic subscription)
             &SessionIdMode::None,
             session_id,
-            None,
-            None,
+            &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             true, // sandbox
         );
@@ -892,8 +891,7 @@ mod tests {
             &[], // no per-profile backend env (built-in Anthropic subscription)
             &SessionIdMode::None,
             session_id,
-            None,
-            None,
+            &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             true, // sandbox
         );
