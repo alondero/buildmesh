@@ -59,6 +59,7 @@ pub(super) fn provider_info_for(profile: &crate::preferences::HarnessProfile, ho
         provider_id: None,
         is_proxied: false,
         group_key: profile.id.clone(),
+        capabilities: crate::agent::capabilities::capabilities_for(adapter),
     })
 }
 
@@ -106,6 +107,7 @@ pub(super) fn provider_info_for_pairing(
         provider_id: Some(pairing.provider_id.clone()),
         is_proxied: true,
         group_key: pairing.harness_id.clone(),
+        capabilities: crate::agent::capabilities::capabilities_for(adapter),
     })
 }
 
@@ -369,6 +371,19 @@ mod tests {
             provider_id: None,
             is_proxied: false,
             group_key: id.to_string(),
+            capabilities: crate::agent::capabilities::HarnessCapabilities {
+                harness_id: id.to_string(),
+                supports_resume: false,
+                auto_resume_on_startup: false,
+                requires_attention_hook: false,
+                produces_readable_transcript: false,
+                supports_model_override: false,
+                supports_effort_override: false,
+                supports_prefill: false,
+                is_plain_terminal: false,
+                effort_control: crate::agent::capabilities::EffortControlKind::None,
+                available_on: Vec::new(),
+            },
         }
     }
 
@@ -638,6 +653,19 @@ mod tests {
             provider_id: Some(provider_id.to_string()),
             is_proxied: true,
             group_key: harness_id.to_string(),
+            capabilities: crate::agent::capabilities::HarnessCapabilities {
+                harness_id: harness_id.to_string(),
+                supports_resume: false,
+                auto_resume_on_startup: false,
+                requires_attention_hook: false,
+                produces_readable_transcript: false,
+                supports_model_override: false,
+                supports_effort_override: false,
+                supports_prefill: false,
+                is_plain_terminal: false,
+                effort_control: crate::agent::capabilities::EffortControlKind::None,
+                available_on: Vec::new(),
+            },
         }
     }
 

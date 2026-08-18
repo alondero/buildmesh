@@ -248,6 +248,14 @@ pub struct ProviderInfo {
     /// `harness_id` duplicated as a grouping key so the UI can
     /// `Array.groupBy(row => row.group_key)` without a derived field.
     pub group_key: String,
+    /// Backend-derived capability contract (issue #1149). The Spawn Menu
+    /// and the configuration resolver both consult this same descriptor;
+    /// the frontend can use `capabilities.supports_model_override` /
+    /// `supports_effort_override` / `effort_control` to render only the
+    /// controls the underlying harness CLI actually accepts, instead of
+    /// offering settings it would silently drop. Generated to
+    /// `src/types/generated/ProviderInfo.ts`.
+    pub capabilities: crate::agent::capabilities::HarnessCapabilities,
 }
 
 /// Behaviour an agent provider must declare.

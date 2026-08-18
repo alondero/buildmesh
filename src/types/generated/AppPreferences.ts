@@ -43,7 +43,7 @@ provider_accounts: Array<ProviderAccount>,
 /**
  * User-chosen order of the spawn-menu harness rows, as a list of row ids
  * (issue #573 / ADR-0016). `Terminal` is excluded — it's always forced to
- * the bottom by `commands::agent::order_providers`. A row whose id isn't
+ * the bottom by `agent::provider_menu::order_providers`. A row whose id isn't
  * listed (a newly-detected harness) appends after the listed ones; an
  * uninstalled harness keeps its saved slot here until it reappears.
  */
