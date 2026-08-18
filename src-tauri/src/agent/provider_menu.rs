@@ -355,6 +355,28 @@ mod tests {
         );
     }
 
+    /// Capability-contract fixture used by both `row_native` and
+    /// `row_proxied`: every bool is `false`, every list is empty, effort
+    /// control is `None`. The Spawn-Menu ordering tests don't depend on
+    /// any capability flag, so an "all false" descriptor is the most
+    /// honest fixture (an accidental `true` would silently bias a future
+    /// test). One helper, two callers — keeps the test contract pinned.
+    fn caps_all_false(id: &str) -> crate::agent::capabilities::HarnessCapabilities {
+        crate::agent::capabilities::HarnessCapabilities {
+            harness_id: id.to_string(),
+            supports_resume: false,
+            auto_resume_on_startup: false,
+            requires_attention_hook: false,
+            produces_readable_transcript: false,
+            supports_model_override: false,
+            supports_effort_override: false,
+            supports_prefill: false,
+            is_plain_terminal: false,
+            effort_control: crate::agent::capabilities::EffortControlKind::None,
+            available_on: Vec::new(),
+        }
+    }
+
     /// Native Spawn Option fixture for `order_providers` tests (issue #583
     /// cleanup — replaces four inline `|id| ProviderInfo { ... }` closures
     /// with one helper). A native row is the clickable harness header:
@@ -371,19 +393,7 @@ mod tests {
             provider_id: None,
             is_proxied: false,
             group_key: id.to_string(),
-            capabilities: crate::agent::capabilities::HarnessCapabilities {
-                harness_id: id.to_string(),
-                supports_resume: false,
-                auto_resume_on_startup: false,
-                requires_attention_hook: false,
-                produces_readable_transcript: false,
-                supports_model_override: false,
-                supports_effort_override: false,
-                supports_prefill: false,
-                is_plain_terminal: false,
-                effort_control: crate::agent::capabilities::EffortControlKind::None,
-                available_on: Vec::new(),
-            },
+            capabilities: caps_all_false(id),
         }
     }
 
@@ -653,19 +663,7 @@ mod tests {
             provider_id: Some(provider_id.to_string()),
             is_proxied: true,
             group_key: harness_id.to_string(),
-            capabilities: crate::agent::capabilities::HarnessCapabilities {
-                harness_id: harness_id.to_string(),
-                supports_resume: false,
-                auto_resume_on_startup: false,
-                requires_attention_hook: false,
-                produces_readable_transcript: false,
-                supports_model_override: false,
-                supports_effort_override: false,
-                supports_prefill: false,
-                is_plain_terminal: false,
-                effort_control: crate::agent::capabilities::EffortControlKind::None,
-                available_on: Vec::new(),
-            },
+            capabilities: caps_all_false(harness_id),
         }
     }
 

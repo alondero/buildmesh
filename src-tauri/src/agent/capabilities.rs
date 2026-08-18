@@ -225,17 +225,17 @@ fn resolve_field(field: FieldInputs<'_>) -> Option<String> {
 /// Apply the capability mask for the effort field. Two-stage mask:
 /// 1. `EffortControlKind::None` → drop unconditionally (the harness has no
 ///    effort control; Buildmesh must not invent one).
-/// 2. `Closed` / `InlineConfig` → drop if the value isn't in `allowed`.
+/// 2. `Closed { allowed }` / `InlineConfig { allowed, .. }` → drop if the
+///    value isn't in `allowed`. The `InlineConfig.key` is UI metadata only
+///    (knob labelling on the frontend); the resolver matches the value
+///    shape, not the key, so the two arms collapse into one.
 fn resolve_effort(field: FieldInputs<'_>, control: &EffortControlKind) -> Option<String> {
-    match control {
-        EffortControlKind::None => None,
-        EffortControlKind::Closed { allowed } => {
-            resolve_field(field).filter(|v| allowed.iter().any(|a| a == v))
-        }
-        EffortControlKind::InlineConfig { allowed, .. } => {
-            resolve_field(field).filter(|v| allowed.iter().any(|a| a == v))
-        }
-    }
+    let allowed: &[String] = match control {
+        EffortControlKind::None => return None,
+        EffortControlKind::Closed { allowed } => allowed,
+        EffortControlKind::InlineConfig { allowed, .. } => allowed,
+    };
+    resolve_field(field).filter(|v| allowed.iter().any(|a| a == v))
 }
 
 /// Trim and drop empties. Pure helper so every layer flows through the same
@@ -289,11 +289,6 @@ pub fn capabilities_for(adapter: &dyn AgentProvider) -> HarnessCapabilities {
 /// `None` otherwise. Adapters with non-default effort shapes
 /// (Codex's inline config) override [`capabilities_for`] directly.
 fn effort_control_for(adapter: &dyn AgentProvider) -> EffortControlKind {
-    if !adapter.supports_model_override() {
-        // The harness never opted into a model override — its effort story
-        // follows the same answer (the existing capability matrix lumps
-        // model + effort together today, so this stays consistent).
-    }
     if adapter.id() == "anthropic" {
         return EffortControlKind::Closed {
             allowed: CLAUDE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
