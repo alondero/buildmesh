@@ -739,17 +739,13 @@ fn spawn_loop_node(
     tauri::async_runtime::spawn(async move {
         if let Err(error) = crate::agent::spawn::spawn_with_intent(
             &app_for_spawn,
-            crate::agent::spawn::SpawnRequest {
-                node_id: node.id,
-                intent: crate::agent::spawn::SpawnIntent::Loop {
+            crate::agent::spawn::SpawnRequest::new(
+                node.id,
+                crate::agent::spawn::SpawnIntent::Loop {
                     initial_prompt: prompt_for_spawn,
                 },
-                terminal_size: crate::agent::spawn::TerminalSize { rows: 24, cols: 80 },
-                // Issue #1155 — looping autopilot spawns inherit the
-                // mesh row + application default; layer 1 stays empty
-                // so the cascade falls through.
-                explicit: Default::default(),
-            },
+                crate::agent::spawn::TerminalSize::default(),
+            ),
         )
         .await
         {
@@ -985,16 +981,11 @@ fn spawn_autopilot_node(
     tauri::async_runtime::spawn(async move {
         if let Err(error) = crate::agent::spawn::spawn_with_intent(
             &app_for_spawn,
-            crate::agent::spawn::SpawnRequest {
-                node_id: node.id,
+            crate::agent::spawn::SpawnRequest::new(
+                node.id,
                 intent,
-                terminal_size: crate::agent::spawn::TerminalSize { rows: 24, cols: 80 },
-                // Issue #1155 — autopilot issue-driven spawn doesn't
-                // accept an explicit per-launch model/effort; layer 1
-                // stays empty so the cascade falls through to mesh →
-                // application → native.
-                explicit: Default::default(),
-            },
+                crate::agent::spawn::TerminalSize::default(),
+            ),
         )
         .await
         {

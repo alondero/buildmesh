@@ -102,25 +102,20 @@ pub async fn spawn_agent(
 ) -> Result<(), String> {
     crate::agent::spawn::spawn_with_intent(
         &app,
-        SpawnRequest {
-            node_id: session_id,
-            intent: if resume.is_some() {
+        SpawnRequest::new(
+            session_id,
+            if resume.is_some() {
                 SpawnIntent::Resume {
                     cause: crate::agent::spawn::ResumeCause::Explicit,
                 }
             } else {
                 SpawnIntent::Fresh
             },
-            terminal_size: TerminalSize {
+            TerminalSize {
                 rows: rows.unwrap_or(24),
                 cols: cols.unwrap_or(80),
             },
-            // Issue #1155 — cascade layer 1 (explicit Agent Node spawn
-            // argument). Today's `spawn_agent` IPC does not accept an
-            // explicit model/effort override; the slot stays empty so
-            // the cascade falls through to mesh → application → native.
-            explicit: Default::default(),
-        },
+        ),
     )
     .await
     .map(|_| ())
@@ -166,15 +161,7 @@ async fn spawn_new_agent_impl(
 
     let outcome = spawn_with_intent(
         app,
-        SpawnRequest {
-            node_id: node.id,
-            intent,
-            terminal_size: TerminalSize { rows: 24, cols: 80 },
-            // Issue #1155 — `spawn_new_agent_impl` doesn't accept
-            // explicit model/effort overrides; layer 1 stays empty so
-            // the cascade falls through to mesh → application → native.
-            explicit: Default::default(),
-        },
+        SpawnRequest::new(node.id, intent, TerminalSize::default()),
     )
     .await?;
 
@@ -345,15 +332,7 @@ pub fn create_issue_node(
     tauri::async_runtime::spawn(async move {
         if let Err(error) = spawn_with_intent(
             &app_for_spawn,
-            SpawnRequest {
-                node_id,
-                intent,
-                terminal_size: TerminalSize { rows: 24, cols: 80 },
-                // Issue #1155 — `create_issue_node` doesn't accept
-                // explicit overrides; layer 1 stays empty so the cascade
-                // falls through to mesh → application → native.
-                explicit: Default::default(),
-            },
+            SpawnRequest::new(node_id, intent, TerminalSize::default()),
         )
         .await
         {
@@ -584,15 +563,11 @@ pub fn create_pr_node(
     tauri::async_runtime::spawn(async move {
         if let Err(error) = spawn_with_intent(
             &app_for_spawn,
-            SpawnRequest {
+            SpawnRequest::new(
                 node_id,
-                intent: SpawnIntent::PullRequest(intent_context),
-                terminal_size: TerminalSize { rows: 24, cols: 80 },
-                // Issue #1155 — `create_pr_node` doesn't accept
-                // explicit overrides; layer 1 stays empty so the cascade
-                // falls through to mesh → application → native.
-                explicit: Default::default(),
-            },
+                SpawnIntent::PullRequest(intent_context),
+                TerminalSize::default(),
+            ),
         )
         .await
         {
@@ -738,18 +713,13 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     for node in &nodes {
         match spawn_with_intent(
             &app,
-            SpawnRequest {
-                node_id: node.id,
-                intent: SpawnIntent::Resume {
+            SpawnRequest::new(
+                node.id,
+                SpawnIntent::Resume {
                     cause: crate::agent::spawn::ResumeCause::Startup,
                 },
-                terminal_size: TerminalSize { rows: 24, cols: 80 },
-                // Issue #1155 — auto-resume is a node-restoration path;
-                // no caller-supplied explicit override, layer 1 stays
-                // empty so the cascade falls through to mesh →
-                // application → native.
-                explicit: Default::default(),
-            },
+                TerminalSize::default(),
+            ),
         )
         .await
         {
