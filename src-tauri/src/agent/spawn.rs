@@ -1399,6 +1399,7 @@ pub(crate) fn cascade_inputs_for<'a>(
     mesh_model: Option<&'a str>,
     mesh_effort: Option<&'a str>,
     app_default: Option<&'a crate::preferences::HarnessConfigValue>,
+    mesh_override: Option<&'a crate::preferences::HarnessConfigValue>,
 ) -> crate::agent::capabilities::AgentConfigInputs<'a> {
     /// Trim; collapse empty / whitespace-only to `None`. Mirrors
     /// `capabilities::normalize_non_empty` at the spawn seam (issue
@@ -1415,11 +1416,13 @@ pub(crate) fn cascade_inputs_for<'a>(
     crate::agent::capabilities::AgentConfigInputs {
         model: crate::agent::capabilities::FieldInputs {
             explicit: explicit_model.and_then(non_empty_trim),
+            mesh_override: mesh_override.and_then(|v| v.model.as_deref()),
             mesh: mesh_model,
             application: app_default.and_then(|v| v.model.as_deref()),
         },
         effort: crate::agent::capabilities::FieldInputs {
             explicit: explicit_effort.and_then(non_empty_trim),
+            mesh_override: mesh_override.and_then(|v| v.effort.as_deref()),
             mesh: mesh_effort,
             application: app_default.and_then(|v| v.effort.as_deref()),
         },
@@ -2614,6 +2617,7 @@ mod tests {
             Some("haiku-4"),
             Some("low"),
             Some(&app_default),
+            None,
         );
         assert_eq!(
             inputs.model,
@@ -2654,6 +2658,7 @@ mod tests {
             Some("haiku-4"),
             Some("low"),
             Some(&app_default),
+            None,
         );
         assert_eq!(
             inputs.model.explicit, None,
@@ -2682,6 +2687,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(inputs.model.explicit, Some("opus"));
         assert_eq!(inputs.effort.explicit, Some("high"));
@@ -2699,13 +2705,13 @@ mod tests {
         };
 
         // Explicit model only — effort falls through to the app default.
-        let model_only = cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default));
+        let model_only = cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default), None);
         assert_eq!(model_only.model.explicit, Some("sonnet-4"));
         assert_eq!(model_only.effort.explicit, None);
         assert_eq!(model_only.effort.application, Some("high"));
 
         // Explicit effort only — model falls through to the app default.
-        let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default));
+        let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default), None);
         assert_eq!(effort_only.model.explicit, None);
         assert_eq!(effort_only.model.application, Some("opus-4-1"));
         assert_eq!(effort_only.effort.explicit, Some("low"));
@@ -2730,6 +2736,7 @@ mod tests {
             Some("haiku-4"),
             Some("medium"),
             Some(&app_default),
+            None,
         );
         let resolved = resolve_agent_config(&anthropic_caps(), inputs);
         assert_eq!(
@@ -2765,6 +2772,7 @@ mod tests {
             Some("haiku-4"),
             Some("medium"),
             Some(&app_default),
+            None,
         );
         let resolved = resolve_agent_config(&anthropic_caps(), inputs);
         // Explicit collapsed → mesh wins over application.
@@ -2787,6 +2795,7 @@ mod tests {
             Some("medium"),
             Some("haiku-4"),
             Some("low"),
+            None,
             None,
         );
         let resolved = resolve_agent_config(&anthropic_caps(), inputs);
@@ -2839,6 +2848,7 @@ mod tests {
             None,
             Some(&mesh_override),
         );
+
         let resolved = resolve_agent_config(
             &crate::agent::capabilities::capabilities_for(
                 &crate::agent::provider::adapters::OPENCODE,
@@ -2852,7 +2862,6 @@ mod tests {
         assert_eq!(resolved.effort, None);
     }
 
->>>>>>> 8bf2f81 (Remove unused mesh_model/mesh_effort locals post AC #6)
     /// `SpawnOptions` must carry the explicit slots through to
     /// `spawn_agent_inner` (issue #1155 AC #1). The orchestrator
     /// destructures them out of `opts`; this test pins the struct
