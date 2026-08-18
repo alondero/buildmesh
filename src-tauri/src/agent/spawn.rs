@@ -23,7 +23,8 @@ use crate::models::{AgentNode, EnvType, Provider};
 
 mod intent;
 pub(crate) use intent::{
-    GitHubWorkContext, ResumeCause, SpawnIntent, SpawnOutcome, SpawnRequest, TerminalSize,
+    ExplicitSpawnOverrides, GitHubWorkContext, ResumeCause, SpawnIntent, SpawnOutcome,
+    SpawnRequest, TerminalSize,
 };
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
@@ -392,6 +393,16 @@ pub struct SpawnOptions {
     pub prefill: Option<String>,
     /// Pre-fetched node to avoid a redundant DB read when the caller already has it.
     pub node: Option<AgentNode>,
+    /// Cascade layer-1 model override (issue #1155). Highest precedence
+    /// in the spawn-config cascade — wins over the Mesh row and the
+    /// application default. `None` or whitespace-only collapses to
+    /// absent at [`cascade_inputs_for`] so the cascade falls through.
+    pub explicit_model: Option<String>,
+    /// Cascade layer-1 effort / reasoning override (issue #1155). Same
+    /// semantics as [`Self::explicit_model`] — independent field, only
+    /// matters when the harness's capability descriptor declares effort
+    /// support (otherwise the resolver mask drops it).
+    pub explicit_effort: Option<String>,
 }
 
 /// Open a PTY pair using the native PTY system.
@@ -1224,7 +1235,13 @@ pub(crate) async fn spawn_with_intent(
         node_id,
         intent,
         terminal_size,
+        explicit,
     } = request;
+    // Bind the type name so the `ExplicitSpawnOverrides` re-export stays
+    // live at the module scope (the destructure pattern alone doesn't
+    // count as a use). The value flows through to `SpawnOptions` below;
+    // the annotation is the only thing this line adds.
+    let explicit: ExplicitSpawnOverrides = explicit;
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     let provider = crate::preferences::resolve_harness_provider(&node.provider);
     let adapter = provider.adapter();
@@ -1315,6 +1332,13 @@ pub(crate) async fn spawn_with_intent(
             cols: terminal_size.cols,
             prefill,
             node: Some(node.clone()),
+            // Cascade layer-1 overrides flow through verbatim. Empty /
+            // whitespace-only values are normalised at `cascade_inputs_for`
+            // inside `spawn_agent_inner` so the cascade falls through to
+            // the next layer rather than forwarding a synthetic blank
+            // arg to the harness (issue #1148 AC #32 + #1155 AC #3).
+            explicit_model: explicit.model,
+            explicit_effort: explicit.effort,
         },
     )
     .await;
@@ -1347,6 +1371,61 @@ pub(crate) async fn spawn_with_intent(
     }
 }
 
+/// Build the per-field cascade inputs the spawn pipeline hands to
+/// [`crate::agent::capabilities::resolve_agent_config`] (issue #1155).
+///
+/// Pure helper so the wiring is testable independent of the resolver —
+/// the resolver already has unit tests for its cascade order
+/// (`resolver_cascade_prefers_explicit_over_mesh_over_application`), but
+/// that test never proves the spawn pipeline *populates* the explicit
+/// slot from `SpawnOptions`. This helper is the seam every future spawn
+/// site writes to if it wants layer-1 precedence, and the unit tests in
+/// `mod tests` below pin both the field-by-field wiring AND the cascade
+/// precedence when fed through the resolver.
+///
+/// Whitespace-only / empty strings on the explicit slot collapse to
+/// `None` here (closer to the transport — mobile HTTP / autopilot / UI
+/// — than the resolver) so the cascade falls through to the next layer
+/// regardless of whether the caller or the resolver did the trimming.
+/// Mirrors `resolve_field`'s `normalize_non_empty` (issue #1148 AC #32,
+/// #1155 AC #3).
+///
+/// `mesh_*` and the `application` slot borrow from the mesh row /
+/// preferences cache and pass straight through; the resolver normalises
+/// those layers at its seam.
+pub(crate) fn cascade_inputs_for<'a>(
+    explicit_model: Option<&'a str>,
+    explicit_effort: Option<&'a str>,
+    mesh_model: Option<&'a str>,
+    mesh_effort: Option<&'a str>,
+    app_default: Option<&'a crate::preferences::HarnessConfigValue>,
+) -> crate::agent::capabilities::AgentConfigInputs<'a> {
+    /// Trim; collapse empty / whitespace-only to `None`. Mirrors
+    /// `capabilities::normalize_non_empty` at the spawn seam (issue
+    /// #1148 AC #32 + #1155 AC #3). Inline closure hoisted here so the
+    /// model + effort legs share the same shape.
+    fn non_empty_trim(s: &str) -> Option<&str> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+    crate::agent::capabilities::AgentConfigInputs {
+        model: crate::agent::capabilities::FieldInputs {
+            explicit: explicit_model.and_then(non_empty_trim),
+            mesh: mesh_model,
+            application: app_default.and_then(|v| v.model.as_deref()),
+        },
+        effort: crate::agent::capabilities::FieldInputs {
+            explicit: explicit_effort.and_then(non_empty_trim),
+            mesh: mesh_effort,
+            application: app_default.and_then(|v| v.effort.as_deref()),
+        },
+    }
+}
+
 /// Transitional implementation retained while transport callers migrate to
 /// [`spawn_with_intent`]. It is private to the agent module once migration is
 /// complete.
@@ -1354,7 +1433,17 @@ pub(crate) async fn spawn_agent_inner(
     app: &tauri::AppHandle,
     opts: SpawnOptions,
 ) -> Result<(), String> {
-    let SpawnOptions { session_id, provider, resume, rows, cols, prefill, node: preloaded_node } = opts;
+    let SpawnOptions {
+        session_id,
+        provider,
+        resume,
+        rows,
+        cols,
+        prefill,
+        node: preloaded_node,
+        explicit_model,
+        explicit_effort,
+    } = opts;
 
     tracing::info!(
         "spawn_agent_inner: session_id={}, provider={:?}, resume={:?}, size={}x{}",
@@ -2039,18 +2128,13 @@ pub(crate) async fn spawn_agent_inner(
     };
     let resolved_config = crate::agent::capabilities::resolve_agent_config(
         &capabilities,
-        crate::agent::capabilities::AgentConfigInputs {
-            model: crate::agent::capabilities::FieldInputs {
-                explicit: None,
-                mesh: mesh_model,
-                application: app_default.as_ref().and_then(|v| v.model.as_deref()),
-            },
-            effort: crate::agent::capabilities::FieldInputs {
-                explicit: None,
-                mesh: mesh_effort,
-                application: app_default.as_ref().and_then(|v| v.effort.as_deref()),
-            },
-        },
+        cascade_inputs_for(
+            explicit_model.as_deref(),
+            explicit_effort.as_deref(),
+            mesh_model,
+            mesh_effort,
+            app_default.as_ref(),
+        ),
     );
     let cmd = build_spawn_command_prepared(
         &resolved,
@@ -2434,6 +2518,273 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    // -----------------------------------------------------------------------
+    // Cascade layer-1 wiring at the spawn seam (issue #1155).
+    //
+    // The `resolve_agent_config` resolver already had unit tests for its
+    // cascade order, but those tests never proved the spawn pipeline
+    // *populated* the explicit slot from `SpawnOptions`. Before #1155 the
+    // `explicit:` field on `FieldInputs` was hard-coded `None`, so layer
+    // 1 of the documented cascade (issue #1148: explicit > mesh >
+    // application > native) was unreachable. `cascade_inputs_for` is the
+    // spawn-side seam; these tests pin both the wiring AND the cascade
+    // precedence when the helper's output is fed through the resolver.
+    // -----------------------------------------------------------------------
+
+    use crate::agent::capabilities::{
+        FieldInputs, HarnessCapabilities, resolve_agent_config,
+    };
+    use crate::preferences::HarnessConfigValue;
+
+    /// Helper that returns the Anthropic capabilities descriptor for the
+    /// integration tests below. Pulled out so each test reads as the
+    /// cascade it pins without dragging harness-table setup inline.
+    fn anthropic_caps() -> HarnessCapabilities {
+        crate::agent::capabilities::capabilities_for(
+            &crate::agent::provider::adapters::ANTHROPIC,
+        )
+    }
+
+    /// Regression pin for issue #1155 acceptance criterion 4 — the spawn
+    /// pipeline must populate the `explicit` slot from the values the
+    /// caller passed in. Without this wiring the helper would feed `None`
+    /// for the explicit slot and the top layer of the cascade would never
+    /// fire. The test fails compilation if any future refactor drops the
+    /// `explicit_*` parameters from `cascade_inputs_for`.
+    #[test]
+    fn cascade_inputs_for_populates_explicit_slot_for_both_fields() {
+        let app_default = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("high".into()),
+        };
+        let inputs = cascade_inputs_for(
+            Some("sonnet-4"),
+            Some("medium"),
+            Some("haiku-4"),
+            Some("low"),
+            Some(&app_default),
+        );
+        assert_eq!(
+            inputs.model,
+            FieldInputs {
+                explicit: Some("sonnet-4"),
+                mesh: Some("haiku-4"),
+                application: Some("opus-4-1"),
+            },
+            "explicit must win over mesh which wins over application",
+        );
+        assert_eq!(
+            inputs.effort,
+            FieldInputs {
+                explicit: Some("medium"),
+                mesh: Some("low"),
+                application: Some("high"),
+            },
+            "explicit effort must win over mesh effort which wins over application effort",
+        );
+    }
+
+    /// Whitespace-only / empty strings on the explicit slot must collapse
+    /// to `None` so the cascade falls through (issue #1148 AC #32,
+    /// #1155 AC #3). Mirrors the resolver's `normalize_non_empty` so the
+    /// cascade behaves identically regardless of which layer trimmed the
+    /// blank.
+    #[test]
+    fn cascade_inputs_for_collapses_whitespace_explicit_to_none() {
+        let app_default = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("high".into()),
+        };
+        let inputs = cascade_inputs_for(
+            Some("   "),
+            Some("\t\n  "),
+            Some("haiku-4"),
+            Some("low"),
+            Some(&app_default),
+        );
+        assert_eq!(
+            inputs.model.explicit, None,
+            "whitespace-only explicit model must collapse so mesh/application win"
+        );
+        assert_eq!(
+            inputs.effort.explicit, None,
+            "whitespace-only explicit effort must collapse so mesh/application win"
+        );
+        // Mesh + application survive the collapse — they're the layers
+        // that win when explicit is blank.
+        assert_eq!(inputs.model.mesh, Some("haiku-4"));
+        assert_eq!(inputs.effort.application, Some("high"));
+    }
+
+    /// Trimming: a layer value with surrounding whitespace keeps its
+    /// trimmed content (the harness shouldn't receive ` opus `, but
+    /// `opus`). Mirrors `resolver_trims_layer_values` at the spawn seam
+    /// so an explicit value like `" opus "` lands at the resolver as
+    /// `"opus"` regardless of which side trimmed it.
+    #[test]
+    fn cascade_inputs_for_trims_explicit_values() {
+        let inputs = cascade_inputs_for(
+            Some("  opus  "),
+            Some(" high\t"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(inputs.model.explicit, Some("opus"));
+        assert_eq!(inputs.effort.explicit, Some("high"));
+    }
+
+    /// Independence: model and effort can be set independently. A spawn
+    /// site that only wants to override model must NOT accidentally
+    /// clobber effort. Pin for issue #1155 AC #1 — "explicit model
+    /// and/or effort argument".
+    #[test]
+    fn cascade_inputs_for_independent_fields() {
+        let app_default = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("high".into()),
+        };
+
+        // Explicit model only — effort falls through to the app default.
+        let model_only = cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default));
+        assert_eq!(model_only.model.explicit, Some("sonnet-4"));
+        assert_eq!(model_only.effort.explicit, None);
+        assert_eq!(model_only.effort.application, Some("high"));
+
+        // Explicit effort only — model falls through to the app default.
+        let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default));
+        assert_eq!(effort_only.model.explicit, None);
+        assert_eq!(effort_only.model.application, Some("opus-4-1"));
+        assert_eq!(effort_only.effort.explicit, Some("low"));
+    }
+
+    /// Integration pin: feed the helper's output through the resolver
+    /// and verify the explicit value wins over the mesh + application
+    /// layers. This is the "real spawn site" regression test for issue
+    /// #1155 AC #4 — every layer is populated, so any layer's value
+    /// reaching the resolver instead of the explicit one flips the
+    /// assertion. The harness is Anthropic (model + effort both
+    /// supported) so the capability mask passes everything through.
+    #[test]
+    fn cascade_inputs_for_layer1_wins_over_mesh_and_application_at_resolver() {
+        let app_default = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("high".into()),
+        };
+        let inputs = cascade_inputs_for(
+            Some("sonnet-4"),
+            Some("low"),
+            Some("haiku-4"),
+            Some("medium"),
+            Some(&app_default),
+        );
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert_eq!(
+            resolved.model.as_deref(),
+            Some("sonnet-4"),
+            "layer-1 explicit must win over mesh and application"
+        );
+        assert_eq!(
+            resolved.effort.as_deref(),
+            Some("low"),
+            "layer-1 explicit must win over mesh and application"
+        );
+    }
+
+    /// Integration pin for the fall-through path: when explicit is empty
+    /// (whitespace) at the spawn seam, the resolver sees `None` for that
+    /// slot and the mesh layer drives the resolved value (cascade order:
+    /// explicit > mesh > application). Combined with
+    /// `cascade_inputs_for_collapses_whitespace_explicit_to_none`, this is
+    /// the end-to-end "no silent blank arg to the harness" regression
+    /// pin — the explicit slot's whitespace doesn't reach the resolver,
+    /// and the mesh slot wins over the application slot per the
+    /// documented cascade.
+    #[test]
+    fn cascade_inputs_for_empty_explicit_falls_through_at_resolver() {
+        let app_default = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("high".into()),
+        };
+        let inputs = cascade_inputs_for(
+            Some("   "),
+            Some(""),
+            Some("haiku-4"),
+            Some("medium"),
+            Some(&app_default),
+        );
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        // Explicit collapsed → mesh wins over application.
+        assert_eq!(resolved.model.as_deref(), Some("haiku-4"));
+        assert_eq!(resolved.effort.as_deref(), Some("medium"));
+    }
+
+    /// Regression pin for issue #1155 AC #2: the explicit layer must
+    /// drive the resolved value even when the mesh slot ALSO has a
+    /// value — proving the helper routes the explicit value to the
+    /// resolver's `explicit` slot (not, say, the `mesh` slot). A
+    /// future refactor that re-orders the helper's parameters or
+    /// mistakenly maps the explicit arg to the mesh slot would flip
+    /// this assertion (model would resolve to "haiku-4" — the mesh
+    /// value — instead of "sonnet-4").
+    #[test]
+    fn cascade_inputs_for_explicit_wins_over_mesh_when_application_empty() {
+        let inputs = cascade_inputs_for(
+            Some("sonnet-4"),
+            Some("medium"),
+            Some("haiku-4"),
+            Some("low"),
+            None,
+        );
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
+        assert_eq!(resolved.effort.as_deref(), Some("medium"));
+    }
+
+    /// `SpawnOptions` must carry the explicit slots through to
+    /// `spawn_agent_inner` (issue #1155 AC #1). The orchestrator
+    /// destructures them out of `opts`; this test pins the struct
+    /// shape so a refactor that drops either field fails compilation.
+    #[test]
+    fn spawn_options_carries_explicit_slots() {
+        let opts = SpawnOptions {
+            session_id: -1,
+            provider: Provider::Anthropic,
+            resume: None,
+            rows: 24,
+            cols: 80,
+            prefill: None,
+            node: None,
+            explicit_model: Some("sonnet-4".into()),
+            explicit_effort: Some("low".into()),
+        };
+        assert_eq!(opts.explicit_model.as_deref(), Some("sonnet-4"));
+        assert_eq!(opts.explicit_effort.as_deref(), Some("low"));
+    }
+
+    /// `SpawnRequest` must carry an `explicit` field (issue #1155 AC #1).
+    /// The struct shape pin protects `spawn_with_intent` from a future
+    /// refactor that drops the field — the orchestrator destructures
+    /// `explicit` out of the request and feeds it into `SpawnOptions`.
+    #[test]
+    fn spawn_request_carries_explicit_overrides() {
+        let req = SpawnRequest {
+            node_id: -1,
+            intent: SpawnIntent::Fresh,
+            terminal_size: TerminalSize { rows: 24, cols: 80 },
+            explicit: ExplicitSpawnOverrides {
+                model: Some("opus-4-1".into()),
+                effort: Some("high".into()),
+            },
+        };
+        assert_eq!(req.explicit.model.as_deref(), Some("opus-4-1"));
+        assert_eq!(req.explicit.effort.as_deref(), Some("high"));
+
+        // `Default` lets spawn sites opt out via `..Default::default()`.
+        assert_eq!(ExplicitSpawnOverrides::default().model, None);
+        assert_eq!(ExplicitSpawnOverrides::default().effort, None);
     }
 
     // -----------------------------------------------------------------------

@@ -607,6 +607,11 @@ pub async fn regenerate(
             node_id,
             intent,
             terminal_size: TerminalSize { rows: 24, cols: 80 },
+            // Issue #1155 — `regenerate_agent_node` swaps the harness
+            // and inherits whatever the prior node's Mesh row stored;
+            // layer 1 stays empty so the cascade falls through to
+            // mesh → application → native.
+            explicit: Default::default(),
         },
     )
     .await
