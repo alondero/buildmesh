@@ -2976,6 +2976,7 @@ mod tests {
             Some("haiku-4"),
             Some("low"),
             Some(&app_default),
+            None,
         );
         assert_eq!(
             resolved.model.as_deref(),
@@ -3008,6 +3009,10 @@ mod tests {
             model: Some("   ".into()),
             effort: Some("\t\n".into()),
         });
+        let mesh_override = HarnessConfigValue {
+            model: Some("haiku-4".into()),
+            effort: Some("medium".into()),
+        };
         let app_default = HarnessConfigValue {
             model: Some("opus-4-1".into()),
             effort: Some("high".into()),
@@ -3016,11 +3021,15 @@ mod tests {
             Provider::Anthropic,
             req.explicit.model.as_deref(),
             req.explicit.effort.as_deref(),
-            Some("haiku-4"),
-            Some("medium"),
+            // Legacy mesh columns are no longer read as active config
+            // (issue #1151 AC #6) — the v33 migration copied any
+            // non-empty legacy values into the mesh override map.
+            None,
+            None,
             Some(&app_default),
+            Some(&mesh_override),
         );
-        // Explicit collapsed → mesh wins over application.
+        // Explicit collapsed → mesh_override wins over application.
         assert_eq!(resolved.model.as_deref(), Some("haiku-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
