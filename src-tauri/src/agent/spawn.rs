@@ -1556,11 +1556,12 @@ pub(crate) async fn spawn_agent_inner(
         SessionIdMode::None
     };
 
-    // 5. Read mesh row for use_worktree / model / effort / worktree_mode
+    // 5. Read mesh row for use_worktree / worktree_mode (legacy
+    // model/effort columns are no longer read as active spawn
+    // configuration — the v33 migration copied any non-empty legacy
+    // values into the new map; see issue #1151 acceptance criteria 6).
     let row = env::mesh_row(&std::path::PathBuf::from(&node.path));
     let use_worktree = row.as_ref().map(|r| r.use_worktree).unwrap_or(true);
-    let mesh_model = row.as_ref().and_then(|r| r.model.as_deref());
-    let mesh_effort = row.as_ref().and_then(|r| r.effort.as_deref());
     // OS-level sandbox toggle (macOS Seatbelt #497, Windows AppContainer #498).
     // Off by default; the per-OS spawn policy is decided in `spawn_environment::wrap`
     // and `crate::sandbox::spawn::spawn_sandboxed`.
@@ -2618,6 +2619,7 @@ mod tests {
             inputs.model,
             FieldInputs {
                 explicit: Some("sonnet-4"),
+                mesh_override: None,
                 mesh: Some("haiku-4"),
                 application: Some("opus-4-1"),
             },
@@ -2627,6 +2629,7 @@ mod tests {
             inputs.effort,
             FieldInputs {
                 explicit: Some("medium"),
+                mesh_override: None,
                 mesh: Some("low"),
                 application: Some("high"),
             },
@@ -2791,6 +2794,65 @@ mod tests {
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
 
+    /// Per-Mesh harness override wiring at the spawn seam (issue #1151).
+    /// The `mesh_override` slot sits between explicit and the legacy mesh
+    /// layer (cascade: explicit > mesh_override > mesh > application > native).
+    /// A populated mesh override wins over the application default and
+    /// falls below explicit.
+    #[test]
+    fn cascade_inputs_for_mesh_override_wins_over_application() {
+        let app_default = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("high".into()),
+        };
+        let mesh_override = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("medium".into()),
+        };
+        let inputs = cascade_inputs_for(
+            None,
+            None,
+            None,
+            None,
+            Some(&app_default),
+            Some(&mesh_override),
+        );
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
+        assert_eq!(resolved.effort.as_deref(), Some("medium"));
+    }
+
+    /// Mesh override is masked by the harness's capability contract:
+    /// values outside the allowed vocabulary are dropped before reaching
+    /// the resolver's resolution (issue #1151 / #1148 AC #21).
+    #[test]
+    fn cascade_inputs_for_mesh_override_masked_for_opencode() {
+        let mesh_override = HarnessConfigValue {
+            model: Some("some-model".into()),
+            effort: Some("high".into()),
+        };
+        let inputs = cascade_inputs_for(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&mesh_override),
+        );
+        let resolved = resolve_agent_config(
+            &crate::agent::capabilities::capabilities_for(
+                &crate::agent::provider::adapters::OPENCODE,
+            ),
+            inputs,
+        );
+        // OpenCode's capability mask drops both model and effort since
+        // it advertises `supports_model_override = false` and
+        // `EffortControlKind::None`.
+        assert_eq!(resolved.model, None);
+        assert_eq!(resolved.effort, None);
+    }
+
+>>>>>>> 8bf2f81 (Remove unused mesh_model/mesh_effort locals post AC #6)
     /// `SpawnOptions` must carry the explicit slots through to
     /// `spawn_agent_inner` (issue #1155 AC #1). The orchestrator
     /// destructures them out of `opts`; this test pins the struct
