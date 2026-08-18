@@ -115,6 +115,11 @@ pub async fn spawn_agent(
                 rows: rows.unwrap_or(24),
                 cols: cols.unwrap_or(80),
             },
+            // Issue #1155 — cascade layer 1 (explicit Agent Node spawn
+            // argument). Today's `spawn_agent` IPC does not accept an
+            // explicit model/effort override; the slot stays empty so
+            // the cascade falls through to mesh → application → native.
+            explicit: Default::default(),
         },
     )
     .await
@@ -165,6 +170,10 @@ async fn spawn_new_agent_impl(
             node_id: node.id,
             intent,
             terminal_size: TerminalSize { rows: 24, cols: 80 },
+            // Issue #1155 — `spawn_new_agent_impl` doesn't accept
+            // explicit model/effort overrides; layer 1 stays empty so
+            // the cascade falls through to mesh → application → native.
+            explicit: Default::default(),
         },
     )
     .await?;
@@ -340,6 +349,10 @@ pub fn create_issue_node(
                 node_id,
                 intent,
                 terminal_size: TerminalSize { rows: 24, cols: 80 },
+                // Issue #1155 — `create_issue_node` doesn't accept
+                // explicit overrides; layer 1 stays empty so the cascade
+                // falls through to mesh → application → native.
+                explicit: Default::default(),
             },
         )
         .await
@@ -575,6 +588,10 @@ pub fn create_pr_node(
                 node_id,
                 intent: SpawnIntent::PullRequest(intent_context),
                 terminal_size: TerminalSize { rows: 24, cols: 80 },
+                // Issue #1155 — `create_pr_node` doesn't accept
+                // explicit overrides; layer 1 stays empty so the cascade
+                // falls through to mesh → application → native.
+                explicit: Default::default(),
             },
         )
         .await
@@ -727,6 +744,11 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
                     cause: crate::agent::spawn::ResumeCause::Startup,
                 },
                 terminal_size: TerminalSize { rows: 24, cols: 80 },
+                // Issue #1155 — auto-resume is a node-restoration path;
+                // no caller-supplied explicit override, layer 1 stays
+                // empty so the cascade falls through to mesh →
+                // application → native.
+                explicit: Default::default(),
             },
         )
         .await

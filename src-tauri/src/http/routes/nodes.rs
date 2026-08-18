@@ -91,6 +91,11 @@ pub async fn create(
                 rows: req.rows,
                 cols: req.cols,
             },
+            // Issue #1155 — the mobile `POST /api/nodes/create` route
+            // doesn't accept an explicit model/effort body field yet;
+            // layer 1 stays empty so the cascade falls through to mesh
+            // → application → native.
+            explicit: Default::default(),
         },
     )
     .await

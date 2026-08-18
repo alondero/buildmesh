@@ -60,11 +60,42 @@ impl SpawnIntent {
     }
 }
 
+/// Cascade layer-1 overrides supplied by the caller of a single spawn
+/// (issue #1155). Highest precedence in the spawn-config cascade:
+///
+/// 1. **Explicit Agent Node spawn argument** — values the caller passed for
+///    this one spawn (e.g. an autopilot-side override, a future
+///    `--model <x> --effort <y>` CLI flag, a mobile HTTP request body).
+/// 2. Mesh row value (`meshes.model` / `meshes.effort`).
+/// 3. Application-level default (`preferences::harness_defaults`).
+/// 4. Harness native fallback.
+///
+/// Both fields are optional and independent — a caller can pin only the
+/// model, only the effort, both, or neither. Empty / whitespace-only
+/// strings are collapsed to `None` at the helper that builds the resolver
+/// inputs (`spawn::cascade_inputs_for`) so the cascade falls through to
+/// the next layer, matching every other layer's normalisation rule
+/// (issue #1148 AC #32).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ExplicitSpawnOverrides {
+    /// Optional model id this one spawn should use, overriding the mesh
+    /// row and the application default. `None` or whitespace-only
+    /// collapses to absent.
+    pub(crate) model: Option<String>,
+    /// Optional effort / reasoning value this one spawn should use,
+    /// overriding the mesh row and the application default. `None` or
+    /// whitespace-only collapses to absent.
+    pub(crate) effort: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SpawnRequest {
     pub(crate) node_id: i64,
     pub(crate) intent: SpawnIntent,
     pub(crate) terminal_size: TerminalSize,
+    /// Cascade layer-1 overrides (issue #1155). Empty / whitespace-only
+    /// values are normalised to absent before reaching the resolver.
+    pub(crate) explicit: ExplicitSpawnOverrides,
 }
 
 #[derive(Debug, Clone)]

@@ -745,6 +745,10 @@ fn spawn_loop_node(
                     initial_prompt: prompt_for_spawn,
                 },
                 terminal_size: crate::agent::spawn::TerminalSize { rows: 24, cols: 80 },
+                // Issue #1155 — looping autopilot spawns inherit the
+                // mesh row + application default; layer 1 stays empty
+                // so the cascade falls through.
+                explicit: Default::default(),
             },
         )
         .await
@@ -985,6 +989,11 @@ fn spawn_autopilot_node(
                 node_id: node.id,
                 intent,
                 terminal_size: crate::agent::spawn::TerminalSize { rows: 24, cols: 80 },
+                // Issue #1155 — autopilot issue-driven spawn doesn't
+                // accept an explicit per-launch model/effort; layer 1
+                // stays empty so the cascade falls through to mesh →
+                // application → native.
+                explicit: Default::default(),
             },
         )
         .await

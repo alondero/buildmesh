@@ -172,7 +172,7 @@ pub struct ResolvedAgentConfig {
 /// 4. **Harness native fallback** — never a Buildmesh synthetic value: when
 ///    every supplied layer is empty/absent, the resolver returns `None` so
 ///    the harness runs with its own defaults.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FieldInputs<'a> {
     /// Explicit Agent Node spawn argument (highest precedence).
     pub explicit: Option<&'a str>,
@@ -184,7 +184,7 @@ pub struct FieldInputs<'a> {
 
 /// Per-field inputs to the configuration resolver. `model` and `effort` are
 /// resolved independently so each layer's cascade runs per field.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentConfigInputs<'a> {
     pub model: FieldInputs<'a>,
     pub effort: FieldInputs<'a>,
