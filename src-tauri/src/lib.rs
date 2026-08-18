@@ -534,6 +534,17 @@ pub fn run() {
             commands::mesh_properties::get_loop_status,
             commands::mesh_properties::update_mesh_pool_size,
             commands::mesh_properties::get_mesh_pool_count,
+            // Per-Mesh harness overrides (issue #1151 / slice 2 of #1148).
+            // The sparse harness-override map is the layer that sits
+            // between explicit Agent Node spawn arguments and the
+            // application-level harness defaults. The IPC surface
+            // re-uses the shared `HarnessConfigValue` + capability-derived
+            // validation from `preferences::validate_harness_default` so
+            // unknown ids / out-of-vocab effort values are rejected at
+            // the write boundary (issue #1148 AC #5).
+            commands::mesh_properties::upsert_mesh_harness_override,
+            commands::mesh_properties::remove_mesh_harness_override,
+            commands::mesh_properties::clear_mesh_harness_overrides,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
             commands::scratchpad::get_mesh_scratchpad,
             commands::scratchpad::set_mesh_scratchpad,

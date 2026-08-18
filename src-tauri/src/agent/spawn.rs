@@ -1399,6 +1399,7 @@ pub(crate) fn cascade_inputs_for<'a>(
     mesh_model: Option<&'a str>,
     mesh_effort: Option<&'a str>,
     app_default: Option<&'a crate::preferences::HarnessConfigValue>,
+    mesh_override: Option<&'a crate::preferences::HarnessConfigValue>,
 ) -> crate::agent::capabilities::AgentConfigInputs<'a> {
     /// Trim; collapse empty / whitespace-only to `None`. Mirrors
     /// `capabilities::normalize_non_empty` at the spawn seam (issue
@@ -1415,11 +1416,13 @@ pub(crate) fn cascade_inputs_for<'a>(
     crate::agent::capabilities::AgentConfigInputs {
         model: crate::agent::capabilities::FieldInputs {
             explicit: explicit_model.and_then(non_empty_trim),
+            mesh_override: mesh_override.and_then(|v| v.model.as_deref()),
             mesh: mesh_model,
             application: app_default.and_then(|v| v.model.as_deref()),
         },
         effort: crate::agent::capabilities::FieldInputs {
             explicit: explicit_effort.and_then(non_empty_trim),
+            mesh_override: mesh_override.and_then(|v| v.effort.as_deref()),
             mesh: mesh_effort,
             application: app_default.and_then(|v| v.effort.as_deref()),
         },
@@ -1448,16 +1451,19 @@ pub(crate) fn resolve_spawn_config(
     mesh_model: Option<&str>,
     mesh_effort: Option<&str>,
     app_default: Option<&crate::preferences::HarnessConfigValue>,
+    mesh_override: Option<&crate::preferences::HarnessConfigValue>,
 ) -> crate::agent::capabilities::ResolvedAgentConfig {
+    let _ = (mesh_model, mesh_effort);
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
     crate::agent::capabilities::resolve_agent_config(
         &capabilities,
         cascade_inputs_for(
             explicit_model,
             explicit_effort,
-            mesh_model,
-            mesh_effort,
+            None,
+            None,
             app_default,
+            mesh_override,
         ),
     )
 }
@@ -1553,11 +1559,12 @@ pub(crate) async fn spawn_agent_inner(
         SessionIdMode::None
     };
 
-    // 5. Read mesh row for use_worktree / model / effort / worktree_mode
+    // 5. Read mesh row for use_worktree / worktree_mode (legacy
+    // model/effort columns are no longer read as active spawn
+    // configuration — the v33 migration copied any non-empty legacy
+    // values into the new map; see issue #1151 acceptance criteria 6).
     let row = env::mesh_row(&std::path::PathBuf::from(&node.path));
     let use_worktree = row.as_ref().map(|r| r.use_worktree).unwrap_or(true);
-    let mesh_model = row.as_ref().and_then(|r| r.model.as_deref());
-    let mesh_effort = row.as_ref().and_then(|r| r.effort.as_deref());
     // OS-level sandbox toggle (macOS Seatbelt #497, Windows AppContainer #498).
     // Off by default; the per-OS spawn policy is decided in `spawn_environment::wrap`
     // and `crate::sandbox::spawn::spawn_sandboxed`.
@@ -2133,25 +2140,30 @@ pub(crate) async fn spawn_agent_inner(
     };
     timer.checkpoint("after_provider_preflight");
     // Resolve configuration values through the per-field cascade (issue
-    // #1149 prefactor; #1150 / #1148 fills the application slot). The
-    // resolver applies the capability mask, so `build_spawn_command`
-    // receives values the harness actually accepts — unsupported values
-    // never reach the harness process regardless of which layer supplied
-    // them. The application slot reads the latest in-process preferences
-    // cache (no disk read on the spawn hot path); the validator already
-    // removed any value the harness couldn't accept at save time, so the
-    // resolver's mask here is the second-and-final gate.
+    // #1149 prefactor; #1150 fills the application slot; #1151 fills the
+    // per-Mesh override slot). The resolver applies the capability mask,
+    // so `build_spawn_command` receives values the harness actually accepts
+    // — unsupported values never reach the harness process regardless of
+    // which layer supplied them. The application slot reads the latest
+    // in-process preferences cache (no disk read on the spawn hot path);
+    // the validator already removed any value the harness couldn't accept
+    // at save time, so the resolver's mask here is the second-and-final gate.
     //
     // `node.provider` for a Proxied Provider row is the composite id
     // `"<harness>:<provider>"` (e.g. `"claude:minimax"`, `"codex:minimax"`).
-    // The application-defaults map is keyed by the harness *profile* id
-    // (the half before the first `:`), so a raw lookup would miss every
-    // Proxied spawn — failing AC #12 ("Native and Proxied Provider Spawn
-    // Options consume the same application-default layer"). Split the
-    // composite id through `parse_spawn_option_id` before the lookup so
-    // native and Proxied rows hit the same map key.
+    // The per-Mesh override map and the application-defaults map are both
+    // keyed by the harness *profile* id (the half before the first `:`),
+    // so a raw lookup would miss every Proxied spawn — failing AC #12
+    // ("Native and Proxied Provider Spawn Options consume the same
+    // application-default layer"). Split the composite id through
+    // `parse_spawn_option_id` before both lookups so native and Proxied
+    // rows hit the same map key.
     let (harness_id_for_default, _) =
         crate::agent::provider::parse_spawn_option_id(&node.provider);
+    let mesh_override = crate::db::get_mesh_harness_overrides(node.mesh_id)
+        .ok()
+        .flatten()
+        .and_then(|m| m.get(harness_id_for_default).cloned());
     let app_default = match crate::preferences::load() {
         Ok(prefs) => crate::preferences::harness_default_for(&prefs, harness_id_for_default),
         Err(e) => {
@@ -2165,9 +2177,16 @@ pub(crate) async fn spawn_agent_inner(
         provider,
         explicit_model.as_deref(),
         explicit_effort.as_deref(),
-        mesh_model,
-        mesh_effort,
+        // Legacy `meshes.model` / `meshes.effort` columns are physically
+        // present for positional row compatibility but are no longer
+        // read as active spawn configuration — the v33 one-shot
+        // migration copied any non-empty legacy values into the
+        // `claude` override entry of the new map (issue #1151 acceptance
+        // criteria 6). On a healthy v33+ DB this slot is always `None`.
+        None,
+        None,
         app_default.as_ref(),
+        mesh_override.as_ref(),
     );
     let cmd = build_spawn_command_prepared(
         &resolved,
@@ -2598,11 +2617,13 @@ mod tests {
             Some("haiku-4"),
             Some("low"),
             Some(&app_default),
+            None,
         );
         assert_eq!(
             inputs.model,
             FieldInputs {
                 explicit: Some("sonnet-4"),
+                mesh_override: None,
                 mesh: Some("haiku-4"),
                 application: Some("opus-4-1"),
             },
@@ -2612,6 +2633,7 @@ mod tests {
             inputs.effort,
             FieldInputs {
                 explicit: Some("medium"),
+                mesh_override: None,
                 mesh: Some("low"),
                 application: Some("high"),
             },
@@ -2636,6 +2658,7 @@ mod tests {
             Some("haiku-4"),
             Some("low"),
             Some(&app_default),
+            None,
         );
         assert_eq!(
             inputs.model.explicit, None,
@@ -2664,6 +2687,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(inputs.model.explicit, Some("opus"));
         assert_eq!(inputs.effort.explicit, Some("high"));
@@ -2681,13 +2705,13 @@ mod tests {
         };
 
         // Explicit model only — effort falls through to the app default.
-        let model_only = cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default));
+        let model_only = cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default), None);
         assert_eq!(model_only.model.explicit, Some("sonnet-4"));
         assert_eq!(model_only.effort.explicit, None);
         assert_eq!(model_only.effort.application, Some("high"));
 
         // Explicit effort only — model falls through to the app default.
-        let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default));
+        let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default), None);
         assert_eq!(effort_only.model.explicit, None);
         assert_eq!(effort_only.model.application, Some("opus-4-1"));
         assert_eq!(effort_only.effort.explicit, Some("low"));
@@ -2712,6 +2736,7 @@ mod tests {
             Some("haiku-4"),
             Some("medium"),
             Some(&app_default),
+            None,
         );
         let resolved = resolve_agent_config(&anthropic_caps(), inputs);
         assert_eq!(
@@ -2747,6 +2772,7 @@ mod tests {
             Some("haiku-4"),
             Some("medium"),
             Some(&app_default),
+            None,
         );
         let resolved = resolve_agent_config(&anthropic_caps(), inputs);
         // Explicit collapsed → mesh wins over application.
@@ -2770,10 +2796,70 @@ mod tests {
             Some("haiku-4"),
             Some("low"),
             None,
+            None,
         );
         let resolved = resolve_agent_config(&anthropic_caps(), inputs);
         assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
+    }
+
+    /// Per-Mesh harness override wiring at the spawn seam (issue #1151).
+    /// The `mesh_override` slot sits between explicit and the legacy mesh
+    /// layer (cascade: explicit > mesh_override > mesh > application > native).
+    /// A populated mesh override wins over the application default and
+    /// falls below explicit.
+    #[test]
+    fn cascade_inputs_for_mesh_override_wins_over_application() {
+        let app_default = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("high".into()),
+        };
+        let mesh_override = HarnessConfigValue {
+            model: Some("opus-4-1".into()),
+            effort: Some("medium".into()),
+        };
+        let inputs = cascade_inputs_for(
+            None,
+            None,
+            None,
+            None,
+            Some(&app_default),
+            Some(&mesh_override),
+        );
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
+        assert_eq!(resolved.effort.as_deref(), Some("medium"));
+    }
+
+    /// Mesh override is masked by the harness's capability contract:
+    /// values outside the allowed vocabulary are dropped before reaching
+    /// the resolver's resolution (issue #1151 / #1148 AC #21).
+    #[test]
+    fn cascade_inputs_for_mesh_override_masked_for_opencode() {
+        let mesh_override = HarnessConfigValue {
+            model: Some("some-model".into()),
+            effort: Some("high".into()),
+        };
+        let inputs = cascade_inputs_for(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&mesh_override),
+        );
+
+        let resolved = resolve_agent_config(
+            &crate::agent::capabilities::capabilities_for(
+                &crate::agent::provider::adapters::OPENCODE,
+            ),
+            inputs,
+        );
+        // OpenCode's capability mask drops both model and effort since
+        // it advertises `supports_model_override = false` and
+        // `EffortControlKind::None`.
+        assert_eq!(resolved.model, None);
+        assert_eq!(resolved.effort, None);
     }
 
     /// `SpawnOptions` must carry the explicit slots through to
@@ -2890,6 +2976,7 @@ mod tests {
             Some("haiku-4"),
             Some("low"),
             Some(&app_default),
+            None,
         );
         assert_eq!(
             resolved.model.as_deref(),
@@ -2922,6 +3009,10 @@ mod tests {
             model: Some("   ".into()),
             effort: Some("\t\n".into()),
         });
+        let mesh_override = HarnessConfigValue {
+            model: Some("haiku-4".into()),
+            effort: Some("medium".into()),
+        };
         let app_default = HarnessConfigValue {
             model: Some("opus-4-1".into()),
             effort: Some("high".into()),
@@ -2930,11 +3021,15 @@ mod tests {
             Provider::Anthropic,
             req.explicit.model.as_deref(),
             req.explicit.effort.as_deref(),
-            Some("haiku-4"),
-            Some("medium"),
+            // Legacy mesh columns are no longer read as active config
+            // (issue #1151 AC #6) — the v33 migration copied any
+            // non-empty legacy values into the mesh override map.
+            None,
+            None,
             Some(&app_default),
+            Some(&mesh_override),
         );
-        // Explicit collapsed → mesh wins over application.
+        // Explicit collapsed → mesh_override wins over application.
         assert_eq!(resolved.model.as_deref(), Some("haiku-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }

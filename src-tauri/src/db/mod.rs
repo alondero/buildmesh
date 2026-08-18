@@ -46,6 +46,9 @@ mod warm_pool_tests;
 #[cfg(test)]
 mod agent_node_tests;
 
+#[cfg(test)]
+mod harness_overrides_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -54,6 +57,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::models::*;
+use crate::preferences::HarnessConfigValue;
 
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
@@ -1478,7 +1482,28 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         loop_max_iterations: row.get(28)?,
         loop_interval_seconds: row.get::<_, i32>(29)?,
         loop_consecutive_failures: row.get::<_, i32>(30)?,
+        harness_overrides: parse_harness_overrides(&row.get::<_, String>(31)?),
     })
+}
+
+/// Parse the `meshes.harness_overrides` JSON column into the typed
+/// `HashMap<String, HarnessConfigValue>` (issue #1151, slice 2 of #1148).
+///
+/// The column is `TEXT NOT NULL DEFAULT '{}'` (schema v33), so the read
+/// side never sees a NULL — the `COALESCE(.., '{}')` in
+/// `migrations::mesh_columns_projection` shields the read path during
+/// the brief window between ALTER-add and the column-walk pass finding
+/// the new registry entry. A malformed JSON value (e.g. a hand-edited
+/// `meshes.harness_overrides = "not json"`) degrades to an empty `HashMap`
+/// rather than erroring the whole query — the same fail-safe contract
+/// the pre-#1151 `parse_db_timestamp` helper uses. The empty map means
+/// "no exceptions" at the resolver, which matches the legacy v32 zero-row
+/// reading.
+fn parse_harness_overrides(raw: &str) -> std::collections::HashMap<String, HarnessConfigValue> {
+    if raw.trim().is_empty() {
+        return std::collections::HashMap::new();
+    }
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 fn get_mesh_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Mesh> {
@@ -1747,6 +1772,166 @@ pub fn set_mesh_loop_config(
             consecutive_failures,
             id,
         ],
+    )
+}
+
+// --- Per-Mesh harness overrides (issue #1151 / slice 2 of #1148) ---
+//
+// Each Mesh owns a sparse `HashMap<String, HarnessConfigValue>` written to
+// the `meshes.harness_overrides` JSON column at schema v33. The CRUD
+// helpers below compose the new map on top of the current row state —
+// they do NOT touch the legacy `meshes.model` / `meshes.effort` columns,
+// which remain physically present for positional row compatibility but
+// are no longer read as active configuration. The cascade order at the
+// spawn seam is now:
+//   explicit > mesh override > application default > native
+// (the application slot is fed by `preferences::harness_default_for`).
+//
+// The wire-level validation (`is_known_harness_id`,
+// `validate_harness_default`) lives in `preferences.rs` and is
+// RE-INVOKED at the IPC boundary — these DB helpers are the typed
+// write pass, not the validation gate. The helpers nevertheless re-read
+// the current map via `get_mesh_harness_overrides_inner` so an upsert
+// doesn't clobber a sibling harness's override (independent per-entry
+// storage is the user-facing contract — see acceptance criteria 8-9).
+
+/// Read the typed `harness_overrides` map for a Mesh. None on a missing
+/// mesh (the IPC surface maps `None` to a "mesh not found" error).
+pub fn get_mesh_harness_overrides(mesh_id: i64) -> SqlResult<Option<std::collections::HashMap<String, HarnessConfigValue>>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(&format!(
+        "SELECT harness_overrides FROM meshes WHERE id = ?1",
+    ))?;
+    let result = stmt.query_row(params![mesh_id], |row| {
+        let raw: String = row.get(0)?;
+        Ok(parse_harness_overrides(&raw))
+    });
+    match result {
+        Ok(map) => Ok(Some(map)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Internal read helper so the upsert/remove paths can join the
+/// current-state read with the write under a single lock. Returns
+/// `Ok(None)` for a missing mesh. The lock-once + `_inner(&Connection)`
+/// pattern mirrors the rest of the DB module.
+pub(crate) fn get_mesh_harness_overrides_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Option<std::collections::HashMap<String, HarnessConfigValue>>> {
+    let mut stmt = conn.prepare("SELECT harness_overrides FROM meshes WHERE id = ?1")?;
+    let result = stmt.query_row(params![mesh_id], |row| {
+        let raw: String = row.get(0)?;
+        Ok(parse_harness_overrides(&raw))
+    });
+    match result {
+        Ok(map) => Ok(Some(map)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Upsert one harness's entry in the mesh's `harness_overrides` map
+/// (issue #1151 / slice 2 of #1148). Composes the new map on top of the
+/// current row state so a sibling harness's override is preserved. An
+/// empty `value` (every field collapsed by the validator / normalize
+/// pass) removes the entry instead of writing `{model: null, effort:
+/// null}` — the sparse-map invariant from issue #1148 acceptance criteria
+/// 6 ("an empty harness configuration removes its sparse entry").
+///
+/// **Validation is the caller's responsibility** (issue #1148 AC #5: write
+/// boundary rejects unknown ids / out-of-vocab effort). The DB helper
+/// assumes the caller already validated. This mirrors the
+/// `preferences::upsert_harness_default` pure-mutator split where the
+/// validator lives in `preferences::validate_harness_default` and the
+/// IPC command runs the load → mutate → save trio.
+///
+/// Returns the number of rows updated so the IPC surface can surface a
+/// "mesh not found" error (same zero-rows contract as
+/// `set_mesh_loop_config`, `set_mesh_autopilot`, `update_mesh_pool_size`).
+pub fn upsert_mesh_harness_override(
+    mesh_id: i64,
+    harness_id: &str,
+    value: HarnessConfigValue,
+) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    upsert_mesh_harness_override_inner(&db, mesh_id, harness_id, value)
+}
+
+/// Lock-once + `_inner` companion for `upsert_mesh_harness_override` so
+/// tests can drive the path with an in-memory connection.
+pub(crate) fn upsert_mesh_harness_override_inner(
+    conn: &Connection,
+    mesh_id: i64,
+    harness_id: &str,
+    value: HarnessConfigValue,
+) -> SqlResult<usize> {
+    let mut map = match get_mesh_harness_overrides_inner(conn, mesh_id)? {
+        Some(m) => m,
+        None => return Ok(0),
+    };
+    if value.is_empty() {
+        map.remove(harness_id);
+    } else {
+        map.insert(harness_id.to_string(), value);
+    }
+    let serialised = serde_json::to_string(&map)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "UPDATE meshes SET harness_overrides = ?1 WHERE id = ?2",
+        params![serialised, mesh_id],
+    )
+}
+
+/// Remove one harness's entry from the mesh's `harness_overrides` map
+/// (issue #1151). Idempotent — calling on a harness that was not already
+/// overridden is a no-op (the IPC's "Reset" affordance never errors on
+/// a UI button that was already in the cleared state). Returns the
+/// number of rows updated so the IPC surface can surface "mesh not
+/// found" (same zero-rows contract as the upsert).
+pub fn remove_mesh_harness_override(mesh_id: i64, harness_id: &str) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    remove_mesh_harness_override_inner(&db, mesh_id, harness_id)
+}
+
+pub(crate) fn remove_mesh_harness_override_inner(
+    conn: &Connection,
+    mesh_id: i64,
+    harness_id: &str,
+) -> SqlResult<usize> {
+    let mut map = match get_mesh_harness_overrides_inner(conn, mesh_id)? {
+        Some(m) => m,
+        None => return Ok(0),
+    };
+    // The `remove` is a no-op when the harness id was absent — the
+    // row is still "touched" so a non-v33 schema (no `harness_overrides`
+    // column) doesn't surface a 0-rows update as a misleading "mesh not
+    // found" error. The column walk guarantees the column is present on
+    // a v33+ DB; we still want a definitional behaviour for test fixtures
+    // that omit column walk.
+    map.remove(harness_id);
+    let serialised = serde_json::to_string(&map)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "UPDATE meshes SET harness_overrides = ?1 WHERE id = ?2",
+        params![serialised, mesh_id],
+    )
+}
+
+/// Clear every entry in the mesh's `harness_overrides` map (issue #1151) —
+/// the secondary "Reset all" bulk action. Distinct from the per-harness
+/// reset (`remove_mesh_harness_override`) — that preserves every other
+/// entry; this one resets the entire map. Idempotent on a mesh that has
+/// no overrides (the row is "touched" either way so the zero-rows
+/// contract surfaces a real "mesh not found" rather than a confusing
+/// "no rows updated" silent success).
+pub fn clear_mesh_harness_overrides(mesh_id: i64) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET harness_overrides = '{}' WHERE id = ?1",
+        params![mesh_id],
     )
 }
 

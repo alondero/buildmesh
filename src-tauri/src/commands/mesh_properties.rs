@@ -12,7 +12,8 @@
 //! source of truth — the DB column is the source.
 
 use crate::db;
-use crate::models::MeshRow;
+use crate::models::{HarnessConfigValue, MeshRow};
+use crate::preferences;
 use crate::services::warm_pool;
 use std::path::PathBuf;
 use tauri::AppHandle;
@@ -447,4 +448,96 @@ pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
     }
 
     remove_base_ref(&mesh.path)
+}
+
+// ---------------------------------------------------------------------------
+// Per-Mesh harness overrides (issue #1151 / slice 2 of #1148)
+// ---------------------------------------------------------------------------
+//
+// Each Mesh owns a sparse `HashMap<String, HarnessConfigValue>` written to
+// the `meshes.harness_overrides` JSON column at schema v33. The cascade
+// at the spawn seam is now: explicit > mesh override > application
+// default > native. The user-facing surface (separate per-harness
+// override rows + a Reset-all bulk action) lives in
+// `MeshPropertiesTab` — these commands are the typed edge behind it.
+//
+// Validation lives here at the IPC boundary (issue #1148 acceptance
+// criteria 5: "Unknown harness ids and invalid effort values are
+// rejected at the backend boundary"). The DB helpers are the typed
+// write pass; the validator (`preferences::validate_harness_default`)
+// is re-used verbatim so the harness-id and effort-vocabulary rules
+// can't drift between the application-default and per-mesh-override
+// paths.
+
+/// Upsert one harness's entry in the mesh's `harness_overrides` map
+/// (issue #1151 / slice 2 of #1148). Equivalent to the App Settings
+/// `set_harness_default` command but scoped to a single Mesh: it
+/// validates the harness id and effort vocabulary against the same
+/// capability descriptor, then writes the JSON map. An empty
+/// post-validation value removes the entry (sparse-map invariant).
+/// Validation runs BEFORE the write so a rejected call never produces
+/// a half-edited map (the DB helper is also safe to call on a
+/// not-found mesh — it returns 0 rows, which the IPC surface maps to
+/// an error).
+#[tauri::command]
+pub async fn upsert_mesh_harness_override(
+    mesh_id: i64,
+    harness_id: String,
+    value: HarnessConfigValue,
+) -> Result<(), String> {
+    // Validate first (issue #1148 AC #5). The validator trims + collapses
+    // blanks via `preferences::normalize_harness_default` so a save
+    // carrying only whitespace is rejected as an empty map entry (the
+    // helper then drops the entry to maintain the sparse invariant).
+    // The harness-id lookup is case-insensitive for built-ins (matches
+    // `preferences::is_known_harness_id`) and case-sensitive for stored
+    // custom profiles — matching the same keying the application-default
+    // map uses.
+    let validated = preferences::validate_harness_default(&harness_id, value)?;
+    let rows = db::upsert_mesh_harness_override(mesh_id, &harness_id, validated)
+        .map_err(|e| format!("failed to upsert mesh harness override: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    Ok(())
+}
+
+/// Remove one harness's entry from the mesh's `harness_overrides` map
+/// (issue #1151 / slice 2 of #1148). Idempotent — clearing a harness
+/// that had no override is a no-op. The resolved value at the next
+/// spawn falls back to the application default (then native) for that
+/// harness. Does NOT validate the harness id — the validator is the
+/// typed-write gate, and the IPC caller has already loaded the mesh's
+/// override list (so a typo in the harness id is impossible from the
+/// UI flow). A bad harness id passed directly surfaces as a silent
+/// no-op row "touch" — the row count is the source of truth for the
+/// "mesh not found" error.
+#[tauri::command]
+pub async fn remove_mesh_harness_override(
+    mesh_id: i64,
+    harness_id: String,
+) -> Result<(), String> {
+    let rows = db::remove_mesh_harness_override(mesh_id, &harness_id)
+        .map_err(|e| format!("failed to remove mesh harness override: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    Ok(())
+}
+
+/// Reset every entry in the mesh's `harness_overrides` map (issue #1151)
+/// — the secondary "Reset all" bulk action on the Mesh Properties tab.
+/// Distinct from the per-harness reset: this clears the entire map,
+/// restoring the Mesh to "inherit every application default" for every
+/// Agent Harness. The application-level defaults map is NOT touched —
+/// the user can still configure application defaults per harness and
+/// the Mesh will inherit them cleanly after the reset.
+#[tauri::command]
+pub async fn clear_mesh_harness_overrides(mesh_id: i64) -> Result<(), String> {
+    let rows = db::clear_mesh_harness_overrides(mesh_id)
+        .map_err(|e| format!("failed to clear mesh harness overrides: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    Ok(())
 }
