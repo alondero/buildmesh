@@ -2007,23 +2007,48 @@ pub(crate) async fn spawn_agent_inner(
         }
     };
     timer.checkpoint("after_provider_preflight");
-    // Resolve configuration values through the per-field cascade (issue #1149).
-    // Today only the Mesh slot is populated; #1148 fills the application slot.
-    // The resolver applies the capability mask, so `build_spawn_command`
-    // receives values the harness actually accepts.
+    // Resolve configuration values through the per-field cascade (issue
+    // #1149 prefactor; #1150 / #1148 fills the application slot). The
+    // resolver applies the capability mask, so `build_spawn_command`
+    // receives values the harness actually accepts — unsupported values
+    // never reach the harness process regardless of which layer supplied
+    // them. The application slot reads the latest in-process preferences
+    // cache (no disk read on the spawn hot path); the validator already
+    // removed any value the harness couldn't accept at save time, so the
+    // resolver's mask here is the second-and-final gate.
+    //
+    // `node.provider` for a Proxied Provider row is the composite id
+    // `"<harness>:<provider>"` (e.g. `"claude:minimax"`, `"codex:minimax"`).
+    // The application-defaults map is keyed by the harness *profile* id
+    // (the half before the first `:`), so a raw lookup would miss every
+    // Proxied spawn — failing AC #12 ("Native and Proxied Provider Spawn
+    // Options consume the same application-default layer"). Split the
+    // composite id through `parse_spawn_option_id` before the lookup so
+    // native and Proxied rows hit the same map key.
+    let (harness_id_for_default, _) =
+        crate::agent::provider::parse_spawn_option_id(&node.provider);
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
+    let app_default = match crate::preferences::load() {
+        Ok(prefs) => crate::preferences::harness_default_for(&prefs, harness_id_for_default),
+        Err(e) => {
+            tracing::warn!(
+                "spawn_agent_inner: harness-default load failed, treating as absent: {e}"
+            );
+            None
+        }
+    };
     let resolved_config = crate::agent::capabilities::resolve_agent_config(
         &capabilities,
         crate::agent::capabilities::AgentConfigInputs {
             model: crate::agent::capabilities::FieldInputs {
                 explicit: None,
                 mesh: mesh_model,
-                application: None,
+                application: app_default.as_ref().and_then(|v| v.model.as_deref()),
             },
             effort: crate::agent::capabilities::FieldInputs {
                 explicit: None,
                 mesh: mesh_effort,
-                application: None,
+                application: app_default.as_ref().and_then(|v| v.effort.as_deref()),
             },
         },
     );

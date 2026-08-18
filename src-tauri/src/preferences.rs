@@ -8,11 +8,15 @@
 //! fallback (`anthropic` for providers).
 
 use crate::models::Provider;
+use crate::agent::capabilities::{
+    capabilities_for, EffortControlKind, HarnessCapabilities,
+};
 use crate::agent::provider::compatibility::{
     self, CompatibilityDecision, EndpointModelDescriptor, ProviderAuthMode, WireApi,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use ts_rs::TS;
@@ -287,6 +291,49 @@ pub struct ProviderAccount {
     pub api_key: Option<String>,
 }
 
+/// The configurable **values** an Agent Harness can accept (issue #1148).
+///
+/// This is the wire-level "configurable harness value type" referenced by
+/// #1149 step 2 — the shared shape every layer of the cascade (Agent Node
+/// argument, Mesh override, application default) feeds into the resolver.
+/// The `model` / `effort` fields are optional individually so a user can set
+/// just one of them; an instance with both fields `None` is the empty
+/// representation (the cascade treats it as absent).
+///
+/// Whitespace-only inputs are collapsed to `None` by [`normalize_harness_default`]
+/// before the resolver ever sees them — issue #1148 acceptance criteria 32.
+///
+/// Generated to `src/types/generated/HarnessConfigValue.ts`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "HarnessConfigValue.ts")]
+pub struct HarnessConfigValue {
+    /// Optional primary model id for this harness (e.g. `"MiniMax-M3[1m]"`,
+    /// `"opus-4-1"`). `None` means "no model override at this layer". The
+    /// resolver's capability mask drops this field when the selected harness
+    /// does not declare `supports_model_override`, regardless of what layer
+    /// supplied it (issue #1148 acceptance criteria 5).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional effort / reasoning value for this harness (e.g. `"high"` for
+    /// Claude Code, `"xhigh"` for Codex). `None` means "no effort override at
+    /// this layer". The resolver drops the value when the selected harness
+    /// advertises `EffortControlKind::None` OR when the value isn't in the
+    /// harness's `effort_control.allowed` vocabulary.
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+impl HarnessConfigValue {
+    /// True when no field carries a non-blank value. A save that would
+    /// leave the entry fully empty must remove the sparse map entry entirely
+    /// — issue #1148 acceptance criteria 6 ("an empty harness configuration
+    /// removes its sparse entry").
+    pub fn is_empty(&self) -> bool {
+        self.model.as_deref().is_none_or(str::is_empty)
+            && self.effort.as_deref().is_none_or(str::is_empty)
+    }
+}
+
 /// User-editable, persisted preferences applied across all meshes.
 ///
 /// Generated to src/types/generated/AppPreferences.ts (issue #404).
@@ -381,6 +428,23 @@ pub struct AppPreferences {
     /// spawns until enough slots free up.
     #[serde(default)]
     pub autopilot_pool_size: Option<u32>,
+    /// **Application-level harness defaults** (issue #1148 / #1150) — a
+    /// sparse map keyed by stable harness profile id (the id the Spawn Menu
+    /// uses, e.g. `"claude"`, `"codex"`, `"agy"`, plus any user-defined
+    /// custom profile id). A present entry supplies a per-harness model
+    /// and/or effort value; the resolver consumes them through the
+    /// `application` slot of [`crate::agent::capabilities::FieldInputs`].
+    /// A missing entry means "Buildmesh supplies no application override —
+    /// the harness runs with its native behaviour".
+    ///
+    /// The map is **sparse**: an entry whose every field collapses to absent
+    /// (blank after trimming) is removed entirely by [`upsert_harness_default`]
+    /// / [`remove_harness_default`], so a stored empty `{}` is unreachable.
+    /// Additive on disk — an older `preferences.json` without this field
+    /// loads as an empty `HashMap` (issue #1148 acceptance criteria 1) via
+    /// `#[serde(default)]`.
+    #[serde(default)]
+    pub harness_defaults: HashMap<String, HarnessConfigValue>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -1602,6 +1666,162 @@ pub fn remove_provider_pairing(prefs: &mut AppPreferences, harness_id: &str, pro
     prefs
         .provider_pairings
         .retain(|p| !(p.harness_id == harness_id && p.provider_id == provider_id));
+}
+
+/// Resolve the **capability descriptor** for a harness profile id, used by
+/// the application-default validator (issue #1148 step 3). `None` when the
+/// profile id doesn't name a known harness (built-in or user-added), so the
+/// validator can reject unknown ids at the backend boundary — issue #1148
+/// acceptance criteria 5 ("Unknown harness ids … are rejected at the backend
+/// boundary").
+///
+/// Known = `harness_profiles()` carries the id, *or* `Provider::from_db_str`
+/// parses it (built-in adapter ids, plus the legacy `"anthropic"` alias).
+/// `resolve_harness_provider` already merges both sources and falls back to
+/// the Anthropic executor on an unknown — we re-check by feeding the same
+/// input into `harness_profiles()` + the built-in id whitelist so unknown
+/// ids are refused.
+pub fn harness_capabilities_for(profile_id: &str) -> Option<HarnessCapabilities> {
+    if !is_known_harness_id(profile_id) {
+        return None;
+    }
+    Some(capabilities_for(resolve_harness_provider(profile_id).adapter()))
+}
+
+/// True iff `profile_id` names a known Agent Harness — a built-in adapter id
+/// or a stored `HarnessProfile`. Used by [`harness_capabilities_for`] to
+/// reject unknown ids without leaking the silent `from_db_str → Anthropic`
+/// fallback through the validator (issue #1148 AC #5).
+///
+/// Built-in ids are matched case-insensitively to mirror
+/// [`crate::models::Provider::from_db_str`] (the executor resolver used by
+/// `resolve_harness_provider`). Custom profile ids are matched case-
+/// sensitively because they are user-defined strings — a user who names a
+/// profile `"Claude"` keeps that exact id everywhere.
+pub fn is_known_harness_id(profile_id: &str) -> bool {
+    let trimmed = profile_id.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    // Built-ins (`BUILTIN_HARNESS_IDS` covers every adapter id plus the
+    // legacy `"anthropic"` alias). `contains` short-circuits on the first
+    // hit — same semantics as `iter().any()` but cheaper to read.
+    if crate::agent::provider::BUILTIN_HARNESS_IDS
+        .contains(&normalized.as_str())
+    {
+        return true;
+    }
+    // User-stored profiles (custom Claude-compatible profiles like
+    // `"deepseek-via-claude"`). `harness_profiles()` is cached via the
+    // preferences mutex so this is a single HashMap-style scan on the
+    // post-init path.
+    harness_profiles().iter().any(|p| p.id == profile_id)
+}
+
+/// Trim and collapse blank values on a single harness-default value (issue
+/// #1148 acceptance criteria 6: "Blank values are normalized to absent").
+/// Pure — the unit-test seam for "what does an empty input look like after
+/// the boundary normalises it".
+pub fn normalize_harness_default(raw: HarnessConfigValue) -> HarnessConfigValue {
+    HarnessConfigValue {
+        model: trim_to_none(raw.model.as_deref()),
+        effort: trim_to_none(raw.effort.as_deref()),
+    }
+}
+
+/// Trim a string slice and collapse empties to `None`. Local helper so
+/// [`normalize_harness_default`] doesn't reach into
+/// `agent::capabilities::normalize_non_empty` (a private seam there).
+fn trim_to_none(s: Option<&str>) -> Option<String> {
+    s.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+}
+
+/// Validate a harness default against the selected harness's capability
+/// contract. Three rules (issue #1148 acceptance criteria 5):
+///
+/// * **Unknown harness id** → `Err`. The harness profile id must resolve to
+///   a known adapter (built-in or user-added); an unrecognised id is refused
+///   at the write boundary so corrupt config can't affect unrelated harnesses.
+/// * **Effort on a harness without effort control** → `Err`. The harness's
+///   `EffortControlKind` is the single contract; an effort value submitted
+///   for a harness that advertises `None` is refused at the write boundary
+///   (issue #1148 AC #5 "Accept effort only when the harness declares
+///   effort support").
+/// * **Effort value outside the harness's vocabulary** → `Err`. The
+///   harness's `EffortControlKind::allowed` list is the single contract; a
+///   value not in it is refused at the write boundary (issue #1148 AC #5
+///   "Accept only values allowed by that harness's effort-control kind").
+///
+/// Model values pass through after trimming — there is no harness-side model
+/// vocabulary; the harness either accepts the override or the resolver's
+/// `supports_model_override` flag drops it on the spawn path. A blank model
+/// collapses to `None` here so the storage-shape invariant
+/// (`is_empty → no entry`) keeps working.
+pub fn validate_harness_default(
+    profile_id: &str,
+    raw: HarnessConfigValue,
+) -> Result<HarnessConfigValue, String> {
+    let caps = harness_capabilities_for(profile_id)
+        .ok_or_else(|| format!("unknown harness id '{profile_id}'"))?;
+    let normalized = normalize_harness_default(raw);
+    match &caps.effort_control {
+        EffortControlKind::None => {
+            if normalized.effort.is_some() {
+                return Err(format!(
+                    "harness '{profile_id}' does not support an effort override"
+                ));
+            }
+        }
+        EffortControlKind::Closed { allowed } | EffortControlKind::InlineConfig { allowed, .. } => {
+            if let Some(value) = normalized.effort.as_deref() {
+                if !allowed.iter().any(|a| a == value) {
+                    return Err(format!(
+                        "effort '{value}' is not allowed for harness '{profile_id}' \
+                         (allowed: {allowed:?})"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+/// Upsert one harness's application default (issue #1148 / #1150).
+/// Validates against the harness's capability descriptor; an empty
+/// post-validation value **removes** the sparse map entry rather than
+/// storing `{model: None, effort: None}` (issue #1148 acceptance criteria
+/// 6 "an empty harness configuration removes its sparse entry").
+///
+/// Pure mutator — the caller wraps it in [`update`] (or loads + saves) so
+/// the in-process cache refreshes on a successful persist.
+pub fn upsert_harness_default(
+    prefs: &mut AppPreferences,
+    profile_id: &str,
+    raw: HarnessConfigValue,
+) -> Result<(), String> {
+    let validated = validate_harness_default(profile_id, raw)?;
+    if validated.is_empty() {
+        prefs.harness_defaults.remove(profile_id);
+    } else {
+        prefs.harness_defaults.insert(profile_id.to_string(), validated);
+    }
+    Ok(())
+}
+
+/// Remove one harness's application default. Idempotent — calling on a
+/// missing id is a no-op (so the UI's "Reset" affordance never errors on a
+/// harness that was already cleared).
+pub fn remove_harness_default(prefs: &mut AppPreferences, profile_id: &str) {
+    prefs.harness_defaults.remove(profile_id);
+}
+
+/// The stored default for `profile_id`, if any. The caller passes the value
+/// straight into the resolver's `application` slot — the resolver's
+/// capability mask is what actually gates whether the value reaches the
+/// harness process (issue #1148 acceptance criteria 6).
+pub fn harness_default_for(prefs: &AppPreferences, profile_id: &str) -> Option<HarnessConfigValue> {
+    prefs.harness_defaults.get(profile_id).cloned()
 }
 
 /// Set a provider account's **global** API key only if it currently has none
@@ -4084,5 +4304,407 @@ mod tests {
             value["provider_pairings"].as_array().unwrap().is_empty(),
             "keyed generic without an endpoint must not synthesise a pairing"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Harness defaults (issue #1150 / #1148)
+    // -----------------------------------------------------------------------
+
+    /// Older `preferences.json` files without a `harness_defaults` key load
+    /// as an empty map (issue #1148 acceptance criteria 1: "Older preference
+    /// files without harness defaults load as an empty defaults map").
+    /// The `#[serde(default)]` annotation on the field is the contract; this
+    /// test pins the on-disk shape so a future field-rename doesn't silently
+    /// break compat with installed users.
+    #[test]
+    fn old_prefs_file_without_harness_defaults_loads_as_empty_map() {
+        with_temp_dir(|dir| {
+            // Hand-written legacy payload: every other field present, but no
+            // `harness_defaults` key. Mirrors a `preferences.json` written
+            // by a pre-#1150 build.
+            let raw = serde_json::json!({
+                "default_provider": "claude",
+                "ad0025_account_pairings_migrated": true,
+                "provider_accounts": [],
+                "provider_pairings": [],
+                "harness_profiles": [],
+                "harness_order": [],
+                "pairing_verifications": [],
+                "proxied_provider_order": []
+            });
+            std::fs::write(dir.join("preferences.json"), raw.to_string()).unwrap();
+            *CACHE.lock().unwrap() = None;
+            let prefs = load().unwrap();
+            assert!(
+                prefs.harness_defaults.is_empty(),
+                "missing field must deserialise to empty map, got {:?}",
+                prefs.harness_defaults
+            );
+        });
+    }
+
+    /// Sparse persistence: only harnesses the user has configured appear in
+    /// the stored map. The validator removes entries whose every field
+    /// collapsed to absent, so a stored empty value is unreachable
+    /// (issue #1148 AC #6: "Blank values are normalized to absent, and an
+    /// empty harness configuration removes its sparse entry").
+    #[test]
+    fn upsert_harness_default_persists_then_round_trips() {
+        with_temp_dir(|_| {
+            let mut prefs = AppPreferences {
+                ad0025_account_pairings_migrated: true,
+                ..Default::default()
+            };
+            upsert_harness_default(
+                &mut prefs,
+                "claude",
+                HarnessConfigValue {
+                    model: Some("opus-4-1".into()),
+                    effort: Some("high".into()),
+                },
+            )
+            .unwrap();
+            save(prefs.clone()).unwrap();
+            *CACHE.lock().unwrap() = None;
+            let loaded = load().unwrap();
+            assert_eq!(loaded.harness_defaults.len(), 1);
+            assert_eq!(
+                loaded.harness_defaults.get("claude"),
+                Some(&HarnessConfigValue {
+                    model: Some("opus-4-1".into()),
+                    effort: Some("high".into())
+                })
+            );
+        });
+    }
+
+    /// Clearing the last field of a harness's default removes the sparse
+    /// map entry entirely (issue #1148 AC #6).
+    #[test]
+    fn upsert_harness_default_removes_entry_when_all_fields_blank() {
+        with_temp_dir(|_| {
+            let mut prefs = AppPreferences {
+                ad0025_account_pairings_migrated: true,
+                ..Default::default()
+            };
+            // Seed: a stored default for `claude`.
+            upsert_harness_default(
+                &mut prefs,
+                "claude",
+                HarnessConfigValue {
+                    model: Some("opus".into()),
+                    effort: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(prefs.harness_defaults.len(), 1);
+
+            // Write an all-blank value: validator must remove the entry.
+            upsert_harness_default(
+                &mut prefs,
+                "claude",
+                HarnessConfigValue {
+                    model: Some("   ".into()), // whitespace collapses to None
+                    effort: None,
+                },
+            )
+            .unwrap();
+            assert!(
+                prefs.harness_defaults.is_empty(),
+                "all-blank value must remove the entry, got {:?}",
+                prefs.harness_defaults
+            );
+
+            // Whitespace + None on effort: same path.
+            upsert_harness_default(
+                &mut prefs,
+                "codex",
+                HarnessConfigValue {
+                    model: Some("\t".into()),
+                    effort: Some(String::new()),
+                },
+            )
+            .unwrap();
+            assert!(prefs.harness_defaults.is_empty());
+        });
+    }
+
+    /// Validator rejects unknown harness ids at the write boundary so corrupt
+    /// configuration can't affect unrelated harnesses (issue #1148 AC #5:
+    /// "Unknown harness ids … are rejected at the backend boundary").
+    #[test]
+    fn upsert_harness_default_rejects_unknown_harness_id() {
+        let mut prefs = AppPreferences::default();
+        let result = upsert_harness_default(
+            &mut prefs,
+            "definitely-not-a-harness",
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: None,
+            },
+        );
+        assert!(result.is_err(), "must reject unknown id, got {:?}", result);
+        assert!(prefs.harness_defaults.is_empty());
+    }
+
+    /// Validator rejects effort on a harness without effort control (Agy,
+    /// OpenCode, Terminal, Kimi, Grok, Mcode) — the harness has no place
+    /// for the value, so the write is refused at the boundary rather than
+    /// silently storing a field the resolver would never forward (issue
+    /// #1148 AC #5: "Accept effort only when the harness declares effort
+    /// support").
+    #[test]
+    fn upsert_harness_default_rejects_effort_on_harness_without_effort_control() {
+        let mut prefs = AppPreferences::default();
+        // Agy supports model override but NOT effort (per capabilities).
+        let result = upsert_harness_default(
+            &mut prefs,
+            "agy",
+            HarnessConfigValue {
+                model: Some("some-model".into()),
+                effort: Some("high".into()),
+            },
+        );
+        assert!(result.is_err(), "must reject effort on a non-effort harness");
+        assert!(
+            prefs.harness_defaults.is_empty(),
+            "rejected write must not partially mutate the map"
+        );
+    }
+
+    /// Validator accepts a model-only value for a non-effort harness (the
+    /// model path is independent of effort — Agy accepts `--model` but not
+    /// `--effort`). The blank-after-trim effort is rejected here because the
+    /// input carries an effort value at all; a pure model-only write
+    /// succeeds.
+    #[test]
+    fn upsert_harness_default_accepts_model_only_on_non_effort_harness() {
+        let mut prefs = AppPreferences::default();
+        upsert_harness_default(
+            &mut prefs,
+            "agy",
+            HarnessConfigValue {
+                model: Some("some-model".into()),
+                effort: None,
+            },
+        )
+        .unwrap();
+        let stored = prefs.harness_defaults.get("agy").unwrap();
+        assert_eq!(stored.model.as_deref(), Some("some-model"));
+        assert!(stored.effort.is_none());
+    }
+
+    /// Validator rejects effort values outside the harness's vocabulary
+    /// (issue #1148 AC #5: "Accept only values allowed by that harness's
+    /// effort-control kind"). Codex's closed vocabulary is `["none", "low",
+    /// "medium", "high", "xhigh"]`; a clearly-bogus value is refused.
+    #[test]
+    fn upsert_harness_default_rejects_effort_outside_vocabulary() {
+        let mut prefs = AppPreferences::default();
+        let result = upsert_harness_default(
+            &mut prefs,
+            "codex",
+            HarnessConfigValue {
+                model: None,
+                effort: Some("ultra-mega-high".into()),
+            },
+        );
+        assert!(result.is_err(), "must reject out-of-vocabulary effort");
+        assert!(prefs.harness_defaults.is_empty());
+    }
+
+    /// Codex accepts `xhigh` (superset of Claude's closed vocab); the
+    /// capability mask must allow it through at write.
+    #[test]
+    fn upsert_harness_default_accepts_codex_xhigh() {
+        let mut prefs = AppPreferences::default();
+        upsert_harness_default(
+            &mut prefs,
+            "codex",
+            HarnessConfigValue {
+                model: None,
+                effort: Some("xhigh".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            prefs.harness_defaults.get("codex").and_then(|v| v.effort.as_deref()),
+            Some("xhigh")
+        );
+    }
+
+    /// Validator is case-insensitive on built-in harness ids to mirror
+    /// `Provider::from_db_str` (the executor resolver that
+    /// `resolve_harness_provider` uses). A capitalised `"Claude"` is
+    /// accepted as the Claude profile. The Spawn Menu emits lowercase ids
+    /// anyway, so this only matters when a hand-typed or scripted write
+    /// bypasses the canonical form.
+    #[test]
+    fn upsert_harness_default_accepts_canonical_lowercase_via_capitalisation() {
+        let mut prefs = AppPreferences::default();
+        upsert_harness_default(
+            &mut prefs,
+            "Claude",
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: Some("high".into()),
+            },
+        )
+        .unwrap();
+        // Stored under the canonical lowercase id (the validator doesn't
+        // re-key the entry — it accepts the input as written — but the
+        // harness profile list lookup canonicalises for built-ins).
+        assert!(prefs.harness_defaults.contains_key("Claude"));
+    }
+
+    /// `remove_harness_default` is idempotent — clearing an already-cleared
+    /// harness is a no-op (so the UI's "Reset" affordance never errors).
+    #[test]
+    fn remove_harness_default_is_idempotent() {
+        let mut prefs = AppPreferences {
+            ad0025_account_pairings_migrated: true,
+            ..Default::default()
+        };
+        // Missing key: no-op, no error.
+        remove_harness_default(&mut prefs, "claude");
+        assert!(prefs.harness_defaults.is_empty());
+
+        // Present key: removed.
+        prefs.harness_defaults.insert(
+            "claude".into(),
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: None,
+            },
+        );
+        remove_harness_default(&mut prefs, "claude");
+        assert!(prefs.harness_defaults.is_empty());
+
+        // Missing again: still no-op.
+        remove_harness_default(&mut prefs, "claude");
+        assert!(prefs.harness_defaults.is_empty());
+    }
+
+    /// `normalize_harness_default` collapses whitespace-only inputs to `None`
+    /// (issue #1148 AC #6: "Blank values are normalized to absent"). Trim
+    /// the kept value so a user who pastes `" opus "` doesn't store the
+    /// padding.
+    #[test]
+    fn normalize_harness_default_trims_blanks_and_whitespace() {
+        let normalized = normalize_harness_default(HarnessConfigValue {
+            model: Some("  opus  ".into()),
+            effort: Some("   ".into()),
+        });
+        assert_eq!(normalized.model.as_deref(), Some("opus"));
+        assert!(normalized.effort.is_none(), "blank effort must collapse to None");
+    }
+
+    /// The reader `harness_default_for` is the spawn-seam's source of truth
+    /// for the application slot. A present entry round-trips; a missing key
+    /// is `None`.
+    #[test]
+    fn harness_default_for_reads_back_stored_value() {
+        let mut prefs = AppPreferences {
+            ad0025_account_pairings_migrated: true,
+            ..Default::default()
+        };
+        assert!(harness_default_for(&prefs, "claude").is_none());
+        upsert_harness_default(
+            &mut prefs,
+            "claude",
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: Some("high".into()),
+            },
+        )
+        .unwrap();
+        let got = harness_default_for(&prefs, "claude").unwrap();
+        assert_eq!(got.model.as_deref(), Some("opus"));
+        assert_eq!(got.effort.as_deref(), Some("high"));
+        assert!(harness_default_for(&prefs, "codex").is_none());
+    }
+
+    /// A failed save must not publish the candidate to the cache (mirrors
+    /// `failed_update_does_not_publish_candidate_to_cache` for harness
+    /// defaults). The point is: a write that the backend rejects at the
+    /// boundary never poisons the in-process cache, so subsequent spawns
+    /// see the previous good state.
+    #[test]
+    fn failed_upsert_harness_default_leaves_cache_unchanged() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = test_dir();
+        std::fs::create_dir_all(&tmp).unwrap();
+        init_for_tests(tmp.clone());
+
+        // Seed: a valid default for `claude`.
+        save(AppPreferences {
+            harness_defaults: HashMap::from([(
+                "claude".into(),
+                HarnessConfigValue {
+                    model: Some("opus".into()),
+                    effort: None,
+                },
+            )]),
+            ad0025_account_pairings_migrated: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Attempt an invalid upsert (unknown harness id). The command layer
+        // returns Err without touching the cache; load() returns the seed.
+        let mut prefs = load().unwrap();
+        let err = upsert_harness_default(
+            &mut prefs,
+            "not-a-harness",
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown harness id"));
+
+        // Cached prefs are unchanged (the mutator ran on a local clone that
+        // was never written back).
+        let reloaded = load().unwrap();
+        assert_eq!(
+            reloaded.harness_defaults.get("claude").and_then(|v| v.model.as_deref()),
+            Some("opus")
+        );
+        assert!(!reloaded.harness_defaults.contains_key("not-a-harness"));
+
+        reset_for_tests();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `is_known_harness_id` accepts every built-in adapter id (issue
+    /// #1148 AC #5). The whitelist is the same one `BUILTIN_HARNESS_IDS`
+    /// documents so a future adapter edit can't silently widen or shrink the
+    /// acceptance surface.
+    #[test]
+    fn is_known_harness_id_accepts_every_builtin() {
+        for id in crate::agent::provider::BUILTIN_HARNESS_IDS {
+            assert!(
+                is_known_harness_id(id),
+                "built-in harness id '{id}' must be accepted"
+            );
+        }
+    }
+
+    /// `is_known_harness_id` rejects empty strings and truly-bogus ids.
+    /// Empty strings would let a frontend typo silently fall through to the
+    /// Anthropic executor via `from_db_str`'s fallback — exactly the leak
+    /// the validator is meant to close. Built-in case variations
+    /// (`"Claude"`, `"OPENCODE"`) are accepted — see
+    /// [`is_known_harness_id_accepts_canonical_lowercase_via_capitalisation`]
+    /// above.
+    #[test]
+    fn is_known_harness_id_rejects_unknown() {
+        for id in ["", "definitely-not-a-harness", "  ", "claude-mini"] {
+            assert!(
+                !is_known_harness_id(id),
+                "id '{id}' must be rejected"
+            );
+        }
     }
 }

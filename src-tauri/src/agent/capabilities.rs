@@ -749,4 +749,162 @@ mod tests {
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
     }
+
+    // -----------------------------------------------------------------------
+    // Application-default slot feed (issue #1150 / #1148)
+    // -----------------------------------------------------------------------
+
+    /// The application slot drives the resolved value when explicit + mesh
+    /// are empty (issue #1148 cascade layer 3: explicit > mesh > application
+    /// > native). The spawn path in `spawn_agent_inner` populates this slot
+    /// from `preferences::harness_default_for(&node.provider)`; this test
+    /// pins the resolver contract that the spawn path relies on.
+    #[test]
+    fn resolver_application_slot_drives_anthropic_when_mesh_and_explicit_empty() {
+        let inputs = AgentConfigInputs {
+            model: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: Some("opus-4-1"),
+            },
+            effort: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: Some("high"),
+            },
+        };
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
+    }
+
+    /// Application slot is masked: a non-effort harness never receives an
+    /// effort value, regardless of which layer supplied it. Pin: the spawn
+    /// path passes the stored default's effort straight into the resolver,
+    /// so a stale or hand-edited `preferences.json` entry can't bypass the
+    /// capability mask. (Agy accepts model override but not effort, per the
+    /// `inventory_matches_research_matrix` pin — the resolver model mask
+    /// would otherwise pass the model through.)
+    #[test]
+    fn resolver_application_slot_dropped_when_capability_masks_it() {
+        let inputs = AgentConfigInputs {
+            model: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: Some("some-model"),
+            },
+            effort: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: Some("high"),
+            },
+        };
+        let resolved = resolve_agent_config(&agy_caps(), inputs);
+        assert_eq!(
+            resolved.model.as_deref(),
+            Some("some-model"),
+            "Agy accepts model override (per the capability inventory)"
+        );
+        assert!(resolved.effort.is_none(), "Agy doesn't accept effort");
+    }
+
+    /// Application slot falls through when None (issue #1148 AC #11: "With
+    /// no explicit or application value, Buildmesh omits the corresponding
+    /// argument and preserves native harness behavior"). The resolver must
+    /// return `None` for empty cascade layers — the harness binary's own
+    /// defaults apply.
+    #[test]
+    fn resolver_application_slot_none_falls_through_to_native() {
+        let inputs = AgentConfigInputs {
+            model: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: None,
+            },
+            effort: FieldInputs::default(),
+        };
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert!(
+            resolved.model.is_none(),
+            "empty cascade must fall through to native behaviour"
+        );
+    }
+
+    /// Whitespace-only application value collapses to absent (issue #1148
+    /// AC #32). The validator at write time trims and removes the entry
+    /// for an all-blank value; the resolver still defends in depth so a
+    /// stale `preferences.json` (pre-migration hand-edit, or a future
+    /// bypass of the validator) cannot forward whitespace to the harness.
+    #[test]
+    fn resolver_application_slot_trims_whitespace() {
+        let inputs = AgentConfigInputs {
+            model: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: Some("   "),
+            },
+            effort: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: Some("  high  "),
+            },
+        };
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert_eq!(resolved.model, None, "whitespace-only model collapses");
+        assert_eq!(
+            resolved.effort.as_deref(),
+            Some("high"),
+            "trimmed effort passes the mask"
+        );
+    }
+
+    /// Application default wins over the explicit Agent Node argument's
+    /// absence, but is overridden by an explicit Agent Node argument when
+    /// both are present (issue #1148 cascade layer 1 > 3).
+    #[test]
+    fn resolver_explicit_argument_overrides_application_default() {
+        let inputs = AgentConfigInputs {
+            model: FieldInputs {
+                explicit: Some("sonnet-4"),
+                mesh: None,
+                application: Some("opus-4-1"),
+            },
+            effort: FieldInputs::default(),
+        };
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
+    }
+
+    /// Pin the **Proxied Provider** path (issue #1148 AC #12: "Native and
+    /// Proxied Provider Spawn Options consume the same application-default
+    /// layer"). The spawn seam calls `parse_spawn_option_id` on
+    /// `node.provider` so a composite id `"claude:minimax"` looks up the
+    /// application default under its harness half `"claude"`. This test
+    /// drives the resolver with inputs that mirror what
+    /// `spawn_agent_inner` produces for a Proxied row: the harness's
+    /// application default feeds through, and the harness's capability
+    /// descriptor applies the same mask as the native row.
+    #[test]
+    fn proxied_provider_spawn_consumes_application_default() {
+        // Simulate: the spawn seam split "claude:minimax" → harness_id="claude"
+        // → looked up the application default → fed it into the resolver's
+        // application slot. The Anthropic capability descriptor is shared
+        // with native Claude (same adapter), so the resolved model +
+        // effort flow through identically to a native Claude spawn.
+        let inputs = AgentConfigInputs {
+            model: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: Some("opus-4-1"),
+            },
+            effort: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: Some("high"),
+            },
+        };
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
+    }
 }

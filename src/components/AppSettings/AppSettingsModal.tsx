@@ -5,6 +5,7 @@ import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
 import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
+import { HarnessDefaultsSection } from './HarnessDefaultsSection';
 import * as api from '../../lib/tauri';
 import type {
   ProviderInfo,
@@ -14,6 +15,7 @@ import type {
   DeviceSession,
   RealizedBind,
 } from '../../lib/tauri';
+import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
@@ -47,11 +49,11 @@ const SETTINGS_TABS = [
 type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
 
 /** Which pane a dirty site belongs to, so its nav item can show the
- *  unsaved-changes dot. Site keys: `autopilot-pool` (General), `harness-*`
- *  (Harnesses, prefixed where the modal wires HarnessConfigList), and
- *  `account-*` / `add-custom-form` (Providers). */
+ *  unsaved-changes dot. Site keys: `autopilot-pool` + `harness-defaults`
+ *  (General), `harness-*` (Harnesses, prefixed where the modal wires
+ *  HarnessConfigList), and `account-*` / `add-custom-form` (Providers). */
 function paneForDirtySite(site: string): SettingsTabId {
-  if (site === 'autopilot-pool') return 'general';
+  if (site === 'autopilot-pool' || site === 'harness-defaults') return 'general';
   if (site.startsWith('harness-')) return 'harnesses';
   return 'providers';
 }
@@ -443,6 +445,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // path — setTheme is synchronous and writes to a synchronous
   // localStorage key, so a "failed save" isn't possible.
   const [themeDraft, setThemeDraft] = useState<ThemeName>(currentTheme);
+  // Issue #1150: per-harness application defaults. The full sparse map
+  // hydrates from `getAppPreferences` alongside the other settings; the
+  // section re-reads via `getAppPreferences` after a successful save so a
+  // backend normalise-on-write (e.g. clearing an all-blank value) is
+  // reflected without a stale local cache.
+  const [harnessDefaults, setHarnessDefaults] = useState<Record<string, HarnessConfigValue>>({});
   // `loaded` flag carries over from the existing hydration logic below;
   // mirrored here so the rename picker only enables after the
   // preferences load resolves.
@@ -555,6 +563,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
         setPoolDraft(storedPool);
         poolSavedRef.current = storedPool;
+        setHarnessDefaults(prefs.harness_defaults ?? {});
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
         setDevices(deviceList);
@@ -834,6 +843,48 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     if (next === themeDraft) return;
     setThemeDraft(next);
     setTheme(next);
+  };
+
+  // Issue #1150 / #1148: persist one harness's application default.
+  // Returns `true` on success so the section's optimistic card can commit
+  // the draft into its `committed` snapshot; `false` on failure rolls
+  // back the draft to the last confirmed value AND surfaces the shared
+  // error banner (issue #1148 acceptance criteria 7: "On save failure,
+  // retain or restore the last confirmed value and show the existing
+  // settings error feedback rather than displaying an unsaved value as
+  // active"). A successful save re-reads `getAppPreferences` so a
+  // backend normalise-on-write (all-blank → entry removed) is reflected
+  // without a stale local snapshot.
+  const handleSetHarnessDefault = async (
+    profileId: string,
+    value: HarnessConfigValue,
+  ): Promise<boolean> => {
+    setError(null);
+    try {
+      await api.setHarnessDefault(profileId, value);
+      const prefs = await api.getAppPreferences();
+      setHarnessDefaults(prefs.harness_defaults ?? {});
+      return true;
+    } catch (e) {
+      setError(formatError(e));
+      return false;
+    }
+  };
+
+  const handleClearHarnessDefault = async (profileId: string): Promise<boolean> => {
+    setError(null);
+    try {
+      await api.clearHarnessDefault(profileId);
+      setHarnessDefaults((prev) => {
+        const next = { ...prev };
+        delete next[profileId];
+        return next;
+      });
+      return true;
+    } catch (e) {
+      setError(formatError(e));
+      return false;
+    }
   };
 
   // Commit the autopilot pool-size draft (blur / Enter). `''` clears the
@@ -1223,6 +1274,21 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               if (e.key === 'Enter') commitPoolSize();
             }}
             className="w-48 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+          />
+        </div>
+
+        {/* Issue #1150 / #1148: Application-level Agent Harness defaults.
+            One card per native Agent Harness, capability-gated (model
+            only where `supports_model_override`, effort with the
+            harness's declared vocabulary otherwise). On-dirty mirrors
+            into the modal's discard-confirm via `harness-defaults`. */}
+        <div className="pt-6 border-t border-border-subtle">
+          <HarnessDefaultsSection
+            providers={providers}
+            defaults={harnessDefaults}
+            onChange={handleSetHarnessDefault}
+            onReset={handleClearHarnessDefault}
+            onDirtyChange={(d) => siteDirtyChange('harness-defaults', d)}
           />
         </div>
 

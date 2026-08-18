@@ -21,6 +21,7 @@ import type { FileDiff } from '../types/generated/FileDiff';
 import type { FileNode } from '../types/generated/FileNode';
 import type { FreeResult } from '../types/generated/FreeResult';
 import type { GitBranchStatus } from '../types/generated/GitBranchStatus';
+import type { HarnessConfigValue } from '../types/generated/HarnessConfigValue';
 import type { GitHubIssue } from '../types/generated/GitHubIssue';
 import type { GitHubPullRequest } from '../types/generated/GitHubPullRequest';
 import type { GitRepoPruneInfo } from '../types/generated/GitRepoPruneInfo';
@@ -812,6 +813,28 @@ export const setAppNamingProvider = (provider: string | null) =>
  *  Semantics documented on `AppPreferences::autopilot_pool_size`. */
 export const setAppAutopilotPoolSize = (size: number | null) =>
   _invoke('set_app_autopilot_pool_size', { size });
+
+// ── Application-level Agent Harness defaults (issue #1150 / #1148) ──────────
+//
+// Sparse map keyed by stable harness profile id (`"claude"`, `"codex"`,
+// `"agy"`, plus user-defined custom profiles). The backend validates each
+// write against the harness's capability descriptor — unknown harness ids,
+// effort values outside `effort_control.allowed`, and whitespace-only inputs
+// are rejected at the boundary. An empty post-validation value removes the
+// sparse map entry rather than storing `{model: null, effort: null}`.
+
+/** Upsert one harness's application default. Errors propagate verbatim from
+ *  the backend (the parent surfaces them through the existing settings-error
+ *  feedback loop). */
+export const setHarnessDefault = (
+  profileId: string,
+  value: HarnessConfigValue,
+) => _invoke('set_harness_default', { profileId, value });
+
+/** Remove one harness's application default. Idempotent — clearing an already-
+ *  cleared harness is a no-op (so the UI's "Reset" affordance never errors). */
+export const clearHarnessDefault = (profileId: string) =>
+  _invoke('clear_harness_default', { profileId });
 
 export const setMinimaxApiKey = (key: string | null) =>
   _invoke('set_minimax_api_key', { key });

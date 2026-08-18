@@ -14,6 +14,12 @@ import type { ProviderInfo } from '../../src/lib/tauri';
 
 function provider(id: string, label: string): ProviderInfo {
   // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape.
+  // Issue #1149 added `capabilities`; issue #1150's harness-defaults
+  // section reads it, so the fixture must carry at least an
+  // "all false / no configurable defaults" descriptor (matches what the
+  // test would receive from a pre-#1149 backend). The reorder test
+  // doesn't care about the descriptor's contents — it just needs the
+  // modal to mount without throwing.
   return {
     id,
     label,
@@ -24,6 +30,19 @@ function provider(id: string, label: string): ProviderInfo {
     provider_id: null,
     is_proxied: false,
     group_key: id,
+    capabilities: {
+      harness_id: id,
+      supports_resume: false,
+      auto_resume_on_startup: false,
+      requires_attention_hook: false,
+      produces_readable_transcript: false,
+      supports_model_override: false,
+      supports_effort_override: false,
+      supports_prefill: false,
+      is_plain_terminal: id === 'terminal',
+      effort_control: { kind: 'none' },
+      available_on: ['windows'],
+    },
   };
 }
 
