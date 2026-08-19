@@ -6,6 +6,7 @@ import type { Mesh } from '../stores/meshStore';
 import type { AiContextStatus } from '../types/generated/AiContextStatus';
 import type { AppPreferences } from '../types/generated/AppPreferences';
 import type { AutopilotMode } from '../types/generated/AutopilotMode';
+import type { AutopilotCompatibility } from '../types/generated/AutopilotCompatibility';
 import type { AutopilotRunStateRow } from '../types/generated/AutopilotRunState';
 import type { BillingBalance } from '../types/generated/BillingBalance';
 import type { BillingMode } from '../types/generated/BillingMode';
@@ -314,6 +315,18 @@ export const setMeshAutopilotEnabled = (meshId: number, enabled: boolean) =>
  *  the DB is the source of truth (there is no separate scheduler state). */
 export const getLoopStatus = (meshId: number) =>
   _invoke<LoopStatusDto>('get_loop_status', { meshId });
+
+/** Autopilot compatibility verdict for a Mesh (issue #1152). Pure
+ *  read-side command — walks the resolved Autopilot Spawn Option
+ *  (explicit Autopilot selection → mesh default → app default →
+ *  "claude" fallback) and the harness capability contract, returning a
+ *  structured verdict. The Probe UI gates enable/start controls on this;
+ *  the backend `update_mesh_autopilot` and `set_mesh_autopilot_enabled`
+ *  commands enforce the same verdict on the write side. Refetch on every
+ *  relevant change (default provider, explicit Autopilot selection,
+ *  worktree toggle, harness availability). */
+export const getAutopilotCompatibility = (meshId: number) =>
+  _invoke<AutopilotCompatibility>('get_autopilot_compatibility', { meshId });
 
 /** Per-mesh target for the pre-spawn Worktree Pool
  *  (`services::warm_pool`, issue #611). `0` disables the pool for the
