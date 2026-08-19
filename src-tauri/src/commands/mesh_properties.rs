@@ -132,12 +132,42 @@ pub async fn update_mesh_column(
 
 #[tauri::command]
 pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
-    let db = db::get().lock().unwrap();
-    db.execute(
-        "UPDATE meshes SET use_worktree = ?1 WHERE id = ?2",
-        rusqlite::params![use_worktree as i32, mesh_id],
-    )
-    .map_err(|e| format!("failed to update use_worktree: {}", e))?;
+    let rows = {
+        let db = db::get().lock().unwrap();
+        db.execute(
+            "UPDATE meshes SET use_worktree = ?1 WHERE id = ?2",
+            rusqlite::params![use_worktree as i32, mesh_id],
+        )
+        .map_err(|e| format!("failed to update use_worktree: {}", e))?
+    };
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    // Issue #1152 — turning worktrees OFF on a mesh that has Autopilot
+    // enabled makes Autopilot incompatible (it always forces a worktree
+    // for the wrap-up PR branch). Persist `autopilot_enabled = 0` through
+    // the existing narrow `set_mesh_autopilot_enabled` write so the next
+    // poll pass skips the mesh rather than scheduling an incompatible
+    // spawn. We do NOT kill running Agent Nodes — the wrap-up sequence
+    // only matters for new spawns, and an in-flight node's worktree was
+    // created when the previous setting was active (acceptance criteria
+    // 11: "Existing Agent Nodes are not killed by compatibility changes").
+    // The change is silent on success — the existing Mesh Properties
+    // save indicator covers the user feedback path for the worktree
+    // toggle; the autopilot disablement is a side effect the next refresh
+    // of the Autopilot Probe tab will reflect.
+    if !use_worktree {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+        if mesh.autopilot_enabled {
+            crate::db::set_mesh_autopilot_enabled(mesh_id, false)
+                .map_err(|e| format!("failed to clear autopilot_enabled: {}", e))?;
+            tracing::info!(
+                "update_mesh_use_worktree: disabled autopilot on mesh {} (worktrees off)",
+                mesh_id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -351,6 +381,31 @@ pub async fn update_mesh_autopilot(
             return Err(format!("unknown autopilot action_on_success: {}", action));
         }
     }
+    // Issue #1152 — enforce compatibility on the write side. Read the
+    // mesh row to evaluate the verdict with the *new* `provider`
+    // selection in place; reject the write with the structured reason
+    // text if the new state would be incompatible and the caller is
+    // trying to enable. Disabling (`enabled = false`) is always allowed
+    // — the user is opting out, never opting in to an invalid run.
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    if enabled {
+        let app_default_provider = preferences::default_provider();
+        let verdict = crate::autopilot::compatibility::compute_for_mesh(
+            provider.as_deref().or(mesh.autopilot_provider.as_deref()),
+            mesh.default_provider.as_deref(),
+            app_default_provider.as_deref(),
+            mesh.use_worktree,
+        );
+        if !verdict.allowed {
+            let reasons = format_reasons(&verdict.reasons);
+            return Err(format!(
+                "cannot enable Autopilot on mesh {}: incompatible Spawn Option {} ({reasons}). \
+                 Pick a compatible harness, or correct the mesh configuration.",
+                mesh_id, verdict.resolved_spawn_option.as_deref().unwrap_or("<none>"),
+            ));
+        }
+    }
     let rows = db::set_mesh_autopilot(
         mesh_id,
         enabled,
@@ -366,6 +421,45 @@ pub async fn update_mesh_autopilot(
     Ok(())
 }
 
+/// Format a list of [`AutopilotCompatibilityReason`]s into a user-facing
+/// string suitable for a Tauri command's `Err` message. The Autopilot Probe
+/// UI also surfaces these reasons verbatim — the formatter is the canonical
+/// place to translate them into prose so both surfaces stay aligned.
+fn format_reasons(reasons: &[crate::autopilot::compatibility::AutopilotCompatibilityReason]) -> String {
+    use crate::autopilot::compatibility::AutopilotCompatibilityReason;
+    let mut parts: Vec<String> = Vec::with_capacity(reasons.len());
+    for reason in reasons {
+        let part = match reason {
+            AutopilotCompatibilityReason::NoResolvedHarness => {
+                "no Agent Harness resolved".to_string()
+            }
+            AutopilotCompatibilityReason::UnknownHarness { harness_id } => {
+                format!("Agent Harness '{}' is not installed", harness_id)
+            }
+            AutopilotCompatibilityReason::PlainTerminal => {
+                "Terminal is a plain shell, not an Agent Harness".to_string()
+            }
+            AutopilotCompatibilityReason::MissingPrefill { harness_id } => {
+                format!(
+                    "Agent Harness '{}' does not accept a startup prompt",
+                    harness_id
+                )
+            }
+            AutopilotCompatibilityReason::MissingAttentionHook { harness_id } => {
+                format!(
+                    "Agent Harness '{}' does not install an attention hook",
+                    harness_id
+                )
+            }
+            AutopilotCompatibilityReason::WorktreeDisabled => {
+                "worktrees are disabled on this mesh".to_string()
+            }
+        };
+        parts.push(part);
+    }
+    parts.join("; ")
+}
+
 /// Toggle a mesh's Looping Autopilot on/off — the Start/Stop control on the
 /// Autopilot Probe tab (ticket #994). Looping mode is DB-config-driven: the
 /// poller (`services::autopilot`) spawns iterations for any mesh where
@@ -379,6 +473,28 @@ pub async fn update_mesh_autopilot(
 /// an error rather than a silent success.
 #[tauri::command]
 pub async fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(), String> {
+    // Issue #1152 — read-side check before the narrow write. Reject the
+    // enable when the resolved Spawn Option is incompatible (same
+    // verdict the Probe UI displays). Disabling is always allowed.
+    if enabled {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+        let app_default_provider = preferences::default_provider();
+        let verdict = crate::autopilot::compatibility::compute_for_mesh(
+            mesh.autopilot_provider.as_deref(),
+            mesh.default_provider.as_deref(),
+            app_default_provider.as_deref(),
+            mesh.use_worktree,
+        );
+        if !verdict.allowed {
+            let reasons = format_reasons(&verdict.reasons);
+            return Err(format!(
+                "cannot enable Autopilot on mesh {}: incompatible Spawn Option {} ({reasons}). \
+                 Pick a compatible harness, or correct the mesh configuration.",
+                mesh_id, verdict.resolved_spawn_option.as_deref().unwrap_or("<none>"),
+            ));
+        }
+    }
     let rows = db::set_mesh_autopilot_enabled(mesh_id, enabled)
         .map_err(|e| format!("failed to update autopilot_enabled: {}", e))?;
     if rows == 0 {
@@ -404,6 +520,37 @@ pub async fn get_loop_status(
     Ok(crate::services::autopilot::derive_loop_status(
         mesh.autopilot_enabled,
         &rows,
+    ))
+}
+
+/// Pure compatibility verdict for Autopilot on one Mesh (issue #1152).
+///
+/// Composes the three layers the UI needs:
+/// 1. Resolves the Spawn Option Autopilot will launch (`meshes.autopilot_provider`
+///    explicit → mesh default → app default → `"claude"`).
+/// 2. Looks up the harness's authoritative capability descriptor.
+/// 3. Runs the pure evaluator and returns the verdict + reason codes.
+///
+/// The command is read-only — no DB writes. The Mesh is fetched via
+/// `db::get_mesh_by_id` so an unknown mesh id surfaces as an error rather
+/// than a silent "incompatible" verdict (the front-end then shows "Mesh
+/// not found"). `use_worktree` is read straight off the row; the App-wide
+/// default provider is read via `preferences::default_provider()` to keep
+/// the layer-3 lookup in lock-step with `resolve_default_provider`'s
+/// existing fall-through (`"claude"` hardcoded fallback if every layer
+/// was empty).
+#[tauri::command]
+pub async fn get_autopilot_compatibility(
+    mesh_id: i64,
+) -> Result<crate::autopilot::compatibility::AutopilotCompatibility, String> {
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let app_default_provider = preferences::default_provider();
+    Ok(crate::autopilot::compatibility::compute_for_mesh(
+        mesh.autopilot_provider.as_deref(),
+        mesh.default_provider.as_deref(),
+        app_default_provider.as_deref(),
+        mesh.use_worktree,
     ))
 }
 

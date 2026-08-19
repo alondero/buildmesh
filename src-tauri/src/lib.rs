@@ -532,6 +532,11 @@ pub fn run() {
             // enabled flag + loop-iteration ledger into the tab's status badge.
             commands::mesh_properties::set_mesh_autopilot_enabled,
             commands::mesh_properties::get_loop_status,
+            // Autopilot compatibility gate (issue #1152) — pure verdict for
+            // the Probe UI. `update_mesh_autopilot` and
+            // `set_mesh_autopilot_enabled` enforce the same verdict on the
+            // write side.
+            commands::mesh_properties::get_autopilot_compatibility,
             commands::mesh_properties::update_mesh_pool_size,
             commands::mesh_properties::get_mesh_pool_count,
             // Per-Mesh harness overrides (issue #1151 / slice 2 of #1148).

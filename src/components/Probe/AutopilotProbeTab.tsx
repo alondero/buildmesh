@@ -70,6 +70,7 @@ import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { groupByHarness } from '../../lib/groups';
 import {
+  getAutopilotCompatibility,
   getLoopStatus,
   getMeshProperties,
   listProviders,
@@ -81,6 +82,8 @@ import {
 } from '../../lib/tauri';
 import type { MeshRow } from '../../types/generated/MeshRow';
 import type { AutopilotMode } from '../../types/generated/AutopilotMode';
+import type { AutopilotCompatibility } from '../../types/generated/AutopilotCompatibility';
+import type { AutopilotCompatibilityReason } from '../../types/generated/AutopilotCompatibilityReason';
 import type { LoopStatusDto } from '../../types/generated/LoopStatus';
 import { LoadingState } from '../shared/Spinner';
 import { SaveIndicator } from '../shared/SaveIndicator';
@@ -158,6 +161,53 @@ function toLoopStatus(dto: LoopStatusDto): LoopStatus {
     return { kind: 'active', iteration: dto.active_iteration };
   }
   return dto.enabled ? { kind: 'idle' } : { kind: 'stopped' };
+}
+
+/** Translate a single `AutopilotCompatibilityReason` to user-facing copy
+ *  (issue #1152). Returns an object with `headline` (always shown) and
+ *  optional `remedy` (a concrete corrective action the user can take).
+ *  The headline is what the Probe banner shows; the remedy is the
+ *  secondary line that tells the user what to change.
+ *
+ *  Kept as a pure function so the formatter is unit-testable in
+ *  isolation from the React tree, and so the wire-side Rust enum
+ *  (each variant) maps 1:1 to a stable English string — no silent
+ *  fall-throughs, no `as any`. */
+export function compatibilityReasonCopy(
+  reason: AutopilotCompatibilityReason
+): { headline: string; remedy: string | null } {
+  switch (reason.kind) {
+    case 'no_resolved_harness':
+      return {
+        headline: 'No Agent Harness could be resolved.',
+        remedy: 'Open App Settings → Providers and ensure a default is set.',
+      };
+    case 'unknown_harness':
+      return {
+        headline: `Agent Harness "${reason.harness_id}" is not installed.`,
+        remedy: 'Pick an installed harness from the Spawn Option list.',
+      };
+    case 'plain_terminal':
+      return {
+        headline: 'Terminal is a plain shell, not an Agent Harness.',
+        remedy: 'Pick a real Agent Harness (Claude Code, Codex, Agy, …).',
+      };
+    case 'missing_prefill':
+      return {
+        headline: `${reason.harness_id} cannot accept a startup prompt.`,
+        remedy: 'Pick an Agent Harness that accepts prompts on launch.',
+      };
+    case 'missing_attention_hook':
+      return {
+        headline: `${reason.harness_id} does not install an attention hook.`,
+        remedy: 'Pick an Agent Harness that signals "awaiting input" events.',
+      };
+    case 'worktree_disabled':
+      return {
+        headline: 'Worktrees are disabled on this mesh.',
+        remedy: 'Enable worktrees in Mesh Properties → Worktrees.',
+      };
+  }
 }
 
 /** Form state. Numeric loop caps live as strings so an empty input means
@@ -314,6 +364,11 @@ export function AutopilotProbeTab() {
   // fetched (or not in looping mode); the row renders a muted "Checking…"
   // placeholder until the first `get_loop_status` resolves.
   const [loopStatus, setLoopStatus] = useState<LoopStatus | null>(null);
+  // Autopilot compatibility verdict (issue #1152). `null` while the
+  // first fetch is in flight — the children render an "unknown" banner
+  // rather than blocking on the verdict. The verdict controls whether
+  // the master "Autopilot on" checkbox + Start button are enabled.
+  const [compatibility, setCompatibility] = useState<AutopilotCompatibility | null>(null);
   const saveStatus = useSaveStatus();
   const mountedRef = useRef(true);
 
@@ -421,6 +476,36 @@ export function AutopilotProbeTab() {
       });
   }, [activeMeshId]);
 
+  /** Refresh the Autopilot compatibility verdict for the active Mesh
+   *  (issue #1152). Mesh-switch guarded (drop the result if the user
+   *  changed meshes mid-flight). A fetch failure is logged but does NOT
+   *  block the form — we keep the previous verdict in state rather than
+   *  flapping the gate open. The banner is the user feedback path; the
+   *  IPC error is not surfaced through SaveIndicator because a verdict
+   *  fetch is read-only telemetry, not a user-triggered save.
+   *
+   *  Refresh triggers:
+   *  - Mesh switch (the effect above re-mounts this effect via deps).
+   *  - After any save that can flip the verdict (worktree toggle,
+   *    `autopilot_provider` change, default-provider change). The save
+   *    handlers below call `refreshCompatibility()` directly so the
+   *    verdict updates without waiting for a subsequent mesh-switch. */
+  const refreshCompatibility = useCallback(async () => {
+    const meshId = activeMeshIdRef.current;
+    if (meshId === null) return;
+    try {
+      const verdict = await getAutopilotCompatibility(meshId);
+      if (!mountedRef.current || activeMeshIdRef.current !== meshId) return;
+      setCompatibility(verdict);
+    } catch (e) {
+      console.error('getAutopilotCompatibility failed:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCompatibility();
+  }, [activeMeshId, refreshCompatibility]);
+
   /** Save the loop config atomically. Local validation failures (bad
    *  numeric input, etc.) skip the IPC and surface through the
    *  SaveIndicator directly — matching the issue #729 AC of "show the
@@ -461,12 +546,21 @@ export function AutopilotProbeTab() {
    *  IPC — `use_worktree` is NOT a loop-config column (issue #481's
    *  issue-driven autopilot force-override notwithstanding), so it
    *  doesn't funnel through `update_mesh_loop_config`. Mirrors the
-   *  optimistic pattern from `MeshPropertiesTab.saveSandbox`. */
+   *  optimistic pattern from `MeshPropertiesTab.saveSandbox`.
+   *
+   *  Refreshes the compatibility verdict after a successful write —
+   *  flipping `use_worktree` to false makes the mesh incompatible, so
+   *  the verdict flips from `allowed=true` to `WorktreeDisabled` and
+   *  the banner / enable controls must reflect that. The backend
+   *  (`update_mesh_use_worktree`) ALSO auto-disables a previously-enabled
+   *  mesh in this case — the verdict refresh surfaces that auto-disable
+   *  so the user sees the new state without a mesh-switch. */
   const saveUseWorktree = async (value: boolean) => {
     const meshId = activeMeshIdRef.current;
     if (meshId === null) return;
     setForm((p) => ({ ...p, useWorktree: value }));
     await wrappedSave(() => updateMeshUseWorktree(meshId, value));
+    await refreshCompatibility();
   };
 
   /** Persist the issue-driven Autopilot Policy in one atomic write
@@ -476,7 +570,14 @@ export function AutopilotProbeTab() {
    *  the policy fields out of sync with the master enable flag. Blank
    *  `triggerLabel` / `provider` collapse to `null`; an unset
    *  `actionOnSuccess` defaults to `'draft_pr'` (the spec's chosen
-   *  default action). Optimistic like `saveUseWorktree`. */
+   *  default action). Optimistic like `saveUseWorktree`.
+   *
+   *  Refreshes the compatibility verdict after a successful write — the
+   *  `provider` column is one of the three Spawn Option layers, so a
+   *  change can flip the verdict (issue #1152). Refreshing here also
+   *  covers the case where the user disables Autopilot after a
+   *  compatibility error: the verdict stays `allowed=false` (the
+   *  Spawn Option is still incompatible) but the user can move on. */
   const saveIssueDriven = async (next: IssueDrivenForm) => {
     const meshId = activeMeshIdRef.current;
     if (meshId === null) return;
@@ -490,6 +591,7 @@ export function AutopilotProbeTab() {
         next.actionOnSuccess || null
       )
     );
+    await refreshCompatibility();
   };
 
   /** Optimistic patch helper for the issue-driven controls (master
@@ -535,12 +637,19 @@ export function AutopilotProbeTab() {
   /** Start/Stop the loop — flips `autopilot_enabled` via its narrow command,
    *  then immediately refetches the status so the badge reflects the new state
    *  without waiting for the next poll tick. Routed through `wrappedSave` so a
-   *  rejection surfaces in the SaveIndicator (this IS a user-triggered write). */
+   *  rejection surfaces in the SaveIndicator (this IS a user-triggered write).
+   *
+   *  Refetches the compatibility verdict too — the loop's Start action is the
+   *  primary place a user tries to enable Autopilot, so the verdict gates
+   *  whether the call can succeed. A rejection from the backend (incompatible
+   *  Spawn Option) is surfaced via SaveIndicator and the verdict remains
+   *  `allowed=false` so the UI keeps the controls disabled. */
   const setLoopEnabled = async (enabled: boolean) => {
     const meshId = activeMeshIdRef.current;
     if (meshId === null) return;
     await wrappedSave(() => setMeshAutopilotEnabled(meshId, enabled));
     await refreshLoopStatus();
+    await refreshCompatibility();
   };
 
   return (
@@ -595,6 +704,7 @@ export function AutopilotProbeTab() {
                 onSaveUseWorktree={saveUseWorktree}
                 loopStatus={loopStatus}
                 onSetLoopEnabled={setLoopEnabled}
+                compatibility={compatibility}
                 mountedRef={mountedRef}
               />
           ) : (
@@ -604,6 +714,7 @@ export function AutopilotProbeTab() {
               onSaveIssueDriven={saveIssueDriven}
               onPatchIssueDriven={patchIssueDriven}
               providers={providers}
+              compatibility={compatibility}
               mountedRef={mountedRef}
             />
           )}
@@ -627,6 +738,10 @@ interface LoopingSectionProps {
   loopStatus: LoopStatus | null;
   /** Start (`true`) / Stop (`false`) the loop by flipping `autopilot_enabled`. */
   onSetLoopEnabled: (enabled: boolean) => Promise<void>;
+  /** Autopilot compatibility verdict (issue #1152). `null` while the
+   *  first fetch is in flight — the section renders the controls as if
+   *  compatible (the backend will reject an incompatible Start). */
+  compatibility: AutopilotCompatibility | null;
   mountedRef: React.MutableRefObject<boolean>;
 }
 
@@ -637,19 +752,36 @@ function LoopingSection({
   onSaveUseWorktree,
   loopStatus,
   onSetLoopEnabled,
+  compatibility,
   mountedRef,
 }: LoopingSectionProps) {
+  // Issue #1152: Start is disabled when the verdict says incompatible.
+  // Stop is *always* available so the user can always turn off Autopilot
+  // (an enabled-and-now-incompatible mesh still needs a manual reset
+  // until the scheduler pass auto-disables it; the Stop control here is
+  // the synchronous affordance).
+  const compatible = compatibility === null || compatibility.allowed;
   return (
     <div className="space-y-4">
+      {/* Compatibility banner (issue #1152). Renders nothing when the
+          verdict is unknown or allowed — only surfaces when there is
+          something actionable for the user to see. Each reason renders
+          as its own row so the user sees every gap, not just the first. */}
+      <CompatibilityBanner compatibility={compatibility} />
+
       {/* Runtime loop status row + Start/Stop controls (ticket #994). The
           loop is DB-config-driven: Start flips `autopilot_enabled` on and the
           poller (`services::autopilot`) spawns iterations for this Looping mesh
           within ~2 min; Stop flips it off (a running iteration finishes on its
           own). The badge is derived from `get_loop_status` — the enabled flag +
-          iteration ledger — so it reflects real runtime state, not a guess. */}
+          iteration ledger — so it reflects real runtime state, not a guess.
+          Issue #1152: Start is gated on the compatibility verdict so an
+          incompatible Spawn Option never gets turned on (the backend will
+          reject anyway, but the UI disabling prevents the round-trip). */}
       <LoopStatusRow
         status={loopStatus}
         promptBlank={form.initialPrompt.trim() === ''}
+        compatible={compatible}
         onStart={() => onSetLoopEnabled(true)}
         onStop={() => onSetLoopEnabled(false)}
       />
@@ -808,17 +940,24 @@ interface LoopStatusRowProps {
   /** Whether the initial prompt is blank — the loop stays idle when it is,
    *  so Start is disabled with an explanatory tooltip. */
   promptBlank: boolean;
+  /** Whether the resolved Spawn Option is compatible with the Autopilot
+   *  pipeline (issue #1152). `false` disables Start with an explanatory
+   *  tooltip. Stop is always available regardless of compatibility — the
+   *  user must always be able to turn the loop off. */
+  compatible: boolean;
   onStart: () => void;
   onStop: () => void;
 }
 
-function LoopStatusRow({ status, promptBlank, onStart, onStop }: LoopStatusRowProps) {
+function LoopStatusRow({ status, promptBlank, compatible, onStart, onStop }: LoopStatusRowProps) {
   // `stopped` (or not-yet-loaded) means the loop is off → Start is the live
   // action; any other state means it's on → Stop is the live action.
   const enabled = status !== null && status.kind !== 'stopped';
-  const startDisabled = status === null || enabled || promptBlank;
+  const startDisabled = status === null || enabled || promptBlank || !compatible;
   const stopDisabled = status === null || !enabled;
-  const startTitle = promptBlank
+  const startTitle = !compatible
+    ? 'Autopilot cannot run on this Mesh — see the reason above. Fix the configuration first.'
+    : promptBlank
     ? 'Add an initial prompt first — the loop stays idle without one.'
     : 'Start the loop — the poller spawns the first iteration within ~2 min.';
 
@@ -849,6 +988,7 @@ function LoopStatusRow({ status, promptBlank, onStart, onStop }: LoopStatusRowPr
           onClick={onStart}
           title={startTitle}
           aria-label="Start loop"
+          data-testid="autopilot-loop-start"
           className="text-xs px-2 py-1 rounded-md border border-accent-cyan/40 text-accent-cyan hover:bg-accent-cyan/10 disabled:border-border-subtle disabled:text-text-muted/60 disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
         >
           Start
@@ -873,6 +1013,64 @@ function LoopStatusRow({ status, promptBlank, onStart, onStop }: LoopStatusRowPr
   );
 }
 
+/** Compatibility banner (issue #1152). Renders nothing when the verdict is
+ *  unknown (`null`) or compatible — only surfaces when there is something
+ *  actionable for the user to see. Each reason renders as its own row so the
+ *  user sees every gap, not just the first.
+ *
+ *  The banner is the single source of user-visible "why is this disabled?"
+ *  copy; the LoopStatusRow + IssueDrivenSection only consume the verdict's
+ *  boolean to gate their controls. */
+function CompatibilityBanner({
+  compatibility,
+}: {
+  compatibility: AutopilotCompatibility | null;
+}) {
+  if (compatibility === null || compatibility.allowed) return null;
+  const headline = compatibility.explicit_autopilot_provider
+    ? 'Autopilot selection is incompatible'
+    : 'Default Autopilot Spawn Option is incompatible';
+  return (
+    <div
+      data-testid="autopilot-compatibility-banner"
+      role="status"
+      className="rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 space-y-2"
+    >
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <span className="text-xs font-semibold text-status-warning">
+          {headline}
+        </span>
+        {compatibility.resolved_spawn_option !== null && (
+          <span className="text-2xs text-text-muted">
+            (resolved: <code className="text-text-secondary">{compatibility.resolved_spawn_option}</code>)
+          </span>
+        )}
+      </div>
+      <ul className="space-y-1">
+        {compatibility.reasons.map((reason, idx) => {
+          const copy = compatibilityReasonCopy(reason);
+          return (
+            <li
+              key={`${reason.kind}-${idx}`}
+              data-testid={`autopilot-compatibility-reason-${reason.kind}`}
+              className="text-xs text-text-secondary"
+            >
+              <span className="font-medium text-text-primary">
+                {copy.headline}
+              </span>
+              {copy.remedy !== null && (
+                <span className="block text-2xs text-text-muted/80 ml-0 mt-0.5">
+                  → {copy.remedy}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 interface IssueDrivenSectionProps {
   form: IssueDrivenForm;
   setForm: React.Dispatch<React.SetStateAction<IssueDrivenForm>>;
@@ -888,6 +1086,14 @@ interface IssueDrivenSectionProps {
    *  parent fetches once on mount and re-fetches on
    *  `provider-list-changed`; this prop is read-only here. */
   providers: ProviderInfo[];
+  /** Autopilot compatibility verdict (issue #1152). `null` while the
+   *  first fetch is in flight. The master "Autopilot on" checkbox is
+   *  gated on the verdict — enabling Autopilot with an incompatible
+   *  Spawn Option is rejected by the backend, so the UI disablement
+   *  prevents a guaranteed-fail round-trip. The four policy columns
+   *  remain editable so the user can adjust the configuration that
+   *  blocks enablement (issue #1152 AC #5). */
+  compatibility: AutopilotCompatibility | null;
   mountedRef: React.MutableRefObject<boolean>;
 }
 
@@ -897,8 +1103,24 @@ function IssueDrivenSection({
   onSaveIssueDriven,
   onPatchIssueDriven,
   providers,
+  compatibility,
   mountedRef,
 }: IssueDrivenSectionProps) {
+  // Issue #1152: gating rules.
+  // - `enableBlocked`: when the verdict says incompatible, the master
+  //   "Autopilot on" checkbox can't be turned ON (backend would reject).
+  //   Turning it OFF is always allowed — the user must always be able to
+  //   disable Autopilot, even when the configuration is broken.
+  // - `compatAllowToggle`: shorthand — true when the user CAN turn it on.
+  const compatAllowToggle = compatibility === null || compatibility.allowed;
+  // Once Autopilot is enabled, the master toggle's "off" branch is the
+  // important one — flipping it off must stay possible regardless of the
+  // verdict (so the user can always recover). When Autopilot is currently
+  // disabled and the verdict is incompatible, the "on" branch is blocked.
+  const enableBlocked = !form.enabled && !compatAllowToggle;
+  const enableTitle = enableBlocked
+    ? 'Autopilot cannot run on this Mesh — see the reason above. Fix the configuration first.'
+    : undefined;
   return (
     <div className="space-y-3">
       {/* One-line intro — the loom sentence that used to live at the
@@ -911,13 +1133,24 @@ function IssueDrivenSection({
         and opens a PR.
       </p>
 
+      {/* Compatibility banner (issue #1152). See `CompatibilityBanner`
+          in the Looping section above for the rationale — the banner
+          is identical in shape so both modes use the same
+          presentation. */}
+      <CompatibilityBanner compatibility={compatibility} />
+
       {/* Master enable (issue #481). Owns the four policy columns in
           the same atomic write — unchecking fires
           `update_mesh_autopilot({ enabled: false, …4 fields })` so
           both halves stay in sync. Renamed from
           `MeshPropertiesTab`'s "Autopilot Mode" to avoid clashing
           with the `Autopilot mode` segmented toggle at the top of
-          this tab. */}
+          this tab.
+
+          Issue #1152: blocked when the verdict is incompatible AND the
+          user is trying to enable (i.e. currently disabled). The
+          always-on `form.enabled === false` → `true` path is the one
+          that's blocked; turning OFF is always permitted. */}
       <div>
         <label
           htmlFor="ap-policy-enabled"
@@ -927,10 +1160,13 @@ function IssueDrivenSection({
             id="ap-policy-enabled"
             type="checkbox"
             checked={form.enabled}
+            disabled={enableBlocked}
             onChange={async (e) => {
               await onPatchIssueDriven({ enabled: e.target.checked });
             }}
-            className="accent-accent-cyan"
+            title={enableTitle}
+            data-testid="autopilot-policy-enabled"
+            className="accent-accent-cyan disabled:opacity-50 disabled:cursor-not-allowed"
           />
           <span className="text-text-primary">Autopilot on</span>
         </label>

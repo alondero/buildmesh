@@ -213,6 +213,44 @@ fn poll_mesh(
     mesh: &Mesh,
     global_budget: &mut Option<i64>,
 ) -> Result<(), String> {
+    // Issue #1152 — revalidate compatibility at the scheduler boundary
+    // (acceptance criteria 7: "Revalidate at the scheduler/worker boundary
+    // before creating an Agent Node. Stale or externally modified enabled
+    // state must not launch an incompatible harness"). A user can flip a
+    // mesh's `use_worktree` to false, or change the default provider, or
+    // change the explicit Autopilot selection, while the mesh is enabled;
+    // the backend write paths auto-disable on the same turn (see
+    // `update_mesh_use_worktree` / the harness-defaults writers), but the
+    // re-check here is the second-and-final gate so an out-of-band write
+    // (e.g. a stale UI snapshot, a direct DB edit, a third-party IPC
+    // caller that bypassed the UI) cannot spawn an incompatible Agent
+    // Node. We persist `autopilot_enabled = 0` through the existing
+    // narrow write so the next pass skips this mesh entirely; running
+    // Agent Nodes are NOT killed (the in-flight wrap-up runs complete on
+    // their own — issue #1152 AC #11).
+    let verdict = crate::autopilot::compatibility::compute_for_mesh(
+        mesh.autopilot_provider.as_deref(),
+        mesh.default_provider.as_deref(),
+        crate::preferences::default_provider().as_deref(),
+        mesh.use_worktree,
+    );
+    if !verdict.allowed {
+        tracing::warn!(
+            "autopilot: mesh {} ({}) is incompatible — disabling: harness={} reasons={:?}",
+            mesh.id,
+            mesh.name,
+            verdict.resolved_spawn_option.as_deref().unwrap_or("<none>"),
+            verdict.reasons,
+        );
+        if let Err(e) = db::set_mesh_autopilot_enabled(mesh.id, false) {
+            tracing::warn!(
+                "autopilot: failed to disable incompatible mesh {}: {}",
+                mesh.id,
+                e
+            );
+        }
+        return Ok(());
+    }
     // The merged-PR sweep runs BEFORE the capacity gate: a mesh at capacity
     // must still get its finished nodes archived (that's what clears grid
     // space), and the sweep costs no network when there's nothing to sweep.

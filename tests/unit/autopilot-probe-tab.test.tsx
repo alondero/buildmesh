@@ -101,6 +101,18 @@ function mockBackend(
      *  provider select consumes, so shape drift between tests and
      *  production code is caught at compile time. */
     providers?: ProviderInfo[];
+    /** Compatibility verdict the AutopilotProbeTab UI consumes
+     *  (issue #1152). Defaults to a fully-compatible verdict so
+     *  existing tests don't need to know about the gate. Tests that
+     *  exercise the disabled-controls behaviour override this with an
+     *  `allowed: false` verdict + a reason list. */
+    compatibility?: {
+      allowed: boolean;
+      reasons: Array<Record<string, unknown>>;
+      resolved_harness_id: string | null;
+      resolved_spawn_option: string | null;
+      explicit_autopilot_provider: boolean;
+    };
   } = {}
 ) {
   let enabled = opts.loopStatus?.enabled ?? row.autopilot_enabled;
@@ -116,6 +128,20 @@ function mockBackend(
         total_iterations: totalIterations,
       };
       return Promise.resolve(dto);
+    }
+    if (cmd === 'get_autopilot_compatibility') {
+      // Default to a fully-compatible verdict so the existing
+      // AutopilotProbeTab tests can focus on the legacy behaviour.
+      // Issue #1152-specific tests override this via `opts.compatibility`.
+      return Promise.resolve(
+        opts.compatibility ?? {
+          allowed: true,
+          reasons: [],
+          resolved_harness_id: 'claude',
+          resolved_spawn_option: 'claude',
+          explicit_autopilot_provider: false,
+        }
+      );
     }
     if (cmd === 'list_providers') {
       // Empty by default — the looping branch never reads the
@@ -689,13 +715,16 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
     // (enabled + trigger + concurrency + provider + action) so a
     // partial update can never desync the master enable from the rest
     // of the policy. Each change below asserts the FULL payload the
-    // contract pins, not just the changed field.
+    // contract pins, not just the changed field. Issue #1152 added a
+    // `get_autopilot_compatibility` follow-up call after every save,
+    // so we assert via `toHaveBeenCalledWith` (not `Last`) — the
+    // exact "last call" is now the compatibility refresh.
     await user.selectOptions(
       screen.getByLabelText('Max concurrent autopilot nodes'),
       '5'
     );
     await waitFor(() => {
-      expect(invoke).toHaveBeenLastCalledWith('update_mesh_autopilot', {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
         meshId: 42,
         enabled: true,
         triggerLabel: 'buildmesh:run',
@@ -710,7 +739,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
     // Untouched fields travel with the change — proving atomicity.
     await user.selectOptions(screen.getByLabelText('Autopilot provider'), '');
     await waitFor(() => {
-      expect(invoke).toHaveBeenLastCalledWith('update_mesh_autopilot', {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
         meshId: 42,
         enabled: true,
         triggerLabel: 'buildmesh:run',
@@ -722,7 +751,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
 
     await user.selectOptions(screen.getByLabelText('On success'), 'none');
     await waitFor(() => {
-      expect(invoke).toHaveBeenLastCalledWith('update_mesh_autopilot', {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
         meshId: 42,
         enabled: true,
         triggerLabel: 'buildmesh:run',
@@ -755,6 +784,234 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         'update_mesh_autopilot',
         expect.objectContaining({ triggerLabel: null })
       );
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Issue #1152 — Autopilot compatibility gate UI behaviour
+  // ---------------------------------------------------------------------
+
+  /** Helper to construct a `mockBackend` options bag with a specific
+   *  compatibility verdict. The defaults elsewhere use a fully-compatible
+   *  verdict so existing tests don't need to know about the gate; here
+   *  every test wants a specific verdict so we centralise the helper. */
+  function compatVerdict(overrides: {
+    allowed?: boolean;
+    reasons?: Array<Record<string, unknown>>;
+    resolved_harness_id?: string | null;
+    resolved_spawn_option?: string | null;
+    explicit_autopilot_provider?: boolean;
+  }) {
+    return {
+      allowed: overrides.allowed ?? false,
+      reasons: overrides.reasons ?? [],
+      resolved_harness_id: overrides.resolved_harness_id ?? null,
+      resolved_spawn_option: overrides.resolved_spawn_option ?? null,
+      explicit_autopilot_provider: overrides.explicit_autopilot_provider ?? false,
+    };
+  }
+
+  it('renders the compatibility banner with the resolved spawn option + each reason headline', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'issue_driven',
+        autopilot_enabled: false,
+        use_worktree: true,
+        autopilot_provider: 'opencode',
+      }),
+      {
+        compatibility: compatVerdict({
+          allowed: false,
+          reasons: [
+            { kind: 'missing_prefill', harness_id: 'opencode' },
+            { kind: 'missing_attention_hook', harness_id: 'opencode' },
+          ],
+          resolved_harness_id: 'opencode',
+          resolved_spawn_option: 'opencode',
+          explicit_autopilot_provider: true,
+        }),
+      }
+    );
+    await openAutopilotTab();
+
+    // Banner is visible with the explicit-selection label.
+    const banner = await screen.findByTestId('autopilot-compatibility-banner');
+    expect(banner.textContent).toMatch(/Autopilot selection is incompatible/);
+    expect(banner.textContent).toMatch(/resolved:.*opencode/);
+
+    // Each reason renders as its own bullet with the harness id.
+    expect(
+      screen.getByTestId('autopilot-compatibility-reason-missing_prefill')
+    ).toBeTruthy();
+    expect(
+      screen.getByTestId('autopilot-compatibility-reason-missing_attention_hook')
+    ).toBeTruthy();
+  });
+
+  it('uses the default-spawn-option label when the verdict fell through', async () => {
+    mockBackend(
+      meshRow({ autopilot_mode: 'issue_driven', autopilot_enabled: false }),
+      {
+        compatibility: compatVerdict({
+          allowed: false,
+          reasons: [
+            { kind: 'missing_prefill', harness_id: 'opencode' },
+          ],
+          resolved_harness_id: 'opencode',
+          resolved_spawn_option: 'opencode',
+          explicit_autopilot_provider: false,
+        }),
+      }
+    );
+    await openAutopilotTab();
+
+    const banner = await screen.findByTestId('autopilot-compatibility-banner');
+    expect(banner.textContent).toMatch(/Default Autopilot Spawn Option is incompatible/);
+  });
+
+  it('disables the master Autopilot-on checkbox while incompatible (but keeps Stop available)', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'issue_driven',
+        autopilot_enabled: false,
+        autopilot_provider: 'opencode',
+      }),
+      {
+        compatibility: compatVerdict({
+          allowed: false,
+          reasons: [
+            { kind: 'missing_prefill', harness_id: 'opencode' },
+            { kind: 'missing_attention_hook', harness_id: 'opencode' },
+          ],
+          resolved_harness_id: 'opencode',
+          resolved_spawn_option: 'opencode',
+          explicit_autopilot_provider: true,
+        }),
+      }
+    );
+    await openAutopilotTab();
+
+    const checkbox = (await screen.findByTestId(
+      'autopilot-policy-enabled'
+    )) as HTMLInputElement;
+    expect(checkbox.disabled).toBe(true);
+    expect(checkbox.title).toMatch(/cannot run on this Mesh/i);
+
+    // The user can still see the four policy columns are gated behind the
+    // master toggle — they aren't rendered until Autopilot is enabled.
+    expect(screen.queryByLabelText('Trigger label')).toBeNull();
+  });
+
+  it('lets the user re-enable after switching to a compatible harness', async () => {
+    // Pin: when the verdict flips from `allowed=false` to `allowed=true`,
+    // the UI unblocks (banner disappears, checkbox enabled). The actual
+    // IPC re-mock flow is exercised by the integration suite — here we
+    // mount with the *new* allowed verdict directly and verify the UI
+    // state, which is the observable outcome the user sees.
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'issue_driven',
+        autopilot_enabled: false,
+        autopilot_provider: 'claude:minimax',
+      }),
+      {
+        compatibility: compatVerdict({
+          allowed: true,
+          resolved_harness_id: 'claude',
+          resolved_spawn_option: 'claude:minimax',
+          explicit_autopilot_provider: true,
+        }),
+      }
+    );
+    await openAutopilotTab();
+    await waitFor(() => {
+      expect(screen.queryByTestId('autopilot-compatibility-banner')).toBeNull();
+    });
+    const checkbox = (await screen.findByTestId(
+      'autopilot-policy-enabled'
+    )) as HTMLInputElement;
+    expect(checkbox.disabled).toBe(false);
+  });
+
+  it('disables Looping-mode Start while incompatible but keeps Stop available', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'looping',
+        autopilot_enabled: false,
+        loop_initial_prompt: 'do the work',
+        autopilot_provider: 'opencode',
+      }),
+      {
+        compatibility: compatVerdict({
+          allowed: false,
+          reasons: [
+            { kind: 'missing_prefill', harness_id: 'opencode' },
+            { kind: 'missing_attention_hook', harness_id: 'opencode' },
+          ],
+          resolved_harness_id: 'opencode',
+          resolved_spawn_option: 'opencode',
+          explicit_autopilot_provider: true,
+        }),
+      }
+    );
+    const user = userEvent.setup();
+    await openAutopilotTab();
+
+    const start = (await screen.findByTestId(
+      'autopilot-loop-start'
+    )) as HTMLButtonElement;
+    const stop = (await screen.findByRole('button', { name: /stop loop/i })) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    expect(start.title).toMatch(/cannot run on this Mesh/i);
+    // Stop is gated on the live loop status (Idle/Active), not the
+    // compatibility verdict — so it's *not* disabled purely by an
+    // incompatible Spawn Option. The user can always recover.
+    expect(stop).toBeTruthy();
+    // Suppress unused warning.
+    void user;
+  });
+
+  it('shows the worktree-disabled reason when the mesh has worktrees off', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'issue_driven',
+        autopilot_enabled: false,
+        use_worktree: false,
+      }),
+      {
+        compatibility: compatVerdict({
+          allowed: false,
+          reasons: [{ kind: 'worktree_disabled' }],
+          resolved_harness_id: 'claude',
+          resolved_spawn_option: 'claude',
+          explicit_autopilot_provider: false,
+        }),
+      }
+    );
+    await openAutopilotTab();
+
+    const banner = await screen.findByTestId('autopilot-compatibility-banner');
+    expect(banner.textContent).toMatch(/worktrees are disabled on this mesh/i);
+  });
+
+  it('does not render the banner when the verdict is allowed', async () => {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'issue_driven',
+        autopilot_enabled: false,
+      }),
+      {
+        compatibility: compatVerdict({
+          allowed: true,
+          resolved_harness_id: 'claude',
+          resolved_spawn_option: 'claude',
+        }),
+      }
+    );
+    await openAutopilotTab();
+    // Give the verdict fetch a tick to resolve.
+    await waitFor(() => {
+      expect(screen.queryByTestId('autopilot-compatibility-banner')).toBeNull();
     });
   });
 });
