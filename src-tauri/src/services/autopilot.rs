@@ -298,32 +298,24 @@ fn poll_mesh(
         .map_err(|e| e.to_string())?;
     let known = db::list_known_autopilot_issue_numbers(mesh.id).map_err(|e| e.to_string())?;
 
-    let candidates = plan_spawns(&issues, &known, capacity as usize);
     // Map #976: skip issues whose body declares a `**Blocked by**` reference
-    // that's still unresolved on this pass. `plan_spawns` returns GitHub's
-    // best-match order (newest-labelled first for a label query); the
-    // blocked-by filter walks the candidate list once and drops the
-    // deferred ones. The open-number set is built per-pass from the
-    // labelled-open page — see `unresolved_blockers` for the fail-open
-    // semantics (decision 2).
+    // that's still unresolved on this pass. `plan_spawns_with_blockers`
+    // runs the blocked-by filter BEFORE the dedup-and-take (the worked
+    // example: alondero/pixelgrab dep-chain silent-stall under
+    // `concurrency_limit = 1` — the head-of-list blocked issue would
+    // otherwise starve the unblocked tail). The `LOGGED_BLOCKS`-gated
+    // "blocked by … parked" log is emitted inside the helper for every
+    // blocked issue, not just the head, so the operator sees the full
+    // parked set on the first observation of a pass.
     let open_numbers: HashSet<i64> = issues.iter().map(|i| i.number).collect();
-    let planned: Vec<&Issue> = candidates
-        .into_iter()
-        .filter(|issue| {
-            let Some(unresolved) = unresolved_blockers(issue, &open_numbers, &known) else {
-                return true;
-            };
-            if mark_blocked_logged(mesh.id, issue.number) {
-                tracing::info!(
-                    "autopilot: issue #{} on mesh {} blocked by {:?} — parked, retry next pass",
-                    issue.number,
-                    mesh.name,
-                    unresolved
-                );
-            }
-            false
-        })
-        .collect();
+    let planned = plan_spawns_with_blockers(
+        &issues,
+        &known,
+        &open_numbers,
+        capacity as usize,
+        mesh.id,
+        &mesh.name,
+    );
     if planned.is_empty() {
         return Ok(());
     }
@@ -875,6 +867,13 @@ pub(crate) fn effective_capacity(mesh_capacity: i64, global_budget: Option<i64>)
 /// given the issue numbers this mesh already has nodes for and the spare
 /// concurrency `capacity`. Keeps GitHub's returned order (best-match first —
 /// effectively newest-labelled first for a label query).
+///
+/// Production callers go through [`plan_spawns_with_blockers`] (which
+/// layers the **Blocked by** filter in front of the dedup-and-take to
+/// avoid the head-of-list blocked silent-stall — see its docstring). This
+/// primitive stays around for the four unit tests below, which pin the
+/// dedup-then-take contract in isolation from the Blocker logic.
+#[allow(dead_code)]
 pub(crate) fn plan_spawns<'a>(
     issues: &'a [Issue],
     known_issue_numbers: &[i64],
@@ -883,6 +882,63 @@ pub(crate) fn plan_spawns<'a>(
     issues
         .iter()
         .filter(|i| !known_issue_numbers.contains(&i.number))
+        .take(capacity)
+        .collect()
+}
+
+/// Issue-driven planner with the dependency-chain filter layered in.
+///
+/// **Why this helper exists.** A dep-chain mesh (worked example: the
+/// alondero/pixelgrab Tracer 14–15 series, `concurrency_limit = 1`, 14
+/// open issues with `ready-for-agent`) needs the planner to *filter
+/// blocked-by BEFORE the capacity take*. The previous order — call
+/// `plan_spawns` (dedup, take capacity) and then filter — meant
+/// `capacity = 1` selected only the head-of-list issue (newest-labelled
+/// first per GitHub's default order). When the head was blocked the
+/// filter rejected it, `planned` was empty, and the poller wasted the
+/// pass even though an unblocked issue sat further down the list. Every
+/// 2-minute pass repeated the same waste; nothing ever spawned.
+///
+/// The fix is to sieve blocked-by FIRST, then dedup, then take. The
+/// unblocked tail can win under capacity=1 because the `take` now
+/// operates on the unblocked subset. The dedup-vs-take ordering inside
+/// `plan_spawns` (`filter(!known).take(capacity)`) is preserved as a
+/// sub-step — the dedup tests on `plan_spawns` stay green.
+///
+/// **Side effect.** The "blocked by [...] — parked, retry next pass"
+/// info log is emitted inline, gated by [`mark_blocked_logged`] so a
+/// repeated (mesh_id, issue_number) pair is silent on subsequent passes.
+/// The log emission is intrinsically tied to the filter rejection (it's
+/// the diagnostic that names the blocker chain), so splitting it from
+/// the filter would create a confusing two-call API. The helper is
+/// `pub(crate)` and the only production caller is [`poll_mesh`].
+pub(crate) fn plan_spawns_with_blockers<'a>(
+    issues: &'a [Issue],
+    known_issue_numbers: &[i64],
+    open_issue_numbers: &HashSet<i64>,
+    capacity: usize,
+    mesh_id: i64,
+    mesh_name: &str,
+) -> Vec<&'a Issue> {
+    issues
+        .iter()
+        .filter(|issue| {
+            match unresolved_blockers(issue, open_issue_numbers, known_issue_numbers) {
+                None => true,
+                Some(unresolved) => {
+                    if mark_blocked_logged(mesh_id, issue.number) {
+                        tracing::info!(
+                            "autopilot: issue #{} on mesh {} blocked by {:?} — parked, retry next pass",
+                            issue.number,
+                            mesh_name,
+                            unresolved
+                        );
+                    }
+                    false
+                }
+            }
+        })
+        .filter(|issue| !known_issue_numbers.contains(&issue.number))
         .take(capacity)
         .collect()
 }
@@ -1139,6 +1195,191 @@ mod tests {
         assert!(planned.is_empty());
     }
 
+    // -- plan_spawns_with_blockers: regression for the head-of-list
+    //    silent-stall (worked example: alondero/pixelgrab dep chain). The
+    //    helper composes `unresolved_blockers` (with the LOGGED_BLOCKS-gated
+    //    info log) + the dedup-and-take, in that order. See the helper's
+    //    docstring for the ordering contract.
+
+    /// Mesh id reserved for the planner tests so `LOGGED_BLOCKS` (a global
+    /// `Lazy<Mutex<HashSet>>`) never collides with another test's pair.
+    /// Each test that drives the helper removes its own pairs at the end
+    /// so the tests stay re-orderable.
+    const PLANNER_TEST_MESH: i64 = i64::MAX - 211;
+
+    fn reset_planner_logged_blocks(issue_numbers: &[i64]) {
+        let mut guard = LOGGED_BLOCKS.lock().unwrap();
+        for n in issue_numbers {
+            guard.remove(&(PLANNER_TEST_MESH, *n));
+        }
+    }
+
+    /// The headline regression: capacity=1, head-of-list blocked by open
+    /// dependencies, tail unblocked. The previous shape (dedup-then-take
+    /// + filter-after-take) wasted the pass. The new shape lets the tail
+    /// win.
+    #[test]
+    fn plan_spawns_with_blockers_capacity_one_unblocked_tail_wins_over_blocked_head() {
+        // Pixelgrab dep chain, distilled: #27 is the most-recent issue
+        // (head-of-list per GitHub's newest-first default) and references
+        // 9 open blockers; #14 references only #13, which is closed so
+        // the unresolved set is empty under fail-open semantics.
+        //
+        // `open_numbers` must include the blockers of #27 — the labelled-open
+        // page and the blockers-of-issue set are the same shape.
+        let head_blocked = issue_with_blocked_by(27, &[
+            "- #15", "- #18", "- #20", "- #21", "- #22", "- #23", "- #24", "- #25", "- #26",
+        ]);
+        let tail_unblocked = issue_with_blocked_by(14, &["- #13"]);
+        let issues = vec![head_blocked, tail_unblocked];
+        let open_numbers: HashSet<i64> = [
+            27, 14, 15, 18, 20, 21, 22, 23, 24, 25, 26,
+        ]
+        .into_iter()
+        .collect();
+        let known: Vec<i64> = Vec::new();
+
+        let planned = plan_spawns_with_blockers(
+            &issues,
+            &known,
+            &open_numbers,
+            1,
+            PLANNER_TEST_MESH,
+            "test_mesh",
+        );
+
+        assert_eq!(
+            planned.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![14],
+            "capacity=1 with head blocked must pick the unblocked tail (#14); \
+             the previous shape yielded an empty plan and silently starved the mesh"
+        );
+
+        reset_planner_logged_blocks(&[27, 14, 15, 18, 20, 21, 22, 23, 24, 25, 26]);
+    }
+
+    /// The complement of the regression: when the head IS unblocked, the
+    /// helper still picks it (the fix must not change the happy path).
+    #[test]
+    fn plan_spawns_with_blockers_capacity_one_picks_unblocked_head() {
+        let head_unblocked = issue_with_blocked_by(27, &["- #13"]); // #13 closed
+        let tail_unblocked = issue_with_blocked_by(14, &["- #13"]);
+        let issues = vec![head_unblocked, tail_unblocked];
+        let open_numbers: HashSet<i64> = [27, 14].into_iter().collect();
+        let known: Vec<i64> = Vec::new();
+
+        let planned = plan_spawns_with_blockers(
+            &issues,
+            &known,
+            &open_numbers,
+            1,
+            PLANNER_TEST_MESH,
+            "test_mesh",
+        );
+
+        assert_eq!(
+            planned.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![27],
+            "head-of-list unblocked wins when capacity=1 (existing happy-path contract)"
+        );
+
+        reset_planner_logged_blocks(&[27, 14]);
+    }
+
+    /// Dedup interacts with the new ordering: an already-spawned head
+    /// (in `known`) must be skipped and the next unblocked issue picked,
+    /// even when `capacity=1` would otherwise take the head.
+    #[test]
+    fn plan_spawns_with_blockers_skips_known_head_to_reach_unblocked_tail() {
+        let head_unblocked = issue_with_blocked_by(27, &["- #13"]); // #13 closed
+        let tail_unblocked = issue_with_blocked_by(14, &["- #13"]);
+        let issues = vec![head_unblocked, tail_unblocked];
+        let open_numbers: HashSet<i64> = [27, 14].into_iter().collect();
+        let known: Vec<i64> = vec![27]; // #27 already spawned
+
+        let planned = plan_spawns_with_blockers(
+            &issues,
+            &known,
+            &open_numbers,
+            1,
+            PLANNER_TEST_MESH,
+            "test_mesh",
+        );
+
+        assert_eq!(
+            planned.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![14],
+            "dedup must drop the head (in `known`) before the take so the unblocked tail \
+             wins — mirrors `plan_spawns_skips_known_issues_before_taking_capacity` \
+             for the new helper"
+        );
+
+        reset_planner_logged_blocks(&[27, 14]);
+    }
+
+    /// Capacity=N reconciles correctly: when capacity is large enough to
+    /// enumerate the whole list, the new shape picks the unblocked
+    /// subset in GitHub order. This is the case that worked correctly
+    /// under the OLD shape (capacity=1 was the silent-stall trigger) and
+    /// pins that the new shape preserves the broad-coverage behaviour.
+    #[test]
+    fn plan_spawns_with_blockers_capacity_large_takes_all_unblocked_in_order() {
+        // #27 blocked by #15, #18 (both in open_numbers) → blocked.
+        // #14 blocked by #13 (closed, not in open_numbers) → unblocked.
+        // #15 has no blocker entry → unblocked.
+        let blocked = issue_with_blocked_by(27, &["- #15", "- #18"]);
+        let unblocked_a = issue_with_blocked_by(14, &["- #13"]);
+        let unblocked_b = issue_with_blocked_by(15, &[]);
+        let issues = vec![blocked, unblocked_a, unblocked_b];
+        let open_numbers: HashSet<i64> = [27, 14, 15, 18].into_iter().collect();
+        let known: Vec<i64> = Vec::new();
+
+        let planned = plan_spawns_with_blockers(
+            &issues,
+            &known,
+            &open_numbers,
+            10,
+            PLANNER_TEST_MESH,
+            "test_mesh",
+        );
+
+        assert_eq!(
+            planned.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![14, 15],
+            "with capacity large enough, the blocked issue is dropped and the \
+             unblocked ones taken in GitHub order"
+        );
+
+        reset_planner_logged_blocks(&[27, 14, 15, 18]);
+    }
+
+    /// All-blocked pass returns an empty plan (the poller's early-return
+    /// path) and the helper must NOT panic. Pin the silent-stall symmetry.
+    #[test]
+    fn plan_spawns_with_blockers_all_blocked_returns_empty_plan() {
+        let a = issue_with_blocked_by(7, &["- #8"]);
+        let b = issue_with_blocked_by(8, &["- #7"]);
+        let issues = vec![a, b];
+        let open_numbers: HashSet<i64> = [7, 8].into_iter().collect();
+        let known: Vec<i64> = Vec::new();
+
+        let planned = plan_spawns_with_blockers(
+            &issues,
+            &known,
+            &open_numbers,
+            1,
+            PLANNER_TEST_MESH,
+            "test_mesh",
+        );
+
+        assert!(
+            planned.is_empty(),
+            "all-blocked set yields an empty plan and the poller ends the pass"
+        );
+
+        reset_planner_logged_blocks(&[7, 8]);
+    }
+
     #[test]
     fn effective_capacity_without_global_cap_is_mesh_capacity() {
         // No pool size set → per-mesh limits are the only gate (the
@@ -1174,6 +1415,24 @@ mod tests {
                   "body": "**Blocked by**\n----------\n\n{}\n" }}"#,
             listing
         ))
+        .expect("issue parses")
+    }
+
+    /// Like `body_with_blocked_by` but with a caller-supplied issue
+    /// number and a list of bullet lines (one per blocker). Each entry in
+    /// `listing` MUST be a bullet-form line (e.g. `"- #15"`) — see
+    /// `BLOCKED_BY_BARE_RE` for why bare `#NNN` references need a leading
+    /// bullet marker.
+    fn issue_with_blocked_by(number: i64, listing: &[&str]) -> Issue {
+        let body = format!("**Blocked by**\n----------\n\n{}\n", listing.join("\n"));
+        // `serde_json::json!` escapes the real Rust newlines from
+        // `listing.join("\n")` at the JSON boundary.
+        serde_json::from_value(serde_json::json!({
+            "number": number,
+            "title": format!("task {}", number),
+            "user": {"login": "octocat"},
+            "body": body,
+        }))
         .expect("issue parses")
     }
 
