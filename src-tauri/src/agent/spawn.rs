@@ -1305,18 +1305,28 @@ pub(crate) async fn spawn_with_intent(
         _ => None,
     };
 
-    let prefill = intent.prefill().filter(|prefill| {
-        if adapter.supports_prefill() {
-            true
-        } else {
-            tracing::warn!(
-                "spawn_with_intent: provider '{}' does not support prefill; skipping {} bytes",
-                node.provider,
-                prefill.len()
-            );
-            false
-        }
-    });
+    // Issue #1180 — the prefill comes from `SpawnIntent::initial_prompt`,
+    // the single source of truth shared with the desktop draft response
+    // and the Autopilot watcher. `into_string()` consumes the
+    // `InitialPrompt` wrapper, giving us an owned `String` without an
+    // extra `as_str().to_string()` re-allocation. A supporting harness
+    // forwards the same string the user already saw on the draft
+    // response (byte-identical).
+    let prefill = intent
+        .initial_prompt()
+        .map(|prompt| prompt.into_string())
+        .filter(|prefill| {
+            if adapter.supports_prefill() {
+                true
+            } else {
+                tracing::warn!(
+                    "spawn_with_intent: provider '{}' does not support prefill; skipping {} bytes",
+                    node.provider,
+                    prefill.len()
+                );
+                false
+            }
+        });
 
     if is_agent_already_running(&node_id) {
         return Ok(SpawnOutcome::AlreadyActive(node));
@@ -4640,6 +4650,12 @@ mod tests {
         );
     }
 
+    /// Issue #1180 — `SpawnIntent::initial_prompt` is the single source
+    /// of truth for the GitHub-issue prefill. The spawn seam (`spawn_with_intent`)
+    /// routes through it; so does the desktop draft response and the
+    /// Autopilot watcher. Pin the wording here so any future drift would
+    /// surface as a unit-test failure before the agent gets the wrong
+    /// prompt.
     #[test]
     fn issue_intent_builds_its_prefill_at_the_spawn_seam() {
         let intent = SpawnIntent::Issue(GitHubWorkContext {
@@ -4650,7 +4666,10 @@ mod tests {
         });
 
         assert_eq!(
-            intent.prefill().as_deref(),
+            intent
+                .initial_prompt()
+                .as_ref()
+                .map(intent::InitialPrompt::as_str),
             Some(
                 "Please work on GitHub issue #247 — Deepen spawn pipeline\n\
 https://github.com/alondero/buildmesh/issues/247"

@@ -1001,8 +1001,26 @@ fn spawn_autopilot_node(
     repo: &str,
     issue: &Issue,
 ) -> Result<(), String> {
-    let prefill =
-        crate::commands::agent::format_issue_prefill(owner, repo, issue.number, &issue.title);
+    // Issue #1180 — build the `SpawnIntent::Issue` once so the watcher's
+    // prefill and the background launch's prefill both come from the
+    // same `initial_prompt()` source. Previously this function called
+    // `commands::agent::format_issue_prefill` here (independent of the
+    // intent built a few lines down) and the intent was passed to
+    // `spawn_with_intent` — three sites (desktop draft, background
+    // launch, watcher) could silently drift if anyone changed the
+    // wording in one but not the others.
+    let intent = crate::agent::spawn::SpawnIntent::Issue(
+        crate::agent::spawn::GitHubWorkContext {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number: issue.number,
+            title: issue.title.clone(),
+        },
+    );
+    let prefill = intent
+        .initial_prompt()
+        .map(|p| p.into_string())
+        .expect("Issue intent always has an initial prompt");
     let initial_name = crate::session_naming::issue_node_name(issue.number, &issue.title);
     // Provider chain: the Autopilot Policy's own provider wins; otherwise the
     // normal default chain (mesh default -> app default -> claude).
@@ -1064,14 +1082,11 @@ fn spawn_autopilot_node(
     );
 
     let app_for_spawn = app.clone();
-    let intent = crate::agent::spawn::SpawnIntent::Issue(
-        crate::agent::spawn::GitHubWorkContext {
-            owner: owner.to_string(),
-            repo: repo.to_string(),
-            number: issue.number,
-            title: issue.title.clone(),
-        },
-    );
+    // Issue #1180 — `intent` was built at the top of `spawn_autopilot_node`
+    // so the watcher's prefill and the background launch's prefill both
+    // come from the same `initial_prompt()` source. No more re-building
+    // it here; the two-phase paste path stays intact (watcher first,
+    // then `spawn_with_intent` ships the same intent to the harness).
     tauri::async_runtime::spawn(async move {
         if let Err(error) = crate::agent::spawn::spawn_with_intent(
             &app_for_spawn,

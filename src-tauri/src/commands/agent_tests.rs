@@ -977,111 +977,22 @@ mod tests {
         );
     }
 
-    /// Spawning from a GitHub issue prefills the agent with a short URL-bearing
-    /// instruction, NOT the full issue body. The body used to be concatenated in
-    /// (title + "\n\n" + body) which forced megabytes of markdown through the
-    /// Windows PowerShell -EncodedCommand path (see memory: powershell-encoding-fix).
-    /// The URL is the canonical source the agent fetches on demand and the cite
-    /// it uses when opening the PR that closes the issue.
-    #[test]
-    fn issue_prefill_is_url_with_title_hint_not_body() {
-        let prefill = crate::commands::agent::format_issue_prefill(
-            "alondero",
-            "buildmesh",
-            123,
-            "Add dark mode to settings",
-        );
-
-        assert_eq!(
-            prefill,
-            "Please work on GitHub issue #123 — Add dark mode to settings\n\
-             https://github.com/alondero/buildmesh/issues/123"
-        );
-    }
-
-    /// An empty title falls back to a number-only imperative — no dangling
-    /// em-dash artifact.
-    #[test]
-    fn issue_prefill_with_empty_title_falls_back_to_number_only() {
-        let prefill = crate::commands::agent::format_issue_prefill(
-            "alondero",
-            "buildmesh",
-            7,
-            "",
-        );
-
-        assert_eq!(
-            prefill,
-            "Please work on GitHub issue #7\n\
-             https://github.com/alondero/buildmesh/issues/7"
-        );
-    }
-
-    /// Titles with double quotes pass through verbatim — the prefill format
-    /// uses an em-dash separator rather than surrounding quotes, so there is
-    /// nothing to escape. The consumer is an LLM, not a parser; ensuring
-    /// `\"` doesn't leak into the prompt is the explicit goal here.
-    #[test]
-    fn issue_prefill_preserves_quotes_in_title_verbatim() {
-        let prefill = crate::commands::agent::format_issue_prefill(
-            "alondero",
-            "buildmesh",
-            42,
-            "Fix the \"weird\" race in spawn",
-        );
-
-        assert_eq!(
-            prefill,
-            "Please work on GitHub issue #42 — Fix the \"weird\" race in spawn\n\
-             https://github.com/alondero/buildmesh/issues/42"
-        );
-        assert!(
-            !prefill.contains('\\'),
-            "title must reach the LLM without backslash escapes: {:?}",
-            prefill
-        );
-    }
-
-    // ----- format_pr_prefill (issue #420) ---------------------------------
-
-    /// `format_pr_prefill` mirrors `format_issue_prefill` (the issue-spawn
-    /// flow): one-line imperative + the canonical URL. The body is
-    /// intentionally NOT included — multi-KB markdown is the worst case for
-    /// the PowerShell `-EncodedCommand` argv path.
-    #[test]
-    fn format_pr_prefill_includes_number_title_and_url() {
-        let prefill = crate::commands::agent::format_pr_prefill(
-            "alondero",
-            "buildmesh",
-            420,
-            "spawn on PR",
-        );
-        assert_eq!(
-            prefill,
-            "Please review pull request #420 — spawn on PR\n\
-             https://github.com/alondero/buildmesh/pull/420"
-        );
-    }
-
-    /// Empty / whitespace-only title degrades to the bare `#N\n<url>` form
-    /// so the prefill never carries a dangling em-dash artifact. Mirrors
-    /// the issue-spawn behaviour so both spawn paths produce uniform output.
-    #[test]
-    fn format_pr_prefill_handles_empty_title() {
-        let prefill = crate::commands::agent::format_pr_prefill("alondero", "buildmesh", 420, "");
-        assert_eq!(
-            prefill,
-            "Please review pull request #420\n\
-             https://github.com/alondero/buildmesh/pull/420"
-        );
-        let prefill_ws = crate::commands::agent::format_pr_prefill(
-            "alondero",
-            "buildmesh",
-            420,
-            "   \t  ",
-        );
-        assert_eq!(prefill_ws, prefill, "whitespace title trims like empty");
-    }
+    // The issue/PR prefill contract (issue #1180) lives at the source
+    // of truth: `agent::spawn::intent::tests`. Pre-#1180 these tests
+    // pinned the wording via the now-removed `commands::agent::format_*_prefill`
+    // helpers; the contract is unchanged but the canonical home is
+    // `SpawnIntent::initial_prompt` and the regression tests moved with
+    // it (they exercise the same shapes: URL with title hint, empty
+    // title falls back to number-only, whitespace trims, quotes pass
+    // through verbatim).
+    //
+    // The old `format_pr_prefill_includes_number_title_and_url` and
+    // `format_pr_prefill_handles_empty_title` tests were deleted; their
+    // wording assertions are duplicated in
+    // `crate::agent::spawn::intent::tests::pull_request_prefill_uses_canonical_pull_url_and_trimmed_title`
+    // plus the new contract pinning (issue #1180 AC #1–7). Keeping a
+    // second copy in `commands::agent_tests` would invite drift — the
+    // single source of truth principle is the whole point.
 
     /// On a Windows-native host a Claude-compatible provider is launched through
     /// `powershell.exe -NoLogo -NoProfile -EncodedCommand <base64>`. The
