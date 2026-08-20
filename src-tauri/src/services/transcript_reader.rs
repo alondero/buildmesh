@@ -5,10 +5,11 @@
 //! [`Unavailable`] reason when the provider has no readable transcript or the
 //! file fails to parse.
 //!
-//! Two harness formats are supported, selected by [`TranscriptFormat`]:
-//! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl` and
-//! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
-//! #885). Both map onto the same [`Turn`]/[`ToolCall`] wire shape, so the
+//! Three harness formats are supported, selected by [`TranscriptFormat`]:
+//! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, Cursor's
+//! `~/.cursor/projects/<workspace>/agent-transcripts/<session>/<session>.jsonl`,
+//! and Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
+//! #885). All map onto the same [`Turn`]/[`ToolCall`] wire shape, so the
 //! Coordinator never learns which harness wrote the file.
 //!
 //! **All transcript-format brittleness is quarantined here.** Both this reader
@@ -53,21 +54,23 @@ pub const MAX_TAIL: usize = 200;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptFormat {
     ClaudeCode,
+    Cursor,
     Codex,
 }
 
 impl TranscriptFormat {
     /// Map a resolved harness adapter id to its transcript format. Every
-    /// Claude-Code-backed executor (the `anthropic` adapter behind the built-in
-    /// subscription and all custom MiniMax/DeepSeek profiles) shares the
-    /// Claude Code format; only Codex writes its own rollout format. Kimi Code
+    /// Claude-Code-backed executors (the `anthropic` adapter behind the built-in
+    /// subscription and all custom MiniMax/DeepSeek profiles) share the Claude
+    /// Code format. Cursor has the same message shape but a workspace-scoped
+    /// path, while Codex writes its own rollout format. Kimi Code
     /// (wayfinder #918) writes standard JSONL (`~/.kimi/sessions/wire.jsonl`)
     /// but the path resolver isn't wired yet — tracked as a follow-up.
     pub fn for_harness(harness_id: &str) -> Self {
-        if harness_id == "codex" {
-            TranscriptFormat::Codex
-        } else {
-            TranscriptFormat::ClaudeCode
+        match harness_id {
+            "codex" => TranscriptFormat::Codex,
+            "cursor" => TranscriptFormat::Cursor,
+            _ => TranscriptFormat::ClaudeCode,
         }
     }
 }
@@ -276,6 +279,7 @@ fn locate_transcript(
 ) -> Option<PathBuf> {
     match format {
         TranscriptFormat::ClaudeCode => Some(transcript_path(session_id, node_path)),
+        TranscriptFormat::Cursor => Some(cursor_transcript_path(session_id, node_path)),
         TranscriptFormat::Codex => find_codex_rollout(session_id),
     }
 }
@@ -286,6 +290,56 @@ fn transcript_path(session_id: &str, node_path: &str) -> PathBuf {
         .join("projects")
         .join(encode_path(node_path))
         .join(format!("{session_id}.jsonl"))
+}
+
+/// Build the expected on-disk path of a Cursor CLI session transcript:
+/// `<cursor_dir>/projects/<workspace-slug>/agent-transcripts/<session>/<session>.jsonl`.
+fn cursor_transcript_path(session_id: &str, node_path: &str) -> PathBuf {
+    cursor_transcript_path_in(&env::cursor_dir(), session_id, node_path)
+}
+
+/// Pure path builder for Cursor transcripts, split from the environment lookup
+/// so the workspace layout can be tested without process-global state.
+pub(crate) fn cursor_transcript_path_in(
+    cursor_home: &Path,
+    session_id: &str,
+    node_path: &str,
+) -> PathBuf {
+    cursor_home
+        .join("projects")
+        .join(cursor_workspace_slug(node_path))
+        .join("agent-transcripts")
+        .join(session_id)
+        .join(format!("{session_id}.jsonl"))
+}
+
+/// Convert a workspace path into Cursor's lossy project directory slug.
+/// Cursor drops a leading separator, removes a Windows drive colon, and uses
+/// dashes for path separators and other non-alphanumeric characters.
+pub(crate) fn cursor_workspace_slug(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    if let Some(first) = parts.first_mut() {
+        if first.len() == 2 && first.as_bytes()[1] == b':' {
+            first.truncate(1);
+            first.make_ascii_lowercase();
+        }
+    }
+
+    parts
+        .into_iter()
+        .map(|part| {
+            part.chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("-")
 }
 /// Locate a Codex rollout file `rollout-<timestamp>-<session_id>.jsonl` under
 /// `<codex home>/sessions/YYYY/MM/DD/`. Codex cannot relocate its sessions dir
@@ -360,7 +414,7 @@ fn parse_transcript(
     keep: usize,
 ) -> Parsed {
     match format {
-        TranscriptFormat::ClaudeCode => parse_turns(lines, keep),
+        TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => parse_turns(lines, keep),
         TranscriptFormat::Codex => parse_codex_turns(lines, keep),
     }
 }
@@ -950,6 +1004,14 @@ fn pending_background_task_ids(lines: impl Iterator<Item = String>) -> Vec<Strin
 mod tests {
     use super::*;
     use std::path::Path;
+    fn write_fixture(name: &str, body: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "buildmesh_transcript_{name}_{}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
@@ -1589,8 +1651,61 @@ mod tests {
     #[test]
     fn transcript_format_for_harness_routes_codex_only() {
         assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
+        assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
         for id in ["anthropic", "claude", "agy", "opencode", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
         }
+    }
+
+    #[test]
+    fn cursor_workspace_slug_matches_cursor_storage_names() {
+        assert_eq!(
+            cursor_workspace_slug("/Users/adam/src/buildmesh"),
+            "Users-adam-src-buildmesh"
+        );
+        assert_eq!(
+            cursor_workspace_slug("C:\\Users\\adam\\src\\buildmesh"),
+            "c-Users-adam-src-buildmesh"
+        );
+        assert_eq!(
+            cursor_workspace_slug("C:\\Users\\adam\\src\\buildmesh\\.claude\\worktrees\\fancy-name"),
+            "c-Users-adam-src-buildmesh--claude-worktrees-fancy-name"
+        );
+    }
+
+    #[test]
+    fn cursor_transcript_path_uses_workspace_scoped_session_directory() {
+        let path = cursor_transcript_path_in(
+            Path::new("/home/adam/.cursor"),
+            "session-123",
+            "C:\\Users\\adam\\src\\buildmesh",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(
+                r#"/home/adam/.cursor/projects/c-Users-adam-src-buildmesh/agent-transcripts/session-123/session-123.jsonl"#
+            )
+        );
+    }
+
+    #[test]
+    fn cursor_jsonl_reuses_the_shared_message_parser() {
+        let path = write_fixture(
+            "cursor_transcript",
+            r#"{"type":"user","message":{"role":"user","content":"Inspect the cursor path"}}
+{"type":"assistant","message":{"role":"assistant","id":"msg-1","content":[{"type":"tool_use","name":"Read","input":{"file":"src/main.rs"}}]}}
+{"type":"assistant","message":{"role":"assistant","id":"msg-1","content":[{"type":"text","text":"The path is wired."}]}}
+"#,
+        );
+        let tail = read_tail_from_file(&path, 10, TranscriptFormat::Cursor);
+        std::fs::remove_file(path).ok();
+
+        let TranscriptTail::Available { turns, .. } = tail else {
+            panic!("Cursor's compatible JSONL should be readable");
+        };
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[1].text, "The path is wired.");
+        assert_eq!(turns[1].tool_calls[0].name, "Read");
     }
 }

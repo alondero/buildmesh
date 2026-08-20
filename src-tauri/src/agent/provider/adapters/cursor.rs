@@ -61,9 +61,9 @@ impl AgentProvider for CursorAdapter {
     }
 
     fn produces_readable_transcript(&self) -> bool {
-        // Cursor writes compatible JSONL, but the shared reader and archive
-        // discovery do not yet know its ~/.cursor/projects/ layout.
-        false
+        // Cursor writes Anthropic-shaped JSONL under its workspace-scoped
+        // ~/.cursor/projects/agent-transcripts layout.
+        true
     }
 
     fn supports_model_override(&self) -> bool {
@@ -163,10 +163,8 @@ mod tests {
     }
 
     #[test]
-    fn defers_transcript_support_until_reader_wiring() {
-        // Cursor writes compatible JSONL, but the shared reader and archive
-        // discovery do not yet know its ~/.cursor/projects/ layout.
-        assert!(!CURSOR.produces_readable_transcript());
+    fn advertises_transcript_support_after_reader_wiring() {
+        assert!(CURSOR.produces_readable_transcript());
         assert!(!CURSOR.requires_attention_hook());
     }
 }

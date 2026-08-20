@@ -313,8 +313,9 @@ pub trait AgentProvider: Send + Sync {
     /// `anthropic` adapter runs real Claude Code (with a swapped backend for
     /// custom MiniMax/DeepSeek profiles), so it writes Claude Code's
     /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, which
-    /// `services::transcript_reader` knows how to read; Codex's rollout format
-    /// is parsed by the same reader via `TranscriptFormat::Codex` (issue #887).
+    /// `services::transcript_reader` knows how to read. Codex's rollout format
+    /// is parsed via `TranscriptFormat::Codex` (issue #887), and Cursor's
+    /// workspace-scoped JSONL via `TranscriptFormat::Cursor`.
     /// Providers with no readable transcript (OpenCode, Agy, Terminal) return
     /// `false`; their digest degrades to spine-only with enrichment explicitly
     /// flagged `unsupported`, never silently omitted.

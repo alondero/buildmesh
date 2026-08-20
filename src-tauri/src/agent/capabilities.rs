@@ -356,6 +356,10 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::CODEX)
     }
 
+    fn cursor_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::CURSOR)
+    }
+
     fn agy_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::AGY)
     }
@@ -423,6 +427,17 @@ mod tests {
             }
         );
 
+        let cursor = cursor_caps();
+        assert_eq!(cursor.harness_id, "cursor");
+        assert!(cursor.supports_resume);
+        assert!(cursor.auto_resume_on_startup);
+        assert!(!cursor.requires_attention_hook);
+        assert!(cursor.produces_readable_transcript);
+        assert!(cursor.supports_model_override);
+        assert!(!cursor.supports_effort_override);
+        assert!(cursor.supports_prefill);
+        assert_eq!(cursor.effort_control, EffortControlKind::None);
+
         let agy = agy_caps();
         assert_eq!(agy.harness_id, "agy");
         assert!(agy.supports_resume);
@@ -452,7 +467,8 @@ mod tests {
         assert_eq!(terminal.effort_control, EffortControlKind::None);
 
         // Interactive-TUI harnesses — model override, no effort, no prefill,
-        // no attention hook (issue #886), no transcript reader yet.
+        // and no attention hook (issue #886). Cursor is the exception for
+        // transcript support because its workspace JSONL reader is wired.
         let kimi = kimi_caps();
         assert!(kimi.supports_model_override);
         assert!(!kimi.supports_effort_override);
@@ -480,6 +496,7 @@ mod tests {
         for caps in [
             anthropic_caps(),
             codex_caps(),
+            cursor_caps(),
             agy_caps(),
             opencode_caps(),
             terminal_caps(),
