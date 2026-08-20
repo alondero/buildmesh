@@ -177,7 +177,12 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
 
   // Live refresh: the agent keeps editing while the overlay is open, so re-pull
   // when the watcher reports a change in this worktree. Mirrors AgentReviewPanel.
-  useGitPathInvalidation(diff.rootPath, () => fetchDiff({ background: true }));
+  // Issue #1165: same 2 s freshness window — a burst of `GIT_CHANGED` events
+  // during a heavy edit session collapses to one trailing refetch instead of
+  // one per emit (each refetch hits the libgit2 walk + 3× syntect pass).
+  useGitPathInvalidation(diff.rootPath, () => fetchDiff({ background: true }), {
+    minRefetchIntervalMs: 2_000,
+  });
 
   return (
     <DiffOverlayShell

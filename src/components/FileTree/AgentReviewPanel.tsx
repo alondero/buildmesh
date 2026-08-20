@@ -74,8 +74,16 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
   // primitive normalizes both. Issue #357: this now goes through the
   // cancelled-flag-guarded hook so an event that races a path change
   // (e.g. user switches nodes mid-fetch) is dropped before it can write
-  // into the new component's state.
-  useGitPathInvalidation(rootPath, () => fetchDiff({ background: true }));
+  // into the new component's state. Issue #1165: `minRefetchIntervalMs:
+  // 2_000` collapses a burst of agent edits (the backend coalescer
+  // emits up to ~2/s) into one trailing refetch per window — the diff
+  // walk is the heaviest per-event work in the app and was the single
+  // biggest pool-parker. 2 s matches `useGitSummary` (the cheapest
+  // sibling consumer) and is comfortably longer than the coalescer's
+  // 500 ms throttle.
+  useGitPathInvalidation(rootPath, () => fetchDiff({ background: true }), {
+    minRefetchIntervalMs: 2_000,
+  });
 
   if (loading) {
     return (
