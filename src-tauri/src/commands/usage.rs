@@ -15,13 +15,13 @@ use tauri::command;
 /// gracefully (logged-in, detail explains) rather than failing the row. The
 /// no-credential gate in [`assemble_meters`] drops the row until the user
 /// stores a key, matching the user contract for keyed providers.
-const FETCHABLE: [&str; 9] = [
-    "anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai",
+const FETCHABLE: [&str; 10] = [
+    "anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai",
 ];
 
 /// Map a self-authenticating **native** provider account to the harness whose
 /// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
-/// id `anthropic`), `codex`↔Codex, `agy`↔Antigravity, `opencode`↔OpenCode. A keyed provider
+/// id `anthropic`), `codex`↔Codex, `cursor`↔Cursor, `agy`↔Antigravity, `opencode`↔OpenCode. A keyed provider
 /// (MiniMax/Kimi/OpenRouter/custom Claude-compatible) returns `None` — it's
 /// gated on the user enabling it, not on a detected binary. The Kimi Code CLI
 /// Agent Harness itself is registered separately in `HarnessProfile` /
@@ -31,6 +31,7 @@ fn native_harness_for(account_id: &str) -> Option<&'static str> {
     match account_id {
         "anthropic" => Some("anthropic"),
         "codex" => Some("codex"),
+        "cursor" => Some("cursor"),
         "agy" => Some("agy"),
         "grok" => Some("grok"),
         "opencode" => Some("opencode"),
@@ -232,6 +233,7 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
     let result = match provider {
         "anthropic" => usage::anthropic_usage(),
         "codex" => usage::codex_usage(),
+        "cursor" => usage::cursor_usage(),
         // `minimax_api_key_resolved` already reads the account key then the legacy
         // flat field, so it's the single source of truth here.
         "minimax" => usage::minimax_usage(
@@ -393,7 +395,7 @@ mod tests {
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai"] {
+        for id in ["anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.

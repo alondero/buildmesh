@@ -1116,6 +1116,7 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "opencode",  name: "OpenCode",             self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
+    BuiltInProviderAccount { id: "cursor",    name: "Cursor",               self_auth: true  },
     // OpenAI Platform API — keyed by an `sk-admin-…` (org spend) or
     // `sk-proj-…` (graceful degradation: org costs 401, project keys still
     // work for inference). See ADR-0026 / issue #1109. No first-class
@@ -3112,7 +3113,7 @@ mod tests {
     #[test]
     fn default_provider_accounts_are_self_auth_only() {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode"]);
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode", "cursor"]);
         for a in default_provider_accounts() {
             assert!(!a.claude_compatible, "{} must be self-auth", a.id);
             assert_eq!(a.billing_mode, BillingMode::Plan);
@@ -3125,7 +3126,7 @@ mod tests {
     fn default_provider_accounts_cover_the_builtin_providers() {
         // Retained name; ADR-0025 defaults are self-auth only.
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode"]);
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode", "cursor"]);
         let catalog_ids: Vec<_> = keyed_first_class_catalog().into_iter().map(|a| a.id).collect();
         // `openai` joins the keyed catalog in issue #1109 / ADR-0026 — its
         // /v1/organization/costs fetcher is admin-scoped, so the row is
@@ -3164,7 +3165,7 @@ mod tests {
     #[test]
     fn merge_provider_accounts_override_by_id_and_append() {
         let defaults = default_provider_accounts();
-        assert_eq!(defaults.len(), 5);
+        assert_eq!(defaults.len(), 6);
         let stored = vec![
             ProviderAccount {
                 id: "minimax".to_string(),
@@ -3180,14 +3181,14 @@ mod tests {
         assert_eq!(merged.iter().filter(|a| a.id == "minimax").count(), 1);
         assert!(!merged.iter().find(|a| a.id == "minimax").unwrap().enabled);
         assert!(merged.iter().any(|a| a.id == "deepseek"));
-        // 5 self-auth + minimax + deepseek
-        assert_eq!(merged.len(), 7);
-        // storing only a custom → 6
+        // 6 self-auth + minimax + deepseek
+        assert_eq!(merged.len(), 8);
+        // storing only a custom → 7
         let just_custom = merge_provider_accounts(default_provider_accounts(), vec![custom_account("x")]);
-        assert_eq!(just_custom.len(), 6);
-        // storing only minimax → 6
+        assert_eq!(just_custom.len(), 7);
+        // storing only minimax → 7
         let just_mm = merge_provider_accounts(default_provider_accounts(), vec![keyed_minimax("sk")]);
-        assert_eq!(just_mm.len(), 6);
+        assert_eq!(just_mm.len(), 7);
     }
 
     #[test]

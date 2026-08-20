@@ -2188,6 +2188,354 @@ pub fn agy_usage() -> ProviderUsage {
     )
 }
 
+// ─── Cursor CLI Usage Probe (Issue #1173) ───────────────────────────────────
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct CursorModelUsage {
+    #[serde(rename = "numRequests", default)]
+    pub num_requests: Option<f64>,
+    #[serde(rename = "numSlowRequests", default)]
+    pub num_slow_requests: Option<f64>,
+    #[serde(rename = "maxRequestUsage", default)]
+    pub max_request_usage: Option<f64>,
+    #[serde(rename = "maxTokenUsage", default)]
+    pub max_token_usage: Option<f64>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct CursorUsageResponse {
+    #[serde(rename = "gpt-4", default)]
+    pub gpt_4: Option<CursorModelUsage>,
+    #[serde(rename = "startOfMonth", default)]
+    pub start_of_month: Option<String>,
+}
+
+/// Compute the next calendar month reset timestamp in RFC3339 format given
+/// an ISO 8601 / RFC3339 start-of-month string (e.g. `"2026-08-01T00:00:00.000Z"`).
+fn compute_next_month_reset(start_of_month: &str) -> Option<String> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(start_of_month) {
+        let utc = dt.with_timezone(&chrono::Utc);
+        let (year, month) = if utc.month() == 12 {
+            (utc.year() + 1, 1)
+        } else {
+            (utc.year(), utc.month() + 1)
+        };
+        chrono::NaiveDate::from_ymd_opt(year, month, 1)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|naive| naive.and_utc().to_rfc3339())
+    } else {
+        None
+    }
+}
+
+/// Parse Cursor quota & usage payload (`GET https://api2.cursor.sh/auth/usage`).
+fn parse_cursor_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
+    let resp: CursorUsageResponse =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+
+    let resets_at = resp
+        .start_of_month
+        .as_deref()
+        .and_then(compute_next_month_reset);
+
+    let mut windows = Vec::new();
+    let mut detail = None;
+
+    if let Some(gpt4) = resp.gpt_4 {
+        let num = gpt4.num_requests.unwrap_or(0.0);
+        let slow = gpt4.num_slow_requests.unwrap_or(0.0);
+        let max = gpt4.max_request_usage;
+
+        let used_percent = max.filter(|m| *m > 0.0).map(|m| (num / m) * 100.0);
+
+        windows.push(UsageWindow {
+            label: "Fast Requests".to_string(),
+            used_percent,
+            resets_at: resets_at.clone(),
+        });
+
+        if let Some(m) = max {
+            if m > 0.0 {
+                let remaining = (m - num).max(0.0);
+                if slow > 0.0 {
+                    detail = Some(format!(
+                        "{} of {} fast requests remaining ({} slow requests used)",
+                        remaining as i64, m as i64, slow as i64
+                    ));
+                } else {
+                    detail = Some(format!(
+                        "{} of {} fast requests remaining",
+                        remaining as i64, m as i64
+                    ));
+                }
+            }
+        } else if num > 0.0 {
+            detail = Some(format!("{} requests used this billing period", num as i64));
+        }
+    }
+
+    if windows.is_empty() {
+        detail = Some("No active Cursor usage windows".to_string());
+    }
+
+    Ok((windows, detail))
+}
+
+/// Read access token from Cursor's global SQLite database (`state.vscdb`),
+/// table `ItemTable`, key `cursorAuth/accessToken`.
+fn read_cursor_sqlite_token(path: &Path) -> Result<String, UsageError> {
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| UsageError::NoCredential(format!("{}: {}", path.display(), e)))?;
+
+    let mut stmt = conn
+        .prepare("SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'")
+        .map_err(|e| UsageError::Shape(format!("Failed to prepare ItemTable query: {}", e)))?;
+
+    let raw: String = stmt
+        .query_row([], |row| row.get(0))
+        .map_err(|e| UsageError::NoCredential(format!("Key cursorAuth/accessToken not found in {}: {}", path.display(), e)))?;
+
+    let token = if let Ok(parsed) = serde_json::from_str::<String>(&raw) {
+        parsed
+    } else {
+        raw.trim().to_string()
+    };
+
+    if token.is_empty() {
+        return Err(UsageError::NoCredential(format!("{}: empty token", path.display())));
+    }
+
+    Ok(token)
+}
+
+/// Read access token from secondary JSON auth file (`auth.json`).
+fn read_cursor_auth_json(path: &Path) -> Result<String, UsageError> {
+    let content = fs::read_to_string(path)
+        .map_err(|_| UsageError::NoCredential(path.to_string_lossy().to_string()))?;
+
+    #[derive(Deserialize)]
+    struct CursorAuthFile {
+        #[serde(rename = "accessToken", default)]
+        access_token_camel: Option<String>,
+        #[serde(rename = "access_token", default)]
+        access_token_snake: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+    }
+
+    let parsed: CursorAuthFile = serde_json::from_str(&content)
+        .map_err(|e| UsageError::Shape(e.to_string()))?;
+
+    parsed
+        .access_token_camel
+        .or(parsed.access_token_snake)
+        .or(parsed.token)
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| UsageError::NoCredential(path.to_string_lossy().to_string()))
+}
+
+/// Discover candidate credential sources for Cursor.
+///
+/// Priority:
+/// 1. `CURSOR_API_KEY` environment variable.
+/// 2. Platform-specific `state.vscdb` globalStorage SQLite database:
+///    - Windows: `%APPDATA%\Cursor\User\globalStorage\state.vscdb`
+///    - macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
+///    - Linux: `~/.config/Cursor/User/globalStorage/state.vscdb` (and `$XDG_CONFIG_HOME`)
+/// 3. Secondary JSON fallback: `~/.cursor/auth.json`
+/// 4. WSL fallback on Windows: `/home/<USERNAME>/.config/Cursor/User/globalStorage/state.vscdb`
+///    and `/home/<USERNAME>/.cursor/auth.json` mapped via `env::to_host_path`.
+fn discover_cursor_auth_sources() -> (Option<String>, Vec<PathBuf>) {
+    let env_token = env::var("CURSOR_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut paths = Vec::new();
+
+    // Windows %APPDATA%
+    if let Ok(appdata) = env::var("APPDATA") {
+        if !appdata.is_empty() {
+            paths.push(
+                PathBuf::from(appdata)
+                    .join("Cursor")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+            );
+        }
+    }
+
+    // macOS ~/Library/Application Support/Cursor/User/globalStorage/state.vscdb
+    paths.push(
+        home_dir()
+            .join("Library")
+            .join("Application Support")
+            .join("Cursor")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb"),
+    );
+
+    // Linux XDG_CONFIG_HOME / ~/.config
+    if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            paths.push(
+                PathBuf::from(xdg)
+                    .join("Cursor")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+            );
+        }
+    }
+    paths.push(
+        home_dir()
+            .join(".config")
+            .join("Cursor")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb"),
+    );
+
+    // Secondary JSON fallback: ~/.cursor/auth.json
+    paths.push(home_dir().join(".cursor").join("auth.json"));
+
+    // WSL fallback (Windows host only)
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(username) = env::var("USERNAME").ok().filter(|s| !s.is_empty()) {
+            let wsl_sqlite_path = format!(
+                "/home/{}/.config/Cursor/User/globalStorage/state.vscdb",
+                username
+            );
+            let host_sqlite_path = crate::env::to_host_path(&wsl_sqlite_path);
+            if host_sqlite_path != wsl_sqlite_path {
+                paths.push(PathBuf::from(host_sqlite_path));
+            }
+
+            let wsl_json_path = format!("/home/{}/.cursor/auth.json", username);
+            let host_json_path = crate::env::to_host_path(&wsl_json_path);
+            if host_json_path != wsl_json_path {
+                paths.push(PathBuf::from(host_json_path));
+            }
+        }
+    }
+
+    (env_token, paths)
+}
+
+/// Walk candidate sources and extract the first valid Cursor token.
+fn read_cursor_token_from_candidates(
+    env_token: Option<String>,
+    candidates: &[PathBuf],
+) -> Result<String, UsageError> {
+    if let Some(token) = env_token.filter(|t| !t.trim().is_empty()) {
+        return Ok(token);
+    }
+
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        let is_vscdb = path.extension().and_then(|ext| ext.to_str()) == Some("vscdb");
+        if is_vscdb {
+            match read_cursor_sqlite_token(path) {
+                Ok(token) => return Ok(token),
+                Err(UsageError::Shape(e)) => return Err(UsageError::Shape(e)),
+                Err(_) => continue,
+            }
+        } else {
+            match read_cursor_auth_json(path) {
+                Ok(token) => return Ok(token),
+                Err(UsageError::Shape(e)) => return Err(UsageError::Shape(e)),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    let first = candidates
+        .first()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Cursor credential store".to_string());
+    Err(UsageError::NoCredential(first))
+}
+
+/// Public Cursor usage fetcher. Reads credential from environment / `state.vscdb` / `auth.json`
+/// and hits the Cursor quota endpoint `https://api2.cursor.sh/auth/usage`.
+pub fn cursor_usage() -> ProviderUsage {
+    let (env_token, candidates) = discover_cursor_auth_sources();
+    cursor_usage_with_sources(env_token, &candidates, "https://api2.cursor.sh/auth/usage")
+}
+
+/// Test seam: allows passing custom candidate list, environment token, and mock endpoint.
+pub fn cursor_usage_with_sources(
+    env_token: Option<String>,
+    candidates: &[PathBuf],
+    live_url: &str,
+) -> ProviderUsage {
+    let token = match read_cursor_token_from_candidates(env_token, candidates) {
+        Ok(t) => t,
+        Err(e) => return logged_out("cursor", e.to_string()),
+    };
+
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+        Ok(c) => c,
+        Err(e) => return unavailable("cursor", format!("Client error: {}", e)),
+    };
+
+    let resp = match client
+        .get(live_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+    {
+        Ok(r) => r,
+        Err(e) => return unavailable("cursor", format!("Request failed: {}", e)),
+    };
+
+    let status = resp.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return logged_out(
+            "cursor",
+            "Cursor session expired — run 'cursor-agent login' to log in".to_string(),
+        );
+    }
+    if status.as_u16() == 429 {
+        return unavailable(
+            "cursor",
+            "Rate limited — usage data temporarily unavailable".to_string(),
+        );
+    }
+    if !status.is_success() {
+        return unavailable(
+            "cursor",
+            format!("API error {}: usage endpoint failed", status.as_u16()),
+        );
+    }
+
+    let body = match resp.text() {
+        Ok(b) => b,
+        Err(e) => return unavailable("cursor", format!("Failed to read response: {}", e)),
+    };
+
+    match parse_cursor_response(&body) {
+        Ok((windows, detail)) => ProviderUsage {
+            provider: "cursor".to_string(),
+            logged_in: true,
+            windows,
+            balance: None,
+            detail,
+            error: None,
+        },
+        Err(e) => unavailable("cursor", format!("Failed to parse response: {}", e)),
+    }
+}
+
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
 type Cache = HashMap<String, (Instant, ProviderUsage)>;
@@ -4469,6 +4817,299 @@ mod tests {
         assert_eq!(usage.windows[0].used_percent, Some(25.0));
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    // ─── Cursor CLI Usage Probe Tests (Issue #1173) ─────────────────────────
+
+    #[test]
+    fn test_parse_cursor_response_fast_requests() {
+        let json = r#"{
+            "gpt-4": {
+                "numRequests": 125,
+                "numSlowRequests": 0,
+                "maxRequestUsage": 500,
+                "maxTokenUsage": null
+            },
+            "startOfMonth": "2026-08-01T00:00:00.000Z"
+        }"#;
+
+        let (windows, detail) = parse_cursor_response(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Fast Requests");
+        assert_eq!(windows[0].used_percent, Some(25.0));
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-09-01T00:00:00+00:00"));
+        assert_eq!(detail.as_deref(), Some("375 of 500 fast requests remaining"));
+    }
+
+    #[test]
+    fn test_parse_cursor_response_with_slow_requests() {
+        let json = r#"{
+            "gpt-4": {
+                "numRequests": 450,
+                "numSlowRequests": 12,
+                "maxRequestUsage": 500
+            },
+            "startOfMonth": "2026-08-01T00:00:00Z"
+        }"#;
+
+        let (windows, detail) = parse_cursor_response(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].used_percent, Some(90.0));
+        assert_eq!(
+            detail.as_deref(),
+            Some("50 of 500 fast requests remaining (12 slow requests used)")
+        );
+    }
+
+    #[test]
+    fn test_parse_cursor_response_unlimited_requests() {
+        let json = r#"{
+            "gpt-4": {
+                "numRequests": 88
+            },
+            "startOfMonth": "2026-08-01T00:00:00Z"
+        }"#;
+
+        let (windows, detail) = parse_cursor_response(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].used_percent, None);
+        assert_eq!(detail.as_deref(), Some("88 requests used this billing period"));
+    }
+
+    #[test]
+    fn test_parse_cursor_response_empty_is_empty_windows() {
+        let json = r#"{
+            "startOfMonth": "2026-08-01T00:00:00Z"
+        }"#;
+
+        let (windows, detail) = parse_cursor_response(json).unwrap();
+        assert!(windows.is_empty());
+        assert_eq!(detail.as_deref(), Some("No active Cursor usage windows"));
+    }
+
+    #[test]
+    fn test_parse_cursor_response_invalid_shape() {
+        let err = parse_cursor_response("not-json").unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)));
+    }
+
+    #[test]
+    fn test_compute_next_month_reset_year_boundary() {
+        let dec = "2026-12-01T00:00:00Z";
+        let next = compute_next_month_reset(dec).unwrap();
+        assert_eq!(next, "2027-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn test_read_cursor_sqlite_token_plain_and_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "cursor_vscdb_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("state.vscdb");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', '\"test-jwt-token\"')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let token = read_cursor_sqlite_token(&db_path).unwrap();
+        assert_eq!(token, "test-jwt-token");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_cursor_sqlite_token_missing_key() {
+        let dir = std::env::temp_dir().join(format!(
+            "cursor_vscdb_empty_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("state.vscdb");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = read_cursor_sqlite_token(&db_path).unwrap_err();
+        assert!(matches!(err, UsageError::NoCredential(_)));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_cursor_auth_json_variants() {
+        let dir = std::env::temp_dir().join(format!(
+            "cursor_auth_json_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let json_path = dir.join("auth.json");
+
+        fs::write(&json_path, r#"{"accessToken": "tok-camel"}"#).unwrap();
+        assert_eq!(read_cursor_auth_json(&json_path).unwrap(), "tok-camel");
+
+        fs::write(&json_path, r#"{"access_token": "tok-snake"}"#).unwrap();
+        assert_eq!(read_cursor_auth_json(&json_path).unwrap(), "tok-snake");
+
+        fs::write(&json_path, r#"{"token": "tok-plain"}"#).unwrap();
+        assert_eq!(read_cursor_auth_json(&json_path).unwrap(), "tok-plain");
+
+        fs::write(&json_path, r#"{"other": "value"}"#).unwrap();
+        assert!(matches!(
+            read_cursor_auth_json(&json_path).unwrap_err(),
+            UsageError::NoCredential(_)
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cursor_token_candidate_priority() {
+        let dir = std::env::temp_dir().join(format!(
+            "cursor_priority_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let db_path = dir.join("state.vscdb");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', 'db-token')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let json_path = dir.join("auth.json");
+        fs::write(&json_path, r#"{"accessToken": "json-token"}"#).unwrap();
+
+        // 1. Env token wins over candidates
+        let tok1 = read_cursor_token_from_candidates(
+            Some("env-token".to_string()),
+            &[db_path.clone(), json_path.clone()],
+        )
+        .unwrap();
+        assert_eq!(tok1, "env-token");
+
+        // 2. DB candidate wins when env token is None
+        let tok2 = read_cursor_token_from_candidates(
+            None,
+            &[db_path.clone(), json_path.clone()],
+        )
+        .unwrap();
+        assert_eq!(tok2, "db-token");
+
+        // 3. JSON candidate used when DB is absent
+        let tok3 = read_cursor_token_from_candidates(
+            None,
+            &[dir.join("nonexistent.vscdb"), json_path.clone()],
+        )
+        .unwrap();
+        assert_eq!(tok3, "json-token");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cursor_usage_with_sources_live_loopback() {
+        let dir = std::env::temp_dir().join(format!(
+            "cursor_loopback_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let json_path = dir.join("auth.json");
+        fs::write(&json_path, r#"{"accessToken": "test-key"}"#).unwrap();
+
+        // Success 200 OK
+        let port_ok = spawn_loopback(1, |req| {
+            assert_eq!(
+                req.headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.as_str()),
+                Some("Bearer test-key")
+            );
+            let body = r#"{
+                "gpt-4": {
+                    "numRequests": 100,
+                    "maxRequestUsage": 500
+                },
+                "startOfMonth": "2026-08-01T00:00:00Z"
+            }"#;
+            let _ = req.respond(tiny_http::Response::from_string(body));
+        });
+        let usage = cursor_usage_with_sources(
+            None,
+            std::slice::from_ref(&json_path),
+            &format!("http://127.0.0.1:{port_ok}/auth/usage"),
+        );
+        assert!(usage.logged_in);
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].used_percent, Some(20.0));
+        assert!(usage.error.is_none());
+
+        // 401 Unauthorized -> logged_out
+        let port_401 = spawn_loopback(1, |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string(r#"{"error":"unauthorized"}"#)
+                    .with_status_code(401),
+            );
+        });
+        let usage_401 = cursor_usage_with_sources(
+            None,
+            std::slice::from_ref(&json_path),
+            &format!("http://127.0.0.1:{port_401}/auth/usage"),
+        );
+        assert!(!usage_401.logged_in);
+        assert!(usage_401.error.as_deref().unwrap().contains("cursor-agent login"));
+
+        // 429 Rate Limited -> unavailable
+        let port_429 = spawn_loopback(1, |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string(r#"{"error":"too many requests"}"#)
+                    .with_status_code(429),
+            );
+        });
+        let usage_429 = cursor_usage_with_sources(
+            None,
+            std::slice::from_ref(&json_path),
+            &format!("http://127.0.0.1:{port_429}/auth/usage"),
+        );
+        assert!(usage_429.logged_in);
+        assert!(usage_429.error.as_deref().unwrap().contains("Rate limited"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 
