@@ -24,6 +24,14 @@ describe('brandFor', () => {
     });
   });
 
+  it('registers Cursor with its official brand treatment', () => {
+    expect(brandFor('cursor')).toMatchObject({
+      id: 'cursor',
+      chipHex: '#1B1913',
+      chipClass: 'bg-neutral-900',
+    });
+  });
+
   it('returns undefined for an unregistered provider', () => {
     expect(brandFor('claude:custom-account')).toBeUndefined();
     expect(brandFor('mystery')).toBeUndefined();

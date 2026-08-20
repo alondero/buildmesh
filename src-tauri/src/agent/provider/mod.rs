@@ -11,7 +11,7 @@ pub mod provider_conf;
 use crate::models::EnvType;
 
 /// Built-in **Harness Profile** ids that detection populates (`claude`,
-/// `codex`, `agy`, `opencode`, `grok`, `kimi`) plus the code-defined
+/// `codex`, `cursor`, `agy`, `opencode`, `grok`, `kimi`) plus the code-defined
 /// `terminal` default (issue #536) and the legacy `anthropic` executor id.
 ///
 /// Used by the v19 Spawn Option composite-id migration's
@@ -30,6 +30,7 @@ use crate::models::EnvType;
 pub const BUILTIN_HARNESS_IDS: &[&str] = &[
     "claude",
     "codex",
+    "cursor",
     "agy",
     "grok",
     "kimi",

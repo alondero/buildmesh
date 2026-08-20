@@ -56,6 +56,13 @@ const DETECTABLE: &[Detectable] = &[
         config_dirs: &[".codex"],
     },
     Detectable {
+        id: "cursor",
+        name: "Cursor Agent",
+        harness: "cursor",
+        binaries: &["cursor-agent", "agent"],
+        config_dirs: &[".cursor"],
+    },
+    Detectable {
         id: "agy",
         name: "Antigravity",
         harness: "agy",
@@ -230,6 +237,40 @@ mod tests {
     }
 
     #[test]
+    fn detects_cursor_agent_binary_without_matching_cursor_ide_binary() {
+        let path_dirs = dirs(&["/bin"]);
+        let exists = fake_fs(&["/bin/cursor-agent", "/bin/cursor"]);
+        let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "cursor");
+        assert_eq!(profiles[0].name, "Cursor Agent");
+        assert_eq!(profiles[0].harness, "cursor");
+    }
+
+    #[test]
+    fn detects_cursor_agent_via_bare_agent_binary() {
+        let path_dirs = dirs(&["/bin"]);
+        let exists = fake_fs(&["/bin/agent"]);
+        let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "cursor");
+        assert_eq!(profiles[0].name, "Cursor Agent");
+        assert_eq!(profiles[0].harness, "cursor");
+    }
+
+    #[test]
+    fn cursor_config_dir_alone_counts_as_installed() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.cursor"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["cursor"]
+        );
+    }
+
+    #[test]
     fn windows_extension_resolves_the_binary() {
         // `claude` itself isn't on disk, but `claude.exe` (via PATHEXT) is.
         let path_dirs = dirs(&["C:/tools"]);
@@ -294,6 +335,7 @@ mod tests {
         let exists = fake_fs(&[
             "/bin/claude",
             "/bin/codex",
+            "/bin/cursor-agent",
             "/bin/agy",
             "/bin/opencode",
             "/bin/grok",
@@ -308,6 +350,7 @@ mod tests {
             match p.id.as_str() {
                 "claude" => assert_eq!(provider, Provider::Anthropic),
                 "codex" => assert_eq!(provider, Provider::Codex),
+                "cursor" => assert_eq!(provider, Provider::Cursor),
                 "agy" => assert_eq!(provider, Provider::Agy),
                 "opencode" => assert_eq!(provider, Provider::OpenCode),
                 "grok" => assert_eq!(provider, Provider::Grok),
