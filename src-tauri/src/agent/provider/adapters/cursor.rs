@@ -41,9 +41,9 @@ impl AgentProvider for CursorAdapter {
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         SpawnRecipe {
             binary: "cursor-agent",
-            // Keep the interactive TUI, but avoid blocking on Cursor's own
-            // tool-approval and workspace-trust prompts inside the PTY.
-            base_args: vec!["--force".into(), "--trust".into()],
+            // Cursor documents `--force` as allowing commands unless denied.
+            // `--trust` is a print-mode option, not an interactive-TUI flag.
+            base_args: vec!["--force".into()],
             windows_shell: shell_for(platform),
         }
     }
@@ -118,13 +118,13 @@ mod tests {
     fn spawn_recipe_uses_cmd_only_on_windows() {
         let windows = CURSOR.spawn_recipe(Platform::Windows, EnvType::Windows);
         assert_eq!(windows.binary, "cursor-agent");
-        assert_eq!(windows.base_args, vec!["--force", "--trust"]);
+        assert_eq!(windows.base_args, vec!["--force"]);
         assert!(matches!(windows.windows_shell, WindowsShell::Cmd));
 
         for platform in [Platform::Linux, Platform::Macos] {
             let recipe = CURSOR.spawn_recipe(platform, EnvType::Windows);
             assert_eq!(recipe.binary, "cursor-agent");
-            assert_eq!(recipe.base_args, vec!["--force", "--trust"]);
+            assert_eq!(recipe.base_args, vec!["--force"]);
             assert!(
                 matches!(recipe.windows_shell, WindowsShell::Direct),
                 "{platform:?} must use WindowsShell::Direct"

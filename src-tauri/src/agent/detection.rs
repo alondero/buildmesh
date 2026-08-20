@@ -248,12 +248,26 @@ mod tests {
     }
 
     #[test]
+    fn detects_cursor_agent_via_bare_agent_binary() {
+        let path_dirs = dirs(&["/bin"]);
+        let exists = fake_fs(&["/bin/agent"]);
+        let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "cursor");
+        assert_eq!(profiles[0].name, "Cursor Agent");
+        assert_eq!(profiles[0].harness, "cursor");
+    }
+
+    #[test]
     fn cursor_config_dir_alone_counts_as_installed() {
         let path_dirs = dirs(&["/usr/bin"]);
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.cursor"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["cursor"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["cursor"]
+        );
     }
 
     #[test]
