@@ -1335,15 +1335,13 @@ mod tests {
         assert!(!Provider::Mcode.adapter().requires_attention_hook());
     }
 
-    /// The "produces a readable transcript" capability (#317) — the Claude-backed
-    /// `anthropic` adapter (which also runs custom MiniMax/DeepSeek profiles)
-    /// and Codex (whose rollout format the reader parses since #887) write
-    /// transcripts the coordinator read API can drill into. Kimi Code's
-    /// `wire.jsonl` is standard JSONL (#911 research), but the reader's
-    /// path resolver isn't wired for `~/.kimi/` yet — Kimi returns `false`
-    /// and the Node Digest rich layer degrades to spine-only with
-    /// `unsupported`. Everything else degrades the same way; this matrix
-    /// is load-bearing.
+    /// The "produces a readable transcript" capability (#317) — the
+    /// Claude-backed `anthropic` adapter (which also runs custom
+    /// MiniMax/DeepSeek profiles), Codex, and Cursor write transcripts the
+    /// coordinator read API can drill into. Kimi Code's `wire.jsonl` is
+    /// standard JSONL (#911 research), but the reader's path resolver isn't
+    /// wired for `~/.kimi/` yet. Everything else degrades to spine-only with
+    /// `unsupported`; this matrix is load-bearing.
     #[test]
     fn only_transcript_writing_providers_produce_a_readable_transcript() {
         assert!(Provider::Anthropic.adapter().produces_readable_transcript());
@@ -1352,9 +1350,8 @@ mod tests {
         // Kimi Code (#918) — reader wiring is the follow-up; capability
         // claim is honest at `false` until then.
         assert!(!Provider::Kimi.adapter().produces_readable_transcript());
-        // Cursor writes compatible JSONL, but its ~/.cursor/projects layout
-        // still needs reader/archive-discovery wiring.
-        assert!(!Provider::Cursor.adapter().produces_readable_transcript());
+        // Cursor's workspace-scoped JSONL is parsed by TranscriptFormat::Cursor.
+        assert!(Provider::Cursor.adapter().produces_readable_transcript());
         assert!(!Provider::Mcode.adapter().produces_readable_transcript());
         assert!(!Provider::Agy.adapter().produces_readable_transcript());
         assert!(!Provider::OpenCode.adapter().produces_readable_transcript());

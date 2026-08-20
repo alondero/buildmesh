@@ -1135,6 +1135,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provider_info_marks_cursor_profile_as_resumable() {
+        use crate::preferences::HarnessProfile;
+        let cursor = HarnessProfile {
+            id: "cursor".to_string(),
+            name: "Cursor Agent".to_string(),
+            harness: "cursor".to_string(),
+        };
+        let info = provider_info_for(&cursor, Platform::Windows)
+            .expect("Cursor is available on Windows");
+        assert!(
+            info.resumable,
+            "Cursor's workspace JSONL transcript must enable archive resume"
+        );
+        assert!(info.capabilities.produces_readable_transcript);
+    }
+
     /// Negative companion to the previous test: the `harness` field must
     /// actually drive the executor resolution. If a profile pins
     /// `harness: "opencode"`, `resumable` must be `false` even though the

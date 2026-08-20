@@ -161,6 +161,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cursor_dir_uses_the_current_environment_home() {
+        let expected = match current_env() {
+            Environment::Wsl => std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/root"))
+                .join(".cursor"),
+            Environment::Windows => std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    let user = std::env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                    std::path::PathBuf::from(format!("C:\\Users\\{user}"))
+                })
+                .join(".cursor"),
+        };
+        assert_eq!(cursor_dir(), expected);
+    }
+
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
     #[test]

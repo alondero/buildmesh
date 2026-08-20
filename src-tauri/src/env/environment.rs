@@ -239,6 +239,30 @@ pub fn claude_dir() -> PathBuf {
     }
 }
 
+/// The Cursor CLI home directory, mirroring [`claude_dir`]. Cursor stores
+/// workspace-scoped agent transcripts below `<cursor home>/projects/`.
+pub fn cursor_dir() -> PathBuf {
+    match current_env() {
+        Environment::Wsl => {
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".cursor")
+            } else {
+                PathBuf::from("/root/.cursor")
+            }
+        }
+        Environment::Windows => {
+            if let Ok(home) = env::var("USERPROFILE") {
+                PathBuf::from(home).join(".cursor")
+            } else if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".cursor")
+            } else {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}\\.cursor"))
+            }
+        }
+    }
+}
+
 /// The Codex CLI home directory, mirroring [`claude_dir`]. Codex honours a
 /// `CODEX_HOME` override for its *entire* state directory (sessions, auth,
 /// config — issue #885), so that takes precedence; otherwise `~/.codex` in the
