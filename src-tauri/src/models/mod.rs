@@ -71,6 +71,9 @@ pub enum Provider {
     Agy,
     OpenCode,
     Codex,
+    /// Cursor's interactive coding agent CLI.
+    /// See `agent::provider::adapters::cursor`.
+    Cursor,
     /// xAI's Grok Build CLI — interactive TUI-based coding agent.
     /// See `agent::provider::adapters::grok`.
     Grok,
@@ -94,6 +97,7 @@ impl Provider {
             Provider::Agy,
             Provider::OpenCode,
             Provider::Codex,
+            Provider::Cursor,
             Provider::Grok,
             Provider::Kimi,
             Provider::Mcode,
@@ -117,6 +121,7 @@ impl Provider {
             "agy" => Provider::Agy,
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
+            "cursor" => Provider::Cursor,
             "grok" => Provider::Grok,
             "kimi" => Provider::Kimi,
             "mcode" | "minimax-code" => Provider::Mcode,
@@ -148,6 +153,7 @@ impl Provider {
             Provider::Agy => &adapters::AGY,
             Provider::OpenCode => &adapters::OPENCODE,
             Provider::Codex => &adapters::CODEX,
+            Provider::Cursor => &adapters::CURSOR,
             Provider::Grok => &adapters::GROK,
             Provider::Kimi => &adapters::KIMI,
             Provider::Mcode => &adapters::MCODE,
@@ -163,6 +169,7 @@ impl std::fmt::Display for Provider {
             Provider::Agy => write!(f, "agy"),
             Provider::OpenCode => write!(f, "opencode"),
             Provider::Codex => write!(f, "codex"),
+            Provider::Cursor => write!(f, "cursor"),
             Provider::Grok => write!(f, "grok"),
             Provider::Kimi => write!(f, "kimi"),
             Provider::Mcode => write!(f, "mcode"),
@@ -1345,6 +1352,9 @@ mod tests {
         // Kimi Code (#918) — reader wiring is the follow-up; capability
         // claim is honest at `false` until then.
         assert!(!Provider::Kimi.adapter().produces_readable_transcript());
+        // Cursor writes compatible JSONL, but its ~/.cursor/projects layout
+        // still needs reader/archive-discovery wiring.
+        assert!(!Provider::Cursor.adapter().produces_readable_transcript());
         assert!(!Provider::Mcode.adapter().produces_readable_transcript());
         assert!(!Provider::Agy.adapter().produces_readable_transcript());
         assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
@@ -1575,6 +1585,7 @@ mod tests {
         assert_eq!(format!("{}", Provider::Agy), "agy");
         assert_eq!(format!("{}", Provider::OpenCode), "opencode");
         assert_eq!(format!("{}", Provider::Codex), "codex");
+        assert_eq!(format!("{}", Provider::Cursor), "cursor");
         assert_eq!(format!("{}", Provider::Grok), "grok");
         assert_eq!(format!("{}", Provider::Kimi), "kimi");
         assert_eq!(format!("{}", Provider::Mcode), "mcode");

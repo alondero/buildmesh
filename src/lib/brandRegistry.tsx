@@ -59,6 +59,18 @@ function KimiIcon({ className, title }: InlineIconProps) {
   );
 }
 
+function CursorIcon({ className, title }: InlineIconProps) {
+  return (
+    <svg viewBox="400 395 168 191" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <title>{title}</title>
+      <path
+        fill="currentColor"
+        d="M563.463 439.971L487.344 396.057C484.899 394.646 481.883 394.646 479.439 396.057L403.323 439.971C401.269 441.156 400 443.349 400 445.723V534.276C400 536.647 401.269 538.843 403.323 540.029L479.443 583.943C481.887 585.353 484.903 585.353 487.347 583.943L563.466 540.029C565.521 538.843 566.79 536.651 566.79 534.276V445.723C566.79 443.352 565.521 441.156 563.466 439.971H563.463ZM558.681 449.273L485.199 576.451C484.703 577.308 483.391 576.958 483.391 575.966V492.691C483.391 491.027 482.501 489.488 481.058 488.652L408.887 447.016C408.03 446.52 408.38 445.209 409.373 445.209H556.337C558.424 445.209 559.728 447.47 558.685 449.276H558.681V449.273Z"
+      />
+    </svg>
+  );
+}
+
 function TerminalIcon({ className, title }: InlineIconProps) {
   return (
     <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
@@ -86,6 +98,9 @@ const BRANDS: readonly BrandRegistration[] = [
   { id: 'anthropic', aliases: ['claude'], icon: { kind: 'inline', component: ClaudeCodeIcon }, chipHex: '#1d7cfc', chipClass: 'bg-blue-500' },
   { id: 'minimax', aliases: ['mcode'], icon: { kind: 'image', src: minimaxLogo }, chipHex: '#6366f1', chipClass: 'bg-indigo-500' },
   { id: 'kimi', icon: { kind: 'inline', component: KimiIcon }, chipHex: '#00c4c4', chipClass: 'bg-cyan-500' },
+  // Cursor's current 2D mark is the warm-black/light cube treatment shown
+  // in the official brand assets: https://cursor.com/en-US/brand
+  { id: 'cursor', icon: { kind: 'inline', component: CursorIcon }, chipHex: '#1B1913', chipClass: 'bg-neutral-900' },
   { id: 'agy', icon: { kind: 'image', src: antigravityLogo }, chipHex: '#10b981', chipClass: 'bg-emerald-500' },
   { id: 'opencode', icon: { kind: 'inline', component: OpenCodeIcon }, chipHex: '#f59e0b', chipClass: 'bg-amber-500' },
   { id: 'terminal', icon: { kind: 'inline', component: TerminalIcon }, chipHex: '#9ca3af', chipClass: 'bg-gray-500' },
