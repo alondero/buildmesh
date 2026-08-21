@@ -35,6 +35,7 @@ pub const BUILTIN_HARNESS_IDS: &[&str] = &[
     "grok",
     "kimi",
     "mcode",
+    "dsh",
     "opencode",
     "terminal",
     "anthropic",

@@ -20,7 +20,7 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 ### Agent spawn shell wrappers (Windows)
 Each provider adapter declares its `SpawnRecipe`; `spawn_environment::wrap` consumes it. Don't hard-code the shell — the adapter owns it.
 - **cwrap providers** (Anthropic, Minimax, Kimi) → `powershell.exe` so ANSI escapes propagate
-- **`.cmd` batch providers** (Antigravity, OpenCode, MiniMax Code) → `cmd.exe /c`
+- **`.cmd` batch providers** (Antigravity, OpenCode, MiniMax Code, DeepSeek Harness) → `cmd.exe /c`
 - **Codex** → `powershell.exe` on Windows, direct spawn on macOS/Linux
 - **Grok** → direct spawn on all platforms (native binary, interactive TUI)
 - On macOS/Linux, every provider uses `WindowsShell::Direct`; the Windows shell only matters on Windows.

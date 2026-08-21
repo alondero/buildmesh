@@ -21,6 +21,7 @@ pub mod agy;
 pub mod anthropic;
 pub mod codex;
 pub mod cursor;
+pub mod dsh;
 pub mod grok;
 pub mod kimi;
 pub mod mcode;
@@ -31,9 +32,11 @@ pub use agy::AGY;
 pub use anthropic::ANTHROPIC;
 pub use codex::CODEX;
 pub use cursor::CURSOR;
+pub use dsh::DSH;
 pub use grok::GROK;
 pub use kimi::KIMI;
 pub use mcode::MCODE;
 pub use opencode::OPENCODE;
 pub use terminal::TERMINAL;
+
 
