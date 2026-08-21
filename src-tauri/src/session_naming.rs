@@ -990,6 +990,81 @@ fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
 // Internal: LLM-based summarization
 // ---------------------------------------------------------------------------
 
+/// Resolve the absolute path of the `claude` binary used by
+/// `summarize_and_rename_with`.
+///
+/// Why this exists: the previous `Command::new("claude")` call relied on
+/// the buildmesh process's inherited `PATH`, which on Windows is captured
+/// at process start. If buildmesh was launched before Claude Code was
+/// installed/added to the user PATH — or from a launch context that
+/// doesn't merge `HKCU\Environment` (Start menu via MSI, sandboxed
+/// launchers, services) — the rename silently fails with
+/// `failed to spawn CLI: program not found` and the node trips the
+/// sticky 3-attempt lockout (the toast: "Couldn't auto-name node …").
+///
+/// Resolution order, matching `where.exe`:
+/// 1. `which::which("claude")` — walks the process `PATH` honouring
+///    `PATHEXT`. Returns the absolute path of the first hit, mirroring
+///    the same lookup the regular Claude Code spawn relies on.
+/// 2. **Well-known install fallback** — probes the standard install
+///    locations for Claude Code on Windows, derived from the *current*
+///    `USERPROFILE` / `APPDATA` env vars (not the path captured at
+///    process start, so a recently-installed binary is still found):
+///    - `%USERPROFILE%\.local\bin\claude.exe` (official installer)
+///    - `%APPDATA%\npm\claude.cmd` / `claude` / `claude.exe` (npm shim)
+///    - `%APPDATA%\npm\claude-code.cmd` / `claude-code` (npm package
+///      scoped to the `claude-code` command name)
+/// 3. **Clear error** — when both miss, surface a message that points
+///    the user at Settings → Auto-naming (which `App.tsx`'s toast
+///    already references) instead of a generic OS ENOENT string.
+///
+/// Pure and side-effect-free: reads env via `std::env::var`, never
+/// mutates it. `pub(crate)` so a future test in a sibling module can
+/// exercise the well-known-fallback arm against a stubbed `USERPROFILE`
+/// without going through a real spawn.
+pub(crate) fn resolve_claude_binary() -> Result<std::path::PathBuf, String> {
+    if let Ok(p) = which::which("claude") {
+        return Ok(p);
+    }
+    if let Some(p) = resolve_from_windows_install_paths(
+        std::env::var("USERPROFILE").ok().as_deref(),
+        std::env::var("APPDATA").ok().as_deref(),
+    ) {
+        return Ok(p);
+    }
+    Err(
+        "claude binary not found on PATH or in well-known install \
+         locations (checked USERPROFILE\\.local\\bin and APPDATA\\npm); \
+         install Claude Code (https://docs.claude.com/claude-code) so \
+         the auto-rename can spawn `claude --print`"
+            .to_string(),
+    )
+}
+
+/// Probe the standard Windows install locations for a `claude` binary.
+/// No-op on platforms where `USERPROFILE` / `APPDATA` are unset.
+fn resolve_from_windows_install_paths(
+    userprofile: Option<&str>,
+    appdata: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = userprofile {
+        candidates.push(
+            std::path::PathBuf::from(home).join(r".local\bin\claude.exe"),
+        );
+    }
+    if let Some(appdata) = appdata {
+        let npm = std::path::PathBuf::from(appdata).join("npm");
+        candidates.push(npm.join("claude.cmd"));
+        candidates.push(npm.join("claude"));
+        candidates.push(npm.join("claude.exe"));
+        candidates.push(npm.join("claude-code.cmd"));
+        candidates.push(npm.join("claude-code"));
+    }
+
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 /// Pure routing decision. The single input is fed in via a closure so
 /// tests can stub the disk-reading helper
 /// (`preferences::resolve_provider_env`) without touching real
@@ -1073,10 +1148,17 @@ async fn summarize_and_rename_with(
     // versions, so we use the stdin-only mode for reliability.
     let full_input = format!("{}\n\nTerminal log to summarize:\n{}", prompt, clean_buffer);
 
-    // `claude` is a native binary, so no shell wrapper is needed. The
-    // CREATE_NO_WINDOW setting carries through the std→tokio `From` conversion.
+    // Resolve `claude` to an absolute path before spawning — a direct
+    // `Command::new("claude")` would rely on the buildmesh process's
+    // inherited `PATH` (Windows: captured at process start; stale if
+    // Claude Code was installed after launch).
+    let claude_path = resolve_claude_binary()?;
+    tracing::info!(
+        "session_naming: resolved claude binary to {}",
+        claude_path.display()
+    );
     let mut cmd: tokio::process::Command =
-        crate::process_util::command_no_window("claude").into();
+        crate::process_util::command_no_window(&claude_path).into();
     // Caller (on_turn_with, line 734) is `tauri::async_runtime::spawn` and this
     // future is wrapped in a 30s `tokio::time::timeout` (line below) — both
     // cancel the awaiter, not the child, so without this flag a claude leak
@@ -1209,6 +1291,41 @@ fn slug_with_retry(raw: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialises tests that mutate process env (PATH, USERPROFILE,
+    /// APPDATA) so two parallel tests can't observe each other's
+    /// mid-flight values. Required because the env-mutating tests in
+    /// this module read three different vars and a partial overlap
+    /// would let the resolver's `is_file()` check silently return a
+    /// real install path from a non-overridden var.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with each `(name, value)` in `vars` set on the process
+    /// env, restoring the originals (or unsetting) afterwards even on
+    /// panic. Lets env-mutating tests stay under the `ENV_LOCK` and
+    /// fail without leaking global state to other tests in the binary.
+    fn with_env_vars<F: FnOnce()>(vars: &[(&str, Option<&std::ffi::OsStr>)], f: F) {
+        let saved: Vec<(&str, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, saved_val) in saved {
+            match saved_val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
 
     /// Open the buffering gate for a node so `on_output` writes immediately.
     /// Real code opens the gate via `should_trigger_rename`; tests use this
@@ -2433,6 +2550,283 @@ mod tests {
         assert!(
             code_only.contains("naming_backend_env(&user_naming_provider)"),
             "rename env must come from naming_backend_env(&user_naming_provider)"
+        );
+    }
+
+    // --- claude binary resolution: PATH + well-known install fallback ---
+
+    /// The well-known-fallback arm must surface the official installer
+    /// binary (`%USERPROFILE%\.local\bin\claude.exe`) when it exists,
+    /// even if APPDATA is unset / has no `npm\claude*`. Mirrors the
+    /// common install path for Claude Code on Windows (the installer
+    /// drops a real `.exe` at `.local\bin\`, not an npm shim).
+    #[test]
+    fn windows_install_paths_finds_local_bin_claude_exe() {
+        // `tempfile::tempdir` gives each test a unique directory so
+        // parallel test execution can't race on a shared `pid`-suffixed
+        // path. The directory auto-cleans on drop.
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let bin_dir = tmp.path().join(".local").join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create temp .local/bin");
+        let target = bin_dir.join("claude.exe");
+        // Create a tiny placeholder file so `is_file()` returns true. The
+        // content doesn't matter — the resolver checks existence, not
+        // executability, so we don't need a real PE here.
+        std::fs::write(&target, b"fake").expect("write placeholder");
+
+        let resolved = resolve_from_windows_install_paths(
+            Some(tmp.path().to_str().unwrap()),
+            None,
+        );
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(target.as_path()),
+            "well-known fallback must return %USERPROFILE%\\.local\\bin\\claude.exe when present"
+        );
+    }
+
+    /// The well-known-fallback arm must surface the npm shim when the
+    /// official installer is absent. The `claude.cmd` candidate is
+    /// checked first to match `PATHEXT`'s `cmd` precedence (the npm
+    /// package on Windows ships a `.cmd` shim).
+    #[test]
+    fn windows_install_paths_finds_npm_claude_cmd() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let npm_dir = tmp.path().join("npm");
+        std::fs::create_dir_all(&npm_dir).expect("create temp npm");
+        let target = npm_dir.join("claude.cmd");
+        std::fs::write(&target, b"fake").expect("write placeholder");
+
+        let resolved = resolve_from_windows_install_paths(
+            None,
+            Some(tmp.path().to_str().unwrap()),
+        );
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(target.as_path()),
+            "well-known fallback must return %APPDATA%\\npm\\claude.cmd when present"
+        );
+    }
+
+    /// When neither USERPROFILE nor APPDATA is set (e.g. a service or
+    /// a context where the env block was scrubbed), the resolver must
+    /// return `None` cleanly rather than panicking. The caller maps
+    /// `None` to the clear "claude binary not found" error rather than
+    /// a generic ENOENT.
+    #[test]
+    fn windows_install_paths_returns_none_when_no_env() {
+        assert!(
+            resolve_from_windows_install_paths(None, None).is_none(),
+            "no env => no candidates => None"
+        );
+    }
+
+    /// When the env vars are set but point at a directory without any
+    /// `claude*` binary, the resolver must return `None` (not a
+    /// `Some` of a non-existent path). This pins the `is_file()` check
+    /// inside the candidate loop — a regression that dropped it would
+    /// return a phantom path and the spawn would then fail with the
+    /// very "program not found" error we're trying to make clearer.
+    #[test]
+    fn windows_install_paths_returns_none_when_no_binary_present() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        std::fs::create_dir_all(tmp.path().join(".local").join("bin"))
+            .expect("dirs");
+        std::fs::create_dir_all(tmp.path().join("npm")).expect("npm dir");
+
+        let resolved = resolve_from_windows_install_paths(
+            Some(tmp.path().to_str().unwrap()),
+            Some(tmp.path().to_str().unwrap()),
+        );
+
+        assert!(
+            resolved.is_none(),
+            "empty install dirs must return None (no phantom path); got {:?}",
+            resolved
+        );
+    }
+
+    /// The official installer path wins over the npm shim when both
+    /// are present (the installer's `claude.exe` shadows the npm
+    /// shim, which is what `where.exe` would also return). This pins
+    /// the candidate ordering inside `resolve_from_well_known_paths`.
+    #[test]
+    fn windows_install_paths_prefers_local_bin_over_npm() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let local = tmp.path().join(".local").join("bin");
+        let npm = tmp.path().join("npm");
+        std::fs::create_dir_all(&local).expect("local dir");
+        std::fs::create_dir_all(&npm).expect("npm dir");
+        let local_target = local.join("claude.exe");
+        let npm_target = npm.join("claude.cmd");
+        std::fs::write(&local_target, b"local").expect("write local");
+        std::fs::write(&npm_target, b"npm").expect("write npm");
+
+        let resolved = resolve_from_windows_install_paths(
+            Some(tmp.path().to_str().unwrap()),
+            Some(tmp.path().to_str().unwrap()),
+        );
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(local_target.as_path()),
+            "official installer (USERPROFILE\\.local\\bin\\claude.exe) must be preferred over npm shim"
+        );
+    }
+
+    /// `resolve_claude_binary` (the public resolver) must wire the
+    /// `which`-miss arm to the Windows-install-paths fallback. Without
+    /// this, the wiring "which says no → fall through to install paths"
+    /// is untested.
+    #[test]
+    fn resolve_claude_binary_falls_through_to_windows_install_paths() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let empty_path = tmp.path().join("empty_path");
+        std::fs::create_dir_all(&empty_path).expect("empty PATH dir");
+        let bin_dir = tmp.path().join(".local").join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("install dir");
+        let target = bin_dir.join("claude.exe");
+        std::fs::write(&target, b"fake").expect("write placeholder");
+        let empty_appdata = tmp.path().join("empty_appdata");
+        std::fs::create_dir_all(&empty_appdata).expect("empty APPDATA dir");
+
+        // Force the which-arm to miss (PATH → empty) and isolate the
+        // resolver from any pre-existing real install (USERPROFILE /
+        // APPDATA → our temp dirs). All three vars are touched because
+        // the resolver reads all three; missing any one lets a
+        // parallel test's value bleed through and produce a false Ok.
+        with_env_vars(
+            &[
+                ("PATH", Some(empty_path.as_os_str())),
+                ("USERPROFILE", Some(tmp.path().as_os_str())),
+                ("APPDATA", Some(empty_appdata.as_os_str())),
+            ],
+            || {
+                let result = resolve_claude_binary();
+                assert_eq!(result.as_deref().map(|p| p.to_path_buf()), Ok(target));
+            },
+        );
+    }
+
+    /// When both arms miss, the error must point users at the
+    /// actionable fix (install Claude Code) and NOT at the misleading
+    /// "pick a different provider in Settings → Auto-naming" — the
+    /// rename backend is always `claude --print`, so changing the
+    /// provider setting doesn't unblock a missing binary.
+    #[test]
+    fn resolve_claude_binary_error_does_not_mislead_to_settings() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let empty_path = tmp.path().join("empty_path");
+        std::fs::create_dir_all(&empty_path).expect("empty PATH dir");
+        let empty_appdata = tmp.path().join("empty_appdata");
+        std::fs::create_dir_all(&empty_appdata).expect("empty APPDATA dir");
+
+        with_env_vars(
+            &[
+                ("PATH", Some(empty_path.as_os_str())),
+                ("USERPROFILE", Some(tmp.path().as_os_str())),
+                ("APPDATA", Some(empty_appdata.as_os_str())),
+            ],
+            || {
+                let err = resolve_claude_binary()
+                    .expect_err("with no binary anywhere, the resolver must Err");
+                assert!(
+                    err.contains("claude binary not found"),
+                    "error must say what was missing; got: {}",
+                    err
+                );
+                assert!(
+                    err.contains("install Claude Code"),
+                    "error must point at the actionable fix; got: {}",
+                    err
+                );
+                assert!(
+                    !err.contains("pick a different provider"),
+                    "error must not blame Settings → Auto-naming for a missing binary; got: {}",
+                    err
+                );
+            },
+        );
+    }
+
+    /// Static guard: the rename call site must go through
+    /// `resolve_claude_binary` rather than the previous literal
+    /// `Command::new("claude")`. A regression that re-introduces the
+    /// literal would re-trigger the "program not found" toast for
+    /// users with a stale buildmesh PATH.
+    ///
+    /// Brace-counts the function body instead of a file-level
+    /// `source.contains("...")`, because the assertion message itself
+    /// contains the literal being checked (a file-level check would
+    /// always pass). Matches the established gh824 test shape at
+    /// `session_naming.rs:2377`.
+    #[test]
+    fn summarize_and_rename_uses_resolved_claude_path_not_literal() {
+        let source = include_str!("session_naming.rs");
+
+        // Pull out the body of `fn summarize_and_rename_with(..)` by
+        // brace-counting so nested closures don't false-match.
+        let sig = "async fn summarize_and_rename_with(";
+        let sig_idx = source
+            .find(sig)
+            .expect("summarize_and_rename_with must exist");
+        let open_rel = source[sig_idx..]
+            .find('{')
+            .expect("summarize_and_rename_with body must open with `{`");
+        let body_start = sig_idx + open_rel + 1;
+        let bytes = source.as_bytes();
+        let mut depth: usize = 1;
+        let mut i = body_start;
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        assert_eq!(depth, 0, "summarize_and_rename_with body must close");
+        let body_end = i - 1;
+        let body = &source[body_start..body_end];
+
+        // Strip line comments so the explanatory prose in the body
+        // (the rejected-v1 design note) doesn't false-positive.
+        let code_only: String = body
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") { "" } else { line }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The call site must go through the resolver so the
+        // well-known install-location fallback applies when the
+        // process's PATH is stale (the "program not found" toast).
+        assert!(
+            code_only.contains("resolve_claude_binary()?"),
+            "summarize_and_rename_with must call resolve_claude_binary() \
+             (PATH-stale spawn failure). A direct `Command::new(\"claude\")` \
+             falls back to the process's inherited PATH, which on Windows \
+             can be stale if Claude Code was installed after buildmesh \
+             launched."
+        );
+
+        // And the call site must NOT still spawn the literal "claude"
+        // string — that would re-introduce the bug. The
+        // `command_no_window("claude")` shape is unique to the old
+        // call site (the regular Claude Code spawn goes through
+        // `claude_direct_recipe` / `spawn_environment`, not
+        // `command_no_window`).
+        assert!(
+            !code_only.contains("command_no_window(\"claude\")"),
+            "summarize_and_rename_with must NOT spawn the literal \
+             \"claude\" anymore — use resolve_claude_binary() so the \
+             well-known install-location fallback applies."
         );
     }
 }

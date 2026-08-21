@@ -10,7 +10,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 ///
 /// On Windows GUI apps (windows_subsystem = "windows"), spawning a console process
 /// allocates a new visible console unless CREATE_NO_WINDOW is passed.
-pub fn command_no_window(program: &str) -> Command {
+pub fn command_no_window(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let cmd = Command::new(program);
     #[cfg(target_os = "windows")]
     {
