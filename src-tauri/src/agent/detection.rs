@@ -59,7 +59,10 @@ const DETECTABLE: &[Detectable] = &[
         id: "cursor",
         name: "Cursor Agent",
         harness: "cursor",
-        binaries: &["cursor-agent", "agent"],
+        // No bare "agent" stem: it false-positived against unrelated PATH
+        // binaries of that name (e.g. Grok's agent.exe) and offered Cursor
+        // on machines without it. Alias installs are still caught via .cursor.
+        binaries: &["cursor-agent"],
         config_dirs: &[".cursor"],
     },
     Detectable {
@@ -247,17 +250,6 @@ mod tests {
     fn detects_cursor_agent_binary_without_matching_cursor_ide_binary() {
         let path_dirs = dirs(&["/bin"]);
         let exists = fake_fs(&["/bin/cursor-agent", "/bin/cursor"]);
-        let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].id, "cursor");
-        assert_eq!(profiles[0].name, "Cursor Agent");
-        assert_eq!(profiles[0].harness, "cursor");
-    }
-
-    #[test]
-    fn detects_cursor_agent_via_bare_agent_binary() {
-        let path_dirs = dirs(&["/bin"]);
-        let exists = fake_fs(&["/bin/agent"]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].id, "cursor");
