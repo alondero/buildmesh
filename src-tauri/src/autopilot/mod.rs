@@ -28,6 +28,7 @@ pub mod compatibility;
 pub mod evaluator;
 pub mod finish;
 pub mod launch;
+pub mod node_launch;
 pub mod pipeline;
 
 use crate::models::SessionStatus;
