@@ -55,6 +55,7 @@ impl InitialPrompt {
     /// Borrow the prompt text without consuming it. Used by the spawn
     /// pipeline (`spawn_with_intent`) and the watcher marker helper
     /// (`marker_hint_for_prefill`) where a `&str` is all that's needed.
+    #[allow(dead_code)] // deferred callers per issue #1180 — docstring is the contract; drop on wire-up
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
