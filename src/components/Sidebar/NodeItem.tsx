@@ -11,6 +11,8 @@ import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { addToast } from '../../stores/toastStore';
+import { formatError } from '../../lib/errorUtils';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
 // node" flow wired up in ticket 03 of #774. We disable it (rather than
@@ -163,8 +165,14 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     if (!pendingRegenerate) return;
     const { providerId } = pendingRegenerate;
     setPendingRegenerate(null);
+    // Issue #1001 (mirrors `agentNodeStore.deleteAgentNode`): surface a
+    // failure through the shared toast pipeline. The previous
+    // `console.error` here left the user staring at a menu that
+    // closed silently on a backend rejection (the classic case was a
+    // `Completed` autopilot node, which the validator used to refuse
+    // before the Regenerate-on-Completed fix landed).
     regenerateAgentNode(node.id, providerId).catch((err) => {
-      console.error('[NodeItem] Regenerate failed:', err);
+      addToast('Regenerate', formatError(err), 'error');
     });
   };
 
@@ -186,8 +194,14 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
       setPendingRegenerate({ providerId, providerLabel });
       return;
     }
+    // See `confirmRegenerate` for the why; this is the non-running
+    // branch — every status the picker reaches where a fresh
+    // `regenerate_agent_node` IPC is fine without a confirm dialog
+    // (idle / awaiting_input / error / suspended / completed). Shares
+    // the same toast plumbing so the user always sees a backend
+    // rejection instead of a silent menu close.
     regenerateAgentNode(node.id, providerId).catch((err) => {
-      console.error('[NodeItem] Regenerate failed:', err);
+      addToast('Regenerate', formatError(err), 'error');
     });
   };
 

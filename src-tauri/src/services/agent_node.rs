@@ -437,10 +437,10 @@ fn process_removals(
 
 /// Validate that a node's status is eligible for regeneration.
 ///
-/// Allowed: `Idle`, `AwaitingInput`, `Error`, `Running`, `Suspended` —
-/// the node is in a state we can either kill-and-replace or, in the
-/// `Suspended` case, just respawn (no live process to kill). The
-/// orchestrator (see `regenerate` step 3) branches on `Suspended` to
+/// Allowed: `Idle`, `AwaitingInput`, `Error`, `Running`, `Suspended`,
+/// `Completed` — the node is in a state we can either kill-and-replace
+/// or, in the `Suspended` case, just respawn (no live process to kill).
+/// The orchestrator (see `regenerate` step 3) branches on `Suspended` to
 /// skip the unconditional `kill_agent` call.
 /// Rejected: `Spawning` / `Pending` (another spawn is in flight) and
 /// `Archived` (the node is closed-but-historical).
@@ -453,15 +453,27 @@ fn process_removals(
 /// branch in `regenerate` prevents `kill_agent_blocking`'s
 /// unconditional `on_idle` tail (commands/agent.rs:1172) from
 /// clobbering Suspended→Idle before the new spawn lands.
+///
+/// `Completed` was added alongside (the second issue surfaced after
+/// the autopilot wrap-up flow matured — issue #485 left autopilot
+/// nodes stuck in a "viewable but un-interactable" state from the
+/// Regenerate picker's perspective). The agent PTY is still alive at
+/// that point (autopilot doesn't kill the process when it writes the
+/// wrap-up complete), so the orchestrator's normal kill+respawn path
+/// applies — `should_skip_kill_for_regenerate(Completed)` stays
+/// `false`. `decide_resume` reuses the captured `cli_session_id`, so a
+/// same-harness Regenerate picks up exactly where the autopilot node
+/// left off.
 pub fn validate_status_eligible(status: SessionStatus) -> Result<(), String> {
     match status {
         SessionStatus::Idle
         | SessionStatus::AwaitingInput
         | SessionStatus::Error
         | SessionStatus::Running
-        | SessionStatus::Suspended => Ok(()),
+        | SessionStatus::Suspended
+        | SessionStatus::Completed => Ok(()),
         _ => Err(format!(
-            "regenerate unavailable: node is in {} state (must be idle, awaiting_input, error, running, or suspended)",
+            "regenerate unavailable: node is in {} state (must be idle, awaiting_input, error, running, suspended, or completed)",
             status.to_db_str()
         )),
     }
@@ -1077,8 +1089,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn validate_status_eligible_allows_running_idle_awaiting_error_suspended() {
-        // The five states the regenerate orchestrator accepts:
+    fn validate_status_eligible_allows_running_idle_awaiting_error_suspended_completed() {
+        // The six states the regenerate orchestrator accepts:
         //   * Running / Idle / AwaitingInput / Error — "process is or
         //     was running", so kill + respawn makes sense.
         //   * Suspended — no live process to kill; the orchestrator
@@ -1089,12 +1101,23 @@ mod tests {
         //     user-driven Resume affordance on `cli_session_id` non-
         //     empty to keep the autopilot-gate case (Suspended +
         //     NULL session id) from surfacing a confusing toast.
+        //   * Completed — autopilot-finished wrap-up (#485). The agent
+        //     PTY is still alive at the moment of `complete_autopilot_run`
+        //     (knowledge claim, not unit-tested: see
+        //     autopilot::pipeline::complete_autopilot_run — the function
+        //     never calls `kill_agent`), so we route through the
+        //     kill+respawn path. `decide_resume` reuses the captured
+        //     `cli_session_id` so a same-harness Regenerate picks up
+        //     exactly where autopilot left off — which is the "I want
+        //     to keep interacting with this session" affordance that
+        //     #774 ticket 04 framed.
         for status in [
             SessionStatus::Running,
             SessionStatus::Idle,
             SessionStatus::AwaitingInput,
             SessionStatus::Error,
             SessionStatus::Suspended,
+            SessionStatus::Completed,
         ] {
             assert!(
                 validate_status_eligible(status).is_ok(),
@@ -1149,6 +1172,12 @@ mod tests {
             SessionStatus::AwaitingInput,
             SessionStatus::Error,
             SessionStatus::Running,
+            // Completed — autopilot wrap-up flipped the status, but the
+            // agent PTY is still alive (Claude Code sits at the prompt
+            // after `gh pr create`). Regenerate must kill it so
+            // `spawn_agent_inner`'s `is_agent_already_running` short-
+            // circuit doesn't return early at spawn.rs:743.
+            SessionStatus::Completed,
         ] {
             assert!(
                 !should_skip_kill_for_regenerate(status),
