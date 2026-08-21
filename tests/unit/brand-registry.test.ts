@@ -33,12 +33,17 @@ describe('brandFor', () => {
   });
 
   it('registers DeepSeek with its official brand treatment', () => {
-    const dsh = brandFor('dsh');
-    expect(brandFor('deepseek-harness')).toBe(dsh);
-    expect(brandFor('deepseek')).toBe(dsh);
-    expect(brandFor('claude:deepseek')).toBe(dsh);
-    expect(dsh).toMatchObject({
-      id: 'dsh',
+    // Issue #1127: the primary brand id is `deepseek` (matching the
+    // First-class Model Provider account id), with `dsh` and
+    // `deepseek-harness` kept as aliases so the harness-side brand chip
+    // still resolves. All four ids (canonical + three aliases) must point
+    // at the same Brand record.
+    const ds = brandFor('deepseek');
+    expect(brandFor('dsh')).toBe(ds);
+    expect(brandFor('deepseek-harness')).toBe(ds);
+    expect(brandFor('claude:deepseek')).toBe(ds);
+    expect(ds).toMatchObject({
+      id: 'deepseek',
       chipHex: '#1E88E5',
       chipClass: 'bg-blue-600',
     });

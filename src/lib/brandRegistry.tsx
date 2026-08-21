@@ -115,7 +115,13 @@ const BRANDS: readonly BrandRegistration[] = [
   { id: 'cursor', icon: { kind: 'inline', component: CursorIcon }, chipHex: '#1B1913', chipClass: 'bg-neutral-900' },
   { id: 'agy', icon: { kind: 'image', src: antigravityLogo }, chipHex: '#10b981', chipClass: 'bg-emerald-500' },
   { id: 'opencode', icon: { kind: 'inline', component: OpenCodeIcon }, chipHex: '#f59e0b', chipClass: 'bg-amber-500' },
-  { id: 'dsh', aliases: ['deepseek-harness', 'deepseek'], icon: { kind: 'inline', component: DeepSeekIcon }, chipHex: '#1E88E5', chipClass: 'bg-blue-600' },
+  // DeepSeek brand identity (issue #1127). The harness (`dsh`) and the
+  // First-class Model Provider (`deepseek`) share one brand record; the
+  // primary id is `deepseek` so `brandFor('deepseek')` resolves to its own
+  // entry rather than aliasing. `dsh` and `deepseek-harness` stay
+  // resolvable as aliases for the harness-side lookups (`brandFor('dsh')`)
+  // so the DeepSeek Harness adapter's brand chip keeps working.
+  { id: 'deepseek', aliases: ['dsh', 'deepseek-harness'], icon: { kind: 'inline', component: DeepSeekIcon }, chipHex: '#1E88E5', chipClass: 'bg-blue-600' },
   { id: 'terminal', icon: { kind: 'inline', component: TerminalIcon }, chipHex: '#9ca3af', chipClass: 'bg-gray-500' },
   { id: 'codex', icon: { kind: 'inline', component: OpenAIIcon }, chipHex: '#10a37f', chipClass: 'bg-gray-500' },
   { id: 'openrouter', icon: { kind: 'inline', component: OpenRouterIcon }, chipHex: '#615EFF', chipClass: 'bg-gray-500' },
