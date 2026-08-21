@@ -83,11 +83,74 @@ import { pathMatchesGitEvent } from './paths';
 // symbol per call would be functionally equivalent but would bloat
 // `callbackBusHandlers` for no benefit.
 const NOOP_CLIENT_ID = Symbol('subscribeGitPathInvalidation');
-// Stateless: dispatches to whichever subscriber the bus matched, regardless
-// of which `subscribeGitPathInvalidation` call added it. Hoisted to a const
-// so we register the SAME function reference in `callbackBusHandlers` on
-// every call (no fresh arrow allocation per component mount).
-const NOOP_HANDLER: CallbackBusHandler = (sub) => sub.notify();
+// Per-subscriber freshness-window bookkeeping for the callback-only
+// path (issue #1165). The keyed cache path stores `lastFetchedAt` +
+// `trailingTimers` + `trailingNotifies` on the per-key state inside
+// `createInternalClient`; the callback path has no per-key state
+// (no cache, no key), so the freshness stamp is per-subscriber instead.
+// Keyed on the subscriber object — when the subscriber is GC'd, the
+// entry is collected; the trailing timer is cancelled deterministically
+// on unsubscribe so we don't leak timer slots between mount/unmount.
+interface CallbackSubscriberState {
+  /** Last time we fired `sub.notify()` (immediate or trailing). Starts
+   * at `0` so the first event always passes the freshness check (it's
+   * effectively "infinitely old"), matching the keyed branch's
+   * "no `fetchedAt` recorded yet → fire immediately" behaviour. */
+  lastInvokedAt: number;
+  /** Pending trailing-timer handle. Cleared on fire or unsubscribe. */
+  trailingTimer: ReturnType<typeof setTimeout> | null;
+  /** Freshness window in ms. `0` (or undefined) → fire on every event,
+   * matching the original behaviour. */
+  minRefetchIntervalMs: number;
+}
+const callbackSubscriberState = new WeakMap<
+  CallbackPathSubscriber,
+  CallbackSubscriberState
+>();
+
+// Stateless *modulo* the per-subscriber state above — dispatches to
+// whichever subscriber the bus matched, regardless of which
+// `subscribeGitPathInvalidation` call added it. Hoisted to a const so
+// we register the SAME function reference in `callbackBusHandlers` on
+// every call (no fresh arrow allocation per component mount). The
+// freshness check + trailing-arm lives here (instead of in each
+// subscriber's handler) because the keyed branch already proves the
+// pattern works and because there's no per-subscriber handler entry to
+// extend — see module docstring's "callback-only" section.
+const NOOP_HANDLER: CallbackBusHandler = (sub) => {
+  const state = callbackSubscriberState.get(sub);
+  // No state → pre-#1165 subscriber (none should exist after the change
+  // lands, but degrade gracefully if it does). Same as `minRefetchIntervalMs: 0`.
+  if (state === undefined || state.minRefetchIntervalMs <= 0) {
+    sub.notify();
+    return;
+  }
+  const now = Date.now();
+  const sinceLast = now - state.lastInvokedAt;
+  if (sinceLast < state.minRefetchIntervalMs) {
+    // Inside the freshness window — suppress this event and arm ONE
+    // trailing fire at the window's expiry so the settled state still
+    // lands. Mirrors the keyed branch (`createInternalClient`'s
+    // `trailingTimers`/`trailingNotifies`); the only difference is the
+    // freshness stamp is per-subscriber here (no cache value to
+    // compare against). If a trailing is already armed, leave it —
+    // resetting it would push the fire further out and potentially
+    // miss the settled state for a long-running burst.
+    if (state.trailingTimer === null) {
+      const delay = state.minRefetchIntervalMs - sinceLast;
+      state.trailingTimer = setTimeout(() => {
+        state.trailingTimer = null;
+        state.lastInvokedAt = Date.now();
+        sub.notify();
+      }, delay);
+    }
+    return;
+  }
+  // Outside the window — fire immediately and stamp the new
+  // "lastInvokedAt" so a subsequent burst starts a fresh window.
+  state.lastInvokedAt = now;
+  sub.notify();
+};
 
 // ------------------------------------------------------------------
 // Public client interfaces
@@ -306,6 +369,24 @@ function installListener(): void {
  * global state.
  */
 export function resetPathInvalidatedCacheForTests(): void {
+  // Clear any pending trailing timers for callback subscribers before
+  // wiping `pathSubscribers` (issue #1165). WeakMaps can't be iterated,
+  // so walk the path map to find callback subscribers whose trailing
+  // timer is still armed and clear it. Once `pathSubscribers.clear()`
+  // runs, the subscriber objects lose their last reference (assuming the
+  // test doesn't hold one) and the WeakMap entries are GC'd along with
+  // them.
+  for (const subs of pathSubscribers.values()) {
+    for (const sub of subs) {
+      if (isCallbackSubscriber(sub)) {
+        const state = callbackSubscriberState.get(sub);
+        if (state?.trailingTimer != null) {
+          clearTimeout(state.trailingTimer);
+          state.trailingTimer = null;
+        }
+      }
+    }
+  }
   pathSubscribers.clear();
   keyedBusHandlers.clear();
   callbackBusHandlers.clear();
@@ -705,18 +786,63 @@ export function createDualKeyCache<K, V>(
  * `cb` is invoked with no arguments — the bus payload is the same shape
  * the hook subscribers see, but callback-only consumers have always
  * ignored it; pass an arrow if you need to capture component state.
+ *
+ * `options.minRefetchIntervalMs` (issue #1165) ports the keyed cache's
+ * freshness window onto the callback path. While the last fire for this
+ * subscriber is younger than the window, matching `GIT_CHANGED` events
+ * are suppressed and ONE trailing fire is armed for the window's
+ * expiry — a burst of agent edits collapses to one trailing refetch
+ * instead of one per `git-changed` emit. The freshness stamp is
+ * per-subscriber (each subscriber tracks its own "last invoked"
+ * timestamp) because callback subscribers have no cache value to
+ * compare against; the keyed branch's stamp is per-key. Defaults to
+ * `0` (fire on every event, original behaviour).
  */
+export interface SubscribeGitPathInvalidationOptions {
+  /** See [`subscribeGitPathInvalidation`] for the full contract. */
+  minRefetchIntervalMs?: number;
+}
+
 export function subscribeGitPathInvalidation(
   path: string,
   cb: () => void,
+  options: SubscribeGitPathInvalidationOptions = {},
 ): () => void {
   installListener();
-  // The noop handler is stateless and shared across every
-  // `subscribeGitPathInvalidation` caller. The re-register call
-  // (idempotent — see `registerCallbackBusHandler`) keeps the bus working
-  // after `resetPathInvalidatedCacheForTests` wipes `callbackBusHandlers`
+  // The noop handler is stateless *modulo* the per-subscriber
+  // freshness state in `callbackSubscriberState`; the handler is
+  // hoisted so we register the SAME function reference in
+  // `callbackBusHandlers` on every call (no fresh arrow allocation per
+  // component mount). The re-register call (idempotent — see
+  // `registerCallbackBusHandler`) keeps the bus working after
+  // `resetPathInvalidatedCacheForTests` wipes `callbackBusHandlers`
   // between tests.
   registerCallbackBusHandler(NOOP_CLIENT_ID, NOOP_HANDLER);
   const sub: CallbackPathSubscriber = { kind: 'callback', clientId: NOOP_CLIENT_ID, notify: cb };
-  return addPathSubscriber(sub, path);
+  const minRefetchIntervalMs = options.minRefetchIntervalMs ?? 0;
+  // Issue #1165 — initialise the per-subscriber freshness state. The
+  // `lastInvokedAt: 0` sentinel makes the FIRST event always pass the
+  // freshness check (a "very long time ago" stamp), mirroring the
+  // keyed branch's "no `fetchedAt` recorded yet → fire immediately"
+  // behaviour. Without this, a 2 s window would suppress the very
+  // first event (since the subscriber just subscribed, so the
+  // "since-last" delta would be 0 ms, well within the window).
+  callbackSubscriberState.set(sub, {
+    lastInvokedAt: 0,
+    trailingTimer: null,
+    minRefetchIntervalMs,
+  });
+  const unsubscribe = addPathSubscriber(sub, path);
+  // Wrap the path unsubscribe so we ALSO cancel any pending trailing
+  // timer (#1165). Without this, an unmount mid-burst leaves the
+  // timer alive and a stray `cb()` lands after the component is gone.
+  return () => {
+    const state = callbackSubscriberState.get(sub);
+    if (state?.trailingTimer != null) {
+      clearTimeout(state.trailingTimer);
+      state.trailingTimer = null;
+    }
+    callbackSubscriberState.delete(sub);
+    unsubscribe();
+  };
 }
