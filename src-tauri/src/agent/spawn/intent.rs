@@ -55,6 +55,15 @@ impl InitialPrompt {
     /// Borrow the prompt text without consuming it. Used by the spawn
     /// pipeline (`spawn_with_intent`) and the watcher marker helper
     /// (`marker_hint_for_prefill`) where a `&str` is all that's needed.
+    ///
+    /// `#[allow(dead_code)]`: shipped as part of #1180 alongside the doc'd
+    /// callers (`spawn_with_intent`, `marker_hint_for_prefill`) that haven't
+    /// landed yet — the docstring is the contract. When those call sites
+    /// wire up, this allow drops. The companion `into_string` has the
+    /// same shape — its only call site is the intent's own test module —
+    /// so the same escape hatch could land there in a follow-up; it's not
+    /// applied today because the failure isn't biting.
+    #[allow(dead_code)]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }

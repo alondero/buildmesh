@@ -1117,6 +1117,13 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
     BuiltInProviderAccount { id: "cursor",    name: "Cursor",               self_auth: true  },
+    // DeepSeek Platform API — keyed by the user's DeepSeek API key.
+    // Publishes both Anthropic- and OpenAI-compatible surfaces (DeepSeek
+    // runs an OpenAI-compatible endpoint at https://api.deepseek.com/v1
+    // and an Anthropic-compatible Claude Code surface). Models: `deepseek-chat`
+    // (V3.x — fast chat / mid-tier code) and `deepseek-reasoner` (R1 — the
+    // strongest reasoning tier). See issue #1127.
+    BuiltInProviderAccount { id: "deepseek",  name: "DeepSeek",              self_auth: false },
     // OpenAI Platform API — keyed by an `sk-admin-…` (org spend) or
     // `sk-proj-…` (graceful degradation: org costs 401, project keys still
     // work for inference). See ADR-0026 / issue #1109. No first-class
@@ -1195,6 +1202,27 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
             base_url: "https://openrouter.ai/api".to_string(),
             model_tiers: ModelTiers::default(),
         }],
+        // DeepSeek publishes both surfaces (issue #1127):
+        //   - Anthropic-compatible Claude Code backend (DeepSeek maintains
+        //     an Anthropic Messages-compatible surface alongside the OpenAI
+        //     endpoint — Claude Code routes through it without modification)
+        //   - OpenAI-compatible `/v1` for Codex + any other OpenAI-compatible
+        //     consumer (matches the documented `https://api.deepseek.com/v1`
+        //     base URL). Tier defaults mirror the two-tier model lineup
+        //     (`deepseek-chat` for the fast path, `deepseek-reasoner` for
+        //     the strong-reasoning tiers).
+        "deepseek" => vec![
+            SurfaceEndpoint {
+                surface: ApiSurface::Anthropic,
+                base_url: "https://api.deepseek.com/anthropic".to_string(),
+                model_tiers: deepseek_default_tiers(),
+            },
+            SurfaceEndpoint {
+                surface: ApiSurface::OpenAI,
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                model_tiers: openai_tiers("deepseek-chat"),
+            },
+        ],
         _ => Vec::new(),
     }
 }
@@ -1488,6 +1516,42 @@ pub(crate) fn kimi_default_tiers() -> ModelTiers {
     }
 }
 
+/// DeepSeek's default tier map for the **First-class Model Provider**
+/// `deepseek` (issue #1127). DeepSeek's two production model lines:
+///   - `deepseek-chat` (V3.x) — the general-purpose chat / mid-tier code model.
+///   - `deepseek-reasoner` (R1) — the strong-reasoning model.
+///
+/// Per the first-class rule pinned in
+/// `resolve_provider_env_composite_kimi_default_fable_matches_opus`,
+/// `default` mirrors `opus` and `fable` falls back to `opus` when unset.
+/// Here we explicitly set fable/opus/reasoner to `deepseek-reasoner` so the
+/// Anthropic-compatible Claude Code backend gets a strong reasoning model for
+/// the `Opus` / `Fable` aliases and the fast chat model for `Sonnet` /
+/// `Haiku` / `small_fast`.
+///
+/// **Single source** consumed by the Anthropic surface's `model_tiers` in
+/// `first_class_surfaces("deepseek")` and attach-time pairing defaults
+/// (ADR-0025). The OpenAI surface passes only the `default` tier (Codex
+/// takes a single model), which `first_class_surfaces` pins to
+/// `deepseek-chat` directly.
+pub(crate) fn deepseek_default_tiers() -> ModelTiers {
+    ModelTiers {
+        // `default` mirrors `opus` per the first-class rule.
+        default: Some("deepseek-reasoner".to_string()),
+        // Strong-reasoning tier: route Opus + Fable through R1.
+        opus: Some("deepseek-reasoner".to_string()),
+        fable: Some("deepseek-reasoner".to_string()),
+        // Mid-tier code: deepseek-chat (V3.x) is the fastest code-friendly
+        // model DeepSeek ships.
+        sonnet: Some("deepseek-chat".to_string()),
+        // Cheap / background: deepseek-chat covers the haiku + small_fast
+        // slots so Claude Code's "small fast" alias doesn't 404 on the
+        // custom endpoint.
+        haiku: Some("deepseek-chat".to_string()),
+        small_fast: Some("deepseek-chat".to_string()),
+    }
+}
+
 /// The effective account list: code-defined defaults with the user's stored
 /// `provider_accounts` merged over them by `id` (user wins / new ids append).
 /// Mirrors [`harness_profiles`] so a built-in can never be removed by an empty
@@ -1619,6 +1683,19 @@ pub fn openai_api_key_resolved() -> Option<String> {
     merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
         .into_iter()
         .find(|a| a.id == "openai")
+        .and_then(|a| a.api_key)
+        .filter(|v| !v.is_empty())
+}
+
+/// Resolve the effective DeepSeek API key from the merged provider-accounts
+/// list (issue #1127). Brand-new keyed id — no legacy flat field; identical
+/// lookup shape to [`openai_api_key_resolved`] so each provider's single seam
+/// stays explicit. Empty strings collapse to `None` so a half-cleared config
+/// doesn't surface as a logged-out row in the Usage panel.
+pub fn deepseek_api_key_resolved() -> Option<String> {
+    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
+        .into_iter()
+        .find(|a| a.id == "deepseek")
         .and_then(|a| a.api_key)
         .filter(|v| !v.is_empty())
 }
@@ -3132,10 +3209,12 @@ mod tests {
         // /v1/organization/costs fetcher is admin-scoped, so the row is
         // keyed (user-supplied `sk-admin-…` or `sk-proj-…`) rather than
         // self-auth. PayAsYouGo because the costs API reports monthly spend.
+        // `deepseek` joins in issue #1127 — keyed (user-supplied DeepSeek
+        // API key), PayAsYouGo because the balance endpoint reports cash.
         // Order matches `BUILTIN_PROVIDER_ACCOUNTS` insertion order (the
         // catalog is `filter(!self_auth)` over the source list).
-        assert_eq!(catalog_ids, vec!["kimi", "minimax", "openrouter", "openai"]);
-        for id in &["kimi", "minimax", "openrouter", "openai"] {
+        assert_eq!(catalog_ids, vec!["kimi", "minimax", "openrouter", "deepseek", "openai"]);
+        for id in &["kimi", "minimax", "openrouter", "deepseek", "openai"] {
             let a = keyed_first_class_catalog()
                 .into_iter()
                 .find(|a| a.id == *id)
@@ -3368,6 +3447,11 @@ mod tests {
             minimax_default_tiers().opus,
             "built-in minimax defaults fable to the opus pick"
         );
+        assert_eq!(
+            deepseek_default_tiers().fable,
+            deepseek_default_tiers().opus,
+            "built-in deepseek defaults fable to the opus pick"
+        );
 
         tiers.fable = Some("kimi-fable-x".to_string());
         let env = anthropic_surface_env(Some("https://api.moonshot.ai/anthropic"), Some("sk"), &tiers);
@@ -3404,6 +3488,51 @@ mod tests {
         assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("MiniMax-M3[1m]"));
         assert_eq!(get("ANTHROPIC_DEFAULT_FABLE_MODEL"), Some("MiniMax-M3[1m]"));
         assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("MiniMax-M2.7"));
+        assert_eq!(get("API_TIMEOUT_MS"), Some("3000000"));
+    }
+
+    #[test]
+    fn builtin_deepseek_pairing_reproduces_claude_code_model_routing() {
+        // Issue #1127: DeepSeek's Anthropic-compatible Claude Code backend
+        // receives the full per-tier alias map (issue #567). The default
+        // tier map routes Opus/Fable to `deepseek-reasoner` (R1) and the
+        // fast tiers (Sonnet/Haiku/small_fast) to `deepseek-chat` (V3.x).
+        let account = ProviderAccount {
+            api_key: Some("sk-deepseek".to_string()),
+            ..keyed_first_class_catalog()
+                .into_iter()
+                .find(|a| a.id == "deepseek")
+                .unwrap()
+        };
+        let pairing = ProviderPairing {
+            harness_id: "claude".into(),
+            provider_id: "deepseek".into(),
+            surface: ApiSurface::Anthropic,
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            model_tiers: deepseek_default_tiers(),
+        };
+        let env = provider_account_env(&account, &[pairing], "claude");
+        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        assert_eq!(
+            get("ANTHROPIC_BASE_URL"),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(get("ANTHROPIC_AUTH_TOKEN"), Some("sk-deepseek"));
+        assert_eq!(get("ANTHROPIC_MODEL"), Some("deepseek-reasoner"));
+        assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("deepseek-chat"));
+        assert_eq!(
+            get("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some("deepseek-chat")
+        );
+        assert_eq!(
+            get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some("deepseek-reasoner")
+        );
+        assert_eq!(
+            get("ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            Some("deepseek-reasoner")
+        );
+        assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("deepseek-chat"));
         assert_eq!(get("API_TIMEOUT_MS"), Some("3000000"));
     }
 
@@ -3472,7 +3601,27 @@ mod tests {
         assert_eq!(by(ApiSurface::Anthropic).model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
         assert_eq!(by(ApiSurface::OpenAI).base_url, "https://api.minimax.io/v1");
         assert_eq!(by(ApiSurface::OpenAI).model_tiers.default.as_deref(), Some("MiniMax-M3"));
-        assert!(first_class_surfaces("deepseek").is_empty());
+        // DeepSeek (issue #1127) publishes both surfaces too: an
+        // Anthropic-compatible Claude Code backend and an OpenAI-compatible
+        // `/v1` endpoint. Tier defaults use deepseek-reasoner for the
+        // strongest tier and deepseek-chat for the fast path.
+        let ds_surfaces = first_class_surfaces("deepseek");
+        assert_eq!(ds_surfaces.len(), 2);
+        let ds_anthropic = ds_surfaces
+            .iter()
+            .find(|e| e.surface == ApiSurface::Anthropic)
+            .unwrap();
+        assert_eq!(ds_anthropic.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(
+            ds_anthropic.model_tiers.default.as_deref(),
+            Some("deepseek-reasoner")
+        );
+        let ds_openai = ds_surfaces
+            .iter()
+            .find(|e| e.surface == ApiSurface::OpenAI)
+            .unwrap();
+        assert_eq!(ds_openai.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(ds_openai.model_tiers.default.as_deref(), Some("deepseek-chat"));
         assert!(first_class_surfaces("anthropic").is_empty());
         // OpenRouter is Anthropic-only with empty tiers.
         let or_surfaces = first_class_surfaces("openrouter");
@@ -3499,9 +3648,24 @@ mod tests {
             provider_surfaces(&mm),
             vec![ApiSurface::Anthropic, ApiSurface::OpenAI]
         );
-        // Generic → both surfaces (ADR-0025).
+        // DeepSeek (issue #1127) is a first-class keyed provider — its
+        // surfaces come from `first_class_surfaces`, not from the Generic
+        // "both surfaces" fallback. The published surface set is identical
+        // to MiniMax's, so the harness picker offers both Anthropic and
+        // OpenAI attachments.
+        let ds = keyed_first_class_catalog()
+            .into_iter()
+            .find(|a| a.id == "deepseek")
+            .unwrap();
         assert_eq!(
-            provider_surfaces(&custom_account("deepseek")),
+            provider_surfaces(&ds),
+            vec![ApiSurface::Anthropic, ApiSurface::OpenAI]
+        );
+        // Generic → both surfaces (ADR-0025). A custom (non-built-in) id
+        // keeps the Generic fallback path even though `deepseek` itself is
+        // now first-class.
+        assert_eq!(
+            provider_surfaces(&custom_account("glm")),
             vec![ApiSurface::Anthropic, ApiSurface::OpenAI]
         );
         let anth = default_provider_accounts()
@@ -4288,15 +4452,18 @@ mod tests {
     fn migrate_prefs_json_skips_keyed_generic_without_endpoint() {
         // A keyed+enabled generic with no legacy URL and no first-class
         // surface must NOT get a null-base_url pairing (the attach command
-        // would reject it as a no-op).
+        // would reject it as a no-op). `glm` is a true Generic (no entry in
+        // `BUILTIN_PROVIDER_ACCOUNTS`); `deepseek` was a Generic before
+        // issue #1127 promoted it to first-class keyed tracked, so we can't
+        // reuse it here without breaking the test's intent.
         let mut value = serde_json::json!({
             "provider_accounts": [{
-                "id": "deepseek",
-                "name": "DeepSeek",
+                "id": "glm",
+                "name": "GLM",
                 "enabled": true,
                 "billing_mode": "pay_as_you_go",
                 "claude_compatible": true,
-                "api_key": "sk-ds"
+                "api_key": "sk-glm"
             }],
             "provider_pairings": []
         });

@@ -12,11 +12,14 @@ use tauri::command;
 ///
 /// `openai` joins the keyed tracked set per issue #1109 / ADR-0026: the
 /// Organization Costs API is admin-scoped, so a `sk-proj-…` key degrades
-/// gracefully (logged-in, detail explains) rather than failing the row. The
-/// no-credential gate in [`assemble_meters`] drops the row until the user
-/// stores a key, matching the user contract for keyed providers.
-const FETCHABLE: [&str; 10] = [
-    "anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai",
+/// gracefully (logged-in, detail explains) rather than failing the row.
+/// `deepseek` joins in issue #1127 — its `/user/balance` endpoint is keyed
+/// (user-supplied DeepSeek API key), PayAsYouGo, and returns a
+/// `BillingBalance` (no usage windows). The no-credential gate in
+/// [`assemble_meters`] drops the row until the user stores a key, matching
+/// the user contract for keyed providers.
+const FETCHABLE: [&str; 11] = [
+    "anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai", "deepseek",
 ];
 
 /// Map a self-authenticating **native** provider account to the harness whose
@@ -104,6 +107,9 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
             "kimi" => preferences::kimi_api_key_resolved().is_some_and(|k| !k.is_empty()),
             "openrouter" => preferences::openrouter_api_key_resolved().is_some_and(|k| !k.is_empty()),
             "openai" => preferences::openai_api_key_resolved().is_some_and(|k| !k.is_empty()),
+            // DeepSeek joins the keyed tracked set in issue #1127 — its
+            // `/user/balance` fetcher is keyed (no legacy flat field).
+            "deepseek" => preferences::deepseek_api_key_resolved().is_some_and(|k| !k.is_empty()),
             // Custom (Generic) Claude-compatible providers store the key on
             // the account itself — no legacy flat field.
             other => accounts
@@ -113,7 +119,7 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
                 .is_some_and(|k| !k.is_empty()),
         }
     };
-    for id in ["minimax", "kimi", "openrouter", "openai"] {
+    for id in ["minimax", "kimi", "openrouter", "openai", "deepseek"] {
         if has_key(id) {
             configured.insert(id.to_string());
         }
@@ -271,6 +277,16 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
                 .as_deref()
                 .unwrap_or(""),
         ),
+        // DeepSeek — keyed, no legacy flat field. Mirrors Kimi/OpenRouter:
+        // empty string lets `deepseek_usage` surface its own "No API key
+        // configured" message and renders as `usage_tracked` with a
+        // logged-out card until the user adds a key. The balance endpoint
+        // is queried through `usage::deepseek_usage` (issue #1127).
+        "deepseek" => usage::deepseek_usage(
+            preferences::deepseek_api_key_resolved()
+                .as_deref()
+                .unwrap_or(""),
+        ),
         other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
     };
 
@@ -390,16 +406,20 @@ mod tests {
         // harness profiles present at all.
         assert!(account_visible(&account("minimax", true), &[]));
         assert!(account_visible(&account("minimax", false), &[]));
+        // DeepSeek is now a first-class keyed provider (issue #1127) — its
+        // card shows regardless of detection state. Disabled cards stick
+        // around so the user can re-enable (see `assemble_meters_keeps_disabled_*`).
+        assert!(account_visible(&account("deepseek", true), &[]));
         assert!(account_visible(&account("deepseek", false), &[]));
     }
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai"] {
+        for id in ["anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai", "deepseek"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.
-        for id in ["deepseek", "glm"] {
+        for id in ["glm"] {
             assert!(!usage_tracked(id), "{id} should not be tracked");
         }
     }
@@ -417,11 +437,14 @@ mod tests {
             // fetcher's empty-key path returns `logged_out` until the user adds
             // a key). The `poll_ids` gate here is purely enable+visible+tracked.
             account("openrouter", true),
-            account("deepseek", true),  // Generic, no fetcher → out
+            // DeepSeek is first-class keyed tracked (issue #1127); the
+            // configured-key gate in `assemble_meters` (not `poll_ids`) drops
+            // the row until the user adds a key.
+            account("deepseek", true),
         ];
         assert_eq!(
             poll_ids(&accounts, &claude),
-            vec!["anthropic", "minimax", "kimi", "openrouter"]
+            vec!["anthropic", "minimax", "kimi", "openrouter", "deepseek"]
         );
     }
 
@@ -442,7 +465,12 @@ mod tests {
             account("anthropic", true),
             account("codex", true),    // undetected harness → excluded entirely (AC1)
             account("minimax", true),
-            account("deepseek", true), // Generic → included, usage_tracked = false (AC4)
+            // A *true* Generic provider (custom id, no first-class fetcher)
+            // — included with `usage_tracked = false` (AC4). `glm` stands in
+            // for the class: `deepseek` was a Generic before issue #1127
+            // promoted it to first-class keyed tracked, so we can't reuse it
+            // here without confusing the AC4 contract.
+            account("glm", true),
         ];
         let mut usages = HashMap::new();
         usages.insert("anthropic".to_string(), usage("anthropic"));
@@ -450,15 +478,15 @@ mod tests {
 
         let rows = assemble_meters(&accounts, &claude, &usages, &HashSet::new());
         let ids: Vec<_> = rows.iter().map(|r| r.provider.as_str()).collect();
-        assert_eq!(ids, vec!["anthropic", "minimax", "deepseek"]);
+        assert_eq!(ids, vec!["anthropic", "minimax", "glm"]);
 
         let anthropic = &rows[0];
         assert!(anthropic.usage_tracked);
         assert!(anthropic.usage.is_some());
 
-        let deepseek = rows.iter().find(|r| r.provider == "deepseek").unwrap();
-        assert!(!deepseek.usage_tracked);
-        assert!(deepseek.usage.is_none());
+        let glm = rows.iter().find(|r| r.provider == "glm").unwrap();
+        assert!(!glm.usage_tracked);
+        assert!(glm.usage.is_none());
     }
 
     #[test]
