@@ -522,19 +522,34 @@ mod tests {
     }
 
     fn respond(stream: &mut TcpStream, status: &str, body: &str) {
-        write!(
+        // Lenient: a parallel test runner can schedule the client and
+        // server threads such that the client (HTTP layer) closes the
+        // connection *between* the test-server's chunked writes — the
+        // next write then surfaces `ConnectionReset (10054)` and the
+        // `unwrap()` panic propagates back through `server.join()`.
+        // The test-server is best-effort: once the client is gone,
+        // there's nothing useful to send, so bail instead of panicking.
+        // The test contract (client observes the status, error doesn't
+        // echo the credential) is preserved because the client has
+        // already read enough by the time it closes.
+        let _ = write!(
             stream,
             "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        stream.flush().unwrap();
+        );
+        if stream.flush().is_err() {
+            return;
+        }
         for event in body.split_inclusive("\n\n") {
-            write!(stream, "{:x}\r\n{event}\r\n", event.len()).unwrap();
-            stream.flush().unwrap();
+            if write!(stream, "{:x}\r\n{event}\r\n", event.len()).is_err() {
+                return;
+            }
+            if stream.flush().is_err() {
+                return;
+            }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        write!(stream, "0\r\n\r\n").unwrap();
-        stream.flush().unwrap();
+        let _ = write!(stream, "0\r\n\r\n");
+        let _ = stream.flush();
     }
 
     fn descriptor(endpoint: String) -> EndpointModelDescriptor {

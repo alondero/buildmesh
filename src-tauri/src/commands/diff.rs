@@ -7,14 +7,94 @@ use crate::git::primitives;
 use crate::models::{DiffHunk, DiffLine, FileDiff, DiffResult};
 use difference_rs::{Changeset, Difference};
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
-use std::fs;
 use tauri::command;
 
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
+
+// Issue #1181 — per-node cancellation for `diff_node_against_base`.
+//
+// When the Agent Review panel re-fetches on every `git-changed` event
+// while an agent is editing, overlapping `run_blocking` tasks pile up on
+// the pool. Slice 1 (issue #1165) bounds the *rate* of fetches at the
+// frontend via `minRefetchIntervalMs`; this module bounds the *pool
+// pressure* on the Rust side by cancelling a stale in-flight diff when a
+// fresher one arrives for the same `node_id`. The map is keyed by
+// `node_id` because `AgentReviewPanel` and `CenterDiffOverlay` are each
+// focused on a single node at a time — so the natural granularity of
+// "stale" is "older request for the same node".
+//
+// `Arc<AtomicBool>` (rather than a `JoinHandle::abort()`) because
+// `spawn_blocking` runs a `FnOnce` closure that cannot be interrupted —
+// the only way to short-circuit a blocking walk is a flag the closure
+// polls between deltas. The flag also doubles as the seam a future
+// Tauri `AbortSignal` channel would flip.
+static DIFF_NODE_CANCEL: Lazy<Mutex<HashMap<i64, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Sentinel returned to the frontend so its race guard can identify
+/// "cancelled, not a real failure" and skip the `setError` branch (a
+/// genuine error must still surface).
+const DIFF_CANCELLED: &str = "diff_node_against_base cancelled";
+
+/// Flip any prior flag for `node_id` (so its in-flight blocking task
+/// exits at its next poll) and return a fresh flag for the new
+/// invocation. Acquired inside the `run_blocking` closure, never in
+/// the async wrapper, so an async-cancel between the `#[command]`
+/// entry and `spawn_blocking` can't leak a map entry.
+fn acquire_diff_cancel(node_id: i64) -> Arc<AtomicBool> {
+    let mut map = DIFF_NODE_CANCEL
+        .lock()
+        .expect("DIFF_NODE_CANCEL mutex poisoned");
+    if let Some(prev) = map.get(&node_id) {
+        prev.store(true, Ordering::SeqCst);
+    }
+    let token = Arc::new(AtomicBool::new(false));
+    map.insert(node_id, Arc::clone(&token));
+    token
+}
+
+/// Lenient cleanup: ignore a poisoned mutex (the cleanup is best-effort
+/// anyway, and the next `acquire_diff_cancel` for this `node_id` will
+/// overwrite whatever stale entry we leave behind).
+fn release_diff_cancel(node_id: i64, token: &Arc<AtomicBool>) {
+    let Ok(mut map) = DIFF_NODE_CANCEL.lock() else { return };
+    // Only clear if our token is still the current one — a fresh
+    // arrival will already have replaced us, and we mustn't stomp
+    // their flag.
+    if map
+        .get(&node_id)
+        .is_some_and(|current| Arc::ptr_eq(current, token))
+    {
+        map.remove(&node_id);
+    }
+}
+
+/// `Drop` guard that releases the per-node cancel flag when the
+/// `run_blocking` closure returns (success, error, panic, or cancel).
+/// Without this, an early `Err(DIFF_CANCELLED)` return would leave the
+/// prior token in `DIFF_NODE_CANCEL` until the next `acquire_diff_cancel`
+/// for the same `node_id` displaces it — not a correctness bug (the next
+/// acquire flips + replaces the entry either way), but the guard makes
+/// the lifecycle explicit and ensures the map doesn't transiently hold
+/// a `Arc<AtomicBool>` whose only reader has already exited.
+struct DiffCancelGuard {
+    node_id: i64,
+    token: Arc<AtomicBool>,
+}
+
+impl Drop for DiffCancelGuard {
+    fn drop(&mut self) {
+        release_diff_cancel(self.node_id, &self.token);
+    }
+}
 
 /// Highlight a string with syntect, returning HTML
 fn highlight_content(content: &str, path: &str) -> String {
@@ -388,10 +468,15 @@ fn resolve_base_tree<'r>(repo: &'r git2::Repository, base_ref: &str) -> Option<g
 /// result is everything the agent changed since branching — committed *and*
 /// uncommitted (ADR 0005). `only`, when set, restricts to one repo-relative
 /// path. Files are returned sorted by path for a stable review order.
+///
+/// `cancel`, when set, is polled between deltas and between per-file hunks;
+/// a flipped flag returns `Err(DIFF_CANCELLED)` so the calling `#[command]`
+/// wrapper can short-circuit the blocking pool task (issue #1181).
 fn diff_against_base(
     repo_path: &str,
     base_ref: &str,
     only: Option<&str>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<DiffResult, String> {
     let host = to_host_path(repo_path);
     let repo = git2::Repository::open(&host).map_err(|e| e.to_string())?;
@@ -434,6 +519,15 @@ fn diff_against_base(
     let mut files = Vec::new();
 
     for delta in diff.deltas() {
+        // Poll cancellation at the file boundary — cheap load on every
+        // delta, and the walk is delta-bounded so we can't park here
+        // long. Pairs with the per-hunk poll below for files whose
+        // highlight passes dominate the cost.
+        if let Some(c) = cancel {
+            if c.load(Ordering::SeqCst) {
+                return Err(DIFF_CANCELLED.to_string());
+            }
+        }
         let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
             continue;
         };
@@ -476,10 +570,24 @@ fn diff_against_base(
         let lines = compute_file_diff(&old_content, &new_content);
         let additions = lines.iter().filter(|l| l.line_type == "add").count();
         let deletions = lines.iter().filter(|l| l.line_type == "remove").count();
-        let hunks = group_into_hunks(&lines, CONTEXT_LINES)
+        let groups = group_into_hunks(&lines, CONTEXT_LINES);
+        // Per-hunk poll — `build_hunk` does three syntect highlight
+        // passes per hunk (the costliest step on a busy worktree), so
+        // a single huge file would otherwise pin a worker for seconds
+        // after cancellation. The check is one atomic load; syntect
+        // dominates the cost by orders of magnitude.
+        let hunks = groups
             .iter()
-            .map(|g| build_hunk(g, &rel))
-            .collect();
+            .map(|g| {
+                if let Some(c) = cancel {
+                    if c.load(Ordering::SeqCst) {
+                        return Err(());
+                    }
+                }
+                Ok(build_hunk(g, &rel))
+            })
+            .collect::<Result<Vec<_>, ()>>()
+            .map_err(|_| DIFF_CANCELLED.to_string())?;
 
         files.push(FileDiff {
             path: rel,
@@ -598,12 +706,30 @@ fn node_base_ref(node: &crate::models::AgentNode) -> String {
 // panel re-fetches it on every `git-changed` event while an agent edits, so
 // an inline body is the single biggest pool-parker in the app (the
 // #761/#762 starvation class: UI alive, keystrokes and probes frozen).
+//
+// Issue #1181: a fresh arrival flips the prior in-flight flag so the
+// stale task exits at its next per-delta / per-hunk poll. This bounds
+// pool pressure to one task per `node_id` regardless of the frontend's
+// fetch rate.
 #[command]
 pub async fn diff_node_against_base(node_id: i64) -> Result<DiffResult, String> {
     crate::commands::run_blocking("diff_node_against_base", move || {
+        let token = acquire_diff_cancel(node_id);
+        let _guard = DiffCancelGuard {
+            node_id,
+            token: Arc::clone(&token),
+        };
+        if token.load(Ordering::SeqCst) {
+            return Err(DIFF_CANCELLED.to_string());
+        }
         let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
         let base_ref = node_base_ref(&node);
-        diff_against_base(&crate::env::node_working_path(&node).host_path, &base_ref, None)
+        diff_against_base(
+            &crate::env::node_working_path(&node).host_path,
+            &base_ref,
+            None,
+            Some(&token),
+        )
     })
     .await
 }
@@ -611,18 +737,32 @@ pub async fn diff_node_against_base(node_id: i64) -> Result<DiffResult, String> 
 /// Diff a single file of an Agent Node against its merge-base — the per-file
 /// entry point the mobile changes view taps into.
 // Offloaded via `run_blocking` — same rationale as `diff_node_against_base`.
+//
+// Issue #1181: same per-node cancel plumbing as `diff_node_against_base`.
+/// Rapid file-switching in `CenterDiffOverlay` would otherwise pile up
+/// per-file `run_blocking` tasks for the same `node_id`; a fresh tap
+/// flips the prior flag so the stale task exits at its next poll.
 #[command]
 pub async fn diff_node_file_against_base(
     node_id: i64,
     file_path: String,
 ) -> Result<DiffResult, String> {
     crate::commands::run_blocking("diff_node_file_against_base", move || {
+        let token = acquire_diff_cancel(node_id);
+        let _guard = DiffCancelGuard {
+            node_id,
+            token: Arc::clone(&token),
+        };
+        if token.load(Ordering::SeqCst) {
+            return Err(DIFF_CANCELLED.to_string());
+        }
         let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
         let base_ref = node_base_ref(&node);
         diff_against_base(
             &crate::env::node_working_path(&node).host_path,
             &base_ref,
             Some(&file_path),
+            Some(&token),
         )
     })
     .await
@@ -742,6 +882,7 @@ mod tests {
         let diff_paths: std::collections::HashSet<String> = diff_against_base(
             dir.path().to_str().unwrap(),
             "origin/main",
+            None,
             None,
         )
         .unwrap()
@@ -1099,7 +1240,7 @@ mod tests {
         // ...and leaves an uncommitted edit to an existing file.
         std::fs::write(tmp.join("base.txt"), "one\nTWO\nthree\n").unwrap();
 
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"committed.txt"), "committed file missing: {:?}", paths);
         assert!(paths.contains(&"base.txt"), "uncommitted edit missing: {:?}", paths);
@@ -1125,7 +1266,7 @@ mod tests {
         }
         commit_all(&repo, "rename base.txt");
 
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
         let renamed = result
             .files
             .iter()
@@ -1145,7 +1286,7 @@ mod tests {
 
         // A base_ref that doesn't resolve must fall back to HEAD, not error.
         let result =
-            diff_against_base(tmp.to_str().unwrap(), "origin/does-not-exist", None).unwrap();
+            diff_against_base(tmp.to_str().unwrap(), "origin/does-not-exist", None, None).unwrap();
         let f = result.files.iter().find(|f| f.path == "base.txt").unwrap();
         assert_eq!(f.status, "modified");
         assert_eq!(f.additions, 1);
@@ -1159,7 +1300,7 @@ mod tests {
 
         std::fs::write(tmp.join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
 
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
         let bin = result.files.iter().find(|f| f.path == "blob.bin").unwrap();
         assert!(bin.binary, "binary file should be flagged");
         assert!(bin.hunks.is_empty(), "binary file must not dump byte hunks");
@@ -1196,7 +1337,7 @@ mod tests {
         std::fs::write(tmp.join("b.txt"), "y\n").unwrap();
         commit_all(&repo, "two files");
 
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", Some("a.txt")).unwrap();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", Some("a.txt"), None).unwrap();
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["a.txt"], "only the filtered path should appear");
     }
@@ -1243,7 +1384,7 @@ mod tests {
         std::fs::write(wt_dir.join("base.txt"), "one\nTWO\nthree\n").unwrap();
 
         // Following the resolved worktree path surfaces the agent's edit...
-        let via_worktree = diff_against_base(&wt_path, "base", None).unwrap();
+        let via_worktree = diff_against_base(&wt_path, "base", None, None).unwrap();
         assert!(
             via_worktree.files.iter().any(|f| f.path == "base.txt"),
             "worktree edit missing: {:?}",
@@ -1253,11 +1394,143 @@ mod tests {
         // ...while the old behaviour — diffing the project root — never surfaces
         // the agent's edit (the root's own `base.txt` is untouched; it can only
         // see the worktree as an opaque untracked subdir).
-        let via_root = diff_against_base(node.path.as_str(), "base", None).unwrap();
+        let via_root = diff_against_base(node.path.as_str(), "base", None, None).unwrap();
         assert!(
             !via_root.files.iter().any(|f| f.path == "base.txt"),
             "project-root diff must not surface the worktree's edit, got {:?}",
             via_root.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+    }
+
+    // ----- cancellation plumbing (issue #1181) -------------------------
+
+    /// Acquiring a fresh token returns a non-cancelled flag, so the
+    /// first invocation of a `node_id` walks the full diff.
+    #[test]
+    fn acquire_diff_cancel_yields_fresh_flag() {
+        let node_id = 91001_i64;
+        let token = acquire_diff_cancel(node_id);
+        assert!(
+            !token.load(Ordering::SeqCst),
+            "freshly acquired token must not be cancelled"
+        );
+        release_diff_cancel(node_id, &token);
+    }
+
+    /// The whole point of the per-node map: a second `acquire_diff_cancel`
+    /// for the same `node_id` flips the first token, so the prior
+    /// `run_blocking` closure exits at its next poll. Pool pressure
+    /// for this `node_id` collapses to one in-flight task regardless
+    /// of the frontend's fetch rate.
+    #[test]
+    fn acquire_diff_cancel_cancels_prior_token_for_same_node() {
+        let node_id = 91002_i64;
+        let token_a = acquire_diff_cancel(node_id);
+        let token_b = acquire_diff_cancel(node_id);
+
+        assert!(
+            token_a.load(Ordering::SeqCst),
+            "a second acquire must flip the prior flag so the stale task exits"
+        );
+        assert!(
+            !token_b.load(Ordering::SeqCst),
+            "the freshly acquired token must be unset"
+        );
+
+        release_diff_cancel(node_id, &token_b);
+        release_diff_cancel(node_id, &token_a);
+    }
+
+    /// `release_diff_cancel` only clears the map entry when its token
+    /// is still the current one. If a fresh acquisition has already
+    /// replaced the token, releasing the old one is a no-op — stomping
+    /// would clobber the new arrival's flag and silently break the
+    /// very contract above.
+    #[test]
+    fn release_after_replace_is_a_no_op() {
+        let node_id = 91003_i64;
+        let token_a = acquire_diff_cancel(node_id);
+        let token_b = acquire_diff_cancel(node_id);
+
+        // Release the *old* token after it's been replaced.
+        release_diff_cancel(node_id, &token_a);
+
+        // The new token must remain the current entry, unchanged.
+        let map = DIFF_NODE_CANCEL.lock().unwrap();
+        assert!(
+            Arc::ptr_eq(map.get(&node_id).unwrap(), &token_b),
+            "release of a stale token must not displace the current entry"
+        );
+        drop(map);
+
+        release_diff_cancel(node_id, &token_b);
+    }
+
+    /// `diff_against_base` returns the cancellation sentinel when its
+    /// cancel flag is flipped before the walk starts — the cheapest
+    /// proof that the polling seam works.
+    #[test]
+    fn diff_against_base_returns_cancelled_when_flag_pre_set() {
+        let tmp = tempdir_via_env();
+        let _repo = init_repo_with_base(&tmp);
+
+        std::fs::write(tmp.join("edit.rs"), "fn main() {}\n").unwrap();
+
+        let token = AtomicBool::new(true);
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, Some(&token));
+        assert_eq!(
+            result.as_ref().err().map(|s| s.as_str()),
+            Some(DIFF_CANCELLED),
+            "pre-set flag must short-circuit with the cancellation sentinel"
+        );
+    }
+
+    /// A flag flipped mid-walk returns the cancellation sentinel
+    /// before the no-cancel baseline completes. The bound is loose
+    /// (1s) — CI flake guard — but must be well under the no-cancel
+    /// baseline on any reasonable machine, otherwise pool-pressure
+    /// mitigation is moot. 50 small files is enough that the walk
+    /// takes >0ms of highlight work; if even that flips within 1s
+    /// the poll is in the right place.
+    #[test]
+    fn diff_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
+        let tmp = tempdir_via_env();
+        let _repo = init_repo_with_base(&tmp);
+
+        // Enough files that the no-cancel walk is non-trivial.
+        for i in 0..50 {
+            std::fs::write(
+                tmp.join(format!("f{i}.txt")),
+                format!("line {} {}\n", i, "x".repeat(40)),
+            )
+            .unwrap();
+        }
+
+        let token = Arc::new(AtomicBool::new(false));
+        let token_for_flipper = Arc::clone(&token);
+
+        // Flip the flag from a sibling thread after a tiny delay so
+        // the walk is already mid-flight when the flag is observed.
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            token_for_flipper.store(true, Ordering::SeqCst);
+        });
+
+        let start = std::time::Instant::now();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, Some(&token));
+        let elapsed = start.elapsed();
+
+        flipper.join().unwrap();
+
+        assert_eq!(
+            result.as_ref().err().map(|s| s.as_str()),
+            Some(DIFF_CANCELLED),
+            "mid-walk flag flip must return the cancellation sentinel; got {:?}",
+            result
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "cancellation must short-circuit the walk promptly; took {elapsed:?}"
         );
     }
 }

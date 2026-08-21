@@ -434,11 +434,45 @@ export const diffFileAgainstHead = (sessionPath: string, filePath: string) =>
 
 // Every file an agent changed since branching (merge-base with mesh base_ref;
 // see ADR 0005). One call returns the whole change set for the review panel.
-export const diffNodeAgainstBase = (nodeId: number) =>
-  _invoke<DiffResult>('diff_node_against_base', { nodeId });
+//
+// Issue #1181 — cancellation seam: `signal` is accepted so a component
+// that issues overlapping `fetchDiff` calls can pass a per-call
+// `AbortSignal` and have the local `.then` short-circuit if a newer
+// request has superseded it. Tauri 2's `invoke` doesn't yet forward the
+// signal to the Rust command, so the *actual* backend cancellation
+// (pool-pressure ≤1 per node_id) happens on the Rust side via the
+// `DIFF_NODE_CANCEL` map — see `commands::diff::acquire_diff_cancel`.
+// The frontend signal exists to (a) drop stale local results so the UI
+// doesn't flicker, and (b) be the seam a future Tauri signal-aware
+// invoke can plug into without touching call sites.
+export const diffNodeAgainstBase = (
+  nodeId: number,
+  signal?: AbortSignal,
+): Promise<DiffResult> => {
+  if (signal?.aborted) {
+    // Don't even kick off an IPC for a request the caller has already
+    // superseded — a freshly aborted controller has nothing to wait
+    // for, and starting the network round-trip would just produce a
+    // promise we'd discard.
+    return Promise.reject(new DOMException('aborted', 'AbortError'));
+  }
+  return _invoke<DiffResult>('diff_node_against_base', { nodeId });
+};
 
-export const diffNodeFileAgainstBase = (nodeId: number, filePath: string) =>
-  _invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
+export const diffNodeFileAgainstBase = (
+  nodeId: number,
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<DiffResult> => {
+  // Issue #1181 — see `diffNodeAgainstBase` for the rationale. Per-file
+  // diffs share the same pool-pressure concern (the overlay's rapid
+  // file-switching + `git-changed` bursts pile up the same way the
+  // review panel does).
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException('aborted', 'AbortError'));
+  }
+  return _invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
+};
 
 // File watcher
 export const watchAgentNode = (nodeId: number) =>

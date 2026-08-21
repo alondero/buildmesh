@@ -149,14 +149,25 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   // burst of GIT_CHANGED events) can't overwrite the newest result.
   const reqId = useRef(0);
 
+  // Issue #1181 — see AgentReviewPanel for the full rationale. Per-file
+  // diffs also go through `run_blocking`, and rapid file switching in
+  // the overlay + `git-changed` bursts can pile up the same way the
+  // review panel does. Owning an AbortController + matching the
+  // existing reqId pattern keeps the two consumers symmetric.
+  const abortRef = useRef<AbortController | null>(null);
+
   const fetchDiff = useCallback(
     (opts?: { background?: boolean }) => {
       const myId = ++reqId.current;
+      // Abort the prior fetch (if any) before kicking off a new one.
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
       if (!opts?.background) setFiles(null);
       setError(null);
       const promise: Promise<DiffResult> =
         diff.source === 'base' && diff.nodeId !== null
-          ? diffNodeFileAgainstBase(diff.nodeId, diff.filePath)
+          ? diffNodeFileAgainstBase(diff.nodeId, diff.filePath, controller.signal)
           : diffFileAgainstHead(diff.rootPath, diff.filePath);
       promise
         .then((d) => {
@@ -165,6 +176,10 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
         })
         .catch((e) => {
           if (reqId.current !== myId) return;
+          // Cancellation is the expected end-state for any superseded
+          // fetch — surface it as nothing so a background-refresh
+          // abort doesn't masquerade as a real failure.
+          if (controller.signal.aborted) return;
           if (!opts?.background) setError(formatError(e));
         });
     },
@@ -173,6 +188,11 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
 
   useEffect(() => {
     fetchDiff();
+    // Same cleanup as AgentReviewPanel — abort pending fetches on
+    // unmount or dep change so a stale `.then` can't setState.
+    return () => {
+      abortRef.current?.abort();
+    };
   }, [fetchDiff]);
 
   // Live refresh: the agent keeps editing while the overlay is open, so re-pull

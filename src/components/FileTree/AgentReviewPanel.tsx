@@ -36,14 +36,33 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
   // state — older in-flight results are dropped.
   const reqId = useRef(0);
 
+  // Issue #1181 — also cancel the stale `diff_node_against_base` Rust task
+  // when a fresh request arrives. The ref pattern is the same as `reqId`:
+  // both tokens are flipped on every new fetch, and the closure inside
+  // `useEffect` / `useGitPathInvalidation` only checks the latest one.
+  // Tauri's `invoke()` doesn't natively forward an AbortSignal to the
+  // Rust command in this version, so the *pool-pressure* guarantee
+  // lives on the Rust side (`DIFF_NODE_CANCEL` per-node map); this
+  // controller keeps the local `.then` from flickering stale results
+  // onto the UI and is the seam a future Tauri signal-aware invoke can
+  // plug into.
+  const abortRef = useRef<AbortController | null>(null);
+
   const fetchDiff = useCallback(
     (opts?: { background?: boolean }) => {
       const myId = ++reqId.current;
+      // Abort any prior in-flight diff so its local `.then`/`catch`
+      // short-circuits on `signal.aborted` (don't write state for a
+      // request we've superseded). The Rust side sees the same effect
+      // through its own cancel-token map keyed by `nodeId`.
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
       // A background refetch keeps the current diff on screen rather than
       // flashing the full-panel loading state.
       if (!opts?.background) setLoading(true);
       setError(null);
-      diffNodeAgainstBase(nodeId)
+      diffNodeAgainstBase(nodeId, controller.signal)
         .then((d) => {
           if (reqId.current !== myId) return;
           setDiff(d);
@@ -51,6 +70,10 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
         })
         .catch((e) => {
           if (reqId.current !== myId) return;
+          // Cancellation is the *expected* end-state for any superseded
+          // fetch — surface it as nothing so a background-refresh
+          // abort doesn't look like a real failure.
+          if (controller.signal.aborted) return;
           // Don't blow away a good diff because a background refresh failed;
           // only surface the error when we have nothing else to show.
           if (!opts?.background) setError(formatError(e));
@@ -63,6 +86,14 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
   // Initial load, and a fresh load whenever the node changes.
   useEffect(() => {
     fetchDiff();
+    // Abort any in-flight diff on unmount or when the dep changes —
+    // both are "this fetch is no longer wanted" situations, and aborting
+    // the signal prevents a stale `.then` from setState-ing on an
+    // unmounted component (React 18+ is silent but the abort is the
+    // cleanest seam).
+    return () => {
+      abortRef.current?.abort();
+    };
   }, [fetchDiff]);
 
   // Live refresh: the agent keeps editing after the panel mounts, so re-pull
