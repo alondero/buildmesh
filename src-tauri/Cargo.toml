@@ -63,6 +63,10 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # operation runs once per modal open so the I/O cost is negligible.
 tempfile = "3"
 parking_lot = "0.12"
+# PATH + PATHEXT-aware lookup for `session_naming::resolve_claude_binary`.
+# See session_naming.rs for the rationale (PATH-stale buildmesh process
+# can't find `claude.exe` via plain `Command::new("claude")`).
+which = "7"
 # Non-Windows LAN/VPN enumeration (issue #501). Windows uses `GetAdaptersAddresses`
 # directly via `http::interface_rank::windows_impl` (inline FFI, no `windows-sys`
 # dep — matches `sandbox::restricted_token`'s convention); this crate is only
