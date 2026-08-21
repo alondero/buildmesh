@@ -225,6 +225,23 @@ pub fn default_prepare(
     }
 }
 
+/// Assert `args` contains `flag` immediately followed by `value` (no
+/// other arg interleaved). Used by the per-adapter recipe pins (grok
+/// `--model`, kimi `-m`) to catch the specific failure mode the
+/// table-driven `capability_recipe_coherence` cannot — silent
+/// short↔long flag swaps that the adapter would silently follow.
+#[cfg(test)]
+pub(crate) fn assert_flag_followed_by_value(args: &[String], flag: &str, value: &str) {
+    let idx = args.iter().position(|a| a == flag).unwrap_or_else(|| {
+        panic!("prepared recipe must contain {flag} flag; got args = {args:?}")
+    });
+    assert_eq!(
+        args.get(idx + 1).map(String::as_str),
+        Some(value),
+        "prepared recipe must put {value:?} immediately after {flag}; got args = {args:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
