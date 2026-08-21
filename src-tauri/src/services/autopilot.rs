@@ -682,24 +682,24 @@ fn parse_sqlite_datetime(s: &str) -> Option<SystemTime> {
     Some(SystemTime::from(dt))
 }
 
-/// Spawn a loop-iteration node (ticket #992). Mirrors
-/// [`spawn_autopilot_node`] but:
-/// - `use_worktree_override = None` — the worktree policy respects
-///   `mesh.use_worktree` (the issue-driven path forces `Some(true)`);
-///   non-worktree repos (game-decompilation style) need this.
-/// - `source_issue = None` — the loop iteration has no GitHub issue,
-///   so the dedupe view (`list_known_autopilot_issue_numbers`) doesn't
-///   need to know about it.
-/// - The `autopilot_runs` row is written with `loop_iteration` (via
-///   [`db::create_autopilot_loop_run`]) instead of `issue_number`,
-///   so `list_loop_iterations` picks it up on the next pass.
+/// Spawn a loop-iteration node (ticket #992). Derives the loop-mode plan
+/// facts (no `source_issue`, `use_worktree_override = None` so the Mesh
+/// policy applies, ledger tagged with `loop_iteration`) and delegates to
+/// [`crate::autopilot::node_launch::launch_autopilot_node`].
 ///
-/// The prefill is `loop_initial_prompt`; the watch-and-submit helper
-/// is reused (it already does the two-phase paste/Enter split per
-/// #874 — never glue `\r` onto a bracketed paste). One spawned node
-/// per loop iteration; the merged-PR sweep is irrelevant for loop
-/// iterations (a loop-mode mesh's `autopilot_action_on_success` is
-/// the user's choice, but the wrap-up flow itself is unchanged).
+/// `use_worktree_override = None` is the load-bearing line — see the
+/// module docblock's "Looping Autopilot mode" section.
+/// `create_with_source_pr_fork`'s `unwrap_or(mesh.use_worktree)` fall-through
+/// means a mesh with `use_worktree = false` (game decompilation, etc.)
+/// spawns on the root branch; a mesh with `use_worktree = true` still
+/// cuts a worktree.
+///
+/// The prefill is `loop_initial_prompt`; the watch-and-submit helper is
+/// reused (it already does the two-phase paste/Enter split per #874 —
+/// never glue `\r` onto a bracketed paste). One spawned node per loop
+/// iteration; the merged-PR sweep is irrelevant for loop iterations (a
+/// loop-mode mesh's `autopilot_action_on_success` is the user's choice,
+/// but the wrap-up flow itself is unchanged).
 fn spawn_loop_node(
     app: &AppHandle,
     mesh: &Mesh,
@@ -720,83 +720,28 @@ fn spawn_loop_node(
         .unwrap_or_else(|_| "main".to_string());
     let initial_name = format!("loop-iter-{}", iteration);
 
-    // `use_worktree_override = None` is the load-bearing line — see the
-    // module docblock's "Looping Autopilot mode" section. `create_*`'s
-    // `unwrap_or(mesh.use_worktree)` fall-through means a mesh with
-    // `use_worktree = false` (game decompilation, etc.) spawns on the
-    // root branch; a mesh with `use_worktree = true` still cuts a
-    // worktree.
-    let node = crate::services::agent_node::create_with_source_pr_fork(
-        mesh.id,
-        &mesh.path,
-        &branch,
-        Some(&provider),
-        None, // source_issue — loop iterations have no GitHub issue
-        None, // source_pr
-        None, // source_pr_pinned_sha
-        None, // use_worktree_override — respects mesh.use_worktree
-        Some(&initial_name),
-        None, // head_repo_owner
-        None, // head_repo_clone_url
+    // `watcher_issue_number = 0` is preserved for the toast payload
+    // only (wayfinder #1027 — the literal `issue #0` cannot appear in
+    // any user-authored loop prefill, so the watcher's marker is
+    // derived from the prefill text inside `launch_autopilot_node`).
+    crate::autopilot::node_launch::launch_autopilot_node(
+        app,
+        crate::autopilot::node_launch::AutopilotNodeLaunchPlan {
+            mesh: mesh.clone(),
+            provider,
+            branch,
+            initial_name,
+            intent: crate::agent::spawn::SpawnIntent::Loop {
+                initial_prompt: initial_prompt.to_string(),
+            },
+            run: crate::autopilot::node_launch::AutopilotRunIdentity::Loop {
+                iteration,
+            },
+            worktree_policy:
+                crate::autopilot::node_launch::AutopilotWorktreePolicy::RespectMesh,
+            watcher_issue_number: 0,
+        },
     )
-    .map_err(|e| e.to_string())?;
-    crate::agent::session_lifecycle::on_created(
-        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
-        node.id,
-    )
-    .map_err(|e| e.to_string())?;
-    // Ledger row tagged with `loop_iteration`. INSERT OR IGNORE keyed on
-    // node_id so a restart that replays the spawn doesn't double-write.
-    db::create_autopilot_loop_run(node.id, mesh.id, iteration)
-        .map_err(|e| e.to_string())?;
-
-    crate::autopilot::evaluator::register(node.id);
-
-    let _ = app.emit(
-        "node-created",
-        crate::commands::agent::NodeCreatedPayload { id: node.id },
-    );
-    tracing::info!(
-        "autopilot: created loop node {} for mesh {} iteration {} (provider {})",
-        node.id,
-        mesh.id,
-        iteration,
-        provider
-    );
-
-    let app_for_spawn = app.clone();
-    let prompt_for_spawn = initial_prompt.to_string();
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = crate::agent::spawn::spawn_with_intent(
-            &app_for_spawn,
-            crate::agent::spawn::SpawnRequest::new(
-                node.id,
-                crate::agent::spawn::SpawnIntent::Loop {
-                    initial_prompt: prompt_for_spawn,
-                },
-                crate::agent::spawn::TerminalSize::default(),
-            ),
-        )
-        .await
-        {
-            tracing::error!("autopilot: loop node {} failed: {}", node.id, error);
-        }
-    });
-
-    // The launch watcher does the same two-phase submit as the issue-driven
-    // path (#874): stage the paste, wait for the harness echo + quiescence,
-    // press Enter, verify PTY output follows. The marker is derived from
-    // the prefill text (wayfinder #1027: passing `0` as the issue number
-    // would produce a literal `issue #0` marker — invisible in any
-    // user-authored loop prefill — and the watcher would silently time
-    // out). `issue_number = 0` is preserved for the toast payload only.
-    crate::autopilot::launch::watch_and_submit(
-        app.clone(),
-        node.id,
-        0,
-        initial_prompt,
-    );
-    Ok(())
 }
 
 /// Merged-PR auto-close sweep: for each completed run whose wrap-up PR is
@@ -990,10 +935,15 @@ pub(crate) fn mark_blocked_logged(mesh_id: i64, issue_number: i64) -> bool {
         .insert((mesh_id, issue_number))
 }
 
-/// Create the node row (Pending, worktree enforced) + `autopilot_runs` ledger
-/// entry, then hand off to the shared stage-2 background spawn. Mirrors
-/// `commands::agent::create_issue_node` + `start_node_background`, minus the
-/// IPC skin.
+/// Derive the issue-driven plan facts and delegate to
+/// [`crate::autopilot::node_launch::launch_autopilot_node`]. The launch
+/// module owns the ordered sequence (row create → lifecycle `Pending` →
+/// ledger row → evaluator register → `node-created` emit → background
+/// stage-2 → watcher arm), so a future Autopilot mode cannot bypass any
+/// step through this seam (issue #1178).
+///
+/// Provider chain: the Autopilot Policy's own provider wins; otherwise the
+/// normal default chain (mesh default -> app default -> claude).
 fn spawn_autopilot_node(
     app: &AppHandle,
     mesh: &Mesh,
@@ -1003,12 +953,11 @@ fn spawn_autopilot_node(
 ) -> Result<(), String> {
     // Issue #1180 — build the `SpawnIntent::Issue` once so the watcher's
     // prefill and the background launch's prefill both come from the
-    // same `initial_prompt()` source. Previously this function called
-    // `commands::agent::format_issue_prefill` here (independent of the
-    // intent built a few lines down) and the intent was passed to
-    // `spawn_with_intent` — three sites (desktop draft, background
-    // launch, watcher) could silently drift if anyone changed the
-    // wording in one but not the others.
+    // same `initial_prompt()` source. Three sites (desktop draft,
+    // background launch, watcher) used to be able to silently drift if
+    // anyone changed the wording in one but not the others; the launch
+    // module derives the watcher's prefill from this same `intent`, so
+    // we pass the intent (not a separately-formatted string).
     let intent = crate::agent::spawn::SpawnIntent::Issue(
         crate::agent::spawn::GitHubWorkContext {
             owner: owner.to_string(),
@@ -1017,13 +966,7 @@ fn spawn_autopilot_node(
             title: issue.title.clone(),
         },
     );
-    let prefill = intent
-        .initial_prompt()
-        .map(|p| p.into_string())
-        .expect("Issue intent always has an initial prompt");
     let initial_name = crate::session_naming::issue_node_name(issue.number, &issue.title);
-    // Provider chain: the Autopilot Policy's own provider wins; otherwise the
-    // normal default chain (mesh default -> app default -> claude).
     let provider = mesh.autopilot_provider.clone().unwrap_or_else(|| {
         crate::preferences::resolve_default_provider(
             None,
@@ -1037,85 +980,26 @@ fn spawn_autopilot_node(
     let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
         .unwrap_or_else(|_| "main".to_string());
 
-    // `use_worktree_override = Some(true)` enforces isolation even on a mesh
-    // configured worktree-off (PRD implementation decision). Status Pending +
-    // background stage-2 replicates `create_pending`'s two-write contract.
-    let node = crate::services::agent_node::create_with_source_pr_fork(
-        mesh.id,
-        &mesh.path,
-        &branch,
-        Some(&provider),
-        Some(issue.number),
-        None,
-        None,
-        Some(true),
-        Some(&initial_name),
-        None,
-        None,
+    // Issue-driven: force `use_worktree = true` (PRD implementation
+    // decision) — the wrap-up PR needs a real branch to push.
+    crate::autopilot::node_launch::launch_autopilot_node(
+        app,
+        crate::autopilot::node_launch::AutopilotNodeLaunchPlan {
+            mesh: mesh.clone(),
+            provider,
+            branch,
+            initial_name,
+            intent,
+            run: crate::autopilot::node_launch::AutopilotRunIdentity::Issue {
+                issue_number: issue.number,
+            },
+            worktree_policy:
+                crate::autopilot::node_launch::AutopilotWorktreePolicy::ForceWorktreeBranch,
+            // The literal that survives into the `autopilot-submitted`
+            // toast payload — preserves the issue-driven wire shape.
+            watcher_issue_number: issue.number,
+        },
     )
-    .map_err(|e| e.to_string())?;
-    // Routes through SessionLifecycle (issue #132). `AppSessionLifecycleSink`
-    // here even though `Pending` doesn't emit events — keeps the write
-    // site symmetric with sibling code in this module that *does* emit.
-    crate::agent::session_lifecycle::on_created(
-        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
-        node.id,
-    )
-    .map_err(|e| e.to_string())?;
-    // Ledger row BEFORE stage-2 starts, so `spawn_agent_inner`'s branched-mode
-    // enforcement (which keys off `get_autopilot_run`) sees it.
-    db::create_autopilot_run(node.id, mesh.id, issue.number).map_err(|e| e.to_string())?;
-
-    // Start buffering the node's PTY output for the state evaluator (#483).
-    crate::autopilot::evaluator::register(node.id);
-
-    let _ = app.emit(
-        "node-created",
-        crate::commands::agent::NodeCreatedPayload { id: node.id },
-    );
-    tracing::info!(
-        "autopilot: created node {} for issue #{} on mesh {} (provider {})",
-        node.id,
-        issue.number,
-        mesh.id,
-        provider
-    );
-
-    let app_for_spawn = app.clone();
-    // Issue #1180 — `intent` was built at the top of `spawn_autopilot_node`
-    // so the watcher's prefill and the background launch's prefill both
-    // come from the same `initial_prompt()` source. No more re-building
-    // it here; the two-phase paste path stays intact (watcher first,
-    // then `spawn_with_intent` ships the same intent to the harness).
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = crate::agent::spawn::spawn_with_intent(
-            &app_for_spawn,
-            crate::agent::spawn::SpawnRequest::new(
-                node.id,
-                intent,
-                crate::agent::spawn::TerminalSize::default(),
-            ),
-        )
-        .await
-        {
-            tracing::error!("autopilot: issue node {} failed: {}", node.id, error);
-        }
-    });
-
-    // The prefill only *stages* the prompt in the harness's input box —
-    // nothing submits it. Watch the PTY until the harness is observably
-    // ready (prefill echoed + output quiet), then press Enter for it.
-    // The marker is derived from the prefill (wayfinder #1027) — the
-    // old `submit_marker(issue.number)` literal `issue #N` still
-    // happened to match the issue-driven prefill, but loop-mode
-    // prefills carry no issue reference and silently timed out.
-    crate::autopilot::launch::watch_and_submit(
-        app.clone(),
-        node.id,
-        issue.number,
-        &prefill,
-    );
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2093,45 +1977,11 @@ mod tests {
     // confirm the cross-module helper still exists with the expected
     // path/signature, so a future rename drops this test out of the
     // build before any call site silently references a non-existent
-    // function. Mirrors `spawn_loop_node_signature_respects_worktree_via_none_override`
-    // below.
+    // function.
     #[test]
     fn spawn_loop_node_signature_uses_prefill_via_marker_hint() {
         let _marker = crate::autopilot::launch::marker_hint_for_prefill(
             "Iterate on the failing test cases",
         );
-    }
-
-    // -- spawn_loop_node: worktree discipline ---------------------------------
-    //
-    // `spawn_loop_node` itself can't be unit-tested end-to-end (it
-    // touches DB + PTY), but the worktree-discipline contract is the
-    // load-bearing difference from the issue-driven path and worth a
-    // single contract pin: `mesh.use_worktree == false` must NOT be
-    // overridden to `true` by the looping path. The test asserts on
-    // the spawn helper's argument shape via the public signature
-    // (`create_with_source_pr_fork`'s `use_worktree_override: None`
-    // is the load-bearing argument).
-    #[test]
-    fn spawn_loop_node_signature_respects_worktree_via_none_override() {
-        // The signature contract is the test. `create_with_source_pr_fork`
-        // unwraps `use_worktree_override` to `mesh.use_worktree` (line ~121
-        // in `services/agent_node.rs`). The loop-mode spawn passes
-        // `None` for this argument — verified here by reading
-        // `spawn_loop_node`'s call site directly. A future refactor
-        // that flips this to `Some(true)` would silently force
-        // worktree-on for non-worktree meshes (the canonical
-        // game-decompilation case the ticket calls out).
-        //
-        // We assert via a static reachability check rather than
-        // executing the spawn (which would touch DB and PTY): the
-        // function must exist and take the same Mesh argument shape
-        // that creates the contract.
-        let _mesh = looping_mesh(); // fixture exists, no panic
-        // The `pub(crate)` re-export and the `use_worktree_override =
-        // None` line are both in `services::autopilot::spawn_loop_node`;
-        // a regression that swapped to `Some(true)` would compile but
-        // silently break the contract — see the worktree test in
-        // `db::mesh_tests.rs` for the broader regression net.
     }
 }
