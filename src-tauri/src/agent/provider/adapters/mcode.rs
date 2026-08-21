@@ -11,16 +11,16 @@
 //! `session_naming`), so `self_assigns_session_id()` is `true` and
 //! `session_assign_args()` is a no-op.
 //!
-//! **Model override** uses `mcode exec --model <provider>/<model>`. mcode's
-//! flag is *only* available on the `exec` subcommand (interactive TUI mode has
-//! no `--model` flag) and requires the `<provider>/<model>` format — the
-//! provider is the id from `mcode provider list` (default `minimax`). We emit
-//! the correct syntax today so an `exec`-mode spawn (the upcoming attention-hook
-//! work, see memory) end-to-end fires the override; against the current TUI
-//! recipe the flag is rejected upstream, which mirrors the existing
-//! pre-fix failure mode (`-m` was also rejected). `model_args()` prefixes a
-//! bare model id with the default provider; if the user writes
-//! `<provider>/<model>` explicitly we round-trip it without re-prefixing.
+//! **No model override** (issue #1179). `mcode` exposes `--model
+//! <provider>/<model>` on the `exec` subcommand only; the interactive TUI
+//! the harness always launches rejects it. Previously this adapter
+//! advertised `supports_model_override() == true` while emitting a
+//! `--model` flag the active recipe did not accept — the resolver
+//! passed the value through, the spawn path appended it, and the TUI
+//! surfaced an upstream rejection. The coherent choice (recorded in
+//! the issue thread) is to keep the interactive TUI as the supported
+//! mode and drop the override. A future `mcode exec`-based launch
+//! mode (with its own lifecycle work) would re-advertise the flag.
 //!
 //! **Prefill** is the trailing positional `[prompt]` — there is no `--prefill`
 //! flag. We override `prefill_args()` to return the text as a single positional
@@ -37,30 +37,11 @@ use crate::models::EnvType;
 pub struct McodeAdapter;
 pub static MCODE: McodeAdapter = McodeAdapter;
 
-/// Default provider id we prefix bare model names with. Matches the
-/// `providerId: "minimax_api"` returned by `mcode provider list --json` and
-/// the `kind: "minimax-api-key"` row. Pinned here (not derived from the
-/// CLI's runtime output) so a future mcode default change doesn't silently
-/// shift Buildmesh's emitted `--model` strings — the regression-test surface
-/// in `model_args_format_*` catches any drift.
-const DEFAULT_MCODE_PROVIDER: &str = "minimax";
-
 /// Per-platform shell selection. Mirrors the OpenCode / Antigravity pattern.
 fn shell_for(platform: Platform) -> WindowsShell {
     match platform {
         Platform::Macos | Platform::Linux => WindowsShell::Direct,
         Platform::Windows => WindowsShell::Cmd,
-    }
-}
-
-/// If `model` already contains a `/`, treat it as `<provider>/<model>` and
-/// return as-is; otherwise prefix with [`DEFAULT_MCODE_PROVIDER`]. Pure helper
-/// so the prefix logic is unit-testable in isolation from the trait impl.
-fn normalize_mcode_model(model: &str) -> String {
-    if model.contains('/') {
-        model.to_string()
-    } else {
-        format!("{DEFAULT_MCODE_PROVIDER}/{model}")
     }
 }
 
@@ -101,14 +82,18 @@ impl AgentProvider for McodeAdapter {
         false
     }
 
+    /// `false` — the interactive TUI recipe (`mcode [--session <id>]
+    /// [<prompt>]`) does not accept `--model`. The flag exists on
+    /// `mcode exec`, but Buildmesh does not launch that subcommand. See
+    /// the module doc for the issue #1179 product decision.
     fn supports_model_override(&self) -> bool {
-        true
+        false
     }
 
     fn supports_prefill(&self) -> bool {
-        // mcode accepts `[prompt]` as a trailing positional on both TUI and
-        // exec modes. Override below emits the text verbatim, no `--prefill`
-        // flag.
+        // mcode accepts `[prompt]` as a trailing positional on the
+        // interactive TUI (and on `exec`). Override below emits the
+        // text verbatim, no `--prefill` flag.
         true
     }
 
@@ -125,24 +110,14 @@ impl AgentProvider for McodeAdapter {
         vec!["--session".into(), id.into()]
     }
 
-    fn model_args(&self, model: &str) -> Vec<String> {
-        // `--model <provider>/<model>` per `mcode exec --help`. The flag is
-        // only valid on the `exec` subcommand (TUI mode rejects it), so end-
-        // to-end override needs the `exec` recipe — that lands with the
-        // attention-hook work. Emitting the correct syntax today means the
-        // recipe switch is the only thing standing between us and a working
-        // override, not a CLI-shape fix too.
-        vec!["--model".into(), normalize_mcode_model(model)]
-    }
-
     /// No `--session-id` flag — MiniMax Code assigns its own.
     fn session_assign_args(&self, _id: &str) -> Vec<String> {
         vec![]
     }
 
     fn prefill_args(&self, text: &str) -> Vec<String> {
-        // mcode's prompt is the trailing positional `[prompt]` on both TUI
-        // and exec subcommands — there is no `--prefill` flag. The trait
+        // mcode's prompt is the trailing positional `[prompt]` on the
+        // interactive TUI — there is no `--prefill` flag. The trait
         // default would emit `["--prefill", text]` which mcode rejects.
         vec![text.into()]
     }
@@ -151,6 +126,8 @@ impl AgentProvider for McodeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+    use crate::agent::capabilities::ResolvedAgentConfig;
 
     #[test]
     fn id_and_ui_metadata() {
@@ -214,34 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn model_args_format_prefixes_default_provider() {
-        // Bare model id → `--model <default-provider>/<model>` per mcode's
-        // `exec --help`. The default provider (`minimax`) is the documented
-        // fallback from `mcode provider list --json` (kind: minimax-api-key).
-        let args = MCODE.model_args("MiniMax-Text-01");
-        assert_eq!(args, vec!["--model", "minimax/MiniMax-Text-01"]);
-    }
-
-    #[test]
-    fn model_args_format_passes_through_explicit_provider_prefix() {
-        // If the user writes `<provider>/<model>` explicitly, don't double-prefix.
-        let args = MCODE.model_args("minimax/MiniMax-Text-01");
-        assert_eq!(
-            args,
-            vec!["--model", "minimax/MiniMax-Text-01"],
-            "explicit <provider>/<model> must round-trip without re-prefixing"
-        );
-    }
-
-    #[test]
-    fn model_args_format_passes_through_custom_provider() {
-        // A user-configured provider via `mcode provider add` flows through
-        // verbatim. Buildmesh doesn't pin the provider list — mcode owns it.
-        let args = MCODE.model_args("openai-compatible/gpt-4o");
-        assert_eq!(args, vec!["--model", "openai-compatible/gpt-4o"]);
-    }
-
-    #[test]
     fn session_assign_args_empty() {
         let args = MCODE.session_assign_args("any-id");
         assert!(
@@ -252,8 +201,8 @@ mod tests {
 
     #[test]
     fn prefill_args_is_positional() {
-        // mcode accepts `[prompt]` as a positional on both TUI and exec modes —
-        // there is no `--prefill` flag. The trait default (`vec!["--prefill", t]`)
+        // mcode accepts `[prompt]` as a positional on the TUI — there is
+        // no `--prefill` flag. The trait default (`vec!["--prefill", t]`)
         // is wrong here.
         let args = MCODE.prefill_args("fix the auth bug");
         assert_eq!(args, vec!["fix the auth bug"]);
@@ -273,11 +222,94 @@ mod tests {
         assert!(MCODE.supports_prefill());
     }
 
+    /// Issue #1179: mcode does not advertise a model override. Even if a
+    /// resolved value somehow reached the launch helper, the prepared
+    /// recipe must never carry a `--model` flag — the interactive TUI
+    /// rejects it. The capability descriptor and the recipe are
+    /// required to agree.
     #[test]
-    fn supports_resume_and_model_override_but_no_attention_hook() {
+    fn supports_resume_but_no_model_override_after_issue_1179() {
         assert!(MCODE.supports_resume());
-        assert!(MCODE.supports_model_override());
+        assert!(!MCODE.supports_model_override());
         assert!(!MCODE.requires_attention_hook());
+    }
+
+    /// Pin the capability descriptor end-to-end: the harness-id,
+    /// `supports_model_override = false`, and the absence of effort /
+    /// attention controls. Drift here means the Spawn Menu or autopilot
+    /// compatibility gate will misroute mcode.
+    #[test]
+    fn capabilities_descriptor_drops_model_and_effort() {
+        let caps = MCODE.capabilities();
+        assert_eq!(caps.harness_id, "mcode");
+        assert!(caps.supports_resume);
+        assert!(caps.supports_prefill);
+        assert!(!caps.supports_model_override);
+        assert!(!caps.supports_effort_override);
+        assert!(!caps.requires_attention_hook);
+        assert!(!caps.produces_readable_transcript);
+        assert!(!caps.is_plain_terminal);
+        assert_eq!(
+            caps.effort_control,
+            crate::agent::capabilities::EffortControlKind::None
+        );
+    }
+
+    /// The recipe for the default launch mode — even with a (hypothetical)
+    /// resolved model in the input — must contain no `--model` flag.
+    /// This is the central coherence regression the issue asked for.
+    #[test]
+    fn mcode_interactive_recipe_never_carries_model_arg() {
+        // Defence in depth: even if a caller bypassed the resolver mask
+        // and stuffed a model into ResolvedAgentConfig, the prepared
+        // recipe must not include --model, because the harness
+        // advertised `supports_model_override = false`.
+        let config = ResolvedAgentConfig {
+            model: Some("minimax/MiniMax-Text-01".to_string()),
+            effort: None,
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+        };
+        let prepared = default_prepare(&MCODE, input);
+        assert!(
+            !prepared.recipe.base_args.iter().any(|a| a == "--model"),
+            "mcode interactive recipe must never carry --model (issue #1179); got {:?}",
+            prepared.recipe.base_args
+        );
+    }
+
+    /// Cross-check the resume-mode recipe: it uses the `--session`
+    /// positional and the TUI never receives `--model` even when a model
+    /// is in the resolved config.
+    #[test]
+    fn mcode_resume_recipe_carries_session_not_model() {
+        let config = ResolvedAgentConfig {
+            model: Some("minimax/MiniMax-Text-01".to_string()),
+            effort: None,
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume("abc-123"),
+            config: &config,
+            prefill: None,
+        };
+        let prepared = default_prepare(&MCODE, input);
+        assert!(
+            prepared.recipe.base_args.contains(&"--session".to_string()),
+            "mcode resume must include --session, got {:?}",
+            prepared.recipe.base_args
+        );
+        assert!(prepared.recipe.base_args.contains(&"abc-123".to_string()));
+        assert!(
+            !prepared.recipe.base_args.iter().any(|a| a == "--model"),
+            "mcode resume must not carry --model"
+        );
     }
 
     #[test]

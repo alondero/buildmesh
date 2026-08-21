@@ -1799,9 +1799,8 @@ pub fn set_mesh_loop_config(
 /// mesh (the IPC surface maps `None` to a "mesh not found" error).
 pub fn get_mesh_harness_overrides(mesh_id: i64) -> SqlResult<Option<std::collections::HashMap<String, HarnessConfigValue>>> {
     let db = get().lock().unwrap();
-    let mut stmt = db.prepare(&format!(
-        "SELECT harness_overrides FROM meshes WHERE id = ?1",
-    ))?;
+    let mut stmt = db
+        .prepare("SELECT harness_overrides FROM meshes WHERE id = ?1")?;
     let result = stmt.query_row(params![mesh_id], |row| {
         let raw: String = row.get(0)?;
         Ok(parse_harness_overrides(&raw))

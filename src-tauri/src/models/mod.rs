@@ -1331,7 +1331,9 @@ mod tests {
         assert!(Provider::Kimi.adapter().supports_model_override());
         assert!(!Provider::Kimi.adapter().requires_attention_hook());
         assert!(Provider::Mcode.adapter().supports_resume());
-        assert!(Provider::Mcode.adapter().supports_model_override());
+        // Issue #1179: mcode's interactive TUI rejects `--model`, so the
+        // override is no longer advertised.
+        assert!(!Provider::Mcode.adapter().supports_model_override());
         assert!(!Provider::Mcode.adapter().requires_attention_hook());
     }
 

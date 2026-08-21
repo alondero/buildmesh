@@ -4,6 +4,7 @@
 //! OS-specific wrapping lives in `spawn_environment`.
 //! PTY-specific helpers (open_pty_pair, spawn_child) live in `process.rs`.
 
+use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
 use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
 use crate::agent::session_lifecycle;
@@ -455,19 +456,6 @@ fn reader_should_capture_session_id(
     adapter_self_assigns && matches!(session_id_mode, SessionIdMode::None)
 }
 
-/// Collapse `\r\n` and bare `\r` to `\n` in prefill text.
-///
-/// GitHub issue/PR bodies come back from the REST API with CRLF line endings.
-/// A bare carriage return reaching an agent's TUI input (notably when the
-/// agent is launched through `cmd.exe` or PowerShell on Windows) is
-/// interpreted as Enter, submitting the prompt after the first line — so an
-/// issue-seeded agent only ever sees its first line. macOS and Linux
-/// (`claude` spawned directly) tolerate CRLF, which is why this only bit
-/// Windows.
-fn normalize_prefill_newlines(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
 ///
 /// `backend_env` is the per-profile backend selection resolved by the caller
@@ -527,47 +515,30 @@ pub fn build_spawn_command_prepared(
         Platform::current()
     };
 
-    // The base recipe before session-id / override / prefill args are layered on.
-    let base_recipe = || adapter.spawn_recipe(platform, resolved.env_type);
-
-    let mut recipe = match session_id_mode {
-        SessionIdMode::Resume(id) => {
-            if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(platform, id) {
-                tracing::info!("spawn_agent: using resume recipe for session {}", id);
-                resume_recipe
-            } else {
-                let mut r = base_recipe();
-                let args = adapter.resume_args(id);
-                if !args.is_empty() {
-                    tracing::info!("spawn_agent: resuming session {}", id);
-                    r.base_args.extend(args);
-                }
-                r
-            }
-        }
-        SessionIdMode::Assign(id) => {
-            let mut r = base_recipe();
-            let args = adapter.session_assign_args(id);
-            if !args.is_empty() {
-                tracing::info!("spawn_agent: assigning session-id {}", id);
-                r.base_args.extend(args);
-            }
-            r
-        }
-        SessionIdMode::None => base_recipe(),
+    // Compose the harness's launch contribution: recipe + capability
+    // descriptor + env policy, all from the same adapter. The
+    // capability-mask guarantee still holds — the resolver ran before
+    // we got here, and the helper re-asserts the descriptor on the
+    // forward as defence in depth (issue #1179).
+    let session_ref = match session_id_mode {
+        SessionIdMode::Assign(id) => SessionIdModeRef::Assign(id.as_str()),
+        SessionIdMode::Resume(id) => SessionIdModeRef::Resume(id.as_str()),
+        SessionIdMode::None => SessionIdModeRef::None,
     };
+    let input = HarnessLaunchInput {
+        platform,
+        runtime: resolved.env_type,
+        session: session_ref,
+        config,
+        prefill,
+    };
+    let prepared = crate::agent::launch::default_prepare(adapter, input);
 
-    // The resolver already applied the capability mask; `Some` here means
-    // the harness accepts this control AND the value is in its vocabulary
-    // (issue #1149 acceptance criteria 6, 7, 9). The mask is the single
-    // guarantee that unsupported values never reach a harness process.
-    if let Some(model) = config.model.as_deref().filter(|s| !s.is_empty()) {
-        recipe.base_args.extend(adapter.model_args(model));
-    }
-    if let Some(effort) = config.effort.as_deref().filter(|s| !s.is_empty()) {
-        recipe.base_args.extend(adapter.effort_args(effort));
-    }
-
+    // CodexProxy contributes --profile / --model to the recipe. This
+    // belongs at the orchestrator layer (not the harness): the
+    // pairing's verified profile is the orchestrator's knowledge, and
+    // the per-pairing model id is a routing fact, not a harness fact.
+    let mut recipe = prepared.recipe;
     if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
         profile_name,
         descriptor,
@@ -582,16 +553,6 @@ pub fn build_spawn_command_prepared(
         ]);
     }
 
-    if adapter.supports_prefill() {
-        if let Some(text) = prefill.filter(|s| !s.is_empty()) {
-            let normalized = normalize_prefill_newlines(text);
-            recipe.base_args.extend(adapter.prefill_args(&normalized));
-        }
-    }
-
-    // Routing has already been prepared and verified by the caller. Command
-    // construction remains pure: it only applies explicit profile/model args
-    // and the child-scoped credential below.
     let (wsl_distro, executable_override) = match routing {
         crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy { install, .. } => {
             (install.wsl_distro.as_deref(), Some(install.executable.as_str()))
@@ -608,95 +569,117 @@ pub fn build_spawn_command_prepared(
         sandbox,
     );
 
-    // Reset the claude backend env vars cwrap would have `unset` before
-    // `exec claude`, so a value inherited from buildmesh's own environment can't
-    // leak into the agent. For the built-in Anthropic subscription this clean
-    // slate is the whole job (no overrides follow); a custom Claude-compatible
-    // profile resets then sets its own `backend_env` below. On the WSL path this
-    // only clears the wsl.exe launcher's env — harmless, since only WSLENV-listed
-    // vars cross the boundary anyway.
-    if adapter.resets_backend_env() {
+    // Apply the harness's environment policy (CLAUDE_BACKEND_ENV_VARS
+    // reset + per-harness env_remove). The adapter owns this — the
+    // Claude-backed anthropic adapter sets the reset, Codex sets
+    // OPENAI_* strip; every other adapter uses HarnessEnvironmentPolicy::NONE.
+    if prepared.environment.resets_backend_env {
         for k in CLAUDE_BACKEND_ENV_VARS {
             cmd.env_remove(k);
         }
     }
+    for k in prepared.environment.env_remove {
+        cmd.env_remove(k);
+    }
 
-    // Inject the per-profile backend-selecting env (custom Claude-compatible
-    // base URL, API token, model) resolved by the caller from the node's paired
-    // provider account. Empty for the built-in Anthropic subscription and the
-    // native-binary providers.
-    let backend_env = match routing {
+    // Inject the per-profile backend env + Codex Proxy credential.
+    // Extracted as helpers because the WSLENV bookkeeping is intricate
+    // and was previously duplicated in two large inline blocks.
+    apply_routing_env(&mut cmd, routing, resolved.env_type);
+    apply_codex_proxy_credential(&mut cmd, routing, provider_enum, resolved.env_type);
+    cmd
+}
+
+/// Apply the per-profile backend env (`PreparedLaunchRouting::Environment`)
+/// to the child command. On WSL, appends the new key names to `WSLENV` with
+/// the `/u` suffix so values cross the WSL boundary (only WSLENV-listed
+/// vars propagate). Existing WSLENV entries are deduped by base name.
+fn apply_routing_env(
+    cmd: &mut CommandBuilder,
+    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
+    env_type: EnvType,
+) {
+    let backend_env: &[(String, String)] = match routing {
         crate::agent::launch_routing::PreparedLaunchRouting::Environment(values) => {
             values.as_slice()
         }
         _ => &[],
     };
-    if !backend_env.is_empty() {
-        for (k, v) in backend_env {
-            cmd.env(k, v);
+    if backend_env.is_empty() {
+        return;
+    }
+    for (k, v) in backend_env {
+        cmd.env(k, v);
+    }
+    if env_type == EnvType::Wsl {
+        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+        for (k, _) in backend_env {
+            append_to_wslenv(&mut wslenv, k, "/u");
         }
-        if resolved.env_type == EnvType::Wsl {
-            // Append the key names to WSLENV so they propagate into WSL
-            let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-            for (k, _) in backend_env {
-                let suffix = "/u";
-                let entry = format!("{}{}", k, suffix);
-                let already_has = wslenv.split(':').any(|part| {
-                    part.split('/').next() == Some(k.as_str())
-                });
-                if !already_has {
-                    if wslenv.is_empty() {
-                        wslenv = entry;
-                    } else {
-                        wslenv = format!("{}:{}", wslenv, entry);
-                    }
-                }
-            }
-            if !wslenv.is_empty() {
-                cmd.env("WSLENV", wslenv);
-            }
+        if !wslenv.is_empty() {
+            cmd.env("WSLENV", wslenv);
         }
     }
-    if matches!(provider_enum, Provider::Codex) {
-        let key = crate::agent::provider::adapters::codex::PROXY_CREDENTIAL_ENV;
-        cmd.env_remove(key);
-        if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
-            credential_reference,
-            credential,
-            ..
-        } = routing
-        {
-            debug_assert_eq!(credential_reference, key);
-            // A verified profile authenticates exclusively through its
-            // pairing-scoped reference. Generic OpenAI variables inherited by
-            // Buildmesh must not become an alternate credential/endpoint.
-            cmd.env_remove("OPENAI_API_KEY");
-            cmd.env_remove("OPENAI_BASE_URL");
-            cmd.env(credential_reference, credential);
-            if resolved.env_type == EnvType::Wsl {
-                let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-                if !wslenv.split(':').any(|part| part.split('/').next() == Some(key)) {
-                    if !wslenv.is_empty() {
-                        wslenv.push(':');
-                    }
-                    wslenv.push_str(key);
-                    wslenv.push_str("/u");
-                }
-                if std::env::var_os("CODEX_HOME").is_some()
-                    && !wslenv
-                        .split(':')
-                        .any(|part| part.split('/').next() == Some("CODEX_HOME"))
-                {
-                    if !wslenv.is_empty() {
-                        wslenv.push(':');
-                    }
-                    wslenv.push_str("CODEX_HOME/u");
-                }
-                cmd.env("WSLENV", wslenv);
-            }
+}
+
+/// Apply the Codex Proxy pairing-scoped credential. A verified profile
+/// authenticates exclusively through its pairing-scoped reference
+/// (`PROXY_CREDENTIAL_ENV`); generic `OPENAI_API_KEY` / `OPENAI_BASE_URL`
+/// inherited by Buildmesh are stripped so they cannot become an alternate
+/// credential/endpoint. On WSL the credential key (and `CODEX_HOME` when
+/// set) is appended to WSLENV.
+fn apply_codex_proxy_credential(
+    cmd: &mut CommandBuilder,
+    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
+    provider_enum: Provider,
+    env_type: EnvType,
+) {
+    if !matches!(provider_enum, Provider::Codex) {
+        return;
+    }
+    let key = crate::agent::provider::adapters::codex::PROXY_CREDENTIAL_ENV;
+    cmd.env_remove(key);
+    let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
+        credential_reference,
+        credential,
+        ..
+    } = routing
+    else {
+        return;
+    };
+    debug_assert_eq!(credential_reference, key);
+    cmd.env_remove("OPENAI_API_KEY");
+    cmd.env_remove("OPENAI_BASE_URL");
+    cmd.env(credential_reference, credential);
+    if env_type == EnvType::Wsl {
+        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+        append_to_wslenv(&mut wslenv, key, "/u");
+        if std::env::var_os("CODEX_HOME").is_some() {
+            append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
+        }
+        if !wslenv.is_empty() {
+            cmd.env("WSLENV", wslenv);
         }
     }
-    cmd
+}
+
+/// Append a key (with its WSLENV suffix flag, usually `/u`) to the
+/// colon-delimited WSLENV list, deduplicated by base name. Pure helper
+/// so the Codex and the per-profile-backend paths agree on the rule.
+fn append_to_wslenv(wslenv: &mut String, key: &str, suffix: &str) {
+    let already_has = wslenv.split(':').any(|part| {
+        part.split('/').next() == Some(key)
+    });
+    if already_has {
+        return;
+    }
+    let entry = format!("{key}{suffix}");
+    if wslenv.is_empty() {
+        wslenv.push_str(&entry);
+    } else {
+        wslenv.push(':');
+        wslenv.push_str(&entry);
+    }
 }
 
 /// Spawn the child process.
@@ -2559,6 +2542,7 @@ mod tests {
     // `crate::git::worktree::provision` in PR #676 / issue #677, and #698
     // added `locked_fetch_pr_head` on top. The tests here exercise them by
     // name, so re-import at the test-module scope.
+    use crate::agent::capabilities::ResolvedAgentConfig;
     use crate::git::worktree::provision::{
         adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
         locked_fetch_pr_head, read_origin_ref_sha, upgrade_warm_to_mode,
@@ -4722,5 +4706,199 @@ https://github.com/alondero/buildmesh/issues/247"
     fn decide_startup_resume_startup_with_session_id_and_adapter_accepts_proceeds() {
         let d = decide_startup_resume(Some("uuid-7"), ResumeCause::Startup, true);
         assert_eq!(d, ResumeSkipDecision::Proceed("uuid-7".to_string()));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #1179: capability / recipe coherence table.
+    //
+    // For every adapter × every session mode × every value the resolver
+    // might forward, the prepared recipe must contain exactly the flags
+    // the capability descriptor advertises. The single test below drives
+    // the full matrix; per-adapter adapter-level tests continue to pin
+    // the arg shapes directly via `*_args` helpers.
+    // -----------------------------------------------------------------
+
+    fn make_input<'a>(
+        platform: Platform,
+        session: SessionIdModeRef<'a>,
+        config: &'a ResolvedAgentConfig,
+        prefill: Option<&'a str>,
+    ) -> HarnessLaunchInput<'a> {
+        HarnessLaunchInput {
+            platform,
+            runtime: EnvType::Windows,
+            session,
+            config,
+            prefill,
+        }
+    }
+
+    /// Coherence pin (issue #1179): for every adapter, the
+    /// `HarnessCapabilities` descriptor and the recipe produced by
+    /// `default_prepare` agree.
+    ///
+    /// 1. The recipe's model-flag presence (the flag name from
+    ///    `adapter.model_args(m).first()`) matches
+    ///    `caps.supports_model_override`. Kimi uses `-m`, anthropic /
+    ///    codex / grok / agy / cursor use `--model`, mcode uses nothing.
+    /// 2. The recipe's effort-flag presence (matched by
+    ///    `caps.effort_control` shape: `Closed => "--effort"`,
+    ///    `InlineConfig => key prefix`, `None => neither`) matches
+    ///    `caps.effort_control != None`.
+    /// 3. The recipe's prefill marker (trailing positional, `--prefill`,
+    ///    or `--prompt-interactive`) matches `caps.supports_prefill`.
+    #[test]
+    fn capability_recipe_coherence() {
+        let mut any_adapters = 0;
+        for provider in crate::models::Provider::all() {
+            let adapter = provider.adapter();
+            let caps = adapter.capabilities();
+            any_adapters += 1;
+
+            // Build a config where every layer is populated, then verify
+            // the recipe only carries what caps allow. Ask the adapter
+            // itself for its model-flag shape — some harnesses use
+            // short forms (Kimi `-m`) or vendor-specific names; the
+            // adapter owns its flag vocabulary.
+            let model_value = match adapter.id() {
+                // mcode's `model` slot is no longer advertised; pick a
+                // plausible value to attempt smuggling it past the mask.
+                "mcode" => "minimax/MiniMax-Text-01",
+                "codex" => "gpt-4o",
+                "kimi" => "kimi-k2",
+                "grok" => "grok-3",
+                "agy" => "claude-sonnet",
+                "cursor" => "claude-3-7-sonnet",
+                "opencode" => "gpt-4o",
+                "anthropic" => "claude-sonnet-4-5",
+                "terminal" => "irrelevant",
+                _ => "model",
+            };
+            let effort_value = match adapter.id() {
+                "anthropic" => "high",
+                "codex" => "xhigh",
+                _ => "high", // other harnesses don't accept effort
+            };
+            let config = ResolvedAgentConfig {
+                model: Some(model_value.to_string()),
+                effort: Some(effort_value.to_string()),
+            };
+            let prefill_text = "fix the auth bug in handler.rs";
+            let input = make_input(
+                Platform::Linux,
+                SessionIdModeRef::None,
+                &config,
+                Some(prefill_text),
+            );
+            let prepared = crate::agent::launch::default_prepare(adapter, input);
+            let args = &prepared.recipe.base_args;
+
+            // 1. Model-flag coherence. Ask the adapter what its model-flag
+            //    shape is; the recipe must contain it iff caps advertises
+            //    the control. mcode (which used to advertise) now does
+            //    not, so the recipe must not carry `--model` even when
+            //    a value is in the resolved config.
+            let model_flag = adapter
+                .model_args(model_value)
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let has_model_flag = !model_flag.is_empty()
+                && args.iter().any(|a| a == &model_flag);
+            assert_eq!(
+                has_model_flag, caps.supports_model_override,
+                "model-flag / supports_model_override mismatch for {}: \
+                 recipe has {} = {}, caps.supports_model_override = {}; args = {:?}",
+                adapter.id(), model_flag, has_model_flag, caps.supports_model_override, args
+            );
+
+            // 2. Effort-flag coherence. Codex uses -c model_reasoning_effort=...;
+            //    anthropic uses --effort; everything else must not carry either.
+            //    Pin by `caps.effort_control` shape: Closed => "--effort";
+            //    InlineConfig => the configured key prefix; None => neither.
+            let has_effort_flag = match &caps.effort_control {
+                crate::agent::capabilities::EffortControlKind::Closed { .. } => {
+                    args.iter().any(|a| a == "--effort")
+                }
+                crate::agent::capabilities::EffortControlKind::InlineConfig { key, .. } => {
+                    args.iter().any(|a| a.starts_with(key))
+                }
+                crate::agent::capabilities::EffortControlKind::None => false,
+            };
+            let has_effort_vocab =
+                !matches!(caps.effort_control, crate::agent::capabilities::EffortControlKind::None);
+            assert_eq!(
+                has_effort_flag, has_effort_vocab,
+                "effort-flag / effort_control mismatch for {}: \
+                 recipe has effort flag = {}, caps.effort_control != None = {}; args = {:?}",
+                adapter.id(), has_effort_flag, has_effort_vocab, args
+            );
+
+            // 3. Prefill coherence.
+            let has_prefill_text = args.last().map(|a| a.as_str()) == Some(prefill_text);
+            let has_prefill_flag = args.iter().any(|a| a == "--prefill");
+            let has_prefill_marker = has_prefill_text || has_prefill_flag
+                || args.iter().any(|a| a == "--prompt-interactive");
+            assert_eq!(
+                has_prefill_marker, caps.supports_prefill,
+                "prefill-marker / supports_prefill mismatch for {}: \
+                 recipe has prefill marker = {}, caps.supports_prefill = {}; args = {:?}",
+                adapter.id(), has_prefill_marker, caps.supports_prefill, args
+            );
+        }
+        assert!(any_adapters >= 9, "expected at least 9 adapters in the matrix");
+    }
+
+    /// Codex's subcommand-style resume is the one recipe shape that
+    /// diverges from the default. Pin the recipe contains the
+    /// `resume <id>` shape AND not the model's regular flags when the
+    /// resume is in play.
+    #[test]
+    fn codex_resume_recipe_uses_subcommand_shape() {
+        let adapter = &crate::agent::provider::adapters::CODEX as &dyn crate::agent::provider::AgentProvider;
+        let config = ResolvedAgentConfig::default();
+        let input = make_input(
+            Platform::Macos,
+            SessionIdModeRef::Resume("sess-xyz"),
+            &config,
+            None,
+        );
+        let prepared = crate::agent::launch::default_prepare(adapter, input);
+        let args = &prepared.recipe.base_args;
+        assert!(args.contains(&"resume".to_string()));
+        assert!(args.contains(&"sess-xyz".to_string()));
+        // Codex resume recipe is the subcommand form; no `--resume <id>`
+        // flag is appended.
+        assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    /// Issue #1179 follow-up pin: `mcode` no longer advertises
+    /// `supports_model_override`. Even with a value in the resolver
+    /// config, the recipe must not contain `--model`.
+    #[test]
+    fn mcode_recipe_never_carries_model_arg_under_coherence_matrix() {
+        let adapter = &crate::agent::provider::adapters::MCODE as &dyn crate::agent::provider::AgentProvider;
+        let config = ResolvedAgentConfig {
+            model: Some("minimax/MiniMax-Text-01".to_string()),
+            effort: None,
+        };
+        let input = make_input(
+            Platform::Macos,
+            SessionIdModeRef::None,
+            &config,
+            Some("check the auth handler"),
+        );
+        let prepared = crate::agent::launch::default_prepare(adapter, input);
+        let args = &prepared.recipe.base_args;
+        assert!(
+            !args.contains(&"--model".to_string()),
+            "mcode recipe must never carry --model; got {:?}",
+            args
+        );
+        assert!(
+            args.last().map(|a| a.as_str()) == Some("check the auth handler"),
+            "mcode prefill should be the trailing positional, got {:?}",
+            args
+        );
     }
 }

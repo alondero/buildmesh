@@ -8,6 +8,7 @@ pub mod adapters;
 pub mod compatibility;
 pub mod provider_conf;
 
+use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
 use crate::models::EnvType;
 
 /// Built-in **Harness Profile** ids that detection populates (`claude`,
@@ -401,6 +402,81 @@ pub trait AgentProvider: Send + Sync {
     /// vars.
     fn resets_backend_env(&self) -> bool {
         false
+    }
+
+    /// The effort-control vocabulary this harness accepts.
+    ///
+    /// Replaces the adapter-id switch in the previous
+    /// `agent::capabilities::effort_control_for`. Adapters whose CLI
+    /// exposes a reasoning-effort knob override this with the matching
+    /// `EffortControlKind::Closed { allowed }` (e.g. Claude Code's
+    /// `--effort low|medium|high`) or
+    /// `EffortControlKind::InlineConfig { key, allowed }` (e.g. Codex's
+    /// `-c model_reasoning_effort=…`); every other adapter inherits the
+    /// `None` default and the resolver drops the effort layer.
+    fn effort_control(&self) -> EffortControlKind {
+        EffortControlKind::None
+    }
+
+    /// The capability contract this harness advertises for its normal
+    /// launch mode (issue #1149, refactored in #1179).
+    ///
+    /// **Invariant:** the values here must match the recipe produced by
+    /// [`AgentProvider::prepare_launch`] for the same platform; the
+    /// coherence is regression-pinned by
+    /// `crate::agent::spawn::tests::capability_recipe_coherence`. The
+    /// default implementation composes the existing `*_flags` methods
+    /// so every adapter that does not need a custom descriptor inherits
+    /// a correct one for free; the resolver and Spawn Menu consult
+    /// this single source of truth.
+    fn capabilities(&self) -> HarnessCapabilities {
+        let platforms: Vec<String> = self
+            .available_on()
+            .iter()
+            .map(|p| crate::agent::capabilities::platform_name(*p).to_string())
+            .collect();
+        let effort_control = self.effort_control();
+        HarnessCapabilities {
+            harness_id: self.id().to_string(),
+            supports_resume: self.supports_resume(),
+            auto_resume_on_startup: self.auto_resume_on_startup(),
+            requires_attention_hook: self.requires_attention_hook(),
+            produces_readable_transcript: self.produces_readable_transcript(),
+            supports_model_override: self.supports_model_override(),
+            supports_effort_override: !matches!(effort_control, EffortControlKind::None),
+            supports_prefill: self.supports_prefill(),
+            is_plain_terminal: self.is_plain_terminal(),
+            effort_control,
+            available_on: platforms,
+        }
+    }
+
+    /// Build the coherent launch contribution for one spawn (issue #1179).
+    ///
+    /// Pure (no I/O, no DB, no globals). The shared default
+    /// implementation in `agent::launch::default_prepare` composes the
+    /// existing `*_args` methods into a single
+    /// [`crate::agent::launch::PreparedHarnessLaunch`] — recipe +
+    /// capability contract + env policy — so `build_spawn_command_prepared`
+    /// no longer has to reassemble per-adapter semantics from many
+    /// independent trait methods. Adapters that diverge (e.g. Codex's
+    /// subcommand-style resume) can override; nothing in the current
+    /// set needs to.
+    ///
+    /// `where Self: Sized` because the default coerces `&Self` to a
+    /// `&dyn AgentProvider` to call the shared helper. Object-safe
+    /// callers (the orchestrator's `&'static dyn AgentProvider`) route
+    /// through the free function `agent::launch::default_prepare`
+    /// directly; the trait method exists so future adapter overrides
+    /// can be invoked through the same call site.
+    fn prepare_launch(
+        &self,
+        input: crate::agent::launch::HarnessLaunchInput<'_>,
+    ) -> crate::agent::launch::PreparedHarnessLaunch
+    where
+        Self: Sized,
+    {
+        crate::agent::launch::default_prepare(self, input)
     }
 }
 

@@ -19,9 +19,10 @@
 
 pub mod capabilities;
 pub mod detection;
+pub mod launch;
+pub mod launch_routing;
 pub mod process;
 pub mod provider;
-pub mod launch_routing;
 pub mod provider_menu;
 pub mod sandbox;
 pub mod session_lifecycle;
