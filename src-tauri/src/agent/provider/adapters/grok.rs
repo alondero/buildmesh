@@ -162,4 +162,75 @@ mod tests {
     fn no_prefill_support() {
         assert!(!GROK.supports_prefill());
     }
+
+    // -------------------------------------------------------------------
+    // Issue #1186 — capability coherence regression pins.
+    //
+    // Grok's CLI accepts `-m <model>` AND `--model <model>` (both forms
+    // are advertised in `grok --help`); the adapter deliberately emits
+    // the long form `--model`. A Buildmesh-level model override forwarded
+    // via the spawn path must therefore land in the prepared recipe as
+    // `--model <value>`. Mirrors the mcode precedent (issue #1179) but
+    // the POSITIVE direction: where mcode's pin asserts `--model` is
+    // NEVER emitted, Grok's pin asserts `--model` IS emitted when a
+    // model is resolved.
+    // -------------------------------------------------------------------
+
+    /// Pin the harness-specific model-flag shape: when a model is in the
+    /// resolved config, the prepared recipe MUST carry `--model` (the
+    /// long form the adapter declares) followed by the model value. A
+    /// future refactor that flips the adapter to the short `-m` form
+    /// would still pass `capability_recipe_coherence` (which only
+    /// asserts *some* model flag exists), so this sharper pin catches
+    /// that drift before it reaches the wire.
+    #[test]
+    fn grok_interactive_recipe_carries_long_model_arg() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let config = ResolvedAgentConfig {
+            model: Some("grok-3".to_string()),
+            effort: None,
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+        };
+        let prepared = default_prepare(&GROK, input);
+        let args = &prepared.recipe.base_args;
+
+        // The long flag must appear, and the value must follow it
+        // immediately (no other arg interleaved).
+        let m_idx = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("Grok prepared recipe must contain the --model flag when a model is resolved (issue #1186)");
+        assert_eq!(
+            args.get(m_idx + 1).map(String::as_str),
+            Some("grok-3"),
+            "Grok prepared recipe must put the model value immediately after --model; got args = {:?}",
+            args
+        );
+    }
+
+    /// Capability descriptor end-to-end pin (mirrors mcode's
+    /// `capabilities_descriptor_drops_model_and_effort`). The Spawn Menu,
+    /// resolver, and autopilot compatibility gate all consume this
+    /// descriptor — drift here means the menu misroutes Grok.
+    #[test]
+    fn capabilities_descriptor_advertises_model_override() {
+        let caps = GROK.capabilities();
+        assert_eq!(caps.harness_id, "grok");
+        assert!(caps.supports_resume);
+        assert!(caps.supports_model_override);
+        assert!(!caps.supports_effort_override);
+        assert!(!caps.supports_prefill);
+        assert!(!caps.requires_attention_hook);
+        assert!(!caps.produces_readable_transcript);
+        assert!(!caps.is_plain_terminal);
+        assert_eq!(caps.effort_control, crate::agent::capabilities::EffortControlKind::None);
+    }
 }

@@ -7,7 +7,7 @@ Buildmesh is an orchestration platform for AI coding agents that work in paralle
 **Agent Harness**:
 The executor binary recipe (e.g. `claude` / `claude.exe`, `codex`, `agy`, `opencode`, `terminal`) that launches and communicates with an AI coding agent. Only the `Terminal` harness is always available; all others must be installed on the host and enabled by the user. A harness is distinct from the **Model Provider** whose models it runs (ADR-0014).
 - **Model-Configurable Harness**: An **Agent Harness** that accepts dynamic model/provider overrides directly from Buildmesh's Mesh settings at spawn time (via CLI flags like `--model` or `--provider`). E.g., `Claude Code` (`anthropic`), `Codex`, `Antigravity` (`agy`), `OpenCode`.
-- **Default-Only Harness**: An **Agent Harness** that ignores Buildmesh-level model/provider overrides and runs exclusively using its own local or global configuration file (e.g., `~/.grok/config.toml`, `~/.kimi/config.toml`, or `~/.pi/config.json`). E.g., `Grok Code`, `Kimi Code`, `Pi Code`, and the `Terminal` harness.
+- **Default-Only Harness**: An **Agent Harness** that ignores Buildmesh-level model/provider overrides and runs exclusively using its own local or global configuration file (e.g., `~/.pi/config.json`). E.g., `Pi Code` and the `Terminal` harness. (Grok Code and Kimi Code used to be listed here as of decision #913 / wayfinder map #908, but probing their CLIs in #1186 confirmed both accept `-m <model>` / `--model <model>` overrides, contradicting the historical claim — they are now treated as **Model-Configurable Harnesses** that also ship their own config files.)
 _Avoid_: Executor, runtime, provider (a harness is *not* a provider — see **Model Provider**).
 
 **Model Provider**:
