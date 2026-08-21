@@ -19,17 +19,8 @@
 //! path — the `-m <model>` flag is forwarded to the Kimi CLI, which then
 //! runs that model for the invocation (overriding the harness's
 //! `default_model` from `~/.kimi/config.toml` for that one session).
-//! Historically `CONTEXT.md` listed Kimi Code as a **Default-Only
-//! Harness** (decision #913 / wayfinder map #908); issue #1186 probed the
-//! binary and confirmed both `-m` and `--model` are accepted and acted
-//! upon, so Kimi Code is a **Model-Configurable Harness** that ALSO
-//! ships its own global config (credentials + provider mapping in
-//! `~/.kimi/config.toml`). Buildmesh still does NOT manage Kimi's
-//! credentials or surface Kimi's provider list — the harness's own
-//! login flow owns those — but a resolved `--model` value from the
-//! cascade (`explicit` / `mesh_override` / `application` per #1151 /
-//! #1155) is forwarded through to the CLI as `-m <model>` on a normal
-//! spawn.
+//! Credentials and provider mapping live in `~/.kimi/config.toml`;
+//! Buildmesh does not manage those — Kimi's own login flow owns them.
 //!
 //! **Shell wrapping**: `kimi` is a native binary on all platforms (not a
 //! `.cmd` shim), so `WindowsShell::Direct` is correct everywhere — matching
@@ -218,27 +209,15 @@ mod tests {
         assert!(!KIMI.produces_readable_transcript());
     }
 
-    // -------------------------------------------------------------------
-    // Issue #1186 — capability coherence regression pins.
-    //
-    // Kimi's CLI accepts `-m <model>` (short form — Kimi's own `--help`
-    // advertises it first). A Buildmesh-level model override forwarded via
-    // the spawn path must therefore land in the prepared recipe as
-    // `-m <value>`. Mirrors the mcode precedent (issue #1179) but the
-    // POSITIVE direction: where mcode's pin asserts `--model` is NEVER
-    // emitted, Kimi's pin asserts `-m` IS emitted when a model is
-    // resolved.
-    // -------------------------------------------------------------------
-
-    /// Pin the harness-specific model-flag shape: when a model is in the
-    /// resolved config, the prepared recipe MUST carry `-m` (not `--model`)
-    /// followed by the model value. Kimi's CLI accepts both, but the
-    /// adapter deliberately emits the short form to match Kimi's own
-    /// `--help` examples.
+    /// Issue #1186: pin the harness-specific model-flag shape. The
+    /// table-driven `capability_recipe_coherence` only asserts *some*
+    /// model flag exists in the recipe — a silent `-m` ↔ `--model`
+    /// flip on the adapter would pass. This pin catches the drift
+    /// before it reaches the wire.
     #[test]
     fn kimi_interactive_recipe_carries_short_m_model_arg() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
 
         let config = ResolvedAgentConfig {
             model: Some("kimi-k2".to_string()),
@@ -253,36 +232,20 @@ mod tests {
         };
         let prepared = default_prepare(&KIMI, input);
         let args = &prepared.recipe.base_args;
-
-        // The flag itself must appear, and the value must follow it
-        // immediately (no other arg interleaved).
-        let m_idx = args
-            .iter()
-            .position(|a| a == "-m")
-            .expect("Kimi prepared recipe must contain the short -m flag when a model is resolved (issue #1186)");
-        assert_eq!(
-            args.get(m_idx + 1).map(String::as_str),
-            Some("kimi-k2"),
-            "Kimi prepared recipe must put the model value immediately after -m; got args = {:?}",
-            args
-        );
-
-        // And the long form must NOT be emitted (the short form is
-        // canonical — a future refactor that flips to `--model` must
-        // also flip the doc comment, and this pin catches that drift).
+        assert_flag_followed_by_value(args, "-m", "kimi-k2");
+        // Short form is canonical — a refactor to `--model` would
+        // silently flip the wire shape; this catches it.
         assert!(
             !args.iter().any(|a| a == "--model"),
-            "Kimi prepared recipe must use -m (short form), not --model; got args = {:?}",
-            args
+            "Kimi must use -m (short form), not --model; got args = {args:?}"
         );
     }
 
-    /// Capability descriptor end-to-end pin (mirrors mcode's
-    /// `capabilities_descriptor_drops_model_and_effort`). The Spawn Menu,
+    /// Issue #1179 (mirror): end-to-end descriptor pin. The Spawn Menu,
     /// resolver, and autopilot compatibility gate all consume this
     /// descriptor — drift here means the menu misroutes Kimi.
     #[test]
-    fn capabilities_descriptor_advertises_model_override_short_form() {
+    fn capabilities_descriptor_advertises_model_override() {
         let caps = KIMI.capabilities();
         assert_eq!(caps.harness_id, "kimi");
         assert!(caps.supports_resume);

@@ -12,8 +12,14 @@
 //! `session_naming`), so `self_assigns_session_id()` is `true` and
 //! `session_assign_args()` is a no-op.
 //!
-//! **Model override** uses `--model <model-id>` (or `-m`). Custom models are
-//! configured via `[model.<name>]` blocks in `~/.grok/config.toml`.
+//! **Model override** uses `-m <model-id>` / `--model <model-id>` (`grok
+//! --help` advertises the long form; the adapter emits it). Grok Code
+//! accepts Buildmesh-level model overrides passed via the spawn path —
+//! the `--model <model>` flag is forwarded to the Grok CLI, which then
+//! runs that model for the invocation (overriding the harness's
+//! `[model.<name>]` default in `~/.grok/config.toml` for that one
+//! session). Custom models are configured via `[model.<name>]` blocks
+//! in `~/.grok/config.toml`; Buildmesh does not manage those.
 //!
 //! **Shell wrapping**: `grok` is a native binary on all platforms (not a
 //! `.cmd` shim), so `WindowsShell::Direct` is correct everywhere — matching
@@ -163,30 +169,15 @@ mod tests {
         assert!(!GROK.supports_prefill());
     }
 
-    // -------------------------------------------------------------------
-    // Issue #1186 — capability coherence regression pins.
-    //
-    // Grok's CLI accepts `-m <model>` AND `--model <model>` (both forms
-    // are advertised in `grok --help`); the adapter deliberately emits
-    // the long form `--model`. A Buildmesh-level model override forwarded
-    // via the spawn path must therefore land in the prepared recipe as
-    // `--model <value>`. Mirrors the mcode precedent (issue #1179) but
-    // the POSITIVE direction: where mcode's pin asserts `--model` is
-    // NEVER emitted, Grok's pin asserts `--model` IS emitted when a
-    // model is resolved.
-    // -------------------------------------------------------------------
-
-    /// Pin the harness-specific model-flag shape: when a model is in the
-    /// resolved config, the prepared recipe MUST carry `--model` (the
-    /// long form the adapter declares) followed by the model value. A
-    /// future refactor that flips the adapter to the short `-m` form
-    /// would still pass `capability_recipe_coherence` (which only
-    /// asserts *some* model flag exists), so this sharper pin catches
-    /// that drift before it reaches the wire.
+    /// Issue #1186: pin the harness-specific model-flag shape. The
+    /// table-driven `capability_recipe_coherence` only asserts *some*
+    /// model flag exists in the recipe — a silent `-m` ↔ `--model`
+    /// flip on the adapter would pass. This pin catches the drift
+    /// before it reaches the wire.
     #[test]
     fn grok_interactive_recipe_carries_long_model_arg() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
 
         let config = ResolvedAgentConfig {
             model: Some("grok-3".to_string()),
@@ -200,24 +191,10 @@ mod tests {
             prefill: None,
         };
         let prepared = default_prepare(&GROK, input);
-        let args = &prepared.recipe.base_args;
-
-        // The long flag must appear, and the value must follow it
-        // immediately (no other arg interleaved).
-        let m_idx = args
-            .iter()
-            .position(|a| a == "--model")
-            .expect("Grok prepared recipe must contain the --model flag when a model is resolved (issue #1186)");
-        assert_eq!(
-            args.get(m_idx + 1).map(String::as_str),
-            Some("grok-3"),
-            "Grok prepared recipe must put the model value immediately after --model; got args = {:?}",
-            args
-        );
+        assert_flag_followed_by_value(&prepared.recipe.base_args, "--model", "grok-3");
     }
 
-    /// Capability descriptor end-to-end pin (mirrors mcode's
-    /// `capabilities_descriptor_drops_model_and_effort`). The Spawn Menu,
+    /// Issue #1179 (mirror): end-to-end descriptor pin. The Spawn Menu,
     /// resolver, and autopilot compatibility gate all consume this
     /// descriptor — drift here means the menu misroutes Grok.
     #[test]
