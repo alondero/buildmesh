@@ -26,6 +26,21 @@ import { getMeshColor } from '../../src/lib/meshColors';
 import type { SpawnOption } from '../../src/lib/groups';
 import { colorClassForProvider } from '../../src/lib/groups';
 
+// Regenerate on a Completed autopilot node now reaches the backend
+// (`validate_status_eligible` accepts Completed) — but the previous
+// silent `console.error` left the user staring at a menu that closed
+// without a word on rejection. Pin the new shared-toast plumbing so a
+// future regression to `console.error` (or a missing catch) is caught
+// here. The same pattern is used in `tests/unit/git-issues-tab.test.tsx`
+// for the trigger-label toggle's IPC failure path.
+const { addToastMock } = vi.hoisted(() => ({
+  addToastMock: vi.fn(),
+}));
+vi.mock('../../src/stores/toastStore', () => ({
+  addToast: addToastMock,
+  dismissToast: vi.fn(),
+}));
+
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
     id: 42,
@@ -119,6 +134,9 @@ describe('NodeItem context menu (issue #776)', () => {
       error: null,
       closingNodeIds: new Set(),
     });
+    // Reset the shared toast spy between tests so a Regenerate IPC
+    // failure in one case doesn't bleed into the next.
+    addToastMock.mockReset();
     // Spy on the store's `regenerateAgentNode` so the picker-click
     // tests can assert the call without going through the Tauri
     // `invoke` mock — the store method is the public surface
@@ -573,6 +591,43 @@ describe('NodeItem context menu (issue #776)', () => {
       await waitFor(() => {
         expect(document.querySelector('[role="menu"]')).toBeNull();
       });
+    });
+
+    it('surfaces a Regenerate toast when the IPC rejects', async () => {
+      // Pinned for the "Completed autopilot node" case (and any future
+      // backend rejection): the previous `console.error` catch left the
+      // user staring at a closed menu with no feedback. The store spy
+      // is reset by `beforeEach`'s `mockImplementation`; we override it
+      // for this single test with `mockImplementationOnce` so the rest
+      // of the suite keeps the happy-path mock.
+      const rejection = new Error('regenerate unavailable: node is in archived state (must be idle, awaiting_input, error, running, suspended, or completed)');
+      vi.mocked(useAgentNodeStore.getState().regenerateAgentNode)
+        .mockImplementationOnce(async () => {
+          throw rejection;
+        });
+      const node = makeNode({ id: 411, provider: 'anthropic', status: 'idle' });
+      await openSubmenu(node, [
+        makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+        makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
+      ]);
+      // The picker is now open; click the Claude row (the only
+      // alternate provider). `pickProvider`'s catch branch fires the
+      // `addToast('Regenerate', ...)` call — the assertion below is
+      // the regression pin.
+      const claudeItem = screen.getByRole('menuitem', { name: /claude/i });
+      await userEvent.click(claudeItem);
+      await waitFor(() => {
+        expect(addToastMock).toHaveBeenCalledTimes(1);
+      });
+      expect(addToastMock).toHaveBeenCalledWith(
+        'Regenerate',
+        expect.stringContaining('regenerate unavailable'),
+        'error',
+      );
+      // IPC was called exactly once before the toast — pins the
+      // catch-side firing, not a re-throw-and-catch dance.
+      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledTimes(1);
+      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(411, 'claude');
     });
 
     it('renders an empty-state message when no other providers are available', async () => {
