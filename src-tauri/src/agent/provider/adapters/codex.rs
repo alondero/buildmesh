@@ -1,3 +1,4 @@
+use crate::agent::capabilities::{EffortControlKind, CODEX_EFFORT_ALLOWED, CODEX_EFFORT_KEY};
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 use base64::Engine;
@@ -694,6 +695,19 @@ impl AgentProvider for CodexAdapter {
 
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec![text.into()]
+    }
+
+    /// Codex's reasoning-effort knob is the inline per-invocation config
+    /// override `-c model_reasoning_effort="…"` (issue #1143 research),
+    /// distinct from Claude Code's closed-vocab flag. The vocabulary
+    /// list lives in `agent::capabilities::CODEX_EFFORT_ALLOWED` and is
+    /// consumed by both this method and the resolver; the key is
+    /// surfaced to the frontend for knob labelling.
+    fn effort_control(&self) -> EffortControlKind {
+        EffortControlKind::InlineConfig {
+            key: CODEX_EFFORT_KEY.to_string(),
+            allowed: CODEX_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+        }
     }
 }
 

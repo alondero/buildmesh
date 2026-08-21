@@ -284,45 +284,16 @@ fn normalize_non_empty(raw: &str) -> Option<String> {
 /// Adapters that need a non-default `effort_control` override
 /// [`capabilities_for`] (the lower-level helper) rather than this method —
 /// the override pattern keeps each adapter's CLI surface in one place.
+/// Derive a [`HarnessCapabilities`] descriptor for one adapter.
+///
+/// Thin pass-through to [`AgentProvider::capabilities`] (issue #1179).
+/// Retained as a free function so the ~9 external call sites
+/// (`provider_menu.rs`, `autopilot/compatibility.rs`, `preferences.rs`,
+/// `commands/agent_tests.rs`, `spawn.rs`, the inventory tests) keep
+/// their existing import surface; the body is one line so any future
+/// harness that overrides `capabilities()` automatically flows through.
 pub fn capabilities_for(adapter: &dyn AgentProvider) -> HarnessCapabilities {
-    let platforms: Vec<String> = adapter
-        .available_on()
-        .iter()
-        .map(|p| platform_name(*p).to_string())
-        .collect();
-    HarnessCapabilities {
-        harness_id: adapter.id().to_string(),
-        supports_resume: adapter.supports_resume(),
-        auto_resume_on_startup: adapter.auto_resume_on_startup(),
-        requires_attention_hook: adapter.requires_attention_hook(),
-        produces_readable_transcript: adapter.produces_readable_transcript(),
-        supports_model_override: adapter.supports_model_override(),
-        supports_effort_override: !matches!(effort_control_for(adapter), EffortControlKind::None),
-        supports_prefill: adapter.supports_prefill(),
-        is_plain_terminal: adapter.is_plain_terminal(),
-        effort_control: effort_control_for(adapter),
-        available_on: platforms,
-    }
-}
-
-/// Default `EffortControlKind` derived from the trait surface. Closed vocab
-/// when the adapter reports `supports_effort_override() = true` AND the
-/// adapter's native flag follows the closed-vocab convention (Claude Code);
-/// `None` otherwise. Adapters with non-default effort shapes
-/// (Codex's inline config) override [`capabilities_for`] directly.
-fn effort_control_for(adapter: &dyn AgentProvider) -> EffortControlKind {
-    if adapter.id() == "anthropic" {
-        return EffortControlKind::Closed {
-            allowed: CLAUDE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
-        };
-    }
-    if adapter.id() == "codex" {
-        return EffortControlKind::InlineConfig {
-            key: CODEX_EFFORT_KEY.to_string(),
-            allowed: CODEX_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
-        };
-    }
-    EffortControlKind::None
+    adapter.capabilities()
 }
 
 /// The closed-vocabulary effort values Claude Code accepts (issue #1143
@@ -481,7 +452,10 @@ mod tests {
         assert_eq!(grok.effort_control, EffortControlKind::None);
 
         let mcode = mcode_caps();
-        assert!(mcode.supports_model_override);
+        // Issue #1179: mcode's interactive TUI rejects `--model`, so
+        // the override is no longer advertised. The capability and
+        // recipe now agree (see `adapters::mcode::tests`).
+        assert!(!mcode.supports_model_override);
         assert!(!mcode.supports_effort_override);
         assert!(mcode.supports_prefill);
         assert_eq!(mcode.effort_control, EffortControlKind::None);
@@ -510,6 +484,40 @@ mod tests {
                 "supports_effort_override must equal (effort_control != None) for {}; \
                  got supports={} control={:?}",
                 caps.harness_id, caps.supports_effort_override, caps.effort_control
+            );
+        }
+    }
+
+    /// Issue #1179: `effort_control_for` was an adapter-id switch
+    /// (`adapter.id() == "anthropic"`, `== "codex"`) living in
+    /// `agent::capabilities`. The refactor moves the choice to the
+    /// adapter itself via `AgentProvider::effort_control()`, and
+    /// `capabilities_for` becomes a thin pass-through. This test pins
+    /// the new contract: for every adapter, the descriptor's
+    /// `effort_control` exactly matches the trait method's return.
+    /// A future refactor that reintroduces an id switch in the
+    /// descriptor (or drops a vocabulary the trait advertises) trips
+    /// this test.
+    #[test]
+    fn effort_control_descriptor_delegates_to_adapter_no_id_switch() {
+        for adapter in [
+            &crate::agent::provider::adapters::ANTHROPIC as &dyn crate::agent::provider::AgentProvider,
+            &crate::agent::provider::adapters::CODEX,
+            &crate::agent::provider::adapters::CURSOR,
+            &crate::agent::provider::adapters::AGY,
+            &crate::agent::provider::adapters::OPENCODE,
+            &crate::agent::provider::adapters::TERMINAL,
+            &crate::agent::provider::adapters::KIMI,
+            &crate::agent::provider::adapters::GROK,
+            &crate::agent::provider::adapters::MCODE,
+        ] {
+            let from_trait = adapter.effort_control();
+            let from_descriptor = capabilities_for(adapter).effort_control;
+            assert_eq!(
+                from_trait, from_descriptor,
+                "effort_control must agree between trait method and descriptor for {}; \
+                 trait = {:?}, descriptor = {:?}",
+                adapter.id(), from_trait, from_descriptor
             );
         }
     }

@@ -1,3 +1,4 @@
+use crate::agent::capabilities::{EffortControlKind, CLAUDE_EFFORT_ALLOWED};
 use crate::agent::provider::{
     claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta,
 };
@@ -64,5 +65,15 @@ impl AgentProvider for AnthropicAdapter {
     /// built-in subscription on the default Anthropic endpoint.
     fn resets_backend_env(&self) -> bool {
         true
+    }
+
+    /// Claude Code's reasoning-effort knob is the closed-vocab
+    /// `--effort <low|medium|high>` flag. The vocabulary list lives in
+    /// `agent::capabilities::CLAUDE_EFFORT_ALLOWED` (issue #1143 research)
+    /// and is consumed by both this method and the resolver.
+    fn effort_control(&self) -> EffortControlKind {
+        EffortControlKind::Closed {
+            allowed: CLAUDE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+        }
     }
 }
