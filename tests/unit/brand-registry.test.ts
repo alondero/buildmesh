@@ -32,6 +32,18 @@ describe('brandFor', () => {
     });
   });
 
+  it('registers DeepSeek with its official brand treatment', () => {
+    const dsh = brandFor('dsh');
+    expect(brandFor('deepseek-harness')).toBe(dsh);
+    expect(brandFor('deepseek')).toBe(dsh);
+    expect(brandFor('claude:deepseek')).toBe(dsh);
+    expect(dsh).toMatchObject({
+      id: 'dsh',
+      chipHex: '#1E88E5',
+      chipClass: 'bg-blue-600',
+    });
+  });
+
   it('returns undefined for an unregistered provider', () => {
     expect(brandFor('claude:custom-account')).toBeUndefined();
     expect(brandFor('mystery')).toBeUndefined();

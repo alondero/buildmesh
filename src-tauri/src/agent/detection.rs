@@ -97,6 +97,13 @@ const DETECTABLE: &[Detectable] = &[
         binaries: &["mcode"],
         config_dirs: &[".mcode", ".minimax-code"],
     },
+    Detectable {
+        id: "dsh",
+        name: "DeepSeek Harness",
+        harness: "dsh",
+        binaries: &["dsh"],
+        config_dirs: &[".dsh", ".deepseek-harness"],
+    },
 ];
 
 /// True if `binary` (plus any of `exts`) exists in one of the `path_dirs`.
@@ -316,6 +323,20 @@ mod tests {
         assert_eq!(profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["mcode"]);
     }
 
+    /// DeepSeek Harness (`dsh`) ships `~/.dsh/` or `~/.deepseek-harness/` for config alongside the `dsh` binary.
+    #[test]
+    fn dsh_config_dir_alone_counts_as_installed() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.dsh"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["dsh"]);
+
+        let exists_alt = fake_fs(&["/home/me/.deepseek-harness"]);
+        let profiles_alt = detect_profiles(&path_dirs, &[""], Some(&home), &exists_alt);
+        assert_eq!(profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["dsh"]);
+    }
+
     #[test]
     fn agy_has_no_config_dir_so_needs_the_binary() {
         // Antigravity declares no config dir, so a stray home dir can't conjure
@@ -341,6 +362,7 @@ mod tests {
             "/bin/grok",
             "/bin/kimi",
             "/bin/mcode",
+            "/bin/dsh",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -356,6 +378,7 @@ mod tests {
                 "grok" => assert_eq!(provider, Provider::Grok),
                 "kimi" => assert_eq!(provider, Provider::Kimi),
                 "mcode" => assert_eq!(provider, Provider::Mcode),
+                "dsh" => assert_eq!(provider, Provider::Dsh),
                 other => panic!("unexpected detected id {other}"),
             }
         }

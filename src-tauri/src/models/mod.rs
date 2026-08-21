@@ -83,6 +83,9 @@ pub enum Provider {
     /// MiniMax Code CLI — interactive TUI-based coding agent.
     /// See `agent::provider::adapters::mcode`.
     Mcode,
+    /// DeepSeek Harness CLI (`dsh`) — interactive agent harness.
+    /// See `agent::provider::adapters::dsh`.
+    Dsh,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -101,6 +104,7 @@ impl Provider {
             Provider::Grok,
             Provider::Kimi,
             Provider::Mcode,
+            Provider::Dsh,
             Provider::Terminal,
         ]
     }
@@ -125,6 +129,7 @@ impl Provider {
             "grok" => Provider::Grok,
             "kimi" => Provider::Kimi,
             "mcode" | "minimax-code" => Provider::Mcode,
+            "dsh" | "deepseek-harness" | "deepseek" => Provider::Dsh,
             "terminal" => Provider::Terminal,
             // "minimax" is no longer a first-class executor: it is Claude Code
             // with a swapped backend, configured as a harness profile whose
@@ -157,6 +162,7 @@ impl Provider {
             Provider::Grok => &adapters::GROK,
             Provider::Kimi => &adapters::KIMI,
             Provider::Mcode => &adapters::MCODE,
+            Provider::Dsh => &adapters::DSH,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -173,6 +179,7 @@ impl std::fmt::Display for Provider {
             Provider::Grok => write!(f, "grok"),
             Provider::Kimi => write!(f, "kimi"),
             Provider::Mcode => write!(f, "mcode"),
+            Provider::Dsh => write!(f, "dsh"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }
@@ -1335,6 +1342,9 @@ mod tests {
         // override is no longer advertised.
         assert!(!Provider::Mcode.adapter().supports_model_override());
         assert!(!Provider::Mcode.adapter().requires_attention_hook());
+        assert!(Provider::Dsh.adapter().supports_resume());
+        assert!(Provider::Dsh.adapter().supports_model_override());
+        assert!(!Provider::Dsh.adapter().requires_attention_hook());
     }
 
     /// The "produces a readable transcript" capability (#317) — the
@@ -1355,6 +1365,7 @@ mod tests {
         // Cursor's workspace-scoped JSONL is parsed by TranscriptFormat::Cursor.
         assert!(Provider::Cursor.adapter().produces_readable_transcript());
         assert!(!Provider::Mcode.adapter().produces_readable_transcript());
+        assert!(!Provider::Dsh.adapter().produces_readable_transcript());
         assert!(!Provider::Agy.adapter().produces_readable_transcript());
         assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
         assert!(!Provider::Terminal.adapter().produces_readable_transcript());
@@ -1394,6 +1405,7 @@ mod tests {
         assert_eq!(Provider::from_db_str("OpenCode"), Provider::OpenCode);
         assert_eq!(Provider::from_db_str("Codex"), Provider::Codex);
         assert_eq!(Provider::from_db_str("Mcode"), Provider::Mcode);
+        assert_eq!(Provider::from_db_str("Dsh"), Provider::Dsh);
     }
 
     /// Hard cutover (issue #538): "minimax" is no longer a first-class executor.
@@ -1430,6 +1442,16 @@ mod tests {
         assert_eq!(Provider::from_db_str("Mcode"), Provider::Mcode);
         assert_eq!(Provider::from_db_str("MCODE"), Provider::Mcode);
         assert_eq!(Provider::from_db_str("minimax-code"), Provider::Mcode);
+    }
+
+    /// DeepSeek Harness CLI (`dsh`) is a native binary executor on PATH as `dsh`.
+    #[test]
+    fn provider_from_db_str_dsh_resolves_to_native_harness() {
+        assert_eq!(Provider::from_db_str("dsh"), Provider::Dsh);
+        assert_eq!(Provider::from_db_str("Dsh"), Provider::Dsh);
+        assert_eq!(Provider::from_db_str("DSH"), Provider::Dsh);
+        assert_eq!(Provider::from_db_str("deepseek-harness"), Provider::Dsh);
+        assert_eq!(Provider::from_db_str("deepseek"), Provider::Dsh);
     }
 
     /// Whitespace around the value shouldn't break matching either — a

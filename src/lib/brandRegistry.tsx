@@ -90,6 +90,18 @@ function OpenRouterIcon({ className, title }: InlineIconProps) {
   );
 }
 
+function DeepSeekIcon({ className, title }: InlineIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <title>{title}</title>
+      <path
+        fill="currentColor"
+        d="M20.25 10.5c-.4-3.5-3.2-6.25-6.75-6.5-4.25-.3-7.85 2.75-8.25 7-.25 2.6 1 5 3 6.4v2.6c0 .55.45 1 1 1h5.5c.55 0 1-.45 1-1v-2.2c2.75-1.45 4.65-4.25 4.5-7.3zM9 13a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm6 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"
+      />
+    </svg>
+  );
+}
+
 type BrandRegistration = Brand & { readonly aliases?: readonly string[] };
 
 // Colour-baked assets stay as images; monochrome marks remain inline so
@@ -103,6 +115,7 @@ const BRANDS: readonly BrandRegistration[] = [
   { id: 'cursor', icon: { kind: 'inline', component: CursorIcon }, chipHex: '#1B1913', chipClass: 'bg-neutral-900' },
   { id: 'agy', icon: { kind: 'image', src: antigravityLogo }, chipHex: '#10b981', chipClass: 'bg-emerald-500' },
   { id: 'opencode', icon: { kind: 'inline', component: OpenCodeIcon }, chipHex: '#f59e0b', chipClass: 'bg-amber-500' },
+  { id: 'dsh', aliases: ['deepseek-harness', 'deepseek'], icon: { kind: 'inline', component: DeepSeekIcon }, chipHex: '#1E88E5', chipClass: 'bg-blue-600' },
   { id: 'terminal', icon: { kind: 'inline', component: TerminalIcon }, chipHex: '#9ca3af', chipClass: 'bg-gray-500' },
   { id: 'codex', icon: { kind: 'inline', component: OpenAIIcon }, chipHex: '#10a37f', chipClass: 'bg-gray-500' },
   { id: 'openrouter', icon: { kind: 'inline', component: OpenRouterIcon }, chipHex: '#615EFF', chipClass: 'bg-gray-500' },

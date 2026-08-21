@@ -355,6 +355,10 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::MCODE)
     }
 
+    fn dsh_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::DSH)
+    }
+
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
     /// descriptor must match the matrix documented in `docs/knowledge-primer.md`
     /// and the #1143 research summary. Drift here means a future adapter
@@ -459,6 +463,17 @@ mod tests {
         assert!(!mcode.supports_effort_override);
         assert!(mcode.supports_prefill);
         assert_eq!(mcode.effort_control, EffortControlKind::None);
+
+        let dsh = dsh_caps();
+        assert_eq!(dsh.harness_id, "dsh");
+        assert!(dsh.supports_resume);
+        assert!(dsh.auto_resume_on_startup);
+        assert!(!dsh.requires_attention_hook);
+        assert!(!dsh.produces_readable_transcript);
+        assert!(dsh.supports_model_override);
+        assert!(!dsh.supports_effort_override);
+        assert!(!dsh.supports_prefill);
+        assert_eq!(dsh.effort_control, EffortControlKind::None);
     }
 
     /// `supports_effort_override` must mirror `effort_control != None`. The
@@ -477,6 +492,7 @@ mod tests {
             kimi_caps(),
             grok_caps(),
             mcode_caps(),
+            dsh_caps(),
         ] {
             let has_effort_control = !matches!(caps.effort_control, EffortControlKind::None);
             assert_eq!(
@@ -833,10 +849,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// The application slot drives the resolved value when explicit + mesh_override
-    /// + mesh are empty (issue #1148 cascade layer 4: explicit > mesh_override
-    /// > mesh > application > native). The spawn path in `spawn_agent_inner`
-    /// populates this slot from `preferences::harness_default_for(&node.provider)`;
-    /// this test pins the resolver contract that the spawn path relies on.
+    /// + mesh are empty (issue #1148 cascade layer 4: `explicit > mesh_override > mesh > application > native`).
+    /// The spawn path in `spawn_agent_inner` populates this slot from
+    /// `preferences::harness_default_for(&node.provider)`; this test pins the resolver
+    /// contract that the spawn path relies on.
     #[test]
     fn resolver_application_slot_drives_anthropic_when_mesh_and_explicit_empty() {
         let inputs = AgentConfigInputs {

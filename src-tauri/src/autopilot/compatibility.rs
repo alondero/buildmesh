@@ -243,6 +243,7 @@ pub fn resolve_harness_adapter_id(harness_id: &str) -> Option<&'static str> {
         "grok" => Some("grok"),
         "kimi" => Some("kimi"),
         "mcode" | "minimax-code" => Some("mcode"),
+        "dsh" | "deepseek-harness" | "deepseek" => Some("dsh"),
         "terminal" => Some("terminal"),
         _ => None,
     }
