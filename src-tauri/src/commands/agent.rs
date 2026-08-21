@@ -3,8 +3,13 @@
 //! After issue #1052 this module owns only the **spawn-orchestration** surface
 //! (`spawn_agent`, `spawn_issue_agent`, `create_issue_node`, `create_pr_node`,
 //! `spawn_handover_agent`, `auto_resume_agent_nodes`, `list_autopilot_runs`) +
-//! the helpers that wrap their inputs (`format_issue_prefill`,
-//! `format_pr_prefill`, `validate_pr_spawn_inputs`) + the matching wire types.
+//! the helpers that wrap their inputs (`validate_pr_spawn_inputs`) + the matching wire types.
+//! The GitHub-issue / GitHub-PR prefill helpers (`format_issue_prefill`,
+//! `format_pr_prefill`) used to live here; both were consolidated into
+//! [`crate::agent::spawn::SpawnIntent::initial_prompt`] (issue #1180) so the
+//! desktop draft, the background launch, and the Autopilot watcher all
+//! derive from the same `SpawnIntent` instead of three divergent free
+//! functions.
 //!
 //! The **process-lifecycle** home (`kill_agent` / `write_to_agent` /
 //! `resize_agent` / `send_to_agent` / `is_agent_running` / `debug_*` /
@@ -216,37 +221,13 @@ pub async fn spawn_issue_agent(
     Ok(node)
 }
 
-/// Compose the prefill string handed to the agent on GitHub-issue spawn.
-///
-/// Shape: `Please work on GitHub issue #N — Title\n<html_url>` — terse imperative,
-/// the issue number for cite-ability, the title as a one-line freebie so the
-/// agent can usually start without round-tripping for the body, and the URL as
-/// the canonical source. An empty title degrades to just `#N\n<url>` (no
-/// dangling em-dash artifact).
-///
-/// The title is passed verbatim — the consumer is an LLM, not a parser, and
-/// the prefill bytes round-trip safely through the PowerShell `-EncodedCommand`
-/// path (see memory: powershell-encoding-fix). Using an em-dash instead of
-/// surrounding quotes sidesteps any escape question entirely.
-///
-/// Pure function — exposed `pub(crate)` for unit tests in `agent_tests.rs`.
-pub(crate) fn format_issue_prefill(
-    owner: &str,
-    repo: &str,
-    issue_number: i64,
-    issue_title: &str,
-) -> String {
-    let url = format!("https://github.com/{}/{}/issues/{}", owner, repo, issue_number);
-    let trimmed = issue_title.trim();
-    if trimmed.is_empty() {
-        format!("Please work on GitHub issue #{}\n{}", issue_number, url)
-    } else {
-        format!(
-            "Please work on GitHub issue #{} — {}\n{}",
-            issue_number, trimmed, url
-        )
-    }
-}
+// The prefill string handed to the agent on GitHub-issue spawn is owned by
+// [`crate::agent::spawn::SpawnIntent::initial_prompt`] as of issue #1180 —
+// this section used to host the `format_issue_prefill` helper that
+// duplicated the logic. The single source of truth lives in
+// `agent::spawn::intent` and is reached via
+// `SpawnIntent::Issue(context).initial_prompt()` everywhere (desktop draft,
+// background launch, Autopilot watcher).
 
 // ---------------------------------------------------------------------------
 // Two-stage issue spawn (fast stage-1 + background stage-2)
@@ -300,7 +281,16 @@ pub fn create_issue_node(
         number: issue_number,
         title: issue_title.clone(),
     });
-    let prefill = intent.prefill().unwrap_or_default();
+    // Issue #1180 — `initial_prompt()` is the single source of truth for
+    // the GitHub-issue prefill; the same intent is then passed to
+    // `spawn_with_intent` below so the background launch gets a
+    // byte-identical string. `Issue(...)` always has a prompt, so
+    // `unwrap_or_default()` is unreachable in practice but kept as a
+    // defensive fallback matching the wire-shape contract.
+    let prefill = intent
+        .initial_prompt()
+        .map(|p| p.into_string())
+        .unwrap_or_default();
     // Issue #111: seed the node with a `gh{N}-{slug}` name (mirrors
     // `spawn_issue_agent` so the desktop modal and mobile route produce
     // identical names).
@@ -388,33 +378,12 @@ pub fn list_autopilot_runs() -> Result<Vec<AutopilotRunStateRow>, String> {
 // `git fetch origin <head_ref>` worktree adoption.
 // ---------------------------------------------------------------------------
 
-/// Compose the prefill string handed to the agent on PR spawn.
-///
-/// Shape: `Please review pull request #N — Title\n<html_url>` — mirrors
-/// `format_issue_prefill` (issue flow) so the agent gets the same kind of
-/// one-line imperative + URL hand-off. The title is passed verbatim (the
-/// consumer is an LLM, not a parser); the PR's body is intentionally NOT
-/// included (same rationale as the issue flow — multi-KB markdown is the
-/// worst case for the PowerShell `-EncodedCommand` argv path).
-///
-/// Pure function — exposed `pub(crate)` so unit tests can pin the wording.
-pub(crate) fn format_pr_prefill(
-    owner: &str,
-    repo: &str,
-    pr_number: i64,
-    pr_title: &str,
-) -> String {
-    let url = format!("https://github.com/{}/{}/pull/{}", owner, repo, pr_number);
-    let trimmed = pr_title.trim();
-    if trimmed.is_empty() {
-        format!("Please review pull request #{}\n{}", pr_number, url)
-    } else {
-        format!(
-            "Please review pull request #{} — {}\n{}",
-            pr_number, trimmed, url
-        )
-    }
-}
+// The prefill string handed to the agent on PR spawn is owned by
+// [`crate::agent::spawn::SpawnIntent::initial_prompt`] as of issue #1180 —
+// this section used to host the `format_pr_prefill` helper that duplicated
+// the logic. The single source of truth lives in `agent::spawn::intent` and
+// is reached via `SpawnIntent::PullRequest(context).initial_prompt()`
+// everywhere (desktop draft, background launch).
 
 /// Validate and normalise the inputs to a PR-spawn request.
 ///
@@ -532,18 +501,15 @@ pub fn create_pr_node(
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
 ) -> Result<IssueNodeDraft, String> {
-    let intent_context = {
-        let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-        let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
-            .map_err(|e| format!("{} — cannot derive PR URL", e))?;
-        GitHubWorkContext {
-            owner,
-            repo,
-            number: pr_number,
-            title: pr_title.clone(),
-        }
-    };
-    let draft = create_pr_node_impl(
+    // Issue #1180 — the impl now returns the `SpawnIntent::PullRequest`
+    // it built (owner/repo resolved from the mesh + the supplied
+    // pr_number/pr_title). The wrapper reuses that single intent for
+    // `spawn_with_intent` so the desktop draft, the background launch,
+    // and the (future) marker derivation all agree on byte-identical
+    // prefill text. Previously the wrapper re-built the intent here
+    // and the impl called `format_pr_prefill` independently — a silent
+    // drift waiting to happen.
+    let (draft, intent) = create_pr_node_impl(
         mesh_id,
         pr_number,
         pr_title,
@@ -563,11 +529,7 @@ pub fn create_pr_node(
     tauri::async_runtime::spawn(async move {
         if let Err(error) = spawn_with_intent(
             &app_for_spawn,
-            SpawnRequest::new(
-                node_id,
-                SpawnIntent::PullRequest(intent_context),
-                TerminalSize::default(),
-            ),
+            SpawnRequest::new(node_id, intent, TerminalSize::default()),
         )
         .await
         {
@@ -586,6 +548,13 @@ pub fn create_pr_node(
 /// (`create_pending_with_source_pr_fork`) and a `tracing::info!` log —
 /// the `node-created` Tauri event is the only AppHandle-bound concern,
 /// and it stays in the command wrapper.
+///
+/// Returns the `(draft, intent)` pair so the wrapper can hand the
+/// **same** `SpawnIntent` to [`spawn_with_intent`] (issue #1180). The
+/// intent is built once from `(owner, repo, pr_number, pr_title)` and
+/// the prefill surfaced on the desktop draft comes from
+/// [`SpawnIntent::initial_prompt`] — the single source of truth shared
+/// with the background launch path and the Autopilot watcher.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pr_node_impl(
     mesh_id: i64,
@@ -596,7 +565,7 @@ pub(crate) fn create_pr_node_impl(
     provider: Option<String>,
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
-) -> Result<IssueNodeDraft, String> {
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     // Issue #471 — the gate is split into two independent rejections. See
     // `validate_pr_spawn_inputs` for the truth table; both guards are tested
     // exhaustively in `commands::agent_tests`. The helper also returns the
@@ -614,7 +583,22 @@ pub(crate) fn create_pr_node_impl(
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive PR URL", e))?;
 
-    let prefill = format_pr_prefill(&owner, &repo, pr_number, &pr_title);
+    // Build the `SpawnIntent` ONCE here so the prefill the desktop draft
+    // surfaces (and the `spawn_with_intent` background task forwards to the
+    // harness) come from the same `initial_prompt()` source. Issue #1180
+    // closed the previous `format_pr_prefill` helper duplication — three
+    // sites (commands, services/autopilot, autopilot/launch) used to
+    // recompute the prompt independently and could silently drift.
+    let intent = SpawnIntent::PullRequest(GitHubWorkContext {
+        owner,
+        repo,
+        number: pr_number,
+        title: pr_title.clone(),
+    });
+    let prefill = intent
+        .initial_prompt()
+        .map(|p| p.into_string())
+        .unwrap_or_default();
 
     // Seed the node with a `pr{N}-{slug}` name (mirrors `issue_node_name`) so
     // the user can identify it in the mesh list from the moment the row
@@ -662,7 +646,7 @@ pub(crate) fn create_pr_node_impl(
         mesh_id
     );
 
-    Ok(IssueNodeDraft { node, prefill })
+    Ok((IssueNodeDraft { node, prefill }, intent))
 }
 
 /// Spawn a new agent node pre-filled with selected text from a parent terminal.
@@ -992,13 +976,16 @@ mod tests {
     }
 
     /// The seam the issue calls out most explicitly: the returned
-    /// `IssueNodeDraft` must carry the prefill from `format_pr_prefill`
+    /// `IssueNodeDraft` must carry the prefill from `SpawnIntent::initial_prompt`
     /// AND the node name from `pr_node_name`. Both pieces are computed
     /// from the SAME `(pr_number, pr_title)` pair, so a refactor that
     /// accidentally passes a different value to one of them (e.g. a
     /// stale `pr_title` from a closure) would break the user's mental
     /// model: the agent gets a prefill referring to a different PR
-    /// than the one whose name appears in the sidebar.
+    /// than the one whose name appears in the sidebar. (Issue #1180 —
+    /// the prefill helper consolidation means we now build the intent
+    /// and read `initial_prompt()` here rather than calling
+    /// `format_pr_prefill`.)
     #[test]
     fn create_pr_node_impl_wires_name_and_prefill_seam() {
         let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -1012,7 +999,7 @@ mod tests {
         let pr_number: i64 = 445;
         let pr_title = "test(pr-spawn): Rust unit tests for create_pr_node + fetch_single_ref";
 
-        let draft = create_pr_node_impl(
+        let (draft, intent) = create_pr_node_impl(
             mesh_id,
             pr_number,
             pr_title.to_string(),
@@ -1024,16 +1011,19 @@ mod tests {
         )
         .expect("create_pr_node_impl with valid inputs must succeed");
 
-        // Prefill seam: matches the helper exactly.
-        let expected_prefill = format_pr_prefill(
-            "alondero",
-            "buildmesh",
-            pr_number,
-            pr_title,
-        );
+        // Prefill seam: matches the SpawnIntent's `initial_prompt()`
+        // exactly (issue #1180 — the single source of truth). We
+        // construct the same `SpawnIntent::PullRequest` the wrapper
+        // would use for the background launch and compare. A divergence
+        // here would mean the agent gets a different PR URL on the
+        // desktop draft vs the background launch.
+        let expected_prefill = intent
+            .initial_prompt()
+            .map(|p| p.into_string())
+            .expect("PullRequest intent always has an initial prompt");
         assert_eq!(
             draft.prefill, expected_prefill,
-            "returned prefill must match format_pr_prefill exactly — \
+            "returned prefill must match SpawnIntent::initial_prompt exactly — \
              a divergence means the agent gets the wrong PR URL"
         );
 
@@ -1089,6 +1079,7 @@ mod tests {
             None,
             None,
         )
+        .map(|(draft, _intent)| draft)
         .expect("explicit provider must be accepted");
         assert_eq!(
             draft.node.provider, "minimax",
@@ -1122,6 +1113,7 @@ mod tests {
             None,
             None,
         )
+        .map(|(draft, _intent)| draft)
         .expect("mesh default must be accepted");
         assert_eq!(
             draft.node.provider, "agy",
@@ -1159,6 +1151,7 @@ mod tests {
             None,
             None,
         )
+        .map(|(draft, _intent)| draft)
         .expect("non-empty head_sha must be accepted");
         assert_eq!(
             draft_a.node.source_pr_pinned_sha.as_deref(),
@@ -1179,6 +1172,7 @@ mod tests {
             None,
             None,
         )
+        .map(|(draft, _intent)| draft)
         .expect("empty head_sha must be accepted (drift check skipped)");
         assert_eq!(
             draft_b.node.source_pr_pinned_sha, None,

@@ -269,13 +269,24 @@ mod tests {
     fn marker_hint_for_prefill_is_a_substring_of_normalized_prefill() {
         // Issue prefill keeps the baseline covered; loop prefill is
         // the regression shape. Both paths go through `watch_and_submit`.
+        // Issue #1180 — the issue prefill here is the EXACT string the
+        // watcher will be handed (built from `SpawnIntent::Issue` →
+        // `initial_prompt()`); the loop prefill is taken verbatim, just
+        // like `SpawnIntent::Loop`. Routing through the source of truth
+        // keeps the marker test honest if anyone changes the wording.
+        let issue_prefill = crate::agent::spawn::SpawnIntent::Issue(
+            crate::agent::spawn::GitHubWorkContext {
+                owner: "alondero".into(),
+                repo: "buildmesh".into(),
+                number: 358,
+                title: "Fix the login flow".into(),
+            },
+        )
+        .initial_prompt()
+        .expect("issue intent always has a prompt")
+        .into_string();
         for prefill in [
-            crate::commands::agent::format_issue_prefill(
-                "alondero",
-                "buildmesh",
-                358,
-                "Fix the login flow",
-            ),
+            issue_prefill,
             "Iterate on the failing test cases".to_string(),
         ] {
             let marker = marker_hint_for_prefill(&prefill);
