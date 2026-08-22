@@ -481,6 +481,14 @@ pub(crate) fn app_data_dir() -> Option<PathBuf> {
         .clone()
 }
 
+/// Serialises tests outside this module against [`TEST_LOCK`] while they use
+/// the process-global `APP_DATA_DIR`/`CACHE` state via [`init_for_tests`] —
+/// without it, a parallel test in another module can swap the globals mid-run.
+#[cfg(test)]
+pub(crate) fn test_state_guard() -> std::sync::MutexGuard<'static, ()> {
+    tests::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 fn preferences_path() -> Result<PathBuf, String> {
     app_data_dir()
         .map(|d| d.join("preferences.json"))
@@ -2444,8 +2452,9 @@ mod tests {
     use std::sync::Mutex as TestMutex;
 
     /// Tests in this module share `APP_DATA_DIR` and `CACHE` global state, so
-    /// they must run serially.
-    static TEST_LOCK: TestMutex<()> = TestMutex::new(());
+    /// they must run serially. Other modules reach this via
+    /// [`test_state_guard`].
+    pub(crate) static TEST_LOCK: TestMutex<()> = TestMutex::new(());
     static TEST_DIR_COUNTER: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);
 
