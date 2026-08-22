@@ -66,6 +66,8 @@ fn read_sse_events(response: reqwest::blocking::Response) -> Result<Vec<serde_js
     Ok(events)
 }
 
+const VERIFICATION_PROMPT: &str = "Call buildmesh_verification once with value 'ready'.";
+
 fn verify_responses_agent_loop(
     descriptor: &crate::agent::provider::compatibility::EndpointModelDescriptor,
     credential: &str,
@@ -84,7 +86,7 @@ fn verify_responses_agent_loop(
         .bearer_auth(credential)
         .json(&serde_json::json!({
             "model": descriptor.model_id,
-            "input": "Call buildmesh_verification once with value 'ready'.",
+            "input": VERIFICATION_PROMPT,
             "stream": true,
             "tools": [{
                 "type": "function",
@@ -96,6 +98,8 @@ fn verify_responses_agent_loop(
                     "required": ["value"],
                     "additionalProperties": false
                 },
+                // Codex sends strict function tools; exercising the same
+                // shape here keeps verification faithful to real traffic.
                 "strict": true
             }]
         }))
@@ -108,12 +112,6 @@ fn verify_responses_agent_loop(
     if events.len() < 2 {
         return Err("Responses endpoint did not produce an incremental event stream".into());
     }
-    let response_id = events.iter().find_map(|event| {
-        event
-            .get("response")
-            .and_then(|r| r.get("id"))
-            .and_then(|id| id.as_str())
-    });
     let call_id = events.iter().find_map(|event| {
         event
             .get("item")
@@ -121,23 +119,38 @@ fn verify_responses_agent_loop(
             .and_then(|item| item.get("call_id"))
             .and_then(|id| id.as_str())
     });
-    let arguments = events.iter().find_map(|event| {
-        if event.get("type").and_then(|value| value.as_str())
-            == Some("response.function_call_arguments.done")
-        {
-            event.get("arguments").and_then(|value| value.as_str())
-        } else {
-            event
-                .get("item")
-                .and_then(|item| item.get("arguments"))
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty())
-        }
+    let call_name = events.iter().find_map(|event| {
+        event
+            .get("item")
+            .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call"))
+            .and_then(|item| item.get("name"))
+            .and_then(|name| name.as_str())
     });
-    let (response_id, call_id, arguments) = match (response_id, call_id, arguments) {
-        (Some(response_id), Some(call_id), Some(arguments)) => {
-            (response_id, call_id, arguments)
-        }
+    // Prefer the terminal `…arguments.done` event: intermediate
+    // `output_item.added` events can carry a *partial* arguments string while
+    // the provider streams the call incrementally.
+    let arguments = events
+        .iter()
+        .find_map(|event| {
+            if event.get("type").and_then(|value| value.as_str())
+                == Some("response.function_call_arguments.done")
+            {
+                event.get("arguments").and_then(|value| value.as_str())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            events.iter().find_map(|event| {
+                event
+                    .get("item")
+                    .and_then(|item| item.get("arguments"))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+            })
+        });
+    let (call_id, call_name, arguments) = match (call_id, call_name, arguments) {
+        (Some(call_id), Some(call_name), Some(arguments)) => (call_id, call_name, arguments),
         _ => return Err("Responses stream did not produce a tool call".into()),
     };
     let sentinel_is_valid = serde_json::from_str::<serde_json::Value>(arguments)
@@ -148,17 +161,29 @@ fn verify_responses_agent_loop(
         return Err("Responses tool call did not return the sentinel arguments".into());
     }
 
+    // The tool result is replayed as explicit input items — the OpenAI
+    // Responses multi-turn shape. `previous_response_id` cannot be used here:
+    // some Responses implementations (MiniMax's included) reject it with an
+    // HTTP 500 instead of ignoring it.
     let second = client
         .post(&url)
         .bearer_auth(credential)
         .json(&serde_json::json!({
             "model": descriptor.model_id,
-            "previous_response_id": response_id,
-            "input": [{
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": "verified"
-            }],
+            "input": [
+                { "type": "message", "role": "user", "content": VERIFICATION_PROMPT },
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": call_name,
+                    "arguments": arguments
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": "verified"
+                }
+            ],
             "stream": true
         }))
         .send()
@@ -330,9 +355,30 @@ pub fn matching_verification(
                 && record.provider_id == pairing.provider_id
                 && record.runtime == install.runtime_identity
         })?;
-    if record.pairing_signature != expected || !record.capability_result.compatible {
+    // A record whose capability snapshot already failed (e.g. verified against
+    // a since-retired model alias) carries its own truthful status and reason —
+    // never re-label it as a signature mismatch.
+    if !record.capability_result.compatible {
+        return Some(record);
+    }
+    if record.pairing_signature != expected {
+        let descriptor = preferences::endpoint_model_descriptor(pairing);
+        let routing_changed = record.endpoint.trim_end_matches('/')
+            != descriptor.endpoint.trim_end_matches('/')
+            || record.model_id != descriptor.model_id;
+        let cli_changed =
+            record.codex_version != install.version || record.executable != install.executable;
         record.status = PairingVerificationStatus::Stale;
-        record.reason = Some("routing inputs changed; verify the pairing again".into());
+        record.reason = Some(if routing_changed {
+            "routing inputs changed; verify the pairing again".into()
+        } else if cli_changed {
+            format!(
+                "the Codex CLI changed ({}, previously {}); verify the pairing again",
+                install.version, record.codex_version
+            )
+        } else {
+            "the provider credential changed; verify the pairing again".into()
+        });
     }
     Some(record)
 }
@@ -492,7 +538,8 @@ pub fn current_statuses(env_type: EnvType) -> Vec<PairingVerification> {
 mod tests {
     use super::*;
     use crate::agent::provider::compatibility::{
-        complete_agent_capabilities, EndpointModelDescriptor, ProviderAuthMode, WireApi,
+        complete_agent_capabilities, CompatibilityDecision, EndpointModelDescriptor,
+        ProviderAuthMode, WireApi,
     };
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -580,14 +627,27 @@ mod tests {
                 assert!(request.contains("\"model\":\"MiniMax-M3\""));
                 if step == 0 {
                     assert!(request.contains("buildmesh_verification"));
+                    // Codex sends strict function tools — the probe must too.
+                    assert!(request.contains("\"strict\":true"), "{request}");
                     respond(
                         &mut stream,
                         "200 OK",
-                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\"}}\n\ndata: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{\\\"value\\\":\\\"ready\\\"}\"}\n\n",
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"buildmesh_verification\",\"arguments\":\"{}\"}}\n\ndata: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{\\\"value\\\":\\\"ready\\\"}\"}\n\n",
                     );
                 } else {
+                    // MiniMax's Responses API has no `previous_response_id`
+                    // and returns HTTP 500 for it — the tool result must be
+                    // replayed as explicit input items (the documented
+                    // multi-turn pattern, also valid OpenAI Responses).
+                    assert!(
+                        !request.to_ascii_lowercase().contains("previous_response_id"),
+                        "{request}"
+                    );
                     assert!(request.contains("function_call_output"));
                     assert!(request.contains("call_1"));
+                    assert!(request.contains("\"name\":\"buildmesh_verification\""), "{request}");
+                    assert!(request.contains("\"type\":\"function_call\""), "{request}");
+                    assert!(request.contains("\"type\":\"message\""), "{request}");
                     respond(
                         &mut stream,
                         "200 OK",
@@ -599,6 +659,166 @@ mod tests {
 
         verify_responses_agent_loop(&descriptor(endpoint), "sentinel-key").unwrap();
         server.join().unwrap();
+    }
+
+    /// The two preferences-backed tests below mutate the process-global
+    /// `APP_DATA_DIR`/`CACHE`; serialise them against every other test that
+    /// uses those globals (the shared guard also covers this module's pair).
+    static PREFS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A verification recorded against an older Codex CLI (npm auto-updates)
+    /// must report the CLI change as the staleness cause — not the generic
+    /// "routing inputs changed" message that masks the real state.
+    #[test]
+    fn stale_after_cli_update_reports_the_cli_change_not_routing() {
+        let _guard = [
+            PREFS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
+            preferences::test_state_guard(),
+        ];
+        let tmp = std::env::temp_dir().join(format!("buildmesh-pv-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        preferences::init_for_tests(tmp.clone());
+
+        let pairing = ProviderPairing {
+            harness_id: "codex".into(),
+            provider_id: "minimax".into(),
+            surface: preferences::ApiSurface::OpenAI,
+            base_url: Some("https://api.minimax.io/v1".into()),
+            model_tiers: preferences::ModelTiers {
+                default: Some("MiniMax-M3".into()),
+                ..Default::default()
+            },
+        };
+        let account = ProviderAccount {
+            id: "minimax".into(),
+            name: "MiniMax".into(),
+            enabled: true,
+            billing_mode: preferences::BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sentinel-key".into()),
+        };
+        let old_install = codex::CodexInstall {
+            executable: r"C:\npm\codex.cmd".into(),
+            version: "0.148.0".into(),
+            runtime_identity: "native-windows".into(),
+            codex_home: r"C:\Users\u\.codex".into(),
+            wsl_distro: None,
+        };
+        let record = PairingVerification {
+            harness_id: pairing.harness_id.clone(),
+            provider_id: pairing.provider_id.clone(),
+            pairing_signature: signature_for(&pairing, &account, &old_install),
+            endpoint: "https://api.minimax.io/v1".into(),
+            model_id: "MiniMax-M3".into(),
+            auth_mode: crate::agent::provider::compatibility::ProviderAuthMode::BearerEnv,
+            runtime: old_install.runtime_identity.clone(),
+            executable: old_install.executable.clone(),
+            codex_version: old_install.version.clone(),
+            capability_result: CompatibilityDecision {
+                compatible: true,
+                reason: None,
+            },
+            status: PairingVerificationStatus::Verified,
+            verified_at: Some(Utc::now()),
+            reason: None,
+        };
+        preferences::update(|prefs| prefs.pairing_verifications.push(record.clone())).unwrap();
+
+        let new_install = codex::CodexInstall {
+            version: "0.149.0".into(),
+            ..old_install.clone()
+        };
+        let got = matching_verification(&pairing, &account, &new_install).unwrap();
+        assert_eq!(got.status, PairingVerificationStatus::Stale);
+        let reason = got.reason.unwrap();
+        assert!(reason.contains("Codex"), "reason should name the CLI change: {reason}");
+        assert!(!reason.contains("routing inputs"), "reason must not blame routing: {reason}");
+
+        // A changed endpoint/model is the genuine routing-change case and must
+        // keep the original message.
+        let rerouted_pairing = ProviderPairing {
+            base_url: Some("https://api.minimax.io/v2".into()),
+            ..pairing.clone()
+        };
+        let got = matching_verification(&rerouted_pairing, &account, &old_install).unwrap();
+        assert_eq!(got.status, PairingVerificationStatus::Stale);
+        assert_eq!(
+            got.reason.as_deref(),
+            Some("routing inputs changed; verify the pairing again")
+        );
+
+        preferences::reset_for_tests();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A saved record whose capability snapshot is incompatible (e.g. a WSL
+    /// leftover verified against the retired `MiniMax-M3[1m]` alias) keeps its
+    /// real failure status and reason instead of being re-labelled as a stale
+    /// signature.
+    #[test]
+    fn incompatible_capability_record_keeps_its_reason_instead_of_stale_mask() {
+        let _guard = [
+            PREFS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
+            preferences::test_state_guard(),
+        ];
+        let tmp =
+            std::env::temp_dir().join(format!("buildmesh-pv-test-2-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        preferences::init_for_tests(tmp.clone());
+
+        let pairing = ProviderPairing {
+            harness_id: "codex".into(),
+            provider_id: "minimax".into(),
+            surface: preferences::ApiSurface::OpenAI,
+            base_url: Some("https://api.minimax.io/v1".into()),
+            model_tiers: preferences::ModelTiers {
+                default: Some("MiniMax-M3".into()),
+                ..Default::default()
+            },
+        };
+        let account = ProviderAccount {
+            id: "minimax".into(),
+            name: "MiniMax".into(),
+            enabled: true,
+            billing_mode: preferences::BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sentinel-key".into()),
+        };
+        let install = codex::CodexInstall {
+            executable: String::new(),
+            version: String::new(),
+            runtime_identity: "wsl".into(),
+            codex_home: "/home/u/.codex".into(),
+            wsl_distro: None,
+        };
+        let incompatible_reason =
+            "MiniMax Codex pairings require the current Responses model ID 'MiniMax-M3'";
+        let record = PairingVerification {
+            harness_id: pairing.harness_id.clone(),
+            provider_id: pairing.provider_id.clone(),
+            pairing_signature: String::new(),
+            endpoint: "https://api.minimax.io/v1".into(),
+            model_id: "MiniMax-M3[1m]".into(),
+            auth_mode: crate::agent::provider::compatibility::ProviderAuthMode::BearerEnv,
+            runtime: install.runtime_identity.clone(),
+            executable: String::new(),
+            codex_version: String::new(),
+            capability_result: CompatibilityDecision {
+                compatible: false,
+                reason: Some(incompatible_reason.into()),
+            },
+            status: PairingVerificationStatus::Failed,
+            verified_at: None,
+            reason: Some(incompatible_reason.into()),
+        };
+        preferences::update(|prefs| prefs.pairing_verifications.push(record)).unwrap();
+
+        let got = matching_verification(&pairing, &account, &install).unwrap();
+        assert_eq!(got.status, PairingVerificationStatus::Failed);
+        assert_eq!(got.reason.as_deref(), Some(incompatible_reason));
+
+        preferences::reset_for_tests();
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
