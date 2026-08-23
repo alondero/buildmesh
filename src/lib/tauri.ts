@@ -1301,5 +1301,17 @@ export const deleteCircuit = (circuitId: number) =>
 export const triggerCircuitNow = (circuitId: number) =>
   _invoke<number>('trigger_circuit_now', { circuitId });
 
+/** Graceful pause: the graph stops advancing; current steps finish (#1207). */
+export const pauseCircuitRun = (runId: number) =>
+  _invoke<void>('pause_circuit_run', { runId });
+
+/** Resume a paused run where it stopped (#1207). */
+export const resumeCircuitRun = (runId: number) =>
+  _invoke<void>('resume_circuit_run', { runId });
+
+/** Approve a CollaboratorCheck gate parked in `blocked` (#1207). */
+export const approveCircuitStep = (runId: number, nodeId: string) =>
+  _invoke<void>('approve_circuit_step', { runId, nodeId });
+
 export const listCircuitRuns = (circuitId: number, limit?: number) =>
   _invoke<CircuitRunDetail[]>('list_circuit_runs', { circuitId, limit });

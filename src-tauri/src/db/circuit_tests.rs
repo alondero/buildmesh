@@ -115,7 +115,7 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     // `circuit.*` before the worker ever sees the row).
     assert_eq!(runs[0].context_json, r#"{"circuit.name":"ledgered"}"#);
 
-    // One atomic advance: trigger completes, spawn starts.
+// One atomic advance: trigger completes, spawn starts.
     commit_circuit_advance(
         run_id,
         Some("running"),
@@ -127,6 +127,8 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
                 outcome: Some(Some("completed".into())),
                 error: None,
                 agent_node_id: None,
+                attempt: 1,
+                fresh_attempt: false,
             },
             CircuitStepOp {
                 node_id: "spawn".into(),
@@ -134,6 +136,8 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
                 outcome: None,
                 error: None,
                 agent_node_id: None,
+                attempt: 1,
+                fresh_attempt: false,
             },
         ],
     )
@@ -160,6 +164,8 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
+                attempt: 1,
+        fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -186,7 +192,7 @@ fn step_upsert_never_duplicates_a_node_row() {
     let circuit = create_autopilot_circuit(mesh.id, "dup", "", 1, "{}").unwrap();
     let run_id = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
 
-    for _ in 0..3 {
+for _ in 0..3 {
         commit_circuit_advance(
             run_id,
             None,
@@ -197,6 +203,8 @@ fn step_upsert_never_duplicates_a_node_row() {
                 outcome: None,
                 error: None,
                 agent_node_id: Some(7),
+                attempt: 1,
+                fresh_attempt: false,
             }],
         )
         .unwrap();
@@ -230,6 +238,8 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
+                attempt: 1,
+        fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -282,6 +292,8 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
+                attempt: 1,
+        fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -331,6 +343,8 @@ fn concurrency_counters_count_only_running_work() {
                 outcome: Some(Some("completed".into())),
                 error: None,
                 agent_node_id: None,
+                attempt: 1,
+            fresh_attempt: false,
             },
             CircuitStepOp {
                 node_id: "spawn".into(),
@@ -338,6 +352,8 @@ fn concurrency_counters_count_only_running_work() {
                 outcome: None,
                 error: None,
                 agent_node_id: Some(101),
+                attempt: 1,
+                fresh_attempt: false,
             },
             CircuitStepOp {
                 node_id: "second-spawn".into(),
@@ -345,13 +361,15 @@ fn concurrency_counters_count_only_running_work() {
                 outcome: None,
                 error: None,
                 agent_node_id: None,
+                attempt: 1,
+            fresh_attempt: false,
             },
         ],
     )
     .unwrap();
 
     // Circuit two (same mesh): running step piloting agent 102.
-    let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
+let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
     commit_circuit_advance(
         r2,
         Some("running"),
@@ -362,6 +380,8 @@ fn concurrency_counters_count_only_running_work() {
             outcome: None,
             error: None,
             agent_node_id: Some(102),
+            attempt: 1,
+            fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -378,6 +398,8 @@ fn concurrency_counters_count_only_running_work() {
             outcome: None,
             error: None,
             agent_node_id: Some(999),
+            attempt: 1,
+            fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -527,4 +549,169 @@ fn evolve_to_v34_creates_the_three_circuit_tables_from_a_v33_db() {
 
     // Idempotent: re-running the migration must not error or duplicate.
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 2 (#1207): pause/resume, retry attempts, gate outcomes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn paused_runs_stay_active_and_counters_count_them() {
+    let path = init_temp_db("paused");
+    let mesh = create_mesh("circuit-pause-mesh", "/tmp/circuit-pause").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "pausable", "", 4, &sample_graph_json()).unwrap();
+
+    // A running step on a RUNNING run occupies one slot.
+    let r1 = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    commit_circuit_advance(
+        r1,
+        Some("running"),
+        None,
+        &[CircuitStepOp {
+            node_id: "spawn".into(),
+            status: "running".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: Some(900),
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+
+    // Pause the run: it must stay in the active list and keep counting.
+    // (The ledger DB is process-global across this module's tests, so
+    // scope the assertion to this circuit rather than the whole table.)
+    set_circuit_run_state(r1, "paused").unwrap();
+    let active = list_active_circuit_runs().unwrap();
+    let mine: Vec<_> = active.iter().filter(|a| a.run.circuit_id == circuit.id).collect();
+    assert_eq!(mine.len(), 1, "a paused run stays active (it resumes later)");
+    assert_eq!(mine[0].run.state, "paused");
+    assert_eq!(count_running_circuit_steps(circuit.id).unwrap(), 1);
+    assert_eq!(count_active_circuit_agent_nodes(mesh.id).unwrap(), 1);
+
+    // Resume flips the state back through the same setter.
+    set_circuit_run_state(r1, "running").unwrap();
+    let active = list_active_circuit_runs().unwrap();
+    let mine: Vec<_> = active.iter().filter(|a| a.run.circuit_id == circuit.id).collect();
+    assert_eq!(mine[0].run.state, "running");
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
+    let path = init_temp_db("retry-attempt");
+    let mesh = create_mesh("circuit-retry-mesh", "/tmp/circuit-retry").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "flaky", "", 2, &sample_graph_json()).unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
+
+    // Round 1 fails with an error.
+    commit_circuit_advance(
+        run_id,
+        None,
+        None,
+        &[CircuitStepOp {
+            node_id: "work".into(),
+            status: "failed".into(),
+            outcome: Some(Some("failed".into())),
+            error: Some("boom".into()),
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+
+    // Retry reset: fresh_attempt clears outcome/error and stamps attempt 2.
+    commit_circuit_advance(
+        run_id,
+        None,
+        None,
+        &[CircuitStepOp {
+            node_id: "work".into(),
+            status: "pending_slot".into(),
+            outcome: Some(None),
+            error: None,
+            agent_node_id: None,
+            attempt: 2,
+            fresh_attempt: true,
+        }],
+    )
+    .unwrap();
+
+    let steps = list_circuit_run_steps(run_id).unwrap();
+    let work = steps.iter().find(|s| s.node_id == "work").unwrap();
+    assert_eq!(work.status, "pending_slot");
+    assert_eq!(work.attempt, 2, "the retry's execution count persists");
+    assert_eq!(work.outcome, None, "fresh attempt clears the stale outcome");
+    assert_eq!(work.error_message, None, "fresh attempt clears the stale error");
+    assert!(work.started_at.is_some());
+    assert!(work.completed_at.is_none(), "a reset step is back in flight");
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn gate_outcomes_stamp_completed_at_and_round_trip() {
+    let path = init_temp_db("gate-outcomes");
+    let mesh = create_mesh("circuit-gate-mesh", "/tmp/circuit-gate").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "gated", "", 2, &sample_graph_json()).unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
+
+    for outcome in ["blocked", "working", "green", "red"] {
+        commit_circuit_advance(
+            run_id,
+            None,
+            None,
+            &[CircuitStepOp {
+                node_id: format!("gate-{outcome}"),
+                status: "completed".into(),
+                outcome: Some(Some(outcome.into())),
+                error: None,
+                agent_node_id: None,
+                attempt: 1,
+                fresh_attempt: false,
+            }],
+        )
+        .unwrap();
+    }
+
+    // A blocked STATUS (collaborator approval parking) is not terminal.
+    commit_circuit_advance(
+        run_id,
+        None,
+        None,
+        &[CircuitStepOp {
+            node_id: "approval".into(),
+            status: "blocked".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+
+    let steps = list_circuit_run_steps(run_id).unwrap();
+    for outcome in ["blocked", "working", "green", "red"] {
+        let step = steps.iter().find(|s| s.node_id == format!("gate-{outcome}")).unwrap();
+        assert_eq!(step.outcome.as_deref(), Some(outcome));
+        assert!(
+            step.completed_at.is_some(),
+            "gate outcome {outcome} is terminal and stamps completed_at"
+        );
+    }
+    let parked = steps.iter().find(|s| s.node_id == "approval").unwrap();
+    assert!(
+        parked.completed_at.is_none(),
+        "a blocked status parks without completing"
+    );
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
 }

@@ -252,7 +252,7 @@ pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
                 c.enabled, c.concurrency_limit, c.graph_json, c.name \
          FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
-         WHERE r.state IN ('pending', 'running') \
+         WHERE r.state IN ('pending', 'running', 'paused') \
          ORDER BY r.id",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -299,6 +299,41 @@ pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<Autopilot
     rows.collect()
 }
 
+/// Persist a run-state transition from outside the stepper's own pass —
+/// pause/resume (#1207) and the effect-failure path. The worker wakes on
+/// the condvar afterwards; the next pass reads the new state.
+pub fn set_circuit_run_state(run_id: i64, state: &str) -> SqlResult<()> {
+    let db = super::get().lock().unwrap();
+    db.execute(
+        "UPDATE autopilot_circuit_runs SET state = ?2, updated_at = datetime('now') WHERE id = ?1",
+        params![run_id, state],
+    )?;
+    Ok(())
+}
+
+/// One run row by id, or `None` when the id is unknown.
+pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
+    let db = super::get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
+                context_json, created_at, updated_at \
+         FROM autopilot_circuit_runs WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![run_id], |row| {
+        Ok(AutopilotCircuitRun {
+            id: row.get(0)?,
+            circuit_id: row.get(1)?,
+            mesh_id: row.get(2)?,
+            trigger_identity: row.get(3)?,
+            state: row.get(4)?,
+            context_json: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?;
+    rows.next().transpose()
+}
+
 pub fn list_circuit_run_steps(run_id: i64) -> SqlResult<Vec<AutopilotCircuitRunStep>> {
     let db = super::get().lock().unwrap();
     let mut stmt = db.prepare(
@@ -334,6 +369,11 @@ pub struct CircuitStepOp {
     pub outcome: Option<Option<String>>,
     pub error: Option<String>,
     pub agent_node_id: Option<i64>,
+    /// The step's execution count after this write (#1207 retry
+    /// bookkeeping). Written on both insert and update.
+    pub attempt: i32,
+    /// A retried execution: clear outcome/error, restamp started_at.
+    pub fresh_attempt: bool,
 }
 
 /// The engine's atomic commit point. Applies an optional run-state and/or
@@ -344,7 +384,9 @@ pub struct CircuitStepOp {
 /// other write).
 ///
 /// Step rows are upserted by `(run_id, node_id)` (UNIQUE constraint);
-/// insert stamps `started_at`, terminal statuses stamp `completed_at`.
+/// insert stamps `started_at`, terminal statuses stamp `completed_at`,
+/// and a `fresh_attempt` op clears the previous round's outcome/error
+/// and restamps `started_at` for the retried execution.
 pub fn commit_circuit_advance(
     run_id: i64,
     run_state: Option<&str>,
@@ -374,24 +416,37 @@ pub fn commit_circuit_advance(
     }
     for op in step_ops {
         let outcome_val = op.outcome.clone().flatten();
-        let terminal = matches!(outcome_val.as_deref(), Some("completed") | Some("failed") | Some("cancelled"));
+        let terminal = outcome_val
+            .as_deref()
+            .map(crate::autopilot::circuit::model::StepOutcome::is_terminal_db_str)
+            .unwrap_or(false);
         tx.execute(
             "INSERT INTO autopilot_circuit_run_steps \
-                 (run_id, node_id, status, attempt, outcome, error_message, agent_node_id, started_at) \
-             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, datetime('now')) \
+                 (run_id, node_id, status, attempt, outcome, error_message, agent_node_id, started_at, completed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), \
+                 CASE WHEN ?10 THEN datetime('now') ELSE NULL END) \
              ON CONFLICT(run_id, node_id) DO UPDATE SET \
                  status = excluded.status, \
-                 outcome = COALESCE(excluded.outcome, autopilot_circuit_run_steps.outcome), \
-                 error_message = COALESCE(excluded.error_message, autopilot_circuit_run_steps.error_message), \
+                 attempt = excluded.attempt, \
+                 outcome = CASE WHEN ?8 THEN NULL \
+                     ELSE COALESCE(excluded.outcome, autopilot_circuit_run_steps.outcome) END, \
+                 error_message = CASE WHEN ?9 THEN NULL \
+                     ELSE COALESCE(excluded.error_message, autopilot_circuit_run_steps.error_message) END, \
                  agent_node_id = COALESCE(excluded.agent_node_id, autopilot_circuit_run_steps.agent_node_id), \
-                 completed_at = CASE WHEN ?7 THEN datetime('now') ELSE autopilot_circuit_run_steps.completed_at END",
+                 started_at = CASE WHEN ?9 THEN datetime('now') \
+                     ELSE autopilot_circuit_run_steps.started_at END, \
+                 completed_at = CASE WHEN ?10 THEN datetime('now') WHEN ?9 THEN NULL \
+                     ELSE autopilot_circuit_run_steps.completed_at END",
             params![
                 run_id,
                 op.node_id,
                 op.status,
+                op.attempt,
                 outcome_val,
                 op.error,
                 op.agent_node_id,
+                op.fresh_attempt,
+                op.fresh_attempt,
                 terminal,
             ],
         )?;
@@ -421,13 +476,14 @@ pub fn set_circuit_step_agent_node(
 // ---------------------------------------------------------------------------
 
 /// Steps currently Running across this circuit's active runs — compared
-/// against `autopilot_circuits.concurrency_limit`.
+/// against `autopilot_circuits.concurrency_limit`. Paused runs count:
+/// their steps still hold real agents even though the graph is parked.
 pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
     let db = super::get().lock().unwrap();
     db.query_row(
         "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-         WHERE r.circuit_id = ?1 AND r.state = 'running' AND s.status = 'running'",
+         WHERE r.circuit_id = ?1 AND r.state IN ('running', 'paused') AND s.status = 'running'",
         params![circuit_id],
         |row| row.get(0),
     )
@@ -436,12 +492,13 @@ pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
 /// Distinct piloted agent nodes across running steps of active runs on
 /// this mesh — compared against `meshes.autopilot_concurrency_limit`
 /// (the mesh-wide auto-spawned-agent cap). NULL agent ids don't count.
+/// Paused runs count (see [`count_running_circuit_steps`]).
 pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
     let db = super::get().lock().unwrap();
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-         WHERE r.mesh_id = ?1 AND r.state = 'running' \
+         WHERE r.mesh_id = ?1 AND r.state IN ('running', 'paused') \
            AND s.status = 'running' AND s.agent_node_id IS NOT NULL",
         params![mesh_id],
         |row| row.get(0),

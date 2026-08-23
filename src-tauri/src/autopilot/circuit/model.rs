@@ -142,12 +142,27 @@ pub enum EdgeCondition {
 
 /// Terminal step outcomes edges and the ledger route on. The DB column
 /// stores the snake_case string (same discipline as `SessionStatus`).
+///
+/// Milestone 2 (#1207) adds the gate outcomes: an LLM turn classifier
+/// routes Completed/Blocked/Working; a deterministic verification gate
+/// routes Green/Red. Each is a terminal step outcome — edges pick their
+/// successors with `OnOutcome(...)`, so a gate whose branches don't
+/// cover an outcome simply parks that branch (the run waits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepOutcome {
     Completed,
     Failed,
     Cancelled,
+    // -- Gates (milestone 2) --
+    /// LlmTurnClassifier: the agent needs a human.
+    Blocked,
+    /// LlmTurnClassifier: mid-task yield.
+    Working,
+    /// DeterministicVerification: the check exited 0.
+    Green,
+    /// DeterministicVerification: the check failed.
+    Red,
 }
 
 impl StepOutcome {
@@ -156,6 +171,10 @@ impl StepOutcome {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Blocked => "blocked",
+            Self::Working => "working",
+            Self::Green => "green",
+            Self::Red => "red",
         }
     }
 
@@ -164,8 +183,21 @@ impl StepOutcome {
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
             "cancelled" => Some(Self::Cancelled),
+            "blocked" => Some(Self::Blocked),
+            "working" => Some(Self::Working),
+            "green" => Some(Self::Green),
+            "red" => Some(Self::Red),
             _ => None,
         }
+    }
+
+    /// Is this a terminal-outcome DB string? Mirrors the ledger's
+    /// `completed_at` stamping rule in `db::commit_circuit_advance`.
+    pub fn is_terminal_db_str(s: &str) -> bool {
+        matches!(
+            s,
+            "completed" | "failed" | "cancelled" | "blocked" | "working" | "green" | "red"
+        )
     }
 }
 
@@ -176,9 +208,9 @@ pub fn consumes_agent_slot(kind: &CircuitNodeKind) -> bool {
     matches!(kind, CircuitNodeKind::SpawnAgentNode { .. })
 }
 
-/// Is this kind executable by the milestone-1 engine? Triggers and the
-/// action subset are; gates and GitHub actions parse but deliberately
-/// fail their step when reached (see module doc).
+/// Is this kind executable by the engine? Triggers, the action subset
+/// and — since #1207 — every gate kind are; GitHub actions parse but
+/// deliberately fail their step when reached (see module doc).
 pub fn is_executable(kind: &CircuitNodeKind) -> bool {
     matches!(
         kind,
@@ -190,6 +222,10 @@ pub fn is_executable(kind: &CircuitNodeKind) -> bool {
             | CircuitNodeKind::InjectPty { .. }
             | CircuitNodeKind::SetNodeStatus { .. }
             | CircuitNodeKind::Notify { .. }
+            | CircuitNodeKind::LlmTurnClassifier
+            | CircuitNodeKind::DeterministicVerification { .. }
+            | CircuitNodeKind::CollaboratorCheck { .. }
+            | CircuitNodeKind::RetryLimit { .. }
             | CircuitNodeKind::AllCompleted
             | CircuitNodeKind::AnyCompleted
     )
@@ -413,12 +449,16 @@ mod tests {
     }
 
     #[test]
-    fn milestone_one_executability_vocabulary() {
+    fn executability_vocabulary() {
         assert!(is_executable(&CircuitNodeKind::Manual));
         assert!(is_executable(&CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None }));
         assert!(is_executable(&CircuitNodeKind::InjectPty { prompt: "p".into() }));
         assert!(is_executable(&CircuitNodeKind::Notify { message: "n".into() }));
-        assert!(!is_executable(&CircuitNodeKind::LlmTurnClassifier));
+        // Milestone 2 (#1207): gates execute.
+        assert!(is_executable(&CircuitNodeKind::LlmTurnClassifier));
+        assert!(is_executable(&CircuitNodeKind::DeterministicVerification { command: "cargo test".into() }));
+        assert!(is_executable(&CircuitNodeKind::CollaboratorCheck { require_approval: true }));
+        assert!(is_executable(&CircuitNodeKind::RetryLimit { max_retries: 3 }));
         assert!(!is_executable(&CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, label: None, comment: None }));
     }
 
@@ -426,10 +466,25 @@ mod tests {
 
     #[test]
     fn step_outcome_db_strings_round_trip() {
-        for o in [StepOutcome::Completed, StepOutcome::Failed, StepOutcome::Cancelled] {
+        for o in [
+            StepOutcome::Completed,
+            StepOutcome::Failed,
+            StepOutcome::Cancelled,
+            StepOutcome::Blocked,
+            StepOutcome::Working,
+            StepOutcome::Green,
+            StepOutcome::Red,
+        ] {
             assert_eq!(StepOutcome::from_db_str(o.as_db_str()), Some(o));
         }
         assert_eq!(StepOutcome::from_db_str("nonsense"), None);
+    }
+
+    #[test]
+    fn gate_outcomes_are_terminal_in_the_ledger_vocabulary() {
+        assert!(StepOutcome::is_terminal_db_str("green"));
+        assert!(StepOutcome::is_terminal_db_str("working"));
+        assert!(!StepOutcome::is_terminal_db_str("running"));
     }
 
     // -- walking skeleton shape ----------------------------------------------

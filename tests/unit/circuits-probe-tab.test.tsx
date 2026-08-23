@@ -27,6 +27,9 @@ import {
   deleteCircuit,
   triggerCircuitNow,
   listCircuitRuns,
+  pauseCircuitRun,
+  resumeCircuitRun,
+  approveCircuitStep,
 } from '../../src/lib/tauri';
 
 const MESH: Mesh = {
@@ -221,6 +224,62 @@ describe('CircuitsProbeTab', () => {
 
     expect(await screen.findByText('No circuits yet')).toBeTruthy();
   });
+
+  // -- human-in-the-loop (#1207) ------------------------------------------------
+
+  it('shows the blocked badge with an Approve button for parked gates', async () => {
+    const RUN_BLOCKED: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 15, state: 'running' },
+      steps: [
+        {
+          id: 3,
+          run_id: 15,
+          node_id: 'approval',
+          agent_node_id: null,
+          status: 'blocked',
+          attempt: 1,
+          outcome: null,
+          error_message: null,
+          started_at: '2026-08-22 10:05:00',
+          completed_at: null,
+        },
+      ],
+    };
+    mockBackend({ runs: [RUN_BLOCKED] });
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    expect(
+      await screen.findByTestId('blocked-badge-15-approval'),
+    ).toBeTruthy();
+    await user.click(screen.getByTestId('approve-15-approval'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('approve_circuit_step', {
+        runId: 15,
+        nodeId: 'approval',
+      });
+    });
+  });
+
+  it('offers Pause on a running run and Resume on a paused one', async () => {
+    const RUN_PAUSED: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 16, state: 'paused' },
+      steps: [],
+    };
+    mockBackend({ runs: [RUN_RUNNING, RUN_PAUSED] });
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    await user.click(await screen.findByTestId('run-pause-12'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('pause_circuit_run', { runId: 12 });
+    });
+
+    await user.click(screen.getByTestId('run-resume-16'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('resume_circuit_run', { runId: 16 });
+    });
+  });
 });
 
 describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
@@ -258,5 +317,14 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
 
     await listCircuitRuns(7, 5);
     expect(invoke).toHaveBeenLastCalledWith('list_circuit_runs', { circuitId: 7, limit: 5 });
+
+    await pauseCircuitRun(11);
+    expect(invoke).toHaveBeenLastCalledWith('pause_circuit_run', { runId: 11 });
+
+    await resumeCircuitRun(11);
+    expect(invoke).toHaveBeenLastCalledWith('resume_circuit_run', { runId: 11 });
+
+    await approveCircuitStep(11, 'gate');
+    expect(invoke).toHaveBeenLastCalledWith('approve_circuit_step', { runId: 11, nodeId: 'gate' });
   });
 });

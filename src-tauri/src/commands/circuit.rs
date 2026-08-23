@@ -140,3 +140,57 @@ pub fn list_circuit_runs(
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// Human-in-the-loop (#1207): graceful pause/resume + collaborator approval.
+// ---------------------------------------------------------------------------
+
+/// Gracefully pause one active run: the graph stops advancing while the
+/// current steps finish. Idempotent-friendly (pausing a paused run is a
+/// no-op error only if the run isn't active).
+#[command]
+pub fn pause_circuit_run(run_id: i64) -> Result<(), String> {
+    let run = crate::db::get_circuit_run(run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("run {} does not exist", run_id))?;
+    if run.state != "running" {
+        return Err(format!("only running runs can be paused (run {} is {})", run_id, run.state));
+    }
+    crate::db::set_circuit_run_state(run_id, "paused").map_err(|e| e.to_string())?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    tracing::info!("circuits: run {} paused", run_id);
+    Ok(())
+}
+
+/// Resume one paused run; automation picks up exactly where it stopped.
+#[command]
+pub fn resume_circuit_run(run_id: i64) -> Result<(), String> {
+    let run = crate::db::get_circuit_run(run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("run {} does not exist", run_id))?;
+    if run.state != "paused" {
+        return Err(format!("only paused runs can be resumed (run {} is {})", run_id, run.state));
+    }
+    crate::db::set_circuit_run_state(run_id, "running").map_err(|e| e.to_string())?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    tracing::info!("circuits: run {} resumed", run_id);
+    Ok(())
+}
+
+/// Approve a CollaboratorCheck gate parked in `blocked` on this run.
+#[command]
+pub fn approve_circuit_step(run_id: i64, node_id: String) -> Result<(), String> {
+    let steps = crate::db::list_circuit_run_steps(run_id).map_err(|e| e.to_string())?;
+    let step = steps
+        .iter()
+        .find(|s| s.node_id == node_id)
+        .ok_or_else(|| format!("run {} has no step {}", run_id, node_id))?;
+    if step.status != "blocked" {
+        return Err(format!(
+            "step {} is not waiting for approval (status {})",
+            node_id, step.status
+        ));
+    }
+    crate::services::circuit_worker::request_circuit_approval(run_id, node_id);
+    Ok(())
+}

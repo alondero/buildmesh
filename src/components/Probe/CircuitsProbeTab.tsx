@@ -18,9 +18,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { formatError } from '../../lib/errorUtils';
 import {
+  approveCircuitStep,
   createCircuit,
   deleteCircuit,
   listCircuitsWithRuns,
+  pauseCircuitRun,
+  resumeCircuitRun,
   setCircuitEnabled,
   triggerCircuitNow,
   type CircuitWithRuns,
@@ -35,6 +38,9 @@ function statusClass(status: string): string {
       return 'text-status-success';
     case 'running':
       return 'text-accent-cyan animate-pulse';
+    case 'paused':
+    case 'blocked':
+      return 'text-status-warning';
     case 'pending':
     case 'pending_slot':
       return 'text-text-muted';
@@ -210,16 +216,61 @@ export function CircuitsProbeTab() {
               {runs.length > 0 && (
                 <ul className="mt-1 ml-5 text-xs" data-testid={`circuit-runs-${circuit.id}`}>
                   {runs.map(({ run, steps }) => (
-                    <li key={run.id} className="flex items-baseline gap-2 py-0.5">
+                    <li key={run.id} className="flex items-baseline gap-2 py-0.5 flex-wrap">
                       <span className="text-text-muted">#{run.id}</span>
                       <span className={statusClass(run.state)} data-testid={`run-state-${run.id}`}>
                         {run.state}
                       </span>
+                      {/* Graceful pause/resume (#1207). */}
+                      {run.state === 'running' && (
+                        <button
+                          type="button"
+                          onClick={() => runAction(() => pauseCircuitRun(run.id))}
+                          disabled={busy}
+                          data-testid={`run-pause-${run.id}`}
+                          className="px-1.5 rounded-md bg-text-muted/10 text-text-muted hover:text-text-primary"
+                        >
+                          Pause
+                        </button>
+                      )}
+                      {run.state === 'paused' && (
+                        <button
+                          type="button"
+                          onClick={() => runAction(() => resumeCircuitRun(run.id))}
+                          disabled={busy}
+                          data-testid={`run-resume-${run.id}`}
+                          className="px-1.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25"
+                        >
+                          Resume
+                        </button>
+                      )}
                       <span className="truncate text-text-muted" title={run.trigger_identity}>
                         {steps.length > 0
                           ? steps.map((s) => `${s.node_id}:${s.status}`).join(' → ')
                           : 'no steps'}
                       </span>
+                      {/* Blocked collaborator gates (#1207): amber badge + Approve. */}
+                      {steps
+                        .filter((s) => s.status === 'blocked')
+                        .map((s) => (
+                          <span
+                            key={s.node_id}
+                            className="inline-flex items-center gap-1 px-1.5 rounded-md bg-status-warning/15 text-status-warning"
+                            data-testid={`blocked-badge-${run.id}-${s.node_id}`}
+                          >
+                            ⏸ waiting for approval: {s.node_id}
+                            <button
+                              type="button"
+                              onClick={() => runAction(() => approveCircuitStep(run.id, s.node_id))}
+                              disabled={busy}
+                              aria-label={`Approve ${s.node_id} on run ${run.id}`}
+                              data-testid={`approve-${run.id}-${s.node_id}`}
+                              className="px-1 rounded-md bg-status-warning/25 hover:bg-status-warning/40 font-semibold"
+                            >
+                              Approve
+                            </button>
+                          </span>
+                        ))}
                       {/* Failure detail — first errored step surfaces its message. */}
                       {(() => {
                         const failed = steps.find((s) => s.error_message);
