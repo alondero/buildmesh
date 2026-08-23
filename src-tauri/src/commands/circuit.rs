@@ -26,17 +26,15 @@ pub fn list_circuits(mesh_id: i64) -> Result<Vec<AutopilotCircuit>, String> {
 }
 
 /// Create a circuit with the canonical walking-skeleton blueprint:
-/// Manual trigger → SpawnAgentNode(prompt) → Notify.
+/// Manual trigger → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify.
 #[command]
 pub fn create_circuit(
-    app: tauri::AppHandle,
     mesh_id: i64,
     name: String,
     description: String,
     concurrency_limit: i64,
     initial_prompt: String,
 ) -> Result<AutopilotCircuit, String> {
-    let _ = &app; // reserved for later milestones' post-create events
     let name = name.trim();
     if name.is_empty() {
         return Err("circuit name must not be empty".to_string());

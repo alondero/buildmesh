@@ -14,10 +14,13 @@
 //! mesh's spawned session. Doc comments qualify which is meant.
 //!
 //! Milestone 1 scope: every node kind parses and round-trips, but the
-//! engine only *executes* the Manual trigger + action subset. Gate and
-//! GitHub-action kinds fail their step with an explicit
-//! "not supported until later milestone" error when reached (pinned in
-//! `stepper::tests`) rather than silently stalling.
+//! engine only *executes* the Manual trigger plus the action/join
+//! subset. The Interval/GitHub trigger kinds auto-complete when a run
+//! they sit in is fired by hand (the user is the trigger), and gain
+//! their own firing machinery in later milestones; gate kinds fail
+//! their step with an explicit "not supported until later milestone"
+//! error when reached (pinned in `stepper::tests`) rather than silently
+//! stalling.
 
 use serde::{Deserialize, Serialize};
 

@@ -1270,7 +1270,7 @@ export const listCircuits = (meshId: number) =>
   _invoke<AutopilotCircuit[]>('list_circuits', { meshId });
 
 /** Creates a circuit with the canonical server-side blueprint:
- *  Manual trigger → SpawnAgentNode(prompt) → Notify. */
+ *  Manual trigger → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify. */
 export const createCircuit = (
   meshId: number,
   name: string,

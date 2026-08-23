@@ -105,7 +105,14 @@ pub fn delete_autopilot_circuit(id: i64) -> SqlResult<()> {
 
 /// Create a fresh `pending` run seeded with its template context
 /// (`circuit.*`, pre-populated by the caller; see
-/// [`CircuitContext::with_circuit`]). Returns its row id.
+/// [`CircuitContext::with_circuit`]).
+///
+/// Deduplication is enforced by the schema: `UNIQUE (circuit_id,
+/// trigger_identity)` means re-reporting the same trigger identity
+/// returns the EXISTING run id instead of minting a duplicate (spec:
+/// dedupe scoped per-circuit, so two circuits may process the same
+/// source independently). Manual identities embed a millisecond
+/// timestamp, so Trigger Now effectively always mints a fresh run.
 pub fn create_circuit_run(
     circuit_id: i64,
     mesh_id: i64,
@@ -114,11 +121,17 @@ pub fn create_circuit_run(
 ) -> SqlResult<i64> {
     let db = super::get().lock().unwrap();
     db.execute(
-        "INSERT INTO autopilot_circuit_runs (circuit_id, mesh_id, trigger_identity, context_json) \
+        "INSERT OR IGNORE INTO autopilot_circuit_runs \
+             (circuit_id, mesh_id, trigger_identity, context_json) \
          VALUES (?1, ?2, ?3, ?4)",
         params![circuit_id, mesh_id, trigger_identity, context_json],
     )?;
-    Ok(db.last_insert_rowid())
+    db.query_row(
+        "SELECT id FROM autopilot_circuit_runs \
+         WHERE circuit_id = ?1 AND trigger_identity = ?2",
+        params![circuit_id, trigger_identity],
+        |row| row.get(0),
+    )
 }
 
 /// One active (pending/running) run joined with the fields its worker

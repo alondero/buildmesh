@@ -23,7 +23,9 @@
 //!   mesh agent slot; otherwise the step parks in `Queued`
 //!   (`pending_slot` in the ledger) and promotes FIFO by insertion order
 //!   on a later `Tick`. Non-agent steps never wait on agent slots (they
-//!   still respect the per-circuit limit).
+//!   still respect the per-circuit limit). Known milestone-1 scope note:
+//!   FIFO ordering is per-run — cross-run ordering on one circuit is
+//!   tick order until the multi-run scheduler milestone.
 //! - `InjectPty` waits for `AgentReady` (the spawned agent's process is
 //!   live) before firing; this keeps injection off the async stage-2
 //!   spawn window. Human typing in the terminal never affects these
@@ -673,6 +675,23 @@ fn cascade_after_completion(run: &mut RunView, t: &mut Transition, budget: usize
 /// terminal step (and the blueprint is non-empty). Cancelled steps flip
 /// the run Failed instead of Completed.
 fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
+    // A Failed run sweeps its leftovers: sibling Running/Queued steps are
+    // cancelled so the ledger reflects reality and the concurrency
+    // counters (`count_running_circuit_steps` /
+    // `count_active_circuit_agent_nodes`, which only read runs in
+    // state 'running') stop leaking their slots.
+    if run.state == RunState::Failed {
+        let leftovers: Vec<String> = run
+            .steps
+            .iter()
+            .filter(|s| !s.status.is_terminal())
+            .map(|s| s.node_id.clone())
+            .collect();
+        for node_id in leftovers {
+            cancel_step(run, t, &node_id);
+        }
+        return;
+    }
     if run.state != RunState::Running {
         return;
     }
@@ -959,6 +978,26 @@ mod tests {
         let w = t.step_writes.last().unwrap();
         assert_eq!(w.status, StepStatus::Cancelled);
         assert_eq!(w.outcome, Some(Some(StepOutcome::Cancelled)));
+    }
+
+    #[test]
+    fn a_failed_run_sweeps_its_still_running_siblings_so_slots_are_not_leaked() {
+        // Fan-out: a errors while b is mid-flight. The failure must also
+        // cancel b — otherwise its piloted agent keeps consuming a mesh
+        // slot the counters no longer attribute to this (failed) run.
+        let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "b"), StepStatus::Running);
+        run.attach_agent_node("a", 11);
+        let t =
+            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        assert_eq!(run.state, RunState::Failed);
+        assert_eq!(status_of(&run, "b"), StepStatus::Cancelled);
+        assert!(
+            t.step_writes.iter().any(|w| w.node_id == "b" && w.status == StepStatus::Cancelled),
+            "the sibling cancellation must be persisted"
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ interface CircuitWithRuns {
 }
 
 /** Tailwind token classes for the ledger's run/step status vocabulary. */
-export function statusClass(status: string): string {
+function statusClass(status: string): string {
   switch (status) {
     case 'completed':
       return 'text-status-success';

@@ -27,9 +27,13 @@
 //!    inject PTY prompt, set node status, notify UI).
 //!
 //! A crash between commit and effect execution is recovered by
-//! observation on the next pass (e.g. an orphaned running spawn step
-//! whose agent node vanished maps to `AgentLost`), which is the
-//! milestone-1 slice of the startup-reconciliation story.
+//! observation on the next pass: a spawn step whose agent node has
+//! since vanished maps to `AgentLost`, and an effect that fails
+//! synchronously fails its step immediately (a Running step with no
+//! attached agent would otherwise wedge the run — nothing observes it).
+//! The one remaining gap, a process crash inside the milliseconds
+//! between commit and stage-1 attach, is startup-reconciliation scope
+//! (later milestone).
 
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -144,7 +148,50 @@ fn drive_run(
                 .map_err(|e| format!("commit failed: {}", e))?;
         }
 
-        execute_effects(app, active.run.id, active.run.mesh_id, &view, &transition.effects)?;
+        if let Err(e) = execute_effects(app, active.run.id, active.run.mesh_id, &view, &transition.effects) {
+            // An effect that fails synchronously (e.g. the spawn row
+            // creation) must not leave its step Running forever — the
+            // observation loop has nothing to observe and would wedge
+            // the run. Fail the offending step directly; the next pass's
+            // sweep cancels the siblings.
+            tracing::warn!("circuits: run {} effect failed: {}", active.run.id, e);
+            let failed: Vec<String> = transition
+                .effects
+                .iter()
+                .filter_map(|eff| match eff {
+                    crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id }
+                    | crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. }
+                    | crate::autopilot::circuit::stepper::Effect::SetNodeStatus { node_id, .. } => {
+                        Some(node_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let ops = failed
+                .iter()
+                .map(|node_id| db::CircuitStepOp {
+                    node_id: node_id.clone(),
+                    status: "failed".to_string(),
+                    outcome: Some(Some("failed".to_string())),
+                    error: Some(e.clone()),
+                    agent_node_id: None,
+                })
+                .collect::<Vec<_>>();
+            db::commit_circuit_advance(
+                active.run.id,
+                Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                None,
+                &ops,
+            )
+            .map_err(|commit_err| format!("effect-failure commit also failed: {}", commit_err))?;
+            let _ = app.emit(
+                "circuit-run-updated",
+                CircuitRunUpdatedPayload {
+                    run_id: active.run.id,
+                    state: "failed".to_string(),
+                },
+            );
+        }
 
         if transition.run_state_changed && matches!(view.state, RunState::Completed | RunState::Failed)
         {
@@ -176,8 +223,7 @@ fn load_steps(run_id: i64) -> Result<Vec<StepView>, String> {
 }
 
 /// Observe the world and turn it into pure events for this run.
-fn observe(app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> Vec<CircuitEvent> {
-    let _ = app; // reserved for later milestones' webhook-driven wakes
+fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> Vec<CircuitEvent> {
     let mut events = Vec::new();
 
     // A pending manual run fires now (direct IPC dispatch path).
@@ -256,14 +302,31 @@ fn observe(app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> Ve
         }
     }
 
-    // Capacity snapshot for scheduling.
-    let mesh_limit = db::get_mesh_by_id(active.run.mesh_id)
-        .map(|m| i64::from(m.autopilot_concurrency_limit))
-        .unwrap_or(0);
+    // Capacity snapshot for scheduling. Every failure here fails CLOSED
+    // (zero capacity — the run parks in pending_slot until the next
+    // pass), but loudly: a silent permanent queue would look exactly
+    // like a busy mesh.
+    let mesh_limit = match db::get_mesh_by_id(active.run.mesh_id) {
+        Ok(m) => i64::from(m.autopilot_concurrency_limit),
+        Err(e) => {
+            tracing::warn!(
+                "circuits: could not read mesh {} for capacity snapshot, failing closed: {}",
+                active.run.mesh_id,
+                e
+            );
+            0
+        }
+    };
     let circuit_running =
-        db::count_running_circuit_steps(active.run.circuit_id).unwrap_or(i64::MAX);
+        db::count_running_circuit_steps(active.run.circuit_id).unwrap_or_else(|e| {
+            tracing::warn!("circuits: running-step count failed, failing closed: {}", e);
+            i64::MAX
+        });
     let mesh_active =
-        db::count_active_circuit_agent_nodes(active.run.mesh_id).unwrap_or(i64::MAX);
+        db::count_active_circuit_agent_nodes(active.run.mesh_id).unwrap_or_else(|e| {
+            tracing::warn!("circuits: active-agent count failed, failing closed: {}", e);
+            i64::MAX
+        });
     events.push(CircuitEvent::Tick(Capacity {
         circuit_free_slots: active.circuit_concurrency_limit - circuit_running,
         mesh_agent_free_slots: mesh_limit - mesh_active,

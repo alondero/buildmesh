@@ -361,9 +361,9 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     let circuit =
         create_autopilot_circuit(mesh.id, "watched", "", 3, &sample_graph_json()).unwrap();
 
-    let done = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
+    let done = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
     commit_circuit_advance(done, Some("completed"), Some("{}"), &[]).unwrap();
-    let live = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
+    let live = create_circuit_run(circuit.id, mesh.id, "manual:2", "{}").unwrap();
 
     // The shared process-global DB holds other tests' runs too — scope
     // the assertion to this circuit.
@@ -381,6 +381,31 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     assert_eq!(
         CircuitGraph::from_json(&active[0].circuit_graph_json).unwrap().nodes.len(),
         4
+    );
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn duplicate_trigger_identity_replays_the_existing_run() {
+    // The spec's dedupe: re-reporting the same (circuit, identity)
+    // replays the original run instead of minting a duplicate — but a
+    // DIFFERENT circuit reacting to the same identity is independent.
+    let path = init_temp_db("dedupe");
+    let mesh = create_mesh("circuit-dedupe-mesh", "/tmp/circuit-dedupe").unwrap();
+    let c1 = create_autopilot_circuit(mesh.id, "one", "", 1, "{}").unwrap();
+    let c2 = create_autopilot_circuit(mesh.id, "two", "", 1, "{}").unwrap();
+
+    let first = create_circuit_run(c1.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
+    let replay =
+        create_circuit_run(c1.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
+    assert_eq!(first, replay, "same circuit + identity must dedupe to one run");
+    let independent =
+        create_circuit_run(c2.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
+    assert_ne!(
+        first, independent,
+        "a second circuit may process the same source independently"
     );
 
     drop(get());

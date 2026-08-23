@@ -415,8 +415,10 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
         --     autopilot::circuit::model); no per-node-kind migration — the
         --     AST evolves inside the JSON.
         --   * autopilot_circuit_runs — one execution instance per row.
-        --     `trigger_identity` is deduped per (circuit, identity) so two
-        --     circuits may react to the same source independently.
+        --     UNIQUE (circuit_id, trigger_identity) enforces the spec's
+        --     dedupe: re-reporting an identity replays the existing run,
+        --     while two circuits may react to the same source
+        --     independently (the key is circuit-scoped).
         --   * autopilot_circuit_run_steps — per-circuit-node execution
         --     state. UNIQUE (run_id, node_id) backs the engine's upsert
         --     commit (`db::circuit::commit_circuit_advance`).
@@ -444,7 +446,8 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             state TEXT NOT NULL DEFAULT 'pending',
             context_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (circuit_id, trigger_identity)
         );
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);

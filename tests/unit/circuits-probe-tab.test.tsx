@@ -179,7 +179,7 @@ describe('CircuitsProbeTab', () => {
     });
   });
 
-  it('toggling enable writes the flag and disabling hides Trigger Now', async () => {
+  it('toggling enable writes the flag', async () => {
     mockBackend();
     const user = userEvent.setup();
     await openCircuitsTab();

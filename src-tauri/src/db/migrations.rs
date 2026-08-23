@@ -820,7 +820,8 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     state TEXT NOT NULL DEFAULT 'pending',
                     context_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (circuit_id, trigger_identity)
                 );
                 CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
                 CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
