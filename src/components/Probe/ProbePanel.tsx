@@ -45,6 +45,7 @@ import { AgentChangesTab } from './AgentChangesTab';
 import { MeshPropertiesTab } from './MeshPropertiesTab';
 import { WorktreeManagerTab } from './WorktreeManagerTab';
 import { AutopilotProbeTab } from './AutopilotProbeTab';
+import { CircuitsProbeTab } from './CircuitsProbeTab';
 import { GitIssuesTab } from './GitIssuesTab';
 import { GitPullRequestsTab } from './GitPullRequestsTab';
 import { ArchivedNodesTab } from './ArchivedNodesTab';
@@ -53,6 +54,7 @@ import { UsageTab } from './UsageTab';
 import {
   ArchiveIcon,
   AutopilotIcon,
+  CircuitsIcon,
   CompassIcon,
   FilesIcon,
   IssuesIcon,
@@ -96,6 +98,10 @@ const PROBE_TABS: ProbeTabDef[] = [
   // today, this tab is the dedicated surface for the mode toggle and the
   // looping config.
   { tab: 'autopilot', icon: AutopilotIcon, label: 'Autopilot' },
+  // Autopilot Circuits (spec #1205 / walking skeleton #1206) — the
+  // composable trigger-action graphs. Sits next to the legacy Autopilot
+  // tab so the two automation surfaces cluster.
+  { tab: 'circuits', icon: CircuitsIcon, label: 'Circuits' },
   { tab: 'issues', icon: IssuesIcon, label: 'Git Issues' },
   { tab: 'pulls', icon: PullsIcon, label: 'Pull Requests' },
   { tab: 'sessions', icon: ArchiveIcon, label: 'Archive', tooltip: 'Archived Nodes' },
@@ -371,6 +377,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'review') return <AgentChangesTab />;
   if (tab === 'properties') return <MeshPropertiesTab />;
   if (tab === 'autopilot') return <AutopilotProbeTab />;
+  if (tab === 'circuits') return <CircuitsProbeTab />;
   if (tab === 'worktrees') return <WorktreeManagerTab />;
   if (tab === 'issues') return <GitIssuesTab />;
   if (tab === 'pulls') return <GitPullRequestsTab />;

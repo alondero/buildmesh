@@ -19,6 +19,12 @@
 
 pub(crate) mod migrations;
 
+/// Autopilot Circuits ledger accessors (spec #1205). Re-exported flat so
+/// call sites read `db::list_autopilot_circuits(...)` like every other
+/// table's accessors.
+pub mod circuit;
+pub use circuit::*;
+
 #[cfg(test)]
 mod migration_tests;
 
@@ -48,6 +54,9 @@ mod agent_node_tests;
 
 #[cfg(test)]
 mod harness_overrides_tests;
+
+#[cfg(test)]
+mod circuit_tests;
 
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
@@ -398,6 +407,65 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
+
+        -- Autopilot Circuits (spec #1205 / walking skeleton #1206, schema
+        -- v34). Three tables:
+        --   * autopilot_circuits — the blueprint rows. `graph_json` holds
+        --     the serialised Graph Blueprint AST (see
+        --     autopilot::circuit::model); no per-node-kind migration — the
+        --     AST evolves inside the JSON.
+        --   * autopilot_circuit_runs — one execution instance per row.
+        --     UNIQUE (circuit_id, trigger_identity) enforces the spec's
+        --     dedupe: re-reporting an identity replays the existing run,
+        --     while two circuits may react to the same source
+        --     independently (the key is circuit-scoped).
+        --   * autopilot_circuit_run_steps — per-circuit-node execution
+        --     state. UNIQUE (run_id, node_id) backs the engine's upsert
+        --     commit (`db::circuit::commit_circuit_advance`).
+        --     `status = 'pending_slot'` marks a step parked on a
+        --     concurrency/agent-slot limit; it promotes FIFO by id when
+        --     slots free up.
+        CREATE TABLE IF NOT EXISTS autopilot_circuits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            concurrency_limit INTEGER NOT NULL DEFAULT 1,
+            graph_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id);
+
+        CREATE TABLE IF NOT EXISTS autopilot_circuit_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            circuit_id INTEGER NOT NULL REFERENCES autopilot_circuits(id) ON DELETE CASCADE,
+            mesh_id INTEGER NOT NULL,
+            trigger_identity TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'pending',
+            context_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (circuit_id, trigger_identity)
+        );
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
+
+        CREATE TABLE IF NOT EXISTS autopilot_circuit_run_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL,
+            agent_node_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending_slot',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT,
+            error_message TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            UNIQUE (run_id, node_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
         "
     )?;
 
@@ -2379,6 +2447,9 @@ pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
 
 pub fn delete_mesh(id: i64) -> SqlResult<()> {
     let db = get().lock().unwrap();
+    // Autopilot Circuits ledger (spec #1205): explicit child deletes —
+    // same defensive rule as the warm pool below.
+    circuit::delete_circuits_for_mesh_inner(&db, id)?;
     db.execute("DELETE FROM agent_nodes WHERE mesh_id = ?1", params![id])?;
     // The `warm_worktrees.mesh_id` FK declares ON DELETE CASCADE, but SQLite
     // leaves foreign-key enforcement off by default (no `PRAGMA foreign_keys`

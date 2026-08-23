@@ -1,0 +1,458 @@
+//! Circuit graph blueprint AST (issue #1206, slice 1 of the Autopilot
+//! Circuits spec #1205).
+//!
+//! A [`CircuitGraph`] is the serialisable blueprint of one Autopilot
+//! Circuit: a small set of typed nodes ([`CircuitNodeKind`]) wired by
+//! conditional edges ([`CircuitEdge`]). The blueprint persists as the
+//! `graph_json` TEXT column on `autopilot_circuits`; there is no
+//! per-node-kind migration — the AST evolves inside the JSON.
+//!
+//! Terminology (spec §Domain model): **Circuit** = the blueprint,
+//! **Circuit Run** = one execution instance, **Circuit Step** = per-node
+//! execution state within a run. "Node" is overloaded in Buildmesh prose
+//! — here a *circuit node* is a graph vertex; an *agent node* is the
+//! mesh's spawned session. Doc comments qualify which is meant.
+//!
+//! Milestone 1 scope: every node kind parses and round-trips, but the
+//! engine only *executes* the Manual trigger plus the action/join
+//! subset. The Interval/GitHub trigger kinds auto-complete when a run
+//! they sit in is fired by hand (the user is the trigger), and gain
+//! their own firing machinery in later milestones; gate kinds fail
+//! their step with an explicit "not supported until later milestone"
+//! error when reached (pinned in `stepper::tests`) rather than silently
+//! stalling.
+
+use serde::{Deserialize, Serialize};
+
+/// The full blueprint AST for one circuit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CircuitGraph {
+    pub version: i32,
+    pub nodes: Vec<CircuitNode>,
+    pub edges: Vec<CircuitEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CircuitNode {
+    /// Stable within one blueprint. Referenced by [`CircuitEdge`] ends and
+    /// persisted as `autopilot_circuit_run_steps.node_id`.
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: CircuitNodeKind,
+}
+
+/// Every node kind the AST can express. Serde tags each variant with its
+/// snake_case `type` discriminator so `graph_json` reads like the spec's
+/// node vocabulary (`{"type": "manual"}`, `{"type": "spawn_agent_node",
+/// "prompt": "..."}`, ...).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CircuitNodeKind {
+    // ---- Triggers ----
+    /// Fire-by-hand entry point (the walking skeleton's Trigger Now).
+    Manual,
+    /// Fixed-interval pacer. Parsed but not yet executed (later milestone).
+    Interval { interval_seconds: i64 },
+    /// Fire when a GitHub issue gains `label`. Not yet executed.
+    GithubIssueLabel { label: String },
+    /// Fire when a GitHub PR gains `label`. Not yet executed.
+    GithubPullRequestLabel { label: String },
+
+    // ---- Actions ----
+    /// Spawn a new agent node into the mesh with `prompt` as the initial
+    /// prompt (routed through `SpawnIntent::Loop`, so it stages as prefill).
+    SpawnAgentNode {
+        prompt: String,
+        name: Option<String>,
+    },
+    /// Inject `prompt` into the agent node spawned earlier in this run,
+    /// over PTY, once that process is live.
+    InjectPty { prompt: String },
+    /// GitHub mutation (add/remove label, comment, open PR, close issue).
+    /// Parsed but not yet executed.
+    GithubAction {
+        action: GithubActionKind,
+        label: Option<String>,
+        comment: Option<String>,
+    },
+    /// Set the run's piloted agent node's status.
+    SetNodeStatus { status: SessionStatusKind },
+    /// Surface a message to the user (toast / notification event).
+    Notify { message: String },
+
+    // ---- Gates ----
+    /// LLM turn classification (Completed | Blocked | Working). Not yet executed.
+    LlmTurnClassifier,
+    /// Deterministic verification command (Green | Red). Not yet executed.
+    DeterministicVerification { command: String },
+    /// Collaborator approval gate. Not yet executed.
+    CollaboratorCheck { require_approval: bool },
+    /// Retry budget cap. Not yet executed.
+    RetryLimit { max_retries: i32 },
+
+    // ---- Joins ----
+    /// Fan-in: continue when all incoming branches completed.
+    AllCompleted,
+    /// Fan-in: continue when any incoming branch completed.
+    AnyCompleted,
+}
+
+/// The GitHub mutation vocabulary of [`CircuitNodeKind::GithubAction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubActionKind {
+    AddLabel,
+    RemoveLabel,
+    PostComment,
+    OpenPr,
+    CloseIssue,
+}
+
+/// The agent-node status a [`CircuitNodeKind::SetNodeStatus`] step writes.
+/// Mirrors `models::SessionStatus`'s DB vocabulary; kept as a separate
+/// small enum so the graph JSON stays stable if `SessionStatus` grows
+/// spawn-machinery variants the graph author should not set by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatusKind {
+    Running,
+    Idle,
+    Completed,
+}
+
+/// One directed wire between two circuit nodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CircuitEdge {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub condition: EdgeCondition,
+}
+
+/// When does the edge carry its parent's outcome forward?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeCondition {
+    /// Traverse regardless of how the parent step ended.
+    #[default]
+    Always,
+    /// Traverse only when the parent step produced exactly this outcome.
+    OnOutcome(StepOutcome),
+}
+
+/// Terminal step outcomes edges and the ledger route on. The DB column
+/// stores the snake_case string (same discipline as `SessionStatus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl StepOutcome {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// Does this kind consume one of the mesh's auto-spawned agent slots?
+/// Pure helper the stepper's capacity gating calls; only
+/// [`CircuitNodeKind::SpawnAgentNode`] does today.
+pub fn consumes_agent_slot(kind: &CircuitNodeKind) -> bool {
+    matches!(kind, CircuitNodeKind::SpawnAgentNode { .. })
+}
+
+/// Is this kind executable by the milestone-1 engine? Triggers and the
+/// action subset are; gates and GitHub actions parse but deliberately
+/// fail their step when reached (see module doc).
+pub fn is_executable(kind: &CircuitNodeKind) -> bool {
+    matches!(
+        kind,
+        CircuitNodeKind::Manual
+            | CircuitNodeKind::Interval { .. }
+            | CircuitNodeKind::GithubIssueLabel { .. }
+            | CircuitNodeKind::GithubPullRequestLabel { .. }
+            | CircuitNodeKind::SpawnAgentNode { .. }
+            | CircuitNodeKind::InjectPty { .. }
+            | CircuitNodeKind::SetNodeStatus { .. }
+            | CircuitNodeKind::Notify { .. }
+            | CircuitNodeKind::AllCompleted
+            | CircuitNodeKind::AnyCompleted
+    )
+}
+
+impl CircuitGraph {
+    /// Parse a blueprint from its stored `graph_json`. Unknown node kinds
+    /// are a hard error at the read boundary (the writer always writes
+    /// what this build understands) rather than a silent skip.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json).map_err(|e| format!("invalid circuit graph_json: {}", e))
+    }
+
+    /// Serialise to the `graph_json` column form (compact, sorted field
+    /// order is serde's default struct order).
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|e| format!("could not encode circuit graph: {}", e))
+    }
+
+    /// Children of `node_id` in edge order, deduplicated (parallel edges
+    /// with different conditions keep ONE child entry; the stepper checks
+    /// every incoming edge's condition individually).
+    pub fn children(&self, node_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for edge in &self.edges {
+            if edge.from == node_id && !out.contains(&edge.to) {
+                out.push(edge.to.clone());
+            }
+        }
+        out
+    }
+
+    /// Incoming edges targeting `node_id`, in blueprint order.
+    pub fn incoming(&self, node_id: &str) -> Vec<&CircuitEdge> {
+        self.edges.iter().filter(|e| e.to == node_id).collect()
+    }
+
+    /// Nodes with no incoming edges — the triggers.
+    pub fn roots(&self) -> Vec<&CircuitNode> {
+        self.nodes
+            .iter()
+            .filter(|n| self.incoming(&n.id).is_empty())
+            .collect()
+    }
+
+    pub fn node(&self, node_id: &str) -> Option<&CircuitNode> {
+        self.nodes.iter().find(|n| n.id == node_id)
+    }
+
+    /// The canonical walking-skeleton blueprint (issue #1206): Manual
+    /// trigger → SpawnAgentNode (fresh, no prefill) → InjectPty (the
+    /// configured prompt, over PTY once the process is live) → Notify.
+    /// This is what the Probe tab's create form builds server-side, so
+    /// the AST stays canonical in Rust instead of being hand-rolled in
+    /// TypeScript. Routing the prompt through InjectPty (rather than
+    /// staging it as spawn prefill) exercises the full
+    /// spawn → observe-live-process → inject → await-turn chain the
+    /// acceptance criteria describe.
+    pub fn walking_skeleton(prompt: &str) -> Self {
+        Self {
+            version: 1,
+            nodes: vec![
+                CircuitNode { id: "trigger".to_string(), kind: CircuitNodeKind::Manual },
+                CircuitNode {
+                    id: "spawn".to_string(),
+                    kind: CircuitNodeKind::SpawnAgentNode {
+                        prompt: String::new(),
+                        name: None,
+                    },
+                },
+                CircuitNode {
+                    id: "inject".to_string(),
+                    kind: CircuitNodeKind::InjectPty { prompt: prompt.to_string() },
+                },
+                CircuitNode {
+                    id: "notify".to_string(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "Circuit run started {{circuit.name}}".to_string(),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge { from: "trigger".to_string(), to: "spawn".to_string(), condition: EdgeCondition::Always },
+                CircuitEdge { from: "spawn".to_string(), to: "inject".to_string(), condition: EdgeCondition::Always },
+                CircuitEdge { from: "inject".to_string(), to: "notify".to_string(), condition: EdgeCondition::Always },
+            ],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- serde round-trip ---------------------------------------------------
+
+    #[test]
+    fn walking_skeleton_round_trips_through_graph_json() {
+        let graph = CircuitGraph::walking_skeleton("fix the flaky test");
+        let json = graph.to_json().unwrap();
+        let parsed = CircuitGraph::from_json(&json).unwrap();
+        assert_eq!(parsed, graph);
+    }
+
+    #[test]
+    fn every_node_kind_serialises_with_its_snake_case_discriminator() {
+        let kinds = vec![
+            CircuitNodeKind::Manual,
+            CircuitNodeKind::Interval { interval_seconds: 300 },
+            CircuitNodeKind::GithubIssueLabel { label: "buildmesh:run".into() },
+            CircuitNodeKind::GithubPullRequestLabel { label: "review-me".into() },
+            CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: Some("fix-it".into()) },
+            CircuitNodeKind::InjectPty { prompt: "wrap up".into() },
+            CircuitNodeKind::GithubAction { action: GithubActionKind::AddLabel, label: Some("done".into()), comment: None },
+            CircuitNodeKind::SetNodeStatus { status: SessionStatusKind::Completed },
+            CircuitNodeKind::Notify { message: "hi".into() },
+            CircuitNodeKind::LlmTurnClassifier,
+            CircuitNodeKind::DeterministicVerification { command: "cargo test".into() },
+            CircuitNodeKind::CollaboratorCheck { require_approval: true },
+            CircuitNodeKind::RetryLimit { max_retries: 3 },
+            CircuitNodeKind::AllCompleted,
+            CircuitNodeKind::AnyCompleted,
+        ];
+        for kind in kinds {
+            let node = CircuitNode { id: "n1".into(), kind };
+            let json = serde_json::to_string(&node).unwrap();
+            assert!(json.contains("\"type\""), "every variant must tag its type: {}", json);
+            let back: CircuitNode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, node);
+        }
+    }
+
+    #[test]
+    fn edge_condition_on_outcome_round_trips() {
+        let edge = CircuitEdge {
+            from: "a".into(),
+            to: "b".into(),
+            condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
+        };
+        let json = serde_json::to_string(&edge).unwrap();
+        assert_eq!(CircuitGraph::from_json(&format!("{{\"version\":1,\"nodes\":[],\"edges\":[{}]}}", json)).unwrap().edges[0].condition, EdgeCondition::OnOutcome(StepOutcome::Failed));
+    }
+
+    #[test]
+    fn missing_condition_field_defaults_to_always() {
+        let parsed: CircuitEdge =
+            serde_json::from_str(r#"{"from":"a","to":"b"}"#).unwrap();
+        assert_eq!(parsed.condition, EdgeCondition::Always);
+    }
+
+    #[test]
+    fn unknown_node_kind_is_a_read_error_not_a_silent_skip() {
+        let err = CircuitGraph::from_json(
+            r#"{"version":1,"nodes":[{"id":"n","type":"time_travel"}],"edges":[]}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid circuit graph_json"), "{}", err);
+    }
+
+    // -- graph helpers ------------------------------------------------------
+
+    fn sample_graph() -> CircuitGraph {
+        CircuitGraph {
+            version: 1,
+            nodes: vec![
+                CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode { id: "a".into(), kind: CircuitNodeKind::Notify { message: "x".into() } },
+                CircuitNode { id: "b".into(), kind: CircuitNodeKind::AllCompleted },
+                CircuitNode { id: "c".into(), kind: CircuitNodeKind::AnyCompleted },
+            ],
+            edges: vec![
+                CircuitEdge { from: "t".into(), to: "a".into(), condition: EdgeCondition::default() },
+                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::default() },
+                CircuitEdge { from: "a".into(), to: "c".into(), condition: EdgeCondition::default() },
+                CircuitEdge { from: "t".into(), to: "c".into(), condition: EdgeCondition::default() },
+            ],
+        }
+    }
+
+    #[test]
+    fn roots_are_nodes_without_incoming_edges() {
+        let g = sample_graph();
+        let root_ids: Vec<&str> = g.roots().iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(root_ids, vec!["t"]);
+    }
+
+    #[test]
+    fn children_and_incoming_walk_the_edges() {
+        let g = sample_graph();
+        assert_eq!(g.children("a"), vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(g.children("t"), vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(g.incoming("c").len(), 2);
+        assert_eq!(g.incoming("t").len(), 0);
+    }
+
+    #[test]
+    fn parallel_edges_to_one_child_dedupe_in_children() {
+        let g = CircuitGraph {
+            version: 1,
+            nodes: vec![
+                CircuitNode { id: "a".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode { id: "b".into(), kind: CircuitNodeKind::Notify { message: "m".into() } },
+            ],
+            edges: vec![
+                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::OnOutcome(StepOutcome::Completed) },
+                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::OnOutcome(StepOutcome::Failed) },
+            ],
+        };
+        assert_eq!(g.children("a"), vec!["b".to_string()]);
+        assert_eq!(g.incoming("b").len(), 2);
+    }
+
+    // -- classification helpers ---------------------------------------------
+
+    #[test]
+    fn only_spawn_consumes_an_agent_slot() {
+        assert!(consumes_agent_slot(&CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None }));
+        assert!(!consumes_agent_slot(&CircuitNodeKind::InjectPty { prompt: "p".into() }));
+        assert!(!consumes_agent_slot(&CircuitNodeKind::Notify { message: "n".into() }));
+        assert!(!consumes_agent_slot(&CircuitNodeKind::AllCompleted));
+    }
+
+    #[test]
+    fn milestone_one_executability_vocabulary() {
+        assert!(is_executable(&CircuitNodeKind::Manual));
+        assert!(is_executable(&CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None }));
+        assert!(is_executable(&CircuitNodeKind::InjectPty { prompt: "p".into() }));
+        assert!(is_executable(&CircuitNodeKind::Notify { message: "n".into() }));
+        assert!(!is_executable(&CircuitNodeKind::LlmTurnClassifier));
+        assert!(!is_executable(&CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, label: None, comment: None }));
+    }
+
+    // -- outcome DB strings ---------------------------------------------------
+
+    #[test]
+    fn step_outcome_db_strings_round_trip() {
+        for o in [StepOutcome::Completed, StepOutcome::Failed, StepOutcome::Cancelled] {
+            assert_eq!(StepOutcome::from_db_str(o.as_db_str()), Some(o));
+        }
+        assert_eq!(StepOutcome::from_db_str("nonsense"), None);
+    }
+
+    // -- walking skeleton shape ----------------------------------------------
+
+    #[test]
+    fn walking_skeleton_is_the_manual_spawn_inject_notify_chain() {
+        let g = CircuitGraph::walking_skeleton("do the thing");
+        let ids: Vec<&str> = g.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["trigger", "spawn", "inject", "notify"]);
+        assert_eq!(
+            g.edges.iter().map(|e| (e.from.as_str(), e.to.as_str())).collect::<Vec<_>>(),
+            vec![("trigger", "spawn"), ("spawn", "inject"), ("inject", "notify")]
+        );
+        match &g.node("spawn").unwrap().kind {
+            CircuitNodeKind::SpawnAgentNode { prompt, name } => {
+                assert_eq!(prompt, "", "spawn starts fresh — the prompt rides InjectPty");
+                assert_eq!(*name, None);
+            }
+            other => panic!("expected spawn node, got {:?}", other),
+        }
+        match &g.node("inject").unwrap().kind {
+            CircuitNodeKind::InjectPty { prompt } => assert_eq!(prompt, "do the thing"),
+            other => panic!("expected inject node, got {:?}", other),
+        }
+    }
+}

@@ -201,8 +201,9 @@ function persistGridControls(controls: GridControls): void {
 // for Usage Meters (subscription quota + cash balance), reached from a
 // meter icon in the sidebar header. `autopilot` was added in wayfinder
 // #990 ticket #994 as the dedicated configure + monitor surface for the
-// Issue-Driven and Looping Autopilot modes.
-export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'autopilot' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
+// Issue-Driven and Looping Autopilot modes. `circuits` was added for the
+// Autopilot Circuits walking skeleton (spec #1205 / issue #1206).
+export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'autopilot' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
 
 // Which baseline a single-file diff is taken against:
 //   'head' — uncommitted working-tree changes vs HEAD (Project Files tab,

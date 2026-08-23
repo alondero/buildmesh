@@ -31,6 +31,7 @@ pub mod agent_node_discovery;
 pub mod ai_context;
 pub mod attention;
 pub mod build_run;
+pub mod circuit;
 pub mod coordinator;
 pub mod devices;
 pub mod diff;

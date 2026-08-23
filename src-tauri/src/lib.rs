@@ -351,6 +351,13 @@ pub fn run() {
             // Autopilot enabled.
             services::autopilot::start_autopilot_worker(app.handle().clone());
 
+            // Autopilot Circuits worker (spec #1205 / walking skeleton
+            // #1206). Dedicated OS thread with a fast tick + condvar
+            // wake; drives the pure circuit stepper's decisions through
+            // the effect executor (spawn agent nodes, PTY injection,
+            // node status, notifications).
+            services::circuit_worker::start_circuit_worker(app.handle().clone());
+
             // Coordinator drive ledger GC (issue #750, item 3). One prune
             // pass every 30 minutes keeps the `coordinator_drive_prompts`
             // table bounded by the 7-day retention window so the ledger's
@@ -505,6 +512,14 @@ pub fn run() {
             commands::agent::spawn_handover_agent,
             commands::agent::create_issue_node,
             commands::agent::list_autopilot_runs,
+            // Autopilot Circuits (spec #1205 / walking skeleton #1206).
+            commands::circuit::list_circuits,
+            commands::circuit::list_circuits_with_runs,
+            commands::circuit::create_circuit,
+            commands::circuit::set_circuit_enabled,
+            commands::circuit::delete_circuit,
+            commands::circuit::trigger_circuit_now,
+            commands::circuit::list_circuit_runs,
             // Build/Run
             commands::build_run::build_run,
             commands::build_run::get_mesh_row,

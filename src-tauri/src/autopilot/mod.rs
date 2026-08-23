@@ -24,6 +24,7 @@
 //! gate they will consume — it deliberately stops at "decide + map to a node
 //! status" and does not spawn nodes or touch the UI.
 
+pub mod circuit;
 pub mod compatibility;
 pub mod evaluator;
 pub mod finish;
