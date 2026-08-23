@@ -86,7 +86,15 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// compatibility but are no longer read as active configuration after
 /// the spawn resolver wires the new `mesh_override` layer (issue #1148
 /// cascade order: explicit > mesh override > application > native).
-pub(crate) const SCHEMA_VERSION: u32 = 33;
+///
+/// v34 — Autopilot Circuits ledger (spec #1205 / walking skeleton #1206):
+/// three new tables (`autopilot_circuits`, `autopilot_circuit_runs`,
+/// `autopilot_circuit_run_steps`). Whole tables need no column registry
+/// entries — they follow the warm_worktrees precedent: inline
+/// `CREATE TABLE IF NOT EXISTS` in `init()` for fresh DBs plus an
+/// [`AlwaysStep`] safety net for DBs whose version was bumped past 34 by
+/// a build that didn't yet contain the inline CREATE.
+pub(crate) const SCHEMA_VERSION: u32 = 34;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -198,6 +206,12 @@ pub(crate) enum AlwaysStep {
     /// build that didn't yet include the inline CREATE. Idempotent
     /// via `IF NOT EXISTS`.
     EnsureWarmWorktreesTable,
+    /// CREATE TABLE IF NOT EXISTS for the three Autopilot Circuits
+    /// ledger tables (v34, spec #1205). Same rationale as
+    /// [`AlwaysStep::EnsureWarmWorktreesTable`]: fresh DBs get them from
+    /// the inline CREATE in `init()`; this safety net covers any DB that
+    /// reached v34+ without them. Idempotent via `IF NOT EXISTS`.
+    EnsureAutopilotCircuitsTables,
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +501,7 @@ pub(crate) const V33_BACKFILL_SQL: &str = "UPDATE meshes \
 const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::DropCheckpoints,
     AlwaysStep::EnsureWarmWorktreesTable,
+    AlwaysStep::EnsureAutopilotCircuitsTables,
     AlwaysStep::RewriteAgentNodeProviderId,
     AlwaysStep::HashCoordinatorTokens,
 ];
@@ -775,6 +790,55 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
                 CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
+                ",
+            )?;
+        }
+        AlwaysStep::EnsureAutopilotCircuitsTables => {
+            // v34 — Autopilot Circuits ledger (spec #1205). Mirrors the
+            // inline CREATE in `db::init` verbatim; see that comment for
+            // the column semantics.
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS autopilot_circuits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    concurrency_limit INTEGER NOT NULL DEFAULT 1,
+                    graph_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id);
+
+                CREATE TABLE IF NOT EXISTS autopilot_circuit_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    circuit_id INTEGER NOT NULL REFERENCES autopilot_circuits(id) ON DELETE CASCADE,
+                    mesh_id INTEGER NOT NULL,
+                    trigger_identity TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    context_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
+                CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
+
+                CREATE TABLE IF NOT EXISTS autopilot_circuit_run_steps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+                    node_id TEXT NOT NULL,
+                    agent_node_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'pending_slot',
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    outcome TEXT,
+                    error_message TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    UNIQUE (run_id, node_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
                 ",
             )?;
         }

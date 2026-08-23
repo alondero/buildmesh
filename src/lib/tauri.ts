@@ -1260,3 +1260,40 @@ export const getAppIdentifier = () =>
 export function __resetProviderCachesForTests(): void {
   resetProviderCachesForTests();
 }
+
+// ── Autopilot Circuits (spec #1205 / walking skeleton #1206) ─────────────
+import type { AutopilotCircuit } from '../types/generated/AutopilotCircuit';
+import type { CircuitRunDetail } from '../types/generated/CircuitRunDetail';
+export type { AutopilotCircuit, CircuitRunDetail };
+
+export const listCircuits = (meshId: number) =>
+  _invoke<AutopilotCircuit[]>('list_circuits', { meshId });
+
+/** Creates a circuit with the canonical server-side blueprint:
+ *  Manual trigger → SpawnAgentNode(prompt) → Notify. */
+export const createCircuit = (
+  meshId: number,
+  name: string,
+  description: string,
+  concurrencyLimit: number,
+  initialPrompt: string
+) =>
+  _invoke<AutopilotCircuit>('create_circuit', {
+    meshId,
+    name,
+    description,
+    concurrencyLimit,
+    initialPrompt,
+  });
+
+export const setCircuitEnabled = (circuitId: number, enabled: boolean) =>
+  _invoke<void>('set_circuit_enabled', { circuitId, enabled });
+
+export const deleteCircuit = (circuitId: number) =>
+  _invoke<void>('delete_circuit', { circuitId });
+
+export const triggerCircuitNow = (circuitId: number) =>
+  _invoke<number>('trigger_circuit_now', { circuitId });
+
+export const listCircuitRuns = (circuitId: number, limit?: number) =>
+  _invoke<CircuitRunDetail[]>('list_circuit_runs', { circuitId, limit });

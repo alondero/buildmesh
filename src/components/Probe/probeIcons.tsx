@@ -172,6 +172,18 @@ export function AutopilotIcon({ className }: IconProps) {
   );
 }
 
+/** Lucide `workflow` — Autopilot Circuits (spec #1205). Reads as the
+ *  trigger-action graph the circuit blueprint serialises. */
+export function CircuitsIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect width="8" height="8" x="3" y="3" rx="2" />
+      <path d="M7 11v4a2 2 0 0 0 2 2h4" />
+      <rect width="8" height="8" x="13" y="13" rx="2" />
+    </Svg>
+  );
+}
+
 /** Lucide `search` — "No active agent node" shell empty state. */
 export function SearchIcon({ className }: IconProps) {
   return (

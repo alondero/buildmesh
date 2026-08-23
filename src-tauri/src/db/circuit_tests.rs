@@ -1,0 +1,460 @@
+//! Autopilot Circuits ledger tests (spec #1205 / walking skeleton #1206).
+//!
+//! Exercises the three v34 tables through the `db::circuit` accessors
+//! against temp-dir SQLite files (the `mesh_tests` pattern) and pins the
+//! v33 → v34 migration (fresh table creation via the new `AlwaysStep`).
+
+use super::*;
+use crate::autopilot::circuit::model::CircuitGraph;
+use rusqlite::Connection;
+
+/// Temp-dir DB init, serialised by unique filename (`mesh_tests`
+/// pattern). Tests in this file share the process-global DB, so they
+/// must run with `--test-threads=1`; CI's cargo invocation already pins
+/// that for the db test modules.
+fn init_temp_db(tag: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "buildmesh_circuit_test_{}_{}.db",
+        tag,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    init(&path).unwrap();
+    path
+}
+
+fn sample_graph_json() -> String {
+    CircuitGraph::walking_skeleton("fix the flaky test")
+        .to_json()
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Circuit CRUD + persistence across "restarts" (re-open reads).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn circuit_crud_round_trips_all_fields() {
+    let path = init_temp_db("crud");
+    let mesh = create_mesh("circuit-crud-mesh", "/tmp/circuit-crud").unwrap();
+
+    let created =
+        create_autopilot_circuit(mesh.id, "nightly-sweep", "desc", 3, &sample_graph_json()).unwrap();
+    assert_eq!(created.mesh_id, mesh.id);
+    assert_eq!(created.name, "nightly-sweep");
+    assert_eq!(created.description, "desc");
+    assert_eq!(created.concurrency_limit, 3);
+    assert!(created.enabled, "circuits default to enabled");
+    // graph_json round-trips back into the parsed AST.
+    let parsed = CircuitGraph::from_json(&created.graph_json).unwrap();
+    assert_eq!(parsed.nodes.len(), 4);
+
+    let listed = list_autopilot_circuits(mesh.id).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, created.id);
+
+    // Enable/disable round-trips (the Probe tab's toggle).
+    assert!(listed[0].enabled);
+    set_autopilot_circuit_enabled(created.id, false).unwrap();
+    let disabled = get_autopilot_circuit(created.id).unwrap().unwrap();
+    assert!(!disabled.enabled);
+
+    delete_autopilot_circuit(created.id).unwrap();
+    assert!(get_autopilot_circuit(created.id).unwrap().is_none());
+    assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty());
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
+    let path = init_temp_db("persist");
+    // Every app start runs `db::init` → `evolve_to` against the existing
+    // file. Simulate that on the live global DB: the migration rerun
+    // must be a no-op for circuit rows (no drops, no resets), so an
+    // enabled circuit survives restarts.
+    let mesh = create_mesh("circuit-persist-mesh", "/tmp/circuit-persist").unwrap();
+    let created =
+        create_autopilot_circuit(mesh.id, "survivor", "", 1, &sample_graph_json()).unwrap();
+
+    {
+        let conn = get().lock().unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+    }
+
+    let after = get_autopilot_circuit(created.id).unwrap().unwrap();
+    assert_eq!(after.name, "survivor");
+    assert!(after.enabled);
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Runs + steps ledger.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn run_and_step_ledger_records_status_outcome_and_timestamps() {
+    let path = init_temp_db("ledger");
+    let mesh = create_mesh("circuit-ledger-mesh", "/tmp/circuit-ledger").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "ledgered", "", 2, &sample_graph_json()).unwrap();
+
+    let run_id =
+        create_circuit_run(circuit.id, mesh.id, "manual:1234", r#"{"circuit.name":"ledgered"}"#)
+            .unwrap();
+    let runs = list_circuit_runs(circuit.id, 10).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, "pending");
+    assert_eq!(runs[0].trigger_identity, "manual:1234");
+    // The run's seeded template context round-trips (Trigger Now writes
+    // `circuit.*` before the worker ever sees the row).
+    assert_eq!(runs[0].context_json, r#"{"circuit.name":"ledgered"}"#);
+
+    // One atomic advance: trigger completes, spawn starts.
+    commit_circuit_advance(
+        run_id,
+        Some("running"),
+        Some(r#"{"circuit.name":"ledgered"}"#),
+        &[
+            CircuitStepOp {
+                node_id: "trigger".into(),
+                status: "completed".into(),
+                outcome: Some(Some("completed".into())),
+                error: None,
+                agent_node_id: None,
+            },
+            CircuitStepOp {
+                node_id: "spawn".into(),
+                status: "running".into(),
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+            },
+        ],
+    )
+    .unwrap();
+
+    let steps = list_circuit_run_steps(run_id).unwrap();
+    assert_eq!(steps.len(), 2);
+    let spawn_step = steps.iter().find(|s| s.node_id == "spawn").unwrap();
+    assert_eq!(spawn_step.status, "running");
+    assert!(spawn_step.outcome.is_none());
+    assert!(spawn_step.started_at.is_some(), "insert stamps started_at");
+    assert!(spawn_step.completed_at.is_none(), "non-terminal step has no completed_at");
+    assert_eq!(spawn_step.attempt, 1);
+
+    // Attach the spawned agent node, then finish the step.
+    set_circuit_step_agent_node(run_id, "spawn", 900).unwrap();
+    commit_circuit_advance(
+        run_id,
+        Some("completed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "spawn".into(),
+            status: "completed".into(),
+            outcome: Some(Some("completed".into())),
+            error: None,
+            agent_node_id: None,
+        }],
+    )
+    .unwrap();
+
+    let steps = list_circuit_run_steps(run_id).unwrap();
+    let spawn_step = steps.iter().find(|s| s.node_id == "spawn").unwrap();
+    assert_eq!(spawn_step.agent_node_id, Some(900));
+    assert_eq!(spawn_step.outcome.as_deref(), Some("completed"));
+    assert!(
+        spawn_step.completed_at.is_some(),
+        "terminal status stamps completed_at"
+    );
+    let runs = list_circuit_runs(circuit.id, 10).unwrap();
+    assert_eq!(runs[0].state, "completed");
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn step_upsert_never_duplicates_a_node_row() {
+    let path = init_temp_db("upsert");
+    let mesh = create_mesh("circuit-upsert-mesh", "/tmp/circuit-upsert").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "dup", "", 1, "{}").unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
+
+    for _ in 0..3 {
+        commit_circuit_advance(
+            run_id,
+            None,
+            None,
+            &[CircuitStepOp {
+                node_id: "spawn".into(),
+                status: "running".into(),
+                outcome: None,
+                error: None,
+                agent_node_id: Some(7),
+            }],
+        )
+        .unwrap();
+    }
+    let steps = list_circuit_run_steps(run_id).unwrap();
+    assert_eq!(steps.len(), 1, "UNIQUE(run_id, node_id) must dedupe");
+    assert_eq!(steps[0].agent_node_id, Some(7));
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn deleting_a_circuit_cascades_to_runs_and_steps() {
+    let path = init_temp_db("cascade");
+    let mesh = create_mesh("circuit-cascade-mesh", "/tmp/circuit-cascade").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "doomed", "", 1, "{}").unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
+    commit_circuit_advance(
+        run_id,
+        None,
+        None,
+        &[CircuitStepOp {
+            node_id: "trigger".into(),
+            status: "completed".into(),
+            outcome: Some(Some("completed".into())),
+            error: None,
+            agent_node_id: None,
+        }],
+    )
+    .unwrap();
+
+    delete_autopilot_circuit(circuit.id).unwrap();
+    // The shared process-global DB holds other tests' rows too — count
+    // only this circuit's descendants.
+    let remaining_runs: i64 = {
+        let conn = get().lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM autopilot_circuit_runs WHERE circuit_id = ?1",
+            params![circuit.id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let remaining_steps: i64 = {
+        let conn = get().lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
+             JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+             WHERE r.circuit_id = ?1",
+            params![circuit.id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(remaining_runs, 0, "runs must cascade with their circuit");
+    assert_eq!(remaining_steps, 0, "steps must cascade with their run");
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency counters.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn concurrency_counters_count_only_running_work() {
+    let path = init_temp_db("counters");
+    let mesh_a = create_mesh("circuit-count-a", "/tmp/circuit-count-a").unwrap();
+    let mesh_b = create_mesh("circuit-count-b", "/tmp/circuit-count-b").unwrap();
+    let c1 = create_autopilot_circuit(mesh_a.id, "one", "", 4, "{}").unwrap();
+    let c2 = create_autopilot_circuit(mesh_a.id, "two", "", 4, "{}").unwrap();
+    let cb = create_autopilot_circuit(mesh_b.id, "bee", "", 4, "{}").unwrap();
+
+    // Circuit one: one completed step + one running step piloting agent
+    // 101 + one queued step (must not count).
+    let r1 = create_circuit_run(c1.id, mesh_a.id, "", "{}").unwrap();
+    commit_circuit_advance(
+        r1,
+        Some("running"),
+        None,
+        &[
+            CircuitStepOp {
+                node_id: "trigger".into(),
+                status: "completed".into(),
+                outcome: Some(Some("completed".into())),
+                error: None,
+                agent_node_id: None,
+            },
+            CircuitStepOp {
+                node_id: "spawn".into(),
+                status: "running".into(),
+                outcome: None,
+                error: None,
+                agent_node_id: Some(101),
+            },
+            CircuitStepOp {
+                node_id: "second-spawn".into(),
+                status: "pending_slot".into(),
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+            },
+        ],
+    )
+    .unwrap();
+
+    // Circuit two (same mesh): running step piloting agent 102.
+    let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
+    commit_circuit_advance(
+        r2,
+        Some("running"),
+        None,
+        &[CircuitStepOp {
+            node_id: "spawn".into(),
+            status: "running".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: Some(102),
+        }],
+    )
+    .unwrap();
+
+    // Mesh B: its own piloted agent must not leak into mesh A's count.
+    let rb = create_circuit_run(cb.id, mesh_b.id, "", "{}").unwrap();
+    commit_circuit_advance(
+        rb,
+        Some("running"),
+        None,
+        &[CircuitStepOp {
+            node_id: "spawn".into(),
+            status: "running".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: Some(999),
+        }],
+    )
+    .unwrap();
+
+    assert_eq!(count_running_circuit_steps(c1.id).unwrap(), 1);
+    assert_eq!(count_running_circuit_steps(c2.id).unwrap(), 1);
+    assert_eq!(
+        count_active_circuit_agent_nodes(mesh_a.id).unwrap(),
+        2,
+        "distinct piloted agents across circuits on mesh A"
+    );
+    assert_eq!(count_active_circuit_agent_nodes(mesh_b.id).unwrap(), 1);
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Active-run listing (the worker pass's input).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
+    let path = init_temp_db("active");
+    let mesh = create_mesh("circuit-active-mesh", "/tmp/circuit-active").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "watched", "", 3, &sample_graph_json()).unwrap();
+
+    let done = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
+    commit_circuit_advance(done, Some("completed"), Some("{}"), &[]).unwrap();
+    let live = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
+
+    // The shared process-global DB holds other tests' runs too — scope
+    // the assertion to this circuit.
+    let active = list_active_circuit_runs()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.run.circuit_id == circuit.id)
+        .collect::<Vec<_>>();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].run.id, live);
+    assert_eq!(active[0].run.state, "pending");
+    assert_eq!(active[0].circuit_name, "watched");
+    assert_eq!(active[0].circuit_concurrency_limit, 3);
+    assert!(active[0].circuit_enabled);
+    assert_eq!(
+        CircuitGraph::from_json(&active[0].circuit_graph_json).unwrap().nodes.len(),
+        4
+    );
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Migration pin: v33 → v34 materialises the three circuit tables via the
+// new AlwaysStep safety net (the warm_worktrees precedent).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evolve_to_v34_creates_the_three_circuit_tables_from_a_v33_db() {
+    let conn = Connection::open_in_memory().unwrap();
+    // Hand-rolled v33-shape DB: app_settings pinned at version 33 plus
+    // just enough of meshes for the column walk to find its tables. No
+    // circuit tables — a v33 build predates them.
+    conn.execute_batch(
+        "
+        CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE meshes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            layout TEXT NOT NULL DEFAULT 'grid',
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', '33');
+        ",
+    )
+    .unwrap();
+
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+    for table in [
+        "autopilot_circuits",
+        "autopilot_circuit_runs",
+        "autopilot_circuit_run_steps",
+    ] {
+        let present: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get::<_, i64>(0).map(|c| c > 0),
+            )
+            .unwrap();
+        assert!(present, "table {table} must exist after evolve_to(34)");
+    }
+
+    // The UNIQUE(run_id, node_id) constraint is load-bearing for the
+    // engine's upsert commit — pin it directly.
+    let dupes_rejected = conn
+        .execute_batch(
+            "
+            INSERT INTO autopilot_circuits (mesh_id, name) VALUES (1, 'pin');
+            INSERT INTO autopilot_circuit_runs (circuit_id, mesh_id) VALUES (1, 1);
+            INSERT INTO autopilot_circuit_run_steps (run_id, node_id, status)
+                VALUES (1, 'spawn', 'running');
+            ",
+        )
+        .and_then(|_| {
+            conn.execute(
+                "INSERT INTO autopilot_circuit_run_steps (run_id, node_id, status) \
+                 VALUES (1, 'spawn', 'completed')",
+                [],
+            )
+        })
+        .is_err();
+    assert!(
+        dupes_rejected,
+        "a second (run_id, node_id) row must violate the UNIQUE constraint"
+    );
+
+    // Idempotent: re-running the migration must not error or duplicate.
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+}

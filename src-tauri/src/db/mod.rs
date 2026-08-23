@@ -19,6 +19,12 @@
 
 pub(crate) mod migrations;
 
+/// Autopilot Circuits ledger accessors (spec #1205). Re-exported flat so
+/// call sites read `db::list_autopilot_circuits(...)` like every other
+/// table's accessors.
+pub mod circuit;
+pub use circuit::*;
+
 #[cfg(test)]
 mod migration_tests;
 
@@ -48,6 +54,9 @@ mod agent_node_tests;
 
 #[cfg(test)]
 mod harness_overrides_tests;
+
+#[cfg(test)]
+mod circuit_tests;
 
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
@@ -398,6 +407,62 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
+
+        -- Autopilot Circuits (spec #1205 / walking skeleton #1206, schema
+        -- v34). Three tables:
+        --   * autopilot_circuits — the blueprint rows. `graph_json` holds
+        --     the serialised Graph Blueprint AST (see
+        --     autopilot::circuit::model); no per-node-kind migration — the
+        --     AST evolves inside the JSON.
+        --   * autopilot_circuit_runs — one execution instance per row.
+        --     `trigger_identity` is deduped per (circuit, identity) so two
+        --     circuits may react to the same source independently.
+        --   * autopilot_circuit_run_steps — per-circuit-node execution
+        --     state. UNIQUE (run_id, node_id) backs the engine's upsert
+        --     commit (`db::circuit::commit_circuit_advance`).
+        --     `status = 'pending_slot'` marks a step parked on a
+        --     concurrency/agent-slot limit; it promotes FIFO by id when
+        --     slots free up.
+        CREATE TABLE IF NOT EXISTS autopilot_circuits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            concurrency_limit INTEGER NOT NULL DEFAULT 1,
+            graph_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id);
+
+        CREATE TABLE IF NOT EXISTS autopilot_circuit_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            circuit_id INTEGER NOT NULL REFERENCES autopilot_circuits(id) ON DELETE CASCADE,
+            mesh_id INTEGER NOT NULL,
+            trigger_identity TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'pending',
+            context_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
+
+        CREATE TABLE IF NOT EXISTS autopilot_circuit_run_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL,
+            agent_node_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending_slot',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT,
+            error_message TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            UNIQUE (run_id, node_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
         "
     )?;
 
