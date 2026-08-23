@@ -1264,10 +1264,16 @@ export function __resetProviderCachesForTests(): void {
 // ── Autopilot Circuits (spec #1205 / walking skeleton #1206) ─────────────
 import type { AutopilotCircuit } from '../types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../types/generated/CircuitRunDetail';
-export type { AutopilotCircuit, CircuitRunDetail };
+import type { CircuitWithRuns } from '../types/generated/CircuitWithRuns';
+export type { AutopilotCircuit, CircuitRunDetail, CircuitWithRuns };
 
 export const listCircuits = (meshId: number) =>
   _invoke<AutopilotCircuit[]>('list_circuits', { meshId });
+
+/** Batched single-IPC load for the Probe tab: every circuit on the mesh
+ *  with up to `limit` newest runs each (steps included). */
+export const listCircuitsWithRuns = (meshId: number, limit?: number) =>
+  _invoke<CircuitWithRuns[]>('list_circuits_with_runs', { meshId, limit });
 
 /** Creates a circuit with the canonical server-side blueprint:
  *  Manual trigger → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify. */

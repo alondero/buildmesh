@@ -83,6 +83,79 @@ pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>>
     rows.collect()
 }
 
+/// One run plus its step ledger, as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CircuitRunLedger {
+    pub run: AutopilotCircuitRun,
+    pub steps: Vec<AutopilotCircuitRunStep>,
+}
+
+/// A mesh's circuits WITH their recent run ledgers, in ONE mutex
+/// acquisition — the Probe tab's single-IPC-load shape (a circuit per
+/// row plus up to `runs_per_circuit` newest runs each, newest first).
+pub fn list_circuits_with_recent_runs(
+    mesh_id: i64,
+    runs_per_circuit: i64,
+) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
+    let db = super::get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
+                graph_json, created_at, updated_at \
+         FROM autopilot_circuits WHERE mesh_id = ?1 ORDER BY id",
+    )?;
+    let circuits: Vec<AutopilotCircuit> =
+        stmt.query_map(params![mesh_id], map_circuit_row)?.collect::<SqlResult<_>>()?;
+    if circuits.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids: Vec<String> = circuits.iter().map(|c| c.id.to_string()).collect();
+    let mut stmt = db.prepare(&format!(
+        "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
+                context_json, created_at, updated_at \
+         FROM autopilot_circuit_runs WHERE circuit_id IN ({}) \
+         ORDER BY circuit_id, id DESC",
+        ids.join(",")
+    ))?;
+    let all_runs: Vec<AutopilotCircuitRun> = stmt
+        .query_map([], |row| {
+            Ok(AutopilotCircuitRun {
+                id: row.get(0)?,
+                circuit_id: row.get(1)?,
+                mesh_id: row.get(2)?,
+                trigger_identity: row.get(3)?,
+                state: row.get(4)?,
+                context_json: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?
+        .collect::<SqlResult<_>>()?;
+
+    let mut out = Vec::with_capacity(circuits.len());
+    for circuit in circuits {
+        let runs: Vec<AutopilotCircuitRun> = all_runs
+            .iter()
+            .filter(|r| r.circuit_id == circuit.id)
+            .take(runs_per_circuit.max(0) as usize)
+            .cloned()
+            .collect();
+        let mut ledgers = Vec::with_capacity(runs.len());
+        for run in runs {
+            let mut stmt = db.prepare(
+                "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
+                        outcome, error_message, started_at, completed_at \
+                 FROM autopilot_circuit_run_steps WHERE run_id = ?1 ORDER BY id",
+            )?;
+            let steps = stmt
+                .query_map(params![run.id], map_step_row)?
+                .collect::<SqlResult<_>>()?;
+            ledgers.push(CircuitRunLedger { run, steps });
+        }
+        out.push((circuit, ledgers));
+    }
+    Ok(out)
+}
+
 pub fn set_autopilot_circuit_enabled(id: i64, enabled: bool) -> SqlResult<()> {
     let db = super::get().lock().unwrap();
     db.execute(
@@ -92,10 +165,36 @@ pub fn set_autopilot_circuit_enabled(id: i64, enabled: bool) -> SqlResult<()> {
     Ok(())
 }
 
+/// Delete one circuit and ALL its descendants (runs, steps) in one
+/// transaction. Explicit child deletes even though the schema declares
+/// `ON DELETE CASCADE`: enforcement depends on the connection's
+/// `foreign_keys` pragma, which is on for the bundled SQLite build but
+/// off-by-default for a system-libsqlite link — the same defensive rule
+/// `delete_mesh` follows for `warm_worktrees`.
 pub fn delete_autopilot_circuit(id: i64) -> SqlResult<()> {
-    let db = super::get().lock().unwrap();
-    // Runs/steps cascade via the FK ON DELETE clauses.
-    db.execute("DELETE FROM autopilot_circuits WHERE id = ?1", params![id])?;
+    let mut db = super::get().lock().unwrap();
+    let tx = db.transaction()?;
+    tx.execute(
+        "DELETE FROM autopilot_circuit_run_steps WHERE run_id IN \
+             (SELECT id FROM autopilot_circuit_runs WHERE circuit_id = ?1)",
+        params![id],
+    )?;
+    tx.execute("DELETE FROM autopilot_circuit_runs WHERE circuit_id = ?1", params![id])?;
+    tx.execute("DELETE FROM autopilot_circuits WHERE id = ?1", params![id])?;
+    tx.commit()
+}
+
+/// Delete every circuit (and its runs/steps) belonging to a mesh.
+/// Called from [`super::delete_mesh`] inside ITS mutex acquisition —
+/// `_inner(&Connection)` discipline, no second lock.
+pub(crate) fn delete_circuits_for_mesh_inner(conn: &Connection, mesh_id: i64) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM autopilot_circuit_run_steps WHERE run_id IN \
+             (SELECT id FROM autopilot_circuit_runs WHERE mesh_id = ?1)",
+        params![mesh_id],
+    )?;
+    conn.execute("DELETE FROM autopilot_circuit_runs WHERE mesh_id = ?1", params![mesh_id])?;
+    conn.execute("DELETE FROM autopilot_circuits WHERE mesh_id = ?1", params![mesh_id])?;
     Ok(())
 }
 
@@ -237,10 +336,12 @@ pub struct CircuitStepOp {
     pub agent_node_id: Option<i64>,
 }
 
-/// The engine's atomic commit point. Applies an optional run-state +
-/// context update and any number of step upserts in ONE transaction on
+/// The engine's atomic commit point. Applies an optional run-state and/or
+/// context update plus any number of step upserts in ONE transaction on
 /// ONE mutex acquisition, so a crash mid-apply can never leave a
-/// half-applied stepper decision behind.
+/// half-applied stepper decision behind. A `context_json` without a
+/// `run_state` still persists (the worker's run-id seeding rides any
+/// other write).
 ///
 /// Step rows are upserted by `(run_id, node_id)` (UNIQUE constraint);
 /// insert stamps `started_at`, terminal statuses stamp `completed_at`.
@@ -252,13 +353,24 @@ pub fn commit_circuit_advance(
 ) -> SqlResult<()> {
     let mut db = super::get().lock().unwrap();
     let tx = db.transaction()?;
-    if let Some(state) = run_state {
-        tx.execute(
-            "UPDATE autopilot_circuit_runs \
-             SET state = ?2, context_json = COALESCE(?3, context_json), updated_at = datetime('now') \
-             WHERE id = ?1",
-            params![run_id, state, context_json],
-        )?;
+    match (run_state, context_json) {
+        (Some(state), ctx) => {
+            tx.execute(
+                "UPDATE autopilot_circuit_runs \
+                 SET state = ?2, context_json = COALESCE(?3, context_json), updated_at = datetime('now') \
+                 WHERE id = ?1",
+                params![run_id, state, ctx],
+            )?;
+        }
+        (None, Some(ctx)) => {
+            tx.execute(
+                "UPDATE autopilot_circuit_runs \
+                 SET context_json = ?2, updated_at = datetime('now') \
+                 WHERE id = ?1",
+                params![run_id, ctx],
+            )?;
+        }
+        (None, None) => {}
     }
     for op in step_ops {
         let outcome_val = op.outcome.clone().flatten();

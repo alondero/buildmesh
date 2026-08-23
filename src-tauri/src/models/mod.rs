@@ -1036,7 +1036,7 @@ pub struct AutopilotCircuitRun {
 }
 
 /// One Circuit Step — a single circuit node's execution within a run.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "AutopilotCircuitRunStep.ts")]
 pub struct AutopilotCircuitRunStep {
     #[ts(as = "i32")]

@@ -25,6 +25,38 @@ pub fn list_circuits(mesh_id: i64) -> Result<Vec<AutopilotCircuit>, String> {
     crate::db::list_autopilot_circuits(mesh_id).map_err(|e| e.to_string())
 }
 
+/// One circuit plus its recent run ledger — the Probe tab's load unit.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitWithRuns.ts")]
+pub struct CircuitWithRuns {
+    pub circuit: AutopilotCircuit,
+    pub runs: Vec<CircuitRunDetail>,
+}
+
+/// Batched single-IPC load for the Circuits Probe tab: every circuit on
+/// the mesh with up to `limit` newest runs each (steps included), one
+/// command instead of N+1 round-trips.
+#[command]
+pub fn list_circuits_with_runs(
+    mesh_id: i64,
+    limit: Option<i64>,
+) -> Result<Vec<CircuitWithRuns>, String> {
+    let limit = limit.unwrap_or(10).clamp(1, 100);
+    crate::db::list_circuits_with_recent_runs(mesh_id, limit)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(circuit, ledgers)| CircuitWithRuns {
+                    circuit,
+                    runs: ledgers
+                        .into_iter()
+                        .map(|l| CircuitRunDetail { run: l.run, steps: l.steps })
+                        .collect(),
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// Create a circuit with the canonical walking-skeleton blueprint:
 /// Manual trigger → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify.
 #[command]
@@ -59,6 +91,11 @@ pub fn delete_circuit(circuit_id: i64) -> Result<(), String> {
 /// Trigger Now: mint a fresh `pending` run with a `manual:<unix-ms>`
 /// dedupe identity, seed its `circuit.*` template context, and wake the
 /// worker so it starts within milliseconds. Returns the new run id.
+///
+/// One lock acquisition: the row is inserted with its base context in a
+/// single statement. `circuit.run_id` can't be known before the insert,
+/// so the worker tops it up on the first pass through its own atomic
+/// commit (`drive_run`'s context seeding).
 #[command]
 pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     let circuit = crate::db::get_autopilot_circuit(circuit_id)
@@ -74,8 +111,6 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
             .unwrap_or_default()
             .as_millis()
     );
-    // Context first without run_id (the row doesn't exist yet), then a
-    // second write stamps `circuit.run_id` once the row id is known.
     let mut context = crate::autopilot::circuit::context::CircuitContext::new();
     context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
     let run_id = crate::db::create_circuit_run(
@@ -85,9 +120,6 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
         &context.to_json()?,
     )
     .map_err(|e| e.to_string())?;
-    context.with_run(run_id);
-    crate::db::commit_circuit_advance(run_id, None, Some(&context.to_json()?), &[])
-        .map_err(|e| e.to_string())?;
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: manual trigger for circuit {} → run {}", circuit_id, run_id);
     Ok(run_id)

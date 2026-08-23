@@ -20,20 +20,13 @@ import { formatError } from '../../lib/errorUtils';
 import {
   createCircuit,
   deleteCircuit,
-  listCircuitRuns,
-  listCircuits,
+  listCircuitsWithRuns,
   setCircuitEnabled,
   triggerCircuitNow,
-  type AutopilotCircuit,
-  type CircuitRunDetail,
+  type CircuitWithRuns,
 } from '../../lib/tauri';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { EmptyState } from '../shared/Spinner';
-
-interface CircuitWithRuns {
-  circuit: AutopilotCircuit;
-  runs: CircuitRunDetail[];
-}
 
 /** Tailwind token classes for the ledger's run/step status vocabulary. */
 function statusClass(status: string): string {
@@ -69,14 +62,9 @@ export function CircuitsProbeTab() {
       return;
     }
     try {
-      const circuits = await listCircuits(activeMeshId);
-      const withRuns = await Promise.all(
-        circuits.map(async (circuit) => ({
-          circuit,
-          runs: await listCircuitRuns(circuit.id, 10).catch(() => []),
-        })),
-      );
-      setRows(withRuns);
+      // One batched IPC: circuits with their recent run ledgers.
+      const rows = await listCircuitsWithRuns(activeMeshId, 10);
+      setRows(rows);
       setLoadError(null);
     } catch (err) {
       console.error('Failed to load circuits:', err);
@@ -232,6 +220,19 @@ export function CircuitsProbeTab() {
                           ? steps.map((s) => `${s.node_id}:${s.status}`).join(' → ')
                           : 'no steps'}
                       </span>
+                      {/* Failure detail — first errored step surfaces its message. */}
+                      {(() => {
+                        const failed = steps.find((s) => s.error_message);
+                        return failed ? (
+                          <span
+                            className="text-status-error truncate"
+                            data-testid={`run-error-${run.id}`}
+                            title={failed.error_message ?? ''}
+                          >
+                            ⚠ {failed.error_message}
+                          </span>
+                        ) : null;
+                      })()}
                     </li>
                   ))}
                 </ul>

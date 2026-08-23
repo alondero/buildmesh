@@ -113,12 +113,17 @@ fn drive_run(
     active: &db::ActiveCircuitRun,
 ) -> Result<(), String> {
     let graph = CircuitGraph::from_json(&active.circuit_graph_json)?;
-    let context = CircuitContext::from_json(&active.run.context_json)?;
+    let mut context = CircuitContext::from_json(&active.run.context_json)?;
+    // Older runs (and the pre-seeding window) may lack `circuit.run_id`;
+    // top it up on the first pass and persist through the normal commit.
+    if context.get("circuit.run_id") != Some(active.run.id.to_string().as_str()) {
+        context.with_run(active.run.id);
+    }
     let mut view = RunView {
         run_id: active.run.id,
         graph,
         state: RunState::from_db_str(&active.run.state),
-        context,
+        context: context.clone(),
         steps: load_steps(active.run.id)?,
     };
 
@@ -126,7 +131,10 @@ fn drive_run(
         let transition = advance(&mut view, &event);
 
         // Commit FIRST (atomically), then execute effects — a crash
-        // after the commit is repaired by observation next pass.
+        // after the commit is repaired by observation next pass. The
+        // (possibly run_id-topped-up) context rides along with every
+        // commit so the seeding above lands whenever anything else
+        // writes; a pass with no commits simply re-seeds next time.
         if !transition.step_writes.is_empty() || transition.run_state_changed {
             let ops = transition
                 .step_writes
@@ -144,11 +152,16 @@ fn drive_run(
             } else {
                 None
             };
-            db::commit_circuit_advance(active.run.id, run_state, None, &ops)
-                .map_err(|e| format!("commit failed: {}", e))?;
+            db::commit_circuit_advance(
+                active.run.id,
+                run_state,
+                Some(&view.context.to_json()?),
+                &ops,
+            )
+            .map_err(|e| format!("commit failed: {}", e))?;
         }
 
-        if let Err(e) = execute_effects(app, active.run.id, active.run.mesh_id, &view, &transition.effects) {
+        if let Err(e) = execute_effects(app, active.run.id, active.run.mesh_id, &mut view, &transition.effects) {
             // An effect that fails synchronously (e.g. the spawn row
             // creation) must not leave its step Running forever — the
             // observation loop has nothing to observe and would wedge
@@ -184,6 +197,7 @@ fn drive_run(
                 &ops,
             )
             .map_err(|commit_err| format!("effect-failure commit also failed: {}", commit_err))?;
+            view.state = RunState::Failed;
             let _ = app.emit(
                 "circuit-run-updated",
                 CircuitRunUpdatedPayload {
@@ -193,8 +207,10 @@ fn drive_run(
             );
         }
 
-        if transition.run_state_changed && matches!(view.state, RunState::Completed | RunState::Failed)
-        {
+        // Live ledger: every step transition or state change refreshes
+        // the Probe tab, not just terminal ones — otherwise a long agent
+        // run renders as a frozen list until it finishes.
+        if !transition.step_writes.is_empty() || transition.run_state_changed {
             let _ = app.emit(
                 "circuit-run-updated",
                 CircuitRunUpdatedPayload {
@@ -335,12 +351,16 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     events
 }
 
-/// Execute one transition's effects against the real world.
+/// Execute one transition's effects against the real world. Takes the
+/// view mutably: a spawn attaches its new agent node id to the in-memory
+/// step (and the DB) so later effects in the same pass — and the
+/// observation loop next pass — resolve targets from the view instead of
+/// re-querying SQLite.
 fn execute_effects(
     app: &AppHandle,
     run_id: i64,
     mesh_id: i64,
-    view: &RunView,
+    view: &mut RunView,
     effects: &[crate::autopilot::circuit::stepper::Effect],
 ) -> Result<(), String> {
     use crate::autopilot::circuit::stepper::Effect;
@@ -352,8 +372,7 @@ fn execute_effects(
             Effect::InjectPty { prompt, .. } => {
                 // Target = the run's most recent piloted agent (the
                 // linear walking-skeleton contract).
-                let target = latest_committed_agent_node_id(run_id)?;
-                match target {
+                match view.latest_agent_node_id() {
                     Some(target) => {
                         crate::autopilot::pipeline::write_prompt_to_pty(target, prompt, app)
                             .map_err(|e| format!("PTY injection failed: {}", e))?;
@@ -370,7 +389,7 @@ fn execute_effects(
                 }
             }
             Effect::SetNodeStatus { status, .. } => {
-                if let Some(agent_node_id) = latest_committed_agent_node_id(run_id)? {
+                if let Some(agent_node_id) = view.latest_agent_node_id() {
                     let kind = SessionStatus::from_db_str(status);
                     db::update_agent_node_status(agent_node_id, kind)
                         .map_err(|e| format!("status write failed: {}", e))?;
@@ -397,7 +416,7 @@ fn spawn_step_agent(
     app: &AppHandle,
     run_id: i64,
     mesh_id: i64,
-    view: &RunView,
+    view: &mut RunView,
     node_id: &str,
 ) -> Result<(), String> {
     use crate::agent::spawn::{SpawnIntent, SpawnRequest};
@@ -438,6 +457,10 @@ fn spawn_step_agent(
 
     db::set_circuit_step_agent_node(run_id, node_id, node.id)
         .map_err(|e| format!("could not attach agent to step: {}", e))?;
+    // Keep the in-memory view in sync with the committed row so later
+    // effects this pass (and the observation loop next pass) resolve the
+    // injection/status target from the view.
+    view.attach_agent_node(node_id, node.id);
 
     // Track output times for this piloted node (the PTY submit watcher
     // and future classifiers read them).
@@ -479,13 +502,6 @@ fn spawn_step_agent(
     });
 
     Ok(())
-}
-
-/// The most recent piloted agent across this run's committed steps.
-fn latest_committed_agent_node_id(run_id: i64) -> Result<Option<i64>, String> {
-    db::list_circuit_run_steps(run_id)
-        .map_err(|e| e.to_string())
-        .map(|steps| steps.into_iter().rev().find_map(|s| s.agent_node_id))
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]

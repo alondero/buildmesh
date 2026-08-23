@@ -210,7 +210,12 @@ fn step_upsert_never_duplicates_a_node_row() {
 }
 
 #[test]
-fn deleting_a_circuit_cascades_to_runs_and_steps() {
+fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
+    // The schema declares ON DELETE CASCADE, but enforcement depends on
+    // the connection's foreign_keys pragma (on for bundled SQLite,
+    // off for a system-libsqlite link) — so delete_autopilot_circuit
+    // removes descendants explicitly. This test must stay honest about
+    // WHICH mechanism it pins: the explicit deletes.
     let path = init_temp_db("cascade");
     let mesh = create_mesh("circuit-cascade-mesh", "/tmp/circuit-cascade").unwrap();
     let circuit = create_autopilot_circuit(mesh.id, "doomed", "", 1, "{}").unwrap();
@@ -254,6 +259,46 @@ fn deleting_a_circuit_cascades_to_runs_and_steps() {
     };
     assert_eq!(remaining_runs, 0, "runs must cascade with their circuit");
     assert_eq!(remaining_steps, 0, "steps must cascade with their run");
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
+    // delete_mesh must not leave circuit-ledger orphans behind.
+    let path = init_temp_db("mesh-cascade");
+    let mesh = create_mesh("circuit-mesh-cascade", "/tmp/circuit-mesh-cascade").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "doomed-with-mesh", "", 1, "{}").unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
+    commit_circuit_advance(
+        run_id,
+        None,
+        None,
+        &[CircuitStepOp {
+            node_id: "trigger".into(),
+            status: "completed".into(),
+            outcome: Some(Some("completed".into())),
+            error: None,
+            agent_node_id: None,
+        }],
+    )
+    .unwrap();
+
+    delete_mesh(mesh.id).unwrap();
+
+    assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty());
+    let remaining_runs: i64 = {
+        let conn = get().lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM autopilot_circuit_runs WHERE mesh_id = ?1",
+            params![mesh.id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(remaining_runs, 0);
 
     drop(get());
     std::fs::remove_file(&path).ok();

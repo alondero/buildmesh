@@ -21,7 +21,7 @@ import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircui
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';
 // Direct wrapper access for the IPC-contract block below.
 import {
-  listCircuits,
+  listCircuitsWithRuns,
   createCircuit,
   setCircuitEnabled,
   deleteCircuit,
@@ -100,9 +100,19 @@ function mockBackend(overrides: {
   circuits?: AutopilotCircuit[];
   runs?: CircuitRunDetail[];
 } = {}) {
+  const circuits = overrides.circuits ?? [CIRCUIT];
+  const runs = overrides.runs ?? [RUN_DONE, RUN_RUNNING];
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
-    if (cmd === 'list_circuits') return Promise.resolve(overrides.circuits ?? [CIRCUIT]);
-    if (cmd === 'list_circuit_runs') return Promise.resolve(overrides.runs ?? [RUN_DONE, RUN_RUNNING]);
+    if (cmd === 'list_circuits') return Promise.resolve(circuits);
+    if (cmd === 'list_circuit_runs') return Promise.resolve(runs);
+    if (cmd === 'list_circuits_with_runs') {
+      return Promise.resolve(
+        circuits.map((circuit) => ({
+          circuit,
+          runs: runs.filter((r) => r.run.circuit_id === circuit.id),
+        })),
+      );
+    }
     if (
       cmd === 'create_circuit' ||
       cmd === 'set_circuit_enabled' ||
@@ -143,9 +153,8 @@ describe('CircuitsProbeTab', () => {
     expect(screen.getByTestId('run-state-12').textContent).toBe('running');
     // Step chain renders as node:status pairs.
     expect(screen.getByText(/trigger:completed/)).toBeTruthy();
-    // The load pass read both commands with camelCase args.
-    expect(invoke).toHaveBeenCalledWith('list_circuits', { meshId: 42 });
-    expect(invoke).toHaveBeenCalledWith('list_circuit_runs', { circuitId: 7, limit: 10 });
+    // The load pass is ONE batched IPC with camelCase args.
+    expect(invoke).toHaveBeenCalledWith('list_circuits_with_runs', { meshId: 42, limit: 10 });
   });
 
   it('creates a circuit through the throwaway authoring form', async () => {
@@ -223,8 +232,8 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
   // each one's exact snake_case command name + camelCase arg keys so a
   // rename breaks here instead of at runtime ("command not found").
   it('every wrapper targets its registered Rust command with camelCase args', async () => {
-    await listCircuits(42);
-    expect(invoke).toHaveBeenLastCalledWith('list_circuits', { meshId: 42 });
+    await listCircuitsWithRuns(42, 10);
+    expect(invoke).toHaveBeenLastCalledWith('list_circuits_with_runs', { meshId: 42, limit: 10 });
 
     await createCircuit(42, 'n', 'd', 2, 'p');
     expect(invoke).toHaveBeenLastCalledWith('create_circuit', {

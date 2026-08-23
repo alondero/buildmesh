@@ -2447,6 +2447,9 @@ pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
 
 pub fn delete_mesh(id: i64) -> SqlResult<()> {
     let db = get().lock().unwrap();
+    // Autopilot Circuits ledger (spec #1205): explicit child deletes —
+    // same defensive rule as the warm pool below.
+    circuit::delete_circuits_for_mesh_inner(&db, id)?;
     db.execute("DELETE FROM agent_nodes WHERE mesh_id = ?1", params![id])?;
     // The `warm_worktrees.mesh_id` FK declares ON DELETE CASCADE, but SQLite
     // leaves foreign-key enforcement off by default (no `PRAGMA foreign_keys`

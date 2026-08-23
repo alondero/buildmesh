@@ -430,18 +430,30 @@ fn fail_step(run: &mut RunView, t: &mut Transition, node_id: &str, error: String
 }
 
 fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
-    if let Some(step) = run.step_mut(node_id) {
-        if step.status.is_terminal() {
-            return;
+    const CANCEL_REASON: &str = "piloted agent node was closed";
+    match run.step_mut(node_id) {
+        Some(step) => {
+            if step.status.is_terminal() {
+                return;
+            }
+            step.status = StepStatus::Cancelled;
+            step.outcome = Some(StepOutcome::Cancelled);
+            step.error = Some(CANCEL_REASON.to_string());
         }
-        step.status = StepStatus::Cancelled;
-        step.outcome = Some(StepOutcome::Cancelled);
+        // Symmetrical with fail_step: an absent step still gets a
+        // Cancelled StepView so run.steps and t.step_writes agree.
+        None => {
+            let mut step = StepView::new(node_id, StepStatus::Cancelled);
+            step.outcome = Some(StepOutcome::Cancelled);
+            step.error = Some(CANCEL_REASON.to_string());
+            run.steps.push(step);
+        }
     }
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
         status: StepStatus::Cancelled,
         outcome: Some(Some(StepOutcome::Cancelled)),
-        error: Some("piloted agent node was closed".to_string()),
+        error: Some(CANCEL_REASON.to_string()),
         agent_node_id: None,
     });
     run.state = RunState::Failed;
@@ -493,40 +505,81 @@ fn e_satisfied_completed(edge: &super::model::CircuitEdge, run: &RunView) -> boo
 }
 
 /// Schedule every eligible node that has no step yet, respecting
-/// capacity. Queued (FIFO) steps promote first when capacity frees.
+/// capacity. Runs to a FIXPOINT: instant-completing steps (Notify,
+/// joins, SetNodeStatus) free their circuit slot again immediately, so a
+/// chain of plain actions executes entirely within this one tick — no
+/// 2s-per-node penalty. Queued (FIFO) steps promote first; agent spawns
+/// occupy their slot until the piloted node finishes.
 fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
     let mut circuit_free = capacity.circuit_free_slots;
     let mut mesh_agent_free = capacity.mesh_agent_free_slots;
 
-    // FIFO promotion of queued steps first (the view preserves ledger
-    // insertion order).
-    let queued: Vec<String> = run
-        .steps
-        .iter()
-        .filter(|s| s.status == StepStatus::Queued)
-        .map(|s| s.node_id.clone())
-        .collect();
-    for node_id in queued {
-        let kind = match run.graph.node(&node_id) {
-            Some(n) => n.kind.clone(),
-            None => continue,
-        };
-        try_start(run, t, &node_id, &kind, &mut circuit_free, &mut mesh_agent_free);
-    }
+    loop {
+        // Fail-fast: stop scheduling the moment anything failed.
+        if run.state != RunState::Running {
+            return;
+        }
+        let mut progressed = false;
 
-    for (node_id, kind) in collect_eligible(run) {
-        let needs_agent_slot = consumes_agent_slot(&kind);
-        let agent_fits = !needs_agent_slot || mesh_agent_free > 0;
-        if circuit_free <= 0 || !agent_fits {
-            set_step(run, t, &node_id, StepStatus::Queued);
-            continue;
+        // FIFO promotion of queued steps first (the view preserves
+        // ledger insertion order).
+        let queued: Vec<String> = run
+            .steps
+            .iter()
+            .filter(|s| s.status == StepStatus::Queued)
+            .map(|s| s.node_id.clone())
+            .collect();
+        for node_id in queued {
+            let kind = match run.graph.node(&node_id) {
+                Some(n) => n.kind.clone(),
+                None => continue,
+            };
+            let started = try_start(run, t, &node_id, &kind, &mut circuit_free, &mut mesh_agent_free);
+            progressed |= started;
+            if started && step_completed_instantly(run, &node_id) {
+                // Freed its slot again — but its successors are picked
+                // up on the next fixpoint pass.
+                circuit_free += 1;
+                if consumes_agent_slot(&kind) {
+                    mesh_agent_free += 1;
+                }
+            }
         }
-        start_step(run, t, &node_id, &kind);
-        circuit_free -= 1;
-        if needs_agent_slot {
-            mesh_agent_free -= 1;
+
+        for (node_id, kind) in collect_eligible(run) {
+            if run.state != RunState::Running {
+                break;
+            }
+            let needs_agent_slot = consumes_agent_slot(&kind);
+            let agent_fits = !needs_agent_slot || mesh_agent_free > 0;
+            if circuit_free <= 0 || !agent_fits {
+                set_step(run, t, &node_id, StepStatus::Queued);
+                continue;
+            }
+            start_step(run, t, &node_id, &kind);
+            progressed = true;
+            if step_completed_instantly(run, &node_id) {
+                // Instant completion: the slot is free again within this
+                // same pass, so don't charge it.
+            } else {
+                circuit_free -= 1;
+                if needs_agent_slot {
+                    mesh_agent_free -= 1;
+                }
+            }
+        }
+
+        if !progressed {
+            return;
         }
     }
+}
+
+/// Did this step reach a terminal status during the start call? Instant
+/// actions (Notify, SetNodeStatus, joins, trigger roots) complete inside
+/// [`start_step`]; spawns/injects stay Running.
+fn step_completed_instantly(run: &RunView, node_id: &str) -> bool {
+    run.step(node_id).map(|s| s.status.is_terminal()).unwrap_or(false)
 }
 
 /// Nodes with no step yet whose incoming edges are all satisfied, in
@@ -1290,6 +1343,64 @@ mod tests {
         let t = advance(&mut run, &tick(9, 9));
         assert!(t.is_empty());
         assert_eq!(run.state, RunState::Pending);
+    }
+
+    #[test]
+    fn instant_action_chain_executes_entirely_within_one_tick() {
+        // Trigger → notify-a → notify-b → notify-c: every link completes
+        // instantly, so one Tick must run the whole chain — not one node
+        // per 2-second tick.
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode { id: "a".into(), kind: CircuitNodeKind::Notify { message: "a".into() } },
+                    CircuitNode { id: "b".into(), kind: CircuitNodeKind::Notify { message: "b".into() } },
+                    CircuitNode { id: "c".into(), kind: CircuitNodeKind::Notify { message: "c".into() } },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "a".into(), condition: Default::default() },
+                    CircuitEdge { from: "a".into(), to: "b".into(), condition: Default::default() },
+                    CircuitEdge { from: "b".into(), to: "c".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        let t = advance(&mut run, &tick(1, 1));
+        for n in ["a", "b", "c"] {
+            assert_eq!(status_of(&run, n), StepStatus::Completed, "node {n} must finish in the same tick");
+        }
+        assert_eq!(run.state, RunState::Completed);
+        assert_eq!(
+            t.effects,
+            vec![
+                Effect::Notify { message: "a".to_string() },
+                Effect::Notify { message: "b".to_string() },
+                Effect::Notify { message: "c".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn instant_chain_respects_the_concurrency_limit_between_instant_completions() {
+        // limit=1 with a two-node instant chain: a starts+completes (slot
+        // freed), b then fits in the same tick — but a SPAWN between them
+        // must still gate: trigger → spawn → notify runs spawn first and
+        // holds the slot; notify waits for the agent event.
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        let t = advance(&mut run, &tick(1, 1));
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+        assert!(run.step("notify").is_none(), "notify must wait while the spawn holds the only slot");
+        assert!(matches!(
+            t.effects.first(),
+            Some(Effect::SpawnAgentNode { .. })
+        ));
     }
 
     #[test]
