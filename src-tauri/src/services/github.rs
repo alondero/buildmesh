@@ -58,7 +58,17 @@ impl From<reqwest::Error> for GitHubError {
 pub struct Issue {
     pub number: i64,
     pub title: String,
-    #[serde(default)]
+    /// Issue body (`body` in the GitHub API). GitHub returns `null` for
+    /// issues created without a description (e.g. alondero/buildmesh #1210
+    /// has `body: null`). `#[serde(default)]` only rescues a *missing* key,
+    /// so the field also layers `deserialize_with = "deserialize_opt_string"`
+    /// to collapse the `null` value to `""`. Without this, a single
+    /// bodyless issue poisons the entire `SearchResult { items }` response
+    /// and `get_repo_issues` rejects with
+    /// `HTTP error: error decoding response body`. Pinned by
+    /// `issue_deserialises_with_null_body_defaults_to_empty` and the
+    /// end-to-end `issue_search_result_with_mixed_null_body_items_parses_end_to_end`.
+    #[serde(default, deserialize_with = "deserialize_opt_string")]
     pub body: String,
     /// Absolute GitHub URL for the issue (`html_url` in the API response).
     /// The mobile "View ↗" link opens this directly; the desktop modal
@@ -90,6 +100,20 @@ pub struct Issue {
     /// `author` for serialisation.
     #[serde(default, alias = "user", deserialize_with = "deserialize_user_login")]
     pub author: String,
+}
+
+/// Tolerates both an *absent* key (rescued by `#[serde(default)]` on the
+/// field) and a present-but-`null` value. The latter is the gotcha: serde
+/// does NOT invoke `Default` when the key is present with a JSON `null`,
+/// so a per-field `deserialize_with` is required for any field that may
+/// arrive as `null`. `body` is the only such field today — GitHub emits
+/// `body: null` on issues opened without a description (issue #1210 in
+/// alondero/buildmesh).
+fn deserialize_opt_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Private GitHub wire shape for the `user` object on an issue/PR. We only need
@@ -1681,6 +1705,74 @@ mod tests {
         }"#;
         let result: Result<Issue, _> = serde_json::from_str(json);
         assert!(result.is_err(), "label entry without `name` must fail to parse");
+    }
+
+    #[test]
+    fn issue_deserialises_with_null_body_defaults_to_empty() {
+        // Pin for the alondero/buildmesh regression: issue #1210 was opened
+        // without a description, so GitHub returns `"body": null`. The probe
+        // panel must show the issue as a titled, body-less row rather than
+        // failing the entire `get_repo_issues` IPC with
+        // `HTTP error: error decoding response body`. `#[serde(default)]`
+        // alone is insufficient because it only rescues a *missing* key,
+        // not a present-but-null value; the field needs an explicit
+        // `Option<String>`-round-trip deserializer to tolerate `null`.
+        let json = r#"{
+            "number": 1210,
+            "title": "Ship parity — presets, master controls & legacy cutover",
+            "body": null,
+            "html_url": "https://github.com/alondero/buildmesh/issues/1210",
+            "state": "open",
+            "user": {"login": "alondero", "id": 1269060, "type": "User"},
+            "labels": [{"id": 1, "name": "needs-triage", "color": "0052CC", "default": false}]
+        }"#;
+        let issue: Issue = serde_json::from_str(json).expect("null body must default to empty");
+        assert_eq!(issue.number, 1210);
+        assert_eq!(issue.body, "", "body: null must default to empty string");
+        assert_eq!(issue.state, "open");
+        assert_eq!(issue.author, "alondero");
+    }
+
+    #[test]
+    fn issue_search_result_with_mixed_null_body_items_parses_end_to_end() {
+        // End-to-end through `SearchResult { items: Vec<Issue> }` — the
+        // exact deserialise path `list_issues_only` uses. Two items: the
+        // first is fully populated, the second mirrors alondero/buildmesh
+        // issue #1210 (body: null). Without the null-tolerant field
+        // deserialiser on `body`, the second item poisons the whole batch
+        // and the surface to the UI reads as
+        // `Failed to load issues — HTTP error: error decoding response body`.
+        let json = r#"{
+            "total_count": 2,
+            "incomplete_results": false,
+            "items": [
+                {
+                    "number": 1212,
+                    "title": "Circuits walking skeleton",
+                    "body": "Follow-ups from #1206",
+                    "html_url": "https://github.com/alondero/buildmesh/issues/1212",
+                    "state": "open",
+                    "user": {"login": "alondero", "id": 1269060, "type": "User"},
+                    "labels": [{"id": 1, "name": "needs-triage", "color": "0052CC", "default": false}]
+                },
+                {
+                    "number": 1210,
+                    "title": "Ship parity — presets, master controls & legacy cutover",
+                    "body": null,
+                    "html_url": "https://github.com/alondero/buildmesh/issues/1210",
+                    "state": "open",
+                    "user": {"login": "alondero", "id": 1269060, "type": "User"},
+                    "labels": []
+                }
+            ]
+        }"#;
+        #[derive(Deserialize)]
+        struct SearchResult { items: Vec<Issue> }
+        let result: SearchResult = serde_json::from_str(json).expect("search result with null body must parse");
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.items[0].body, "Follow-ups from #1206");
+        assert_eq!(result.items[1].body, "");
+        assert_eq!(result.items[1].number, 1210);
     }
 
     #[test]

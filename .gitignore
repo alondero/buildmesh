@@ -87,3 +87,6 @@ coverage/
 /*.exe
 /*.pdb
 .altitude-findings.json
+
+# diagnostic scratch files dropped by ad-hoc Bash commands
+full_diff.txt
