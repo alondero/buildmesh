@@ -83,6 +83,48 @@ pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>>
     rows.collect()
 }
 
+/// Every enabled circuit across ALL meshes — the GitHub poll and
+/// interval trigger passes' input (issue #1208). Circuits are not
+/// mesh-scoped at the trigger layer: a circuit carries its own mesh_id,
+/// so one query serves the whole worker pass.
+pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
+    let db = super::get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
+                graph_json, created_at, updated_at \
+         FROM autopilot_circuits WHERE enabled = 1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], map_circuit_row)?;
+    rows.collect()
+}
+
+/// `created_at` of the circuit's newest run — the interval trigger's
+/// cooldown anchor (issue #1208). `None` when the circuit never fired;
+/// SQLite's datetime strings sort lexicographically, so MAX is correct.
+/// Deliberately trigger-kind agnostic: ANY run (manual Trigger Now
+/// included) restarts the cadence, because the user just intervened.
+pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String>> {
+    let db = super::get().lock().unwrap();
+    db.query_row(
+        "SELECT MAX(created_at) FROM autopilot_circuit_runs WHERE circuit_id = ?1",
+        params![circuit_id],
+        |row| row.get(0),
+    )
+}
+
+/// Every `trigger_identity` ever recorded for this circuit — the GitHub
+/// poll pass's pre-filter set (issue #1208). The schema's UNIQUE
+/// constraint stays the authoritative backstop; this just keeps the pass
+/// from rewriting identical rows every cycle.
+pub fn list_circuit_trigger_identities(circuit_id: i64) -> SqlResult<Vec<String>> {
+    let db = super::get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT trigger_identity FROM autopilot_circuit_runs WHERE circuit_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![circuit_id], |row| row.get(0))?;
+    rows.collect()
+}
+
 /// One run plus its step ledger, as stored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CircuitRunLedger {

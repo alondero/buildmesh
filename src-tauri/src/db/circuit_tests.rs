@@ -480,6 +480,68 @@ fn duplicate_trigger_identity_replays_the_existing_run() {
 }
 
 // ---------------------------------------------------------------------------
+// Trigger-pass inputs (issue #1208): enabled circuits across meshes and
+// the interval cooldown anchor.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
+    let path = init_temp_db("enabled");
+    let mesh_a = create_mesh("circuit-enabled-a", "/tmp/circuit-enabled-a").unwrap();
+    let mesh_b = create_mesh("circuit-enabled-b", "/tmp/circuit-enabled-b").unwrap();
+    let on_a = create_autopilot_circuit(mesh_a.id, "on-a", "", 1, "{}").unwrap();
+    let on_b = create_autopilot_circuit(mesh_b.id, "on-b", "", 1, "{}").unwrap();
+    let off = create_autopilot_circuit(mesh_a.id, "off", "", 1, "{}").unwrap();
+    set_autopilot_circuit_enabled(off.id, false).unwrap();
+
+    // The shared process-global DB holds other tests' circuits — scope
+    // to the ids this test created.
+    let listed: Vec<i64> = list_enabled_circuits()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.id)
+        .filter(|id| [on_a.id, on_b.id, off.id].contains(id))
+        .collect();
+    assert_eq!(listed.len(), 2, "disabled circuits must not appear");
+    assert!(listed.contains(&on_a.id) && listed.contains(&on_b.id), "listing spans meshes");
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
+    let path = init_temp_db("cooldown");
+    let mesh = create_mesh("circuit-cooldown-mesh", "/tmp/circuit-cooldown").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "paced", "", 1, "{}").unwrap();
+
+    assert!(
+        latest_circuit_run_created_at(circuit.id).unwrap().is_none(),
+        "a never-fired circuit has no cooldown anchor"
+    );
+
+    create_circuit_run(circuit.id, mesh.id, "interval:1000", "{}").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    create_circuit_run(circuit.id, mesh.id, "interval:2500", "{}").unwrap();
+
+    let latest = latest_circuit_run_created_at(circuit.id).unwrap().unwrap();
+    // MAX(created_at) must be the SECOND run's timestamp — the sleep
+    // guarantees SQLite's datetime strings differ and sort correctly.
+    let runs = list_circuit_runs(circuit.id, 10).unwrap();
+    let newest = runs.iter().map(|r| r.created_at.as_str()).max().unwrap().to_string();
+    assert_eq!(latest, newest);
+
+    // The identity set the GitHub poll pass pre-filters against.
+    let identities = list_circuit_trigger_identities(circuit.id).unwrap();
+    assert_eq!(identities.len(), 2);
+    assert!(identities.contains(&"interval:1000".to_string()));
+    assert!(identities.contains(&"interval:2500".to_string()));
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
 // Migration pin: v33 → v34 materialises the three circuit tables via the
 // new AlwaysStep safety net (the warm_worktrees precedent).
 // ---------------------------------------------------------------------------

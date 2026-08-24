@@ -62,6 +62,50 @@ impl CircuitContext {
         self
     }
 
+    /// Populate the `issue.*` namespace for a GitHub-triggered run
+    /// (milestone 3, issue #1208). Called once at run creation so every
+    /// later template resolution (`{{issue.title}}` in an InjectPty
+    /// prompt, a Notify message, or a GithubAction comment) sees the
+    /// trigger's values.
+    pub fn with_issue(
+        &mut self,
+        number: i64,
+        title: &str,
+        body: &str,
+        author: &str,
+        url: &str,
+        labels: &[String],
+    ) -> &mut Self {
+        self.set("issue.number", number.to_string());
+        self.set("issue.title", title);
+        self.set("issue.body", body);
+        self.set("issue.author", author);
+        self.set("issue.url", url);
+        self.set("issue.labels", labels.join(", "));
+        self
+    }
+
+    /// Populate the `pr.*` namespace for a GitHub PR-triggered run.
+    pub fn with_pr(
+        &mut self,
+        number: i64,
+        title: &str,
+        body: &str,
+        author: &str,
+        url: &str,
+        head_ref: &str,
+        labels: &[String],
+    ) -> &mut Self {
+        self.set("pr.number", number.to_string());
+        self.set("pr.title", title);
+        self.set("pr.body", body);
+        self.set("pr.author", author);
+        self.set("pr.url", url);
+        self.set("pr.head_ref", head_ref);
+        self.set("pr.labels", labels.join(", "));
+        self
+    }
+
     /// Serialise to the `context_json` column form.
     pub fn to_json(&self) -> Result<String, String> {
         serde_json::to_string(&self.vars).map_err(|e| format!("could not encode context: {}", e))
@@ -161,6 +205,63 @@ mod tests {
     fn node_namespace_carries_the_executing_circuit_node() {
         let ctx = sample_context();
         assert_eq!(ctx.resolve("[{{node.id}}]"), "[spawn]");
+    }
+
+    #[test]
+    fn issue_namespace_resolves_every_documented_field() {
+        let mut ctx = CircuitContext::new();
+        ctx.with_issue(
+            1208,
+            "React to the world",
+            "the body",
+            "alondero",
+            "https://github.com/alondero/buildmesh/issues/1208",
+            &["ready-for-agent".to_string(), "bug".to_string()],
+        );
+        assert_eq!(ctx.resolve("{{issue.number}}"), "1208");
+        assert_eq!(ctx.resolve("{{issue.title}}"), "React to the world");
+        assert_eq!(ctx.resolve("{{issue.body}}"), "the body");
+        assert_eq!(ctx.resolve("{{issue.author}}"), "alondero");
+        assert_eq!(
+            ctx.resolve("{{issue.url}}"),
+            "https://github.com/alondero/buildmesh/issues/1208"
+        );
+        assert_eq!(ctx.resolve("{{issue.labels}}"), "ready-for-agent, bug");
+    }
+
+    #[test]
+    fn pr_namespace_resolves_every_documented_field() {
+        let mut ctx = CircuitContext::new();
+        ctx.with_pr(
+            1213,
+            "walking skeleton",
+            "",
+            "octocat",
+            "https://github.com/alondero/buildmesh/pull/1213",
+            "feat/circuits",
+            &[],
+        );
+        assert_eq!(ctx.resolve("{{pr.number}}"), "1213");
+        assert_eq!(ctx.resolve("{{pr.head_ref}}"), "feat/circuits");
+        assert_eq!(ctx.resolve("{{pr.title}}"), "walking skeleton");
+        assert_eq!(ctx.resolve("{{pr.author}}"), "octocat");
+        // An empty label list interpolates empty, not the literal "[]".
+        assert_eq!(ctx.resolve("[{{pr.labels}}]"), "[]");
+    }
+
+    #[test]
+    fn issue_and_pr_namespaces_survive_the_context_json_round_trip() {
+        // The context is persisted at run creation and re-read by every
+        // worker pass — the trigger's values must survive that round trip
+        // so `{{issue.title}}` resolves identically hours later.
+        let mut ctx = CircuitContext::new();
+        ctx.with_circuit(7, "nightly", 3);
+        ctx.with_run(42);
+        ctx.with_issue(9, "t", "b", "a", "u", &["l".to_string()]);
+        ctx.with_pr(10, "pt", "", "pa", "pu", "head", &[]);
+        let back = CircuitContext::from_json(&ctx.to_json().unwrap()).unwrap();
+        assert_eq!(back, ctx);
+        assert_eq!(back.resolve("fix {{issue.number}} via {{pr.head_ref}}"), "fix 9 via head");
     }
 
     #[test]

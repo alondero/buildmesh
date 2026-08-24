@@ -31,9 +31,13 @@
 //! since vanished maps to `AgentLost`, and an effect that fails
 //! synchronously fails its step immediately (a Running step with no
 //! attached agent would otherwise wedge the run — nothing observes it).
-//! The one remaining gap, a process crash inside the milliseconds
-//! between commit and stage-1 attach, is startup-reconciliation scope
-//! (later milestone).
+//! The one remaining gap — a process crash inside the milliseconds
+//! between commit and stage-1 attach, invisible to observation — is
+//! closed by [`startup_reconcile_pass`], which runs once per app launch
+//! (milestone 3, issue #1208) and evaluates `running` runs against live
+//! process and git state (resume / fail). The [`lost_turn_watchdog_pass`]
+//! recovers quiet piloted nodes whose turn webhook was missed so
+//! multi-hour runs self-heal.
 
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -94,15 +98,21 @@ pub fn wake_circuit_worker() {
 }
 
 /// Start the dedicated circuits worker thread. Called once from Tauri
-/// `setup`, alongside the legacy autopilot worker.
+/// `setup`, alongside the legacy autopilot worker. Startup order:
+/// reconcile → loop (interval pass, GitHub poll pass, drive pass,
+/// lost-turn watchdog).
 pub fn start_circuit_worker(app: AppHandle) {
     std::thread::Builder::new()
         .name("circuit-worker".to_string())
         .spawn(move || {
             std::thread::sleep(STARTUP_DELAY);
+            startup_reconcile_pass(&app);
             let (lock, cvar) = &*WAKE;
             loop {
+                super::circuit_triggers::run_interval_pass();
+                super::circuit_triggers::maybe_poll_github();
                 run_pass(&app);
+                lost_turn_watchdog_pass(&app);
                 // Wait for the next tick OR an immediate wake, whichever
                 // first (`wait_timeout` returns either way).
                 let guard = lock.lock().unwrap();
@@ -200,7 +210,8 @@ fn drive_run(
                 .filter_map(|eff| match eff {
                     crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id }
                     | crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. }
-                    | crate::autopilot::circuit::stepper::Effect::SetNodeStatus { node_id, .. } => {
+                    | crate::autopilot::circuit::stepper::Effect::SetNodeStatus { node_id, .. }
+                    | crate::autopilot::circuit::stepper::Effect::CallGithub { node_id, .. } => {
                         Some(node_id.clone())
                     }
                     _ => None,
@@ -271,9 +282,12 @@ fn load_steps(run_id: i64) -> Result<Vec<StepView>, String> {
 fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> Vec<CircuitEvent> {
     let mut events = Vec::new();
 
-    // A pending manual run fires now (direct IPC dispatch path).
-    if view.state == RunState::Pending && active.run.trigger_identity.starts_with("manual:") {
-        events.push(CircuitEvent::ManualTriggered);
+    // A pending run fires now. Runs exist in Pending only because an
+    // actual trigger dispatch minted them — manual Trigger Now (milestone
+    // 1) or a freshly-ingested GitHub/interval trigger (milestone 3,
+    // `circuit_triggers`) — so the event is trigger-kind agnostic.
+    if view.state == RunState::Pending {
+        events.push(CircuitEvent::Triggered);
     }
 
     // Piloted-agent observation for running steps bound to agent nodes.
@@ -524,6 +538,124 @@ fn run_verification_command(mesh_path: &str, command: &str) -> bool {
     }
 }
 
+/// Perform one `CallGithub` effect (milestone 3, issue #1208): resolve
+/// the target repo from the mesh's `origin`, the target issue/PR number
+/// from the run's trigger context, and execute the mutation through the
+/// shared [`crate::services::github::GitHubClient`] seam. Templates are
+/// resolved here — node execution time — so a comment authored as
+/// `{{issue.title}}` interpolates the run's live context values.
+fn call_github_effect(
+    run_id: i64,
+    mesh_id: i64,
+    view: &RunView,
+    action: crate::autopilot::circuit::model::GithubActionKind,
+    label: Option<&str>,
+    comment: Option<&str>,
+) -> Result<(), String> {
+    use crate::autopilot::circuit::model::GithubActionKind;
+    use crate::services::github::GitHubClient;
+
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+
+    // The trigger source this run reacts to. A GithubAction without a
+    // GitHub trigger upstream has nothing to mutate — fail loudly rather
+    // than guessing.
+    let target = view
+        .context
+        .get("issue.number")
+        .and_then(|n| n.parse::<i64>().ok())
+        .map(|n| ("issue", n))
+        .or_else(|| {
+            view.context
+                .get("pr.number")
+                .and_then(|n| n.parse::<i64>().ok())
+                .map(|n| ("pr", n))
+        })
+        .ok_or_else(|| {
+            "GitHub action has no issue/pr context — the circuit needs a GitHub \
+             trigger upstream of this node"
+                .to_string()
+        })?;
+    let resolved_comment = comment.map(|c| view.context.resolve(c));
+
+    match action {
+        GithubActionKind::AddLabel => {
+            let label = label.ok_or_else(|| "AddLabel requires a label".to_string())?;
+            client
+                .add_issue_label(&owner, &repo, target.1, &view.context.resolve(label))
+                .map_err(|e| e.to_string())?;
+        }
+        GithubActionKind::RemoveLabel => {
+            let label = label.ok_or_else(|| "RemoveLabel requires a label".to_string())?;
+            client
+                .remove_issue_label(&owner, &repo, target.1, &view.context.resolve(label))
+                .map_err(|e| e.to_string())?;
+        }
+        GithubActionKind::PostComment => {
+            let body = resolved_comment
+                .filter(|c| !c.trim().is_empty())
+                .ok_or_else(|| "PostComment requires a non-empty comment template".to_string())?;
+            client
+                .add_issue_comment(&owner, &repo, target.1, &body)
+                .map_err(|e| e.to_string())?;
+        }
+        GithubActionKind::CloseIssue => {
+            if target.0 != "issue" {
+                return Err("CloseIssue requires an issue-triggered run".to_string());
+            }
+            client
+                .close_issue(&owner, &repo, target.1)
+                .map_err(|e| e.to_string())?;
+        }
+        GithubActionKind::OpenPr => {
+            let head = open_pr_head_branch(view)?;
+            let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
+            let title = view
+                .context
+                .get("issue.title")
+                .or_else(|| view.context.get("pr.title"))
+                .unwrap_or("Circuit run")
+                .to_string();
+            let body = resolved_comment.unwrap_or_default();
+            client
+                .create_pull_request(&owner, &repo, &title, &body, &head, &base)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tracing::info!(
+        "circuits: run {} executed GitHub {:?} on {}/{} #{}",
+        run_id,
+        action,
+        owner,
+        repo,
+        target.1
+    );
+    Ok(())
+}
+
+/// The head branch for a GithubAction OpenPr effect: the piloted agent's
+/// worktree branch. Circuit spawn steps cut branched worktrees, so the
+/// worktree name IS the branch; the *agent* is responsible for having
+/// committed and pushed it (the legacy wrap-up contract) — Buildmesh
+/// opens the PR, it does not push on the agent's behalf. A root-repo
+/// spawn (no worktree) cannot open a PR and fails loudly instead.
+fn open_pr_head_branch(view: &RunView) -> Result<String, String> {
+    let agent_node_id = view
+        .latest_agent_node_id()
+        .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
+    let node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
+    if !node.use_worktree {
+        return Err(
+            "OpenPr requires a worktree-backed agent (its commits have no branch)".to_string(),
+        );
+    }
+    node.worktree_name
+        .filter(|w| !w.trim().is_empty())
+        .ok_or_else(|| "the piloted agent has no worktree branch name".to_string())
+}
+
 /// Execute one transition's effects against the real world. Takes the
 /// view mutably: a spawn attaches its new agent node id to the in-memory
 /// step (and the DB) so later effects in the same pass — and the
@@ -576,6 +708,9 @@ fn execute_effects(
                         message: message.clone(),
                     },
                 );
+            }
+            Effect::CallGithub { action, label, comment, .. } => {
+                call_github_effect(run_id, mesh_id, view, *action, label.as_deref(), comment.as_deref())?;
             }
         }
     }
@@ -677,6 +812,245 @@ fn spawn_step_agent(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Startup reconciliation (milestone 3, issue #1208).
+//
+// Observation repairs most crash states by construction, but one wedge
+// survives it: a Running spawn step whose agent attach never landed
+// (process died between the stepper's commit and stage-1). Nothing in
+// the world maps to an event for that step, so it would sit Running
+// forever. The reconcile pass runs ONCE per launch — before the loop —
+// and resolves every running run against live process + git state.
+// ---------------------------------------------------------------------------
+
+/// What startup reconciliation decides for one Running spawn step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnReconciliation {
+    /// The step's world state is recoverable as-is (node exists, not
+    /// archived, worktree intact) — resume machinery / observation
+    /// carries on from here.
+    Leave,
+    /// The piloted agent is unrecoverable (row gone, archived, or its
+    /// git worktree directory vanished) — cancel the step, fail the run.
+    Lost,
+    /// The commit-crash gap: a Running spawn step with no attached agent.
+    /// There is nothing to observe or resume; fail the run loudly.
+    NeverAttached,
+}
+
+/// The slice of agent-node state the pure decision needs. Built by the
+/// impure wrapper so tests need no DB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReconcileNodeState {
+    archived: bool,
+    /// `Some(false)` = the node's worktree directory no longer exists on
+    /// disk (git-state check); `None` = root-repo spawn (no worktree to
+    /// lose) or path unreadable.
+    worktree_dir_exists: Option<bool>,
+}
+
+/// Pure core of [`startup_reconcile_pass`]: classify one Running spawn
+/// step observed at app launch.
+fn reconcile_spawn_step(
+    attached_agent: Option<i64>,
+    node: Option<ReconcileNodeState>,
+) -> SpawnReconciliation {
+    let Some(_agent_node_id) = attached_agent else {
+        return SpawnReconciliation::NeverAttached;
+    };
+    match node {
+        None => SpawnReconciliation::Lost,
+        Some(n) if n.archived => SpawnReconciliation::Lost,
+        Some(n) => match n.worktree_dir_exists {
+            Some(false) => SpawnReconciliation::Lost,
+            _ => SpawnReconciliation::Leave,
+        },
+    }
+}
+
+/// One-shot per-launch sweep over `running` circuit runs. Maps the
+/// spec's three verdicts (issue #1208) onto what observation leaves
+/// behind: `Leave` = **resume** (the node row is intact and auto-resume
+/// re-spawns it; observation then carries the run forward), `Lost` /
+/// `NeverAttached` = **fail**. There is deliberately no in-place
+/// "retry": re-running a half-attached spawn would double-spawn into a
+/// worktree whose state we can't verify, so an unrecoverable step fails
+/// loudly instead.
+pub fn startup_reconcile_pass(app: &AppHandle) {
+    let runs = match db::list_active_circuit_runs() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("circuits: startup reconcile could not list active runs: {}", e);
+            return;
+        }
+    };
+    for active in runs {
+        if active.run.state != "running" {
+            continue; // pending runs start via the normal trigger path
+        }
+        if !active.circuit_enabled {
+            continue; // parked mid-flight; re-enabled circuits resume normally
+        }
+        let graph = match CircuitGraph::from_json(&active.circuit_graph_json) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!("circuits: run {} unreadable graph_json: {}", active.run.id, e);
+                continue;
+            }
+        };
+        let steps = match load_steps(active.run.id) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("circuits: run {} step load failed: {}", active.run.id, e);
+                continue;
+            }
+        };
+        for step in steps.iter().filter(|s| s.status == StepStatus::Running) {
+            let Some(node) = graph.node(&step.node_id) else {
+                continue;
+            };
+            if !matches!(node.kind, CircuitNodeKind::SpawnAgentNode { .. }) {
+                // InjectPty steps re-fire AgentReady once auto-resume
+                // respawns the process; instant actions never persist as
+                // Running across a clean shutdown. Nothing to decide.
+                continue;
+            }
+            let node_state = step.agent_node_id.and_then(|id| {
+                db::get_agent_node_by_id(id).ok().map(|n| ReconcileNodeState {
+                    archived: n.status == SessionStatus::Archived,
+                    worktree_dir_exists: if n.use_worktree {
+                        Some(std::path::Path::new(&n.path).exists())
+                    } else {
+                        None
+                    },
+                })
+            });
+            match reconcile_spawn_step(step.agent_node_id, node_state) {
+                SpawnReconciliation::Leave => {}
+                SpawnReconciliation::Lost => {
+                    let reason =
+                        "piloted agent was lost while the app was offline".to_string();
+                    tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                    let _ = fail_run_step(app, &active.run.id, &step.node_id, "cancelled", &reason);
+                }
+                SpawnReconciliation::NeverAttached => {
+                    let reason = "the app shut down before the spawn attached an \
+                                  agent node — restarting the step is unsafe, \
+                                  failing the run"
+                        .to_string();
+                    tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                    let _ = fail_run_step(app, &active.run.id, &step.node_id, "failed", &reason);
+                }
+            }
+        }
+    }
+}
+
+/// Persist a terminal write for one step + flip the run Failed, then
+/// refresh the Probe tab. Shared by both reconcile verdicts.
+fn fail_run_step(
+    app: &AppHandle,
+    run_id: &i64,
+    node_id: &str,
+    status: &str,
+    error: &str,
+) -> Result<(), String> {
+    db::commit_circuit_advance(
+        *run_id,
+        Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+        None,
+        &[db::CircuitStepOp {
+            node_id: node_id.to_string(),
+            status: status.to_string(),
+            outcome: Some(Some(status.to_string())),
+            error: Some(error.to_string()),
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "circuit-run-updated",
+        CircuitRunUpdatedPayload { run_id: *run_id, state: "failed".to_string() },
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Lost-turn watchdog (milestone 3, issue #1208).
+//
+// The turn webhook (`/api/attention/{id}`) is best-effort HTTP — a lost
+// POST leaves a FINISHED piloted agent looking `running` forever, and
+// the run wedges with it (the legacy pipeline learned this as #874).
+// Once the node's PTY has been quiet for [`LOST_TURN_QUIET_MS`] and its
+// status still says `running`, synthesize the turn: mark it awaiting
+// input through the normal lifecycle seam (which arms attention
+// autoclear, so a false positive self-heals the moment output resumes)
+// and let the next observation pass advance the run.
+// ---------------------------------------------------------------------------
+
+/// Quiet window before the watchdog synthesizes a missed turn. The spec
+/// pins 60s — deliberately tighter than the legacy pipeline's 180s LLM-
+/// classified watchdog, because autoclear makes false positives cheap.
+pub(crate) const LOST_TURN_QUIET_MS: u128 = 60_000;
+
+/// Pure eligibility predicate: alive process, quiet past the window,
+/// status still claiming to be mid-turn.
+fn should_synthesize_turn(is_alive: bool, quiet_ms: Option<u128>, status: SessionStatus) -> bool {
+    is_alive
+        && quiet_ms.map_or(false, |q| q >= LOST_TURN_QUIET_MS)
+        && status == SessionStatus::Running
+}
+
+/// Fast-tick pass: recover every quiet piloted node bound to a running
+/// circuit run. Cheap by construction — only steps already known to be
+/// Running with an attached agent are evaluated.
+fn lost_turn_watchdog_pass(app: &AppHandle) {
+    let runs = match db::list_active_circuit_runs() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("circuits: watchdog could not list active runs: {}", e);
+            return;
+        }
+    };
+    for active in runs {
+        if active.run.state != "running" || !active.circuit_enabled {
+            continue;
+        }
+        let steps = match load_steps(active.run.id) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for step in steps.iter().filter(|s| s.status == StepStatus::Running) {
+            let Some(agent_node_id) = step.agent_node_id else {
+                continue;
+            };
+            let Ok(node) = db::get_agent_node_by_id(agent_node_id) else {
+                continue;
+            };
+            let quiet_ms = crate::autopilot::evaluator::millis_since_last_output(agent_node_id);
+            if !should_synthesize_turn(
+                crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
+                quiet_ms,
+                node.status,
+            ) {
+                continue;
+            }
+            tracing::warn!(
+                "circuits: run {} piloted agent {} quiet {}ms with status 'running' — \
+                 synthesizing the turn webhook may have lost",
+                active.run.id,
+                agent_node_id,
+                quiet_ms.unwrap_or(0)
+            );
+            // The normal mark-attention seam: lifecycle write + event +
+            // autoclear arming, exactly as if the hook had landed.
+            crate::commands::attention::mark_attention(agent_node_id, app);
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitEvents.ts")]
 pub struct CircuitRunUpdatedPayload {
@@ -691,4 +1065,97 @@ pub struct CircuitNotificationPayload {
     #[ts(as = "i32")]
     pub run_id: i64,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- startup reconciliation -------------------------------------------------
+
+    fn node_state(archived: bool, worktree_dir_exists: Option<bool>) -> ReconcileNodeState {
+        ReconcileNodeState { archived, worktree_dir_exists }
+    }
+
+    #[test]
+    fn a_running_spawn_step_without_an_attached_agent_is_the_commit_crash_gap() {
+        // The one state observation can never repair: nothing in the
+        // world maps to an event, so it must fail loudly at startup.
+        assert_eq!(
+            reconcile_spawn_step(None, None),
+            SpawnReconciliation::NeverAttached
+        );
+        assert_eq!(
+            reconcile_spawn_step(None, Some(node_state(false, Some(true)))),
+            SpawnReconciliation::NeverAttached,
+            "even a healthy-looking node row doesn't help — no attach ever landed"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_archived_piloted_agent_is_lost() {
+        assert_eq!(
+            reconcile_spawn_step(Some(7), None),
+            SpawnReconciliation::Lost,
+            "node row deleted while offline"
+        );
+        assert_eq!(
+            reconcile_spawn_step(Some(7), Some(node_state(true, Some(true)))),
+            SpawnReconciliation::Lost,
+            "archived while offline"
+        );
+    }
+
+    #[test]
+    fn a_vanished_worktree_directory_counts_as_lost_git_state() {
+        assert_eq!(
+            reconcile_spawn_step(Some(7), Some(node_state(false, Some(false)))),
+            SpawnReconciliation::Lost,
+            "resume would spawn into a nonexistent worktree"
+        );
+    }
+
+    #[test]
+    fn recoverable_states_leave_the_step_alone() {
+        assert_eq!(
+            reconcile_spawn_step(Some(7), Some(node_state(false, Some(true)))),
+            SpawnReconciliation::Leave,
+            "intact worktree → auto-resume carries on"
+        );
+        assert_eq!(
+            reconcile_spawn_step(Some(7), Some(node_state(false, None))),
+            SpawnReconciliation::Leave,
+            "root-repo spawn has no worktree to lose"
+        );
+        assert_eq!(
+            reconcile_spawn_step(Some(7), Some(node_state(false, None))),
+            SpawnReconciliation::Leave
+        );
+    }
+
+    // -- lost-turn watchdog eligibility -------------------------------------------
+
+    #[test]
+    fn watchdog_needs_alive_quiet_and_still_running() {
+        let running = SessionStatus::Running;
+        assert!(should_synthesize_turn(true, Some(LOST_TURN_QUIET_MS), running));
+        // Below the window: the agent may legitimately be mid-tool-call.
+        assert!(!should_synthesize_turn(
+            true,
+            Some(LOST_TURN_QUIET_MS - 1),
+            running
+        ));
+        // No output timing known (never registered): conservative no-op.
+        assert!(!should_synthesize_turn(true, None, running));
+        // Dead process: AgentLost observation owns that path.
+        assert!(!should_synthesize_turn(false, Some(LOST_TURN_QUIET_MS * 10), running));
+        // Already yielded (awaiting/completed/idle...): observation owns it.
+        for status in [
+            SessionStatus::AwaitingInput,
+            SessionStatus::Completed,
+            SessionStatus::Error,
+        ] {
+            assert!(!should_synthesize_turn(true, Some(LOST_TURN_QUIET_MS), status));
+        }
+    }
 }

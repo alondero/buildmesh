@@ -26,6 +26,7 @@ import {
   resumeCircuitRun,
   setCircuitEnabled,
   triggerCircuitNow,
+  type CircuitTriggerKind,
   type CircuitWithRuns,
 } from '../../lib/tauri';
 import { useProbeContext } from '../../hooks/useProbeContext';
@@ -61,6 +62,10 @@ export function CircuitsProbeTab() {
   // Create-form state (throwaway authoring until the canvas editor).
   const [newName, setNewName] = useState('');
   const [newPrompt, setNewPrompt] = useState('');
+  const [triggerKind, setTriggerKind] = useState<CircuitTriggerKind>('manual');
+  const [triggerLabel, setTriggerLabel] = useState('');
+  const [intervalSeconds, setIntervalSeconds] = useState(300);
+  const needsLabel = triggerKind === 'github_issue_label' || triggerKind === 'github_pr_label';
 
   const load = useCallback(async () => {
     if (activeMeshId === null) {
@@ -114,9 +119,19 @@ export function CircuitsProbeTab() {
     runAction(async () => {
       const name = newName.trim();
       if (name === '') return;
-      await createCircuit(activeMeshId!, name, '', 1, newPrompt.trim());
+      await createCircuit(
+        activeMeshId!,
+        name,
+        '',
+        1,
+        newPrompt.trim(),
+        triggerKind,
+        triggerKind === 'manual' ? undefined : triggerLabel.trim(),
+        triggerKind === 'interval' ? intervalSeconds : undefined
+      );
       setNewName('');
       setNewPrompt('');
+      setTriggerLabel('');
     });
 
   if (activeMeshId === null) {
@@ -148,10 +163,53 @@ export function CircuitsProbeTab() {
           rows={3}
           className="w-full mb-1 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-text-primary font-mono text-xs resize-none focus:outline-none"
         />
+        <div className="flex items-center gap-1 mb-1">
+          <select
+            value={triggerKind}
+            onChange={(e) => setTriggerKind(e.target.value as CircuitTriggerKind)}
+            aria-label="Circuit trigger"
+            data-testid="circuit-trigger-select"
+            className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+          >
+            <option value="manual">Manual</option>
+            <option value="interval">Interval</option>
+            <option value="github_issue_label">Issue label</option>
+            <option value="github_pr_label">PR label</option>
+          </select>
+          {needsLabel && (
+            <input
+              value={triggerLabel}
+              onChange={(e) => setTriggerLabel(e.target.value)}
+              placeholder="Label (e.g. buildmesh:run)"
+              aria-label="Trigger label"
+              data-testid="circuit-trigger-label-input"
+              className="flex-1 min-w-0 px-2 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+            />
+          )}
+          {triggerKind === 'interval' && (
+            <label className="flex items-center gap-1 text-xs text-text-muted shrink-0">
+              every
+              <input
+                type="number"
+                min={60}
+                value={intervalSeconds}
+                onChange={(e) => setIntervalSeconds(Number(e.target.value) || 300)}
+                aria-label="Interval seconds"
+                data-testid="circuit-interval-input"
+                className="w-16 px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+              />
+              s
+            </label>
+          )}
+        </div>
         <button
           type="button"
           onClick={handleCreate}
-          disabled={busy || newName.trim() === ''}
+          disabled={
+            busy ||
+            newName.trim() === '' ||
+            (needsLabel && triggerLabel.trim() === '')
+          }
           data-testid="circuit-create-button"
           className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
         >

@@ -12,6 +12,23 @@ use tauri::command;
 use crate::autopilot::circuit::model::CircuitGraph;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
+/// The trigger vocabulary of [`create_circuit`] (issue #1208). Generated
+/// to `src/types/generated/CircuitTriggerKind.ts` — the TS side imports
+/// this type rather than hand-declaring the union (issue #359 rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitTriggerKind.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitTriggerKind {
+    /// Fire-by-hand only (Trigger Now).
+    Manual,
+    /// Fire on a fixed cadence (`interval_seconds`, cooldown-paced).
+    Interval,
+    /// Fire when an open issue gains `trigger_label`.
+    GithubIssueLabel,
+    /// Fire when an open PR gains `trigger_label`.
+    GithubPrLabel,
+}
+
 /// One run plus its step ledger, for the Probe tab's run list.
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitRunDetail.ts")]
@@ -57,8 +74,15 @@ pub fn list_circuits_with_runs(
         .map_err(|e| e.to_string())
 }
 
-/// Create a circuit with the canonical walking-skeleton blueprint:
-/// Manual trigger → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify.
+/// Create a circuit with the canonical blueprint:
+/// `<trigger>` → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify.
+///
+/// Milestone 3 (issue #1208) added the trigger vocabulary: `trigger_kind`
+/// selects the root node (see [`CircuitTriggerKind`]). GitHub triggers
+/// require a non-empty `trigger_label`; interval circuits take
+/// `interval_seconds` (clamped to 60s–7d so a typo can't become a hot
+/// loop). A GitHub-labelled circuit requests an immediate poll so its
+/// first run can start without waiting out the 120s cadence.
 #[command]
 pub fn create_circuit(
     mesh_id: i64,
@@ -66,16 +90,50 @@ pub fn create_circuit(
     description: String,
     concurrency_limit: i64,
     initial_prompt: String,
+    trigger_kind: Option<CircuitTriggerKind>,
+    trigger_label: Option<String>,
+    interval_seconds: Option<i64>,
 ) -> Result<AutopilotCircuit, String> {
+    use crate::autopilot::circuit::model::CircuitNodeKind;
+
     let name = name.trim();
     if name.is_empty() {
         return Err("circuit name must not be empty".to_string());
     }
     let limit = concurrency_limit.clamp(1, 16);
-    let graph = CircuitGraph::walking_skeleton(&initial_prompt);
+    let kind = match trigger_kind.unwrap_or(CircuitTriggerKind::Manual) {
+        CircuitTriggerKind::Manual => CircuitNodeKind::Manual,
+        CircuitTriggerKind::Interval => {
+            let secs = interval_seconds.unwrap_or(300).clamp(60, 7 * 24 * 3_600);
+            CircuitNodeKind::Interval { interval_seconds: secs }
+        }
+        CircuitTriggerKind::GithubIssueLabel | CircuitTriggerKind::GithubPrLabel => {
+            let label = trigger_label
+                .as_deref()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .ok_or_else(|| "GitHub triggers require a non-empty trigger label".to_string())?;
+            if trigger_kind == Some(CircuitTriggerKind::GithubPrLabel) {
+                CircuitNodeKind::GithubPullRequestLabel { label: label.to_string() }
+            } else {
+                CircuitNodeKind::GithubIssueLabel { label: label.to_string() }
+            }
+        }
+    };
+    let graph = CircuitGraph::triggered_skeleton(&initial_prompt, kind.clone());
     let graph_json = graph.to_json()?;
-    crate::db::create_autopilot_circuit(mesh_id, name, &description, limit, &graph_json)
-        .map_err(|e| e.to_string())
+    let circuit =
+        crate::db::create_autopilot_circuit(mesh_id, name, &description, limit, &graph_json)
+            .map_err(|e| e.to_string())?;
+    if matches!(
+        kind,
+        CircuitNodeKind::GithubIssueLabel { .. } | CircuitNodeKind::GithubPullRequestLabel { .. }
+    ) {
+        // On-demand poll capability: a freshly created labelled circuit
+        // ingests on the very next worker tick.
+        crate::services::circuit_triggers::request_github_poll();
+    }
+    Ok(circuit)
 }
 
 #[command]

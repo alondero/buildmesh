@@ -208,9 +208,9 @@ pub fn consumes_agent_slot(kind: &CircuitNodeKind) -> bool {
     matches!(kind, CircuitNodeKind::SpawnAgentNode { .. })
 }
 
-/// Is this kind executable by the engine? Triggers, the action subset
-/// and — since #1207 — every gate kind are; GitHub actions parse but
-/// deliberately fail their step when reached (see module doc).
+/// Is this kind executable by the engine? Since #1207 every gate kind
+/// and since #1208 (#1206's follow-ups) the GitHub actions too — the
+/// whole AST vocabulary executes.
 pub fn is_executable(kind: &CircuitNodeKind) -> bool {
     matches!(
         kind,
@@ -220,6 +220,7 @@ pub fn is_executable(kind: &CircuitNodeKind) -> bool {
             | CircuitNodeKind::GithubPullRequestLabel { .. }
             | CircuitNodeKind::SpawnAgentNode { .. }
             | CircuitNodeKind::InjectPty { .. }
+            | CircuitNodeKind::GithubAction { .. }
             | CircuitNodeKind::SetNodeStatus { .. }
             | CircuitNodeKind::Notify { .. }
             | CircuitNodeKind::LlmTurnClassifier
@@ -285,10 +286,27 @@ impl CircuitGraph {
     /// spawn → observe-live-process → inject → await-turn chain the
     /// acceptance criteria describe.
     pub fn walking_skeleton(prompt: &str) -> Self {
+        Self::triggered_skeleton(prompt, CircuitNodeKind::Manual)
+    }
+
+    /// The milestone-3 authoring shape (issue #1208): the same
+    /// spawn → inject → notify chain as [`Self::walking_skeleton`] but
+    /// with a caller-chosen trigger root — Interval, GithubIssueLabel,
+    /// or GithubPullRequestLabel. The trigger kind is validated by the
+    /// IPC boundary; this builder accepts any trigger verbatim so the
+    /// AST stays canonical in one place.
+    pub fn triggered_skeleton(prompt: &str, trigger: CircuitNodeKind) -> Self {
+        debug_assert!(matches!(
+            trigger,
+            CircuitNodeKind::Manual
+                | CircuitNodeKind::Interval { .. }
+                | CircuitNodeKind::GithubIssueLabel { .. }
+                | CircuitNodeKind::GithubPullRequestLabel { .. }
+        ));
         Self {
             version: 1,
             nodes: vec![
-                CircuitNode { id: "trigger".to_string(), kind: CircuitNodeKind::Manual },
+                CircuitNode { id: "trigger".to_string(), kind: trigger },
                 CircuitNode {
                     id: "spawn".to_string(),
                     kind: CircuitNodeKind::SpawnAgentNode {
@@ -459,7 +477,19 @@ mod tests {
         assert!(is_executable(&CircuitNodeKind::DeterministicVerification { command: "cargo test".into() }));
         assert!(is_executable(&CircuitNodeKind::CollaboratorCheck { require_approval: true }));
         assert!(is_executable(&CircuitNodeKind::RetryLimit { max_retries: 3 }));
-        assert!(!is_executable(&CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, label: None, comment: None }));
+        // Milestone 3 (issue #1208): all five GitHub actions execute.
+        for action in [
+            GithubActionKind::AddLabel,
+            GithubActionKind::RemoveLabel,
+            GithubActionKind::PostComment,
+            GithubActionKind::OpenPr,
+            GithubActionKind::CloseIssue,
+        ] {
+            assert!(
+                is_executable(&CircuitNodeKind::GithubAction { action, label: None, comment: None }),
+                "{action:?} must be executable"
+            );
+        }
     }
 
     // -- outcome DB strings ---------------------------------------------------
@@ -508,6 +538,34 @@ mod tests {
         match &g.node("inject").unwrap().kind {
             CircuitNodeKind::InjectPty { prompt } => assert_eq!(prompt, "do the thing"),
             other => panic!("expected inject node, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn triggered_skeleton_swaps_only_the_trigger_root() {
+        // Milestone 3 authoring: a GitHub-labelled trigger keeps the rest
+        // of the chain identical to the manual skeleton — the trigger is
+        // the only thing the create form varies.
+        for trigger in [
+            CircuitNodeKind::GithubIssueLabel { label: "buildmesh:run".into() },
+            CircuitNodeKind::GithubPullRequestLabel { label: "review-me".into() },
+            CircuitNodeKind::Interval { interval_seconds: 300 },
+        ] {
+            let g = CircuitGraph::triggered_skeleton("fix it", trigger);
+            assert_eq!(g.nodes.len(), 4);
+            let ids: Vec<&str> = g.nodes.iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(ids, vec!["trigger", "spawn", "inject", "notify"]);
+            match &g.node("trigger").unwrap().kind {
+                CircuitNodeKind::GithubIssueLabel { label } => assert_eq!(label, "buildmesh:run"),
+                CircuitNodeKind::GithubPullRequestLabel { label } => assert_eq!(label, "review-me"),
+                CircuitNodeKind::Interval { interval_seconds } => {
+                    assert_eq!(*interval_seconds, 300)
+                }
+                other => panic!("trigger kind not preserved: {:?}", other),
+            }
+            // Round-trips through graph_json like any blueprint.
+            let parsed = CircuitGraph::from_json(&g.to_json().unwrap()).unwrap();
+            assert_eq!(parsed, g);
         }
     }
 }
