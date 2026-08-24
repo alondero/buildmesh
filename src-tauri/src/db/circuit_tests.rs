@@ -70,6 +70,51 @@ fn circuit_crud_round_trips_all_fields() {
 }
 
 #[test]
+fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
+    // Issue #1209: the canvas editor's save seam. The whole graph_json
+    // is replaced and round-trips back into the AST; other columns
+    // (name, enabled, concurrency_limit) are untouched.
+    let path = init_temp_db("update_graph");
+    let mesh = create_mesh("circuit-update-graph-mesh", "/tmp/circuit-update-graph").unwrap();
+    let created =
+        create_autopilot_circuit(mesh.id, "editable", "desc", 2, &sample_graph_json()).unwrap();
+
+    let new_graph = CircuitGraph {
+        version: 1,
+        nodes: vec![
+            crate::autopilot::circuit::model::CircuitNode {
+                id: "trigger".into(),
+                kind: crate::autopilot::circuit::model::CircuitNodeKind::Manual,
+            },
+            crate::autopilot::circuit::model::CircuitNode {
+                id: "verify".into(),
+                kind: crate::autopilot::circuit::model::CircuitNodeKind::DeterministicVerification {
+                    command: "cargo test".into(),
+                },
+            },
+        ],
+        edges: vec![crate::autopilot::circuit::model::CircuitEdge {
+            from: "trigger".into(),
+            to: "verify".into(),
+            condition: crate::autopilot::circuit::model::EdgeCondition::OnOutcome(
+                crate::autopilot::circuit::model::StepOutcome::Green,
+            ),
+        }],
+    };
+    update_autopilot_circuit_graph(created.id, &new_graph.to_json().unwrap()).unwrap();
+
+    let reloaded = get_autopilot_circuit(created.id).unwrap().unwrap();
+    assert_eq!(reloaded.name, "editable");
+    assert_eq!(reloaded.concurrency_limit, 2);
+    assert!(reloaded.enabled);
+    let parsed = CircuitGraph::from_json(&reloaded.graph_json).unwrap();
+    assert_eq!(parsed, new_graph);
+
+    drop(get());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     let path = init_temp_db("persist");
     // Every app start runs `db::init` → `evolve_to` against the existing

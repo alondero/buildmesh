@@ -514,9 +514,11 @@ pub fn run() {
             commands::agent::list_autopilot_runs,
             // Autopilot Circuits (spec #1205 / walking skeleton #1206).
             commands::circuit::list_circuits,
+            commands::circuit::get_circuit,
             commands::circuit::list_circuits_with_runs,
             commands::circuit::create_circuit,
             commands::circuit::set_circuit_enabled,
+            commands::circuit::update_circuit_graph,
             commands::circuit::delete_circuit,
             commands::circuit::trigger_circuit_now,
             commands::circuit::list_circuit_runs,

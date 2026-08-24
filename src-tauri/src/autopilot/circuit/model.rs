@@ -25,14 +25,21 @@
 use serde::{Deserialize, Serialize};
 
 /// The full blueprint AST for one circuit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+// Milestone 4 (#1209): the canvas editor is the first TypeScript
+// consumer of the AST, so every type here derives ts-rs and exports its
+// generated `.ts` twin (`src/types/generated/CircuitGraph.ts` & co) —
+// the TS side imports them rather than hand-declaring wire shapes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitGraph.ts")]
 pub struct CircuitGraph {
     pub version: i32,
     pub nodes: Vec<CircuitNode>,
     pub edges: Vec<CircuitEdge>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitNode.ts")]
 pub struct CircuitNode {
     /// Stable within one blueprint. Referenced by [`CircuitEdge`] ends and
     /// persisted as `autopilot_circuit_run_steps.node_id`.
@@ -45,14 +52,20 @@ pub struct CircuitNode {
 /// snake_case `type` discriminator so `graph_json` reads like the spec's
 /// node vocabulary (`{"type": "manual"}`, `{"type": "spawn_agent_node",
 /// "prompt": "..."}`, ...).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitNodeKind.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CircuitNodeKind {
     // ---- Triggers ----
     /// Fire-by-hand entry point (the walking skeleton's Trigger Now).
     Manual,
     /// Fixed-interval pacer. Parsed but not yet executed (later milestone).
-    Interval { interval_seconds: i64 },
+    Interval {
+        // serde_json sends `i64` as a JS number — the CLAUDE.md rule for
+        // wire-level 64-bit ints (clamped to 60s–7d, fits i32).
+        #[ts(as = "i32")]
+        interval_seconds: i64,
+    },
     /// Fire when a GitHub issue gains `label`. Not yet executed.
     GithubIssueLabel { label: String },
     /// Fire when a GitHub PR gains `label`. Not yet executed.
@@ -98,7 +111,8 @@ pub enum CircuitNodeKind {
 }
 
 /// The GitHub mutation vocabulary of [`CircuitNodeKind::GithubAction`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "GithubActionKind.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum GithubActionKind {
     AddLabel,
@@ -112,7 +126,8 @@ pub enum GithubActionKind {
 /// Mirrors `models::SessionStatus`'s DB vocabulary; kept as a separate
 /// small enum so the graph JSON stays stable if `SessionStatus` grows
 /// spawn-machinery variants the graph author should not set by hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "SessionStatusKind.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatusKind {
     Running,
@@ -121,7 +136,8 @@ pub enum SessionStatusKind {
 }
 
 /// One directed wire between two circuit nodes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitEdge.ts")]
 pub struct CircuitEdge {
     pub from: String,
     pub to: String,
@@ -130,7 +146,8 @@ pub struct CircuitEdge {
 }
 
 /// When does the edge carry its parent's outcome forward?
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ts_rs::TS)]
+#[ts(export, export_to = "EdgeCondition.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeCondition {
     /// Traverse regardless of how the parent step ended.
@@ -148,7 +165,8 @@ pub enum EdgeCondition {
 /// routes Green/Red. Each is a terminal step outcome — edges pick their
 /// successors with `OnOutcome(...)`, so a gate whose branches don't
 /// cover an outcome simply parks that branch (the run waits).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "StepOutcome.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum StepOutcome {
     Completed,

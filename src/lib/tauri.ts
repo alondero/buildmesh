@@ -1265,10 +1265,28 @@ export function __resetProviderCachesForTests(): void {
 import type { AutopilotCircuit } from '../types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../types/generated/CircuitWithRuns';
-export type { AutopilotCircuit, CircuitRunDetail, CircuitWithRuns };
+// Milestone 4 (#1209): the canvas editor consumes the blueprint AST, so
+// the graph wire types ride the same sanctioned surface.
+export type {
+  AutopilotCircuit,
+  CircuitRunDetail,
+  CircuitWithRuns,
+};
+export type { CircuitGraph } from '../types/generated/CircuitGraph';
+export type { CircuitNode } from '../types/generated/CircuitNode';
+export type { CircuitNodeKind } from '../types/generated/CircuitNodeKind';
+export type { CircuitEdge } from '../types/generated/CircuitEdge';
+export type { EdgeCondition } from '../types/generated/EdgeCondition';
+export type { StepOutcome } from '../types/generated/StepOutcome';
+export type { GithubActionKind } from '../types/generated/GithubActionKind';
+export type { SessionStatusKind } from '../types/generated/SessionStatusKind';
 
 export const listCircuits = (meshId: number) =>
   _invoke<AutopilotCircuit[]>('list_circuits', { meshId });
+
+/** One circuit row — the canvas editor overlay's load unit (#1209). */
+export const getCircuit = (circuitId: number) =>
+  _invoke<AutopilotCircuit>('get_circuit', { circuitId });
 
 /** Batched single-IPC load for the Probe tab: every circuit on the mesh
  *  with up to `limit` newest runs each (steps included). */
@@ -1305,6 +1323,11 @@ export const createCircuit = (
 
 export const setCircuitEnabled = (circuitId: number, enabled: boolean) =>
   _invoke<void>('set_circuit_enabled', { circuitId, enabled });
+
+/** Canvas editor save seam (issue #1209): replace the whole blueprint
+ *  AST. The backend validates the JSON parses before persisting. */
+export const updateCircuitGraph = (circuitId: number, graphJson: string) =>
+  _invoke<void>('update_circuit_graph', { circuitId, graphJson });
 
 export const deleteCircuit = (circuitId: number) =>
   _invoke<void>('delete_circuit', { circuitId });

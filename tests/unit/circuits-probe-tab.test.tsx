@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -30,6 +30,8 @@ import {
   pauseCircuitRun,
   resumeCircuitRun,
   approveCircuitStep,
+  getCircuit,
+  updateCircuitGraph,
 } from '../../src/lib/tauri';
 
 const MESH: Mesh = {
@@ -142,7 +144,12 @@ beforeEach(() => {
     selectedMeshId: MESH.id,
   });
   useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
-  useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
+  useUIStore.setState({
+    probeOpen: false,
+    probeTab: 'files',
+    activeDiffFile: null,
+    activeCircuitEditorId: null,
+  });
 });
 
 describe('CircuitsProbeTab', () => {
@@ -160,13 +167,12 @@ describe('CircuitsProbeTab', () => {
     expect(invoke).toHaveBeenCalledWith('list_circuits_with_runs', { meshId: 42, limit: 10 });
   });
 
-  it('creates a manual circuit through the throwaway authoring form', async () => {
+  it('New Circuit creates the skeleton and opens the canvas editor (#1209)', async () => {
     mockBackend();
     const user = userEvent.setup();
     await openCircuitsTab();
 
     await user.type(await screen.findByTestId('circuit-name-input'), 'review-bot');
-    await user.type(screen.getByTestId('circuit-prompt-input'), 'review the open PR');
     await user.click(screen.getByTestId('circuit-create-button'));
 
     await waitFor(() => {
@@ -175,11 +181,14 @@ describe('CircuitsProbeTab', () => {
         name: 'review-bot',
         description: '',
         concurrencyLimit: 1,
-        initialPrompt: 'review the open PR',
+        // The prompt is authored in the canvas editor's inspector now.
+        initialPrompt: '',
         triggerKind: 'manual',
         triggerLabel: null,
         intervalSeconds: null,
       });
+      // The editor overlay mounts over the center workspace…
+      expect(useUIStore.getState().activeCircuitEditorId).toBe(7);
     });
   });
 
@@ -204,6 +213,15 @@ describe('CircuitsProbeTab', () => {
         triggerLabel: 'buildmesh:run',
       }));
     });
+  });
+
+  it('Edit Flow opens the canvas editor for that circuit (#1209)', async () => {
+    mockBackend();
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    fireEvent.click(await screen.findByTestId('circuit-edit-flow-7'));
+    expect(useUIStore.getState().activeCircuitEditorId).toBe(7);
   });
 
   it('Trigger Now mints a manual run', async () => {
@@ -368,5 +386,15 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
 
     await approveCircuitStep(11, 'gate');
     expect(invoke).toHaveBeenLastCalledWith('approve_circuit_step', { runId: 11, nodeId: 'gate' });
+
+    // Canvas editor seams (issue #1209).
+    await getCircuit(7);
+    expect(invoke).toHaveBeenLastCalledWith('get_circuit', { circuitId: 7 });
+
+    await updateCircuitGraph(9, '{"version":1,"nodes":[],"edges":[]}');
+    expect(invoke).toHaveBeenLastCalledWith('update_circuit_graph', {
+      circuitId: 9,
+      graphJson: '{"version":1,"nodes":[],"edges":[]}',
+    });
   });
 });

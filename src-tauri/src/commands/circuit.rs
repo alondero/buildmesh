@@ -42,6 +42,14 @@ pub fn list_circuits(mesh_id: i64) -> Result<Vec<AutopilotCircuit>, String> {
     crate::db::list_autopilot_circuits(mesh_id).map_err(|e| e.to_string())
 }
 
+/// One circuit row by id — the canvas editor overlay's load unit (#1209).
+#[command]
+pub fn get_circuit(circuit_id: i64) -> Result<AutopilotCircuit, String> {
+    crate::db::get_autopilot_circuit(circuit_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("circuit {} does not exist", circuit_id))
+}
+
 /// One circuit plus its recent run ledger — the Probe tab's load unit.
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitWithRuns.ts")]
@@ -139,6 +147,19 @@ pub fn create_circuit(
 #[command]
 pub fn set_circuit_enabled(circuit_id: i64, enabled: bool) -> Result<(), String> {
     crate::db::set_autopilot_circuit_enabled(circuit_id, enabled).map_err(|e| e.to_string())
+}
+
+/// Save a blueprint edited in the canvas editor (issue #1209): the
+/// whole `graph_json` is replaced after validating it parses into the
+/// AST — an editor bug can never persist a graph the engine can't read.
+/// The worker wakes so trigger passes see the new topology immediately.
+#[command]
+pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), String> {
+    CircuitGraph::from_json(&graph_json)?;
+    crate::db::update_autopilot_circuit_graph(circuit_id, &graph_json).map_err(|e| e.to_string())?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    tracing::info!("circuits: graph saved for circuit {}", circuit_id);
+    Ok(())
 }
 
 #[command]
