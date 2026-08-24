@@ -131,21 +131,21 @@ describe('Settings — optimistic rollback ref pattern (issue #581)', () => {
   });
 
   it('rolls the default-provider dropdown back when set_app_default_provider rejects', async () => {
-    mockBackend([
+    const providers = [
       provider('claude', 'Claude Code'),
       provider('codex', 'Codex'),
       provider('terminal', 'Terminal'),
-    ]);
+    ];
+    let resolveProviders!: (value: ProviderInfo[]) => void;
+    const providerResponse = new Promise<ProviderInfo[]>(resolve => {
+      resolveProviders = resolve;
+    });
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
       switch (cmd) {
         case 'get_app_preferences':
           return Promise.resolve({ default_provider: null, minimax_api_key: null });
         case 'list_providers':
-          return Promise.resolve([
-            provider('claude', 'Claude Code'),
-            provider('codex', 'Codex'),
-            provider('terminal', 'Terminal'),
-          ]);
+          return providerResponse;
         case 'get_provider_accounts':
           return Promise.resolve([]);
         case 'get_provider_meters':
@@ -177,6 +177,17 @@ describe('Settings — optimistic rollback ref pattern (issue #581)', () => {
     // unambiguous (the Auto-naming picker is also a combobox). Reaching in via
     // the role without a name would match either.
     const dropdown = (await screen.findByRole('combobox', { name: 'Default provider' })) as HTMLSelectElement;
+    // The control mounts before the delayed provider response makes its
+    // options available, so finding its role alone is not a readiness signal.
+    expect(dropdown.disabled).toBe(true);
+    expect(dropdown.querySelector('option[value="codex"]')).toBeNull();
+
+    resolveProviders(providers);
+    await waitFor(() => {
+      expect(dropdown.disabled).toBe(false);
+      expect(dropdown.querySelector('option[value="codex"]')).not.toBeNull();
+    });
+
     expect(dropdown.value).toBe('__no_override__');
 
     // Fire the change. We don't assert the transient optimistic state
