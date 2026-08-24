@@ -32,17 +32,41 @@
 //!   events — they come from process/lifecycle observation, not
 //!   keystrokes, so coexistence is structural rather than guarded.
 //! - Joins execute instantly once their fan-in rule is satisfied.
-//! - Kinds the milestone-1 engine deliberately does not execute (gates,
-//!   GitHub actions) fail their step with an explicit error rather than
-//!   stalling the run forever.
-//! - Fail-fast: any step ending `Failed`, or a piloted agent being lost
-//!   (closed/archived mid-run), fails the run.
+//! - **Gates (milestone 2, #1207):**
+//!   - `LlmTurnClassifier` parks Running until the seam observes the
+//!     piloted agent's turn yield, classifies it, and feeds back a
+//!     `TurnClassified` event; the step completes with outcome
+//!     Completed/Blocked/Working (None degrades to Working). Edges pick
+//!     successors with `OnOutcome(...)`; an unmatched outcome simply
+//!     parks that branch.
+//!   - `DeterministicVerification` parks Running until the seam runs its
+//!     command and feeds `VerificationResult`; outcome Green/Red.
+//!   - `CollaboratorCheck` with `require_approval` parks in the new
+//!     `Blocked` status until a `CollaboratorApproved` event arrives;
+//!     `AutoRun` passes through untouched (instant complete).
+//!   - `RetryLimit` bounds re-execution: when reached via a FAILED
+//!     parent, the parent is reset to Queued with `attempt + 1` while
+//!     `attempt < max_retries` (total executions = max_retries); at the
+//!     budget's end the gate fails and fail-fast resumes. A failed step
+//!     wired to a downstream RetryLimit therefore does NOT immediately
+//!     fail the run — the retry gate owns the failure.
+//! - **Pause/resume (#1207):** `Paused` halts graph advancement — no
+//!   scheduling and no completion while paused; lifecycle events still
+//!   mark steps terminal so "the current step finishes", but nothing
+//!   cascades until `Resumed`.
+//! - Kinds the engine deliberately does not execute (GitHub actions)
+//!   fail their step with an explicit error rather than stalling the
+//!   run forever.
+//! - Fail-fast: any step ending `Failed` without a downstream RetryLimit,
+//!   or a piloted agent being lost (closed/archived mid-run), fails the
+//!   run.
 
 use super::context::CircuitContext;
 use super::model::{
     consumes_agent_slot, is_executable, CircuitGraph, CircuitNodeKind, EdgeCondition,
     SessionStatusKind, StepOutcome,
 };
+use crate::autopilot::evaluator::Classification;
 
 // ---------------------------------------------------------------------------
 // State model — the pure mirror of the three ledger tables.
@@ -53,6 +77,9 @@ pub enum RunState {
     /// Run row exists, trigger not yet processed.
     Pending,
     Running,
+    /// Graceful pause (#1207): the current step may finish but the graph
+    /// does not advance until resumed.
+    Paused,
     Completed,
     Failed,
 }
@@ -62,6 +89,7 @@ impl RunState {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
+            Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
         }
@@ -70,6 +98,7 @@ impl RunState {
     pub fn from_db_str(s: &str) -> Self {
         match s {
             "running" => Self::Running,
+            "paused" => Self::Paused,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             _ => Self::Pending,
@@ -83,6 +112,9 @@ pub enum StepStatus {
     /// FIFO when capacity frees (stored as `pending_slot`).
     Queued,
     Running,
+    /// Parked on a CollaboratorCheck RequireApproval gate (#1207):
+    /// waiting for the user's Approve click. Not terminal.
+    Blocked,
     Completed,
     Failed,
     Cancelled,
@@ -93,6 +125,7 @@ impl StepStatus {
         match self {
             Self::Queued => "pending_slot",
             Self::Running => "running",
+            Self::Blocked => "blocked",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -103,6 +136,7 @@ impl StepStatus {
         match s {
             "pending_slot" => Self::Queued,
             "running" => Self::Running,
+            "blocked" => Self::Blocked,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
@@ -133,6 +167,9 @@ pub struct StepView {
     pub error: Option<String>,
     /// The mesh agent node this step piloted (spawn steps only).
     pub agent_node_id: Option<i64>,
+    /// Execution count (1 = first attempt). RetryLimit gates increment
+    /// it when they reset a failed step for re-execution (#1207).
+    pub attempt: i32,
 }
 
 impl StepView {
@@ -143,6 +180,7 @@ impl StepView {
             outcome: None,
             error: None,
             agent_node_id: None,
+            attempt: 1,
         }
     }
 }
@@ -217,6 +255,22 @@ pub enum CircuitEvent {
     AgentFinished { agent_node_id: i64, success: bool },
     /// The step's piloted agent was closed/archived mid-run.
     AgentLost { agent_node_id: i64 },
+    // -- Milestone 2 (#1207) --
+    /// The user paused the run. Current steps finish; nothing advances.
+    Paused,
+    /// The user resumed a paused run.
+    Resumed,
+    /// The user approved a CollaboratorCheck gate parked in Blocked.
+    CollaboratorApproved { node_id: String },
+    /// The seam classified the piloted agent's latest turn for this
+    /// LlmTurnClassifier gate. `None` = unclassifiable (degrades to
+    /// Working).
+    TurnClassified {
+        node_id: String,
+        classification: Option<Classification>,
+    },
+    /// The seam ran the DeterministicVerification command.
+    VerificationResult { node_id: String, green: bool },
 }
 
 // ---------------------------------------------------------------------------
@@ -231,16 +285,22 @@ pub struct StepWrite {
     pub outcome: Option<Option<StepOutcome>>,
     pub error: Option<String>,
     pub agent_node_id: Option<i64>,
+    /// The step's execution count after this write (retry bookkeeping).
+    pub attempt: i32,
+    /// True for a retry reset: clear outcome/error, restamp started_at.
+    pub fresh_attempt: bool,
 }
 
 impl StepWrite {
-    fn insert(node_id: &str, status: StepStatus) -> Self {
+    fn for_existing(node_id: &str, status: StepStatus, attempt: i32) -> Self {
         Self {
             node_id: node_id.to_string(),
             status,
             outcome: None,
             error: None,
             agent_node_id: None,
+            attempt,
+            fresh_attempt: false,
         }
     }
 }
@@ -364,7 +424,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 finish_run_if_done(run, &mut t);
             }
         }
-        CircuitEvent::AgentLost { agent_node_id } => {
+CircuitEvent::AgentLost { agent_node_id } => {
             let bound: Option<String> = run
                 .steps
                 .iter()
@@ -372,6 +432,70 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 .map(|s| s.node_id.clone());
             if let Some(step_node) = bound {
                 cancel_step(run, &mut t, &step_node);
+                finish_run_if_done(run, &mut t);
+            }
+        }
+        // -- Milestone 2 (#1207): pause/resume + human-in-the-loop gates --
+        CircuitEvent::Paused => {
+            if run.state == RunState::Running {
+                run.state = RunState::Paused;
+                t.run_state_changed = true;
+            }
+        }
+        CircuitEvent::Resumed => {
+            if run.state == RunState::Paused {
+                run.state = RunState::Running;
+                t.run_state_changed = true;
+            }
+        }
+        CircuitEvent::CollaboratorApproved { node_id } => {
+            let waiting = matches!(
+                run.step(node_id),
+                Some(s) if s.status == StepStatus::Blocked
+            ) && matches!(
+                run.graph.node(node_id).map(|n| &n.kind),
+                Some(CircuitNodeKind::CollaboratorCheck { require_approval: true })
+            );
+            if waiting && run.state == RunState::Running {
+                set_step(run, &mut t, node_id, StepStatus::Completed);
+                cascade_after_completion(run, &mut t, 1);
+                finish_run_if_done(run, &mut t);
+            }
+        }
+        CircuitEvent::TurnClassified {
+            node_id,
+            classification,
+        } => {
+            let is_waiting_classifier = matches!(
+                run.step(node_id),
+                Some(s) if s.status == StepStatus::Running
+            ) && matches!(
+                run.graph.node(node_id).map(|n| &n.kind),
+                Some(CircuitNodeKind::LlmTurnClassifier)
+            );
+            if is_waiting_classifier && run.state == RunState::Running {
+                let outcome = match classification {
+                    Some(Classification::Completed) => StepOutcome::Completed,
+                    Some(Classification::Blocked) => StepOutcome::Blocked,
+                    Some(Classification::Working) | None => StepOutcome::Working,
+                };
+                complete_with_outcome(run, &mut t, node_id, outcome);
+                cascade_after_completion(run, &mut t, 1);
+                finish_run_if_done(run, &mut t);
+            }
+        }
+        CircuitEvent::VerificationResult { node_id, green } => {
+            let is_waiting_verification = matches!(
+                run.step(node_id),
+                Some(s) if s.status == StepStatus::Running
+            ) && matches!(
+                run.graph.node(node_id).map(|n| &n.kind),
+                Some(CircuitNodeKind::DeterministicVerification { .. })
+            );
+            if is_waiting_verification && run.state == RunState::Running {
+                let outcome = if *green { StepOutcome::Green } else { StepOutcome::Red };
+                complete_with_outcome(run, &mut t, node_id, outcome);
+                cascade_after_completion(run, &mut t, 1);
                 finish_run_if_done(run, &mut t);
             }
         }
@@ -400,8 +524,38 @@ fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepSt
         }
     };
     if changed {
-        t.step_writes.push(StepWrite::insert(node_id, status));
+        // Preserve the existing attempt count on re-transitions (a retry's
+        // second run must not write attempt=1 over its reset value).
+        let attempt = run.step(node_id).map(|s| s.attempt).unwrap_or(1);
+        t.step_writes.push(StepWrite::for_existing(node_id, status, attempt));
     }
+}
+
+/// Complete a step with a specific gate outcome (Completed status but a
+/// Blocked/Working/Green/Red routing outcome — #1207).
+fn complete_with_outcome(
+    run: &mut RunView,
+    t: &mut Transition,
+    node_id: &str,
+    outcome: StepOutcome,
+) {
+    let attempt = match run.step_mut(node_id) {
+        Some(step) => {
+            step.status = StepStatus::Completed;
+            step.outcome = Some(outcome);
+            step.attempt
+        }
+        None => 1,
+    };
+    t.step_writes.push(StepWrite {
+        node_id: node_id.to_string(),
+        status: StepStatus::Completed,
+        outcome: Some(Some(outcome)),
+        error: None,
+        agent_node_id: None,
+        attempt,
+        fresh_attempt: false,
+    });
 }
 
 fn fail_step(run: &mut RunView, t: &mut Transition, node_id: &str, error: String) {
@@ -418,15 +572,81 @@ fn fail_step(run: &mut RunView, t: &mut Transition, node_id: &str, error: String
         step.error = Some(error.clone());
         run.steps.push(step);
     }
+    let attempt = run.step(node_id).map(|s| s.attempt).unwrap_or(1);
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
         status: StepStatus::Failed,
         outcome: Some(Some(StepOutcome::Failed)),
         error: Some(error),
         agent_node_id: None,
+        attempt,
+        fresh_attempt: false,
     });
-    run.state = RunState::Failed;
-    t.run_state_changed = true;
+    // Fail-fast — UNLESS the author wired this failure to a RetryLimit
+    // gate (#1207). Then the gate owns the failure: the run stays
+    // Running so the gate can decide retry vs exhaustion.
+    if !has_retry_path(run, node_id) {
+        run.state = RunState::Failed;
+        t.run_state_changed = true;
+        return;
+    }
+    // Re-arm any already-fired retry gate downstream: a gate that
+    // completed an earlier round must run again for this new failure.
+    // (A gate without a step yet is picked up by ordinary scheduling.)
+    let gates: Vec<String> = run
+        .graph
+        .edges
+        .iter()
+        .filter(|e| {
+            e.from == node_id
+                && matches!(
+                    e.condition,
+                    EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Failed)
+                )
+                && matches!(
+                    run.graph.node(&e.to).map(|n| &n.kind),
+                    Some(CircuitNodeKind::RetryLimit { .. })
+                )
+        })
+        .map(|e| e.to.clone())
+        .collect();
+    for gate in gates {
+        let rearm = match run.step_mut(&gate) {
+            Some(step) if step.status.is_terminal() => {
+                step.status = StepStatus::Queued;
+                step.outcome = None;
+                step.error = None;
+                Some(step.attempt)
+            }
+            _ => None,
+        };
+        if let Some(attempt) = rearm {
+            t.step_writes.push(StepWrite {
+                node_id: gate,
+                status: StepStatus::Queued,
+                outcome: Some(None),
+                error: None,
+                agent_node_id: None,
+                attempt,
+                fresh_attempt: true,
+            });
+        }
+    }
+}
+
+/// Does `node_id` wire its failure into a downstream RetryLimit gate?
+fn has_retry_path(run: &RunView, node_id: &str) -> bool {
+    run.graph.edges.iter().any(|e| {
+        e.from == node_id
+            && matches!(
+                e.condition,
+                EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Failed)
+            )
+            && matches!(
+                run.graph.node(&e.to).map(|n| &n.kind),
+                Some(CircuitNodeKind::RetryLimit { .. })
+            )
+    })
 }
 
 fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
@@ -449,12 +669,15 @@ fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
             run.steps.push(step);
         }
     }
+    let attempt = run.step(node_id).map(|s| s.attempt).unwrap_or(1);
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
         status: StepStatus::Cancelled,
         outcome: Some(Some(StepOutcome::Cancelled)),
         error: Some(CANCEL_REASON.to_string()),
         agent_node_id: None,
+        attempt,
+        fresh_attempt: false,
     });
     run.state = RunState::Failed;
     t.run_state_changed = true;
@@ -462,9 +685,23 @@ fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
 
 /// Is `node_id` eligible to schedule? All incoming edges satisfied by
 /// terminal parent steps with matching conditions — except
-/// `AnyCompleted`, which satisfies on any completed parent.
+/// `AnyCompleted`, which satisfies on any completed parent, and except
+/// edges FROM a RetryLimit gate (#1207): a loop-back wire is control
+/// flow for the retry reset (which re-queues its target directly), not
+/// a data dependency — counting it would wedge the target forever.
 fn is_eligible(run: &RunView, node_id: &str) -> bool {
-    let incoming = run.graph.incoming(node_id);
+    let incoming: Vec<&super::model::CircuitEdge> = run
+        .graph
+        .incoming(node_id)
+        .into_iter()
+        .filter(|e| {
+            !matches!(
+                run.graph.node(&e.from).map(|n| &n.kind),
+                Some(CircuitNodeKind::RetryLimit { .. })
+            )
+        })
+        .collect();
+    let incoming = incoming.as_slice();
     if incoming.is_empty() {
         return false; // roots are handled by the trigger path
     }
@@ -683,10 +920,45 @@ fn start_effects_and_completion(
             });
             // Stays Running until AgentFinished/AgentLost.
         }
-        // Joins are instant once scheduled (eligibility already proved
+// Joins are instant once scheduled (eligibility already proved
         // their fan-in rule).
         CircuitNodeKind::AllCompleted | CircuitNodeKind::AnyCompleted => {
             set_step(run, t, node_id, StepStatus::Completed);
+        }
+        // -- Gates (#1207) -------------------------------------------------
+        CircuitNodeKind::LlmTurnClassifier
+            // Parks Running until the seam classifies the piloted
+            // agent's next turn yield and feeds TurnClassified back.
+            // Without any spawned agent there is nothing to classify —
+            // fail fast rather than wedge.
+            if run.latest_agent_node_id().is_none() =>
+        {
+            fail_step(
+                run,
+                t,
+                node_id,
+                "no agent node was spawned earlier in this run to classify".to_string(),
+            );
+        }
+        CircuitNodeKind::LlmTurnClassifier => {
+            // Stays Running until TurnClassified.
+        }
+        CircuitNodeKind::DeterministicVerification { .. } => {
+            // Parks Running until the seam executes the check and feeds
+            // VerificationResult back (Green/Red routing outcome).
+        }
+        CircuitNodeKind::CollaboratorCheck { require_approval } => {
+            if *require_approval {
+                // Human-in-the-loop: park on a blocked badge until the
+                // Approve click arrives as CollaboratorApproved.
+                set_step(run, t, node_id, StepStatus::Blocked);
+            } else {
+                // AutoRun passes through untouched.
+                set_step(run, t, node_id, StepStatus::Completed);
+            }
+        }
+        CircuitNodeKind::RetryLimit { max_retries } => {
+            execute_retry_limit(run, t, node_id, *max_retries);
         }
         // Triggers never normally reach here (auto-completed at trigger
         // time), but a re-tick racing the trigger write must not wedge.
@@ -696,11 +968,83 @@ fn start_effects_and_completion(
         | CircuitNodeKind::GithubPullRequestLabel { .. } => {
             set_step(run, t, node_id, StepStatus::Completed);
         }
-        // Gates / GitHub actions are filtered by `is_executable` before
-        // this match; unreachable today, kept exhaustive for when the
-        // later milestones add their effects.
+        // GitHub actions are filtered by `is_executable` before this
+        // match; unreachable today, kept exhaustive for when a later
+        // milestone adds their effects.
         _ => {}
     }
+}
+
+/// RetryLimit gate execution (#1207): find the most recent FAILED parent
+/// wired in through a matching edge and decide retry vs exhaustion.
+///
+/// Semantics: `max_retries` is the total allowed executions of the
+/// failing step. `attempt < max_retries` → reset the failed step to
+/// Queued with `attempt + 1` (the FIFO promotion loop re-runs it) and
+/// complete the gate. Budget exhausted → the gate fails, resuming the
+/// normal fail-fast path.
+fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max_retries: i32) {
+    let target: Option<String> = run
+        .steps
+        .iter()
+        .rev()
+        .find(|s| {
+            s.status == StepStatus::Failed
+                && run.graph.incoming(node_id).iter().any(|e| {
+                    e.from == s.node_id
+                        && match e.condition {
+                            EdgeCondition::Always => true,
+                            EdgeCondition::OnOutcome(o) => o == StepOutcome::Failed,
+                        }
+                })
+        })
+        .map(|s| s.node_id.clone());
+    let Some(target) = target else {
+        fail_step(
+            run,
+            t,
+            node_id,
+            "retry limit reached without a failed upstream step".to_string(),
+        );
+        return;
+    };
+    let attempt = run.step(&target).map(|s| s.attempt).unwrap_or(1);
+    if attempt < max_retries {
+        reset_step_for_retry(run, t, &target, attempt + 1);
+        set_step(run, t, node_id, StepStatus::Completed);
+    } else {
+        fail_step(
+            run,
+            t,
+            node_id,
+            format!("retry budget exhausted after {} attempts", max_retries),
+        );
+    }
+}
+
+/// Reset a failed step for another execution: back to Queued with the
+/// attempt count bumped and error/outcome cleared.
+fn reset_step_for_retry(
+    run: &mut RunView,
+    t: &mut Transition,
+    node_id: &str,
+    next_attempt: i32,
+) {
+    if let Some(step) = run.step_mut(node_id) {
+        step.status = StepStatus::Queued;
+        step.outcome = None;
+        step.error = None;
+        step.attempt = next_attempt;
+    }
+    t.step_writes.push(StepWrite {
+        node_id: node_id.to_string(),
+        status: StepStatus::Queued,
+        outcome: Some(None),
+        error: None,
+        agent_node_id: None,
+        attempt: next_attempt,
+        fresh_attempt: true,
+    });
 }
 
 /// After completions, promote newly-eligible NON-agent nodes — but at
@@ -1307,9 +1651,13 @@ mod tests {
 
     // -- unsupported kinds -----------------------------------------------------------
 
-    #[test]
-    fn gate_nodes_fail_explicitly_instead_of_stalling() {
-        let mut run = fan_out_run(CircuitNodeKind::LlmTurnClassifier);
+#[test]
+    fn github_action_nodes_fail_explicitly_instead_of_stalling() {
+        let mut run = fan_out_run(CircuitNodeKind::GithubAction {
+            action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+            label: None,
+            comment: None,
+        });
         run.graph.edges.retain(|e| e.to != "j" && e.from != "b");
         run.graph.nodes.retain(|n| n.id != "b");
         run.graph.edges.push(CircuitEdge {
@@ -1333,6 +1681,33 @@ mod tests {
             w.error
         );
         assert_eq!(run.state, RunState::Failed);
+    }
+
+    #[test]
+    fn llm_classifier_parks_running_until_classified() {
+        // The milestone-1 behavior (fail with "not executed until a later
+        // milestone") is replaced in #1207: the gate waits for the seam.
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier, &[]);
+        fire_to_gate(&mut run, "classify");
+        assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+        assert_eq!(run.state, RunState::Running);
+    }
+
+    #[test]
+    fn classifier_without_any_prior_spawn_fails_fast() {
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier, &[]);
+        run.graph.nodes.retain(|n| n.id != "work");
+        run.graph.edges.retain(|e| e.from != "work");
+        run.graph.edges.push(CircuitEdge {
+            from: "trigger".into(),
+            to: "classify".into(),
+            condition: Default::default(),
+        });
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        let t = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "classify"), StepStatus::Failed);
+        assert_eq!(run.state, RunState::Failed);
+        let _ = t;
     }
 
     // -- pending-run guard ------------------------------------------------------------
@@ -1418,9 +1793,15 @@ mod tests {
 
     // -- DB string round-trips ---------------------------------------------------------
 
-    #[test]
+#[test]
     fn run_state_db_strings_round_trip() {
-        for s in [RunState::Pending, RunState::Running, RunState::Completed, RunState::Failed] {
+        for s in [
+            RunState::Pending,
+            RunState::Running,
+            RunState::Paused,
+            RunState::Completed,
+            RunState::Failed,
+        ] {
             assert_eq!(RunState::from_db_str(s.as_db_str()), s);
         }
         assert_eq!(RunState::from_db_str("garbage"), RunState::Pending);
@@ -1432,6 +1813,7 @@ mod tests {
         for s in [
             StepStatus::Queued,
             StepStatus::Running,
+            StepStatus::Blocked,
             StepStatus::Completed,
             StepStatus::Failed,
             StepStatus::Cancelled,
@@ -1439,5 +1821,397 @@ mod tests {
             assert_eq!(StepStatus::from_db_str(s.as_db_str()), s);
         }
         assert_eq!(StepStatus::from_db_str("garbage"), StepStatus::Queued);
+    }
+
+    // -- milestone-2 gates (#1207) ----------------------------------------------
+
+    /// A trigger → spawn → GATE blueprint with one Notify branch per
+    /// routing outcome, wired `OnOutcome(...)`.
+    fn gate_run(gate_id: &str, kind: CircuitNodeKind, branches: &[(StepOutcome, &str)]) -> RunView {
+        let mut ctx = CircuitContext::new();
+        ctx.with_circuit(7, "gates", 5);
+        ctx.with_run(42);
+        let mut nodes = vec![
+            CircuitNode { id: "trigger".into(), kind: CircuitNodeKind::Manual },
+            CircuitNode {
+                id: "work".into(),
+                kind: CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None },
+            },
+            CircuitNode { id: gate_id.to_string(), kind },
+        ];
+        let mut edges = vec![
+            CircuitEdge { from: "trigger".into(), to: "work".into(), condition: Default::default() },
+            CircuitEdge { from: "work".to_string(), to: gate_id.to_string(), condition: Default::default() },
+        ];
+        for (outcome, branch_id) in branches {
+            nodes.push(CircuitNode {
+                id: branch_id.to_string(),
+                kind: CircuitNodeKind::Notify { message: branch_id.to_string() },
+            });
+            edges.push(CircuitEdge {
+                from: gate_id.to_string(),
+                to: branch_id.to_string(),
+                condition: EdgeCondition::OnOutcome(*outcome),
+            });
+        }
+        RunView {
+            run_id: 42,
+            graph: CircuitGraph { version: 1, nodes, edges },
+            state: RunState::Pending,
+            context: ctx,
+            steps: vec![],
+        }
+    }
+
+    /// Drive a gate_run from Pending up to the gate step existing. The
+    /// gate's exact status depends on its kind (classifier/verification
+    /// park Running; AutoRun completes instantly) — callers assert that.
+    fn fire_to_gate(run: &mut RunView, gate_id: &str) {
+        advance(run, &CircuitEvent::ManualTriggered);
+        advance(run, &tick(5, 5));
+        run.attach_agent_node("work", 900);
+        advance(run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        assert!(run.step(gate_id).is_some(), "gate {} must have started", gate_id);
+    }
+
+    fn classified(node_id: &str, c: Option<Classification>) -> CircuitEvent {
+        CircuitEvent::TurnClassified { node_id: node_id.to_string(), classification: c }
+    }
+
+    #[test]
+    fn classifier_completed_routes_only_the_on_completed_branch() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier,
+            &[(StepOutcome::Completed, "green-path"), (StepOutcome::Blocked, "help-path")],
+        );
+        fire_to_gate(&mut run, "classify");
+        let t = advance(&mut run, &classified("classify", Some(Classification::Completed)));
+        assert_eq!(status_of(&run, "classify"), StepStatus::Completed);
+        assert_eq!(run.step("classify").unwrap().outcome, Some(StepOutcome::Completed));
+        assert_eq!(status_of(&run, "green-path"), StepStatus::Completed);
+        assert!(run.step("help-path").is_none(), "blocked branch must not traverse");
+        assert!(t.effects.iter().any(|e| matches!(e, Effect::Notify { message } if message == "green-path")));
+    }
+
+    #[test]
+    fn classifier_blocked_routes_the_help_branch() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier,
+            &[(StepOutcome::Completed, "green-path"), (StepOutcome::Blocked, "help-path")],
+        );
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &classified("classify", Some(Classification::Blocked)));
+        assert_eq!(run.step("classify").unwrap().outcome, Some(StepOutcome::Blocked));
+        assert_eq!(status_of(&run, "help-path"), StepStatus::Completed);
+        assert!(run.step("green-path").is_none());
+    }
+
+    #[test]
+    fn classifier_working_and_unparseable_route_the_working_branch() {
+        for classification in [Some(Classification::Working), None] {
+            let mut run = gate_run(
+                "classify",
+                CircuitNodeKind::LlmTurnClassifier,
+                &[(StepOutcome::Working, "keep-going"), (StepOutcome::Completed, "done-path")],
+            );
+            fire_to_gate(&mut run, "classify");
+            advance(&mut run, &classified("classify", classification));
+            assert_eq!(run.step("classify").unwrap().outcome, Some(StepOutcome::Working));
+            assert_eq!(status_of(&run, "keep-going"), StepStatus::Completed);
+            assert!(run.step("done-path").is_none());
+        }
+    }
+
+    #[test]
+    fn turn_classified_for_unknown_or_non_running_steps_is_a_no_op() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier,
+            &[(StepOutcome::Completed, "done-path")],
+        );
+        let before = run.clone();
+        advance(
+            &mut run,
+            &CircuitEvent::TurnClassified { node_id: "nowhere".to_string(), classification: Some(Classification::Completed) },
+        );
+        assert_eq!(run, before);
+    }
+
+    #[test]
+    fn verification_gate_routes_green_and_red() {
+        for (green, expected, hit, miss) in [
+            (true, StepOutcome::Green, "pass", "fail"),
+            (false, StepOutcome::Red, "fail", "pass"),
+        ] {
+            let mut run = gate_run(
+                "verify",
+                CircuitNodeKind::DeterministicVerification { command: "cargo test".into() },
+                &[(StepOutcome::Green, "pass"), (StepOutcome::Red, "fail")],
+            );
+            fire_to_gate(&mut run, "verify");
+            advance(
+                &mut run,
+                &CircuitEvent::VerificationResult { node_id: "verify".to_string(), green },
+            );
+            assert_eq!(run.step("verify").unwrap().outcome, Some(expected));
+            assert_eq!(status_of(&run, hit), StepStatus::Completed);
+            assert!(run.step(miss).is_none());
+        }
+    }
+
+    #[test]
+    fn collaborator_check_autorun_passes_through_untouched() {
+        let mut run = gate_run(
+            "gate",
+            CircuitNodeKind::CollaboratorCheck { require_approval: false },
+            &[(StepOutcome::Completed, "after")],
+        );
+        fire_to_gate(&mut run, "gate");
+        // AutoRun never parks: it cascaded straight through.
+        assert_eq!(status_of(&run, "gate"), StepStatus::Completed);
+        assert_eq!(
+            run.state,
+            RunState::Running,
+            "the successor waits for the next tick's capacity pass"
+        );
+        advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "after"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Completed);
+    }
+
+    #[test]
+    fn require_approval_parks_blocked_then_approve_cascades() {
+        let mut run = gate_run(
+            "gate",
+            CircuitNodeKind::CollaboratorCheck { require_approval: true },
+            &[(StepOutcome::Completed, "after")],
+        );
+        fire_to_gate(&mut run, "gate");
+        assert_eq!(status_of(&run, "gate"), StepStatus::Blocked);
+        assert_eq!(run.state, RunState::Running, "the run parks on the badge, not failed");
+        assert!(
+            run.steps.iter().all(|s| s.status != StepStatus::Completed || s.node_id != "after"),
+            "nothing may advance past an unapproved gate"
+        );
+
+        let t = advance(
+            &mut run,
+            &CircuitEvent::CollaboratorApproved { node_id: "gate".to_string() },
+        );
+        assert_eq!(status_of(&run, "gate"), StepStatus::Completed);
+        assert_eq!(status_of(&run, "after"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Completed);
+        assert!(t.run_state_changed);
+    }
+
+    #[test]
+    fn approving_a_non_blocked_step_is_a_no_op() {
+        let mut run = gate_run(
+            "gate",
+            CircuitNodeKind::CollaboratorCheck { require_approval: false },
+            &[],
+        );
+        fire_to_gate(&mut run, "gate");
+        let before = run.clone();
+        advance(&mut run, &CircuitEvent::CollaboratorApproved { node_id: "gate".to_string() });
+        advance(&mut run, &CircuitEvent::CollaboratorApproved { node_id: "elsewhere".to_string() });
+        assert_eq!(run, before, "approvals only act on Blocked collaborator gates");
+    }
+
+    // -- pause / resume (#1207) ---------------------------------------------------
+
+    #[test]
+    fn pause_halts_advancement_while_the_current_step_finishes() {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &tick(1, 1));
+        run.attach_agent_node("spawn", 900);
+
+        let t = advance(&mut run, &CircuitEvent::Paused);
+        assert!(t.run_state_changed);
+        assert_eq!(run.state, RunState::Paused);
+
+        // Ticks do nothing while paused.
+        let again = advance(&mut run, &tick(9, 9));
+        assert!(again.is_empty());
+
+        // The current step may finish — but nothing cascades.
+        run.attach_agent_node("spawn", 900);
+        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
+        assert!(run.step("notify").is_none(), "paused runs must not advance");
+        assert_eq!(run.state, RunState::Paused);
+    }
+
+    #[test]
+    fn resume_continues_exactly_where_the_pause_stopped() {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &tick(1, 1));
+        run.attach_agent_node("spawn", 900);
+        advance(&mut run, &CircuitEvent::Paused);
+        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+
+        let t = advance(&mut run, &CircuitEvent::Resumed);
+        assert!(t.run_state_changed);
+        assert_eq!(run.state, RunState::Running);
+
+        // The finished spawn's successor picks up on the next tick.
+        advance(&mut run, &tick(1, 1));
+        assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Completed);
+    }
+
+    #[test]
+    fn pause_and_resume_are_idempotent() {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Paused);
+        let again = advance(&mut run, &CircuitEvent::Paused);
+        assert!(!again.run_state_changed);
+        advance(&mut run, &CircuitEvent::Resumed);
+        let again = advance(&mut run, &CircuitEvent::Resumed);
+        assert!(!again.run_state_changed);
+    }
+
+    #[test]
+    fn approvals_do_not_fire_while_paused() {
+        let mut run = gate_run(
+            "gate",
+            CircuitNodeKind::CollaboratorCheck { require_approval: true },
+            &[(StepOutcome::Completed, "after")],
+        );
+        fire_to_gate(&mut run, "gate");
+        advance(&mut run, &CircuitEvent::Paused);
+        let before = run.clone();
+        advance(&mut run, &CircuitEvent::CollaboratorApproved { node_id: "gate".to_string() });
+        assert_eq!(run, before, "a paused run must not consume approvals");
+        advance(&mut run, &CircuitEvent::Resumed);
+        advance(&mut run, &CircuitEvent::CollaboratorApproved { node_id: "gate".to_string() });
+        assert_eq!(status_of(&run, "after"), StepStatus::Completed);
+    }
+
+    // -- retry limits (#1207) -------------------------------------------------------
+
+    /// trigger → work →(Failed)→ retry →(Always)→ work (loop-back).
+    fn retry_run(max_retries: i32) -> RunView {
+        RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode {
+                        id: "work".into(),
+                        kind: CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None },
+                    },
+                    CircuitNode { id: "retry".into(), kind: CircuitNodeKind::RetryLimit { max_retries } },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "work".into(), condition: Default::default() },
+                    CircuitEdge {
+                        from: "work".into(),
+                        to: "retry".into(),
+                        condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
+                    },
+                    CircuitEdge { from: "retry".into(), to: "work".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        }
+    }
+
+    #[test]
+    fn retry_limit_resets_the_failed_step_within_its_budget() {
+        let mut run = retry_run(2);
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("work", 11);
+
+        // First failure does NOT fail-fast: the retry gate owns it. The
+        // same advance call cascades into the gate, which resets the
+        // failed step for its second execution.
+        let t =
+            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        assert_eq!(status_of(&run, "retry"), StepStatus::Completed);
+        assert_eq!(status_of(&run, "work"), StepStatus::Queued);
+        assert_eq!(run.step("work").unwrap().attempt, 2);
+        assert_eq!(run.step("work").unwrap().outcome, None, "reset clears the stale outcome");
+        assert_eq!(run.state, RunState::Running, "a wired RetryLimit suppresses fail-fast");
+
+        // Both decisions are persisted: the failure AND the fresh attempt.
+        assert!(
+            t.step_writes.iter().any(|w| w.node_id == "work" && w.status == StepStatus::Failed),
+            "the failure itself must be persisted"
+        );
+        let reset = t
+            .step_writes
+            .iter()
+            .find(|w| w.node_id == "work" && w.fresh_attempt)
+            .expect("reset must be persisted as a fresh attempt");
+        assert_eq!(reset.attempt, 2);
+
+        // Next tick re-executes the retried step.
+        advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "work"), StepStatus::Running);
+    }
+
+    #[test]
+    fn flaky_step_succeeding_on_retry_completes_the_run() {
+        let mut run = retry_run(2);
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("work", 11);
+        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        advance(&mut run, &tick(5, 5)); // promote the attempt-2 execution
+        assert_eq!(run.step("work").unwrap().attempt, 2);
+        let t =
+            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: true });
+        assert_eq!(status_of(&run, "work"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Completed);
+        assert!(t.effects.is_empty());
+    }
+
+    #[test]
+    fn exhausted_retry_budget_fails_the_run() {
+        let mut run = retry_run(2);
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("work", 11);
+        // Attempt 1 fails → reset to 2.
+        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        advance(&mut run, &tick(5, 5));
+        // Attempt 2 fails → budget spent. The gate is re-armed by the
+        // failure, then executes on the next pass and fails the run.
+        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        assert_eq!(run.state, RunState::Running, "the gate still owns the failure");
+        let t = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "retry"), StepStatus::Failed);
+        assert!(run.step("retry").unwrap().error.as_deref().unwrap().contains("exhausted"));
+        assert_eq!(run.state, RunState::Failed);
+        assert!(t.run_state_changed);
+    }
+
+    #[test]
+    fn retry_limit_without_a_failed_upstream_fails_explicitly() {
+        // Reached via an Always edge after SUCCESS — a wiring mistake the
+        // stepper surfaces instead of silently resetting anything.
+        let mut run = retry_run(3);
+        run.graph.edges.retain(|e| !(e.from == "work" && e.to == "retry"));
+        run.graph.edges.push(CircuitEdge {
+            from: "t".into(),
+            to: "retry".into(),
+            condition: Default::default(),
+        });
+        advance(&mut run, &CircuitEvent::ManualTriggered);
+        let t = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "retry"), StepStatus::Failed);
+        assert!(run.step("retry").unwrap().error.as_deref().unwrap().contains("without a failed upstream"));
+        assert_eq!(run.state, RunState::Failed);
+        let _ = t;
     }
 }

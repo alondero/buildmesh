@@ -134,6 +134,12 @@ pub fn on_output(node_id: i64, data: &str) {
         }
         tail.drain(..drain_to);
     }
+    drop(tails);
+    // Reactive gate evaluation (#1207): a circuit LlmTurnClassifier
+    // waiting on this agent's turn yield must not sit out the 2s tick.
+    // Cheap notify; redundant classifications are prevented by the
+    // fresh-output guards in the circuit worker's observation pass.
+    crate::services::circuit_worker::wake_circuit_worker();
 }
 
 /// The current cleaned (ANSI-stripped, tail-capped) buffer for a node.

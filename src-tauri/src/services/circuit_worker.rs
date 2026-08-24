@@ -60,8 +60,32 @@ const TICK_INTERVAL: Duration = Duration::from_secs(2);
 const STARTUP_DELAY: Duration = Duration::from_secs(5);
 
 /// Wake condvar. Trigger Now notifies; the worker otherwise wakes on
-/// its fast tick.
+/// its fast tick. Milestone 2 (#1207): PTY yields also notify (reactive
+/// gate evaluation), as do collaborator approvals.
 static WAKE: Lazy<(Mutex<()>, Condvar)> = Lazy::new(|| (Mutex::new(()), Condvar::new()));
+
+/// Pending collaborator approvals (#1207): `(run_id, node_id)` pairs the
+/// user approved via IPC while the gate step parks in `blocked`. Drained
+/// by the owning run's next pass into pure `CollaboratorApproved` events.
+/// Deliberately in-memory: approvals are click-moments, not durable
+/// state — after an app restart the user simply approves again.
+static APPROVALS: Lazy<Mutex<Vec<(i64, String)>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Queue a collaborator approval and wake the worker immediately so the
+/// parked run advances within milliseconds.
+pub fn request_circuit_approval(run_id: i64, node_id: String) {
+    APPROVALS.lock().unwrap().push((run_id, node_id));
+    wake_circuit_worker();
+}
+
+/// Take this run's queued approvals (leaving other runs' entries alone).
+fn drain_approvals_for(run_id: i64) -> Vec<String> {
+    let mut queue = APPROVALS.lock().unwrap();
+    let (mine, rest): (Vec<_>, Vec<_>) =
+        queue.drain(..).partition(|(r, _)| *r == run_id);
+    *queue = rest;
+    mine.into_iter().map(|(_, node_id)| node_id).collect()
+}
 
 /// Wake the circuit worker immediately (manual trigger dispatch).
 pub fn wake_circuit_worker() {
@@ -145,6 +169,8 @@ fn drive_run(
                     outcome: w.outcome.map(|o| o.map(|v| v.as_db_str().to_string())),
                     error: w.error.clone(),
                     agent_node_id: None,
+                    attempt: w.attempt,
+                    fresh_attempt: w.fresh_attempt,
                 })
                 .collect::<Vec<_>>();
             let run_state = if transition.run_state_changed {
@@ -180,7 +206,7 @@ fn drive_run(
                     _ => None,
                 })
                 .collect();
-            let ops = failed
+let ops = failed
                 .iter()
                 .map(|node_id| db::CircuitStepOp {
                     node_id: node_id.clone(),
@@ -188,6 +214,8 @@ fn drive_run(
                     outcome: Some(Some("failed".to_string())),
                     error: Some(e.clone()),
                     agent_node_id: None,
+                    attempt: 1,
+                    fresh_attempt: false,
                 })
                 .collect::<Vec<_>>();
             db::commit_circuit_advance(
@@ -234,6 +262,7 @@ fn load_steps(run_id: i64) -> Result<Vec<StepView>, String> {
             outcome: row.outcome.as_deref().and_then(GraphStepOutcome::from_db_str),
             error: row.error_message,
             agent_node_id: row.agent_node_id,
+            attempt: row.attempt,
         })
         .collect())
 }
@@ -318,6 +347,18 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
         }
     }
 
+    // Milestone-2 gate observation (#1207). Skipped while paused — a
+    // parked run must not burn classifier calls or run verification
+    // commands; the gates re-evaluate after Resume.
+    if view.state == RunState::Running {
+        observe_gates(active, view, &mut events);
+    }
+
+    // Collaborator approvals queued since the last pass.
+    for node_id in drain_approvals_for(active.run.id) {
+        events.push(CircuitEvent::CollaboratorApproved { node_id });
+    }
+
     // Capacity snapshot for scheduling. Every failure here fails CLOSED
     // (zero capacity — the run parks in pending_slot until the next
     // pass), but loudly: a silent permanent queue would look exactly
@@ -349,6 +390,138 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     }));
 
     events
+}
+
+/// Gate observation (#1207): for each Running gate step, perform the
+/// impure part of the gate (LLM classification / deterministic command)
+/// and feed the result back as a pure event in THIS pass — so a gate
+/// decision lands without waiting another tick.
+fn observe_gates(active: &db::ActiveCircuitRun, view: &RunView, events: &mut Vec<CircuitEvent>) {
+    for step in &view.steps {
+        if step.status != StepStatus::Running {
+            continue;
+        }
+        match view.graph.node(&step.node_id).map(|n| &n.kind) {
+            Some(CircuitNodeKind::LlmTurnClassifier) => {
+                if let Some(classification) = classify_latest_turn(active, view) {
+                    events.push(CircuitEvent::TurnClassified {
+                        node_id: step.node_id.clone(),
+                        classification,
+                    });
+                }
+            }
+            Some(CircuitNodeKind::DeterministicVerification { command }) => {
+                let resolved = view.context.resolve(command);
+                let mesh_path = db::get_mesh_by_id(active.run.mesh_id)
+                    .map(|m| m.path)
+                    .unwrap_or_default();
+                let green = run_verification_command(&mesh_path, &resolved);
+                tracing::info!(
+                    "circuits: verification '{}' → {} for run {}",
+                    resolved,
+                    if green { "green" } else { "red" },
+                    active.run.id
+                );
+                events.push(CircuitEvent::VerificationResult {
+                    node_id: step.node_id.clone(),
+                    green,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Classify the run's piloted agent's latest turn, or `None` when there
+/// is nothing to classify yet. Fires only on a FRESH yield: the agent
+/// must be sitting at its input prompt (`awaiting_input`/`completed`)
+/// AND have produced PTY output more recently than the last evaluation
+/// started — the same lost-turn guard the legacy pipeline uses.
+/// Reactive latency comes from `evaluator::on_output` waking this
+/// worker; correctness comes from these guards.
+fn classify_latest_turn(
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+) -> Option<Option<crate::autopilot::evaluator::Classification>> {
+    use crate::autopilot::evaluator;
+    let agent_node_id = view.latest_agent_node_id()?;
+    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
+        return None;
+    }
+    let yielded = matches!(
+        db::get_agent_node_by_id(agent_node_id).map(|n| n.status),
+        Ok(SessionStatus::AwaitingInput) | Ok(SessionStatus::Completed)
+    );
+    if !yielded {
+        return None;
+    }
+    let fresh_output = match (
+        evaluator::millis_since_last_output(agent_node_id),
+        evaluator::millis_since_last_evaluation(agent_node_id),
+    ) {
+        (Some(output), Some(eval)) => output < eval,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if !fresh_output {
+        return None;
+    }
+    // Evaluator backend env: the mesh's Autopilot provider side-channel
+    // (never the node's own model — the #824 lesson).
+    let provider = db::get_mesh_by_id(active.run.mesh_id)
+        .ok()
+        .and_then(|m| m.autopilot_provider);
+    let backend_env =
+        crate::session_naming::naming_backend_env(provider.as_deref().unwrap_or("anthropic"));
+    evaluator::note_evaluation(agent_node_id);
+    let classification = evaluator::classify(agent_node_id, &backend_env);
+    tracing::info!(
+        "circuits: turn classifier for run {} agent {} → {:?}",
+        active.run.id,
+        agent_node_id,
+        classification
+    );
+    Some(classification)
+}
+
+/// Run a DeterministicVerification command in the mesh directory and
+/// report green (exit 0) / red. Bounded wait (2 minutes), then kill and
+/// call it red — a hung check must not wedge the worker thread.
+fn run_verification_command(mesh_path: &str, command: &str) -> bool {
+    let (program, prefix): (&str, &[&str]) =
+        if cfg!(windows) { ("cmd", &["/C"]) } else { ("sh", &["-c"]) };
+    let mut cmd = crate::process_util::command_no_window(program);
+    cmd.args(prefix).arg(command).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    if !mesh_path.is_empty() {
+        cmd.current_dir(mesh_path);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("circuits: verification '{command}' failed to spawn: {}", e);
+            return false;
+        }
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!("circuits: verification '{command}' timed out after 120s");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(e) => {
+                tracing::warn!("circuits: verification '{command}' wait failed: {}", e);
+                let _ = child.kill();
+                return false;
+            }
+        }
+    }
 }
 
 /// Execute one transition's effects against the real world. Takes the
