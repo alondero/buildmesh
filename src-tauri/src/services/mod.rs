@@ -3,6 +3,7 @@
 pub mod agent_node;
 pub mod agent_node_discovery;
 pub mod autopilot;
+pub mod circuit_triggers;
 pub mod circuit_worker;
 pub mod coordinator_ledger_maintenance;
 pub mod fetch_freshness;

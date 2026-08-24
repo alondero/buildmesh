@@ -1276,13 +1276,21 @@ export const listCircuitsWithRuns = (meshId: number, limit?: number) =>
   _invoke<CircuitWithRuns[]>('list_circuits_with_runs', { meshId, limit });
 
 /** Creates a circuit with the canonical server-side blueprint:
- *  Manual trigger → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify. */
+ *  <trigger> → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify.
+ *  Trigger vocabulary (issue #1208): manual (default), interval,
+ *  github_issue_label, github_pr_label. */
+export type { CircuitTriggerKind } from '../types/generated/CircuitTriggerKind';
+import type { CircuitTriggerKind } from '../types/generated/CircuitTriggerKind';
+
 export const createCircuit = (
   meshId: number,
   name: string,
   description: string,
   concurrencyLimit: number,
-  initialPrompt: string
+  initialPrompt: string,
+  triggerKind: CircuitTriggerKind = 'manual',
+  triggerLabel?: string,
+  intervalSeconds?: number
 ) =>
   _invoke<AutopilotCircuit>('create_circuit', {
     meshId,
@@ -1290,6 +1298,9 @@ export const createCircuit = (
     description,
     concurrencyLimit,
     initialPrompt,
+    triggerKind,
+    triggerLabel: triggerLabel ?? null,
+    intervalSeconds: intervalSeconds ?? null,
   });
 
 export const setCircuitEnabled = (circuitId: number, enabled: boolean) =>

@@ -54,9 +54,9 @@
 //!   scheduling and no completion while paused; lifecycle events still
 //!   mark steps terminal so "the current step finishes", but nothing
 //!   cascades until `Resumed`.
-//! - Kinds the engine deliberately does not execute (GitHub actions)
-//!   fail their step with an explicit error rather than stalling the
-//!   run forever.
+//! - `GithubAction` steps complete instantly and hand a `CallGithub`
+//!   effect to the seam (milestone 3, issue #1208); a failed HTTP call
+//!   fails the step from the seam's effect path.
 //! - Fail-fast: any step ending `Failed` without a downstream RetryLimit,
 //!   or a piloted agent being lost (closed/archived mid-run), fails the
 //!   run.
@@ -64,7 +64,7 @@
 use super::context::CircuitContext;
 use super::model::{
     consumes_agent_slot, is_executable, CircuitGraph, CircuitNodeKind, EdgeCondition,
-    SessionStatusKind, StepOutcome,
+    GithubActionKind, SessionStatusKind, StepOutcome,
 };
 use crate::autopilot::evaluator::Classification;
 
@@ -241,10 +241,11 @@ pub struct Capacity {
 /// "manual PTY interaction never breaks a run" guarantee.
 #[derive(Debug, Clone)]
 pub enum CircuitEvent {
-    /// The run was triggered (Trigger Now). Moves Pending → Running;
-    /// triggers auto-complete; actual scheduling happens on the next Tick
-    /// so every start decision is capacity-checked.
-    ManualTriggered,
+    /// The run was triggered. Renamed from `ManualTriggered` in #1208:
+    /// runs are minted pending by ANY trigger dispatch (Trigger Now,
+    /// a GitHub poll ingest, an interval fire) and this event is
+    /// trigger-kind agnostic.
+    Triggered,
     /// Periodic fast tick carrying current capacity.
     Tick(Capacity),
     /// The seam observed the injected prompt's target process is now live.
@@ -314,6 +315,18 @@ pub enum Effect {
     InjectPty { node_id: String, prompt: String },
     SetNodeStatus { node_id: String, status: String },
     Notify { message: String },
+    /// Milestone 3 (issue #1208): perform a GitHub mutation against the
+    /// run's trigger repo/issue. `label`/`comment` are the raw blueprint
+    /// templates — the seam resolves them against the run context at
+    /// execution time. A synchronous failure fails the step (the seam's
+    /// effect-failure path), so the mutation is retried only by
+    /// re-triggering, never silently.
+    CallGithub {
+        node_id: String,
+        action: GithubActionKind,
+        label: Option<String>,
+        comment: Option<String>,
+    },
 }
 
 /// Everything one `advance` call decided: the step-row writes and the
@@ -342,7 +355,7 @@ impl Transition {
 pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
     let mut t = Transition::default();
     match event {
-        CircuitEvent::ManualTriggered => {
+        CircuitEvent::Triggered => {
             if run.state == RunState::Pending {
                 run.state = RunState::Running;
                 t.run_state_changed = true;
@@ -914,6 +927,20 @@ fn start_effects_and_completion(
                 "no agent node was spawned earlier in this run to inject into".to_string(),
             );
         }
+        CircuitNodeKind::GithubAction { action, label, comment } => {
+            // The mutation rides the effect list; the seam performs the
+            // HTTP call after this transition commits and fails the step
+            // loudly if it errors. Instant completion keeps the step out
+            // of the concurrency counters while the call is in flight
+            // (the same contract Notify uses).
+            t.effects.push(Effect::CallGithub {
+                node_id: node_id.to_string(),
+                action: *action,
+                label: label.clone(),
+                comment: comment.clone(),
+            });
+            set_step(run, t, node_id, StepStatus::Completed);
+        }
         CircuitNodeKind::SpawnAgentNode { .. } => {
             t.effects.push(Effect::SpawnAgentNode {
                 node_id: node_id.to_string(),
@@ -1113,7 +1140,9 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autopilot::circuit::model::{CircuitEdge, CircuitNode};
+    use crate::autopilot::circuit::model::{
+        CircuitEdge, CircuitNode, GithubActionKind,
+    };
 
     // -- fixtures -------------------------------------------------------------
 
@@ -1167,7 +1196,7 @@ mod tests {
     #[test]
     fn manual_trigger_starts_run_and_completes_trigger_roots() {
         let mut run = linear_run();
-        let t = advance(&mut run, &CircuitEvent::ManualTriggered);
+        let t = advance(&mut run, &CircuitEvent::Triggered);
         assert!(t.run_state_changed);
         assert_eq!(run.state, RunState::Running);
         assert_eq!(t.step_writes.len(), 1);
@@ -1183,8 +1212,8 @@ mod tests {
     #[test]
     fn trigger_is_idempotent_on_an_already_running_run() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
-        let second = advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
+        let second = advance(&mut run, &CircuitEvent::Triggered);
         assert!(!second.run_state_changed);
         assert!(second.is_empty());
     }
@@ -1201,7 +1230,7 @@ mod tests {
         ] {
             let mut run = linear_run();
             run.graph.nodes[0].kind = kind;
-            advance(&mut run, &CircuitEvent::ManualTriggered);
+            advance(&mut run, &CircuitEvent::Triggered);
             assert_eq!(status_of(&run, "trigger"), StepStatus::Completed);
         }
     }
@@ -1211,7 +1240,7 @@ mod tests {
     #[test]
     fn first_tick_schedules_spawn_when_both_capacities_allow() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(1, 1));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
         assert_eq!(
@@ -1223,7 +1252,7 @@ mod tests {
     #[test]
     fn spawn_queues_when_mesh_agent_slots_are_exhausted() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(2, 0));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Queued);
         assert!(t.effects.is_empty(), "queued steps emit no spawn effect");
@@ -1232,7 +1261,7 @@ mod tests {
     #[test]
     fn spawn_queues_when_circuit_concurrency_is_exhausted() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(0, 5));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Queued);
         assert!(t.effects.is_empty());
@@ -1241,7 +1270,7 @@ mod tests {
     #[test]
     fn queued_step_promotes_fifo_when_a_mesh_slot_frees() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(2, 0));
         let t = advance(&mut run, &tick(2, 1));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
@@ -1254,7 +1283,7 @@ mod tests {
     #[test]
     fn queued_step_stays_parked_until_both_limits_clear() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(0, 3)); // circuit full → queue
         let t = advance(&mut run, &tick(1, 0)); // agent slots still gone
         assert_eq!(status_of(&run, "spawn"), StepStatus::Queued);
@@ -1264,7 +1293,7 @@ mod tests {
     #[test]
     fn re_tick_with_a_running_step_is_a_no_op() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         let again = advance(&mut run, &tick(1, 1));
         assert!(again.is_empty(), "re-tick must be a no-op: {:?}", again);
@@ -1275,7 +1304,7 @@ mod tests {
     #[test]
     fn agent_finished_completes_the_bound_spawn_step_and_unblocks_successors() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
         let t =
@@ -1294,7 +1323,7 @@ mod tests {
     #[test]
     fn simple_linear_run_lands_completed_end_to_end() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
         advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
@@ -1317,7 +1346,7 @@ mod tests {
             context: ctx,
             steps: vec![],
         };
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
         run.attach_agent_node("spawn", 900);
@@ -1352,7 +1381,7 @@ mod tests {
     #[test]
     fn agent_error_fails_the_spawn_step_and_the_run_fail_fast() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
         let t =
@@ -1366,7 +1395,7 @@ mod tests {
     #[test]
     fn closing_the_piloted_node_mid_run_cancels_its_step_and_fails_the_run() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
         let t = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
@@ -1383,7 +1412,7 @@ mod tests {
         // cancel b — otherwise its piloted agent keeps consuming a mesh
         // slot the counters no longer attribute to this (failed) run.
         let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "b"), StepStatus::Running);
         run.attach_agent_node("a", 11);
@@ -1414,7 +1443,7 @@ mod tests {
             to: "notify-b".to_string(),
             condition: Default::default(),
         });
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("spawn", 900);
         let t =
@@ -1430,7 +1459,7 @@ mod tests {
     #[test]
     fn lifecycle_events_for_unknown_agents_are_no_ops() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         let before = run.clone();
         advance(
@@ -1471,7 +1500,7 @@ mod tests {
     #[test]
     fn inject_waits_for_agent_ready_then_fires_resolved_prompt() {
         let mut run = two_step_inject_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(3, 3));
         run.attach_agent_node("spawn", 900);
         // Spawn finished → inject schedules but must NOT fire yet (no
@@ -1502,7 +1531,7 @@ mod tests {
     #[test]
     fn agent_ready_for_an_unscheduled_step_is_a_no_op() {
         let mut run = two_step_inject_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &CircuitEvent::AgentReady { node_id: "inject".to_string() });
         assert!(t.is_empty());
         assert!(run.step("inject").is_none());
@@ -1526,7 +1555,7 @@ mod tests {
                 condition: Default::default(),
             },
         );
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "early-inject"), StepStatus::Failed);
         assert_eq!(run.state, RunState::Failed);
@@ -1571,7 +1600,7 @@ mod tests {
     #[test]
     fn all_completed_join_executes_only_when_every_branch_finished() {
         let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "a"), StepStatus::Running);
         assert_eq!(status_of(&run, "b"), StepStatus::Running);
@@ -1592,7 +1621,7 @@ mod tests {
     #[test]
     fn any_completed_join_executes_when_one_branch_finishes() {
         let mut run = fan_out_run(CircuitNodeKind::AnyCompleted);
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("a", 11);
         run.attach_agent_node("b", 12);
@@ -1638,7 +1667,7 @@ mod tests {
             context: CircuitContext::new(),
             steps: vec![],
         };
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("work", 5);
         advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 5, success: false });
@@ -1649,41 +1678,9 @@ mod tests {
         );
     }
 
-    // -- unsupported kinds -----------------------------------------------------------
+    // -- gate execution (milestone 2, #1207) -----------------------------------------
 
 #[test]
-    fn github_action_nodes_fail_explicitly_instead_of_stalling() {
-        let mut run = fan_out_run(CircuitNodeKind::GithubAction {
-            action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
-            label: None,
-            comment: None,
-        });
-        run.graph.edges.retain(|e| e.to != "j" && e.from != "b");
-        run.graph.nodes.retain(|n| n.id != "b");
-        run.graph.edges.push(CircuitEdge {
-            from: "a".into(),
-            to: "j".into(),
-            condition: Default::default(),
-        });
-        advance(&mut run, &CircuitEvent::ManualTriggered);
-        advance(&mut run, &tick(5, 5));
-        run.attach_agent_node("a", 11);
-        let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: true });
-        assert_eq!(status_of(&run, "j"), StepStatus::Failed);
-        let w = t.step_writes.iter().find(|w| w.node_id == "j").unwrap();
-        assert!(
-            w.error
-                .as_deref()
-                .unwrap_or("")
-                .contains("not executed until a later milestone"),
-            "error must say why: {:?}",
-            w.error
-        );
-        assert_eq!(run.state, RunState::Failed);
-    }
-
-    #[test]
     fn llm_classifier_parks_running_until_classified() {
         // The milestone-1 behavior (fail with "not executed until a later
         // milestone") is replaced in #1207: the gate waits for the seam.
@@ -1703,11 +1700,105 @@ mod tests {
             to: "classify".into(),
             condition: Default::default(),
         });
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "classify"), StepStatus::Failed);
         assert_eq!(run.state, RunState::Failed);
         let _ = t;
+    }
+
+    
+    // -- GithubAction execution (milestone 3, issue #1208) -------------------------
+
+    #[test]
+    fn github_action_completes_instantly_and_emits_the_call_effect_with_templates() {
+        // Milestone 3: a GithubAction step is instant-completing like
+        // Notify — the HTTP call happens in the seam after the commit.
+        // The raw templates ride the effect; resolution is the seam's
+        // job (execution time, not decision time).
+        let mut run = linear_run();
+        run.graph.nodes.push(CircuitNode {
+            id: "label".into(),
+            kind: CircuitNodeKind::GithubAction {
+                action: GithubActionKind::AddLabel,
+                label: Some("in-progress".into()),
+                comment: None,
+            },
+        });
+        run.graph.edges.push(CircuitEdge {
+            from: "spawn".into(),
+            to: "label".into(),
+            condition: Default::default(),
+        });
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1, 1));
+        // The spawn holds the only slot; the label step waits.
+        assert!(run.step("label").is_none());
+
+        run.attach_agent_node("spawn", 900);
+        let _ =
+            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        // The cascade frees exactly one slot (consumed by Notify); the
+        // label step schedules on the next Tick's authoritative snapshot.
+        let t = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "label"), StepStatus::Completed);
+        assert_eq!(
+            t.effects,
+            vec![
+                Effect::CallGithub {
+                    node_id: "label".to_string(),
+                    action: GithubActionKind::AddLabel,
+                    label: Some("in-progress".to_string()),
+                    comment: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn github_action_chain_executes_within_one_tick_when_capacity_allows() {
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode {
+                        id: "comment".into(),
+                        kind: CircuitNodeKind::GithubAction {
+                            action: GithubActionKind::PostComment,
+                            label: None,
+                            comment: Some("started {{issue.number}}".into()),
+                        },
+                    },
+                ],
+                edges: vec![CircuitEdge {
+                    from: "t".into(),
+                    to: "comment".into(),
+                    condition: Default::default(),
+                }],
+            },
+            state: RunState::Pending,
+            context: {
+                let mut ctx = CircuitContext::new();
+                ctx.set("issue.number", "42");
+                ctx
+            },
+            steps: vec![],
+        };
+        advance(&mut run, &CircuitEvent::Triggered);
+        let t = advance(&mut run, &tick(2, 2));
+        assert_eq!(status_of(&run, "comment"), StepStatus::Completed);
+        assert_eq!(
+            t.effects,
+            vec![Effect::CallGithub {
+                node_id: "comment".to_string(),
+                action: GithubActionKind::PostComment,
+                label: None,
+                comment: Some("started {{issue.number}}".to_string()),
+            }]
+        );
+        assert_eq!(run.state, RunState::Completed);
     }
 
     // -- pending-run guard ------------------------------------------------------------
@@ -1745,7 +1836,7 @@ mod tests {
             context: CircuitContext::new(),
             steps: vec![],
         };
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(1, 1));
         for n in ["a", "b", "c"] {
             assert_eq!(status_of(&run, n), StepStatus::Completed, "node {n} must finish in the same tick");
@@ -1768,7 +1859,7 @@ mod tests {
         // must still gate: trigger → spawn → notify runs spawn first and
         // holds the slot; notify waits for the agent event.
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(1, 1));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
         assert!(run.step("notify").is_none(), "notify must wait while the spawn holds the only slot");
@@ -1867,7 +1958,7 @@ mod tests {
     /// gate's exact status depends on its kind (classifier/verification
     /// park Running; AutoRun completes instantly) — callers assert that.
     fn fire_to_gate(run: &mut RunView, gate_id: &str) {
-        advance(run, &CircuitEvent::ManualTriggered);
+        advance(run, &CircuitEvent::Triggered);
         advance(run, &tick(5, 5));
         run.attach_agent_node("work", 900);
         advance(run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
@@ -2025,7 +2116,7 @@ mod tests {
     #[test]
     fn pause_halts_advancement_while_the_current_step_finishes() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
 
@@ -2048,7 +2139,7 @@ mod tests {
     #[test]
     fn resume_continues_exactly_where_the_pause_stopped() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
         advance(&mut run, &CircuitEvent::Paused);
@@ -2067,7 +2158,7 @@ mod tests {
     #[test]
     fn pause_and_resume_are_idempotent() {
         let mut run = linear_run();
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &CircuitEvent::Paused);
         let again = advance(&mut run, &CircuitEvent::Paused);
         assert!(!again.run_state_changed);
@@ -2128,7 +2219,7 @@ mod tests {
     #[test]
     fn retry_limit_resets_the_failed_step_within_its_budget() {
         let mut run = retry_run(2);
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("work", 11);
 
@@ -2163,7 +2254,7 @@ mod tests {
     #[test]
     fn flaky_step_succeeding_on_retry_completes_the_run() {
         let mut run = retry_run(2);
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("work", 11);
         advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
@@ -2179,7 +2270,7 @@ mod tests {
     #[test]
     fn exhausted_retry_budget_fails_the_run() {
         let mut run = retry_run(2);
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("work", 11);
         // Attempt 1 fails → reset to 2.
@@ -2207,7 +2298,7 @@ mod tests {
             to: "retry".into(),
             condition: Default::default(),
         });
-        advance(&mut run, &CircuitEvent::ManualTriggered);
+        advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "retry"), StepStatus::Failed);
         assert!(run.step("retry").unwrap().error.as_deref().unwrap().contains("without a failed upstream"));

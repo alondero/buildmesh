@@ -779,11 +779,24 @@ impl GitHubClient {
         repo: &str,
         label: &str,
     ) -> Result<Vec<Issue>, GitHubError> {
-        let clean_label = label.replace('"', "");
         let query = format!(
             "repo:{}/{} is:issue state:open label:\"{}\"",
-            owner, repo, clean_label
+            owner,
+            repo,
+            label.replace('"', "")
         );
+        self.search_issues(&query)
+    }
+
+    /// Run one `/search/issues` query and parse the `{items: [...]}`
+    /// envelope. Shared by the labelled issue/PR ingest queries (issue
+    /// #482 / #1208) so the hand-rolled URL encoding lives in exactly
+    /// one place: spaces become `+` (GitHub's search-query form),
+    /// `"`, `#`, and `&` are percent-encoded.
+    fn search_issues<T: serde::de::DeserializeOwned>(
+        &self,
+        query: &str,
+    ) -> Result<Vec<T>, GitHubError> {
         let encoded: String = query
             .chars()
             .map(|c| match c {
@@ -812,11 +825,11 @@ impl GitHubClient {
         }
 
         #[derive(Deserialize)]
-        struct SearchResult {
-            items: Vec<Issue>,
+        struct SearchResult<T> {
+            items: Vec<T>,
         }
 
-        let result: SearchResult = resp.json()?;
+        let result: SearchResult<T> = resp.json()?;
         Ok(result.items)
     }
 
@@ -1269,6 +1282,106 @@ impl GitHubClient {
         // so the connection can be reused.
         let _ = resp.bytes();
         Ok(())
+    }
+
+    /// Post a comment on an issue or PR (`POST /repos/{o}/{r}/issues/{n}/comments`
+    /// — the issues endpoint covers both, which is why the circuit engine's
+    /// PostComment action needs no PR-specific call). Backs the circuit
+    /// GithubAction vocabulary (issue #1208). Uses the read-side timeout:
+    /// comment writes are fast and idempotent to retry by re-triggering.
+    pub fn add_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: i64,
+        body: &str,
+    ) -> Result<(), GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{}/comments",
+            owner, repo, issue_number
+        );
+
+        #[derive(Serialize)]
+        struct Comment<'a> {
+            body: &'a str,
+        }
+
+        let resp = self.client
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&Comment { body })
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+        let _ = resp.bytes();
+        Ok(())
+    }
+
+    /// Close an issue (`PATCH /repos/{o}/{r}/issues/{n}` with
+    /// `{"state": "closed"}`). Idempotent on an already-closed issue —
+    /// GitHub answers 200 either way. Backs the circuit GithubAction
+    /// vocabulary (issue #1208).
+    pub fn close_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: i64,
+    ) -> Result<(), GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{}",
+            owner, repo, issue_number
+        );
+
+        #[derive(Serialize)]
+        struct CloseState {
+            state: &'static str,
+        }
+
+        let resp = self.client
+            .patch(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&CloseState { state: "closed" })
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+        let _ = resp.bytes();
+        Ok(())
+    }
+
+    /// List open pull requests carrying `label` via the search API
+    /// (`is:pr` instead of `is:issue`). The circuit GitHub-poll pass's
+    /// PR-trigger ingest query (issue #1208): same reconciliation shape
+    /// as [`Self::list_open_issues_with_label`] — the query returns the
+    /// current open+labelled set, so a PR closed or untagged while the
+    /// app was offline never appears.
+    pub fn list_open_pull_requests_with_label(
+        &self,
+        owner: &str,
+        repo: &str,
+        label: &str,
+    ) -> Result<Vec<PullRequest>, GitHubError> {
+        let query = format!(
+            "repo:{}/{} is:pr state:open label:\"{}\"",
+            owner,
+            repo,
+            label.replace('"', "")
+        );
+        // Search results carry the issue-shaped wire form for PRs too;
+        // PullRequest's custom Deserialize already tolerates it (the
+        // head object is optional with serde defaults).
+        self.search_issues(&query)
     }
 }
 

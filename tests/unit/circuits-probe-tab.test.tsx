@@ -160,7 +160,7 @@ describe('CircuitsProbeTab', () => {
     expect(invoke).toHaveBeenCalledWith('list_circuits_with_runs', { meshId: 42, limit: 10 });
   });
 
-  it('creates a circuit through the throwaway authoring form', async () => {
+  it('creates a manual circuit through the throwaway authoring form', async () => {
     mockBackend();
     const user = userEvent.setup();
     await openCircuitsTab();
@@ -176,7 +176,33 @@ describe('CircuitsProbeTab', () => {
         description: '',
         concurrencyLimit: 1,
         initialPrompt: 'review the open PR',
+        triggerKind: 'manual',
+        triggerLabel: null,
+        intervalSeconds: null,
       });
+    });
+  });
+
+  it('creates a GitHub-labelled circuit with its trigger label (issue #1208)', async () => {
+    mockBackend();
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    await user.type(await screen.findByTestId('circuit-name-input'), 'issue-runner');
+    await user.selectOptions(screen.getByTestId('circuit-trigger-select'), 'github_issue_label');
+    // The create button stays disabled until the label is filled in.
+    expect(
+      (screen.getByTestId('circuit-create-button') as HTMLButtonElement).disabled
+    ).toBe(true);
+    await user.type(screen.getByTestId('circuit-trigger-label-input'), 'buildmesh:run');
+    await user.click(screen.getByTestId('circuit-create-button'));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('create_circuit', expect.objectContaining({
+        name: 'issue-runner',
+        triggerKind: 'github_issue_label',
+        triggerLabel: 'buildmesh:run',
+      }));
     });
   });
 
@@ -301,6 +327,22 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
       description: 'd',
       concurrencyLimit: 2,
       initialPrompt: 'p',
+      triggerKind: 'manual',
+      triggerLabel: null,
+      intervalSeconds: null,
+    });
+
+    // Milestone-3 trigger vocabulary rides the same command (#1208).
+    await createCircuit(42, 'paced', '', 1, '', 'interval', undefined, 120);
+    expect(invoke).toHaveBeenLastCalledWith('create_circuit', {
+      meshId: 42,
+      name: 'paced',
+      description: '',
+      concurrencyLimit: 1,
+      initialPrompt: '',
+      triggerKind: 'interval',
+      triggerLabel: null,
+      intervalSeconds: 120,
     });
 
     await setCircuitEnabled(7, false);
