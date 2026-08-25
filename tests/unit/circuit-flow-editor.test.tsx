@@ -216,9 +216,18 @@ describe('CircuitFlowEditor', () => {
     );
     const badge = await screen.findByTestId('edge-badge-gate->fix:on:red');
     expect(badge.textContent).toBe('OnOutcome(red)');
-    // Clicking cycles red → always.
+    // Clicking cycles red → always → green → red … (the verification
+    // gate's full outcome vocabulary — this pins the deep-equality fix
+    // in nextCondition; reference equality collapsed every OnOutcome
+    // badge straight back to Always).
     fireEvent.click(badge);
     expect(screen.getByTestId('edge-badge-gate->fix:always').textContent).toBe('Always');
+    fireEvent.click(screen.getByTestId('edge-badge-gate->fix:always'));
+    expect(screen.getByTestId('edge-badge-gate->fix:on:green').textContent).toBe(
+      'OnOutcome(green)'
+    );
+    fireEvent.click(screen.getByTestId('edge-badge-gate->fix:on:green'));
+    expect(screen.getByTestId('edge-badge-gate->fix:on:red').textContent).toBe('OnOutcome(red)');
   });
 
   it('pulses completed steps and parks an Approve badge on blocked gates', async () => {

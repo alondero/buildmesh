@@ -53,6 +53,7 @@ import {
   parseGraph,
   sourceOutcomes,
   specFor,
+  toGraph,
   traversedEdgeKeys,
   type StepLike,
 } from './circuitGraphModel';
@@ -61,19 +62,6 @@ import {
 // React Flow remount every card on any state change.
 const nodeTypes = { circuit: CircuitNodeCard };
 const edgeTypes = { outcome: OutcomeEdge };
-
-/** Derive the persisted blueprint AST from the working copy. */
-export function toGraph(nodes: CircuitFlowNode[], edges: Edge[]): CircuitGraph {
-  return {
-    version: 1,
-    nodes: nodes.map((n) => n.data.circuitNode),
-    edges: edges.map((e) => ({
-      from: e.source,
-      to: e.target,
-      condition: (e.data?.condition as EdgeCondition | undefined) ?? 'always',
-    })),
-  };
-}
 
 interface EditorNodeDataSeed {
   graph: CircuitGraph;

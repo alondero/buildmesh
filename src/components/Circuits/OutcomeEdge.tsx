@@ -30,10 +30,15 @@ export interface OutcomeEdgeData extends Record<string, unknown> {
 export type OutcomeEdgeType = Edge<OutcomeEdgeData, 'outcome'>;
 
 /** Cycle order for a gate with these named outcomes; plain nodes only
- *  toggle Always ↔ OnOutcome(completed). */
+ *  toggle Always ↔ OnOutcome(completed). Outcome conditions compare by
+ *  their payload — the editor rebuilds `{ on_outcome }` objects every
+ *  render, so reference equality would never match and every badge
+ *  would collapse back to `always`. */
 export function nextCondition(current: EdgeCondition, outcomes: EdgeCondition[]): EdgeCondition {
   const cycle: EdgeCondition[] = ['always', ...outcomes];
-  const idx = cycle.findIndex((c) => c === current);
+  const idx = cycle.findIndex((c) =>
+    c === 'always' ? current === 'always' : current !== 'always' && c.on_outcome === current.on_outcome
+  );
   return cycle[(idx + 1) % cycle.length];
 }
 

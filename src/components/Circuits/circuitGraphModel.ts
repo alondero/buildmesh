@@ -13,6 +13,7 @@
 
 import dagre from '@dagrejs/dagre';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
+import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
 import type { CircuitEdge } from '../../types/generated/CircuitEdge';
 import type { EdgeCondition } from '../../types/generated/EdgeCondition';
@@ -373,14 +374,16 @@ export function stepDurationMs(step: Pick<StepLike, 'started_at' | 'completed_at
 /**
  * Edge keys traversed by a run: each finished step routes along edges
  * whose condition matches its recorded outcome; an Always edge carries
- * any outcome (and counts as soon as its source step exists).
+ * any outcome once its source step has actually started (queued steps
+ * light nothing — the path hasn't been walked yet).
  */
 export function traversedEdgeKeys(
-  steps: Array<Pick<StepLike, 'node_id' | 'outcome'>>,
+  steps: Array<Pick<StepLike, 'node_id' | 'status' | 'outcome'>>,
   edges: CircuitEdge[]
 ): Set<string> {
   const keys = new Set<string>();
   for (const step of steps) {
+    if (step.status === 'queued' || step.status === 'pending_slot') continue;
     for (const edge of edges) {
       if (edge.from !== step.node_id) continue;
       if (
@@ -392,6 +395,25 @@ export function traversedEdgeKeys(
     }
   }
   return keys;
+}
+
+/**
+ * Derive the persisted blueprint AST from the editor's working copy of
+ * React Flow nodes/edges (the canonical shape stays the Rust one).
+ */
+export function toGraph(
+  nodes: Array<{ data: { circuitNode: CircuitNode } }>,
+  edges: Array<{ source: string; target: string; data?: { condition?: EdgeCondition } }>
+): CircuitGraph {
+  return {
+    version: 1,
+    nodes: nodes.map((n) => n.data.circuitNode),
+    edges: edges.map((e) => ({
+      from: e.source,
+      to: e.target,
+      condition: e.data?.condition ?? 'always',
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -225,6 +225,14 @@ describe('traversed-path highlighting', () => {
     expect(keys.size).toBe(0);
   });
 
+  it('queued steps light nothing — the path has not been walked yet', () => {
+    const keys = traversedEdgeKeys(
+      [{ node_id: 'next-turn', status: 'pending_slot', outcome: null }],
+      edges
+    );
+    expect(keys.has(edgeKey(edges[2]))).toBe(false);
+  });
+
   it('computes step durations from ledger timestamps', () => {
     expect(
       stepDurationMs({
