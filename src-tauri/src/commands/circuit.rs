@@ -151,12 +151,21 @@ pub fn set_circuit_enabled(circuit_id: i64, enabled: bool) -> Result<(), String>
 
 /// Save a blueprint edited in the canvas editor (issue #1209): the
 /// whole `graph_json` is replaced after validating it parses into the
-/// AST — an editor bug can never persist a graph the engine can't read.
-/// The worker wakes so trigger passes see the new topology immediately.
+/// AST *and* passes semantic checks (unique ids, resolvable edges,
+/// acyclic — see [`CircuitGraph::validate`]), so an editor bug can
+/// never persist a graph the stepper would walk forever. The worker
+/// wakes so trigger passes see the new topology immediately.
 #[command]
 pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), String> {
-    CircuitGraph::from_json(&graph_json)?;
-    crate::db::update_autopilot_circuit_graph(circuit_id, &graph_json).map_err(|e| e.to_string())?;
+    let graph = CircuitGraph::from_json(&graph_json)?;
+    graph.validate()?;
+    crate::db::update_autopilot_circuit_graph(circuit_id, &graph_json).map_err(|e| {
+        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            format!("circuit {} does not exist", circuit_id)
+        } else {
+            e.to_string()
+        }
+    })?;
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: graph saved for circuit {}", circuit_id);
     Ok(())

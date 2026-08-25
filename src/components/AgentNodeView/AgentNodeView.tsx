@@ -330,18 +330,18 @@ export function AgentNodeView() {
 
   // Escape exits Single mode. Only bound while single is active so we don't
   // intercept Escape (e.g. agent CLIs read it) during normal grid use. While
-  // the Center Diff Overlay (#379) is open it sits on top of the solo
-  // terminal and owns Escape — without this guard, Escape would close the
-  // overlay AND exit single in one press. When the overlay closes, this
-  // effect re-runs (activeDiffFile dep) and re-binds the handler.
+  // the Center Diff Overlay (#379) or the Circuit Editor (#1209) is open it
+  // sits on top of the solo terminal and owns Escape — without this guard,
+  // Escape would close the overlay AND exit single in one press. When an
+  // overlay closes, this effect re-runs and re-binds the handler.
   useEffect(() => {
-    if (viewMode !== 'single' || activeDiffFile != null) return;
+    if (viewMode !== 'single' || activeDiffFile != null || circuitEditorOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') exitSingleMode();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [viewMode, activeDiffFile, exitSingleMode]);
+  }, [viewMode, activeDiffFile, circuitEditorOpen, exitSingleMode]);
 
   // Reflow the terminal grid on every mode transition: switching modes
   // changes which (and how many) NodeCards mount, and entering/leaving

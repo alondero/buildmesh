@@ -110,6 +110,11 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     let parsed = CircuitGraph::from_json(&reloaded.graph_json).unwrap();
     assert_eq!(parsed, new_graph);
 
+    // A stale editor saving against a deleted circuit must error, not
+    // silently no-op (review finding: rows_affected == 0 returned Ok).
+    let missing = update_autopilot_circuit_graph(999_999, &sample_graph_json());
+    assert!(missing.is_err());
+
     drop(get());
     std::fs::remove_file(&path).ok();
 }

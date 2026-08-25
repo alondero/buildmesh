@@ -6,6 +6,7 @@
  * circuit context use `MustacheTextarea` so `{{` opens autocomplete.
  */
 
+import { useState } from 'react';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
 import type { GithubActionKind } from '../../types/generated/GithubActionKind';
@@ -20,6 +21,47 @@ interface InspectorPanelProps {
 
 const inputClass =
   'w-full px-2 py-1 bg-bg-input border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none focus:border-border-active';
+
+/**
+ * Number field that tolerates transient states (cleared input, "0",
+ * partial typing): keeps a local draft while focused, commits any
+ * finite number upward, and falls back to the committed value on blur.
+ */
+function NumberField({
+  value,
+  min,
+  ariaLabel,
+  testId,
+  onCommit,
+}: {
+  value: number;
+  min?: number;
+  ariaLabel: string;
+  testId: string;
+  onCommit: (n: number) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const display = draft ?? String(value);
+  return (
+    <input
+      type="number"
+      min={min}
+      value={display}
+      aria-label={ariaLabel}
+      data-testid={testId}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        if (e.target.value !== '') {
+          const n = Number(e.target.value);
+          if (Number.isFinite(n)) onCommit(n);
+        }
+      }}
+      onFocus={() => setDraft(String(value))}
+      onBlur={() => setDraft(null)}
+      className={inputClass}
+    />
+  );
+}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -165,16 +207,12 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
 
       {kind.type === 'interval' && (
         <Field label="Interval seconds">
-          <input
-            type="number"
-            min={60}
+          <NumberField
             value={kind.interval_seconds}
-            aria-label="Interval seconds"
-            data-testid="inspector-interval"
-            onChange={(e) =>
-              onChange({ ...kind, interval_seconds: Number(e.target.value) || 300 })
-            }
-            className={inputClass}
+            min={60}
+            ariaLabel="Interval seconds"
+            testId="inspector-interval"
+            onCommit={(interval_seconds) => onChange({ ...kind, interval_seconds })}
           />
         </Field>
       )}
@@ -220,14 +258,12 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
 
       {kind.type === 'retry_limit' && (
         <Field label="Max retries">
-          <input
-            type="number"
-            min={0}
+          <NumberField
             value={kind.max_retries}
-            aria-label="Max retries"
-            data-testid="inspector-max-retries"
-            onChange={(e) => onChange({ ...kind, max_retries: Number(e.target.value) || 0 })}
-            className={inputClass}
+            min={0}
+            ariaLabel="Max retries"
+            testId="inspector-max-retries"
+            onCommit={(max_retries) => onChange({ ...kind, max_retries })}
           />
         </Field>
       )}

@@ -230,6 +230,37 @@ describe('CircuitFlowEditor', () => {
     expect(screen.getByTestId('edge-badge-gate->fix:on:red').textContent).toBe('OnOutcome(red)');
   });
 
+  it('merges instead of duplicating when cycling hits an existing parallel edge', async () => {
+    // Two parallel edges gate→fix: `always` and `on:red`. Cycling the
+    // red edge onto `always` must swallow it into the existing edge,
+    // never mint a duplicate id.
+    const GRAPH_PARALLEL = JSON.stringify({
+      version: 1,
+      nodes: [
+        { id: 'gate', type: { type: 'deterministic_verification', command: 'cargo test' } },
+        { id: 'fix', type: { type: 'inject_pty', prompt: 'fix it' } },
+      ],
+      edges: [
+        { from: 'gate', to: 'fix', condition: 'always' },
+        { from: 'gate', to: 'fix', condition: { on_outcome: 'red' } },
+      ],
+    });
+    render(
+      <CircuitFlowEditor
+        circuit={{ ...CIRCUIT, graph_json: GRAPH_PARALLEL }}
+        runs={[]}
+        onClose={() => {}}
+      />
+    );
+    const badgesBefore = await screen.findAllByTestId(/^edge-badge-gate->fix/);
+    expect(badgesBefore).toHaveLength(2);
+
+    fireEvent.click(screen.getByTestId('edge-badge-gate->fix:on:red'));
+    await waitFor(() => {
+      expect(screen.getAllByTestId(/^edge-badge-gate->fix/)).toHaveLength(1);
+    });
+  });
+
   it('pulses completed steps and parks an Approve badge on blocked gates', async () => {
     renderEditor();
     expect(await screen.findByTestId('node-completed-trigger')).toBeTruthy();
@@ -268,7 +299,9 @@ describe('CircuitFlowEditor', () => {
 
     fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
     const prompt = await screen.findByTestId('inspector-prompt');
-    await userEvent.setup().type(prompt, 'Fix {{{{');
+    // Trailing space included: `{{ ` must keep the menu open (the
+    // inserted template is `{{ path }}` — spaces are part of the format).
+    await userEvent.setup().type(prompt, 'Fix {{{{ ');
 
     const menu = screen.getByTestId('mustache-menu');
     for (const ns of ['issue.number', 'pr.title', 'node.id', 'verification.outcome', 'retry.attempt', 'circuit.name']) {

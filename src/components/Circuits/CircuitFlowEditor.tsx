@@ -53,6 +53,7 @@ import {
   parseGraph,
   sourceOutcomes,
   specFor,
+  stableGraphJson,
   toGraph,
   traversedEdgeKeys,
   type StepLike,
@@ -122,7 +123,10 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   const [quickConnect, setQuickConnect] = useState<{
     fromNodeId: string;
     fromHandleId: string | null;
-    position: { x: number; y: number };
+    /** Wrapper-relative pixels — where the drag released; drives the menu's DOM placement. */
+    screen: { x: number; y: number };
+    /** Flow coordinates of the same point; where the new node is created. */
+    flow: { x: number; y: number };
   } | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -151,7 +155,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   // Content-addressed topology so highlight recomputes on real edits
   // only — keying this memo on the raw arrays would loop with the
   // highlight-sync effect below.
-  const topologyJson = useMemo(() => JSON.stringify(toGraph(nodes, edges)), [nodes, edges]);
+  const topologyJson = useMemo(() => stableGraphJson(toGraph(nodes, edges)), [nodes, edges]);
   const highlightedKeys = useMemo(
     () =>
       traversedEdgeKeys(
@@ -182,34 +186,38 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
     nodesRef.current = nodes;
   }, [nodes]);
 
-  /** Cycle one edge's condition and re-key it to match. */
+  /** Cycle one edge's condition and re-key it to match. If the target
+   *  condition already exists on a parallel edge between the same pair,
+   *  drop THIS edge instead of minting a duplicate id (React Flow
+   *  requires unique edge ids). */
   const cycleEdge = useCallback(
     (edgeId: string) => {
-      setEdges((es) =>
-        es.map((e) => {
-          if (e.id !== edgeId) return e;
-          const current: EdgeCondition =
-            (e.data?.condition as EdgeCondition | undefined) ?? 'always';
-          const source = nodesRef.current.find((n) => n.id === e.source);
-          const outcomes =
-            source != null ? sourceOutcomes(source.data.circuitNode.type) : null;
-          const outcomeCycle: EdgeCondition[] = (outcomes ?? ['completed']).map(
-            (o) => ({ on_outcome: o })
-          );
-          const next = nextCondition(current, outcomeCycle);
-          const nextKey = edgeKey({
-            from: e.source,
-            to: e.target,
-            condition: next,
-          });
-          return {
-            ...e,
-            id: nextKey,
-            sourceHandle: next === 'always' ? null : next.on_outcome,
-            data: { ...e.data, condition: next },
-          };
-        })
-      );
+      setEdges((es) => {
+        const target = es.find((e) => e.id === edgeId);
+        if (!target) return es;
+        const current: EdgeCondition =
+          (target.data?.condition as EdgeCondition | undefined) ?? 'always';
+        const source = nodesRef.current.find((n) => n.id === target.source);
+        const outcomes =
+          source != null ? sourceOutcomes(source.data.circuitNode.type) : null;
+        const outcomeCycle: EdgeCondition[] = (outcomes ?? ['completed']).map(
+          (o) => ({ on_outcome: o })
+        );
+        const next = nextCondition(current, outcomeCycle);
+        const nextKey = edgeKey({ from: target.source, to: target.target, condition: next });
+        if (nextKey === target.id) return es;
+        const cycled = {
+          ...target,
+          id: nextKey,
+          sourceHandle: next === 'always' ? null : next.on_outcome,
+          data: { ...target.data, condition: next },
+        };
+        // Replace this edge; swallow any parallel edge the new condition
+        // would collide with.
+        return es
+          .filter((e) => e.id !== edgeId && e.id !== nextKey)
+          .concat(cycled);
+      });
     },
     [setEdges]
   );
@@ -229,16 +237,33 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   }, [highlightedKeys, cycleEdge, setEdges]);
 
   // Push the selected run's per-node status into the card overlays
-  // (pulse / check / blocked-approve / error tooltip).
+  // (pulse / check / blocked-approve / error tooltip). Only nodes whose
+  // step actually changed are re-wrapped — telemetry refetches mint new
+  // step objects every tick, and re-allocating every card would make
+  // React Flow re-render/re-measure the whole canvas per heartbeat.
   useEffect(() => {
-    setNodes((ns) =>
-      ns.map((n) => {
+    setNodes((ns) => {
+      let changed = false;
+      const next = ns.map((n) => {
         const step = stepByNodeId.get(n.id);
         const blockedRunId =
           step?.status === 'blocked' && selectedRunId !== null ? selectedRunId : undefined;
+        const prev = n.data.step;
+        const sameStep =
+          prev?.node_id === step?.node_id &&
+          prev?.status === step?.status &&
+          prev?.outcome === step?.outcome &&
+          prev?.error_message === step?.error_message &&
+          prev?.started_at === step?.started_at &&
+          prev?.completed_at === step?.completed_at &&
+          n.data.blockedRunId === blockedRunId &&
+          n.data.onApprove === handleApprove;
+        if (sameStep) return n;
+        changed = true;
         return { ...n, data: { ...n.data, step, blockedRunId, onApprove: handleApprove } };
-      })
-    );
+      });
+      return changed ? next : ns;
+    });
   }, [stepByNodeId, selectedRunId, handleApprove, setNodes]);
 
   const addNodeAt = useCallback(
@@ -279,18 +304,27 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   );
 
   // Drag-to-search: a connection released over empty canvas opens the
-  // fuzzy-search menu instead of wiring nothing.
+  // fuzzy-search menu instead of wiring nothing. Two coordinate spaces:
+  // the menu is a DOM sibling of the canvas, so it positions in
+  // wrapper-relative SCREEN pixels; the created node lands at the same
+  // spot expressed in FLOW coordinates (pan/zoom applied).
   const onConnectEnd: OnConnectEnd = useCallback(
     (event, connectionState) => {
       if (connectionState.isValid) return;
       const fromNodeId = connectionState.fromNode?.id;
       if (!fromNodeId) return;
       const { clientX, clientY } = event as MouseEvent;
-      const position = screenToFlowPosition({ x: clientX, y: clientY });
+      const rect = wrapperRef.current?.getBoundingClientRect();
+      const screen = {
+        x: clientX - (rect?.left ?? 0),
+        y: clientY - (rect?.top ?? 0),
+      };
+      const flow = screenToFlowPosition({ x: clientX, y: clientY });
       setQuickConnect({
         fromNodeId,
         fromHandleId: connectionState.fromHandle?.id ?? null,
-        position,
+        screen,
+        flow,
       });
     },
     [screenToFlowPosition]
@@ -298,6 +332,8 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
 
   const onConnect = useCallback(
     (connection: Connection) => {
+      // Self-loops are invalid circuits (the validator rejects them too).
+      if (connection.source === connection.target || !connection.target) return;
       const source = nodes.find((n) => n.id === connection.source);
       const condition = conditionFromHandle(
         source?.data.circuitNode.type,
@@ -353,8 +389,14 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
     setSelectedNodeId(null);
   };
 
-  const savedJson = useMemo(() => JSON.stringify(parseGraph(circuit.graph_json)), [circuit.graph_json]);
-  const dirty = useMemo(() => JSON.stringify(toGraph(nodes, edges)) !== savedJson, [nodes, edges, savedJson]);
+  const savedJson = useMemo(
+    () => stableGraphJson(parseGraph(circuit.graph_json)),
+    [circuit.graph_json]
+  );
+  const dirty = useMemo(
+    () => stableGraphJson(toGraph(nodes, edges)) !== savedJson,
+    [nodes, edges, savedJson]
+  );
 
   const handleSave = async () => {
     setSaving(true);
@@ -486,13 +528,13 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
           />
           {quickConnect && (
             <QuickConnectMenu
-              position={quickConnect.position}
+              position={quickConnect.screen}
               onSelect={(spec) => {
                 addWiredNode(
                   spec.discriminator,
                   quickConnect.fromNodeId,
                   quickConnect.fromHandleId,
-                  { x: quickConnect.position.x - 110, y: quickConnect.position.y - 32 }
+                  { x: quickConnect.flow.x - 110, y: quickConnect.flow.y - 32 }
                 );
                 setQuickConnect(null);
               }}

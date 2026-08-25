@@ -209,14 +209,18 @@ pub fn set_autopilot_circuit_enabled(id: i64, enabled: bool) -> SqlResult<()> {
 
 /// Persist a new blueprint AST for one circuit — the canvas editor's
 /// save seam (issue #1209). The IPC boundary validates the JSON parses
-/// into the AST; this accessor only writes. `updated_at` stamps so the
-/// Probe list shows fresh edit times.
+/// AND passes semantic checks; this accessor only writes. Errors when
+/// the row doesn't exist (a stale editor must not silently no-op).
+/// `updated_at` stamps so the Probe list shows fresh edit times.
 pub fn update_autopilot_circuit_graph(id: i64, graph_json: &str) -> SqlResult<()> {
     let db = super::get().lock().unwrap();
-    db.execute(
+    let changed = db.execute(
         "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
         params![id, graph_json],
     )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
 }
 

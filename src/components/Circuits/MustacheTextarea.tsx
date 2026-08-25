@@ -8,7 +8,7 @@
  * Escape or blur dismisses it.
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { MUSTACHE_PATHS, insertMustache, fuzzyScore } from './circuitGraphModel';
 
 interface MustacheTextareaProps {
@@ -20,14 +20,16 @@ interface MustacheTextareaProps {
   testId?: string;
 }
 
-/** Text after a `{{` opener that still counts as autocomplete context. */
+/** Text after a `{{` opener that still counts as autocomplete context.
+ *  Spaces are allowed — `{{ ` is exactly what insertMustache produces
+ *  around the path, so typing one must not close the menu. */
 function openContext(text: string, caret: number): string | null {
   const before = text.slice(0, caret);
   const open = before.lastIndexOf('{{');
   if (open === -1) return null;
   const context = before.slice(open + 2);
-  // A closed brace or stray whitespace line means the user moved on.
-  if (/^[a-zA-Z0-9._]*$/.test(context)) return context;
+  // A closed brace or stray punctuation means the user moved on.
+  if (/^[a-zA-Z0-9._ ]*$/.test(context)) return context;
   return null;
 }
 
@@ -40,8 +42,16 @@ export function MustacheTextarea({
   testId,
 }: MustacheTextareaProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [context, setContext] = useState<string | null>(null);
   const [caret, setCaret] = useState(0);
+
+  // Don't let a pending blur-close fire after unmount.
+  useEffect(() => {
+    return () => {
+      if (blurTimer.current !== null) clearTimeout(blurTimer.current);
+    };
+  }, []);
 
   const suggestions = useMemo(() => {
     if (context === null) return [];
@@ -83,7 +93,8 @@ export function MustacheTextarea({
         onChange={(e) => handleChange(e.target.value)}
         onBlur={() => {
           // Let chip clicks land before the menu disappears.
-          setTimeout(() => setContext(null), 150);
+          if (blurTimer.current !== null) clearTimeout(blurTimer.current);
+          blurTimer.current = setTimeout(() => setContext(null), 150);
         }}
         onKeyDown={(e) => {
           if (e.key === 'Escape' && context !== null) {

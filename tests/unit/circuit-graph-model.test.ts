@@ -27,6 +27,7 @@ import {
   traversedEdgeKeys,
   stepDurationMs,
   layoutPositions,
+  stableGraphJson,
 } from '../../src/components/Circuits/circuitGraphModel';
 
 const ALL_DISCRIMINATORS = [
@@ -136,6 +137,21 @@ describe('parseGraph', () => {
     expect(g.edges[0].condition).toBe('always');
     expect(() => parseGraph('not json at all')).toThrow();
   });
+
+  it('stableGraphJson is order-insensitive — an add+delete round-trip is not dirty', () => {
+    const a = parseGraph(
+      '{"version":1,"nodes":[{"id":"a","type":"manual"},{"id":"b","type":"notify","message":"m"}],"edges":[{"from":"a","to":"b"}]}'
+    );
+    const reordered = parseGraph(
+      '{"version":1,"nodes":[{"id":"b","type":"notify","message":"m"},{"id":"a","type":"manual"}],"edges":[{"from":"a","to":"b"}]}'
+    );
+    expect(stableGraphJson(a)).toBe(stableGraphJson(reordered));
+    // A real change still shows.
+    const changed = parseGraph(
+      '{"version":1,"nodes":[{"id":"a","type":"manual"},{"id":"b","type":"notify","message":"changed"}],"edges":[{"from":"a","to":"b"}]}'
+    );
+    expect(stableGraphJson(a)).not.toBe(stableGraphJson(changed));
+  });
 });
 
 describe('fuzzy search (quick-connect menu)', () => {
@@ -242,6 +258,16 @@ describe('traversed-path highlighting', () => {
     ).toBe(2000);
     expect(stepDurationMs({ started_at: null, completed_at: null })).toBeNull();
     expect(stepDurationMs({ started_at: '2026-08-22 10:05:00', completed_at: null })).toBeNull();
+  });
+
+  it('tolerates ISO-8601 timestamps as well as SQLite datetime strings', () => {
+    // Appending "Z" to an already-ISO string would yield "…ZZ" → NaN.
+    expect(
+      stepDurationMs({
+        started_at: '2026-08-22T10:05:00Z',
+        completed_at: '2026-08-22T10:05:03Z',
+      })
+    ).toBe(3000);
   });
 });
 

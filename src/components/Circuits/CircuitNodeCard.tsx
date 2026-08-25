@@ -155,20 +155,25 @@ export function CircuitNodeCard({ data }: NodeProps<CircuitFlowNode>) {
         )}
       </div>
 
-      {/* Source handles: gates that route by outcome get named ports. */}
+      {/* Source handles: gates that route by outcome get named ports.
+          Each port lives in its own relative row so the label always
+          sits beside ITS handle regardless of card height. */}
       {outcomes ? (
-        outcomes.map((outcome, i) => (
-          <Handle
-            key={outcome}
-            id={outcome}
-            type="source"
-            position={Position.Right}
-            style={{ top: `${30 + i * 16}%` }}
-            className="!bg-border-strong"
-            aria-label={`${circuitNode.id} on ${outcome}`}
-            data-testid={`handle-${circuitNode.id}-${outcome}`}
-          />
-        ))
+        <div className="px-2 pb-1.5 flex flex-col items-end gap-0.5">
+          {outcomes.map((o) => (
+            <div key={o} className="relative flex items-center h-4 text-2xs text-text-muted">
+              <Handle
+                id={o}
+                type="source"
+                position={Position.Right}
+                className="!bg-border-strong"
+                aria-label={`${circuitNode.id} on ${o}`}
+                data-testid={`handle-${circuitNode.id}-${o}`}
+              />
+              {o}
+            </div>
+          ))}
+        </div>
       ) : (
         <Handle
           type="source"
@@ -176,17 +181,6 @@ export function CircuitNodeCard({ data }: NodeProps<CircuitFlowNode>) {
           className="!bg-border-strong"
           aria-label={`${circuitNode.id} output`}
         />
-      )}
-
-      {/* Named-port legend for gate cards */}
-      {outcomes && outcomes.length > 1 && (
-        <div className="px-2 pb-1 flex flex-col items-end gap-0.5">
-          {outcomes.map((o) => (
-            <span key={o} className="text-2xs text-text-muted">
-              {o}
-            </span>
-          ))}
-        </div>
       )}
     </div>
   );

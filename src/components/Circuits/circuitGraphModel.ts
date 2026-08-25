@@ -193,6 +193,19 @@ export function parseGraph(json: string): CircuitGraph {
   };
 }
 
+/**
+ * Order-insensitive serialization for dirty tracking: nodes sorted by
+ * id, edges by their key. Raw `JSON.stringify` would flag an add+delete
+ * pair or an equivalent reorder as unsaved changes.
+ */
+export function stableGraphJson(graph: CircuitGraph): string {
+  return JSON.stringify({
+    version: graph.version,
+    nodes: [...graph.nodes].sort((a, b) => a.id.localeCompare(b.id)),
+    edges: [...graph.edges].sort((a, b) => edgeKey(a).localeCompare(edgeKey(b))),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Fuzzy search — quick-connect menu ranking.
 // ---------------------------------------------------------------------------
@@ -362,11 +375,19 @@ export interface StepLike {
   completed_at: string | null;
 }
 
-/** Wall-clock step duration from the ledger timestamps, ms or null. */
+/** Wall-clock step duration from the ledger timestamps, ms or null.
+ *  Tolerates both SQLite's "YYYY-MM-DD HH:MM:SS" (treated as UTC) and
+ *  plain ISO-8601 — appending "Z" unconditionally would corrupt an
+ *  already-ISO timestamp into a silent NaN. */
 export function stepDurationMs(step: Pick<StepLike, 'started_at' | 'completed_at'>): number | null {
   if (step.started_at === null || step.completed_at === null) return null;
-  const start = Date.parse(step.started_at.replace(' ', 'T') + 'Z');
-  const end = Date.parse(step.completed_at.replace(' ', 'T') + 'Z');
+  const toMs = (s: string): number => {
+    const direct = Date.parse(s);
+    if (!Number.isNaN(direct)) return direct;
+    return Date.parse(s.replace(' ', 'T') + 'Z');
+  };
+  const start = toMs(step.started_at);
+  const end = toMs(step.completed_at);
   if (Number.isNaN(start) || Number.isNaN(end)) return null;
   return end - start;
 }
