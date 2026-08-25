@@ -1,13 +1,13 @@
 /**
  * CircuitsProbeTab — the Probe Panel's Autopilot Circuits tab
- * (spec #1205 / walking skeleton #1206).
+ * (spec #1205).
  *
- * Milestone-1 surface: a throwaway authoring form (name + prompt → the
- * canonical server-side Manual → SpawnAgentNode → Notify blueprint), a
- * circuit list with enable toggle + Trigger Now + delete, and a per-
- * circuit run list fed by the `autopilot_circuit_runs` /
- * `_run_steps` ledger. The real React Flow canvas editor arrives in a
- * later milestone; this tab only needs to prove the loop end-to-end.
+ * Milestone-4 surface (issue #1209): authoring moved into the full-screen
+ * React Flow canvas editor. "New Circuit" creates the canonical
+ * server-side skeleton and immediately opens the editor over the center
+ * workspace; every row gets an "Edit Flow" button. The tab itself keeps
+ * the circuit list, enable toggle, Trigger Now, delete, and the per-
+ * circuit run ledger.
  *
  * Live updates ride the backend's `circuit-run-updated` event so a run
  * visibly lands as Completed without a manual refresh; every user
@@ -30,6 +30,7 @@ import {
   type CircuitWithRuns,
 } from '../../lib/tauri';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useUIStore } from '../../stores/uiStore';
 import { EmptyState } from '../shared/Spinner';
 
 /** Tailwind token classes for the ledger's run/step status vocabulary. */
@@ -55,13 +56,13 @@ function statusClass(status: string): string {
 
 export function CircuitsProbeTab() {
   const { activeMeshId } = useProbeContext();
+  const openCircuitEditor = useUIStore((s) => s.openCircuitEditor);
   const [rows, setRows] = useState<CircuitWithRuns[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Create-form state (throwaway authoring until the canvas editor).
+  // New-Circuit row: name + trigger shape, then straight into the editor.
   const [newName, setNewName] = useState('');
-  const [newPrompt, setNewPrompt] = useState('');
   const [triggerKind, setTriggerKind] = useState<CircuitTriggerKind>('manual');
   const [triggerLabel, setTriggerLabel] = useState('');
   const [intervalSeconds, setIntervalSeconds] = useState(300);
@@ -119,19 +120,19 @@ export function CircuitsProbeTab() {
     runAction(async () => {
       const name = newName.trim();
       if (name === '') return;
-      await createCircuit(
+      const circuit = await createCircuit(
         activeMeshId!,
         name,
         '',
         1,
-        newPrompt.trim(),
+        '', // the prompt is authored in the canvas editor's inspector now
         triggerKind,
         triggerKind === 'manual' ? undefined : triggerLabel.trim(),
         triggerKind === 'interval' ? intervalSeconds : undefined
       );
       setNewName('');
-      setNewPrompt('');
       setTriggerLabel('');
+      openCircuitEditor(circuit.id);
     });
 
   if (activeMeshId === null) {
@@ -144,26 +145,32 @@ export function CircuitsProbeTab() {
 
   return (
     <div className="flex flex-col h-full overflow-y-auto text-sm" data-testid="circuits-probe-tab">
-      {/* Create form */}
+      {/* New Circuit row — authoring itself happens in the canvas editor. */}
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
-        <input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          placeholder="New circuit name"
-          aria-label="New circuit name"
-          data-testid="circuit-name-input"
-          className="w-full mb-1 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-text-primary focus:outline-none"
-        />
-        <textarea
-          value={newPrompt}
-          onChange={(e) => setNewPrompt(e.target.value)}
-          placeholder="Initial agent prompt…"
-          aria-label="Initial agent prompt"
-          data-testid="circuit-prompt-input"
-          rows={3}
-          className="w-full mb-1 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-text-primary font-mono text-xs resize-none focus:outline-none"
-        />
         <div className="flex items-center gap-1 mb-1">
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="New circuit name"
+            aria-label="New circuit name"
+            data-testid="circuit-name-input"
+            className="flex-1 min-w-0 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-text-primary focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={handleCreate}
+            disabled={
+              busy ||
+              newName.trim() === '' ||
+              (needsLabel && triggerLabel.trim() === '')
+            }
+            data-testid="circuit-create-button"
+            className="px-2 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40 shrink-0"
+          >
+            New Circuit
+          </button>
+        </div>
+        <div className="flex items-center gap-1">
           <select
             value={triggerKind}
             onChange={(e) => setTriggerKind(e.target.value as CircuitTriggerKind)}
@@ -202,19 +209,6 @@ export function CircuitsProbeTab() {
             </label>
           )}
         </div>
-        <button
-          type="button"
-          onClick={handleCreate}
-          disabled={
-            busy ||
-            newName.trim() === '' ||
-            (needsLabel && triggerLabel.trim() === '')
-          }
-          data-testid="circuit-create-button"
-          className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
-        >
-          Create Circuit
-        </button>
       </div>
 
       {(loadError !== null || actionError !== null) && (
@@ -227,7 +221,7 @@ export function CircuitsProbeTab() {
         <div className="p-4">
           <EmptyState
             label="No circuits yet"
-            hint="Create one above, then hit Trigger Now."
+            hint="Create one above — it opens straight in the flow editor."
           />
         </div>
       ) : (
@@ -248,6 +242,14 @@ export function CircuitsProbeTab() {
                   <span className="truncate text-text-primary">{circuit.name}</span>
                 </label>
                 <span className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => openCircuitEditor(circuit.id)}
+                    data-testid={`circuit-edit-flow-${circuit.id}`}
+                    className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet hover:bg-accent-violet/25"
+                  >
+                    Edit Flow
+                  </button>
                   <button
                     type="button"
                     onClick={() => runAction(() => triggerCircuitNow(circuit.id))}

@@ -272,6 +272,14 @@ interface UIState extends GridControls {
   openDiff: (ctx: DiffContext) => void;
   closeDiff: () => void;
 
+  // Full-screen circuit canvas editor (issue #1209), or null when closed.
+  // Same overlay discipline as `activeDiffFile`: the editor covers the
+  // center workspace while it's open — the TerminalManager singleton keeps
+  // every PTY alive underneath, so closing returns to the exact grid.
+  activeCircuitEditorId: number | null;
+  openCircuitEditor: (circuitId: number) => void;
+  closeCircuitEditor: () => void;
+
   // Agent node currently under an OS file-drag, or null. Drives the terminal
   // "drop file to paste path" overlay; set by the window-level drop listener.
   dragTargetNodeId: number | null;
@@ -342,6 +350,14 @@ export const useUIStore = create<UIState>((set, get) => {
 
     closeDiff: () => {
       set({ activeDiffFile: null });
+    },
+
+    activeCircuitEditorId: null,
+    openCircuitEditor: (circuitId) => {
+      set({ activeCircuitEditorId: circuitId });
+    },
+    closeCircuitEditor: () => {
+      set({ activeCircuitEditorId: null });
     },
 
     // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +

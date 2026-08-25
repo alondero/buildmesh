@@ -25,14 +25,21 @@
 use serde::{Deserialize, Serialize};
 
 /// The full blueprint AST for one circuit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+// Milestone 4 (#1209): the canvas editor is the first TypeScript
+// consumer of the AST, so every type here derives ts-rs and exports its
+// generated `.ts` twin (`src/types/generated/CircuitGraph.ts` & co) —
+// the TS side imports them rather than hand-declaring wire shapes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitGraph.ts")]
 pub struct CircuitGraph {
     pub version: i32,
     pub nodes: Vec<CircuitNode>,
     pub edges: Vec<CircuitEdge>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitNode.ts")]
 pub struct CircuitNode {
     /// Stable within one blueprint. Referenced by [`CircuitEdge`] ends and
     /// persisted as `autopilot_circuit_run_steps.node_id`.
@@ -45,14 +52,20 @@ pub struct CircuitNode {
 /// snake_case `type` discriminator so `graph_json` reads like the spec's
 /// node vocabulary (`{"type": "manual"}`, `{"type": "spawn_agent_node",
 /// "prompt": "..."}`, ...).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitNodeKind.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CircuitNodeKind {
     // ---- Triggers ----
     /// Fire-by-hand entry point (the walking skeleton's Trigger Now).
     Manual,
     /// Fixed-interval pacer. Parsed but not yet executed (later milestone).
-    Interval { interval_seconds: i64 },
+    Interval {
+        // serde_json sends `i64` as a JS number — the CLAUDE.md rule for
+        // wire-level 64-bit ints (clamped to 60s–7d, fits i32).
+        #[ts(as = "i32")]
+        interval_seconds: i64,
+    },
     /// Fire when a GitHub issue gains `label`. Not yet executed.
     GithubIssueLabel { label: String },
     /// Fire when a GitHub PR gains `label`. Not yet executed.
@@ -98,7 +111,8 @@ pub enum CircuitNodeKind {
 }
 
 /// The GitHub mutation vocabulary of [`CircuitNodeKind::GithubAction`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "GithubActionKind.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum GithubActionKind {
     AddLabel,
@@ -112,7 +126,8 @@ pub enum GithubActionKind {
 /// Mirrors `models::SessionStatus`'s DB vocabulary; kept as a separate
 /// small enum so the graph JSON stays stable if `SessionStatus` grows
 /// spawn-machinery variants the graph author should not set by hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "SessionStatusKind.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatusKind {
     Running,
@@ -121,7 +136,8 @@ pub enum SessionStatusKind {
 }
 
 /// One directed wire between two circuit nodes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitEdge.ts")]
 pub struct CircuitEdge {
     pub from: String,
     pub to: String,
@@ -130,7 +146,8 @@ pub struct CircuitEdge {
 }
 
 /// When does the edge carry its parent's outcome forward?
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ts_rs::TS)]
+#[ts(export, export_to = "EdgeCondition.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeCondition {
     /// Traverse regardless of how the parent step ended.
@@ -148,7 +165,8 @@ pub enum EdgeCondition {
 /// routes Green/Red. Each is a terminal step outcome — edges pick their
 /// successors with `OnOutcome(...)`, so a gate whose branches don't
 /// cover an outcome simply parks that branch (the run waits).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "StepOutcome.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum StepOutcome {
     Completed,
@@ -244,6 +262,65 @@ impl CircuitGraph {
     /// order is serde's default struct order).
     pub fn to_json(&self) -> Result<String, String> {
         serde_json::to_string(self).map_err(|e| format!("could not encode circuit graph: {}", e))
+    }
+
+    /// Semantic checks beyond what serde can express: no duplicate node
+    /// ids, every edge endpoint resolves, and the graph is acyclic (the
+    /// stepper walks edges forward; a cycle would park a run forever).
+    /// Writers at trust boundaries (the canvas editor's save command)
+    /// must call this after `from_json`.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for node in &self.nodes {
+            if !ids.insert(node.id.as_str()) {
+                return Err(format!("duplicate node id '{}'", node.id));
+            }
+        }
+        for edge in &self.edges {
+            if !ids.contains(edge.from.as_str()) {
+                return Err(format!(
+                    "edge {} -> {} references unknown source node",
+                    edge.from, edge.to
+                ));
+            }
+            if !ids.contains(edge.to.as_str()) {
+                return Err(format!(
+                    "edge {} -> {} references unknown target node",
+                    edge.from, edge.to
+                ));
+            }
+            if edge.from == edge.to {
+                return Err(format!("node '{}' connects to itself", edge.from));
+            }
+        }
+        // Kahn's algorithm — leftover nodes mean a cycle.
+        let mut indegree: std::collections::HashMap<&str, usize> =
+            self.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
+        for edge in &self.edges {
+            *indegree.get_mut(edge.to.as_str()).unwrap() += 1;
+        }
+        let mut queue: Vec<&str> = indegree
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut visited = 0usize;
+        while let Some(id) = queue.pop() {
+            visited += 1;
+            for edge in &self.edges {
+                if edge.from == id {
+                    let d = indegree.get_mut(edge.to.as_str()).unwrap();
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push(edge.to.as_str());
+                    }
+                }
+            }
+        }
+        if visited != self.nodes.len() {
+            return Err("graph contains a cycle — runs could never terminate".to_string());
+        }
+        Ok(())
     }
 
     /// Children of `node_id` in edge order, deduplicated (parallel edges
@@ -515,6 +592,92 @@ mod tests {
         assert!(StepOutcome::is_terminal_db_str("green"));
         assert!(StepOutcome::is_terminal_db_str("working"));
         assert!(!StepOutcome::is_terminal_db_str("running"));
+    }
+
+    // -- semantic validation (canvas editor save boundary) ------------------
+
+    fn node(id: &str, kind: CircuitNodeKind) -> CircuitNode {
+        CircuitNode { id: id.into(), kind }
+    }
+
+    #[test]
+    fn validate_accepts_the_walking_skeleton() {
+        CircuitGraph::walking_skeleton("x").validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_node_ids() {
+        let g = CircuitGraph {
+            version: 1,
+            nodes: vec![node("t", CircuitNodeKind::Manual), node("t", CircuitNodeKind::Manual)],
+            edges: vec![],
+        };
+        assert!(g.validate().unwrap_err().contains("duplicate node id"));
+    }
+
+    #[test]
+    fn validate_rejects_edges_pointing_at_unknown_nodes() {
+        let g = CircuitGraph {
+            version: 1,
+            nodes: vec![node("t", CircuitNodeKind::Manual)],
+            edges: vec![CircuitEdge {
+                from: "t".into(),
+                to: "ghost".into(),
+                condition: EdgeCondition::default(),
+            }],
+        };
+        assert!(g.validate().unwrap_err().contains("unknown target node"));
+    }
+
+    #[test]
+    fn validate_rejects_self_loops() {
+        let g = CircuitGraph {
+            version: 1,
+            nodes: vec![node("t", CircuitNodeKind::Manual)],
+            edges: vec![CircuitEdge {
+                from: "t".into(),
+                to: "t".into(),
+                condition: EdgeCondition::default(),
+            }],
+        };
+        assert!(g.validate().unwrap_err().contains("connects to itself"));
+    }
+
+    #[test]
+    fn validate_rejects_cycles_but_accepts_diamonds() {
+        // Diamond (valid): a -> b -> d, a -> c -> d.
+        let diamond = CircuitGraph {
+            version: 1,
+            nodes: vec![
+                node("a", CircuitNodeKind::Manual),
+                node("b", CircuitNodeKind::Notify { message: String::new() }),
+                node("c", CircuitNodeKind::Notify { message: String::new() }),
+                node("d", CircuitNodeKind::AllCompleted),
+            ],
+            edges: vec![
+                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::default() },
+                CircuitEdge { from: "a".into(), to: "c".into(), condition: EdgeCondition::default() },
+                CircuitEdge { from: "b".into(), to: "d".into(), condition: EdgeCondition::default() },
+                CircuitEdge { from: "c".into(), to: "d".into(), condition: EdgeCondition::default() },
+            ],
+        };
+        diamond.validate().unwrap();
+
+        // Cycle: a -> b -> c -> a.
+        let cyclic = CircuitGraph {
+            version: 1,
+            nodes: vec![
+                node("a", CircuitNodeKind::Manual),
+                node("b", CircuitNodeKind::Notify { message: String::new() }),
+                node("c", CircuitNodeKind::Notify { message: String::new() }),
+            ],
+            edges: vec![
+                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::default() },
+                CircuitEdge { from: "b".into(), to: "c".into(), condition: EdgeCondition::default() },
+                CircuitEdge { from: "c".into(), to: "a".into(), condition: EdgeCondition::default() },
+            ],
+        };
+        assert!(cyclic.validate().unwrap_err().contains("cycle"));
     }
 
     // -- walking skeleton shape ----------------------------------------------

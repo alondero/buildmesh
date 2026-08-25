@@ -13,6 +13,7 @@ import { GridSplitter } from './GridSplitter';
 import { resolveSingleNode } from '../../lib/viewModes';
 import { deriveVisibleNodes } from './gridControls';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
+import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
 import { NodeCard, type BuildRunState } from './NodeCard';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
@@ -255,6 +256,7 @@ export function AgentNodeView() {
   const exitSingleMode = useUIStore(state => state.exitSingleMode);
   const probeOpen = useUIStore(state => state.probeOpen);
   const activeDiffFile = useUIStore(state => state.activeDiffFile);
+  const circuitEditorOpen = useUIStore(state => state.activeCircuitEditorId !== null);
   const gridSearchQuery = useUIStore(state => state.gridSearchQuery);
   const gridProviderFilter = useUIStore(state => state.gridProviderFilter);
   const gridStatusFilter = useUIStore(state => state.gridStatusFilter);
@@ -328,18 +330,18 @@ export function AgentNodeView() {
 
   // Escape exits Single mode. Only bound while single is active so we don't
   // intercept Escape (e.g. agent CLIs read it) during normal grid use. While
-  // the Center Diff Overlay (#379) is open it sits on top of the solo
-  // terminal and owns Escape — without this guard, Escape would close the
-  // overlay AND exit single in one press. When the overlay closes, this
-  // effect re-runs (activeDiffFile dep) and re-binds the handler.
+  // the Center Diff Overlay (#379) or the Circuit Editor (#1209) is open it
+  // sits on top of the solo terminal and owns Escape — without this guard,
+  // Escape would close the overlay AND exit single in one press. When an
+  // overlay closes, this effect re-runs and re-binds the handler.
   useEffect(() => {
-    if (viewMode !== 'single' || activeDiffFile != null) return;
+    if (viewMode !== 'single' || activeDiffFile != null || circuitEditorOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') exitSingleMode();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [viewMode, activeDiffFile, exitSingleMode]);
+  }, [viewMode, activeDiffFile, circuitEditorOpen, exitSingleMode]);
 
   // Reflow the terminal grid on every mode transition: switching modes
   // changes which (and how many) NodeCards mount, and entering/leaving
@@ -446,6 +448,9 @@ export function AgentNodeView() {
           (a sibling in App's flex row) stays open and interactive. The
           terminals behind it keep running; "Back to Terminals" just hides it. */}
       {activeDiffFile && <CenterDiffOverlay diff={activeDiffFile} />}
+      {/* Circuit canvas editor (#1209) — same overlay discipline: covers the
+          workspace, never unmounts the terminals underneath. */}
+      {circuitEditorOpen && <CircuitEditorOverlay />}
       <div className="flex-1 flex overflow-hidden">
         <DndContext
           sensors={sensors}
