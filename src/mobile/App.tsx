@@ -131,11 +131,20 @@ export default function App() {
     recoveryVersionRef.current += 1;
     clearStoredToken();
     setAuthNotice("Connection expired — scan the QR code again to reconnect.");
+    // If a PR sheet was open when auth expired, it had pushed its own history
+    // entry via openPrSheet — pop it so the user's next back press (or iOS
+    // swipe-back) lands on the screen below, not on the dead entry the sheet
+    // left behind (issue #1260). Mirror the success path in onCreated, which
+    // also calls window.history.back().
+    const sheetWasOpen = prSheetRef.current !== null;
     prSheetRef.current = null;
     setPrSheet(null);
     setPrCreatedUrl(null);
     setOffline(false);
     setScreen({ kind: "connect" });
+    if (sheetWasOpen) {
+      window.history.back();
+    }
   }, []);
 
   const openPrSheet = useCallback((node: AgentNode, branch: string) => {

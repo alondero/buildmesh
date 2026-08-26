@@ -5,6 +5,7 @@
  * /api/session (Authorization: Bearer) — never a ?token= URL. A bad token
  * reports inline; a successful login stores the token and calls onConnected.
  */
+import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -143,5 +144,36 @@ describe("Connect", () => {
     expect(screen.getByTestId("connect-notice").textContent).toBe(
       "Connection expired",
     );
+  });
+
+  it("POSTs /api/session exactly once when mounted under StrictMode with ?token=", async () => {
+    // Issue #1260: React StrictMode double-invokes the mount effect in dev,
+    // so an unguarded `connectWith(urlToken)` runs twice and mints two rows in
+    // pair_device_session_inner. The guard ref `consumedTokenRef` makes the
+    // side-effect idempotent across the simulated remount. The existing
+    // replaceState URL strip ALSO masks the second invocation in jsdom and
+    // most browsers today; the guard is defense-in-depth against the case
+    // where the URL survives (older React, browser quirks, future changes).
+    const fetchMock = mockFetchStatus(200, { token: "device-tok" });
+    const onConnected = vi.fn();
+    window.history.replaceState(null, "", "/?token=abc123");
+
+    render(
+      <React.StrictMode>
+        <Connect onConnected={onConnected} />
+      </React.StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(onConnected).toHaveBeenCalledTimes(1);
+    });
+    // Exactly one POST — the StrictMode double-mount must not double-fire.
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]: [unknown]) => url === "/api/session",
+      ),
+    ).toHaveLength(1);
+    // Token was stripped from the address bar on first effect.
+    expect(window.location.search).not.toContain("token=");
   });
 });
