@@ -117,6 +117,7 @@ describe("mobile App auth recovery", () => {
 
   afterEach(() => {
     localStorage.clear();
+    vi.restoreAllMocks();
   });
 
   it("closes an open PR sheet before rendering Connect", async () => {
@@ -192,5 +193,51 @@ describe("mobile App auth recovery", () => {
     expect(screen.getByTestId("mock-node-list")).toBeTruthy();
     expect(removeItem).toHaveBeenCalledTimes(1);
     removeItem.mockRestore();
+  });
+
+  it("pops the history entry when auth fails while a PR sheet is open (issue #1260)", async () => {
+    // Issue #1260: openPrSheet pushes a history entry, but handleAuthFailed
+    // used to only clear React state — the dead entry lingered, so the first
+    // back press did nothing and iOS swipe-back read as broken.
+    const historyBack = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    render(<App />);
+
+    await screen.findByTestId("mock-node-list");
+    await act(async () => screen.getByTestId("open-terminal").click());
+    await act(async () => screen.getByTestId("open-changes").click());
+    await act(async () => screen.getByTestId("open-pr").click());
+    expect(await screen.findByTestId("create-pr-sheet")).toBeTruthy();
+
+    // Opening the sheet pushed a history entry — back must NOT have fired yet.
+    expect(historyBack).not.toHaveBeenCalled();
+
+    await act(async () => screen.getByTestId("sheet-auth").click());
+    await screen.findByTestId("connect-screen");
+
+    // Auth failure while a sheet was open should pop exactly one entry —
+    // matching the onCreated success path's `window.history.back()`.
+    expect(historyBack).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("create-pr-sheet")).toBeNull();
+  });
+
+  it("does not pop history on auth failure when no PR sheet was open", async () => {
+    // Counterpart to the sheet-open case: an auth failure on the node list
+    // (no sheet) must NOT call window.history.back() — there is no entry
+    // pushed by openPrSheet to pop, and a stray back() leaves the SPA.
+    const historyBack = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    render(<App />);
+
+    await screen.findByTestId("mock-node-list");
+    const callback = appState.authFailed;
+    expect(callback).toBeTruthy();
+
+    act(() => callback!());
+    await screen.findByTestId("connect-screen");
+
+    expect(historyBack).not.toHaveBeenCalled();
   });
 });
