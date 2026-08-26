@@ -5,15 +5,21 @@ cut a release and the one-time setup behind it.
 
 ## Cutting a release
 
-### Versioning scheme: `-dev` between releases
+### Versioning scheme: `-0` between releases
 
-The version in the manifests carries a `-dev` suffix between releases, always
+The version in the manifests carries a `-0` suffix between releases, always
 one minor ahead of the last published release (e.g. after publishing v1.2.0,
-local builds are `1.3.0-dev`). This matters for the auto-updater: it compares
-versions with semver, so a locally built `1.3.0-dev` is *newer* than the
-published `1.2.0` and the app will **not** show an "Update available" prompt
-for your own local builds. Without this, any production-profile build you make
-locally nags you to "update" to the release you already have.
+local builds are `1.3.0-0`). The identifier is numeric because Windows MSI
+(WiX) rejects non-numeric prereleases (`1.3.0-dev` fails bundling with
+"optional pre-release identifier in app version must be numeric-only"). It
+does not increment: every between-release build stays at `-0` until the next
+tagged release.
+
+This matters for the auto-updater: it compares versions with semver, so a
+locally built `1.3.0-0` is *newer* than the published `1.2.0` and the app will
+**not** show an "Update available" prompt for your own local builds. Without
+this, any production-profile build you make locally nags you to "update" to
+the release you already have.
 
 (Dev-profile builds — `npm run tauri:build:dev` — disable the updater entirely
 via their `.dev` bundle identifier; this scheme covers plain `tauri build`
@@ -41,9 +47,9 @@ output.)
 5. Review the draft release on GitHub and **publish** it. Once published,
    `…/releases/latest/download/latest.json` serves the feed, and running installs
    will show the "Update available" prompt on next launch.
-6. **Immediately bump back to the next dev version**:
+6. **Immediately bump back to the next `-0` version**:
    ```
-   npm run version:set -- 1.3.0-dev
+   npm run version:set -- 1.3.0-0
    ```
    Commit and merge so subsequent local builds stay newer than the release.
 
