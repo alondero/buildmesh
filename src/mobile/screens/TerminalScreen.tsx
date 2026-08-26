@@ -287,6 +287,24 @@ export default function TerminalScreen({
       connectInFlightRef.current = false;
       return;
     }
+
+    // Issue #1256: neuter the old socket's handlers BEFORE opening a new
+    // one. A socket whose browser-driven close is still in the CLOSING
+    // state keeps its handlers attached until the handshake finishes, so
+    // any late `onclose`/`onerror` would otherwise schedule a parallel
+    // reconnect ladder and a late `onmessage` would still write PTY bytes
+    // to xterm (duplicated output). Detaching the handlers turns the
+    // about-to-close socket into a passive no-op while the new one comes
+    // up. Belt-and-suspenders alongside the staleness check inside each
+    // handler below.
+    const oldWs = wsRef.current;
+    if (oldWs) {
+      oldWs.onopen = null;
+      oldWs.onmessage = null;
+      oldWs.onclose = null;
+      oldWs.onerror = null;
+    }
+
     let ws: WebSocket;
     try {
       ws = new WebSocket(url);
@@ -310,6 +328,7 @@ export default function TerminalScreen({
     let socketOpened = false;
 
     ws.onopen = () => {
+      if (ws !== wsRef.current) return; // stale: a newer connect() has replaced us
       socketOpened = true;
       reconnectAttemptRef.current = 0;
       setReconnectIn(null);
@@ -321,6 +340,7 @@ export default function TerminalScreen({
     };
 
     ws.onmessage = (event) => {
+      if (ws !== wsRef.current) return; // stale: don't write PTY bytes from a dead socket
       const term = termRef.current;
       if (!term) return;
       if (typeof event.data === "string") {
@@ -334,6 +354,7 @@ export default function TerminalScreen({
 
     const onSocketFailure = () => {
       if (closedByUserRef.current || reconnectScheduled) return;
+      if (ws !== wsRef.current) return; // stale: a newer connect() owns reconnect now
       reconnectScheduled = true;
       // A failed handshake carries the server's 401/403 as the HTTP upgrade
       // response, which browsers expose only as error/close. Mint once
@@ -401,12 +422,21 @@ export default function TerminalScreen({
   // Foreground/online resume: leave a healthy or in-flight socket alone (this
   // fires on every tab switch), but a dead or exhausted one gets its backoff
   // reset and reconnects immediately — same effect as tapping Retry.
+  //
+  // Issue #1256: CLOSING counts as "still alive." The browser enters
+  // CLOSING when it begins the close handshake and only fires `onclose`
+  // on a later tick — if we proceed here we open a duplicate socket
+  // while the old one's handlers are still attached, leading to
+  // duplicated PTY bytes written to the same xterm and a parallel
+  // reconnect ladder scheduled by the old socket's late onclose.
   function resumeConnection() {
     if (closedByUserRef.current) return;
     const ws = wsRef.current;
     if (
       ws &&
-      (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+      (ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING ||
+        ws.readyState === WebSocket.CLOSING)
     ) {
       return;
     }
