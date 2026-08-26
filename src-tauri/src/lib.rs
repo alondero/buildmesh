@@ -25,6 +25,11 @@ mod session_naming;
 
 use tauri::Manager;
 
+/// Handle the private external-crash-watchdog CLI before Tauri initialises.
+pub fn run_crash_watchdog_if_requested() -> bool {
+    diagnostics::run_crash_watchdog_if_requested()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Early panic hook — captures panics that fire BEFORE the main panic
@@ -269,6 +274,10 @@ pub fn run() {
             Box::leak(Box::new(_guard));
 
             tracing::info!("Buildmesh started — db at {:?}", db_path);
+
+            if let Err(error) = diagnostics::start_crash_watchdog(&log_dir) {
+                tracing::error!("failed to start external crash watchdog: {error}");
+            }
 
             // Crash recovery: any sessions still marked 'running' from a previous
             // crash have no live process. Mark them suspended for auto-resume.
@@ -665,9 +674,10 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
+        .run(|_app_handle, event| {
             match &event {
                 tauri::RunEvent::ExitRequested { code, .. } => {
+                    diagnostics::mark_expected_exit(diagnostics::ExpectedExitReason::ExitRequested);
                     tracing::info!(
                         "App exit requested (code={:?}), marking running sessions as suspended",
                         code
@@ -691,6 +701,9 @@ pub fn run() {
                 tauri::RunEvent::WindowEvent { label, event, .. } => match event {
                     tauri::WindowEvent::CloseRequested { .. } => {
                         USER_CLOSE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        diagnostics::mark_expected_exit(
+                            diagnostics::ExpectedExitReason::CloseRequested,
+                        );
                         tracing::info!(window = %label, "Window close requested by user");
                     }
                     tauri::WindowEvent::Destroyed => {
@@ -712,8 +725,16 @@ pub fn run() {
                                 "Window destroyed WITHOUT a user close request — \
                                  webview/GPU process death suspected"
                             );
-                            match app_handle.path().app_data_dir() {
-                                Ok(app_dir) => match auto_relaunch_detached(&app_dir) {
+                            #[cfg(target_os = "windows")]
+                            tracing::info!(
+                                "Deferring unexpected-exit recovery to the external watchdog"
+                            );
+
+                            #[cfg(not(target_os = "windows"))]
+                            match _app_handle.path().app_data_dir() {
+                                Ok(app_dir) => match diagnostics::relaunch_detached(
+                                    &app_dir.join("logs"),
+                                ) {
                                     Ok(true) => {
                                         tracing::info!("Auto-relaunch spawned (guard passed)");
                                     }
@@ -721,7 +742,7 @@ pub fn run() {
                                         tracing::warn!(
                                             "Auto-relaunch skipped — another auto-relaunch \
                                              fired less than {}s ago",
-                                            AUTO_RELAUNCH_COOLDOWN_SECS
+                                            diagnostics::AUTO_RELAUNCH_COOLDOWN_SECS
                                         );
                                     }
                                     Err(e) => {
@@ -750,52 +771,3 @@ pub fn run() {
 /// window's webview — the silent-exit signature.
 static USER_CLOSE_REQUESTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-
-const AUTO_RELAUNCH_COOLDOWN_SECS: u64 = 60;
-
-/// Spawn a fresh copy of the current executable, detached from this dying
-/// process, unless one was already auto-relaunched within the cooldown
-/// window. Returns `Ok(false)` when the cooldown suppressed the relaunch
-/// (protects against crash-looping if the binary dies immediately at
-/// startup). The stamp lives in `<app_dir>/logs/`.
-fn auto_relaunch_detached(app_dir: &std::path::Path) -> Result<bool, String> {
-    use std::io::Read;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let logs_dir = app_dir.join("logs");
-    let stamp_path = logs_dir.join("auto_relaunched_at");
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("system clock: {}", e))?
-        .as_millis();
-
-    if stamp_path.exists() {
-        let mut buf = String::new();
-        if std::fs::File::open(&stamp_path)
-            .and_then(|mut f| f.read_to_string(&mut buf))
-            .is_ok()
-        {
-            if let Ok(last_ms) = buf.trim().parse::<u128>() {
-                let elapsed_ms = now_ms.saturating_sub(last_ms);
-                if elapsed_ms < u128::from(AUTO_RELAUNCH_COOLDOWN_SECS) * 1000 {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
-    let mut cmd = std::process::Command::new(exe);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    cmd.spawn().map_err(|e| format!("spawn: {}", e))?;
-
-    let _ = std::fs::create_dir_all(&logs_dir);
-    let _ = std::fs::write(&stamp_path, now_ms.to_string());
-    Ok(true)
-}

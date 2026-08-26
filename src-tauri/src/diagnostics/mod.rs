@@ -32,7 +32,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+mod watchdog;
 mod writer;
+pub(crate) use watchdog::{mark_expected_exit, ExpectedExitReason};
+#[cfg(not(target_os = "windows"))]
+pub(crate) use watchdog::{relaunch_detached, AUTO_RELAUNCH_COOLDOWN_SECS};
+pub use watchdog::{
+    run_if_requested as run_crash_watchdog_if_requested, start as start_crash_watchdog,
+};
 pub(crate) use writer::RotatingWriter;
 
 #[cfg(test)]
