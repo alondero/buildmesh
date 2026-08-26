@@ -59,18 +59,6 @@ impl JsonRpcResponse {
     }
 }
 
-/// Local helper exposing the test-server liveness flag for IPC consumers.
-/// Deliberately NOT a `#[command]`: there is no consumer on the production
-/// wire today (Playwright talks to the test server directly via
-/// `GET /health` / `POST /invoke`), and an unregistered `#[command]` reads
-/// as a wire surface that callers can't actually invoke (issue #1263).
-/// Re-add the attribute when a real consumer (e.g. a settings-panel
-/// indicator) ships.
-#[allow(dead_code)]
-pub fn is_test_server_running() -> bool {
-    TEST_SERVER_RUNNING.load(Ordering::SeqCst)
-}
-
 /// Listen addresses for the test server: one IPv4, one IPv6 (Windows requires
 /// explicit binding to each address family). Loopback ONLY — the bridge
 /// executes real backend commands with no auth, and a wildcard bind would

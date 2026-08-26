@@ -263,33 +263,66 @@ const MAX_RESIZE_DIMENSION: u64 = 1000;
 ///   normal path for non-resize frames).
 /// - `Some(Ok((c, r)))` — caller invokes `handle_mobile_resize`.
 /// - `Some(Err(reason))` — caller logs + drops the frame; never injects
-///   malformed JSON as PTY input.
+///   malformed JSON as PTY input. Crucially, the moment `type == "resize"`
+///   is confirmed, the parser commits to a resize frame — any subsequent
+///   extraction failure (missing fields, wrong types, nulls) MUST return
+///   `Some(Err(...))` and NEVER fall through to `None`, which the caller
+///   would treat as "not a resize frame" and inject into the PTY as raw
+///   keystrokes (review-feedback regression class — issue #1263 review).
 type ResizeParseResult = Option<Result<(u16, u16), ResizeError>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResizeError {
+    /// `type == "resize"` was confirmed, but cols/rows failed to parse
+    /// (missing, null, wrong type, negative, non-integer).
+    MalformedPayload,
     ZeroDimension,
     DimensionTooLarge,
+}
+
+/// Typed payload: serde enforces `cols` and `rows` are non-negative
+/// integers. Negative numbers, strings, nulls, floats, and missing fields
+/// all fail deserialization — the caller maps that failure to
+/// `ResizeError::MalformedPayload`.
+#[derive(serde::Deserialize)]
+struct ResizeFrame {
+    cols: u64,
+    rows: u64,
 }
 
 fn parse_resize_message(text: &str) -> ResizeParseResult {
     if !text.starts_with('{') {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_str(text).ok()?;
-    if v.get("type")?.as_str()? != "resize" {
+    // Step 1: parse the outer JSON. If the text isn't valid JSON at all,
+    // it can't be a resize frame — caller forwards as input (the normal
+    // path for keystrokes that aren't JSON).
+    let v: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    // Step 2: confirm `type == "resize"`. Any other type (or missing /
+    // non-string type) means this isn't a resize frame — forward as input.
+    // This is the ONLY path that returns `None` after we've seen the `{`.
+    if v.get("type").and_then(|t| t.as_str()) != Some("resize") {
         return None;
     }
-    let cols = v.get("cols")?.as_u64()?;
-    let rows = v.get("rows")?.as_u64()?;
-    if cols == 0 || rows == 0 {
+    // Step 3: type confirmed. ANY extraction failure from here on is a
+    // malformed RESIZE frame, not a non-resize frame — `Some(Err(...))`,
+    // never `None`. The caller drops these (logs + returns), never
+    // forwarding as PTY input.
+    let frame: ResizeFrame = match serde_json::from_value(v) {
+        Ok(f) => f,
+        Err(_) => return Some(Err(ResizeError::MalformedPayload)),
+    };
+    if frame.cols == 0 || frame.rows == 0 {
         return Some(Err(ResizeError::ZeroDimension));
     }
-    if cols > MAX_RESIZE_DIMENSION || rows > MAX_RESIZE_DIMENSION {
+    if frame.cols > MAX_RESIZE_DIMENSION || frame.rows > MAX_RESIZE_DIMENSION {
         return Some(Err(ResizeError::DimensionTooLarge));
     }
     // Safe: 0 < cols/rows <= 1000 fits u16 exactly (u16::MAX = 65_535).
-    Some(Ok((cols as u16, rows as u16)))
+    Some(Ok((frame.cols as u16, frame.rows as u16)))
 }
 
 fn handle_mobile_resize_with(
@@ -790,5 +823,70 @@ mod tests {
         // message (the outer None). Caller forwards as input (or, for a
         // brace-prefixed garbage payload, drops — but it never crashes).
         assert_eq!(parse_resize_message("{not json"), None);
+    }
+
+    // -- parse_resize_message: malformed-payload cases (review feedback) ------
+    //
+    // Once `type == "resize"` is confirmed, ANY extraction failure must
+    // return `Some(Err(MalformedPayload))` — never `None`, which the caller
+    // would forward as PTY input (injection regression). These tests pin
+    // every variant serde can surface for a resize frame.
+
+    #[test]
+    fn parse_resize_rejects_string_cols_as_malformed_not_forwardable() {
+        // `cols:"abc"` — type matches "resize" but cols is the wrong type.
+        // Must NOT fall through to `None` (which the caller would dump
+        // into the running shell as raw text).
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":"abc","rows":10}"#),
+            Some(Err(ResizeError::MalformedPayload))
+        );
+    }
+
+    #[test]
+    fn parse_resize_rejects_missing_fields_as_malformed() {
+        // No cols/rows at all. After type confirmation this is a malformed
+        // RESIZE frame, not "not a resize frame".
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize"}"#),
+            Some(Err(ResizeError::MalformedPayload))
+        );
+    }
+
+    #[test]
+    fn parse_resize_rejects_null_cols_as_malformed() {
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":null,"rows":10}"#),
+            Some(Err(ResizeError::MalformedPayload))
+        );
+    }
+
+    #[test]
+    fn parse_resize_rejects_negative_cols_as_malformed() {
+        // `cols:-1` — serde's u64 rejects negatives at the type level.
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":-1,"rows":10}"#),
+            Some(Err(ResizeError::MalformedPayload))
+        );
+    }
+
+    #[test]
+    fn parse_resize_rejects_float_cols_as_malformed() {
+        // `cols:1.5` — serde's u64 rejects non-integers.
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":1.5,"rows":10}"#),
+            Some(Err(ResizeError::MalformedPayload))
+        );
+    }
+
+    #[test]
+    fn parse_resize_rejects_wrong_type_field_as_malformed() {
+        // `type:123` — the type tag itself is the wrong type. This means
+        // "not a resize frame" → caller forwards as input (the only
+        // correct post-confirmation `None` path).
+        assert_eq!(
+            parse_resize_message(r#"{"type":123,"cols":80,"rows":24}"#),
+            None
+        );
     }
 }
