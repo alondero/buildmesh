@@ -1,4 +1,4 @@
-import { useState, useLayoutEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -13,6 +13,7 @@ import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
+import { dropdownId } from '../../lib/dropdownId';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
 import { MeshRecolorModal } from '../Mesh/MeshRecolorModal';
@@ -178,6 +179,24 @@ export function MeshItem({
     requestAnimationFrame(() => trigger?.focus());
   };
 
+  // Issue #1264 — the `setSyncMessage(null)` timeout in `handleSync` is
+  // armed with `syncTimeoutRef.current` but the component previously
+  // never cleared it on unmount. If the mesh was deleted (or the user
+  // switched views) within the 4-second auto-clear window, the timer
+  // fired against the unmounted component and triggered React's
+  // "setState on unmounted component" warning. Cancel pending timers on
+  // unmount; deps `[]` so the cleanup is bound exactly once to the
+  // component lifecycle (the ref handles in-flight updates from
+  // `handleSync`).
+  useEffect(() => {
+    return () => {
+      if (syncTimeoutRef.current !== null) {
+        clearTimeout(syncTimeoutRef.current);
+        syncTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -202,7 +221,13 @@ export function MeshItem({
   // Issue #814 — outside-mousedown close goes through the shared
   // `useClickOutside` hook. `mesh.id` scopes the selector so two
   // sidebar meshes with open context menus don't interfere.
-  useClickOutside<number>(contextMenu ? mesh.id : null, () => closeContextMenu());
+  //
+  // Issue #1264 — prefix the selector with the surface tag so a
+  // mesh-keyed context menu can't collide with a node-keyed context
+  // menu on the same numeric id (both autoincrement from the same
+  // SQLite sequence, so collisions are routine). Mirrors the prefix
+  // applied in `NodeItem` and the Terminal context menu.
+  useClickOutside<string>(contextMenu ? dropdownId('mesh', mesh.id) : null, () => closeContextMenu());
 
   // Issue #735 — viewport clamping. Runs after the menu mounts so we can
   // read its rendered size; pushes the position back into state if it
@@ -398,7 +423,10 @@ export function MeshItem({
           // "inside" check (the previous hand-rolled ref.contains shape
           // was scoped per-instance via the same `mesh.id`-keyed
           // selector inside the closure).
-          data-dropdown-for={mesh.id}
+          // Issue #1264 — prefix with the surface tag so a mesh-keyed
+          // menu can't collide with a node- or terminal-keyed menu that
+          // shares the same numeric id.
+          data-dropdown-for={dropdownId('mesh', mesh.id)}
           // Issue #735 — WAI-ARIA `menu` role; `aria-labelledby` points at
           // the mesh-name span added above so screen readers can announce
           // the menu's accessible name. Viewport clamping happens in the

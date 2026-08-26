@@ -3,6 +3,7 @@ import { AgentNode } from '../../stores/agentNodeStore';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useViewportClamp } from '../../hooks/useViewportClamp';
+import { dropdownId } from '../../lib/dropdownId';
 
 interface BuildRunDropdownProps {
   node: AgentNode;
@@ -29,7 +30,7 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
   // `node.id` (not a boolean) matters in the grid — multiple
   // `BuildRunDropdown`s render simultaneously (one per agent node),
   // so a click on a sibling's body must close *this* one.
-  useClickOutside<number>(isOpen ? node.id : null, () => setIsOpen(false));
+  useClickOutside<string>(isOpen ? dropdownId('buildrun', node.id) : null, () => setIsOpen(false));
 
   // Issue #814 / #837 — Escape closes the menu and returns focus to the
   // trigger. The `useAriaMenu` hook attaches the document-level keydown
@@ -96,7 +97,7 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     // click on the trigger as "outside" — the document mousedown
     // would close the menu, then the trigger's onClick would toggle
     // it back open in the same tick (a flicker + state race).
-    <div className="relative" data-dropdown-for={isOpen ? node.id : undefined}>
+    <div className="relative" data-dropdown-for={isOpen ? dropdownId('buildrun', node.id) : undefined}>
       <button
         ref={triggerRef}
         type="button"

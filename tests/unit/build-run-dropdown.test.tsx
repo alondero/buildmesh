@@ -261,7 +261,7 @@ describe('BuildRunDropdown', () => {
       openMenu();
       const wrapper = document.querySelector('[data-dropdown-for]') as HTMLElement;
       expect(wrapper).toBeTruthy();
-      expect(wrapper.getAttribute('data-dropdown-for')).toBe(String(NODE.id));
+      expect(wrapper.getAttribute('data-dropdown-for')).toBe(`buildrun-${NODE.id}`);
       // The menu itself does NOT carry the attribute (only the wrapper).
       const menu = document.querySelector('[role="menu"]') as HTMLElement;
       expect(menu.hasAttribute('data-dropdown-for')).toBe(false);

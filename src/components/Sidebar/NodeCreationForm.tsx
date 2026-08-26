@@ -1,5 +1,6 @@
 import type { Mesh } from '../../stores/meshStore';
 import { type SpawnOption } from '../../lib/groups';
+import { dropdownId } from '../../lib/dropdownId';
 import { SpawnButtonCluster } from './SpawnButtonCluster';
 
 interface NodeCreationFormProps {
@@ -42,7 +43,10 @@ export function NodeCreationForm({
   return (
     <SpawnButtonCluster
       providers={providers}
-      meshId={mesh.id}
+      // Issue #1264 — surface prefix keeps this menu's
+      // `data-dropdown-for` from colliding with a node- or
+      // terminal-keyed menu on the same numeric id.
+      dropdownKey={dropdownId('mesh', mesh.id)}
       isOpen={isDropdownOpen}
       isSpawning={isSpawning}
       onToggleDropdown={() => onToggleDropdown(mesh)}

@@ -68,7 +68,8 @@ import {
 } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
-import { mapBackendProviders } from '../../lib/groups';
+import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
+import { dropdownId } from '../../lib/dropdownId';
 import { formatRelativeAge } from '../../lib/time';
 
 // The Archive tab renders a `date` fallback for items older than 30
@@ -82,24 +83,13 @@ function timeAgo(isoString: string): string {
   return formatRelativeAge(then, new Date());
 }
 
-// Mirror the ProviderInfo wire shape with only the columns the picker
-// needs (id/label/color for the row UI; resumable drives the filter;
-// group_key / harness_id / is_proxied drive the harness-grouped render —
-// issue #575). The legacy `isResumableProvider(['anthropic','minimax','kimi'])`
-// allow-list was removed in #550 follow-up — custom Claude-compatible
-// profiles (e.g. "DeepSeek via Claude") share the `anthropic` adapter
-// and now advertise `resumable: true` themselves.
-type ResumableProvider = {
-  id: string;
-  label: string;
-  color: string;
-  icon: string;
-  harness_id: string;
-  provider_id: string | null;
-  is_proxied: boolean;
-  group_key: string;
-  resumable: boolean;
-};
+// Issue #1264 — `ResumableProvider` was a hand-rolled projection that
+// duplicated `SpawnOption`'s 8 fields field-for-field and added a
+// single `resumable: boolean`. The two shapes drifted silently the day
+// someone added a new column to `SpawnOption` and forgot this one.
+// Express the relationship directly: a resumable provider IS a
+// `SpawnOption` with the resume flag tacked on.
+type ResumableProvider = SpawnOption & { resumable: boolean };
 
 export function ArchivedNodesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
@@ -323,7 +313,12 @@ export function ArchivedNodesTab() {
                 >
                   <SpawnButtonCluster
                     providers={resumableProviders}
-                    meshId={session.session_id}
+                    // Issue #1264 — surface prefix keeps this menu's
+                    // `data-dropdown-for` from colliding with a
+                    // node- or mesh-keyed menu on the same id
+                    // (session ids are stringly-typed but the
+                    // collision risk is the same shape).
+                    dropdownKey={dropdownId('session', session.session_id)}
                     isOpen={openDropdown === session.session_id}
                     primaryLabel="Resume"
                     busyLabel="Resuming…"

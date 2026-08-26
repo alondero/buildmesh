@@ -11,6 +11,7 @@ import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { dropdownId } from '../../lib/dropdownId';
 import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
 
@@ -211,7 +212,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // click inside either subtree satisfies the hook's
   // `[data-dropdown-for="<id>"]` selector — closing on a sub-internal
   // click is now handled by attribute scoping instead of two ref walks.
-  useClickOutside<number>(contextMenu ? node.id : null, () => closeContextMenu());
+  //
+  // Issue #1264 — prefix with the surface tag so a node-keyed menu
+  // can't collide with a mesh-keyed menu that shares the same numeric
+  // id (mesh and node ids both autoincrement from the same SQLite
+  // sequence, so collisions are routine).
+  useClickOutside<string>(contextMenu ? dropdownId('node', node.id) : null, () => closeContextMenu());
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -475,7 +481,9 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           // submenu carries the same value (below), so a click inside
           // either subtree matches `[data-dropdown-for="<id>"]` and the
           // hook treats both as "inside".
-          data-dropdown-for={node.id}
+          // Issue #1264 — surface prefix matches the `useClickOutside`
+          // call above so the selector resolves to the same DOM.
+          data-dropdown-for={dropdownId('node', node.id)}
           role="menu"
           aria-labelledby={`node-item-name-${node.id}`}
           className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-left z-[100] py-1 min-w-[180px]"
@@ -583,7 +591,10 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                 // so `useClickOutside` treats clicks inside the
                 // submenu as "inside" (closing on a sub-internal click
                 // would make the picker un-clickable).
-                data-dropdown-for={node.id}
+                // Issue #1264 — same surface prefix as the parent
+                // menu so the `useClickOutside` selector resolves
+                // across both the parent and submenu.
+                data-dropdown-for={dropdownId('node', node.id)}
                 className="absolute left-full top-0 -ml-1 min-w-[200px] bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-[101]"
                 // `onMouseDown stopPropagation` mirrors the parent
                 // menu — without it, a click inside the submenu

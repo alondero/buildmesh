@@ -57,6 +57,19 @@ describe('shortcutCatalog', () => {
     expect(actions.has('zoom-out')).toBe(true);
   });
 
+  it('labels the zoom-in chord as Ctrl+= (the actual US-keyboard chord, issue #1264)', () => {
+    // The previous `Ctrl++` label was the literal "press Ctrl and the
+    // + key" rendering, but the actual US-keyboard chord is `Ctrl+=`
+    // and the matcher in `terminalKeyAction.ts:60` accepts both `=`
+    // and `+` for tolerance. Pin the display label here so a future
+    // edit that flips it back to `Ctrl++` (or to `Ctrl+Shift+=`, the
+    // "type a literal +" chord) is caught at test time.
+    const zoomIn = SHORTCUT_CATALOG.find((s) => s.action === 'zoom-in');
+    expect(zoomIn).toBeDefined();
+    expect(zoomIn?.winKey).toBe('Ctrl+=');
+    expect(zoomIn?.macKey).toBe('⌘+=');
+  });
+
   it('surfaces terminal context-menu actions wired in TerminalRegistry.attachCustomKeyEventHandler', () => {
     const actions = new Set(SHORTCUT_CATALOG.map(s => s.action));
     expect(actions.has('term-copy')).toBe(true);

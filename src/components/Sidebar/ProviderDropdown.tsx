@@ -14,13 +14,18 @@ import { useViewportClamp } from '../../hooks/useViewportClamp';
 const PREREQUISITES_URL = 'https://github.com/alondero/buildmesh#prerequisites';
 
 interface ProviderDropdownProps {
-  /** Stable key for this cluster — passed through to `data-dropdown-for`
-   *  so the shared `useClickOutside` hook can scope to a single cluster
-   *  when many rows share the same page. The value is used as a DOM
-   *  attribute only (string-coerced), so any unique row id is fine —
-   *   numeric for meshes / issues / PRs (whose natural key is `number`),
-   *   string for archived-session resumption whose key is `session_id`. */
-  meshId: number | string;
+  /**
+   * Issue #1264 — stable, pre-prefixed key for this cluster. Mirrored
+   * onto the menu's `data-dropdown-for` so the shared `useClickOutside`
+   * hook can scope to a single cluster when many rows share the same
+   * page. The caller MUST build the value via
+   * `dropdownId(surface, id)` (e.g. `mesh-5`, `node-10`, `issue-3`)
+   * so the per-surface namespace can't collide — raw numeric ids
+   * alone would let a `mesh-5` menu satisfy a `node-5` menu's outside
+   * check. The prop is renamed from the misleading `meshId` so the
+   * contract is obvious at the call site.
+   */
+  dropdownKey: string;
   providers: SpawnOption[];
   onSelect: (providerId: string, altKey: boolean) => void;
   /**
@@ -43,7 +48,7 @@ interface ProviderDropdownProps {
   menuId?: string;
 }
 
-export function ProviderDropdown({ meshId, providers, onSelect, onClose, menuId }: ProviderDropdownProps) {
+export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId }: ProviderDropdownProps) {
   // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
   // Spawn Menu. The single backend-derived list (issue #538 retired the
   // legacy enum-backed rows) is now grouped by `group_key` (== `harness_id`):
@@ -81,7 +86,7 @@ export function ProviderDropdown({ meshId, providers, onSelect, onClose, menuId 
     <div
       ref={menuRef}
       id={menuId}
-      data-dropdown-for={meshId}
+      data-dropdown-for={dropdownKey}
       // Issue #814 — `role="menu"` is declared on `GroupedProviderMenu`'s
       // own root (the inner element that holds the menuitems). Nesting
       // `role="menu"` inside another `role="menu"` is invalid ARIA (a

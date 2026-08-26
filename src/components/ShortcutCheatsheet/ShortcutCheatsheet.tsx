@@ -19,7 +19,11 @@ const GROUP_DESCRIPTIONS: Record<ShortcutGroup, string> = {
   app: 'Work anywhere in the app',
   grid: 'Traverse the on-screen node grid',
   terminal: 'Apply to a focused agent terminal',
-  modal: 'Context-bound',
+  // Issue #1264 — "Context-bound" broke the all-sentence pattern the
+  // other three descriptions follow ("Work…", "Traverse…", "Apply…").
+  // Reword to "Only while a dialog is open" so the section reads as a
+  // complete clause alongside its siblings.
+  modal: 'Only while a dialog is open',
 };
 
 /**

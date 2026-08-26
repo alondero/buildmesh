@@ -76,6 +76,7 @@ import { useProviderListInvalidation } from '../../hooks/useProviderListInvalida
 import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { useUIStore } from '../../stores/uiStore';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
+import { dropdownId } from '../../lib/dropdownId';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 import { ProbeTabBody } from './ProbeTabBody';
@@ -747,7 +748,12 @@ export function GitPullRequestsTab() {
                         >
                           <SpawnButtonCluster
                             providers={providerList}
-                            meshId={pr.number}
+                            // Issue #1264 — surface prefix keeps
+                            // this menu's `data-dropdown-for`
+                            // from colliding with a mesh-, node-,
+                            // or issue-keyed menu on the same
+                            // numeric id.
+                            dropdownKey={dropdownId('pr', pr.number)}
                             isOpen={isDropdownOpen}
                             onToggleDropdown={() =>
                               setOpenDropdown(isDropdownOpen ? null : pr.number)
