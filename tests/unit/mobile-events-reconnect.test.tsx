@@ -47,6 +47,13 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.();
   }
+  /// Move the socket into CLOSING without firing `onclose`. Mirrors the
+  /// real-browser state during a normal close handshake. Used by the
+  /// #1256 resume-race tests to drive the resume path through the
+  /// "mid-close" branch without triggering a full drop.
+  simulateClosing() {
+    this.readyState = FakeWebSocket.CLOSING;
+  }
 }
 
 // `eventsWsUrl` is the only seam useWsEvents reads; stub the mint so
@@ -172,5 +179,43 @@ describe("useWsEvents reconnect on foreground/online", () => {
     });
     await Promise.resolve();
     expect(eventsWsUrl).toHaveBeenCalledTimes(initialCalls);
+  });
+
+  // Issue #1256 — sister fix to the terminal WS resume race.
+  //
+  // The events hook had the same CLOSING gap: resume() only checked
+  // OPEN / CONNECTING, so foregrounding during the browser's close
+  // handshake opened a second events socket while the first was still
+  // mid-close. The fix treats CLOSING as a pending state too.
+  it("does NOT open a second events socket when the current one is mid-close and the document is foregrounded", async () => {
+    const utils = await mountAndConnect();
+    expect(sockets.length).toBe(1);
+    const initialCalls = (eventsWsUrl as ReturnType<typeof vi.fn>).mock
+      .calls.length;
+
+    act(() => sockets[0].simulateClosing());
+
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sockets.length).toBe(1);
+    expect(eventsWsUrl).toHaveBeenCalledTimes(initialCalls);
+
+    // Once onclose finally fires, the normal reconnect path takes over
+    // and we get exactly one new socket — no parallel ladder. Foreground
+    // here drives an immediate resume (no 1s backoff tick to race the
+    // waitFor default 1s timeout against).
+    act(() => sockets[0].simulateDrop());
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await waitFor(() => expect(sockets.length).toBe(2));
+
+    utils.unmount();
   });
 });

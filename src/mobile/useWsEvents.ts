@@ -57,6 +57,21 @@ export function useWsEvents(onEvent: () => void, onAuthError: () => void): void 
         return;
       }
       if (signal.aborted) return;
+
+      // Issue #1256: neuter the old socket's handlers BEFORE opening a new
+      // one. A socket whose browser-driven close is still in the CLOSING
+      // state keeps its handlers attached until the handshake finishes, so
+      // any late `onclose`/`onerror` would otherwise schedule a parallel
+      // reconnect (ladder) and a late `onmessage` would still fire `onEvent`
+      // for a socket the user no longer owns. Detaching the handlers turns
+      // the about-to-close socket into a passive no-op.
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+      }
+
       try {
         ws = new WebSocket(url);
       } catch {
@@ -70,10 +85,20 @@ export function useWsEvents(onEvent: () => void, onAuthError: () => void): void 
       // user expects and the `attempt` counter loses its meaning.
       let reconnectScheduled = false;
 
+      // Issue #1256: capture the socket in a local so the handlers can
+      // detect "stale" events from a socket that has since been replaced
+      // by a newer `connect()` invocation. Belt-and-suspenders alongside
+      // the handler-neutering above — if any race window slips through
+      // and an event reaches a handler from a socket that is no longer
+      // the active connection, it must not schedule a reconnect.
+      const liveWs = ws;
+
       ws.onopen = () => {
+        if (ws !== liveWs) return; // stale: a newer connect() has replaced us
         attempt = 0;
       };
       ws.onmessage = (e) => {
+        if (ws !== liveWs) return; // stale: don't fire onEvent for a dead socket
         try {
           const msg = JSON.parse(typeof e.data === "string" ? e.data : "") as EventMsg;
           if (msg && (msg.type === "attention-needed" || msg.type === "attention-cleared")) {
@@ -85,11 +110,13 @@ export function useWsEvents(onEvent: () => void, onAuthError: () => void): void 
       };
       ws.onclose = () => {
         if (signal.aborted || reconnectScheduled) return;
+        if (ws !== liveWs) return; // stale: a newer connect() owns reconnect now
         reconnectScheduled = true;
         scheduleReconnect();
       };
       ws.onerror = () => {
         if (signal.aborted || reconnectScheduled) return;
+        if (ws !== liveWs) return; // stale: a newer connect() owns reconnect now
         reconnectScheduled = true;
         scheduleReconnect();
       };
@@ -109,11 +136,19 @@ export function useWsEvents(onEvent: () => void, onAuthError: () => void): void 
     // slot while the tab is hidden. Resume the moment the document is
     // foregrounded or the network returns, instead of waiting out the
     // next 8-second backoff tick. Issue #806.
+    //
+    // Issue #1256: CLOSING counts as "still alive." The browser enters
+    // CLOSING when it begins the close handshake and only fires `onclose`
+    // on a later tick — if we proceed here we open a duplicate socket
+    // while the old one's handlers are still attached, leading to
+    // duplicated red-dot state changes and a parallel reconnect ladder.
     const resume = () => {
       if (signal.aborted) return;
       if (
         ws &&
-        (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+        (ws.readyState === WebSocket.OPEN ||
+          ws.readyState === WebSocket.CONNECTING ||
+          ws.readyState === WebSocket.CLOSING)
       ) {
         return;
       }
