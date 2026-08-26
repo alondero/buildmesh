@@ -18,7 +18,7 @@ import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
 import { FontSizeManager } from './FontSizeManager';
 import { ThemeManager } from './ThemeManager';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
-import { loadWebglRenderer } from './loadWebglRenderer';
+import { terminalWebglPool } from './WebglRendererPool';
 import { decodeBase64Bytes } from '../../lib/base64';
 import { setTheme, type ThemeName } from '../../lib/theme';
 
@@ -191,6 +191,10 @@ export class TerminalRegistry {
       }
     }
 
+    // GPU context budget: this terminal just became visible, so it earns a
+    // WebGL renderer (LRU-capped pool; hidden panes fall back to DOM).
+    terminalWebglPool.activate(`agent:${nodeId}`, inst.term);
+
     return inst;
   }
 
@@ -204,6 +208,7 @@ export class TerminalRegistry {
     }
     inst.term.element?.remove();
     inst.attachedContainer = null;
+    terminalWebglPool.release(`agent:${nodeId}`);
   }
 
   fit(nodeId: number): void {
@@ -259,6 +264,7 @@ export class TerminalRegistry {
         instance.resizeObserver.disconnect();
       }
       instance.unlisten();
+      terminalWebglPool.release(`agent:${nodeId}`);
       instance.term.dispose(); // allow-dispose — keyed by deleted-node IPC, the registry's only legit dispose path
       this.instances.delete(nodeId);
       this.writer.unregister(nodeId);
@@ -321,17 +327,16 @@ export class TerminalRegistry {
       // upstream @xterm/addon-unicode11 ships with the wrong width (notably
       // ⚠ U+26A0) — see loadUnicode11Widths.ts for the rationale.
       loadUnicode11Widths(term);
-      // Issue #1122: attach the WebGL renderer. Without this, xterm falls
-      // back to the DOM renderer, which recreates a `<span>` per cell on
-      // every redraw. After thousands of lines of ANSI-styled scrollback
-      // accumulate, the per-keystroke cursor positioning escapes force a
-      // full reflow across hundreds of thousands of spans, and the render
-      // frame climbs from <2ms to 30-60ms+. The WebGL renderer draws the
-      // whole grid to a single canvas, collapsing that to O(1) glyph
-      // uploads. Falls back to the DOM renderer on context loss or when
-      // WebGL is unavailable (no GPU, headless, remote desktop) — see
-      // loadWebglRenderer.ts for the fallback ladder.
-      loadWebglRenderer(term);
+      // Issue #1122: the WebGL renderer is attached LAZILY by
+      // `WebglRendererPool.activate` on DOM attach, not here at creation.
+      // Every WebGL renderer holds a live GPU context and Chromium caps
+      // active contexts at ~16; with 15+ agent terminals created up front,
+      // creation-time attachment constantly evicted older contexts (the
+      // repeated "webgl context not restored" warnings) and churned the
+      // GPU ahead of the driver resets that took the app down. The pool
+      // keeps at most a few live contexts, pinned to the most recently
+      // attached terminals; everything else uses xterm's DOM renderer —
+      // see WebglRendererPool.ts and loadWebglRenderer.ts.
 
       const instance: TerminalInstance = {
         term,

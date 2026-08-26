@@ -999,7 +999,7 @@ pub(crate) const LOST_TURN_QUIET_MS: u128 = 60_000;
 /// status still claiming to be mid-turn.
 fn should_synthesize_turn(is_alive: bool, quiet_ms: Option<u128>, status: SessionStatus) -> bool {
     is_alive
-        && quiet_ms.map_or(false, |q| q >= LOST_TURN_QUIET_MS)
+        && quiet_ms.is_some_and(|q| q >= LOST_TURN_QUIET_MS)
         && status == SessionStatus::Running
 }
 
