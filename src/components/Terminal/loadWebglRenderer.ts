@@ -24,11 +24,27 @@ import { WebglAddon } from '@xterm/addon-webgl';
  * their laptop and the GPU driver reset).
  *
  * Disposes the WebGL addon on context loss so the Terminal keeps working
- * with the DOM renderer it had before we tried to upgrade. Tests can
- * stub the addon via `vi.mock('@xterm/addon-webgl', ...)`.
+ * with the DOM renderer it had before we tried to upgrade. Returns a
+ * disposer so callers (the WebglRendererPool) can drop the addon when the
+ * terminal no longer warrants a GPU context; the disposer is idempotent
+ * and a safe no-op after a context loss. Tests can stub the addon via
+ * `vi.mock('@xterm/addon-webgl', ...)`.
  */
-export function loadWebglRenderer(term: Terminal): void {
+export function loadWebglRenderer(term: Terminal): () => void {
   let webgl: WebglAddon | null = null;
+  // Set once the addon is gone (explicit dispose or context loss) so the
+  // disposer never double-disposes.
+  let released = false;
+  const detach = () => {
+    if (released) return;
+    released = true;
+    try {
+      webgl?.dispose(); // allow-dispose — WebGL addon only, not the Terminal itself
+    } catch {
+      // already disposed — ignore
+    }
+    webgl = null;
+  };
   try {
     webgl = new WebglAddon();
     // `onContextLoss` fires before the WebGL context is fully gone. We
@@ -42,6 +58,7 @@ export function loadWebglRenderer(term: Terminal): void {
         // already disposed — ignore
       }
       webgl = null;
+      released = true;
     });
     term.loadAddon(webgl);
   } catch (err) {
@@ -52,5 +69,7 @@ export function loadWebglRenderer(term: Terminal): void {
     if (webgl) {
       try { webgl.dispose(); } catch { /* ignore */ } // allow-dispose — WebGL addon only, not the Terminal itself
     }
+    released = true;
   }
+  return detach;
 }

@@ -86,6 +86,7 @@ impl CircuitContext {
     }
 
     /// Populate the `pr.*` namespace for a GitHub PR-triggered run.
+    #[allow(clippy::too_many_arguments)] // mirrors the pr.* field set 1:1
     pub fn with_pr(
         &mut self,
         number: i64,

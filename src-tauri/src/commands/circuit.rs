@@ -92,6 +92,7 @@ pub fn list_circuits_with_runs(
 /// loop). A GitHub-labelled circuit requests an immediate poll so its
 /// first run can start without waiting out the 120s cadence.
 #[command]
+#[allow(clippy::too_many_arguments)] // Tauri command surface — one arg per UI field
 pub fn create_circuit(
     mesh_id: i64,
     name: String,

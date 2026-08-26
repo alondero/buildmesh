@@ -665,21 +665,137 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = &event {
-                tracing::info!("App exit requested, marking running sessions as suspended");
-                // Routes through SessionLifecycle (issue #132, #949) —
-                // single owner of every `agent_nodes.status` write,
-                // including the exit-time suspend sweep. `on_exit_sweep()`
-                // wraps `db::mark_running_nodes_suspended()` exactly the
-                // same way `recover_from_crash()` does for the startup
-                // path; the wrappers are named separately so the trigger
-                // (crash vs graceful shutdown) stays distinguishable in
-                // logs and history.
-                if let Err(e) = crate::agent::session_lifecycle::on_exit_sweep() {
-                    tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
+        .run(|app_handle, event| {
+            match &event {
+                tauri::RunEvent::ExitRequested { code, .. } => {
+                    tracing::info!(
+                        "App exit requested (code={:?}), marking running sessions as suspended",
+                        code
+                    );
+                    // Routes through SessionLifecycle (issue #132, #949) —
+                    // single owner of every `agent_nodes.status` write,
+                    // including the exit-time suspend sweep. `on_exit_sweep()`
+                    // wraps `db::mark_running_nodes_suspended()` exactly the
+                    // same way `recover_from_crash()` does for the startup
+                    // path; the wrappers are named separately so the trigger
+                    // (crash vs graceful shutdown) stays distinguishable in
+                    // logs and history.
+                    if let Err(e) = crate::agent::session_lifecycle::on_exit_sweep() {
+                        tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
+                    }
+                    agent::process::kill_all_sessions();
                 }
-                agent::process::kill_all_sessions();
+                tauri::RunEvent::Exit => {
+                    tracing::info!("App exit complete");
+                }
+                tauri::RunEvent::WindowEvent { label, event, .. } => match event {
+                    tauri::WindowEvent::CloseRequested { .. } => {
+                        USER_CLOSE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        tracing::info!(window = %label, "Window close requested by user");
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        let user_initiated =
+                            USER_CLOSE_REQUESTED.load(std::sync::atomic::Ordering::SeqCst);
+                        if user_initiated {
+                            tracing::info!(window = %label, "Window destroyed after user close request");
+                        } else {
+                            // Forensics for the silent-exit class of failures
+                            // seen on 2026-08-26: NVIDIA driver resets killed
+                            // WebView2 twice and Buildmesh quit without ever
+                            // reaching ExitRequested, leaving no fingerprint.
+                            // A Destroyed-without-CloseRequested is that
+                            // failure mode surfacing through an observable
+                            // seam. Log loudly, then bounce the hub back so
+                            // agents keep running (guarded against loops).
+                            tracing::error!(
+                                window = %label,
+                                "Window destroyed WITHOUT a user close request — \
+                                 webview/GPU process death suspected"
+                            );
+                            match app_handle.path().app_data_dir() {
+                                Ok(app_dir) => match auto_relaunch_detached(&app_dir) {
+                                    Ok(true) => {
+                                        tracing::info!("Auto-relaunch spawned (guard passed)");
+                                    }
+                                    Ok(false) => {
+                                        tracing::warn!(
+                                            "Auto-relaunch skipped — another auto-relaunch \
+                                             fired less than {}s ago",
+                                            AUTO_RELAUNCH_COOLDOWN_SECS
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Auto-relaunch failed: {}", e);
+                                    }
+                                },
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Auto-relaunch failed (no app dir): {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
         });
+}
+
+/// Set when the user (or frontend) closes a window through the normal
+/// `CloseRequested` path. A later `Destroyed` for that window is expected;
+/// a `Destroyed` without this flag means something external killed the
+/// window's webview — the silent-exit signature.
+static USER_CLOSE_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+const AUTO_RELAUNCH_COOLDOWN_SECS: u64 = 60;
+
+/// Spawn a fresh copy of the current executable, detached from this dying
+/// process, unless one was already auto-relaunched within the cooldown
+/// window. Returns `Ok(false)` when the cooldown suppressed the relaunch
+/// (protects against crash-looping if the binary dies immediately at
+/// startup). The stamp lives in `<app_dir>/logs/`.
+fn auto_relaunch_detached(app_dir: &std::path::Path) -> Result<bool, String> {
+    use std::io::Read;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let logs_dir = app_dir.join("logs");
+    let stamp_path = logs_dir.join("auto_relaunched_at");
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock: {}", e))?
+        .as_millis();
+
+    if stamp_path.exists() {
+        let mut buf = String::new();
+        if std::fs::File::open(&stamp_path)
+            .and_then(|mut f| f.read_to_string(&mut buf))
+            .is_ok()
+        {
+            if let Ok(last_ms) = buf.trim().parse::<u128>() {
+                let elapsed_ms = now_ms.saturating_sub(last_ms);
+                if elapsed_ms < u128::from(AUTO_RELAUNCH_COOLDOWN_SECS) * 1000 {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
+    let mut cmd = std::process::Command::new(exe);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    cmd.spawn().map_err(|e| format!("spawn: {}", e))?;
+
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let _ = std::fs::write(&stamp_path, now_ms.to_string());
+    Ok(true)
 }
