@@ -91,6 +91,9 @@ pub fn list_circuits_with_runs(
 /// `interval_seconds` (clamped to 60s–7d so a typo can't become a hot
 /// loop). A GitHub-labelled circuit requests an immediate poll so its
 /// first run can start without waiting out the 120s cadence.
+// Tauri IPC commands carry every primitive as a separate wire parameter;
+// collapsing into a struct would change the wire shape and is out of scope.
+#[allow(clippy::too_many_arguments)]
 #[command]
 pub fn create_circuit(
     mesh_id: i64,

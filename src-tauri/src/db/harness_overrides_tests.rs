@@ -106,7 +106,7 @@ mod tests {
         let empty = HarnessConfigValue::default();
         db::upsert_mesh_harness_override(mesh_id, "claude", empty).unwrap();
         let read = db::get_mesh_harness_overrides(mesh_id).unwrap().unwrap();
-        assert!(read.get("claude").is_none(), "empty entry removed");
+        assert!(!read.contains_key("claude"), "empty entry removed");
         assert_eq!(read.len(), 0);
         std::fs::remove_file(&path).ok();
     }
@@ -133,8 +133,8 @@ mod tests {
         let rows = db::remove_mesh_harness_override(mesh_id, "claude").unwrap();
         assert_eq!(rows, 1);
         let read = db::get_mesh_harness_overrides(mesh_id).unwrap().unwrap();
-        assert!(read.get("claude").is_none());
-        assert!(read.get("codex").is_some());
+        assert!(!read.contains_key("claude"));
+        assert!(read.contains_key("codex"));
         assert_eq!(read.len(), 1);
         std::fs::remove_file(&path).ok();
     }
