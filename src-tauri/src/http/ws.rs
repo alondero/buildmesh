@@ -172,10 +172,24 @@ pub(crate) async fn handle_ws_connection(
             msg = read.next() => {
                 match msg {
                     Some(Ok(tungstenite::Message::Text(text))) => {
-                        if let Some(resize) = parse_resize_message(&text) {
-                            handle_mobile_resize(node_id, resize.0, resize.1);
-                        } else {
-                            forward_mobile_input(node_id, &text);
+                        match parse_resize_message(&text) {
+                            Some(Ok((cols, rows))) => {
+                                handle_mobile_resize(node_id, cols, rows);
+                            }
+                            Some(Err(reason)) => {
+                                // Issue #1263: a malformed resize frame is
+                                // logged and dropped — never injected into
+                                // the PTY as text, where it would land as
+                                // garbage on the running shell.
+                                tracing::warn!(
+                                    "WS resize frame rejected for node {}: {:?}",
+                                    node_id,
+                                    reason
+                                );
+                            }
+                            None => {
+                                forward_mobile_input(node_id, &text);
+                            }
                         }
                     }
                     Some(Ok(tungstenite::Message::Binary(data))) => {
@@ -236,7 +250,29 @@ fn forward_mobile_input(node_id: i64, text: &str) {
     forward_mobile_input_with(&**PROCESS_REGISTRY, node_id, text);
 }
 
-fn parse_resize_message(text: &str) -> Option<(u16, u16)> {
+/// Largest cols/rows the mobile client may ask for. Anything larger is
+/// almost certainly a corrupt/malicious frame, not a legitimate terminal
+/// size — ConPTY tolerates it today but the surface is fragile. Picked
+/// well above the largest realistic xterm viewport so this never fires
+/// on a real device (issue #1263).
+const MAX_RESIZE_DIMENSION: u64 = 1000;
+
+/// Three-state result so the caller can tell "not a resize message" apart
+/// from "was a resize message but malformed":
+/// - `None` (outer) — caller forwards the text as mobile input (the
+///   normal path for non-resize frames).
+/// - `Some(Ok((c, r)))` — caller invokes `handle_mobile_resize`.
+/// - `Some(Err(reason))` — caller logs + drops the frame; never injects
+///   malformed JSON as PTY input.
+type ResizeParseResult = Option<Result<(u16, u16), ResizeError>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeError {
+    ZeroDimension,
+    DimensionTooLarge,
+}
+
+fn parse_resize_message(text: &str) -> ResizeParseResult {
     if !text.starts_with('{') {
         return None;
     }
@@ -244,9 +280,16 @@ fn parse_resize_message(text: &str) -> Option<(u16, u16)> {
     if v.get("type")?.as_str()? != "resize" {
         return None;
     }
-    let cols = v.get("cols")?.as_u64()? as u16;
-    let rows = v.get("rows")?.as_u64()? as u16;
-    Some((cols, rows))
+    let cols = v.get("cols")?.as_u64()?;
+    let rows = v.get("rows")?.as_u64()?;
+    if cols == 0 || rows == 0 {
+        return Some(Err(ResizeError::ZeroDimension));
+    }
+    if cols > MAX_RESIZE_DIMENSION || rows > MAX_RESIZE_DIMENSION {
+        return Some(Err(ResizeError::DimensionTooLarge));
+    }
+    // Safe: 0 < cols/rows <= 1000 fits u16 exactly (u16::MAX = 65_535).
+    Some(Ok((cols as u16, rows as u16)))
 }
 
 fn handle_mobile_resize_with(
@@ -675,5 +718,77 @@ mod tests {
         let mock = MockRegistry::failing();
         handle_mobile_resize_with(&mock, 1, 80, 24);
         assert!(!mock.resize_called.load(AtomicOrdering::SeqCst));
+    }
+
+    // -- parse_resize_message (issue #1263) ----------------------------------
+    //
+    // The validation at the WS boundary pins the "no zero/oversized
+    // dimensions reach ConPTY" contract. The three-state return shape
+    // (`None` = not a resize frame, `Some(Ok)` = valid dims,
+    // `Some(Err)` = malformed resize frame) lets the caller decide
+    // between forwarding-as-input, applying, and warning-and-dropping.
+
+    #[test]
+    fn parse_resize_accepts_normal_dimensions() {
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":120,"rows":40}"#),
+            Some(Ok((120, 40)))
+        );
+        // Boundary: exactly MAX_RESIZE_DIMENSION is allowed.
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":1000,"rows":1000}"#),
+            Some(Ok((1000, 1000)))
+        );
+    }
+
+    #[test]
+    fn parse_resize_rejects_zero_dimensions() {
+        // 0×0 (and 0×N, N×0) must NOT reach the PTY — ConPTY tolerates
+        // it today but the surface is fragile.
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":0,"rows":0}"#),
+            Some(Err(ResizeError::ZeroDimension))
+        );
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":80,"rows":0}"#),
+            Some(Err(ResizeError::ZeroDimension))
+        );
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":0,"rows":24}"#),
+            Some(Err(ResizeError::ZeroDimension))
+        );
+    }
+
+    #[test]
+    fn parse_resize_rejects_implausibly_large_dimensions() {
+        // > MAX_RESIZE_DIMENSION — almost certainly a corrupt frame.
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":1001,"rows":40}"#),
+            Some(Err(ResizeError::DimensionTooLarge))
+        );
+        assert_eq!(
+            parse_resize_message(r#"{"type":"resize","cols":80,"rows":99999}"#),
+            Some(Err(ResizeError::DimensionTooLarge))
+        );
+    }
+
+    #[test]
+    fn parse_resize_returns_none_for_non_resize_messages() {
+        // Not a resize message at all → caller forwards as input.
+        assert_eq!(parse_resize_message(r#"{"type":"keystroke","data":"x"}"#), None);
+        // No `type` field at all.
+        assert_eq!(parse_resize_message(r#"{"cols":80,"rows":24}"#), None);
+        // Non-JSON text input.
+        assert_eq!(parse_resize_message("ls\n"), None);
+        // Empty string.
+        assert_eq!(parse_resize_message(""), None);
+    }
+
+    #[test]
+    fn parse_resize_handles_malformed_json_gracefully() {
+        // Truncated/invalid JSON that DOES start with '{' → not a resize
+        // message (the outer None). Caller forwards as input (or, for a
+        // brace-prefixed garbage payload, drops — but it never crashes).
+        assert_eq!(parse_resize_message("{not json"), None);
     }
 }

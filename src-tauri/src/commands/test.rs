@@ -10,7 +10,7 @@
 //! to exercise the real Rust backend without needing Tauri APIs in the browser.
 
 use serde::{Deserialize, Serialize};
-use tauri::{command, Emitter};
+use tauri::Emitter;
 use tauri::AppHandle;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -59,8 +59,14 @@ impl JsonRpcResponse {
     }
 }
 
+/// Local helper exposing the test-server liveness flag for IPC consumers.
+/// Deliberately NOT a `#[command]`: there is no consumer on the production
+/// wire today (Playwright talks to the test server directly via
+/// `GET /health` / `POST /invoke`), and an unregistered `#[command]` reads
+/// as a wire surface that callers can't actually invoke (issue #1263).
+/// Re-add the attribute when a real consumer (e.g. a settings-panel
+/// indicator) ships.
 #[allow(dead_code)]
-#[command]
 pub fn is_test_server_running() -> bool {
     TEST_SERVER_RUNNING.load(Ordering::SeqCst)
 }

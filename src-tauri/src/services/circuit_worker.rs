@@ -91,6 +91,28 @@ fn drain_approvals_for(run_id: i64) -> Vec<String> {
     mine.into_iter().map(|(_, node_id)| node_id).collect()
 }
 
+/// Sweep the approvals queue against the current active-run set
+/// (issue #1263). A user can click "Approve" for a run that completes,
+/// fails, or gets deleted before the next pass — without this sweep
+/// its queued approval would sit forever for a vanished run. Click-bounded
+/// volume (a few approvals per app lifetime at most), so the cost is
+/// negligible; the key-set is the one we already loaded for [`run_pass`],
+/// so no extra DB read.
+fn sweep_stale_approvals(active_run_ids: &[i64]) {
+    use std::collections::HashSet;
+    let active: HashSet<i64> = active_run_ids.iter().copied().collect();
+    let mut queue = APPROVALS.lock().unwrap();
+    let before = queue.len();
+    queue.retain(|(run_id, _)| active.contains(run_id));
+    let dropped = before - queue.len();
+    if dropped > 0 {
+        tracing::debug!(
+            "circuits: dropped {} stale approval(s) for vanished runs",
+            dropped
+        );
+    }
+}
+
 /// Wake the circuit worker immediately (manual trigger dispatch).
 pub fn wake_circuit_worker() {
     let (_lock, cvar) = &*WAKE;
@@ -132,6 +154,11 @@ fn run_pass(app: &AppHandle) {
             return;
         }
     };
+    // Issue #1263: drain approvals queued for runs that vanished
+    // (deleted, completed, failed) between this user and last pass.
+    // Uses the already-loaded active run set so the sweep costs no
+    // extra DB reads.
+    sweep_stale_approvals(&runs.iter().map(|r| r.run.id).collect::<Vec<_>>());
     for active in runs {
         if !active.circuit_enabled {
             continue; // disabled mid-flight: park the run until re-enabled
@@ -999,7 +1026,7 @@ pub(crate) const LOST_TURN_QUIET_MS: u128 = 60_000;
 /// status still claiming to be mid-turn.
 fn should_synthesize_turn(is_alive: bool, quiet_ms: Option<u128>, status: SessionStatus) -> bool {
     is_alive
-        && quiet_ms.map_or(false, |q| q >= LOST_TURN_QUIET_MS)
+        && quiet_ms.is_some_and(|q| q >= LOST_TURN_QUIET_MS)
         && status == SessionStatus::Running
 }
 
@@ -1159,3 +1186,60 @@ mod tests {
         }
     }
 }
+
+
+    // -- approvals sweep (issue #1263) -----------------------------------------
+
+    /// Clear all queue entries (this static is shared across the test binary,
+    /// so each test isolates its own state via the unique run-ids below).
+    fn clear_approvals_queue() {
+        APPROVALS.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn approvals_sweep_drops_entries_for_vanished_runs() {
+        clear_approvals_queue();
+        // Queue approvals for three runs: 901, 902, 903.
+        request_circuit_approval(901, "node-a".into());
+        request_circuit_approval(902, "node-b".into());
+        request_circuit_approval(903, "node-c".into());
+        assert_eq!(APPROVALS.lock().unwrap().len(), 3);
+
+        // Run 902 vanished (deleted/completed) between the click and this
+        // pass. The sweep must drop ONLY its entries; 901 and 903 survive.
+        sweep_stale_approvals(&[901, 903]);
+
+        // Scope the lock so it drops before the trailing clear (the mutex
+        // is not reentrant — holding the guard across another lock would
+        // deadlock).
+        let surviving_run_ids: Vec<i64> = {
+            let queue = APPROVALS.lock().unwrap();
+            queue.iter().map(|(r, _)| *r).collect()
+        };
+        assert_eq!(
+            surviving_run_ids,
+            vec![901, 903],
+            "the vanished run's approvals must be evicted; live ones survive"
+        );
+        clear_approvals_queue();
+    }
+
+    #[test]
+    fn approvals_sweep_is_a_noop_when_queue_is_empty() {
+        clear_approvals_queue();
+        sweep_stale_approvals(&[1, 2, 3]);
+        assert!(APPROVALS.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn approvals_sweep_drops_all_when_no_active_runs() {
+        clear_approvals_queue();
+        request_circuit_approval(11, "x".into());
+        request_circuit_approval(12, "y".into());
+        // Empty active list -> every queued approval is stale.
+        sweep_stale_approvals(&[]);
+        assert!(
+            APPROVALS.lock().unwrap().is_empty(),
+            "all approvals are stale when no runs are active"
+        );
+    }

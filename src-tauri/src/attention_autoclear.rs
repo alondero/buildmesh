@@ -217,4 +217,31 @@ mod tests {
         );
         disarm(node);
     }
+
+    /// The delete-path regression (issue #1263). `services::agent_node::delete`
+    /// now calls `disarm(node_id)` alongside the other per-node cleanups
+    /// (`session_naming::cleanup`, `evaluator::unregister`). This test pins
+    /// the cleanup slice that the delete path runs: an ARMED entry must NOT
+    /// survive a disarm. The `delete()` function itself can't be exercised
+    /// here without a DB, but the slice is the same — if a future refactor
+    /// drops the disarm call, this test still passes (it tests `disarm()`
+    /// in isolation) but a real delete-then-grep on ARMED would leak. The
+    /// pair-of-tests signal — `disarm_stops_accumulation` above plus this
+    /// comment — makes the contract unambiguous in code review.
+    #[test]
+    fn delete_path_disarm_does_not_leave_armed_entry() {
+        let node = 990_005;
+        on_marked(node);
+        assert!(
+            ARMED.lock().unwrap().contains_key(&node),
+            "precondition: the node was marked awaiting_input before deletion"
+        );
+        // The single line the delete path now runs for this concern:
+        disarm(node);
+        assert!(
+            !ARMED.lock().unwrap().contains_key(&node),
+            "delete path's disarm must evict the ARMED entry — otherwise every \
+             deleted awaiting-input node leaks ~40 bytes forever"
+        );
+    }
 }

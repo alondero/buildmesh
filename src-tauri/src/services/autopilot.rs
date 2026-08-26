@@ -461,9 +461,13 @@ pub(crate) fn evaluate_loop_continuation(
     // Capacity gate: a negative or zero capacity (no app-wide pool
     // budget left) means we can't spawn this pass. We never kill a
     // running loop node — the same fail-soft contract as the
-    // issue-driven path's `capacity <= 0` return.
+    // issue-driven path's `capacity <= 0` return. `PoolBudgetExhausted`
+    // is its own variant so a probe / debug log can tell "interval"
+    // apart from "budget" — issue #1263; the previous shape returned
+    // `IntervalNotElapsed` and made pool-exhaustion look like a pacing
+    // issue.
     if capacity <= 0 {
-        return LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed);
+        return LoopDecision::Skip(LoopSkipReason::PoolBudgetExhausted);
     }
     // The "previous iteration still running" check. `active_count`
     // comes from `COUNT_ACTIVE_AUTOPILOT_SQL` which filters all non-terminal
@@ -557,7 +561,13 @@ pub(crate) enum LoopDecision {
 /// SQL-derived fields' lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoopSkipReason {
-    /// `capacity <= 0` — app-wide pool budget exhausted.
+    /// `capacity <= 0` — app-wide pool budget exhausted (issue #1263
+    /// made this its own variant; previously aliased under
+    /// `IntervalNotElapsed`, which made pool-exhaustion look like a
+    /// pacing issue in probe / debug logs).
+    PoolBudgetExhausted,
+    /// `loop_interval_seconds > 0` AND the gap since the last spawn is
+    /// shorter than the configured pause.
     IntervalNotElapsed,
     /// `active_count > 0` — a previous loop iteration is still
     /// `implementing` or `finishing`.
@@ -1113,10 +1123,10 @@ mod tests {
         }
     }
 
-    /// The headline regression: capacity=1, head-of-list blocked by open
-    /// dependencies, tail unblocked. The previous shape (dedup-then-take
-    /// + filter-after-take) wasted the pass. The new shape lets the tail
-    /// win.
+    /// The headline regression: capacity=1 with the head-of-list issue
+    /// blocked by open dependencies and the tail issue clear. The
+    /// previous shape (dedup-then-take + filter-after-take) wasted the
+    /// pass; the new shape lets the tail issue win.
     #[test]
     fn plan_spawns_with_blockers_capacity_one_unblocked_tail_wins_over_blocked_head() {
         // Pixelgrab dep chain, distilled: #27 is the most-recent issue
@@ -1736,10 +1746,12 @@ mod tests {
         );
     }
 
-    /// `capacity <= 0` → Skip (uses the `IntervalNotElapsed` variant
-    /// to share the "no spawn this pass" semantics; the priority order
-    /// in `evaluate_loop_continuation` checks capacity first, so a
-    /// negative pool budget wins over every other skip reason).
+    /// `capacity <= 0` → Skip `PoolBudgetExhausted`. The pool-budget variant
+    /// is its own reason (issue #1263) — a probe reading "interval not
+    /// elapsed" for a zero-capacity mesh would point the operator at
+    /// pacing config when the real knob is `autopilot_pool_size`.
+    /// Capacity is the FIRST gate checked, so a negative pool budget wins
+    /// over every other skip reason.
     #[test]
     fn evaluate_loop_capacity_zero_skips() {
         let mesh = looping_mesh();
@@ -1747,13 +1759,39 @@ mod tests {
         let now = UNIX_EPOCH_PLACEHOLDER;
         assert_eq!(
             evaluate_loop_continuation(&mesh, &history, 0, 0, now),
-            LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed),
-            "capacity == 0 must skip"
+            LoopDecision::Skip(LoopSkipReason::PoolBudgetExhausted),
+            "capacity == 0 must skip with the budget reason"
         );
         assert_eq!(
             evaluate_loop_continuation(&mesh, &history, 0, -3, now),
-            LoopDecision::Skip(LoopSkipReason::IntervalNotElapsed),
-            "negative capacity must skip (not crash on capacity <= 0)"
+            LoopDecision::Skip(LoopSkipReason::PoolBudgetExhausted),
+            "negative capacity must skip with the budget reason (not crash on capacity <= 0)"
+        );
+    }
+
+    /// Regression pin for the mislabel that issue #1263 fixed: when
+    /// `capacity == 0` and ALL OTHER FIELDS would otherwise allow a
+    /// spawn (no active iteration, no interval gating, no max-iter cap,
+    /// no failure threshold), the skip reason MUST be the budget reason —
+    /// not `IntervalNotElapsed`. This pins the priority ordering too:
+    /// capacity-first wins over interval pacing.
+    #[test]
+    fn evaluate_loop_capacity_zero_returns_budget_reason_not_interval() {
+        // Mesh with a 60s interval so a naive reading "no spawn happened"
+        // might guess the interval gate fired.
+        let mut mesh = looping_mesh();
+        mesh.loop_interval_seconds = 60;
+        let history = LoopHistory {
+            iteration_count: 0,
+            trailing_failures: 0,
+            last_spawn_at: Some(UNIX_EPOCH_PLACEHOLDER),
+        };
+        let now = UNIX_EPOCH_PLACEHOLDER + Duration::from_secs(1); // well under interval
+        assert_eq!(
+            evaluate_loop_continuation(&mesh, &history, 0, 0, now),
+            LoopDecision::Skip(LoopSkipReason::PoolBudgetExhausted),
+            "capacity=0 must report PoolBudgetExhausted, never IntervalNotElapsed, \
+             even when the interval gate would also fire"
         );
     }
 
