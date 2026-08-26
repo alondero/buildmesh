@@ -22,6 +22,7 @@ import {
 } from '@dnd-kit/sortable';
 import { MeshItem } from './MeshItem';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
+import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
 
@@ -67,7 +68,13 @@ export function Sidebar() {
   // the tab at the prop site without an extra closure layer.
   const openProbeTab = useUIStore(s => s.openProbeTab);
 
-  const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
+  // Issue #1264 — the open-id is a pre-prefixed string (built via
+  // `dropdownId('mesh', mesh.id)`) so the sidebar spawn picker's
+  // `data-dropdown-for` can't collide with a node- or terminal-keyed
+  // menu that shares the mesh's numeric id. The toggle is mesh-id-keyed
+  // for the open/close state but stores the prefixed value as the
+  // single source of truth.
+  const [openDropdownFor, setOpenDropdownFor] = useState<string | null>(null);
   const [createMeshOpen, setCreateMeshOpen] = useState(false);
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
@@ -84,10 +91,17 @@ export function Sidebar() {
   // (no value), which would close the wrong dropdown if a future second
   // sidebar dropdown were added; the hook's scoped selector
   // `[data-dropdown-for="${openDropdownFor}"]` fixes that as a side effect.
-  useClickOutside(openDropdownFor, () => setOpenDropdownFor(null));
+  // Issue #1264 — the stored id is a pre-prefixed value (see the
+  // `handleToggleDropdown` toggle below + the `NodeCreationForm`
+  // consumer) so the sidebar's spawn-picker menu can't collide with
+  // any other surface that shares the mesh's numeric id.
+  useClickOutside<string>(openDropdownFor, () => setOpenDropdownFor(null));
 
   const handleSelectMesh = (meshId: number) => selectMesh(selectedMeshId === meshId ? null : meshId);
-  const handleToggleDropdown = (mesh: Mesh) => setOpenDropdownFor(openDropdownFor === mesh.id ? null : mesh.id);
+  const handleToggleDropdown = (mesh: Mesh) => {
+    const key = dropdownId('mesh', mesh.id);
+    setOpenDropdownFor(openDropdownFor === key ? null : key);
+  };
 
   // Issue #375 — the right-click "Properties" entry opens the Probe
   // Panel on the ⚙️ Mesh Properties tab. We select the mesh first so
@@ -217,7 +231,7 @@ export function Sidebar() {
                       key={mesh.id}
                       mesh={mesh}
                       isSelected={selectedMeshId === mesh.id}
-                      isDropdownOpen={openDropdownFor === mesh.id}
+                      isDropdownOpen={openDropdownFor === dropdownId('mesh', mesh.id)}
                       isSpawning={spawningMeshIds.has(mesh.id)}
                       providerList={providerData}
                       onSelectMesh={handleSelectMesh}

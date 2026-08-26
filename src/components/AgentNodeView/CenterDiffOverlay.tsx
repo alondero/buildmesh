@@ -144,6 +144,15 @@ function CenterPrDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
 function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   const [files, setFiles] = useState<FileDiff[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Issue #1264 — track the most recent BACKGROUND refresh failure so a
+  // long-lived overlay doesn't keep showing a stale diff after a
+  // transient git error (the previous shape was: "if the initial load
+  // worked, the overlay keeps showing whatever files it last received,
+  // silently". The first-load failure still routes through `error`
+  // and replaces the body; the background chip is a non-blocking
+  // signal that the live refresh is failing. Cleared on the next
+  // successful refresh.
+  const [backgroundError, setBackgroundError] = useState<string | null>(null);
 
   // Monotonic token so an older in-flight fetch (rapid file switching, or a
   // burst of GIT_CHANGED events) can't overwrite the newest result.
@@ -163,7 +172,14 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
-      if (!opts?.background) setFiles(null);
+      if (!opts?.background) {
+        setFiles(null);
+        // A new explicit load is the user's "I'm paying attention now"
+        // signal — clear the stale background-error chip too, even if
+        // the next refresh fails, so the chip is a one-failure-at-a-time
+        // signal rather than sticky history.
+        setBackgroundError(null);
+      }
       setError(null);
       const promise: Promise<DiffResult> =
         diff.source === 'base' && diff.nodeId !== null
@@ -173,6 +189,10 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
         .then((d) => {
           if (reqId.current !== myId) return;
           setFiles(d.files);
+          // A successful refresh — background OR explicit — clears the
+          // chip so a transient error doesn't haunt the overlay past
+          // recovery.
+          setBackgroundError(null);
         })
         .catch((e) => {
           if (reqId.current !== myId) return;
@@ -180,7 +200,15 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
           // fetch — surface it as nothing so a background-refresh
           // abort doesn't masquerade as a real failure.
           if (controller.signal.aborted) return;
-          if (!opts?.background) setError(formatError(e));
+          if (opts?.background) {
+            // The diff is still showing the last-successful result;
+            // surface the failure as a non-blocking chip so the user
+            // can tell the live refresh is failing without losing the
+            // visible diff.
+            setBackgroundError(formatError(e));
+          } else {
+            setError(formatError(e));
+          }
         });
     },
     [diff.source, diff.nodeId, diff.filePath, diff.rootPath],
@@ -242,7 +270,31 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
           <LoadingState label="Loading diff…" />
         </div>
       ) : (
-        <Diff files={files} />
+        <>
+          {backgroundError && (
+            // Issue #1264 — subtle "refresh failed" chip. The diff
+            // below is still the last-successful render; the chip
+            // tells the user the live refresh is failing so the
+            // visible diff is potentially stale. Non-blocking so a
+            // transient git hiccup doesn't tear down the overlay.
+            <div
+              role="status"
+              aria-live="polite"
+              data-testid="background-refresh-failed"
+              className="px-3 py-1.5 bg-status-warning/10 border-b border-status-warning/30 text-2xs text-status-warning flex items-center gap-2"
+            >
+              <span
+                aria-hidden="true"
+                className="inline-block h-1.5 w-1.5 rounded-full bg-status-warning"
+              />
+              Refresh failed — showing last known diff
+              <span className="text-text-muted truncate" title={backgroundError}>
+                ({backgroundError})
+              </span>
+            </div>
+          )}
+          <Diff files={files} />
+        </>
       )}
     </DiffOverlayShell>
   );

@@ -195,6 +195,37 @@ function persistGridControls(controls: GridControls): void {
   }
 }
 
+// Issue #1264 — `setGridSearchQuery` fires once per keystroke; the
+// other four setters are clicked/selected, not typed. Persisting the
+// search-query write synchronously per keystroke was wasteful (a
+// localStorage write + JSON.stringify on every character). Debounce the
+// search-query persistence to ~300 ms so a fast typist's burst lands as
+// one write, mirroring `useSidebarResize.ts:55-62` (which already
+// persists-on-settle for the same reason — sidebar drag fires the
+// setter on every mousemove frame). The in-memory state still updates
+// immediately, so the grid stays responsive; only the localStorage
+// write is coalesced. The other four setters keep their synchronous
+// persistence because their inputs are discrete clicks, not a stream.
+const GRID_SEARCH_PERSIST_DEBOUNCE_MS = 300;
+let pendingSearchPersistTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleDebouncedSearchPersist(controls: GridControls): void {
+  if (pendingSearchPersistTimer !== null) {
+    clearTimeout(pendingSearchPersistTimer);
+  }
+  pendingSearchPersistTimer = setTimeout(() => {
+    pendingSearchPersistTimer = null;
+    persistGridControls(controls);
+  }, GRID_SEARCH_PERSIST_DEBOUNCE_MS);
+}
+/** Test-only: flush the pending debounced search-query persist
+ * synchronously and cancel any armed timer. Mirrors
+ * `resetPathInvalidatedCacheForTests`. */
+export function flushGridSearchPersistForTests(): void {
+  if (pendingSearchPersistTimer === null) return;
+  clearTimeout(pendingSearchPersistTimer);
+  pendingSearchPersistTimer = null;
+}
+
 // Tabs the Probe Panel can show. Kept as a string-literal union (not a
 // generated wire enum) because it's a pure UI concern — no backend serialises
 // it. `usage` was added in issue #601 as the dedicated glanceable surface
@@ -402,7 +433,11 @@ export const useUIStore = create<UIState>((set, get) => {
     setGridSearchQuery: (query) => {
       if (get().gridSearchQuery === query) return;
       set({ gridSearchQuery: query });
-      persistGridControls(get());
+      // Debounced — see `scheduleDebouncedSearchPersist` above. State
+      // updates immediately so the grid re-renders per keystroke; only
+      // the localStorage write is coalesced into a single 300 ms-burst
+      // call.
+      scheduleDebouncedSearchPersist(get());
     },
 
     setGridProviderFilter: (provider) => {

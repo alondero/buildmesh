@@ -64,6 +64,7 @@ import { useProviderListInvalidation } from '../../hooks/useProviderListInvalida
 import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
+import { dropdownId } from '../../lib/dropdownId';
 import { ProbeRow } from './ProbeRow';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
@@ -129,11 +130,10 @@ export function GitIssuesTab() {
   // aborts the previous effect (useAsyncEffect's signal) and re-fires
   // the IPC, so a stale in-flight load can't clobber the refreshed
   // result.
-  // Bump to refetch on manual Refresh (issue #813 — `useAsyncEffect`
-  // aborts the previous effect's signal on dep change, so an
-  // in-flight first-load can't clobber the refreshed result).
-  const [reloadKey, setReloadKey] = useState(0);  // Only one dropdown open at a time, keyed by issue number — mirrors the
-  // SessionBrowserModal pattern so the click-outside handling stays simple.
+  const [reloadKey, setReloadKey] = useState(0);
+  // Only one dropdown open at a time, keyed by issue number — mirrors
+  // the SessionBrowserModal pattern so the click-outside handling
+  // stays simple.
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   // The provider list is fetched once at mount and reused for the lifetime
   // of the tab. Re-fetching on each open would be wasteful, and the list is
@@ -437,7 +437,11 @@ export function GitIssuesTab() {
                     >
                       <SpawnButtonCluster
                         providers={providerList}
-                        meshId={issue.number}
+                        // Issue #1264 — surface prefix keeps this
+                        // menu's `data-dropdown-for` from colliding
+                        // with a mesh-, node-, or PR-keyed menu on
+                        // the same numeric id.
+                        dropdownKey={dropdownId('issue', issue.number)}
                         isOpen={openDropdown === issue.number}
                         onToggleDropdown={() =>
                           setOpenDropdown(openDropdown === issue.number ? null : issue.number)

@@ -330,6 +330,65 @@ describe('MeshItem', () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('git_sync', { path: '/tmp/my-mesh' });
   });
 
+  // Issue #1264 — the sync result's 4-second auto-clear timeout was
+  // previously leaked past unmount: if the user deleted the mesh (or
+  // switched views) before the timer fired, the timer would call
+  // setSyncMessage(null) on an unmounted component. Pin the contract:
+  // MeshItem arms a 4000 ms timer after a successful sync, and the
+  // unmount cleanup calls clearTimeout on the captured handle so the
+  // timer can't fire against a torn-down component.
+  //
+  // Strategy: spy on `globalThis.setTimeout` and `globalThis.clearTimeout`
+  // (the spies wrap the originals — they don't replace them, so the
+  // rest of the test suite's timer-driven code keeps working). Capture
+  // every armed handle + delay, and prove the unmount cleanup cleared
+  // the 4000 ms one specifically.
+  it('clears the pending sync-result timer on unmount (issue #1264)', async () => {
+    let resolveSync!: (v: unknown) => void;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'git_sync') return new Promise((res) => { resolveSync = res; });
+      return Promise.resolve({});
+    });
+
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    const { unmount } = renderMeshItem();
+
+    // Kick off the sync — the 4000 ms timer is armed in the `finally`
+    // block AFTER the IPC resolves.
+    await userEvent.click(await screen.findByTitle('Sync from upstream'));
+    resolveSync({ fetched: true, pulled: true, new_commits: 1, message: 'Pulled 1 commit' });
+    await vi.waitFor(() => screen.getByText('Pulled 1 commit'));
+
+    // Find the 4000 ms timer MeshItem armed. Spies track the call args
+    // in `mock.calls` and the resolved handle in `mock.results`.
+    const syncTimerIndex = setTimeoutSpy.mock.calls.findIndex(
+      (c) => c[1] === 4000 && typeof c[0] === 'function',
+    );
+    expect(syncTimerIndex, 'expected MeshItem to arm a 4000 ms timer').toBeGreaterThanOrEqual(0);
+    const syncHandle = setTimeoutSpy.mock.results[syncTimerIndex]?.value;
+
+    // Snapshot cleared-handle count, then unmount. The cleanup must
+    // call clearTimeout on the captured timer (vs. letting it fire
+    // post-unmount).
+    const clearsBefore = clearTimeoutSpy.mock.calls.length;
+    unmount();
+    const clearsAfter = clearTimeoutSpy.mock.calls.length;
+
+    // The contract: at least one new clearTimeout call was issued
+    // during unmount, AND it targeted the 4000 ms handle MeshItem
+    // armed. A regression that drops the unmount cleanup would leave
+    // the timer to fire post-unmount — the assertion below would
+    // still pass for React's own internal timers, so we also check
+    // the captured handle appears in the cleared list.
+    expect(clearsAfter).toBeGreaterThan(clearsBefore);
+    if (syncHandle !== undefined) {
+      const clearedHandles = clearTimeoutSpy.mock.calls.map((c) => c[0]);
+      expect(clearedHandles).toContain(syncHandle);
+    }
+  });
+
   // Issue #735 — viewport clamping + WAI-ARIA menu keyboard nav.
   // The context menu must have `role="menu"`, items `role="menuitem"`,
   // an `aria-labelledby` pointing at the mesh-name span, a roving tabindex

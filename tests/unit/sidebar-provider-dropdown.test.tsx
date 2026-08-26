@@ -44,7 +44,7 @@ describe('colorClassForProvider', () => {
 
 describe('ProviderDropdown', () => {
   it('renders a menuitem for every provider (issue #814)', () => {
-    render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
+    render(<ProviderDropdown dropdownKey="mesh-1" providers={PROVIDERS} onSelect={() => {}} />);
     // Issue #814 — WAI-ARIA menu semantics: each provider row is
     // `role="menuitem"` (was a bare `<button>`). Tests query by the new
     // role so the assertion matches the rendered accessibility tree.
@@ -52,14 +52,18 @@ describe('ProviderDropdown', () => {
     expect(screen.getByRole('menuitem', { name: /Agy/ })).toBeTruthy();
   });
 
-  it('tags the container with the mesh id for click-outside detection', () => {
-    const { container } = render(<ProviderDropdown meshId={42} providers={PROVIDERS} onSelect={() => {}} />);
-    expect(container.querySelector('[data-dropdown-for="42"]')).toBeTruthy();
+  it('tags the container with the dropdown key for click-outside detection', () => {
+    // Issue #1264 — the `meshId` prop was renamed to `dropdownKey`
+    // and now requires a pre-prefixed value. The test mirrors the
+    // production contract: callers pass `dropdownId('mesh', id)`,
+    // not a raw numeric id.
+    const { container } = render(<ProviderDropdown dropdownKey="mesh-42" providers={PROVIDERS} onSelect={() => {}} />);
+    expect(container.querySelector('[data-dropdown-for="mesh-42"]')).toBeTruthy();
   });
 
   it('calls onSelect with the provider id when an option is clicked', async () => {
     const onSelect = vi.fn();
-    render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={onSelect} />);
+    render(<ProviderDropdown dropdownKey="mesh-1" providers={PROVIDERS} onSelect={onSelect} />);
 
     await userEvent.click(screen.getByRole('menuitem', { name: /Agy/ }));
 
@@ -70,7 +74,7 @@ describe('ProviderDropdown', () => {
     const onParentClick = vi.fn();
     render(
       <div onClick={onParentClick}>
-        <ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />
+        <ProviderDropdown dropdownKey="mesh-1" providers={PROVIDERS} onSelect={() => {}} />
       </div>,
     );
 
@@ -80,7 +84,7 @@ describe('ProviderDropdown', () => {
   });
 
   it('renders nothing actionable when the provider list is empty', () => {
-    render(<ProviderDropdown meshId={1} providers={[]} onSelect={() => {}} />);
+    render(<ProviderDropdown dropdownKey="mesh-1" providers={[]} onSelect={() => {}} />);
     expect(screen.queryAllByRole('menuitem')).toHaveLength(0);
   });
 
@@ -93,7 +97,7 @@ describe('ProviderDropdown', () => {
     ];
 
     it('shows the "No agent CLIs found" panel when only Terminal is offered', () => {
-      render(<ProviderDropdown meshId={1} providers={TERMINAL_ONLY} onSelect={() => {}} />);
+      render(<ProviderDropdown dropdownKey="mesh-1" providers={TERMINAL_ONLY} onSelect={() => {}} />);
       expect(screen.getByTestId('spawn-menu-empty-state')).toBeTruthy();
       expect(screen.getByText('No agent CLIs found')).toBeTruthy();
       // Terminal is still spawnable below the hint.
@@ -101,13 +105,13 @@ describe('ProviderDropdown', () => {
     });
 
     it('links to the README prerequisites via openUrl (Tauri 2 routing)', async () => {
-      render(<ProviderDropdown meshId={1} providers={TERMINAL_ONLY} onSelect={() => {}} />);
+      render(<ProviderDropdown dropdownKey="mesh-1" providers={TERMINAL_ONLY} onSelect={() => {}} />);
       await userEvent.click(screen.getByRole('link', { name: /View setup instructions/ }));
       expect(openUrlMock).toHaveBeenCalledWith('https://github.com/alondero/buildmesh#prerequisites');
     });
 
     it('hides the panel once a real agent harness is present', () => {
-      render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
+      render(<ProviderDropdown dropdownKey="mesh-1" providers={PROVIDERS} onSelect={() => {}} />);
       expect(screen.queryByTestId('spawn-menu-empty-state')).toBeNull();
     });
 
@@ -116,7 +120,7 @@ describe('ProviderDropdown', () => {
         { id: 'claude:minimax', label: 'MiniMax', color: 'bg-indigo-500', icon: 'M', harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
         { id: 'terminal', label: 'Terminal', color: 'bg-gray-500', icon: 'T', harness_id: 'terminal', provider_id: null, is_proxied: false, group_key: 'terminal' },
       ];
-      render(<ProviderDropdown meshId={1} providers={proxiedOnly} onSelect={() => {}} />);
+      render(<ProviderDropdown dropdownKey="mesh-1" providers={proxiedOnly} onSelect={() => {}} />);
       expect(screen.queryByTestId('spawn-menu-empty-state')).toBeNull();
     });
   });
@@ -133,7 +137,7 @@ describe('ProviderDropdown', () => {
       { id: 'codex', label: 'Codex', color: 'bg-gray-500', icon: 'C', harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
       { id: 'terminal', label: 'Terminal', color: 'bg-gray-500', icon: 'T', harness_id: 'terminal', provider_id: null, is_proxied: false, group_key: 'terminal' },
     ];
-    render(<ProviderDropdown meshId={1} providers={profiles} onSelect={() => {}} />);
+    render(<ProviderDropdown dropdownKey="mesh-1" providers={profiles} onSelect={() => {}} />);
     expect(screen.queryByText('Legacy')).toBeNull();
     // Issue #814 — 4 menuitems: 3 native headers + 1 proxied child.
     expect(screen.getAllByRole('menuitem')).toHaveLength(4);
@@ -152,7 +156,7 @@ describe('ProviderDropdown', () => {
     // refactor cannot accidentally drop the prop.
     it('forwards onClose to GroupedProviderMenu (Escape closes via the menu)', () => {
       const onClose = vi.fn();
-      render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} onClose={onClose} />);
+      render(<ProviderDropdown dropdownKey="mesh-1" providers={PROVIDERS} onSelect={() => {}} onClose={onClose} />);
       // The first menuitem is auto-focused on mount. Escape fires
       // `onClose` via the keyboard handler in `GroupedProviderMenu`.
       const firstItem = screen.getByRole('menuitem', { name: /Anthropic/ });
@@ -162,7 +166,7 @@ describe('ProviderDropdown', () => {
     });
 
     it('does not throw when onClose is omitted and Escape is pressed', () => {
-      render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
+      render(<ProviderDropdown dropdownKey="mesh-1" providers={PROVIDERS} onSelect={() => {}} />);
       const firstItem = screen.getByRole('menuitem', { name: /Anthropic/ });
       firstItem.focus();
       expect(() => fireEvent.keyDown(firstItem, { key: 'Escape' })).not.toThrow();
@@ -190,8 +194,8 @@ describe('ProviderDropdown', () => {
         toJSON: () => ({}),
       } as DOMRect);
 
-    render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
-    const menu = document.querySelector('[data-dropdown-for="1"]') as HTMLElement;
+    render(<ProviderDropdown dropdownKey="mesh-1" providers={PROVIDERS} onSelect={() => {}} />);
+    const menu = document.querySelector('[data-dropdown-for="mesh-1"]') as HTMLElement;
     expect(menu.style.transform).toMatch(/translateY\(-/);
     rectSpy.mockRestore();
   });
