@@ -14,7 +14,7 @@
  *    render from the `labels[]` array.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import IssuesScreen from "../../src/mobile/screens/IssuesScreen";
 import type { Mesh, GitHubIssue } from "../../src/mobile/api";
@@ -228,5 +228,81 @@ describe("IssuesScreen", () => {
       expect(screen.getByText("boom")).toBeTruthy();
     });
     expect(screen.getByTestId("issues-filter")).toBeTruthy();
+  });
+
+  // Issue #1259 — the card announces role="button" but ignored Enter/Space,
+  // violating WCAG 2.1.1 (Keyboard) and 4.1.2 (Name, Role, Value). These
+  // tests pin the keyboard activation so a regression is caught at PR time
+  // rather than by a screen-reader / switch-access user.
+  describe("keyboard activation (issue #1259)", () => {
+    /// Helper: render with `BACKEND_ISSUES` loaded and return the card for
+    /// issue #101. Centralised so the four tests below only assert on the
+    /// activation behaviour — not the render plumbing.
+    async function loadAndGetCard() {
+      mockListIssues(BACKEND_ISSUES);
+      render(
+        <IssuesScreen mesh={mesh} onBack={noop} onSpawned={noop} />,
+      );
+      return await screen.findByTestId("issue-101");
+    }
+
+    it("expands the card when Enter is pressed", async () => {
+      const card = await loadAndGetCard();
+      // The body pane should not be visible before activation.
+      expect(screen.queryByTestId("issue-body-101")).toBeNull();
+
+      fireEvent.keyDown(card, { key: "Enter" });
+
+      expect(screen.getByTestId("issue-body-101")).toBeTruthy();
+      expect(screen.getByTestId("issue-spawn-101")).toBeTruthy();
+    });
+
+    it("expands the card when Space is pressed", async () => {
+      const card = await loadAndGetCard();
+      expect(screen.queryByTestId("issue-body-101")).toBeNull();
+
+      fireEvent.keyDown(card, { key: " " });
+
+      expect(screen.getByTestId("issue-body-101")).toBeTruthy();
+    });
+
+    it("toggles the card closed when Enter is pressed a second time", async () => {
+      const card = await loadAndGetCard();
+
+      fireEvent.keyDown(card, { key: "Enter" });
+      expect(screen.getByTestId("issue-body-101")).toBeTruthy();
+
+      fireEvent.keyDown(card, { key: "Enter" });
+      expect(screen.queryByTestId("issue-body-101")).toBeNull();
+    });
+
+    it("ignores keys other than Enter and Space", async () => {
+      const card = await loadAndGetCard();
+
+      // A random letter must NOT trigger expansion — only Enter / Space
+      // are activation keys for a button role.
+      fireEvent.keyDown(card, { key: "a" });
+      expect(screen.queryByTestId("issue-body-101")).toBeNull();
+
+      fireEvent.keyDown(card, { key: "ArrowDown" });
+      expect(screen.queryByTestId("issue-body-101")).toBeNull();
+    });
+
+    it("does not collapse the card when Space bubbles up from the nested Spawn button", async () => {
+      // Regression: a naive onKeyDown handler on the role="button" wrapper
+      // collapses the card on Space bubbled up from the inner Spawn
+      // button, doubling the activation (collapse + spawn). The fix
+      // ignores keydowns whose target is not the card itself.
+      const card = await loadAndGetCard();
+      fireEvent.keyDown(card, { key: "Enter" });
+      expect(screen.getByTestId("issue-spawn-101")).toBeTruthy();
+
+      const spawnBtn = screen.getByTestId("issue-spawn-101");
+      fireEvent.keyDown(spawnBtn, { key: " " });
+
+      // Card must still be open — Space should NOT have collapsed it.
+      expect(screen.getByTestId("issue-spawn-101")).toBeTruthy();
+      expect(screen.getByTestId("issue-body-101")).toBeTruthy();
+    });
   });
 });
