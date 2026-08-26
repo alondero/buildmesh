@@ -390,6 +390,124 @@ describe("NodeList", () => {
     expect(screen.queryByTestId("create-error")).toBeNull();
   });
 
+  it("pauses the 5s poll while document.hidden and refreshes on becoming visible (issue #1261)", async () => {
+    // Backgrounded tab poll would burn battery + server churn for state
+    // the user can't see — mirror the WS hook's resume-on-foreground
+    // shape (useWsEvents / issue #806): on `visibilitychange` to
+    // `hidden`, stop the interval; on the way back, fire ONE refresh
+    // immediately and resume polling.
+    //
+    // jsdom defaults `document.hidden` to false. Force it true BEFORE
+    // render so the mount-time `if (!document.hidden) start()` skips
+    // the interval entirely.
+    //
+    // NOTE: under `vi.useFakeTimers()`, `waitFor` polls on a faked
+    // `setTimeout` so it can never wake up. Match the existing
+    // 5-second-poll test's shape — drain microtasks with `await
+    // Promise.resolve()` chains inside `act()` rather than `waitFor`.
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    });
+
+    vi.useFakeTimers();
+    let nodesCalls = 0;
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        nodesCalls += 1;
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/providers")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "events" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    try {
+      render(
+        <NodeList
+          onOpenNode={noop}
+          onOpenAgentNodes={noop}
+          onOpenIssues={noop}
+          onOffline={noop}
+          onAuthFailed={noop}
+        />,
+      );
+
+      // Initial mount: ONE refresh (the unconditional mount fetch), no
+      // polling started because `document.hidden === true`.
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(nodesCalls).toBe(1);
+
+      // 15s while hidden → still 1. The interval was never armed.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(nodesCalls).toBe(1);
+
+      // Become visible → visibilitychange handler refreshes once
+      // immediately, then starts the interval.
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => false,
+      });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+        // Drain microtasks for refresh() + the WS hook's reconnect
+        // fetch that visibilitychange also fires.
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(nodesCalls).toBe(2);
+
+      // Now polling is active: the next 5s tick should fire ANOTHER
+      // refresh.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(nodesCalls).toBe(3);
+
+      // Background again → polling stops. No further fetch on the tick.
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => true,
+      });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+        await Promise.resolve();
+      });
+      // (Use the count captured RIGHT BEFORE the next tick — if the
+      // interval was cleared cleanly, 15s shouldn't bump it.)
+      const baselineWhileHidden = nodesCalls;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(nodesCalls).toBe(baselineWhileHidden);
+    } finally {
+      vi.useRealTimers();
+      // jsdom exposes document.hidden as a getter — restore the default
+      // so subsequent tests in the file (which don't expect a hidden
+      // document) aren't surprised.
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => false,
+      });
+    }
+  });
+
   it("treats a network failure as offline", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network")));
     const onOffline = vi.fn();

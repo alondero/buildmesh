@@ -1,20 +1,28 @@
 import { defineConfig, devices } from '@playwright/test';
+import { baseConfig } from './playwright.config.base';
 
 export default defineConfig({
-  testDir: './tests/e2e',
-  timeout: 30000,
-  expect: {
-    timeout: 10000,
-  },
-  use: {
-    baseURL: 'http://localhost:1420',
-    trace: 'on-first-retry',
-  },
+  ...baseConfig,
   projects: [
     {
       name: 'chromium',
       testIgnore: /verify-smoke\.spec\.ts$/,
       use: { ...devices['Desktop Chrome'] },
+      // Issue #1261 — auto-start Vite so `npm run test:e2e` works without
+      // a manually running dev server. `reuseExistingServer: true` means
+      // a user with `npm run dev` (or `npm run tauri dev`) already up
+      // pays no extra boot cost; the spec just attaches. Specs that
+      // spawn their own buildmesh.exe (mobile-spa) ignore :1420 — they
+      // talk to the mobile server on 1992-1994 — so Vite being up is
+      // harmless.
+      webServer: {
+        command: 'npm run dev',
+        url: 'http://localhost:1420',
+        reuseExistingServer: true,
+        timeout: 60000,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
     },
     // Issue #157 — verify-smoke only needs Vite (the Tauri mock from
     // scripts/ui-mock/tauri-mock.mjs replaces the Rust backend, so we

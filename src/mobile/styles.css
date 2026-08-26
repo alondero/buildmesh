@@ -118,6 +118,14 @@ button {
   color: #fff;
 }
 
+/* `.chip-btn` is intentionally below the 44px HIG / 48dp Material
+   touch-target floor (issue #1261) — these are secondary row actions
+   (the `+` and `⋯` icons next to a mesh name), not the primary typing
+   surface. Where chips ARE the primary action (the per-row `+` /
+   `⋯` mesh buttons in NodeList), the component overrides width/height
+   inline to 38px so they're still tappable without crowding the
+   section heading. The quick-keys strip (`.qk-btn` below) is the
+   actual primary phone-UI surface and DOES hit the 44px floor. */
 .chip-btn {
   background: transparent;
   border: 1px solid var(--border-strong);
@@ -362,8 +370,12 @@ button {
   color: var(--text-dim);
   font-size: 12px;
   font-family: "JetBrains Mono", "Cascadia Code", "Fira Code", monospace;
-  padding: 7px 0;
+  /* padding + line-height + 2px borders = ~44px hit-target floor
+     (Apple HIG 44pt / Material 48dp). An Esc / ^C mis-tap on this
+     strip costs real time with live agents (issue #1261). */
+  padding: 14px 0;
   min-width: 44px;
+  min-height: 44px;
   text-align: center;
   cursor: pointer;
   line-height: 1.2;
