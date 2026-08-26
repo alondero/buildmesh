@@ -182,6 +182,30 @@ describe('NodeItem context menu (issue #776)', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it('renders the menu on document.body, not inside the session row', () => {
+    // `position:fixed` is retargeted by any ancestor `filter` (the
+    // inactive-row `hover:brightness-125`) or dnd-kit `transform` on
+    // the parent MeshItem. Auto-focus then scrolls the sidebar list
+    // (`overflow-y-auto`) and the menu jumps. Portaling to
+    // `document.body` keeps `top`/`left` in viewport coordinates.
+    renderNode();
+    openContextMenu();
+    const row = screen.getByText('calm-sweet-wolf').closest('[data-session-item]')!;
+    const menu = document.querySelector('[role="menu"]') as HTMLElement;
+    expect(menu).toBeTruthy();
+    expect(row.contains(menu)).toBe(false);
+    expect(menu.parentElement).toBe(document.body);
+  });
+
+  it('auto-focuses the first menuitem with preventScroll so the sidebar does not jump', () => {
+    const focusSpy = vi.spyOn(HTMLElement.prototype, 'focus');
+    renderNode();
+    openContextMenu();
+    expect(document.activeElement).toBe(screen.getByText(/Regenerate/).closest('button'));
+    expect(focusSpy.mock.calls.some((call) => call[0]?.preventScroll === true)).toBe(true);
+    focusSpy.mockRestore();
+  });
+
   it('marks the menu container with role="menu" and two items (Regenerate + Pin) with role="menuitem"', () => {
     // Wayfinder #982 / #985: the menu grew from 1 → 2 items so a user
     // can pin/unpin without entering the canvas, the same store action
