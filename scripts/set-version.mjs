@@ -4,8 +4,17 @@ import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const version = process.argv[2];
-if (!version || !/^\d+\.\d+\.\d+(-[\w.-]+)?$/.test(version)) {
-  console.error("Usage: npm run version:set -- <semver>   e.g. 1.3.0-dev or 1.3.0");
+const parsed = version?.match(/^(\d+\.\d+\.\d+)(?:-(.+))?$/);
+if (!parsed) {
+  console.error("Usage: npm run version:set -- <semver>   e.g. 1.3.0-0 or 1.3.0");
+  process.exit(1);
+}
+// WiX MSI requires a numeric-only prerelease identifier <= 65535. `-dev`
+// is valid semver but fails the bundler; the between-release marker is `-0`.
+if (parsed[2] !== undefined && (!/^\d+$/.test(parsed[2]) || Number(parsed[2]) > 65535)) {
+  console.error(
+    `Prerelease "${parsed[2]}" is not MSI-safe (must be numeric-only and <= 65535). Use e.g. 1.3.0-0`,
+  );
   process.exit(1);
 }
 
