@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(target_os = "windows")]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+#[cfg(target_os = "windows")]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// Create a `Command` that won't flash a console window on Windows.
 ///
@@ -17,6 +21,25 @@ pub fn command_no_window(program: impl AsRef<std::ffi::OsStr>) -> Command {
         use std::os::windows::process::CommandExt;
         let mut cmd = cmd;
         cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        cmd
+    }
+}
+
+/// Create a process that remains alive when its spawning process terminates.
+///
+/// Used by crash recovery, where both the supervisor and the replacement app
+/// must survive the original Buildmesh process disappearing.
+pub fn command_detached(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = cmd;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         cmd
     }
     #[cfg(not(target_os = "windows"))]
