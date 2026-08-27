@@ -42,6 +42,16 @@ export class MobileErrorBoundary extends Component<Props, State> {
     // Same shape as the shim's POSTs (kind/error/promise) — distinguished by
     // `kind: 'boundary'` so the desktop log reader can tell "caught by React"
     // from "escaped to window".
+    //
+    // `src` is `location.pathname` (NOT `location.href`) — issue #1239. The
+    // mobile SPA mounts on `/?token=<ROOT_TOKEN>` and `Connect.tsx` strips
+    // the query string before mounting the rest of the tree. If a render
+    // throw fires BEFORE that strip (e.g. from a child rendered during the
+    // initial mount), the live `location.href` still carries `?token=`
+    // verbatim — and the root token would land in the desktop's debug
+    // log, which is the primary incident-diagnosis surface. Reporting the
+    // pathname alone is enough for "which screen crashed" diagnostics
+    // and removes the secret from the payload.
     try {
       void fetch('/__debug/log', {
         method: 'POST',
@@ -50,7 +60,7 @@ export class MobileErrorBoundary extends Component<Props, State> {
           kind: 'boundary',
           msg: `[MobileErrorBoundary] ${error.name}: ${error.message}\nComponent stack: ${componentStack}`,
           stack: error.stack ?? '',
-          src: location.href,
+          src: location.pathname,
         }),
       }).catch(() => {
         // Intentional: a logging failure cannot itself be logged without

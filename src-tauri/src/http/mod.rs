@@ -1170,6 +1170,40 @@ fn host_header_allowed(host_header: &str) -> bool {
     }
 }
 
+// Maximum characters from a single `/__debug/log` body that may land in
+// the diagnostics log (issue #1239). Independent of the 64KB wire-level
+// body cap — this is the per-record byte ceiling into `tracing`, bounding
+// the contribution of one request regardless of how the body is shaped.
+// The peer rate cap is the volume governor across requests.
+const MAX_DEBUG_BODY_CHARS: usize = 512;
+
+/// Sanitize a `/__debug/log` body before it is interpolated into the
+/// diagnostics tracing event. The endpoint is unauthenticated by design
+/// (the SPA error-catcher shim POSTs here pre-auth), so any LAN peer
+/// that passes the Host guard can hit it — and the resulting `tracing`
+/// line is the primary incident-diagnosis surface that `/use` and
+/// `/verify` tail. Three threats are addressed here:
+///
+///   1. **Forge log lines**: an embedded `\n` lets a peer plant fake
+///      `tracing` events (`\nINFO: revocation accepted by 10.0.0.5`)
+///      into the log. Take only the first line.
+///   2. **Control-char injection**: ANSI escapes / VT sequences render
+///      garbage in a `tail -f` viewer. Strip the Unicode `Cc` category
+///      (which covers both ASCII control chars and the C1 range).
+///   3. **Per-record size cap**: even a maximally-sized body contributes
+///      at most [`MAX_DEBUG_BODY_CHARS`] characters to the log.
+///
+/// Empty / all-newline input collapses to `""` — the endpoint still
+/// 204s; the tracing line is just blank.
+fn sanitize_debug_body(input: &str) -> String {
+    let first_line = input.lines().next().unwrap_or("").trim_end();
+    first_line
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_DEBUG_BODY_CHARS)
+        .collect()
+}
+
 async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // Capture the scheme before the stream is consumed by the buffered reader.
     // This is the authoritative request scheme (the server terminates TLS), used
@@ -1334,13 +1368,58 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // it shows up in the dev log alongside the other connection events, then
     // 204 No Content so the SPA's fetch resolves cleanly. Matched before
     // `/api/*` so a debug POST never gets confused for a real API call.
+    //
+    // Hardened in issue #1239: the endpoint is intentionally unauthenticated
+    // (the SPA shim POSTs here pre-auth for error reporting), so its
+    // defences live in two places — see `sanitize_debug_body` (declared
+    // just above `handle_connection`) for the body-side hardening, and
+    // the per-peer rate limit just before the body read for volume bounds.
     if method == "POST" && path_without_query == "/__debug/log" {
+        // Per-peer sliding-window rate cap (issue #1239). Fingerprint on the
+        // peer IP — mirroring how `/api/ws-ticket` fingerprints its bearer
+        // — so a LAN peer that floods cannot drown the diagnosis surface.
+        // The mobile SPA legitimately fires ~once per error, so the default
+        // 30/min/peer leaves headroom for a real reload-storm and bounds an
+        // attacker's volume. Hashing keeps the raw IP out of the
+        // rate_limiter's map (same posture as `/api/ws-ticket`'s
+        // `db::hash_token` fingerprint).
+        let fingerprint = crate::db::hash_token(&addr.ip().to_string());
+        match rate_limit::check_and_record(
+            &fingerprint,
+            std::time::Instant::now(),
+            rate_limit::DEFAULT_MAX_PER_WINDOW,
+        ) {
+            rate_limit::Outcome::Allow => {}
+            rate_limit::Outcome::Deny { retry_after } => {
+                // Uniform body shape with the other 4xx — no body, only
+                // status + `Retry-After`. The endpoint is pre-auth by
+                // design, so there's no "bad credential" response to align
+                // with, but staying bodyless preserves the principle that
+                // the response carries no diagnostic that an attacker
+                // could use as a probe signal.
+                let _ = request::write_rate_limited(&mut lines, retry_after).await;
+                return;
+            }
+        }
         let content_length = content_length(&headers);
         if content_length <= 64 * 1024 {
             let mut body_bytes = vec![0u8; content_length];
             if content_length == 0 || lines.read_exact(&mut body_bytes).await.is_ok() {
                 let body = String::from_utf8_lossy(&body_bytes).into_owned();
-                tracing::info!(target: "buildmesh_lib::diagnostics", "SPA debug event: {body}");
+                // Sanitize before logging. The rate cap above bounds
+                // request *volume*; this bounds a single record's
+                // contribution and neutralises three threats:
+                //   1. Forge log lines — embedded `\n` would let a peer
+                //      plant fake `tracing` events ("INFO: revocation
+                //      accepted by 10.0.0.5") into the diagnosis
+                //      surface that `/use` and `/verify` tail.
+                //   2. Control-char injection — ANSI escapes render
+                //      garbage in a `tail -f` viewer.
+                //   3. Per-message size cap — `MAX_DEBUG_BODY_CHARS` is
+                //      the bytes-into-tracing ceiling for one request,
+                //      independent of the 64KB wire-level body cap.
+                let sanitized = sanitize_debug_body(&body);
+                tracing::info!(target: "buildmesh_lib::diagnostics", "SPA debug event: {sanitized}");
             }
         } else {
             tracing::warn!(target: "buildmesh_lib::diagnostics",
@@ -3394,6 +3473,129 @@ ANY / -> Public (SPA shell)";
         assert_ne!(
             b_status, 429,
             "token B must not be rate-limited by token A's flood"
+        );
+    }
+
+    // --- /__debug/log sanitation + rate cap (issue #1239) -----------------
+    //
+    // The endpoint is intentionally unauthenticated (the SPA error-catcher
+    // shim POSTs here pre-auth), so its hardening lives at two layers:
+    //
+    //   1. Body sanitation (`sanitize_debug_body`) — take first line, strip
+    //      control chars, cap length. Defends against forging fake log
+    //      entries (e.g. `\nINFO: revocation accepted by 10.0.0.5`) and
+    //      ANSI control-char injection.
+    //
+    //   2. Per-peer sliding-window rate cap (reuse `rate_limit`) — bounds
+    //      request volume so a LAN peer can't drown the diagnosis surface.
+    //      Fingerprint is the SHA-256 of the peer IP (mirroring how
+    //      `/api/ws-ticket` fingerprints its bearer token).
+    //
+    // The isolation guarantee (one peer's flood does not throttle another)
+    // is pinned in `rate_limit::tests::per_token_isolation` — a separate
+    // dispatcher-level test is not possible because loopback binds always
+    // resolve to 127.0.0.1 as the peer IP.
+
+    #[test]
+    fn debug_log_sanitize_takes_only_first_line() {
+        // AC: "assert logged record contains no embedded newline beyond the
+        // first sanitized fragment". An attacker can otherwise forge fake log
+        // entries by writing `\nINFO: …` after the legitimate first line.
+        let body = "first\nINFO: fake revocation accepted\nERROR: fake";
+        assert_eq!(
+            sanitize_debug_body(body),
+            "first",
+            "must drop everything after the first newline"
+        );
+    }
+
+    #[test]
+    fn debug_log_sanitize_strips_control_characters() {
+        // ANSI ESC sequences render garbage in a `tail -f` watcher — strip
+        // them. CR / VT survive `lines().next()` because that iterator only
+        // splits on `\n`; the sanitizer must catch the rest.
+        let body = "\x1b[31mred text\x1b[0m more\r";
+        let sanitized = sanitize_debug_body(body);
+        assert!(!sanitized.contains('\x1b'), "ANSI ESC must be stripped");
+        assert!(!sanitized.contains('\r'), "CR must be stripped");
+        assert!(sanitized.contains("red text"), "content must survive");
+        assert!(sanitized.contains(" more"), "remaining content must survive");
+    }
+
+    #[test]
+    fn debug_log_sanitize_truncates_to_max_chars() {
+        // A 60KB body (the wire-level cap) must not contribute more than
+        // `MAX_DEBUG_BODY_CHARS` chars to the log; the rate cap is the
+        // volume governor, this bounds a single record.
+        let body = "a".repeat(2048);
+        let sanitized = sanitize_debug_body(&body);
+        assert_eq!(
+            sanitized.len(),
+            MAX_DEBUG_BODY_CHARS,
+            "truncate to MAX_DEBUG_BODY_CHARS"
+        );
+    }
+
+    #[test]
+    fn debug_log_sanitize_handles_empty_input() {
+        // Empty body must produce an empty log fragment (not panic, not "null").
+        assert_eq!(sanitize_debug_body(""), "");
+    }
+
+    #[test]
+    fn debug_log_sanitize_handles_only_newlines() {
+        // All-newline body → no first line → empty fragment. The endpoint
+        // still 204s; the tracing line is just blank.
+        assert_eq!(sanitize_debug_body("\n\n\n"), "");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn debug_log_endpoint_rate_limits_a_repeated_peer_after_the_cap() {
+        // AC: "rapid-fire posts beyond the cap get 429". Fingerprint is the
+        // peer IP, which for a loopback test is 127.0.0.1 — every iteration
+        // hits the same bucket. Default cap is 30/min/peer; the 31st POST
+        // must return 429 with `Retry-After`.
+        let _g = RATE_LIMIT_DISPATCH_LOCK.lock().unwrap();
+        rate_limit::reset_for_test();
+
+        let mut saw_429 = false;
+        let mut last_response = String::new();
+        let mut last_status = 0;
+        for _ in 0..(rate_limit::DEFAULT_MAX_PER_WINDOW + 1) {
+            let (status, raw) =
+                post_status_and_headers("POST", "/__debug/log", "").await;
+            last_status = status;
+            last_response = raw;
+            if status == 429 {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "expected 429 within {} attempts; last status was {last_status}",
+            rate_limit::DEFAULT_MAX_PER_WINDOW + 1
+        );
+        assert!(
+            last_response.contains("Retry-After:"),
+            "429 response must include Retry-After; got: {last_response:?}"
+        );
+        let retry_after = last_response
+            .lines()
+            .find_map(|l| {
+                let mut parts = l.splitn(2, ':');
+                let n = parts.next()?;
+                if n.eq_ignore_ascii_case("Retry-After") {
+                    parts.next()?.trim().parse::<u32>().ok()
+                } else {
+                    None
+                }
+            })
+            .expect("Retry-After must parse as u32");
+        assert!(
+            retry_after >= 1,
+            "Retry-After must be >= 1 second; got {retry_after}"
         );
     }
 
