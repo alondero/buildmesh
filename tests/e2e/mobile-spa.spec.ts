@@ -1,18 +1,23 @@
 /**
  * Mobile SPA end-to-end smoke tests.
  *
- * Each test spawns a fresh `buildmesh.exe`, drives Chromium at a phone-sized
- * viewport through the real SPA, and asserts the QR-pairing flow.
+ * Spawns the built `buildmesh.exe` once and drives Chromium through the
+ * QR-pairing flow. Three tests share a single browser context; each
+ * `test()` uses `context.clearCookies()` to get a fresh cookie jar rather
+ * than respawning the native exe (3 native spawns → ~30s of redundant
+ * bind/inspect overhead per spec run).
  *
- * Pre-flight (per CLAUDE.local.md): the stable hub MUST be paused before this
- * spec — the spawned exe binds 1991 (test server) + 1992-1994 (mobile SPA),
- * the same ports the stable hub owns. We probe 1991 up front so a violation
- * surfaces as a clear failure rather than a vague "bind" error.
+ * Pre-flight (per CLAUDE.local.md): the stable hub MUST be paused before
+ * this spec — the spawned exe binds 1991 (test server) + 1992-1994
+ * (mobile SPA), the same ports the stable hub owns. We probe 1991 up
+ * front so a violation surfaces as a clear failure rather than a vague
+ * spawn error.
  *
- * The bm_session cookie carries a freshly minted per-device token (issue
- * #502) — NOT the root token. So we assert the cookie value is a different
- * 32-char hex token, and that it survives a navigation that strips `?token=`
- * from the URL (issue #500).
+ * The bm_session cookie carries a freshly minted per-device token
+ * (issue #502) — NOT the root token. The cookie assertion checks
+ * value-not-root + shape + all three attributes (HttpOnly, SameSite,
+ * Path). The URL assertion waits for NodeList to render first so it
+ * doesn't race `Connect.tsx`'s `replaceState` strip (#500).
  *
  * Prereqs:
  *   - npm run build          (produces dist/ AND dist/mobile/)
@@ -34,51 +39,49 @@ import {
   type BuildmeshProcess,
 } from './utils/buildmesh-launcher';
 
-// Process we last spawned, if any. Tracked by PID so cleanup can target
-// *that* process instead of falling back to `taskkill /IM buildmesh.exe /F`
-// — an image-name sledgehammer that would also murder the user's stable hub
-// if it happened to be running.
 let proc: BuildmeshProcess | null = null;
+let mobilePort: number | null = null;
 
 test.describe('mobile /v2 SPA', () => {
   test.use({ viewport: { width: 390, height: 844 } }); // iPhone 14-ish
 
-  test.beforeEach(async () => {
-    // Belt-and-braces: if a previous crashed run left a zombie on the test
-    // server, terminate it before we spawn a new one. terminate() is a
-    // no-op when the port is free.
-    if (proc) {
-      await terminate(proc);
-      proc = null;
-    }
-    // Hard gate: the test server port must be free. The user can satisfy
-    // this by closing the stable hub (CLAUDE.local.md) or by setting
-    // BUILDMESH_EXE to a dev-profile exe that uses 2991 instead.
-    expect(
+  // The pre-flight probes 1991 (the test-server port). Per CLAUDE.local.md,
+  // the stable hub MUST be paused before this spec runs — otherwise the
+  // spawned exe can't bind 1991 and the spawn silently falls back to talking
+  // to the hub's DB.
+  //
+  // We use `test.skip` (not `expect(...).toBe(false)`) so a running hub is a
+  // clean SKIP, not a loud FAIL. The spec then doesn't crash, doesn't kill
+  // anything, and the user can see in the run output exactly why it was
+  // deferred: "skip — port 1991 must be free before this spec …".
+  test.beforeAll(async () => {
+    test.skip(
       await isPortBound(TEST_SERVER_PORT),
-      `port ${TEST_SERVER_PORT} must be free before this spec — pause the stable hub first (see CLAUDE.local.md)`,
-    ).toBe(false);
-  });
+      `port ${TEST_SERVER_PORT} is bound (likely the stable hub) — pause it first per CLAUDE.local.md before this spec can run. The skip is intentional: this spec binds the same ports the hub owns.`,
+    );
 
-  test.afterEach(async () => {
-    if (proc) {
-      await terminate(proc);
-      proc = null;
-    }
-  });
-
-  test('initial load with ?token= lands on NodeList, sets bm_session cookie, and strips token from URL', async ({
-    page,
-    context,
-  }) => {
     proc = spawnBuildmesh();
+
     expect(
       await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000),
       'test server ready',
     ).toBe(true);
-    const mobilePort = await findMobilePort();
+    mobilePort = await findMobilePort();
     expect(mobilePort, 'one of 1992-1994 should be bound').not.toBeNull();
+  });
 
+  test.afterAll(async () => {
+    if (proc) {
+      await terminate(proc);
+      proc = null;
+      mobilePort = null;
+    }
+  });
+
+  test('initial load with ?token= strips the token from URL, lands on NodeList, and sets bm_session cookie', async ({
+    page,
+    context,
+  }) => {
     const { token } = await invokeViaHttp<{ token: string }>('get_root_token');
     expect(token, 'root token shape').toMatch(/^[0-9a-f]{32}$/);
 
@@ -86,39 +89,33 @@ test.describe('mobile /v2 SPA', () => {
       `http://127.0.0.1:${mobilePort}/?token=${encodeURIComponent(token)}`,
     );
 
-    // Wait for the authenticated view BEFORE checking the URL — Connect.tsx
-    // strips `?token=` via `replaceState` once login completes, so the URL
-    // assertion depends on the same transition the UI assertion guards.
-    // Asserting the URL first would race the `replaceState` (issue #500).
+    // Wait for the authenticated view BEFORE checking the URL.
+    // Connect.tsx strips `?token=` via `replaceState` once login
+    // completes — same transition the UI assertion guards.
+    // Asserting the URL first would race the strip (issue #500).
     await expect(
       page.getByTestId('node-list').or(page.getByTestId('nodelist-loading')),
     ).toBeVisible({ timeout: 10000 });
     await expect(page.getByTestId('connect-screen')).toBeHidden();
 
-    // After Connect.tsx strips the token, the URL must no longer carry
-    // `?token=`. We also assert we landed on our mobile origin (not
-    // about:blank or a 404) — a purely-negative `not.toHaveURL(/token=/)`
-    // would pass on any off-path landing.
-    expect(page.url(), 'URL must be the mobile SPA origin').toMatch(
-      new RegExp(`^http://127\\.0\\.0\\.1:${mobilePort}/(\\?.*)?$`),
-    );
-    expect(page.url(), 'token must NOT linger in the URL (#500)').not.toMatch(/token=/);
+    // After the login transition the URL must be the bare origin —
+    // Connect.tsx:27-33 strips `?token=` and rewrites to `<path>`. The
+    // web-first `toHaveURL` retries automatically against async
+    // `history` mutations; a sync `expect(page.url()).toMatch` would
+    // race the same transition.
+    await expect(page).toHaveURL(`http://127.0.0.1:${mobilePort}/`);
 
     // bm_session cookie: HttpOnly + SameSite=Lax + Path=/, holds a
     // *fresh per-device* token (issue #502) — NOT the root token we
-    // POSTed. If the cookie ever held the root token again, the
+    // POSTed. If the cookie ever held the root token again, that
     // shared-credential regression #502 removed would be back.
     const cookies = await context.cookies(`http://127.0.0.1:${mobilePort}`);
     const session = cookies.find((c) => c.name === 'bm_session');
     expect(session, 'bm_session cookie set').toBeDefined();
-    expect(
-      session!.value,
-      'cookie must NOT hold the root token (#502)',
-    ).not.toBe(token);
-    expect(
-      session!.value,
-      'cookie must be a 32-char lowercase hex token',
-    ).toMatch(/^[0-9a-f]{32}$/);
+    expect(session!.value, 'cookie must NOT hold the root token (#502)').not.toBe(token);
+    expect(session!.value, 'cookie must be a 32-char lowercase hex token').toMatch(
+      /^[0-9a-f]{32}$/,
+    );
     expect(session!.httpOnly, 'cookie HttpOnly').toBe(true);
     expect(session!.sameSite, 'cookie SameSite=Lax').toBe('Lax');
     expect(session!.path, 'cookie Path=/').toBe('/');
@@ -126,14 +123,7 @@ test.describe('mobile /v2 SPA', () => {
 
   test('reload without ?token= reuses bm_session and lands on NodeList', async ({
     page,
-    context,
   }) => {
-    proc = spawnBuildmesh();
-    expect(await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000)).toBe(true);
-    const mobilePort = await findMobilePort();
-    expect(mobilePort).not.toBeNull();
-
-    // First visit: pair via ?token=, which sets the bm_session cookie.
     const { token } = await invokeViaHttp<{ token: string }>('get_root_token');
     await page.goto(
       `http://127.0.0.1:${mobilePort}/?token=${encodeURIComponent(token)}`,
@@ -142,34 +132,25 @@ test.describe('mobile /v2 SPA', () => {
       page.getByTestId('node-list').or(page.getByTestId('nodelist-loading')),
     ).toBeVisible({ timeout: 10000 });
 
-    // Second visit: same browser context (cookies preserved), no ?token=.
-    // The cookie is the per-device token from #502, so the SPA must
-    // re-authenticate via the cookie and land on the list — not bounce
-    // back to the Connect screen.
+    // Reload without `?token=`; the cookie alone should re-auth.
     await page.goto(`http://127.0.0.1:${mobilePort}/`);
     await expect(
       page.getByTestId('node-list').or(page.getByTestId('nodelist-loading')),
     ).toBeVisible({ timeout: 10000 });
     await expect(page.getByTestId('connect-screen')).toBeHidden();
+    // URL stays at `/` on reload — the cookie handles auth.
+    await expect(page).toHaveURL(`http://127.0.0.1:${mobilePort}/`);
   });
 
   test('cold load (no ?token=, no cookie) renders Connect screen', async ({
     page,
     context,
   }) => {
-    proc = spawnBuildmesh();
-    expect(await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000)).toBe(true);
-    const mobilePort = await findMobilePort();
-    expect(mobilePort).not.toBeNull();
-
-    // Ensure no cookies carry over from prior tests in this describe.
+    // Ensure no cookies carry over from prior tests.
     await context.clearCookies();
 
     await page.goto(`http://127.0.0.1:${mobilePort}/`);
     await expect(page.getByTestId('connect-screen')).toBeVisible({ timeout: 10000 });
-    // URL stays at `/` — no token was ever presented, so nothing to strip.
-    expect(page.url(), 'no ?token= ever, so URL is just /').toBe(
-      `http://127.0.0.1:${mobilePort}/`,
-    );
+    await expect(page).toHaveURL(`http://127.0.0.1:${mobilePort}/`);
   });
 });
