@@ -67,14 +67,18 @@ export default function NodeList({
     };
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (isLatest: () => boolean) => {
     try {
       const [m, n] = await Promise.all([listMeshes(), listNodes()]);
-      if (!mountedRef.current) return;
+      // `isLatest()` is the sequence-token check from `useVisibilityPolling`:
+      // if a newer refresh started while this fetch was in flight, drop
+      // our setState so the hung-fetch-during-mobile-suspend case doesn't
+      // clobber fresh data. `mountedRef` is the unmount check.
+      if (!isLatest() || !mountedRef.current) return;
       setMeshes(m);
       setNodes(n);
     } catch (e) {
-      if (!mountedRef.current) return;
+      if (!isLatest() || !mountedRef.current) return;
       // A 401 means the token was revoked/expired — bounce to Connect
       // instead of claiming the desktop is offline.
       if (isAuthError(e)) onAuthFailed();
@@ -94,7 +98,14 @@ export default function NodeList({
   // Live attention events via /ws/events. On any event, refetch so the
   // list reflects the new status immediately rather than waiting for the
   // 5-second poll. WS drop falls back to polling silently.
-  useWsEvents(refresh, onAuthFailed);
+  //
+  // `useWsEvents` invokes its callback with NO arguments — WS events
+  // are inherently "latest" (they ARE the most recent server state),
+  // so we wrap `refresh` to feed it an `isLatest` that always returns
+  // true. The polling hook's sequence-token check still applies to
+  // its own ticks; this wrapper just keeps the WS path from passing
+  // `undefined` as `isLatest`.
+  useWsEvents(() => { void refresh(() => true); }, onAuthFailed);
 
   // Lazy-load the provider list; fallback gives the user something to tap
   // even if the request 401s or the server hasn't woken up yet.

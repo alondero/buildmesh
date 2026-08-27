@@ -1,27 +1,39 @@
 /**
  * Focused unit test for `useVisibilityPolling` (issue #1261). The
- * NodeList component test exercises this hook end-to-end through the
- * full meshes/nodes fetch path; this file pins the hook's own
+ * NodeList integration test exercises this hook end-to-end through
+ * the meshes/nodes fetch path; this file pins the hook's own
  * contract so a future shape change can't silently regress the
  * lifecycle in a way the high-level test happens to paper over.
  *
- * The big questions this file answers:
- *   * Is the hook stable across callback-identity churn? (a parent
- *     re-rendering with a fresh inline arrow must NOT reset the
- *     timer.)
- *   * Does the hook pause when `document.hidden` flips to true, and
- *     resume + immediate-refresh on the way back?
- *   * Is only one `refresh` in flight at a time? (the visibility
- *     resume must NOT fire alongside a still-pending tick.)
+ * Contract pinned here:
+ *   * Initial mount while visible: refresh is called once.
+ *   * Mount while hidden: refresh is NOT called.
+ *   * `visibilitychange` to visible: refresh is called once
+ *     immediately, then the interval resumes.
+ *   * `visibilitychange` to hidden: the pending tick is cancelled
+ *     and no further refresh fires while hidden.
+ *   * `window.online`: refresh is called (network return can race
+ *     ahead of foreground resume — mirrors `useWsEvents`).
+ *   * Callback-identity churn does NOT tear down / re-arm the
+ *     interval. The previous version of this test passed the same
+ *     `refresh` reference across renders, which proved nothing; here
+ *     each render passes a fresh inline arrow (`() => refresh()`)
+ *     so the hook is forced to consider whether to re-arm.
+ *   * Rejections from `refresh` are routed to `onError`, NOT
+ *     propagated as unhandled promise rejections. A bare
+ *     `setTimeout`-callback Promise has no implicit handler.
+ *   * The sequence token: when a newer refresh starts while the old
+ *     is in flight, the older one's `isLatest()` predicate returns
+ *     false — the older refresh's caller MUST check this and bail
+ *     before setState (NodeList does). This is what stops a
+ *     hung-during-mobile-suspend fetch from clobbering fresh data
+ *     minutes later.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render } from "@testing-library/react";
+import { act, render, type RenderResult } from "@testing-library/react";
 import { useEffect } from "react";
 import { useVisibilityPolling } from "../../src/mobile/useVisibilityPolling";
 
-// Stash and restore the original `document.hidden` descriptor so this
-// test never leaks property redefinitions into siblings — the
-// `NodeList` integration test does the same dance.
 const originalHiddenDescriptor = Object.getOwnPropertyDescriptor(
   document,
   "hidden",
@@ -43,32 +55,62 @@ function restoreDocumentHidden() {
 }
 
 interface Harness {
-  refresh: ReturnType<typeof vi.fn>;
+  refresh: (isLatest: () => boolean) => Promise<void> | void;
+  rerender: () => void;
   rerenders: number;
 }
 
+/**
+ * Mounts the hook and returns controls. `refreshProp` is the underlying
+ * `vi.fn`-backed refresh — the host Tree passes a fresh inline arrow
+ * `() => refreshProp(...)` so every render creates a NEW callback
+ * identity. That's the case the previous version of this file missed:
+ * passing the same `refresh` reference across renders proved nothing
+ * about callback-churn tolerance.
+ */
 function mountHook(
-  refresh: ReturnType<typeof vi.fn>,
-  intervalMs = 5000,
-): Harness {
-  const harness: Harness = { refresh, rerenders: 0 };
-  function Tree({ tick }: { tick: number }) {
-    // Re-read `refresh` via a ref-like indirection on every render so we
-    // can prove the hook doesn't react to callback-identity churn.
-    const stableRefresh = tick >= 0 ? refresh : refresh;
-    useVisibilityPolling(stableRefresh, intervalMs);
+  refreshProp: ReturnType<typeof vi.fn>,
+  opts?: { intervalMs?: number; onError?: (e: unknown) => void },
+): Harness & { getRerender: () => () => void } {
+  const harness: Harness = {
+    refresh: refreshProp as unknown as Harness["refresh"],
+    rerender: () => {},
+    rerenders: 0,
+  };
+  let tick = 0;
+
+  function Tree() {
+    // Inline arrow — a NEW function reference every render. This is
+    // exactly what a consumer who passes `(isLatest) => doStuff(...)`
+    // to the hook will produce.
+    useVisibilityPolling(
+      (isLatest) => refreshProp(isLatest),
+      opts?.intervalMs ?? 5000,
+      opts?.onError,
+    );
     useEffect(() => {
       harness.rerenders += 1;
     });
     return null;
   }
-  let currentTick = 0;
-  const { rerender } = render(<Tree tick={currentTick} />);
-  (harness as { rerender: () => void }).rerender = () => {
-    currentTick += 1;
-    rerender(<Tree tick={currentTick} />);
+
+  let rendered: RenderResult | null = null;
+  act(() => {
+    rendered = render(<Tree />);
+  });
+
+  harness.rerender = () => {
+    tick += 1;
+    // NO `key` change — we WANT React to preserve the component
+    // instance across rerenders so the hook's effect stays mounted.
+    // A `key` change would force unmount + remount, which would re-arm
+    // the interval — exactly what we're trying to prove DOESN'T happen.
+    act(() => {
+      rendered!.rerender(<Tree />);
+    });
   };
-  return harness;
+
+  return Object.assign(harness, { getRerender: () => harness.rerender });
 }
 
 describe("useVisibilityPolling", () => {
@@ -84,8 +126,8 @@ describe("useVisibilityPolling", () => {
     setDocumentHidden(false);
     const refresh = vi.fn().mockResolvedValue(undefined);
     mountHook(refresh);
-    // Mount handler fires the initial refresh synchronously inside the
-    // effect; one microtask hop covers `Promise.resolve(undefined)`.
+    // Initial refresh fires synchronously inside the effect; one
+    // microtask hop covers the `Promise.resolve(undefined)`.
     await act(async () => {
       await Promise.resolve();
     });
@@ -96,7 +138,6 @@ describe("useVisibilityPolling", () => {
     setDocumentHidden(true);
     const refresh = vi.fn().mockResolvedValue(undefined);
     mountHook(refresh);
-    // Even after 15s of fake time, no refresh should fire.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15000);
     });
@@ -119,7 +160,7 @@ describe("useVisibilityPolling", () => {
     });
     expect(refresh).toHaveBeenCalledTimes(1);
 
-    // Subsequent tick fires another.
+    // Subsequent tick fires another refresh.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
@@ -129,7 +170,7 @@ describe("useVisibilityPolling", () => {
   it("stops polling again on becoming hidden and skips the next tick", async () => {
     setDocumentHidden(false);
     const refresh = vi.fn().mockResolvedValue(undefined);
-    mountHook(refresh);
+    const harness = mountHook(refresh);
     await act(async () => {
       await Promise.resolve();
     });
@@ -145,74 +186,131 @@ describe("useVisibilityPolling", () => {
       await vi.advanceTimersByTimeAsync(15000);
     });
     expect(refresh).toHaveBeenCalledTimes(beforeHide);
+    // sanity: harness was kept around so we can rerender etc.
+    expect(harness.rerenders).toBeGreaterThan(0);
   });
 
-  it("stays stable across callback-identity churn", async () => {
+  it("fires refresh on the online event (network-return race)", async () => {
+    // Network return can race ahead of foreground resume (the OS may
+    // restore connectivity before the user re-focuses). Mirror the
+    // `useWsEvents` precedent — `online` triggers a refresh
+    // unconditionally.
     setDocumentHidden(false);
     const refresh = vi.fn().mockResolvedValue(undefined);
-    const harness = mountHook(refresh);
-    const initialRerenders = harness.rerenders;
-    // Re-render the host component several times with a "new" callback
-    // identity (a different arrow invoked with the same body each
-    // render — vitest can't tell it's the same function, but the
-    // effect should still NOT tear down and rebuild because the deps
-    // array only mentions intervalMs).
-    for (let i = 0; i < 5; i += 1) {
-      await act(async () => {
-        (harness as { rerender: () => void }).rerender();
-      });
-    }
-    // Rerenders happened — but the effect (and the interval) should
-    // NOT have been re-armed: a fresh refresh per rerender would be
-    // a bug. Sanity-bound: initial rerenders + 5 forced ones.
-    expect(harness.rerenders).toBeGreaterThan(initialRerenders);
-
-    // Drive time: only the ONE interval that the hook armed on mount
-    // should fire. If the effect churned, this counter would tick up
-    // proportional to the rerender count.
-    const callsBeforeTick = refresh.mock.calls.length;
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5000);
-    });
-    const callsAfterTick = refresh.mock.calls.length;
-    // Exactly one tick fired in the 5s window.
-    expect(callsAfterTick - callsBeforeTick).toBe(1);
-  });
-
-  it("drops a new refresh while a previous one is still in flight", async () => {
-    setDocumentHidden(false);
-    let resolveFirst!: () => void;
-    const firstCall = new Promise<void>((r) => {
-      resolveFirst = r;
-    });
-    const refresh = vi
-      .fn()
-      .mockImplementationOnce(() => firstCall)
-      .mockImplementation(() => Promise.resolve());
     mountHook(refresh);
     await act(async () => {
       await Promise.resolve();
     });
-    // The mount fired the first refresh (which is still pending). Now
-    // flip hidden then visible: the resume handler's immediate
-    // refresh should be dropped (in-flight guard), and the callback
-    // counter should NOT bump.
-    const beforeFlip = refresh.mock.calls.length;
-    setDocumentHidden(true);
+    expect(refresh).toHaveBeenCalledTimes(1);
+
     await act(async () => {
-      document.dispatchEvent(new Event("visibilitychange"));
-    });
-    setDocumentHidden(false);
-    await act(async () => {
-      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("online"));
       await Promise.resolve();
     });
-    expect(refresh.mock.calls.length).toBe(beforeFlip);
+    expect(refresh.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
 
-    // Releasing the first call lets the in-flight guard clear without
-    // re-entering the visibility handler.
+  it("stays stable across callback-identity churn (real new closure per render)", async () => {
+    // The previous version of this test passed the SAME `refresh`
+    // reference across renders, which proved nothing — the hook could
+    // have been re-arming on every render and the test wouldn't have
+    // noticed. Here every render passes a fresh inline arrow (see
+    // mountHook's Tree), so the only thing keeping the interval
+    // alive is the `[intervalMs]`-only dep array.
+    setDocumentHidden(false);
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const harness = mountHook(refresh);
     await act(async () => {
-      resolveFirst();
+      await Promise.resolve();
+    });
+    const initialRerenders = harness.rerenders;
+
+    for (let i = 0; i < 5; i += 1) {
+      harness.rerender();
+    }
+    expect(harness.rerenders).toBeGreaterThan(initialRerenders);
+
+    // Advance 5s — exactly ONE tick should fire. If the effect churned
+    // on each rerender, this counter would tick up proportional to
+    // the rerender count.
+    const beforeTick = refresh.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    const afterTick = refresh.mock.calls.length;
+    expect(afterTick - beforeTick).toBe(1);
+  });
+
+  it("routes refresh rejections to onError (no unhandledrejection)", async () => {
+    // A bare `setTimeout`-callback Promise has no implicit handler, so
+    // a rejecting refresh would bubble to window.onunhandledrejection
+    // without this. Track that too — vi's unhandled-rejection
+    // listener should NOT fire across the test.
+    setDocumentHidden(false);
+    const rejection = new Error("network down");
+    const refresh = vi.fn().mockRejectedValue(rejection);
+    const onError = vi.fn();
+    const unhandled = vi.fn();
+    const onUnhandled = (e: PromiseRejectionEvent) => {
+      unhandled(e.reason);
+      e.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+
+    try {
+      mountHook(refresh, { onError });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(onError).toHaveBeenCalledWith(rejection);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    }
+  });
+
+  it("the sequence token: old refresh's isLatest() returns false once a newer one starts", async () => {
+    // This is the hung-during-mobile-suspend case. Refresh1 hangs,
+    // user foregrounds → Refresh2 starts. Refresh2's
+    // `isLatest() === true`; Refresh1's `isLatest() === false`.
+    // Caller (NodeList) checks `isLatest()` before setState and
+    // bails — the old fetch's eventual resolution is dropped, no
+    // stale-data clobber.
+    setDocumentHidden(false);
+    let firstResolve!: () => void;
+    const firstCall = new Promise<void>((r) => {
+      firstResolve = r;
+    });
+    const captured: Array<() => boolean> = [];
+    const refresh = vi.fn().mockImplementation((isLatest) => {
+      captured.push(isLatest);
+      return captured.length === 1 ? firstCall : Promise.resolve();
+    });
+
+    mountHook(refresh);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(captured.length).toBeGreaterThanOrEqual(1);
+    const firstIsLatest = captured[0];
+    expect(firstIsLatest()).toBe(true);
+
+    // Fire another refresh via online — increments the token.
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await Promise.resolve();
+    });
+
+    expect(captured.length).toBeGreaterThanOrEqual(2);
+    // The OLD refresh's predicate now reports stale.
+    expect(firstIsLatest()).toBe(false);
+    // The NEW refresh's predicate reports current.
+    expect(captured[captured.length - 1]()).toBe(true);
+
+    // Cleanup: resolve the hung promise so the test doesn't leak.
+    await act(async () => {
+      firstResolve();
     });
   });
 });
