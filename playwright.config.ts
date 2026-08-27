@@ -14,6 +14,11 @@ export default defineConfig({
   // Declared once at the top level instead of duplicated under every
   // project (Playwright applies top-level `webServer` to all projects
   // — both `chromium` and `verify-smoke` need Vite on :1420).
+  //
+  // NOTE: `webServer` lives on TestConfig (not TestProject), so a
+  // previous version of this config declared it inside `projects[]`
+  // and it was silently dropped — Playwright errored at `page.goto('/')`
+  // with `ERR_CONNECTION_REFUSED`. Issue #1257 caught and fixed it.
   webServer: {
     command: 'npm run dev',
     url: 'http://localhost:1420',

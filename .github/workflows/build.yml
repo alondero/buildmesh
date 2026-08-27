@@ -70,8 +70,16 @@ jobs:
       - name: Typecheck frontend + build mobile bundle
         run: npx tsc --noEmit && npm run build:mobile
 
-      - name: Run vitest unit suite (scripts/check.ps1 unit logic, Linux-portable)
-        run: npx vitest run --pool=threads tests/unit
+      # Single invocation runs both unit and integration suites in the
+      # same vitest worker-pool boot (cheaper than two separate calls
+      # which each start node + transform every module twice). Issue #1257
+      # — --pool=threads is required; the default forks pool silently
+      # times out inside CI's container and reports PASS(0) FAIL(0) exit
+      # 0, the same false-green we hit in worktrees. Tests scope is
+      # explicit (no `vitest run` default) so a new suite dir can't sneak
+      # in.
+      - name: Run vitest test suite (unit + integration)
+        run: npx vitest run --pool=threads tests/unit tests/integration
 
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.
@@ -122,6 +130,65 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: cargo test --locked pinned_codex_cli_loads_profile_for_fresh_and_resume -- --ignored
         working-directory: src-tauri
+
+  # Issue #1257 — the Playwright verify-smoke spec (issue #157) was
+  # designed to run WITHOUT a Rust compile — it boots just Vite and
+  # installs a JS-side Tauri mock before any app module evaluates.
+  # Previously this CI never ran it, so the receiver-binding regression
+  # class (#149 — bytes emitted but never reach xterm.js) had no
+  # pre-merge gate. The job installs Chromium, runs only the
+  # `verify-smoke` Playwright project, and stays well under 5 minutes.
+  # Intentionally does NOT `needs: quality` — verify-smoke is a
+  # lightweight frontend test with a mock backend; gating it on the
+  # ~10-minute quality job destroys the fast feedback loop for a
+  # nothing-in-common dependency. It also doesn't gate `platform-smoke`
+  # (the chromium project is far slower, depends on a running
+  # buildmesh.exe, and stays a separate local-only contract per
+  # CLAUDE.local.md).
+  verify-smoke:
+    name: Verify-smoke (Linux)
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Issue #157 — verify-smoke installs Chromium with its system
+      # dependencies (libnss3, libatk-bridge2.0-0, etc.) so the headless
+      # browser can render xterm.js + the React app. --with-deps is a
+      # no-op on hosts that already have the libs.
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      # The Playwright config's top-level `webServer` (see
+      # playwright.config.ts) boots `npm run dev` (just Vite) and waits
+      # for :1420 to be reachable before running the spec, so no manual
+      # dev-server start is needed here. `--project=verify-smoke`
+      # excludes the chromium project which would need a real
+      # buildmesh.exe on :1991.
+      - name: Run verify-smoke Playwright project
+        run: npx playwright test --project=verify-smoke --reporter=line
+
+      # Surface trace + test-results on failure. `--reporter=line`
+      # intentionally hides what happened; without this artifact a
+      # red CI run leaves zero visibility into the spec failure.
+      - name: Upload Playwright report / trace
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-verify-smoke-report
+          path: test-results/
+          retention-days: 7
 
   platform-smoke:
     name: Platform smoke (${{ matrix.os }})

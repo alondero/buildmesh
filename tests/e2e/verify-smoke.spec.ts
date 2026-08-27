@@ -6,14 +6,24 @@
  * receiver-binding bug from #149 slip through: the spawn log line says
  * "process spawned successfully" but xterm.js never receives bytes, and
  * the strict log scan (which only fires on ` ERROR ` / `panic`) misses
- * it. This spec asserts on the rendered DOM instead.
+ * it. This spec asserts on xterm's buffer model instead.
  *
  * Pipeline under test:
  *   backend `app.emit('agent-output', payload)`
  *     -> frontend `listen('agent-output')` (TerminalRegistry.ts:275)
  *     -> writer.append(nodeId, data) -> TerminalWriter schedules via this.scheduler
  *     -> scheduler calls term.write(data)  (NOT a no-op: #149 fix wraps rAF in an arrow)
- *     -> xterm DOM: `.xterm` -> `.xterm-rows > div` (rendered text)
+ *     -> xterm buffer: term.buffer.active.getLine(y).translateToString(true)
+ *        (read by the spec via expect.poll below)
+ *
+ * Why read the buffer model instead of the DOM? xterm.js has two
+ * renderers. The DOM renderer creates an accessibility mirror at
+ * `.xterm-rows > div` that older specs asserted against. The WebGL
+ * renderer (default since issue #1122) draws to <canvas> and never
+ * builds `.xterm-rows > div`, so the DOM-only check silently flips red
+ * on every host that successfully loads WebGL — which is most of them.
+ * The buffer model is the same regardless of renderer, and it's what
+ * xterm's own integration tests use.
  *
  * Why a Tauri mock (scripts/ui-mock/tauri-mock.mjs) instead of a real backend:
  *   - #149 lives in the frontend's TerminalWriter scheduler binding. The
@@ -32,8 +42,8 @@
  *   2. Reverting #149 (the `requestAnimationFrame` scheduler wrap at
  *      TerminalWriter.ts) causes `this.scheduler(cb)` to throw "Illegal
  *      invocation" inside Chromium; the Tauri listener swallows it and
- *      bytes never reach xterm.js — assertion fails because
- *      `.xterm-rows > div` textContent stays empty.
+ *      bytes never reach xterm.js — the buffer model stays empty and
+ *      the assertion fails.
  *   3. /verify's full tier documents and runs this spec standalone.
  *
  * Run standalone: `npx playwright test --project=verify-smoke`
@@ -141,55 +151,72 @@ async function pushAgentOutput(page: Page, nodeId: number, lines: string[]) {
 }
 
 /**
- * Asserts that at least one rendered row in the node's xterm has
- * non-empty text content. We read textContent rather than scrape canvas
- * pixels: xterm.js renders to <canvas> AND keeps the accessibility
- * mirror in `.xterm-rows > div`; canvas scraping is brittle (font
- * fallback varies across hosts) while the mirror is what every TUI
- * integration test reads (see src/mobile/screens/attachTouchPan.ts:19
- * — same `.xterm-rows > *` selector for row height measurement).
+ * Asserts that at least one row in the node's xterm buffer has non-empty
+ * text content. Reads xterm's renderer-agnostic internal buffer model
+ * (`term.buffer.active.getLine(y).translateToString(true)`) via
+ * `window.__terminalManager`, which is what xterm's own integration
+ * tests use.
  *
- * Row textContent is read in a single browser-context `evaluate` per
- * poll tick rather than N Playwright IPC calls — N×interval latency
- * otherwise makes 10 s timeouts racy on slower hosts. Returns the
- * captured counts so the test body can assert on them without
- * re-evaluating.
+ * Earlier versions read the DOM accessibility mirror at
+ * `.xterm-rows > div`. That selector only works under xterm's DOM
+ * renderer — the WebGL renderer (default since issue #1122) draws to
+ * <canvas> and never builds the mirror, so the assertion silently
+ * flipped red on every host that successfully loaded WebGL (which is
+ * most of them). Reading the buffer model is the same regardless of
+ * renderer, and that's the invariant the issue #149 regression
+ * breaks (bytes never reach `term.write`).
+ *
+ * Polling is delegated to `expect.poll`, which retries on thrown
+ * errors and exposes the timeout message in the failure diff. The
+ * inner `evaluate` returns a primitive number (non-empty row count)
+ * rather than a string[] snapshot — moving large arrays across CDP
+ * every tick was wasted bandwidth and the second `translateToString`
+ * call inside Playwright added an unnecessary IPC roundtrip per row.
  */
-async function assertXtermHasRenderedBytes(page: Page, nodeId: number, timeoutMs = 10000): Promise<{ rowCount: number; nonEmpty: number }> {
+async function assertXtermHasRenderedBytes(page: Page, nodeId: number, timeoutMs = 10000) {
   const container = page.locator(`[data-node-id="${nodeId}"]`);
   await expect(container, `AgentTerminal container for node ${nodeId} should mount`).toBeVisible({ timeout: 10000 });
 
   const xterm = container.locator('.xterm');
   await expect(xterm, `xterm should attach inside the AgentTerminal container`).toBeVisible({ timeout: 10000 });
 
-  // Throwing inside the poll fn is the documented way to signal
-  // "not yet, retry" — expect.poll retries on thrown errors and
-  // surfaces the `message` we pass on timeout.
-  const captured: { rowCount: number; nonEmpty: number } = { rowCount: 0, nonEmpty: 0 };
   await expect.poll(
     async () => {
-      const counts = await xterm.locator('.xterm-rows').evaluate((el) => {
-        const lines = Array.from(el.children).map(c => c.textContent?.trim() ?? '');
-        return { rowCount: lines.length, nonEmpty: lines.filter(l => l.length > 0).length };
-      });
-      if (counts.nonEmpty === 0) {
-        throw new Error('xterm-rows has no non-empty text yet');
-      }
-      captured.rowCount = counts.rowCount;
-      captured.nonEmpty = counts.nonEmpty;
-      return counts;
+      // Returns 0 when the terminal hasn't mounted yet so expect.poll
+      // keeps retrying instead of throwing an uncaught "Terminal not
+      // mounted" rejection that would crash the polling loop on
+      // legitimate async-mount races.
+      return await page.evaluate((id) => {
+        const term = (window as unknown as {
+          __terminalManager?: {
+            getTerminal(nodeId: number): {
+              buffer: {
+                active: {
+                  length: number;
+                  getLine(y: number): { translateToString(trim?: boolean): string } | undefined;
+                };
+              };
+            } | undefined;
+          };
+        }).__terminalManager?.getTerminal(id);
+        if (!term) return 0;
+        let nonEmpty = 0;
+        for (let y = 0; y < term.buffer.active.length; y++) {
+          const line = term.buffer.active.getLine(y);
+          if (line && line.translateToString(true).trim().length > 0) nonEmpty++;
+        }
+        return nonEmpty;
+      }, nodeId);
     },
     {
       timeout: timeoutMs,
       intervals: [100, 200, 500],
       message:
-        `xterm for node ${nodeId} should render at least one row with non-empty textContent. ` +
-        `PTY->xterm pipeline did not deliver bytes — likely the agent-output listener wrapper is ` +
-        `throwing (issue #149 regression: a bare requestAnimationFrame stored on TerminalWriter ` +
-        `loses its window receiver).`,
+        `PTY->xterm pipeline did not deliver bytes to xterm buffer (node ${nodeId}). ` +
+        `Likely the agent-output listener wrapper is throwing (issue #149 regression: ` +
+        `a bare requestAnimationFrame stored on TerminalWriter loses its window receiver).`,
     },
-  );
-  return captured;
+  ).toBeGreaterThan(0);
 }
 
 test.describe('verify-smoke (issue #157)', () => {
@@ -244,9 +271,9 @@ test.describe('verify-smoke (issue #157)', () => {
     ]);
 
     // The actual assertion (issue spec step 4): xterm mounted AND at
-    // least one rendered row has non-empty textContent.
-    const counts = await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
-    expect(counts.rowCount, 'xterm should render rows').toBeGreaterThan(0);
-    expect(counts.nonEmpty, 'at least one rendered row should have non-empty textContent').toBeGreaterThan(0);
+    // least one row in the active buffer has non-empty text — read via
+    // the renderer-agnostic buffer model so this works under both xterm
+    // renderers (DOM and WebGL).
+    await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
   });
 });
