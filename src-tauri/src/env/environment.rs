@@ -354,3 +354,60 @@ pub(crate) fn codex_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<P
         }
     }
 }
+
+/// The Antigravity CLI home directory, mirroring [`claude_dir`]. AGY stores
+/// its config under `<home>/.gemini/antigravity-cli/` and its session
+/// transcripts under `<home>/.gemini/antigravity-cli/brain/<conversation-id>/
+/// .system_generated/logs/transcript.jsonl` (issue #1283). Unlike Claude
+/// Code / Cursor this is *globally* keyed — not project-scoped — so the
+/// transcript reader and the AGY session scanner walk the brain dir directly.
+///
+/// Honours a `GEMINI_HOME` / `ANTIGRAVITY_HOME` override (checked in that
+/// order) so a user who relocates the gemini tree keeps their transcripts
+/// reachable; falls through to `~/.gemini/antigravity-cli` under the current
+/// environment.
+pub fn agy_dir() -> PathBuf {
+    if let Ok(home) = env::var("GEMINI_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home).join("antigravity-cli");
+        }
+    }
+    if let Ok(home) = env::var("ANTIGRAVITY_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    match current_env() {
+        Environment::Wsl => {
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home)
+                    .join(".gemini")
+                    .join("antigravity-cli")
+            } else {
+                PathBuf::from("/root/.gemini/antigravity-cli")
+            }
+        }
+        Environment::Windows => {
+            if let Ok(home) = env::var("USERPROFILE") {
+                PathBuf::from(home)
+                    .join(".gemini")
+                    .join("antigravity-cli")
+            } else if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home)
+                    .join(".gemini")
+                    .join("antigravity-cli")
+            } else {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}\\.gemini\\antigravity-cli"))
+            }
+        }
+    }
+}
+
+/// The AGY "brain" directory that holds one subdirectory per conversation.
+/// Sessions live at `<brain>/<conversation-id>/.system_generated/logs/
+/// transcript.jsonl` (issue #1283) — globally keyed, so this is the single
+/// shared root every AGY session scanner and the transcript reader consult.
+pub fn agy_brain_dir() -> PathBuf {
+    agy_dir().join("brain")
+}

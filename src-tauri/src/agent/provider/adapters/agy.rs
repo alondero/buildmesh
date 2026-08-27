@@ -30,6 +30,16 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
+    fn produces_readable_transcript(&self) -> bool {
+        // Issue #1283: AGY writes per-conversation JSONL under
+        // `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
+        // logs/transcript.jsonl`. `services::transcript_reader` knows the
+        // shape (`TranscriptFormat::Agy`), so the Node Digest rich layer,
+        // the `read_last_assistant_message` cheap digest, and the
+        // archived-node resume picker all hydrate AGY sessions.
+        true
+    }
+
     fn auto_resume_on_startup(&self) -> bool {
         true
     }
