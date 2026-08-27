@@ -1,5 +1,6 @@
 import { formatError } from '../../lib/errorUtils';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import QRCode from 'qrcode';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import * as api from '../../lib/tauri';
@@ -97,6 +98,13 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // "Copied!" feedback for the cert path copy button. Mirrors the
   // AppSettingsModal.tsx:670 clipboard pattern (2s timeout).
   const [certPathCopied, setCertPathCopied] = useState(false);
+  // Issue #1251: the auto-clear setTimeout must be cancellable from
+  // the unmount cleanup, otherwise a close inside the 2s feedback
+  // window lands `setCertPathCopied(false)` on an unmounted component.
+  // `useRef` keeps the handle stable across renders without triggering
+  // a re-render when we mutate `.current`. Mirrors the
+  // `successTimerRef` pattern in `WorktreeManagerTab.tsx:367-374`.
+  const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 'connect' is the default — modal opens for the common case. Tabs
   // let each QR render at full modal width so a phone can scan from
   // across the room; a side-by-side layout made both QRs too small.
@@ -106,7 +114,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
     'connect',
   );
 
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     const init = async () => {
       try {
         // These reads are independent — dispatch them together rather than
@@ -122,6 +130,13 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
           api.getLocalIp().catch(() => '192.168.1.x'),
           api.getCertChainStatus().catch(() => null),
         ]);
+        // Issue #1251: a fast close (user opens + immediately dismisses
+        // the modal) aborts the signal before any of the IPC promises
+        // resolve. Skip every setState below — the component is gone
+        // and React 19 would silently drop them, but the closures
+        // (`buildRemoteAccessUrl`, `QRCode.toDataURL`, …) would still
+        // run, holding React internals + IPC mocks alive for nothing.
+        if (signal.aborted) return;
 
         const { url, host: displayHost, reachable } = buildRemoteAccessUrl(
           status,
@@ -189,6 +204,11 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
               }),
             ),
         ]);
+        // Issue #1251: the QR-generation chain runs to completion
+        // regardless (the `qrcode` library has no abort handle), so
+        // the modal may have unmounted during the wait. Drop the
+        // results instead of setState'ing on a dead component.
+        if (signal.aborted) return;
         if (connectResult.status === 'fulfilled') {
           setQrDataUrl(connectResult.value);
         } else {
@@ -210,10 +230,27 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // rejection here just hides it — the user keeps the connect
         // and Android paths.
       } catch (e) {
+        // Issue #1251: don't setError on a dead component — the modal
+        // closed mid-fetch and the user already moved on.
+        if (signal.aborted) return;
         setError(formatError(e));
       }
     };
     init();
+  }, []);
+
+  // Issue #1251: clear the copy-feedback timer on unmount so a late
+  // `setCertPathCopied(false)` cannot land on an unmounted tree (e.g.
+  // user copies the cert path, then closes the modal within 2s).
+  // Mirror the `WorktreeManagerTab.tsx:367-374` pattern: a dedicated
+  // effect with an empty dep list and the cleanup in the return.
+  useEffect(() => {
+    return () => {
+      if (copyFeedbackTimerRef.current !== null) {
+        clearTimeout(copyFeedbackTimerRef.current);
+        copyFeedbackTimerRef.current = null;
+      }
+    };
   }, []);
 
   const handleCopyCertPath = async () => {
@@ -227,7 +264,20 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
     try {
       await navigator.clipboard.writeText(path);
       setCertPathCopied(true);
-      setTimeout(() => setCertPathCopied(false), 2000);
+      // Issue #1251: stash the handle in a ref so the unmount cleanup
+      // can cancel it. The previous bare `setTimeout` had no way to be
+      // cleared — closing the modal inside the 2s feedback window left
+      // the callback to fire `setCertPathCopied(false)` on a dead
+      // component. We also clear any in-flight previous timer so a
+      // second Copy click inside the 2s window restarts the countdown
+      // instead of double-firing the auto-clear.
+      if (copyFeedbackTimerRef.current !== null) {
+        clearTimeout(copyFeedbackTimerRef.current);
+      }
+      copyFeedbackTimerRef.current = setTimeout(() => {
+        setCertPathCopied(false);
+        copyFeedbackTimerRef.current = null;
+      }, 2000);
     } catch {
       // jsdom in tests + some browsers without clipboard permission reject.
       // The fingerprint text below is still copyable manually, so this is
