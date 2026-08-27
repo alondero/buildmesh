@@ -28,11 +28,30 @@ const MAX_HOOK_BODY: usize = 64 * 1024;
 /// fields are ignored; every field is optional so an empty or legacy body
 /// (`{}` or nothing at all) degrades to the pre-#878 behaviour of always
 /// marking attention.
+///
+/// Grok Code's HTTP hook (`~/.grok/docs/user-guide/10-hooks.md`, issue
+/// #1282) POSTs the same envelope shape but with camelCase top-level
+/// keys (`sessionId`, `hookEventName`) — and adds a separate
+/// `notificationType` field on `Notification` events (`idle_prompt`,
+/// `permission_prompt`, `task_complete`, …). The `#[serde(alias)]`
+/// attributes accept either casing so the same parser handles Claude
+/// and Grok payloads.
 #[derive(serde::Deserialize, Default)]
 struct HookPayload {
+    #[serde(alias = "sessionId")]
     session_id: Option<String>,
+    #[serde(alias = "hookEventName")]
     hook_event_name: Option<String>,
+    #[serde(alias = "transcriptPath")]
     transcript_path: Option<String>,
+    /// Grok's structured notification type on `Notification` events
+    /// (`permission_prompt`, `idle_prompt`, `task_complete`, …). The
+    /// Grok docs note the matcher tests this field — we use it as a
+    /// belt-and-braces parallel to Claude's `message`-substring check.
+    /// Accepts both the wire camelCase (`notificationType`) and the
+    /// grok-agent-sdk snake_case (`notification_type`).
+    #[serde(alias = "notificationType", alias = "notification_type")]
+    notification_type: Option<String>,
     /// Notification hooks carry the human-readable notification text, e.g.
     /// "Claude needs your permission to use Bash".
     message: Option<String>,
@@ -65,13 +84,19 @@ enum Decision {
 /// 1. Unparseable/absent body → `Mark` (pre-#878 behaviour; old hook configs
 ///    that post no body keep working until the next spawn migrates them).
 /// 2. A permission-prompt Notification (Claude Code) or a `PermissionRequest`
-///    event (Codex's dedicated hook for tool approval, issue #884) → `Mark`
-///    always. The agent is blocked on a tool-approval decision — that needs
-///    the user even while background tasks run.
+///    event (Codex's dedicated hook for tool approval, issue #884), or a
+///    Grok `Notification` with `notificationType == "permission_prompt"`
+///    (issue #1282) → `Mark` always. The agent is blocked on a tool-approval
+///    decision — that needs the user even while background tasks run.
 /// 3. Anything else (Stop, idle Notification) with launched-but-unfinished
 ///    background tasks in the transcript → `SuppressPendingBackground`.
 /// 4. No transcript path, unreadable transcript, or no pending tasks → `Mark`.
 ///    "Unknown" must never read as "no attention needed".
+///
+/// Grok's wire form has no `transcript_path` (the transcript reader is
+/// #1281, out of scope), so every Grok payload falls through to step 4
+/// and marks — which is the correct behaviour for a Node Turn signal we
+/// have no transcript to disambiguate.
 fn decide(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> Decision {
     let Ok(payload) = serde_json::from_slice::<HookPayload>(body) else {
         return Decision::Mark;
@@ -79,13 +104,22 @@ fn decide(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> De
     if payload.hook_event_name.as_deref() == Some("PermissionRequest") {
         return Decision::Mark;
     }
-    if payload.hook_event_name.as_deref() == Some("Notification")
-        && payload
+    if payload.hook_event_name.as_deref() == Some("Notification") {
+        // Claude Code: human-readable message contains "permission".
+        if payload
             .message
             .as_deref()
             .is_some_and(|m| m.to_ascii_lowercase().contains("permission"))
-    {
-        return Decision::Mark;
+        {
+            return Decision::Mark;
+        }
+        // Grok Code (issue #1282): structured notificationType =
+        // "permission_prompt". A matcher on the wire might catch it
+        // before us, but the runner POSTs the envelope unconditionally
+        // for every matched hook entry — we still see the callback.
+        if payload.notification_type.as_deref() == Some("permission_prompt") {
+            return Decision::Mark;
+        }
     }
     let Some(transcript_path) = payload.transcript_path.filter(|p| !p.is_empty()) else {
         return Decision::Mark;
@@ -292,5 +326,102 @@ mod tests {
             decide(&body, |_| Some(1)),
             Decision::SuppressPendingBackground
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Grok Code (issue #1282) — camelCase wire, no transcript_path,
+    // Notification carries structured `notificationType`.
+    // -----------------------------------------------------------------
+
+    /// Grok's permission prompt: the matcher fires `Notification` with
+    /// `notificationType = "permission_prompt"`. We mark the node
+    /// regardless of any background-task count (defensive — Grok has
+    /// no transcript reader yet, so the closure is unused, but
+    /// keeping the signature uniform guards against a future
+    /// transcript reader silently swallowing the permission yield).
+    #[test]
+    fn grok_notification_with_permission_type_marks() {
+        let body = serde_json::json!({
+            "hookEventName": "notification",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "cwd": "/Users/you/project",
+            "workspaceRoot": "/Users/you/project",
+            "notificationType": "permission_prompt",
+            "message": "Grok needs your permission to run Bash",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+    }
+
+    /// Grok's idle prompt (`notificationType = "idle_prompt"`) carries
+    /// no transcript path, so it falls through to Mark — the right
+    /// outcome for a Node Turn signal we have no transcript scan to
+    /// disambiguate.
+    #[test]
+    fn grok_idle_notification_marks_without_transcript() {
+        let body = serde_json::json!({
+            "hookEventName": "notification",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "notificationType": "idle_prompt",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+    }
+
+    /// Grok's `Stop` event is a Node Turn — Mark. The runner treats
+    /// the route's empty 200 OK as "allow the stop" (we never return
+    /// a `decision: "block"` JSON), so the agent doesn't loop on the
+    /// gate, but the node still flips to awaiting_input.
+    #[test]
+    fn grok_stop_event_marks() {
+        let body = serde_json::json!({
+            "hookEventName": "stop",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "stopHookActive": false,
+            "lastAssistantMessage": "Done.",
+            "reason": "end_turn",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(decide(&body, |_| Some(0)), Decision::Mark);
+    }
+
+    /// The payload parser accepts Grok's camelCase `sessionId` and
+    /// canonicalises it to the same UUID string Claude payloads do.
+    /// `hook_session_id` is the only consumer of the field on the
+    /// session-id side of the route — both casings must round-trip.
+    #[test]
+    fn hook_payload_reads_camel_case_session_id() {
+        let body = serde_json::json!({
+            "hookEventName": "notification",
+            "sessionId": "550E8400-E29B-41D4-A716-446655440000",
+            "notificationType": "idle_prompt",
+        })
+        .to_string();
+        assert_eq!(
+            hook_session_id(body.as_bytes()).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    /// Grok wires `notificationType` as a separate field, distinct
+    /// from Claude's message-substring convention — both styles must
+    /// classify as a permission yield so a hook that emits either
+    /// shape gets marked.
+    #[test]
+    fn grok_notification_type_via_snake_case_alias_also_marks() {
+        // The grok-agent-sdk converts camelCase top-level keys to
+        // snake_case — accept both so the same parser handles both
+        // delivery surfaces.
+        let body = serde_json::json!({
+            "hook_event_name": "Notification",
+            "session_id": "550e8400-e29b-41d4-a716-446655440000",
+            "notification_type": "permission_prompt",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
     }
 }
