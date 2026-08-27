@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { ProviderErrorPayload } from './types/generated/ProviderErrorPayload';
 import type { ResumeFailedPayload } from './types/generated/ResumeFailedPayload';
@@ -9,8 +9,7 @@ import type { AutopilotPrCreatedPayload } from './types/generated/AutopilotPrCre
 import type { AutopilotFinishFailedPayload } from './types/generated/AutopilotFinishFailedPayload';
 import type { AutopilotSubmittedPayload } from './types/generated/AutopilotSubmittedPayload';
 import type { AutopilotNodeClosedPayload } from './types/generated/AutopilotNodeClosedPayload';
-import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { TitleBar } from './components/TitleBar/TitleBar';
 import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
@@ -73,9 +72,6 @@ function App() {
   // the grid. Same mount/unmount discipline as WorktreeCloseDialog.
   const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
 
-  // Track window focus state for conditional shortcut handling
-  const isFocusedRef = useRef(false);
-
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
 
@@ -93,103 +89,51 @@ function App() {
   // Snap / tmux prefix+Arrow / i3 / VS Code "Move Editor Group" precedent
   // for pane navigation and collides with nothing.
   // Alt+G (Win/Linux) / Cmd+G (macOS) toggles grid ↔ single-view (issue #668).
-  useEffect(() => {
-    // Tauri 2's global-shortcut plugin doesn't expose an `AltOrCommand`
-    // combinator (only `CommandOrControl`, which means Cmd on Mac and Ctrl
-    // elsewhere). Issue #668 explicitly wants `Alt+G` on Windows/Linux —
-    // the mnemonic "G for Grid" — and `Cmd+G` on macOS. So we register
-    // the platform-appropriate binding only, branched on `isMac`. The
-    // handler below is platform-agnostic: same action, same store calls.
-    const gridToggleShortcut = isMac
-      ? { key: 'CommandOrControl+G', action: 'toggle-maximize-grid' as const }
-      : { key: 'Alt+G', action: 'toggle-maximize-grid' as const };
+  // The focus-tracking + register/unregister bookkeeping is owned by
+  // `useGlobalShortcuts` (issue #1249); it papers over the StrictMode
+  // mount→unmount→mount races that the previous inline effect hit
+  // (focus listener leak + stranded shortcut bindings).
+  //
+  // Tauri 2's global-shortcut plugin doesn't expose an `AltOrCommand`
+  // combinator (only `CommandOrControl`, which means Cmd on Mac and Ctrl
+  // elsewhere). Issue #668 explicitly wants `Alt+G` on Windows/Linux —
+  // the mnemonic "G for Grid" — and `Cmd+G` on macOS. So we register
+  // the platform-appropriate binding only, branched on `isMac`. The
+  // handler below is platform-agnostic: same action, same store calls.
+  const gridToggleShortcut = isMac
+    ? { key: 'CommandOrControl+G', action: 'toggle-maximize-grid' as const }
+    : { key: 'Alt+G', action: 'toggle-maximize-grid' as const };
 
-    const shortcuts = [
-      { key: 'CommandOrControl+T', action: 'new-agent' },
-      { key: 'CommandOrControl+Alt+ArrowLeft', action: 'arrow-left' },
-      { key: 'CommandOrControl+Alt+ArrowRight', action: 'arrow-right' },
-      { key: 'CommandOrControl+Alt+ArrowUp', action: 'arrow-up' },
-      { key: 'CommandOrControl+Alt+ArrowDown', action: 'arrow-down' },
-      // Cycle to the next agent node with `status === 'awaiting_input'`
-      // (issue #64). Registered as a Tauri global shortcut (not a window
-      // keydown listener) so the binding fires while an xterm terminal has
-      // focus — the typical state when the user notices a node waiting for
-      // input and wants to jump to it without clicking. The cycle logic
-      // (next-after-current + wrap, scoped to the active node's mesh) lives
-      // in src/lib/awaitingInputShortcuts.ts as a pure store mutator so it
-      // can be unit-tested without standing up the plugin.
-      { key: 'CommandOrControl+Period', action: 'jump-to-next-awaiting' },
-      // Ctrl+Alt+G (Win/Linux) / Cmd+Alt+G (macOS) cycles the grid View Modes
-      // Mesh → Pinned → All (ticket #987) — the keyboard peer to the mouse-only
-      // ViewModeSwitcher. Platform-uniform `CommandOrControl+Alt+G`: it can't
-      // collide with the Single solo toggle (`Alt+G` on Win/Linux, `Cmd+G` on
-      // macOS) because it carries the extra Alt/⌥ modifier.
-      { key: 'CommandOrControl+Alt+G', action: 'cycle-grid-modes' },
-      gridToggleShortcut,
-    ];
-    const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
+  const shortcuts = [
+    { key: 'CommandOrControl+T', action: 'new-agent' },
+    { key: 'CommandOrControl+Alt+ArrowLeft', action: 'arrow-left' },
+    { key: 'CommandOrControl+Alt+ArrowRight', action: 'arrow-right' },
+    { key: 'CommandOrControl+Alt+ArrowUp', action: 'arrow-up' },
+    { key: 'CommandOrControl+Alt+ArrowDown', action: 'arrow-down' },
+    // Cycle to the next agent node with `status === 'awaiting_input'`
+    // (issue #64). Registered as a Tauri global shortcut (not a window
+    // keydown listener) so the binding fires while an xterm terminal has
+    // focus — the typical state when the user notices a node waiting for
+    // input and wants to jump to it without clicking. The cycle logic
+    // (next-after-current + wrap, scoped to the active node's mesh) lives
+    // in src/lib/awaitingInputShortcuts.ts as a pure store mutator so it
+    // can be unit-tested without standing up the plugin.
+    { key: 'CommandOrControl+Period', action: 'jump-to-next-awaiting' },
+    // Ctrl+Alt+G (Win/Linux) / Cmd+Alt+G (macOS) cycles the grid View Modes
+    // Mesh → Pinned → All (ticket #987) — the keyboard peer to the mouse-only
+    // ViewModeSwitcher. Platform-uniform `CommandOrControl+Alt+G`: it can't
+    // collide with the Single solo toggle (`Alt+G` on Win/Linux, `Cmd+G` on
+    // macOS) because it carries the extra Alt/⌥ modifier.
+    { key: 'CommandOrControl+Alt+G', action: 'cycle-grid-modes' },
+    gridToggleShortcut,
+  ];
 
-    const handleShortcut = (action: string) => {
+  useGlobalShortcuts({
+    bindings: shortcuts,
+    onTrigger: (action) => {
       window.dispatchEvent(new CustomEvent('shortcut-triggered', { detail: action }));
-    };
-
-    let unlistenFocus: (() => void) | null = null;
-
-    const setupWindowTracking = async () => {
-      const win = getCurrentWindow();
-      isFocusedRef.current = await win.isFocused();
-
-      unlistenFocus = await win.onFocusChanged(async ({ payload: focused }) => {
-        isFocusedRef.current = focused;
-
-        const ops = shortcuts.map(async ({ key }) => {
-          try {
-            if (focused) {
-              if (!(await isRegistered(key))) {
-                const action = shortcutByKey.get(key);
-                await register(key, () => {
-                  if (!isFocusedRef.current) return;
-                  if (action) handleShortcut(action);
-                });
-              }
-            } else {
-              await unregister(key);
-            }
-          } catch (e) {
-            console.warn(`Failed to update shortcut ${key} on focus change:`, e);
-          }
-        });
-        await Promise.all(ops);
-      });
-    };
-
-    const registerShortcuts = async () => {
-      const ops = shortcuts.map(async ({ key }) => {
-        try {
-          if (!(await isRegistered(key))) {
-            const action = shortcutByKey.get(key);
-            await register(key, () => {
-              if (!isFocusedRef.current) return;
-              if (action) handleShortcut(action);
-            });
-          }
-        } catch (e) {
-          console.warn(`Failed to register shortcut ${key}:`, e);
-        }
-      });
-      await Promise.all(ops);
-    };
-
-    setupWindowTracking();
-    registerShortcuts();
-
-    return () => {
-      if (unlistenFocus) unlistenFocus();
-      for (const { key } of shortcuts) {
-        unregister(key).catch(() => {});
-      }
-    };
-  }, []);
+    },
+  });
 
   // Handle shortcut events (Ctrl+T new-agent; Ctrl/Cmd+Alt+Arrow for node
   // traversal). Arrow traversal works in two phases: in Single view mode the
