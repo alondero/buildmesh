@@ -404,14 +404,6 @@ pub fn agy_dir() -> PathBuf {
     }
 }
 
-/// The AGY "brain" directory that holds one subdirectory per conversation.
-/// Sessions live at `<brain>/<conversation-id>/.system_generated/logs/
-/// transcript.jsonl` (issue #1283) — globally keyed, so this is the single
-/// shared root every AGY session scanner and the transcript reader consult.
-pub fn agy_brain_dir() -> PathBuf {
-    agy_dir().join("brain")
-}
-
 /// The Grok Code home directory, mirroring [`claude_dir`] / [`cursor_dir`].
 /// Issue #1281: Grok writes per-session directories under
 /// `<grok home>/sessions/<urlencoded-cwd>/<session-id>/`. A `GROK_HOME`

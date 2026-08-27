@@ -115,7 +115,9 @@ mod tests {
         assert!(caps.supports_effort_override);
         assert!(caps.supports_prefill);
         assert!(caps.requires_attention_hook);
-        assert!(!caps.produces_readable_transcript);
+        // Issue #1283: AGY now ships a transcript the reader parses
+        // (`TranscriptFormat::Agy`); flip from the pre-#1283 negative.
+        assert!(caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(
             caps.effort_control,

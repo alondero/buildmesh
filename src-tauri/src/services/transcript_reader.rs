@@ -2323,7 +2323,6 @@ mod tests {
 
         std::fs::remove_dir_all(&temp).ok();
     }
-}
 
     // --- Grok transcript format (issue #1281) ---
     //
@@ -2607,7 +2606,5 @@ mod tests {
             "with%20space",
             "space encodes to %20, not '+' (RFC 3986, not form-style)"
         );
-    }
-}
     }
 }
