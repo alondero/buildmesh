@@ -169,6 +169,9 @@ pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 /// direction.
 pub const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
+const STARTUP_MANUAL_RESUME_MESSAGE: &str =
+    "Automatic resume was unavailable; the harness has been started fresh so you can resume manually.";
+
 /// What the PTY reader thread's epilogue should do to the node's status
 /// after the read loop ends. Extracted as a pure decision so the
 /// deliberate-kill / early-exit / plain-terminal matrix is unit-testable
@@ -404,6 +407,9 @@ pub struct SpawnOptions {
     /// matters when the harness's capability descriptor declares effort
     /// support (otherwise the resolver mask drops it).
     pub explicit_effort: Option<String>,
+    /// Startup resume failures are recovered by relaunching the harness fresh
+    /// so its native manual-resume UI remains available.
+    pub fallback_to_fresh_after_resume_failure: bool,
 }
 
 /// Open a PTY pair using the native PTY system.
@@ -454,6 +460,17 @@ fn reader_should_capture_session_id(
     pty_capture: bool,
 ) -> bool {
     pty_capture && matches!(session_id_mode, SessionIdMode::None)
+}
+
+/// Only an unattended startup `--resume` may fall back to a fresh harness
+/// after an early PTY exit. Explicit user resumes and fresh launches must
+/// retain their existing error/clean-exit handling.
+pub(crate) fn should_fallback_to_fresh_after_resume_failure(
+    startup_resume: bool,
+    resume_arg_present: bool,
+    supports_resume: bool,
+) -> bool {
+    startup_resume && resume_arg_present && supports_resume
 }
 
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
@@ -1010,6 +1027,7 @@ fn start_reader(
     spawn_start: std::time::Instant,
     mesh_id: i64,
     deliberate_kill: Arc<AtomicBool>,
+    fallback_to_fresh_after_resume_failure: bool,
 ) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
@@ -1114,11 +1132,41 @@ fn start_reader(
                 let sink = session_lifecycle::AppSessionLifecycleSink {
                     app: &app_clone,
                 };
-                let _ = session_lifecycle::on_resume_failed(
-                    &sink,
-                    session_id,
-                    "Agent exited immediately after spawn — session may have expired",
-                );
+                if fallback_to_fresh_after_resume_failure {
+                    // Do not write Error before the fallback: Error is
+                    // terminal for `on_spawn_started`, which would leave the
+                    // fresh harness PTY blank too.
+                    session_lifecycle::on_resume_manual_required(
+                        &sink,
+                        session_id,
+                        STARTUP_MANUAL_RESUME_MESSAGE,
+                    );
+                    let app_for_fallback = app_clone.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = spawn_with_intent(
+                            &app_for_fallback,
+                            SpawnRequest::new(
+                                session_id,
+                                SpawnIntent::Fresh,
+                                TerminalSize::default(),
+                            ),
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                "startup resume fallback: failed to start fresh harness for node {}: {}",
+                                session_id,
+                                error
+                            );
+                        }
+                    });
+                } else {
+                    let _ = session_lifecycle::on_resume_failed(
+                        &sink,
+                        session_id,
+                        "Agent exited immediately after spawn — session may have expired",
+                    );
+                }
             }
         }
 
@@ -1132,10 +1180,9 @@ fn start_reader(
 
 /// Pure decision for "given the stored CLI session id, the resume cause,
 /// and whether the adapter auto-resumes on startup, what should
-/// `spawn_with_intent` do?". The Skip variants are the regression-pin
-/// for issue #949: a future refactor that re-introduces an `on_idle`
-/// call inside the Skip arms fails review by virtue of the decision
-/// being a single enum variant.
+/// `spawn_with_intent` do?". Startup rows without an ID launch the harness
+/// fresh so its native manual-resume flow remains available; adapters that
+/// cannot resume unattended follow the same path.
 ///
 /// Empty-string defense: legacy writes can leave an empty string in
 /// `agent_nodes.cli_session_id`. `db::list_suspended_nodes`'s SQL
@@ -1145,38 +1192,29 @@ pub(crate) fn decide_startup_resume(
     cli_session_id: Option<&str>,
     cause: ResumeCause,
     auto_resume_on_startup: bool,
-) -> ResumeSkipDecision {
+) -> ResumeDecision {
     let stored = cli_session_id.filter(|s| !s.is_empty());
     match (cause, stored) {
-        (ResumeCause::Startup, None) => ResumeSkipDecision::SkipSuspended,
-        (_, None) => ResumeSkipDecision::NoSessionId,
+        (ResumeCause::Startup, None) => ResumeDecision::StartFreshForManualResume,
+        (_, None) => ResumeDecision::NoSessionId,
         (ResumeCause::Startup, Some(_id)) if !auto_resume_on_startup => {
-            ResumeSkipDecision::SkipAdapterDeclines
+            ResumeDecision::StartFreshForManualResume
         }
-        (_, Some(id)) => ResumeSkipDecision::Proceed(id.to_string()),
+        (_, Some(id)) => ResumeDecision::Proceed(id.to_string()),
     }
 }
 
-/// Decision surface for the Startup resume-skip path (issue #949 /
-/// PR #1121). See [`decide_startup_resume`] for the full rationale —
-/// in short: every `Skip*` variant MUST be paired with a
-/// `SpawnOutcome::Skipped(node)` return path that does NOT call any
-/// `sink.write_status`. The node stays `Suspended` so the user's
-/// Resume / Regenerate affordances remain reachable.
+/// Decision surface for startup resume recovery (issue #949 / PR #1121).
+/// Startup resume failures preserve the node and hand control to the
+/// harness's fresh UI; an explicit resume without an ID remains an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResumeSkipDecision {
-    /// The Startup resume is not viable (missing or empty
-    /// `cli_session_id`); return `SpawnOutcome::Skipped(node)` without
-    /// touching `agent_nodes.status`. The node stays `Suspended`.
-    SkipSuspended,
-    /// The Startup resume is not viable because the adapter declines
-    /// (`auto_resume_on_startup() == false`); return
-    /// `SpawnOutcome::Skipped(node)` without touching
-    /// `agent_nodes.status`. The node stays `Suspended`.
-    SkipAdapterDeclines,
+pub(crate) enum ResumeDecision {
+    /// The harness declines unattended resume, but exposes its own manual
+    /// resume flow after a fresh interactive launch.
+    StartFreshForManualResume,
     /// The Explicit (user-driven) resume is not viable because there
     /// is no captured session id; the caller surfaces this as an
-    /// `Err`. Distinct from `SkipSuspended` because the user expects
+    /// `Err`. Distinct from the startup fresh path because the user expects
     /// an error toast, not a silent no-op.
     NoSessionId,
     /// The resume IS viable; the caller continues the spawn flow and
@@ -1195,21 +1233,14 @@ pub(crate) enum ResumeSkipDecision {
 /// terminal size; low-level `SpawnOptions` stays inside this module while
 /// existing callers migrate to the intent seam.
 ///
-/// ## Resume-skip decision (issue #949, PR #1121)
+/// ## Startup resume recovery (issue #949, PR #1121)
 ///
-/// `spawn_with_intent` previously wrote `Idle` for every Startup-resume
-/// branch it couldn't honour, which silently dropped Suspended nodes with
-/// no UI recovery affordance. The fix was to short-circuit these branches
-/// to `SpawnOutcome::Skipped` WITHOUT touching `agent_nodes.status` —
-/// leaving them as `Suspended` so the user can drive the new Resume /
-/// Regenerate affordances.
+/// A startup resume without a usable session identity starts the harness
+/// fresh because its native manual-resume flow is the recovery path. If a
+/// harness cannot resume unattended, or an automatic resume exits
+/// immediately, the harness is likewise started fresh. Explicit resumes
+/// without an identity still return an error.
 ///
-/// [`decide_startup_resume`] is the testable surface of that contract:
-/// it takes only the three facts the decision depends on (the stored
-/// `cli_session_id`, the cause, and whether the adapter auto-resumes on
-/// startup) and returns the decided outcome. The Skip variants in
-/// particular must NEVER trigger a sink write — the regression test in
-/// `mod tests` pins the decision matrix.
 pub(crate) async fn spawn_with_intent(
     app: &tauri::AppHandle,
     request: SpawnRequest,
@@ -1228,7 +1259,13 @@ pub(crate) async fn spawn_with_intent(
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     let provider = crate::preferences::resolve_harness_provider(&node.provider);
     let adapter = provider.adapter();
-    let is_resume_intent = matches!(intent, SpawnIntent::Resume { .. });
+    let is_resume_intent = matches!(&intent, SpawnIntent::Resume { .. });
+    let is_startup_resume = matches!(
+        &intent,
+        SpawnIntent::Resume {
+            cause: ResumeCause::Startup
+        }
+    );
 
     let resume = match &intent {
         SpawnIntent::Resume { cause } => {
@@ -1238,51 +1275,27 @@ pub(crate) async fn spawn_with_intent(
                 adapter.auto_resume_on_startup(),
             );
             match decision {
-                // Startup resume with no cli_session_id: there is nothing
-                // for us to resume. DO NOT write Idle -- that was the
-                // silent-drop bug that stranded Suspended OpenCode /
-                // Terminal nodes with no UI recovery affordance.
-                // Leaving the status as Suspended means the user can
-                // click the new Resume button in the sidebar / header
-                // to retry with ResumeCause::Explicit. The
-                // auto_resume_agent_nodes caller in commands/agent.rs
-                // queries db::list_suspended_nodes so the row is
-                // always already Suspended here; the prior on_idle
-                // was redundant at best and silently destructive.
-                ResumeSkipDecision::SkipSuspended
-                // Startup resume but the adapter declines (OpenCode,
-                // Terminal -- they have no --resume flag and no
-                // auto-resume). DO NOT write Idle (same rationale as
-                // the cli_session_id-missing branch above): the node
-                // stays Suspended so the user's new Resume button can
-                // retry later, or the node can be regenerated to a
-                // different provider. The Explicit branch
-                // (ResumeCause::Explicit from user-driven Resume /
-                // Regenerate) is not affected -- the explicit user's
-                // expectation is that we try the captured session id
-                // via `supports_resume()`, not that we silently skip.
-                | ResumeSkipDecision::SkipAdapterDeclines => {
-                    return Ok(SpawnOutcome::Skipped(node));
+                ResumeDecision::StartFreshForManualResume => {
+                    let sink = session_lifecycle::AppSessionLifecycleSink { app };
+                    session_lifecycle::on_resume_manual_required(
+                        &sink,
+                        node_id,
+                        STARTUP_MANUAL_RESUME_MESSAGE,
+                    );
+                    None
                 }
-                ResumeSkipDecision::NoSessionId => {
+                ResumeDecision::NoSessionId => {
                     return Err(format!(
                         "cannot resume node {}: no CLI session ID is stored",
                         node.id
                     ));
                 }
-                // Adapter cannot honour a resume arg (OpenCode,
-                // Terminal -- no --resume flag) under an Explicit
-                // cause: fall through to resume = None, which routes
-                // the spawn via the _ => None arm below into
-                // SpawnIntent::Fresh semantics. Same philosophy as
-                // decide_resume returning None on cross-harness: the
-                // captured cli_session_id is preserved in the DB so
-                // a future Regenerate to a resumable harness can
-                // still pick it up. Without this, the user-driven
-                // Resume button on a Suspended OpenCode node would
-                // surface a toast instead of starting fresh on the
-                // same worktree.
-                ResumeSkipDecision::Proceed(id) => Some(id),
+                // Explicit resumes with a stored identity proceed through
+                // the adapter's resume recipe. Adapters that do not support
+                // resume resolve `SessionIdMode::None` in
+                // `spawn_agent_inner`, preserving their existing fresh
+                // launch behavior while retaining the captured identity.
+                ResumeDecision::Proceed(id) => Some(id),
             }
         }
         _ => None,
@@ -1311,6 +1324,15 @@ pub(crate) async fn spawn_with_intent(
             }
         });
 
+    // A startup intent that the adapter cannot resume falls through to a
+    // fresh launch immediately; only a real `--resume` process should trigger
+    // the early-exit fallback below.
+    let fallback_to_fresh_after_resume_failure = should_fallback_to_fresh_after_resume_failure(
+        is_startup_resume,
+        resume.is_some(),
+        adapter.supports_resume(),
+    );
+
     if is_agent_already_running(&node_id) {
         return Ok(SpawnOutcome::AlreadyActive(node));
     }
@@ -1332,6 +1354,7 @@ pub(crate) async fn spawn_with_intent(
             // arg to the harness (issue #1148 AC #32 + #1155 AC #3).
             explicit_model: explicit.model,
             explicit_effort: explicit.effort,
+            fallback_to_fresh_after_resume_failure,
         },
     )
     .await;
@@ -1347,7 +1370,22 @@ pub(crate) async fn spawn_with_intent(
         }
         Err(error) => {
             let sink = session_lifecycle::AppSessionLifecycleSink { app };
-            if is_resume_intent {
+            if is_startup_resume {
+                // A startup resume can fail before a PTY exists (for example,
+                // while provisioning a worktree). Keep the node eligible for
+                // a fresh launch and let the harness expose its manual-resume
+                // flow, just as the reader early-exit path does below.
+                session_lifecycle::on_resume_manual_required(
+                    &sink,
+                    node_id,
+                    STARTUP_MANUAL_RESUME_MESSAGE,
+                );
+                return Box::pin(spawn_with_intent(
+                    app,
+                    SpawnRequest::new(node_id, SpawnIntent::Fresh, terminal_size),
+                ))
+                .await;
+            } else if is_resume_intent {
                 let _ = session_lifecycle::on_resume_failed(&sink, node_id, &error);
             } else {
                 let _ = session_lifecycle::on_error(&sink, node_id);
@@ -1478,6 +1516,7 @@ pub(crate) async fn spawn_agent_inner(
         node: preloaded_node,
         explicit_model,
         explicit_effort,
+        fallback_to_fresh_after_resume_failure,
     } = opts;
 
     tracing::info!(
@@ -2078,15 +2117,17 @@ pub(crate) async fn spawn_agent_inner(
         Ok(_outcome) => {}
         Err(e) => {
             tracing::error!("spawn_agent_inner: provision_for_spawn failed: {}", e);
-            let sink = session_lifecycle::AppSessionLifecycleSink { app };
-            let _ = session_lifecycle::on_error(&sink, session_id);
-            let _ = app.emit(
-                "node-spawn-failed",
-                crate::commands::agent::NodeSpawnFailedPayload {
-                    node_id: session_id,
-                    error: e.clone(),
-                },
-            );
+            if !fallback_to_fresh_after_resume_failure {
+                let sink = session_lifecycle::AppSessionLifecycleSink { app };
+                let _ = session_lifecycle::on_error(&sink, session_id);
+                let _ = app.emit(
+                    "node-spawn-failed",
+                    crate::commands::agent::NodeSpawnFailedPayload {
+                        node_id: session_id,
+                        error: e.clone(),
+                    },
+                );
+            }
             return Err(e);
         }
     }
@@ -2313,6 +2354,7 @@ pub(crate) async fn spawn_agent_inner(
         spawn_start,
         mesh_id,
         deliberate_kill,
+        fallback_to_fresh_after_resume_failure,
     );
 
     // 13b. Start natural-exit watcher (issue #287). On Windows ConPTY
@@ -2875,6 +2917,7 @@ mod tests {
             node: None,
             explicit_model: Some("sonnet-4".into()),
             explicit_effort: Some("low".into()),
+            fallback_to_fresh_after_resume_failure: false,
         };
         assert_eq!(opts.explicit_model.as_deref(), Some("sonnet-4"));
         assert_eq!(opts.explicit_effort.as_deref(), Some("low"));
@@ -4636,6 +4679,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_resume_failure_falls_back_only_for_real_resume_processes() {
+        assert!(should_fallback_to_fresh_after_resume_failure(true, true, true));
+        assert!(!should_fallback_to_fresh_after_resume_failure(true, false, true));
+        assert!(!should_fallback_to_fresh_after_resume_failure(false, true, true));
+        assert!(!should_fallback_to_fresh_after_resume_failure(true, true, false));
+    }
+
     /// Issue #1180 — `SpawnIntent::initial_prompt` is the single source
     /// of truth for the GitHub-issue prefill. The spawn seam (`spawn_with_intent`)
     /// routes through it; so does the desktop draft response and the
@@ -4664,34 +4715,33 @@ https://github.com/alondero/buildmesh/issues/247"
     }
 
     // -----------------------------------------------------------------------
-    // Resume-skip decision surface (issue #949 regression).
+    // Startup resume recovery decision surface (issue #949 regression).
     //
-    // Pins the PR #1121 fix: when a Startup resume is not viable, the
+    // Pins startup recovery: when a Startup resume is not viable, the
     // caller must NOT write `Idle` to `agent_nodes.status` — the node
-    // stays `Suspended` so the user's Resume / Regenerate affordances
-    // remain reachable. `decide_startup_resume` is the single source of
-    // truth for that contract; `spawn_with_intent`'s Skip arms call no
-    // sink. A future refactor that re-introduces an `on_idle` write here
-    // fails review by virtue of the decision being a single enum variant.
+    // remains eligible for fresh startup. The fresh harness
+    // launches with its native manual-resume flow instead of
+    // silently leaving a blank node. `decide_startup_resume` is the single
+    // source of truth for that contract.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn decide_startup_resume_no_session_id_is_skipped() {
+    fn decide_startup_resume_no_session_id_starts_fresh_for_manual_resume() {
         let d = decide_startup_resume(None, ResumeCause::Startup, true);
-        assert_eq!(d, ResumeSkipDecision::SkipSuspended);
+        assert_eq!(d, ResumeDecision::StartFreshForManualResume);
     }
 
     #[test]
-    fn decide_startup_resume_empty_session_id_is_skipped() {
+    fn decide_startup_resume_empty_session_id_starts_fresh_for_manual_resume() {
         // Empty-string defense — `db::list_suspended_nodes`'s SQL filter
         // only catches NULL; legacy writes could leave an empty string
         // behind, so the empty case must be filtered here.
         let d = decide_startup_resume(Some(""), ResumeCause::Startup, true);
-        assert_eq!(d, ResumeSkipDecision::SkipSuspended);
+        assert_eq!(d, ResumeDecision::StartFreshForManualResume);
     }
 
     #[test]
-    fn decide_startup_resume_when_adapter_declines_is_skipped() {
+    fn decide_startup_resume_when_adapter_declines_starts_fresh_for_manual_resume() {
         let d = decide_startup_resume(
             Some("uuid"),
             ResumeCause::Startup,
@@ -4699,8 +4749,8 @@ https://github.com/alondero/buildmesh/issues/247"
         );
         assert_eq!(
             d,
-            ResumeSkipDecision::SkipAdapterDeclines,
-            "OpenCode/Terminal Startup resume must skip without writing Idle"
+            ResumeDecision::StartFreshForManualResume,
+            "a harness that declines automatic resume must still open for manual resume"
         );
     }
 
@@ -4708,9 +4758,9 @@ https://github.com/alondero/buildmesh/issues/247"
     fn decide_startup_resume_explicit_no_session_id_is_an_error() {
         // User clicked Resume on a node that never captured a session id.
         // This is a hard error — surfacing it is the user-driven recovery
-        // path; the orchestrator-side Startup path silently skips.
+        // path; the Startup path instead launches a fresh harness.
         let d = decide_startup_resume(None, ResumeCause::Explicit, true);
-        assert_eq!(d, ResumeSkipDecision::NoSessionId);
+        assert_eq!(d, ResumeDecision::NoSessionId);
     }
 
     #[test]
@@ -4720,13 +4770,13 @@ https://github.com/alondero/buildmesh/issues/247"
             ResumeCause::Explicit,
             false, // explicit cause is unaffected by auto_resume_on_startup
         );
-        assert_eq!(d, ResumeSkipDecision::Proceed("uuid-7".to_string()));
+        assert_eq!(d, ResumeDecision::Proceed("uuid-7".to_string()));
     }
 
     #[test]
     fn decide_startup_resume_startup_with_session_id_and_adapter_accepts_proceeds() {
         let d = decide_startup_resume(Some("uuid-7"), ResumeCause::Startup, true);
-        assert_eq!(d, ResumeSkipDecision::Proceed("uuid-7".to_string()));
+        assert_eq!(d, ResumeDecision::Proceed("uuid-7".to_string()));
     }
 
     // -----------------------------------------------------------------

@@ -210,7 +210,6 @@ impl SpawnRequest {
 pub(crate) enum SpawnOutcome {
     Started(AgentNode),
     AlreadyActive(AgentNode),
-    Skipped(AgentNode),
 }
 
 /// Format the GitHub-issue prefill. Single source of truth (issue #1180):

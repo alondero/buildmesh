@@ -47,10 +47,10 @@ interface NodeItemProps {
   isActive: boolean;
   /**
    * Issue #774 / ticket 03 — the Spawn Options available on this mesh.
-   * The Regenerate submenu renders this list (minus the node's current
-   * provider) as the picker; absent or empty means the submenu has
-   * nothing to offer and the parent Regenerate row stays visible but
-   * greyed-out (the user can still see the affordance exists).
+   * The Regenerate submenu renders every configured provider, including the
+   * node's current provider so a failed resume can be retried in-place.
+   * Absent or empty means the submenu has nothing to offer and the parent
+   * Regenerate row stays visible but greyed-out.
    */
   providerList?: SpawnOption[];
   onSelect: () => void;
@@ -113,16 +113,16 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   const [submenuOpen, setSubmenuOpen] = useState(false);
   const submenuRef = useRef<HTMLDivElement>(null);
   const submenuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  // Issue #774 — Regenerate's submenu lists every Spawn Option EXCEPT
+  // Issue #774 — Regenerate's submenu lists every Spawn Option, including
   // the node's current provider. Regenerating to the same provider is
   // a restart (the inline ↻ button already covers that for `error`
-  // nodes); including the current provider in the picker would invite
-  // accidental no-ops. Grouped by `group_key` so the harness-header
+  // nodes); this keeps a failed resume recoverable in its harness. Grouped
+  // by `group_key` so the harness-header
   // render stays consistent with `ProviderDropdown` and `ArchivedNodesTab`
   // (issue #583 centralisation, ADR-0016).
   const regenerateTargets = useMemo(
-    () => (providerList ?? []).filter((p) => p.id !== node.provider),
-    [providerList, node.provider],
+    () => providerList ?? [],
+    [providerList],
   );
   const regenerateGroups = useMemo(
     () => groupByHarness(regenerateTargets),
@@ -141,13 +141,8 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   itemCountRef.current = itemCount;
 
   const isRegenerateDisabled = REGENERATE_DISABLED_STATUSES.includes(node.status);
-  // Issue #774 — the submenu has nothing to offer when every
-  // available provider is the node's current one (the picker
-  // excludes the current provider). The Regenerate row stays
-  // visible but greyed-out — discoverable for "I want to swap
-  // providers" with a tooltip that explains the lack, not hidden
-  // (mirrors the status-gating pattern above).
-  const hasAlternateProviders = regenerateTargets.length > 0;
+  // The picker remains disabled only when the mesh has no spawn options.
+  const hasRegenerateProviders = regenerateTargets.length > 0;
 
   // Close and return focus to the row that opened the menu. Used by
   // Escape and any menuitem click so the user's focus stays
@@ -198,7 +193,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // name interpolated into the dialog message so the user sees exactly
   // which Model Provider they're switching to.
   const pickProvider = (providerId: string, providerLabel: string) => {
-    if (isRegenerateDisabled || !hasAlternateProviders) return;
+    if (isRegenerateDisabled || !hasRegenerateProviders) return;
     closeContextMenu();
     if (node.status === 'running') {
       setPendingRegenerate({ providerId, providerLabel });
@@ -522,17 +517,17 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
               // Roving tabindex — only the active item is in the Tab
               // order. The Regenerate item is disabled for the four
               // "race-the-spawn / backend-rejects" statuses (see
-              // `REGENERATE_DISABLED_STATUSES`) AND when the picker
-              // has no alternate providers to offer. The click handler
+              // `REGENERATE_DISABLED_STATUSES`) AND when the mesh has no
+              // spawn providers to offer. The click handler
               // short-circuits as a second guard so a programmatic
               // .click() can't bypass the disabled state.
               role="menuitem"
               aria-haspopup="menu"
               aria-expanded={submenuOpen}
               tabIndex={activeIndex === 0 ? 0 : -1}
-              disabled={isRegenerateDisabled || !hasAlternateProviders}
+              disabled={isRegenerateDisabled || !hasRegenerateProviders}
               onClick={() => {
-                if (isRegenerateDisabled || !hasAlternateProviders) return;
+                if (isRegenerateDisabled || !hasRegenerateProviders) return;
                 // Always open — never toggle. The submenu also opens
                 // on hover via the wrapper's `onMouseEnter`; toggling
                 // here would close the picker the moment a real user
@@ -547,11 +542,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                   // so the tooltip stays lowercase and consistent with the
                   // other machine status names (e.g. "while suspended").
                   ? `Regenerate unavailable while ${node.status}`
-                  : !hasAlternateProviders
-                    ? 'No other providers are available on this mesh'
+                  : !hasRegenerateProviders
+                    ? 'No providers are available on this mesh'
                     : submenuOpen
                       ? 'Hide provider picker'
-                      : 'Pick a different Model Provider for this node'
+                      : 'Pick a Model Provider for this node'
               }
               data-testid="regenerate-trigger"
               className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
@@ -622,7 +617,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                     data-testid="regenerate-submenu-empty"
                     className="px-3 py-1.5 text-xs text-text-muted"
                   >
-                    No other providers available
+                    No providers available
                   </div>
                 ) : (
                   regenerateGroups.map(([groupKey, options]) => {
