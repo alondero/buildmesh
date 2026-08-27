@@ -8,7 +8,9 @@
 #[cfg(test)]
 mod tests {
     use crate::db::{
-        update_agent_node_status_if_inner, update_agent_node_status_inner as update_unconditional_inner,
+        clear_cli_session_id_inner, codex_legacy_session_backfill_completed_inner,
+        mark_codex_legacy_session_backfill_completed_inner, update_agent_node_status_if_inner,
+        update_agent_node_status_inner as update_unconditional_inner,
         update_agent_node_status_unless_in_inner,
     };
     use crate::models::SessionStatus;
@@ -22,7 +24,12 @@ mod tests {
             "CREATE TABLE agent_nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 status TEXT NOT NULL DEFAULT 'idle',
+                cli_session_id TEXT,
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )
         .unwrap();
@@ -54,6 +61,36 @@ mod tests {
             |row| row.get(0),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn clear_cli_session_id_removes_stale_conversation_identity() {
+        let conn = conn_with_agent_nodes();
+        let id = insert_node(&conn, "idle");
+        conn.execute(
+            "UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2",
+            params!["anthropic-session-id", id],
+        )
+        .unwrap();
+
+        clear_cli_session_id_inner(&conn, id).unwrap();
+
+        let session_id: Option<String> = conn
+            .query_row(
+                "SELECT cli_session_id FROM agent_nodes WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_id, None);
+    }
+
+    #[test]
+    fn codex_legacy_session_backfill_completion_is_persisted() {
+        let conn = conn_with_agent_nodes();
+        assert!(!codex_legacy_session_backfill_completed_inner(&conn).unwrap());
+        mark_codex_legacy_session_backfill_completed_inner(&conn).unwrap();
+        assert!(codex_legacy_session_backfill_completed_inner(&conn).unwrap());
     }
 
     /// Happy path: when `expected` matches the current row status, the new
