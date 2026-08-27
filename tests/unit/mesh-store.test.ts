@@ -1,8 +1,84 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeshStore } from '../../src/stores/meshStore';
+import type { AgentNode } from '../../src/types/generated/AgentNode';
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
+
+// Issue #1247 — `deleteMesh` reaches into `useAgentNodeStore` to capture
+// doomed node ids, refetch after the IPC commits, and null `activeNodeId`
+// when it pointed into the deleted mesh. Mock the store module with a
+// hoisted shared-state object so each test can pre-load `agentNodes` /
+// `activeNodeId` and observe the post-call side effects
+// (`fetchAgentNodes` invocation, `setActiveNode` invocation) without
+// driving the real store's IPC plumbing.
+//
+// The methods live on `state` (matching the real Zustand `create()`
+// shape — `useAgentNodeStore.getState()` returns the full state object
+// INCLUDING actions). Putting them on the store object instead of on
+// state produces `getState().fetchAgentNodes is not a function`.
+const agentStoreMock = vi.hoisted(() => {
+  const fetchAgentNodes = vi.fn().mockResolvedValue(undefined);
+  const setActiveNode = vi.fn();
+  const state: {
+    agentNodes: AgentNode[];
+    activeNodeId: number | null;
+    fetchAgentNodes: typeof fetchAgentNodes;
+    setActiveNode: typeof setActiveNode;
+  } = {
+    agentNodes: [],
+    activeNodeId: null,
+    fetchAgentNodes,
+    setActiveNode,
+  };
+  // Mirror the production `setActiveNode`: just `set({ activeNodeId })`.
+  // Defined here (not at construction) so `state` is in scope for the
+  // closure.
+  setActiveNode.mockImplementation((id: number | null) => {
+    state.activeNodeId = id;
+  });
+  return {
+    state,
+    useAgentNodeStore: {
+      getState: vi.fn(() => state),
+    },
+  };
+});
+
+vi.mock('../../src/stores/agentNodeStore', () => ({
+  useAgentNodeStore: agentStoreMock.useAgentNodeStore,
+}));
+
+// Issue #1247 — `deleteMesh` calls `disposeTerminal` once per doomed
+// node id after the backend delete commits. Mock the React-component
+// surface that exports `disposeTerminal` so the test can observe the
+// dispose fan-out without spinning up an xterm (Terminal.tsx loads
+// @xterm/xterm + the WebGL addon pool, which would fail jsdom).
+const disposeTerminalMock = vi.hoisted(() => vi.fn());
+vi.mock('../../src/components/Terminal/Terminal', () => ({
+  disposeTerminal: disposeTerminalMock,
+  AgentTerminal: () => null,
+}));
+
+import { disposeTerminal } from '../../src/components/Terminal/Terminal';
+const mockDisposeTerminal = disposeTerminal as ReturnType<typeof vi.fn>;
+
+function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
+  return {
+    id: 1,
+    mesh_id: 1,
+    name: 'node',
+    path: '/p',
+    branch: 'main',
+    env: 'windows',
+    provider: 'claude',
+    status: 'idle',
+    use_worktree: true,
+    position: 0,
+    created_at: '',
+    ...overrides,
+  };
+}
 
 describe('useMeshStore', () => {
   beforeEach(() => {
@@ -13,6 +89,11 @@ describe('useMeshStore', () => {
       loading: false,
       error: null,
     });
+    // Reset the agent-store mock state + call history so each test starts
+    // from a clean slate. `vi.clearAllMocks` only clears call history;
+    // it does NOT reset the state object the hoisted closures capture.
+    agentStoreMock.state.agentNodes = [];
+    agentStoreMock.state.activeNodeId = null;
     vi.clearAllMocks();
   });
 
@@ -72,22 +153,168 @@ describe('useMeshStore', () => {
   });
 
   describe('deleteMesh', () => {
-    it('calls delete_mesh and refetches', async () => {
+    // Issue #1247 — `deleteMesh` calls `fetchMeshes` (which invokes
+    // `list_meshes`) and then `useAgentNodeStore.getState().fetchAgentNodes`
+    // (which is mocked at the module seam here, so it makes NO invokes).
+    // On the happy path the production code makes exactly two invokes:
+    // `delete_mesh` and `list_meshes`. Queueing extras would leave one-time
+    // mocks in the queue that the NEXT test consumes — `vi.clearAllMocks`
+    // clears call history but does NOT clear one-time mock queues, so the
+    // wrong return value lands on the next test's first invoke. Pin the
+    // queue size to the production invoke count.
+
+    it('calls delete_mesh and refetches, returns true on success', async () => {
       mockInvoke
         .mockResolvedValueOnce(undefined) // delete_mesh
-        .mockResolvedValueOnce([]); // list_meshes (refetch)
+        .mockResolvedValueOnce([]);       // list_meshes (refetch)
 
-      await useMeshStore.getState().deleteMesh(5);
+      const ok = await useMeshStore.getState().deleteMesh(5);
 
+      expect(ok).toBe(true);
       expect(mockInvoke).toHaveBeenCalledWith('delete_mesh', { meshId: 5 });
     });
 
-    it('sets error if deletion fails', async () => {
+    it('sets error and returns false if deletion fails', async () => {
       mockInvoke.mockRejectedValueOnce(new Error('Not found'));
 
-      await useMeshStore.getState().deleteMesh(99);
+      const ok = await useMeshStore.getState().deleteMesh(99);
 
+      expect(ok).toBe(false);
       expect(useMeshStore.getState().error).toContain('Not found');
+    });
+
+    // ---- Issue #1247 ghost-cleanup invariants ----
+    // Pre-#1247 `deleteMesh` only refetched meshes, which left:
+    //   * ghost `agentNodes` rows still clickable in the grid + sidebar,
+    //   * xterm instances + 'agent-output' listeners alive in the
+    //     TerminalRegistry,
+    //   * `selectedMeshId` / `activeNodeId` dangling into the deleted mesh.
+    // These tests pin the three cleanup steps the fix introduces.
+
+    it('refetches agent nodes after successful backend delete', async () => {
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(agentStoreMock.state.fetchAgentNodes).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT refetch agent nodes when backend delete fails', async () => {
+      mockInvoke.mockRejectedValueOnce(new Error('boom'));
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(agentStoreMock.state.fetchAgentNodes).not.toHaveBeenCalled();
+      expect(mockDisposeTerminal).not.toHaveBeenCalled();
+    });
+
+    it('disposes each doomed node terminal after successful delete', async () => {
+      // Two doomed nodes (mesh 1) and one survivor (mesh 2). The fix
+      // must only dispose the doomed ids — the survivor's terminal
+      // stays alive because the node IS still alive.
+      agentStoreMock.state.agentNodes = [
+        makeNode({ id: 10, mesh_id: 1 }),
+        makeNode({ id: 11, mesh_id: 1 }),
+        makeNode({ id: 12, mesh_id: 2 }),
+      ];
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(mockDisposeTerminal).toHaveBeenCalledTimes(2);
+      expect(mockDisposeTerminal).toHaveBeenCalledWith(10);
+      expect(mockDisposeTerminal).toHaveBeenCalledWith(11);
+      expect(mockDisposeTerminal).not.toHaveBeenCalledWith(12);
+    });
+
+    it('does not dispose any terminals when the doomed mesh had no nodes', async () => {
+      // No nodes belong to mesh 7 — the doomed-id list is empty, so
+      // the dispose loop is a no-op (matches the registry's "missing
+      // id → silent no-op" discipline, TerminalRegistry.dispose).
+      agentStoreMock.state.agentNodes = [makeNode({ id: 99, mesh_id: 2 })];
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      await useMeshStore.getState().deleteMesh(7);
+
+      expect(mockDisposeTerminal).not.toHaveBeenCalled();
+    });
+
+    it('nulls selectedMeshId when it pointed at the deleted mesh', async () => {
+      useMeshStore.setState({ selectedMeshId: 1 });
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(useMeshStore.getState().selectedMeshId).toBeNull();
+    });
+
+    it('leaves selectedMeshId alone when it pointed at a different mesh', async () => {
+      useMeshStore.setState({ selectedMeshId: 2 });
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(useMeshStore.getState().selectedMeshId).toBe(2);
+    });
+
+    it('nulls activeNodeId when it pointed at a doomed node', async () => {
+      agentStoreMock.state.activeNodeId = 10;
+      agentStoreMock.state.agentNodes = [makeNode({ id: 10, mesh_id: 1 })];
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(agentStoreMock.state.activeNodeId).toBeNull();
+      expect(agentStoreMock.state.setActiveNode).toHaveBeenCalledWith(null);
+    });
+
+    it('leaves activeNodeId alone when it pointed at a node in another mesh', async () => {
+      // activeNodeId points at mesh 2's node 99. Mesh 1 is being deleted
+      // (which would take nodes 10 + 11). Node 99 survives — the fix must
+      // NOT clobber a still-active node id.
+      agentStoreMock.state.activeNodeId = 99;
+      agentStoreMock.state.agentNodes = [
+        makeNode({ id: 10, mesh_id: 1 }),
+        makeNode({ id: 11, mesh_id: 1 }),
+        makeNode({ id: 99, mesh_id: 2 }),
+      ];
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(agentStoreMock.state.activeNodeId).toBe(99);
+      expect(agentStoreMock.state.setActiveNode).not.toHaveBeenCalled();
+    });
+
+    it('does not dispose terminals or null selection when backend delete fails', async () => {
+      // End-to-end "everything stays put on failure" — guards against a
+      // regression where the post-IPC cleanup leaks past the try/catch
+      // and quietly disposes a mesh that the backend refused to delete.
+      agentStoreMock.state.activeNodeId = 10;
+      agentStoreMock.state.agentNodes = [makeNode({ id: 10, mesh_id: 1 })];
+      useMeshStore.setState({ selectedMeshId: 1 });
+      mockInvoke.mockRejectedValueOnce(new Error('backend says no'));
+
+      const ok = await useMeshStore.getState().deleteMesh(1);
+
+      expect(ok).toBe(false);
+      expect(mockDisposeTerminal).not.toHaveBeenCalled();
+      expect(agentStoreMock.state.activeNodeId).toBe(10);
+      expect(useMeshStore.getState().selectedMeshId).toBe(1);
     });
   });
 
