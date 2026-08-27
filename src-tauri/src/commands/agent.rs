@@ -172,7 +172,8 @@ async fn spawn_new_agent_impl(
 
     Ok(match outcome {
         SpawnOutcome::Started(node)
-        | SpawnOutcome::AlreadyActive(node) => node,
+        | SpawnOutcome::AlreadyActive(node)
+        | SpawnOutcome::Skipped(node) => node,
     })
 }
 
@@ -676,11 +677,11 @@ pub async fn spawn_handover_agent(
 /// Auto-resume all suspended nodes that have a stored CLI session ID.
 /// Called by the frontend on startup after event listeners are ready.
 ///
-/// Suspended session rows returned by `list_suspended_nodes` are started
-/// fresh when their harness cannot resume unattended, so the harness can
-/// expose its native manual-resume flow. The SQL `IS NOT NULL` filter keeps
-/// autopilot-gated rows (where no session ever ran) out of this sweep; the
-/// empty-string legacy case is handled at the spawn seam.
+/// Nodes whose `cli_session_id` is missing OR empty are skipped (marked
+/// `Idle` via the SessionLifecycle sink). The SQL `IS NOT NULL` filter in
+/// `list_suspended_nodes` only catches NULL; the empty-string case still
+/// has to be defended against here because legacy writes could leave an
+/// empty string behind.
 #[command]
 pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String> {
     let nodes = db::list_suspended_nodes().map_err(|e| e.to_string())?;
@@ -709,6 +710,9 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
             Ok(SpawnOutcome::Started(_) | SpawnOutcome::AlreadyActive(_)) => {
                 resumed.push(node.id);
                 tracing::info!("auto_resume_agent_nodes: resumed node {}", node.id);
+            }
+            Ok(SpawnOutcome::Skipped(_)) => {
+                tracing::info!("auto_resume_agent_nodes: skipped node {}", node.id);
             }
             Err(e) => {
                 tracing::error!(

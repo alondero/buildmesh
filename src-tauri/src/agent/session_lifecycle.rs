@@ -144,10 +144,9 @@ pub struct AttentionClearedPayload {
 }
 
 /// Payload of the `resume-failed` Tauri event. Emitted by
-/// [`AppSessionLifecycleSink::emit_resume_failed`] when automatic resume is
-/// unavailable or fails (including adapter refusal, a PTY early exit, or a
-/// spawn/provisioning failure). The frontend renders it as a toast and the
-/// harness is launched fresh for manual recovery where possible.
+/// [`AppSessionLifecycleSink::emit_resume_failed`] when a `--resume`
+/// attempt fails (PTY reader early-exit heuristic, `auto_resume_agent_nodes`
+/// `spawn_agent_inner` failure). The frontend renders it as a toast.
 ///
 /// Generated to `src/types/generated/ResumeFailedPayload.ts`.
 #[derive(Debug, Clone, Serialize, TS)]
@@ -352,18 +351,6 @@ pub fn on_resume_failed(
     Ok(())
 }
 
-/// Automatic resume is unavailable, but the harness will be started fresh so
-/// the user can resume through its own interactive UI. This deliberately
-/// emits the same user-facing event without writing `Error`: the fresh spawn
-/// must still be allowed to transition through `Spawning`.
-pub fn on_resume_manual_required(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-    reason: &str,
-) {
-    sink.emit_resume_failed(node_id, reason);
-}
-
 /// The agent yielded control — mark `AwaitingInput` and broadcast
 /// `attention-needed`. Replaces `mark_attention` in
 /// `commands/attention.rs:40-46`. The autoclear arming lives here too —
@@ -399,10 +386,9 @@ pub fn on_attention_cleared(
 ///   `Idle`. The matching `attention-cleared` emit, when the killed
 ///   node was awaiting input, is the *caller's* responsibility
 ///   (`on_attention_cleared` covers it).
-/// - **Legacy resume skip**: an older startup path decided *not* to spawn
+/// - **Resume skip**: `auto_resume_agent_nodes` decided *not* to spawn
 ///   this node (no `cli_session_id` / non-resumable adapter) — there
 ///   is no process to kill, the row simply stays/becomes `Idle`.
-///   Current startup recovery launches a fresh harness instead.
 ///
 /// Renamed from the earlier `on_kill` (the second case isn't a kill,
 /// so the name overloaded two distinct transitions). Caller-visible
@@ -590,21 +576,6 @@ mod tests {
             *sink.resume_failed.borrow(),
             vec![(7, "session expired".to_string())],
             "early exit must emit resume-failed exactly once with the given reason"
-        );
-    }
-
-    #[test]
-    fn on_resume_manual_required_emits_without_marking_error() {
-        let sink = FakeSink::default();
-        on_resume_manual_required(&sink, 7, "manual resume required");
-        assert!(
-            sink.writes.borrow().is_empty()
-                && sink.writes_unless.borrow().is_empty(),
-            "manual fallback must leave the node eligible for Spawning"
-        );
-        assert_eq!(
-            *sink.resume_failed.borrow(),
-            vec![(7, "manual resume required".to_string())]
         );
     }
 
