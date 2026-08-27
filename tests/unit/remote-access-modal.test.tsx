@@ -606,4 +606,134 @@ describe('RemoteAccessModal', () => {
       expect(openUrl).toHaveBeenCalledWith('https://192.168.1.10:1992/install-cert.der'),
     );
   });
+
+  // --- issue #1251: setState-after-unmount hazards -------------------------
+  // The modal opens with a 4-IPC `Promise.all` followed by 3 parallel QR
+  // generations. If the user closes the modal before any of those
+  // promises resolve, the setStates inside `init()` land on an
+  // unmounted component. React 19 silently drops the setStates, but the
+  // closures (`getRootToken`, `getNetworkStatus`, `QRCode.toDataURL`, …)
+  // keep running, holding React internals alive and producing CPU/GCP
+  // churn for no visible reason. The fix is `useAsyncEffect` with
+  // `signal.aborted` guards after each await + a `useRef`-stored
+  // setTimeout handle that's cleared on unmount.
+  //
+  // These two tests pin the contract:
+  // 1) Unmount during the init IPC chain → no QR generation runs (the
+  //    abort happens at the `Promise.all` boundary, before any
+  //    `QRCode.toDataURL` call is scheduled). The spy-on-IPC pattern
+  //    below proves it without needing to introspect React internals.
+  // 2) Unmount during the 2s "Copied!" feedback window → no late
+  //    setState fires. The console.error spy is defense-in-depth
+  //    (React 19 currently doesn't warn, but a future React could
+  //    re-introduce the warning).
+
+  it('aborts the init effect when the modal unmounts before the IPC chain resolves', async () => {
+    // Defer `get_root_token` (the first IPC in the `Promise.all`) so the
+    // modal cannot reach the `setHost` / `setQrDataUrl` setStates until
+    // we explicitly resolve it. We unmount FIRST, then resolve — this is
+    // the exact user flow the issue is filed against (open, immediately
+    // close, IPC resolves milliseconds later). The fix's
+    // `if (signal.aborted) return;` after `await Promise.all([...])` is
+    // the load-bearing guard.
+    let resolveRootToken!: (v: string) => void;
+    const rootTokenPromise = new Promise<string>(resolve => {
+      resolveRootToken = resolve;
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'get_root_token':
+          return rootTokenPromise;
+        case 'get_local_ip':
+          return Promise.resolve('192.168.1.10');
+        case 'get_network_status':
+          return Promise.resolve(
+            status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+          );
+        case 'get_cert_chain_status':
+          return Promise.resolve(SAMPLE_CERT);
+        case 'get_root_cert_mobileconfig':
+          return Promise.resolve('QUJDREVGRw==');
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    const { unmount } = render(<RemoteAccessModal onClose={() => {}} />);
+
+    // Unmount before any of the deferred IPCs resolve. After this point
+    // every setState inside the init() closure is a setState-on-unmounted.
+    unmount();
+
+    // Now let the deferred resolve. In the buggy code, this triggers
+    // the post-`Promise.all` setStates (`setHost`, `setUnreachable`,
+    // `setCertStatus`, `setInstallUrl`) and starts the QR-generation
+    // chain. With the fix, the `signal.aborted` guard short-circuits
+    // before any of that — `QRCode.toDataURL` is never called.
+    resolveRootToken('root-tok');
+
+    // Drain microtasks + the next macrotask so the `Promise.all` and
+    // its `.then` continuations have a chance to run.
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // The QR generator was never invoked. (In the buggy code this is
+    // called once per QR × 3; in the fixed code the abort short-circuits
+    // the Promise.all continuation so the allSettled QR chain never
+    // starts.)
+    expect(toDataURL).not.toHaveBeenCalled();
+  });
+
+  it('clears the copy-feedback timer on unmount (no late setState fires)', async () => {
+    // The "Copy" button flips `certPathCopied` to true and arms a 2s
+    // setTimeout to flip it back. With the buggy code, the handle isn't
+    // stored so the unmount can't cancel it — the timer fires 2s later
+    // and calls `setCertPathCopied(false)` on an unmounted component.
+    // The fix stores the handle in a ref and clears it in a `useEffect`
+    // cleanup.
+    const user = userEvent.setup();
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+
+    // Defense-in-depth spy: React 19 doesn't warn about setState on
+    // unmounted, but a future React may re-introduce the warning. If
+    // anything logs during the post-unmount window we want the test to
+    // catch it. We use `mockImplementation(() => {})` so the test
+    // doesn't spam vitest output if the spy IS called.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Direct verification: the unmount cleanup must call clearTimeout
+    // with the handle that the Copy click scheduled. Without the fix,
+    // the handle is never stored and clearTimeout is never called by
+    // our cleanup (React itself doesn't auto-clear timers). The "delta
+    // of clearTimeout calls across unmount" assertion is robust to
+    // other code paths that may legitimately call clearTimeout (e.g.
+    // userEvent's internal timers).
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    const { unmount } = render(<RemoteAccessModal onClose={() => {}} />);
+    await user.click(await screen.findByTestId('remote-access-cert-reinstall-toggle'));
+    await user.click(await screen.findByTestId('remote-access-cert-copy'));
+
+    const clearCallsBeforeUnmount = clearTimeoutSpy.mock.calls.length;
+
+    // Close the modal inside the 2s feedback window. In the buggy
+    // code, the setTimeout callback is uncancellable.
+    unmount();
+
+    const clearCallsAfterUnmount = clearTimeoutSpy.mock.calls.length;
+    // The fix's `useEffect(() => () => clearTimeout(ref.current), [])`
+    // cleanup runs during unmount and adds exactly one clearTimeout
+    // call for the handle we just scheduled. The buggy code adds zero.
+    expect(clearCallsAfterUnmount).toBe(clearCallsBeforeUnmount + 1);
+
+    // Wait past the 2s timeout so any uncancelled timer has fired.
+    // (Real timers, not fake — the IPC chain and clipboard.writeText
+    // are real Promises; only the late-firing setTimeout is what we
+    // need to drain here.)
+    await new Promise(resolve => setTimeout(resolve, 2100));
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
+  });
 });
