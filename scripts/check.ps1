@@ -24,16 +24,25 @@
                        self-deadlock or interfere when run in parallel)
 
 .PARAMETER Target
-  unit | rust | all  (default: all)
+  unit | integration | rust | all | all-ts  (default: all)
+
+  all    = mobile build + unit vitest + integration vitest + cargo test
+           (the default green bar; integration added in issue #1257 to
+           match the GitHub Actions quality job)
+  all-ts = unit vitest + integration vitest + npm run build (full TS
+           green bar, mirrors the TS gates the GitHub Actions quality job
+           runs on PRs — local parity with CI without spending 13
+           minutes on a Rust build)
 
 .EXAMPLE
-  scripts\check.ps1            # full green bar (mobile build + unit + rust)
-  scripts\check.ps1 unit       # just the TS unit suite, correct pool
+  scripts\check.ps1                 # full green bar (mobile build + unit + integration + rust)
+  scripts\check.ps1 unit            # just the TS unit suite, correct pool
   scripts\check.ps1 rust -SerialRust
+  scripts\check.ps1 all-ts          # full TS gates (unit + integration + build)
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('unit', 'rust', 'all')]
+  [ValidateSet('unit', 'integration', 'rust', 'all', 'all-ts')]
   [string]$Target = 'all',
   [switch]$CleanRust,
   [switch]$SerialRust
@@ -107,6 +116,45 @@ function Invoke-Unit {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'unit' }
 }
 
+function Invoke-Integration {
+  # Issue #1257 — the jsdom integration suite (terminal container
+  # reuse/reparenting, focus guardian, auto-spawn) ships and is
+  # maintained, but used to only run when a developer remembered.
+  # CI now gates it; this gives the same gate locally. No Tauri runtime
+  # required — same `--pool=threads` rationale as Invoke-Unit.
+  Write-Host '== integration (vitest --pool=threads) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  $prevPref = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & npx vitest run --pool=threads tests/integration
+  } finally {
+    $ErrorActionPreference = $prevPref
+    Pop-Location
+  }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'integration' }
+}
+
+function Invoke-TsBuild {
+  # Mirrors the TS-side gating the GitHub Actions quality job runs.
+  # `npm run build` is "tsc && vite build && vite build --mode mobile"
+  # (see package.json:8) so it transitively runs tsc already — calling
+  # `npx tsc --noEmit` beforehand would run the compiler twice and add
+  # no extra signal. The build step is also what surfaces drift against
+  # the generated bindings (issue #359) the same way CI does.
+  Write-Host '== npm run build (tsc + vite + mobile) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  $prevPref = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & npm run build
+  } finally {
+    $ErrorActionPreference = $prevPref
+    Pop-Location
+  }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'build' }
+}
+
 function Invoke-Rust {
   Write-Host '== rust (cargo test) ==' -ForegroundColor Cyan
   # Clear the leaked env var for this process only.
@@ -135,7 +183,12 @@ function Invoke-Rust {
 }
 
 if ($Target -in @('rust', 'all')) { Ensure-MobileBuilt }
-if ($Target -in @('unit', 'all')) { Invoke-Unit }
+if ($Target -in @('unit', 'all', 'all-ts')) { Invoke-Unit }
+# Issue #1257 — integration must run in the default green bar (`all`)
+# as well as `integration` and `all-ts`, otherwise a developer who only
+# runs `scripts\check.ps1` locally gets a green bar that CI will reject.
+if ($Target -in @('integration', 'all', 'all-ts')) { Invoke-Integration }
+if ($Target -in @('all-ts')) { Invoke-TsBuild }
 if ($Target -in @('rust', 'all')) { Invoke-Rust }
 
 if ($failed.Count -gt 0) {
