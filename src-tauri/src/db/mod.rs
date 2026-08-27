@@ -2804,6 +2804,21 @@ pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     Ok(())
 }
 
+/// Remove the identity of a conversation that is deliberately being replaced
+/// with a fresh spawn (for example, after a cross-harness regenerate).
+pub fn clear_cli_session_id(id: i64) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    clear_cli_session_id_inner(&db, id)
+}
+
+pub(crate) fn clear_cli_session_id_inner(conn: &Connection, id: i64) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = NULL WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
 /// Persist a provider-assigned session id without overwriting an id captured
 /// by an earlier, more immediate source. Codex hook callbacks use this as a
 /// structured fallback when PTY output did not expose the UUID (issue #1089).
@@ -2855,6 +2870,19 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM agent_nodes WHERE status = 'suspended' AND cli_session_id IS NOT NULL", AGENT_NODE_COLUMNS)
     )?;
+    let rows = stmt.query_map([], map_agent_node_row)?;
+    rows.collect()
+}
+
+/// Suspended rows with no usable identity, eligible only for a provider's
+/// explicitly safe historic-recovery path before startup resume begins.
+pub fn list_suspended_nodes_without_cli_session_id() -> SqlResult<Vec<AgentNode>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM agent_nodes WHERE status = 'suspended' \
+         AND (cli_session_id IS NULL OR cli_session_id = '')",
+        AGENT_NODE_COLUMNS
+    ))?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
 }
@@ -3725,4 +3753,3 @@ pub struct WarmWorktree {
     pub preassigned_name: String,
     pub base_sha: Option<String>,
 }
-
