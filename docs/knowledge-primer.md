@@ -130,6 +130,7 @@ Wire types that cross the Tauri `invoke` boundary **or** the mobile HTTP server 
 - ❌ Call `dispose()` on an xterm.js Terminal — causes permanent terminal blanking
 - ❌ Pass Linux paths (e.g. `/home/user/`) to non-WSL APIs — causes "file not found"
 - ❌ Spawn cwrap directly without `cmd.exe /c` on Windows — ConPTY breaks
+- ❌ Spawn a provider CLI to fetch a Usage Meter when the CLI is wrapping an HTTP endpoint we can call ourselves. `get_provider_meters` waits for every provider, so a multi-second CLI boot stalls the whole Usage Probe (#1324 spawned `agy --print /usage` ≈6s; the same payload is `POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` in ~250ms, User-Agent gated, token `gemini:antigravity`). `fetchAvailableModels` is five-hour-only fallback.
 - ❌ Lock the DB mutex in nested calls — causes deadlocks
 - ❌ Do blocking network / git-shell-out / slow-libgit2 work directly on an `async fn` (or `#[command(async)]`) command — it parks a tokio worker and, at scale, starves the pool (UI stays alive, keystrokes + probes hang). Use the `*_blocking` sync-core + `run_blocking` wrapper; see *Command Threading*
 - ❌ Hand-declare a TS interface for a Rust wire type, or hand-edit a file in `src/types/generated/` — derive `TS` on the Rust struct and import the generated type instead (issue #359)
