@@ -1459,6 +1459,8 @@ struct GrokPeriod {
 struct GrokBillingConfig {
     #[serde(rename = "currentPeriod")]
     current_period: Option<GrokPeriod>,
+    #[serde(rename = "creditUsagePercent")]
+    credit_usage_percent: Option<f64>,
     #[serde(rename = "onDemandCap")]
     on_demand_cap: Option<GrokVal>,
     #[serde(rename = "onDemandUsed")]
@@ -1502,17 +1504,19 @@ fn parse_grok_response(body: &str) -> Result<ProviderUsage, UsageError> {
     };
 
     if is_unified {
-        if let Some(ref cap) = config.on_demand_cap {
-            let used_percent = if cap.val > 0.0 {
-                if let Some(ref used) = config.on_demand_used {
-                    Some((used.val / cap.val) * 100.0)
+        let used_percent = config.credit_usage_percent
+            .map(|percent| percent.clamp(0.0, 100.0))
+            .or_else(|| config.on_demand_cap.as_ref().map(|cap| {
+                if cap.val > 0.0 {
+                    config.on_demand_used.as_ref()
+                        .map(|used| ((used.val / cap.val) * 100.0).clamp(0.0, 100.0))
+                        .unwrap_or(0.0)
                 } else {
-                    Some(0.0)
+                    0.0
                 }
-            } else {
-                Some(0.0)
-            };
+            }));
 
+        if let Some(used_percent) = used_percent {
             let label = config.current_period.as_ref()
                 .and_then(|p| p.period_type.as_ref())
                 .map(|t| {
@@ -1526,7 +1530,7 @@ fn parse_grok_response(body: &str) -> Result<ProviderUsage, UsageError> {
 
             windows.push(UsageWindow {
                 label,
-                used_percent,
+                used_percent: Some(used_percent),
                 resets_at: config.billing_period_end.clone(),
             });
         }
@@ -3985,6 +3989,32 @@ mod tests {
         assert_eq!(usage.windows[0].used_percent, Some(25.0));
         assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-07-22T00:00:00+00:00"));
         assert!(usage.balance.is_none());
+    }
+
+    #[test]
+    fn parse_grok_response_supergrok_token_plan_uses_credit_percentage() {
+        let json = r#"{
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-08-24T00:00:00+00:00",
+                    "end": "2026-08-31T00:00:00+00:00"
+                },
+                "creditUsagePercent": 37.0,
+                "onDemandCap": { "val": 0.0 },
+                "onDemandUsed": { "val": 0.0 },
+                "productUsage": [
+                    { "product": "grok-build", "usagePercent": 37.0 }
+                ],
+                "isUnifiedBillingUser": true,
+                "prepaidBalance": { "val": 0.0 },
+                "billingPeriodEnd": "2026-08-31T00:00:00+00:00"
+            }
+        }"#;
+        let usage = parse_grok_response(json).unwrap();
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].label, "Weekly Pool");
+        assert_eq!(usage.windows[0].used_percent, Some(37.0));
     }
 
     #[test]
