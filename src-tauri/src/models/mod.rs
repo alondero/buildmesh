@@ -1429,7 +1429,7 @@ mod tests {
 
     /// The "produces a readable transcript" capability (#317) — the
     /// Claude-backed `anthropic` adapter (which also runs custom
-    /// MiniMax/DeepSeek profiles), Codex, Cursor, and Antigravity write
+    /// MiniMax/DeepSeek profiles), Codex, Cursor, Antigravity, and Grok write
     /// transcripts the coordinator read API can drill into. Kimi Code's
     /// `wire.jsonl` is standard JSONL (#911 research), but the reader's path
     /// resolver isn't wired for `~/.kimi/` yet. Everything else degrades to
@@ -1444,6 +1444,11 @@ mod tests {
         assert!(!Provider::Kimi.adapter().produces_readable_transcript());
         // Cursor's workspace-scoped JSONL is parsed by TranscriptFormat::Cursor.
         assert!(Provider::Cursor.adapter().produces_readable_transcript());
+        // Grok Code (#1281) — chat_history.jsonl / updates.jsonl parsed via
+        // TranscriptFormat::Grok; this flip is what surfaces Grok in the
+        // archived-node resume picker (provider_menu derives
+        // `resumable` from `supports_resume && produces_readable_transcript`).
+        assert!(Provider::Grok.adapter().produces_readable_transcript());
         assert!(!Provider::Mcode.adapter().produces_readable_transcript());
         assert!(!Provider::Dsh.adapter().produces_readable_transcript());
         // Issue #1283: AGY's per-conversation JSONL is parsed via

@@ -211,6 +211,31 @@ mod tests {
         );
     }
 
+    /// Pin the Grok home directory resolution (issue #1281). When `GROK_HOME`
+    /// is unset, `grok_dir()` derives from the current environment's home
+    /// (`$HOME` on WSL; `$USERPROFILE`/`$HOME`/`$USERNAME` on Windows). Note:
+    /// `GROK_HOME` honours the override here too (covered by the cursor /
+    /// codex tests in spirit) — this test pins the *base* derivation so a
+    /// future refactor that breaks `.grok` suffixing catches it.
+    #[test]
+    fn grok_dir_uses_the_current_environment_home() {
+        let expected = match current_env() {
+            Environment::Wsl => std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/root"))
+                .join(".grok"),
+            Environment::Windows => std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    let user = std::env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                    std::path::PathBuf::from(format!("C:\\Users\\{user}"))
+                })
+                .join(".grok"),
+        };
+        assert_eq!(grok_dir(), expected);
+    }
+
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
     #[test]
