@@ -58,14 +58,19 @@ describe('NodeItem restart button', () => {
     vi.clearAllMocks();
   });
 
-  it('renders a Restart button when the node is in error state', () => {
-    renderNode(makeNode({ status: 'error' }));
+  it('renders a Retry resume button when the node is in error state with a cli_session_id', () => {
+    renderNode(makeNode({ status: 'error', cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e' }));
+    expect(screen.getByTitle('Retry resume with existing session')).toBeTruthy();
+  });
+
+  it('renders a Restart button when the node is in error state without a cli_session_id', () => {
+    renderNode(makeNode({ status: 'error', cli_session_id: null }));
     expect(screen.getByTitle('Restart agent')).toBeTruthy();
   });
 
   it('does NOT render a Restart button when the node is running', () => {
     renderNode(makeNode({ status: 'running' }));
-    expect(screen.queryByTitle('Restart agent')).toBeNull();
+    expect(screen.queryByTestId('restart-button')).toBeNull();
   });
 
   it('renders a Resume button when the node is suspended AND has a cli_session_id', () => {
@@ -92,7 +97,7 @@ describe('NodeItem restart button', () => {
 
   it('does NOT render a Restart button when the node is idle', () => {
     renderNode(makeNode({ status: 'idle' }));
-    expect(screen.queryByTitle('Restart agent')).toBeNull();
+    expect(screen.queryByTestId('restart-button')).toBeNull();
   });
 
   it('clicking Restart invokes spawn_agent with the original cli_session_id so the resume re-attempts', async () => {
@@ -103,7 +108,7 @@ describe('NodeItem restart button', () => {
     const node = makeNode({ status: 'error' });
     useAgentNodeStore.setState({ agentNodes: [node] });
     renderNode(node);
-    fireEvent.click(screen.getByTitle('Restart agent'));
+    fireEvent.click(screen.getByTestId('restart-button'));
     // spawnAgent's invoke is async; await a microtask so the assertion
     // doesn't race the in-flight promise.
     await Promise.resolve();
@@ -125,7 +130,7 @@ describe('NodeItem restart button', () => {
     // can't silently regress it.
     const onSelect = vi.fn();
     renderNode(makeNode({ status: 'error' }), onSelect);
-    fireEvent.click(screen.getByTitle('Restart agent'));
+    fireEvent.click(screen.getByTestId('restart-button'));
     expect(onSelect).not.toHaveBeenCalled();
   });
 
@@ -166,6 +171,70 @@ describe('NodeItem restart button', () => {
     }), onSelect);
     fireEvent.click(screen.getByTitle('Resume agent'));
     expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1306 — restartFreshAgent and spawnAgent fresh option:
+// passes `resume: null` to spawn_agent IPC, clearing stale session ID and booting fresh.
+// ---------------------------------------------------------------------------
+describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({
+      agentNodes: [],
+      activeNodeId: null,
+      loading: false,
+      error: null,
+    });
+    vi.clearAllMocks();
+  });
+
+  it('restartFreshAgent calls spawn_agent with resume=null when node has a cli_session_id', async () => {
+    mockInvoke.mockResolvedValueOnce(undefined); // spawn_agent
+    mockInvoke.mockResolvedValueOnce([]);        // list_agent_nodes
+    mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
+
+    const node = makeNode({ id: 42, status: 'error', cli_session_id: 'stale-uuid-1234' });
+    useAgentNodeStore.setState({ agentNodes: [node] });
+
+    await useAgentNodeStore.getState().restartFreshAgent(42);
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'spawn_agent',
+      expect.objectContaining({
+        sessionId: 42,
+        provider: 'anthropic',
+        resume: null,
+      }),
+    );
+  });
+
+  it('restartFreshAgent passes custom rows/cols when provided', async () => {
+    mockInvoke.mockResolvedValueOnce(undefined); // spawn_agent
+    mockInvoke.mockResolvedValueOnce([]);        // list_agent_nodes
+    mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
+
+    const node = makeNode({ id: 42, status: 'error', cli_session_id: 'stale-uuid-1234' });
+    useAgentNodeStore.setState({ agentNodes: [node] });
+
+    await useAgentNodeStore.getState().restartFreshAgent(42, { rows: 30, cols: 100 });
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'spawn_agent',
+      expect.objectContaining({
+        sessionId: 42,
+        provider: 'anthropic',
+        resume: null,
+        rows: 30,
+        cols: 100,
+      }),
+    );
+  });
+
+  it('throws an error if node is not found', async () => {
+    await expect(
+      useAgentNodeStore.getState().restartFreshAgent(999),
+    ).rejects.toThrow('Node 999 not found');
   });
 });
 

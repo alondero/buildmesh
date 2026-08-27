@@ -644,7 +644,7 @@ describe('NodeItem context menu (issue #776)', () => {
         expect(addToastMock).toHaveBeenCalledTimes(1);
       });
       expect(addToastMock).toHaveBeenCalledWith(
-        'Regenerate',
+        'Regenerate failed',
         expect.stringContaining('regenerate unavailable'),
         'error',
       );
@@ -805,6 +805,144 @@ describe('NodeItem context menu (issue #776)', () => {
         // Wrap-around: kimi → claude.
         expect(document.activeElement).toBe(items()[0]);
       });
+    });
+  });
+
+  describe('Start Fresh context menu item (issue #1306)', () => {
+    it('renders Start Fresh in context menu for an error node with a cli_session_id (3 items total)', () => {
+      const node = makeNode({
+        status: 'error',
+        cli_session_id: 'stale-uuid-1234',
+      });
+      renderNode(node);
+      openContextMenu();
+
+      const items = document.querySelectorAll('[role="menuitem"]');
+      expect(items).toHaveLength(3);
+      expect(items[0].textContent).toMatch(/Regenerate/);
+      expect(items[1].textContent).toMatch(/Start Fresh/);
+      expect(items[2].textContent).toMatch(/Pin node|Unpin node/);
+    });
+
+    it('does NOT render Start Fresh in context menu when error node has no cli_session_id (2 items)', () => {
+      const node = makeNode({
+        status: 'error',
+        cli_session_id: null,
+      });
+      renderNode(node);
+      openContextMenu();
+
+      const items = document.querySelectorAll('[role="menuitem"]');
+      expect(items).toHaveLength(2);
+      expect(items[0].textContent).toMatch(/Regenerate/);
+      expect(items[1].textContent).toMatch(/Pin node|Unpin node/);
+    });
+
+    it('clicking Start Fresh in context menu calls restartFreshAgent and closes menu', async () => {
+      const restartFreshSpy = vi.fn().mockResolvedValue(makeNode());
+      useAgentNodeStore.setState({
+        restartFreshAgent: restartFreshSpy,
+      });
+
+      const node = makeNode({
+        id: 88,
+        status: 'error',
+        cli_session_id: 'stale-uuid-1234',
+      });
+      renderNode(node);
+      openContextMenu();
+
+      const startFreshBtn = screen.getByTestId('context-start-fresh');
+      await userEvent.click(startFreshBtn);
+
+      expect(restartFreshSpy).toHaveBeenCalledWith(88);
+      await waitFor(() => {
+        expect(document.querySelector('[role="menu"]')).toBeNull();
+      });
+    });
+
+    it('ArrowDown wraps through all 3 items (Regenerate -> Start Fresh -> Pin -> Regenerate)', () => {
+      const node = makeNode({
+        status: 'error',
+        cli_session_id: 'stale-uuid-1234',
+      });
+      renderNode(node);
+      openContextMenu();
+
+      const items = () => Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
+      expect(document.activeElement).toBe(items()[0]);
+
+      fireEvent.keyDown(document, { key: 'ArrowDown' });
+      expect(document.activeElement).toBe(items()[1]);
+
+      fireEvent.keyDown(document, { key: 'ArrowDown' });
+      expect(document.activeElement).toBe(items()[2]);
+
+      fireEvent.keyDown(document, { key: 'ArrowDown' });
+      expect(document.activeElement).toBe(items()[0]);
+    });
+
+    it('ArrowUp wraps backwards through all 3 items (Regenerate -> Pin -> Start Fresh -> Regenerate)', () => {
+      const node = makeNode({
+        status: 'error',
+        cli_session_id: 'stale-uuid-1234',
+      });
+      renderNode(node);
+      openContextMenu();
+
+      const items = () => Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
+      expect(document.activeElement).toBe(items()[0]);
+
+      fireEvent.keyDown(document, { key: 'ArrowUp' });
+      expect(document.activeElement).toBe(items()[2]);
+
+      fireEvent.keyDown(document, { key: 'ArrowUp' });
+      expect(document.activeElement).toBe(items()[1]);
+
+      fireEvent.keyDown(document, { key: 'ArrowUp' });
+      expect(document.activeElement).toBe(items()[0]);
+    });
+
+    it('Home and End jump to first and last items', () => {
+      const node = makeNode({
+        status: 'error',
+        cli_session_id: 'stale-uuid-1234',
+      });
+      renderNode(node);
+      openContextMenu();
+
+      const items = () => Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
+
+      fireEvent.keyDown(document, { key: 'End' });
+      expect(document.activeElement).toBe(items()[2]);
+
+      fireEvent.keyDown(document, { key: 'Home' });
+      expect(document.activeElement).toBe(items()[0]);
+    });
+
+    it('surfaces toast on Start Fresh failure', async () => {
+      const restartFreshSpy = vi.fn().mockRejectedValue(new Error('Spawn crashed'));
+      useAgentNodeStore.setState({
+        restartFreshAgent: restartFreshSpy,
+      });
+
+      const node = makeNode({
+        id: 99,
+        status: 'error',
+        cli_session_id: 'stale-uuid-1234',
+      });
+      renderNode(node);
+      openContextMenu();
+
+      const startFreshBtn = screen.getByTestId('context-start-fresh');
+      await userEvent.click(startFreshBtn);
+
+      expect(restartFreshSpy).toHaveBeenCalledWith(99);
+      expect(addToastMock).toHaveBeenCalledWith(
+        'Start Fresh failed',
+        expect.stringContaining('Spawn crashed'),
+        'error',
+      );
     });
   });
 });

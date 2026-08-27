@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
@@ -62,6 +62,8 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
   const regenerateAgentNode = useAgentNodeStore((s) => s.regenerateAgentNode);
+  // Issue #1306 — "Start Fresh" escape hatch for error nodes with stale session IDs.
+  const restartFreshAgent = useAgentNodeStore((s) => s.restartFreshAgent);
   // Pin/Unpin (wayfinder #982 / #985) — the shared store action is the
   // sole mutation path; `node.is_pinned` drives this item's label/icon.
   const toggleNodePinned = useAgentNodeStore((s) => s.toggleNodePinned);
@@ -76,6 +78,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // spawnAgent passes `cli_session_id` as the resume argument, so a
   // click re-attempts the same --resume the failed auto-resume tried.
   const showRestart = node.status === 'error';
+  // Issue #1306 — "Start Fresh" affordance: shown alongside Restart when
+  // the node is in Error AND has a cli_session_id (i.e. the session that
+  // caused the failure is actually captured). Without cli_session_id the
+  // Restart button already starts fresh; the extra button would be a no-op.
+  const showStartFresh = node.status === 'error' && node.cli_session_id != null;
 
   // Same status (`Suspended`) covers two cases that need different
   // affordances:
@@ -98,11 +105,9 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // Mirrors the MeshItem menu infrastructure (issue #735): the menu
   // container ref drives viewport clamping + ARIA keyboard-nav scoping,
   // the trigger ref lets Escape / outside-click restore focus to the
-  // row, and the menuitem refs hold the buttons so arrow keys can move
-  // focus between them with the roving tabindex pattern.
+  // row, and roving tabindex allows arrow keys to move focus between items.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const triggerRef = useRef<HTMLDivElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   // Issue #774 / ticket 03 — Regenerate submenu state. `submenuOpen`
@@ -132,13 +137,20 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // keyboard-nav handler so ArrowDown/Up inside the submenu wraps
   // around the full picker, not the per-group slice.
   const submenuItemCount = regenerateTargets.length;
-  // Render-time top-level item count: 2 — Regenerate (a submenu trigger,
-  // not a click action) and Pin/Unpin (wayfinder #982 / #985). Kept as a
-  // constant + ref so the keyboard-nav handler reads `itemCountRef` for
-  // the parent menu's wrap-around math.
-  const itemCount = 2;
-  const itemCountRef = useRef(itemCount);
-  itemCountRef.current = itemCount;
+
+  type ContextMenuAction = 'regenerate' | 'startFresh' | 'pin';
+  const menuActions: ContextMenuAction[] = useMemo(
+    () => ['regenerate', ...(showStartFresh ? (['startFresh'] as const) : []), 'pin'],
+    [showStartFresh],
+  );
+
+  const getParentMenuItems = useCallback((): HTMLButtonElement[] => {
+    const menu = menuRef.current;
+    if (!menu) return [];
+    return Array.from(
+      menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]'),
+    ).filter((el) => el.closest('[role="menu"]') === menu);
+  }, []);
 
   const isRegenerateDisabled = REGENERATE_DISABLED_STATUSES.includes(node.status);
   // Issue #774 — the submenu has nothing to offer when every
@@ -182,7 +194,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     // `Completed` autopilot node, which the validator used to refuse
     // before the Regenerate-on-Completed fix landed).
     regenerateAgentNode(node.id, providerId).catch((err) => {
-      addToast('Regenerate', formatError(err), 'error');
+      addToast('Regenerate failed', formatError(err), 'error');
     });
   };
 
@@ -211,7 +223,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     // the same toast plumbing so the user always sees a backend
     // rejection instead of a silent menu close.
     regenerateAgentNode(node.id, providerId).catch((err) => {
-      addToast('Regenerate', formatError(err), 'error');
+      addToast('Regenerate failed', formatError(err), 'error');
     });
   };
 
@@ -227,6 +239,15 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // id (mesh and node ids both autoincrement from the same SQLite
   // sequence, so collisions are routine).
   useClickOutside<string>(contextMenu ? dropdownId('node', node.id) : null, () => closeContextMenu());
+
+  // Mirror dynamic state into refs so the document-level listener does not
+  // tear down and re-attach on every keystroke (mirrors `useAriaMenu.ts:38-42`).
+  const activeIndexRef = useRef(activeIndex);
+  activeIndexRef.current = activeIndex;
+  const submenuOpenRef = useRef(submenuOpen);
+  submenuOpenRef.current = submenuOpen;
+  const submenuItemCountRef = useRef(submenuItemCount);
+  submenuItemCountRef.current = submenuItemCount;
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -257,19 +278,14 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
         closeContextMenu();
         return;
       }
-      // Issue #774 — submenu navigation. ArrowRight when focus is on
-      // the parent opens the submenu and moves focus to the first
-      // provider; ArrowLeft when focus is on the parent OR inside
-      // the submenu returns focus to the parent (and closes the
-      // submenu). Both branches share the close path so a single
-      // ArrowLeft dismisses the picker no matter where focus is.
+      // Issue #774 — submenu navigation. ArrowRight on a submenu trigger
+      // opens the submenu and moves focus to the first provider; ArrowLeft
+      // inside the submenu (or on the parent menu while open) closes the
+      // submenu and returns focus to the submenu trigger.
       if (e.key === 'ArrowRight' && inMenu && !inSubmenu) {
-        // Only the Regenerate trigger owns a submenu — with the Pin/Unpin
-        // item now sharing the parent menu (#985), ArrowRight on any other
-        // item must not open the provider picker.
-        if (active !== menuItemRefs.current[0]) return;
+        if (active?.getAttribute('aria-haspopup') !== 'menu') return;
         e.preventDefault();
-        if (submenuItemCount === 0) return;
+        if (submenuItemCountRef.current === 0) return;
         setSubmenuOpen(true);
         // Focus the first submenu item after the next render. Using
         // `queueMicrotask` (not `requestAnimationFrame`) keeps the
@@ -279,10 +295,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
         queueMicrotask(() => focusWithoutScroll(submenuItemRefs.current[0]));
         return;
       }
-      if (e.key === 'ArrowLeft' && (inSubmenu || (inMenu && submenuOpen))) {
+      if (e.key === 'ArrowLeft' && (inSubmenu || (inMenu && submenuOpenRef.current))) {
         e.preventDefault();
         setSubmenuOpen(false);
-        focusWithoutScroll(menuItemRefs.current[0]);
+        const menuEl = menuRef.current;
+        const trigger = menuEl?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+        if (trigger) focusWithoutScroll(trigger);
         return;
       }
       if (e.key === 'ArrowDown') {
@@ -296,11 +314,13 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           const next = (start + 1) % Math.max(1, submenuItemRefs.current.length);
           focusWithoutScroll(submenuItemRefs.current[next]);
         } else {
-          setActiveIndex((i) => {
-            const next = (i + 1) % itemCountRef.current;
-            focusWithoutScroll(menuItemRefs.current[next]);
-            return next;
-          });
+          const parentItems = getParentMenuItems();
+          if (parentItems.length === 0) return;
+          const current = parentItems.findIndex((el) => el === active);
+          const start = current === -1 ? activeIndexRef.current : current;
+          const next = (start + 1) % parentItems.length;
+          setActiveIndex(next);
+          focusWithoutScroll(parentItems[next]);
         }
         return;
       }
@@ -313,25 +333,31 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           const next = (start - 1 + len) % len;
           focusWithoutScroll(submenuItemRefs.current[next]);
         } else {
-          setActiveIndex((i) => {
-            const next = (i - 1 + itemCountRef.current) % itemCountRef.current;
-            focusWithoutScroll(menuItemRefs.current[next]);
-            return next;
-          });
+          const parentItems = getParentMenuItems();
+          if (parentItems.length === 0) return;
+          const current = parentItems.findIndex((el) => el === active);
+          const start = current === -1 ? activeIndexRef.current : current;
+          const next = (start - 1 + parentItems.length) % parentItems.length;
+          setActiveIndex(next);
+          focusWithoutScroll(parentItems[next]);
         }
         return;
       }
       if (e.key === 'Home' && !inSubmenu) {
         e.preventDefault();
+        const parentItems = getParentMenuItems();
+        if (parentItems.length === 0) return;
         setActiveIndex(0);
-        focusWithoutScroll(menuItemRefs.current[0]);
+        focusWithoutScroll(parentItems[0]);
         return;
       }
       if (e.key === 'End' && !inSubmenu) {
         e.preventDefault();
-        const last = itemCountRef.current - 1;
+        const parentItems = getParentMenuItems();
+        if (parentItems.length === 0) return;
+        const last = parentItems.length - 1;
         setActiveIndex(last);
-        focusWithoutScroll(menuItemRefs.current[last]);
+        focusWithoutScroll(parentItems[last]);
         return;
       }
     };
@@ -339,7 +365,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [contextMenu]);
+  }, [contextMenu, getParentMenuItems]);
 
   // Issue #776 — viewport clamping. Runs after the menu mounts so we
   // can read its rendered size; pushes the position back into state if
@@ -372,8 +398,9 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   useLayoutEffect(() => {
     if (!contextMenu) return;
     setActiveIndex(0);
-    focusWithoutScroll(menuItemRefs.current[0]);
-  }, [contextMenu !== null]);
+    const parentItems = getParentMenuItems();
+    if (parentItems[0]) focusWithoutScroll(parentItems[0]);
+  }, [contextMenu !== null, getParentMenuItems]);
 
   return (
     <div
@@ -420,12 +447,21 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           onClick={(e) => {
             e.stopPropagation();
             spawnAgent(node.id, node.provider).catch((err) => {
-              console.error('[NodeItem] Restart failed:', err);
+              addToast('Restart failed', formatError(err), 'error');
             });
           }}
           className="text-text-muted hover:text-status-warning text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
-          title="Restart agent"
-          aria-label={`Restart ${node.name}`}
+          title={
+            node.cli_session_id != null
+              ? 'Retry resume with existing session'
+              : 'Restart agent'
+          }
+          aria-label={
+            node.cli_session_id != null
+              ? `Retry resume for ${node.name}`
+              : `Restart ${node.name}`
+          }
+          data-testid="restart-button"
         >
           ↻
         </button>
@@ -442,7 +478,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
             // instead of erroring; for adapters that DO, the captured
             // `cli_session_id` is honoured.
             spawnAgent(node.id, node.provider).catch((err) => {
-              console.error('[NodeItem] Resume failed:', err);
+              addToast('Resume failed', formatError(err), 'error');
             });
           }}
           // Mirrors the inline Restart button's hover/focus surface so
@@ -518,7 +554,6 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
             onMouseLeave={() => setSubmenuOpen(false)}
           >
             <button
-              ref={(el) => { menuItemRefs.current[0] = el; }}
               // Roving tabindex — only the active item is in the Tab
               // order. The Regenerate item is disabled for the four
               // "race-the-spawn / backend-rejects" statuses (see
@@ -529,7 +564,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
               role="menuitem"
               aria-haspopup="menu"
               aria-expanded={submenuOpen}
-              tabIndex={activeIndex === 0 ? 0 : -1}
+              tabIndex={menuActions[activeIndex] === 'regenerate' ? 0 : -1}
               disabled={isRegenerateDisabled || !hasAlternateProviders}
               onClick={() => {
                 if (isRegenerateDisabled || !hasAlternateProviders) return;
@@ -669,21 +704,46 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
               </div>
             )}
           </div>
+          {/* Issue #1306 — "Start Fresh" context menu action: available when
+              the node is in Error status and has a captured cli_session_id.
+              Allows the user to explicitly discard the dead session ID and boot
+              fresh without having to delete the node or switch providers. */}
+          {showStartFresh && (
+            <button
+              type="button"
+              role="menuitem"
+              tabIndex={menuActions[activeIndex] === 'startFresh' ? 0 : -1}
+              onClick={() => {
+                closeContextMenu();
+                restartFreshAgent(node.id).catch((err) => {
+                  addToast('Start Fresh failed', formatError(err), 'error');
+                });
+              }}
+              title="Discard stale session and boot a fresh agent"
+              data-testid="context-start-fresh"
+              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+              Start Fresh
+            </button>
+          )}
           {/* Pin/Unpin (wayfinder #982 / #985) — one conditional top-level
               action next to Regenerate; label and icon reflect the node's
               current is_pinned rather than rendering two items. Same menu
               contract as Regenerate: role=menuitem, roving tabindex,
               close-and-return-focus on activation. */}
           <button
-            ref={(el) => { menuItemRefs.current[1] = el; }}
             type="button"
             role="menuitem"
             aria-pressed={node.is_pinned}
-            tabIndex={activeIndex === 1 ? 0 : -1}
+            tabIndex={menuActions[activeIndex] === 'pin' ? 0 : -1}
             onClick={() => {
               closeContextMenu();
               toggleNodePinned(node.id).catch((err) => {
-                console.error('[NodeItem] Pin toggle failed:', err);
+                addToast('Pin toggle failed', formatError(err), 'error');
               });
             }}
             title={node.is_pinned ? 'Remove this node from the Pinned grid' : 'Keep this node in the Pinned grid'}
