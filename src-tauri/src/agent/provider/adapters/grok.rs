@@ -37,7 +37,22 @@
 //! `$BUILDMESH_SESSION_ID` at hook runner time (set per-agent by
 //! `spawn_environment`), so the file is reusable across nodes — every
 //! runner carries the session id and port from its own environment.
+//!
+//! **Effort override** uses the documented `--effort` alias of
+//! `--reasoning-effort <level>` (`grok --help`). Grok accepts the seven
+//! canonical levels (`none | minimal | low | medium | high | xhigh | max`)
+//! across the interactive TUI and headless mode — see
+//! `docs/learning/grok-harness-capabilities.md` and the
+//! `GROK_EFFORT_ALLOWED` constant in `agent::capabilities`. The trait
+//! default `effort_args` already emits `["--effort", value]`, so no
+//! override is required for the recipe shape — only the closed vocabulary
+//! needs advertising via `effort_control()`. Issue #1280.
+//!
+//! **Shell wrapping**: `grok` is a native binary on all platforms (not a
+//! `.cmd` shim), so `WindowsShell::Direct` is correct everywhere — matching
+//! the AGY adapter pattern.
 
+use crate::agent::capabilities::{EffortControlKind, GROK_EFFORT_ALLOWED};
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 use std::path::Path;
@@ -215,6 +230,18 @@ impl AgentProvider for GrokAdapter {
         // Trailing positional [PROMPT] on the interactive TUI. The trait
         // default would emit `["--prefill", text]`, which grok rejects.
         vec![text.into()]
+    }
+
+    /// Grok 1.0.5 accepts `--reasoning-effort <level>` (alias `--effort`)
+    /// with the seven canonical levels documented in
+    /// `docs/learning/grok-harness-capabilities.md` and kept in
+    /// [`GROK_EFFORT_ALLOWED`]. The trait default `effort_args` emits
+    /// `["--effort", value]` — the documented alias — so no recipe-shape
+    /// override is needed. Issue #1280.
+    fn effort_control(&self) -> EffortControlKind {
+        EffortControlKind::Closed {
+            allowed: GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+        }
     }
 }
 
@@ -421,17 +448,24 @@ mod tests {
 
     /// Issue #1179 (mirror): end-to-end descriptor pin. The Spawn Menu,
     /// resolver, and autopilot compatibility gate all consume this
-    /// descriptor — drift here means the menu misroutes Grok. Issue #1281:
-    /// Grok now writes a transcript Buildmesh can read (`TranscriptFormat::Grok`
-    /// in `services::transcript_reader`), so `produces_readable_transcript`
-    /// flips to true and the archived-node resume picker surfaces Grok.
+    /// descriptor — drift here means the menu misroutes Grok.
+    ///
+    /// Issue #1280 flipped `effort_control` from `None` to
+    /// `Closed { allowed: GROK_EFFORT_ALLOWED }`. The vocabulary is the
+    /// seven canonical levels documented at
+    /// `docs/learning/grok-harness-capabilities.md`; the resolver mask
+    /// drops anything outside it.
+    ///
+    /// Issue #1281: Grok now writes a transcript Buildmesh can read
+    /// (`TranscriptFormat::Grok` in `services::transcript_reader`), so
+    /// `produces_readable_transcript` flips to true.
     #[test]
     fn capabilities_descriptor_advertises_model_override() {
         let caps = GROK.capabilities();
         assert_eq!(caps.harness_id, "grok");
         assert!(caps.supports_resume);
         assert!(caps.supports_model_override);
-        assert!(!caps.supports_effort_override);
+        assert!(caps.supports_effort_override);
         assert!(caps.supports_prefill);
         // Issue #1282: Grok now ships attention hooks.
         assert!(caps.requires_attention_hook, "issue #1282: Grok now ships attention hooks");
@@ -440,7 +474,198 @@ mod tests {
         // and Node Digest rich layer surface Grok.
         assert!(caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
-        assert_eq!(caps.effort_control, crate::agent::capabilities::EffortControlKind::None);
+        assert_eq!(
+            caps.effort_control,
+            crate::agent::capabilities::EffortControlKind::Closed {
+                allowed: GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            }
+        );
+    }
+
+    /// Issue #1280: descriptor advertises the seven canonical Grok levels.
+    /// Mirrors the Anthropic-style closed-vocab pin (the AGY precedent is
+    /// `agy::tests::capabilities_descriptor_advertises_effort_override`).
+    /// A future change that drops `none` or `max` from the list — or that
+    /// silently flips the trait default back to `None` — would be caught
+    /// here before reaching the Spawn Menu.
+    #[test]
+    fn capabilities_descriptor_advertises_effort_override() {
+        let caps = GROK.capabilities();
+        assert!(
+            caps.supports_effort_override,
+            "Grok 1.0.5 accepts --effort; descriptor must advertise it"
+        );
+        let allowed: Vec<String> = match &caps.effort_control {
+            crate::agent::capabilities::EffortControlKind::Closed { allowed } => allowed.clone(),
+            other => panic!(
+                "Grok must advertise Closed-vocab effort control after #1280; got {other:?}"
+            ),
+        };
+        let expected: Vec<String> = GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            allowed, expected,
+            "Grok effort vocabulary must be exactly GROK_EFFORT_ALLOWED"
+        );
+    }
+
+    /// Issue #1280: when the resolver forwards an effort layer, the
+    /// prepared recipe must carry `--effort <level>` (the documented alias
+    /// of `--reasoning-effort`). Without an effort layer, no `--effort`
+    /// flag may appear — the resolver mask and `default_prepare` together
+    /// guarantee this for every adapter (issue #1179 coherence matrix),
+    /// but the per-adapter pin catches future silent drift (e.g. an
+    /// override that emits the long form instead of the alias).
+    #[test]
+    fn grok_recipe_appends_effort_arg_when_resolved() {
+        use crate::agent::capabilities::{EffortControlKind, ResolvedAgentConfig, GROK_EFFORT_ALLOWED};
+        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        // Sanity check the adapter advertises the same vocabulary the
+        // constant carries — protects a future refactor that moves the
+        // vocabulary off into the constant.
+        let caps = GROK.capabilities();
+        let advertised: Vec<String> = match &caps.effort_control {
+            EffortControlKind::Closed { allowed } => allowed.clone(),
+            other => panic!("expected Closed, got {other:?}"),
+        };
+        let expected: Vec<String> = GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect();
+        assert_eq!(advertised, expected);
+
+        // With an effort layer, the recipe carries --effort <level>.
+        let config = ResolvedAgentConfig {
+            model: None,
+            effort: Some("high".into()),
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(&GROK, input);
+        assert_flag_followed_by_value(&prepared.recipe.base_args, "--effort", "high");
+        // Pin the alias preference — Grok accepts both `--effort` and
+        // `--reasoning-effort`; the documented alias is `--effort` and
+        // Buildmesh emits it (issue #1280 acceptance criteria).
+        assert!(
+            !prepared.recipe.base_args.iter().any(|a| a == "--reasoning-effort"),
+            "Grok must use the --effort alias, not the long --reasoning-effort form; \
+             got {:?}",
+            prepared.recipe.base_args
+        );
+
+        // Without an effort layer, no --effort flag appears at all
+        // (capability mask + default_prepare are the joint guarantee).
+        let config = ResolvedAgentConfig::default();
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: Some("continue from where we left off"),
+            sandbox: false,
+        };
+        let prepared = default_prepare(&GROK, input);
+        assert!(
+            !prepared.recipe.base_args.iter().any(|a| a == "--effort"),
+            "no effort layer must produce no --effort flag; got {:?}",
+            prepared.recipe.base_args
+        );
+        assert!(
+            !prepared
+                .recipe
+                .base_args
+                .iter()
+                .any(|a| a == "--reasoning-effort"),
+            "no effort layer must produce no --reasoning-effort flag; got {:?}",
+            prepared.recipe.base_args
+        );
+    }
+
+    /// Issue #1280: end-to-end vocabulary pin via the resolver. A value
+    /// inside the seven-level vocabulary passes the mask and reaches the
+    /// recipe; a value outside (e.g. `"ultra-mega-high"`, an obvious
+    /// typo) is dropped at the resolver and never reaches `default_prepare`.
+    /// Mirrors the AGY precedent (`agy::tests::agy_recipe_appends_effort_arg_when_resolved`).
+    #[test]
+    fn grok_resolver_keeps_in_vocabulary_drops_out_of_vocabulary() {
+        use crate::agent::capabilities::{
+            resolve_agent_config, AgentConfigInputs, FieldInputs,
+        };
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let caps = GROK.capabilities();
+
+        // "xhigh" is in the seven-level vocabulary — must pass through.
+        let inputs = AgentConfigInputs {
+            model: FieldInputs::default(),
+            effort: FieldInputs {
+                explicit: Some("xhigh"),
+                ..FieldInputs::default()
+            },
+        };
+        let resolved = resolve_agent_config(&caps, inputs);
+        assert_eq!(resolved.effort.as_deref(), Some("xhigh"));
+
+        // End-to-end: the prepared recipe carries --effort xhigh.
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &resolved,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(&GROK, input);
+        assert!(
+            prepared.recipe.base_args.windows(2).any(|w| {
+                w.first().map(String::as_str) == Some("--effort")
+                    && w.get(1).map(String::as_str) == Some("xhigh")
+            }),
+            "in-vocabulary effort must reach the recipe as --effort xhigh; got {:?}",
+            prepared.recipe.base_args
+        );
+
+        // "ultra-mega-high" is not in Grok's vocabulary — must be masked out.
+        let inputs = AgentConfigInputs {
+            model: FieldInputs::default(),
+            effort: FieldInputs {
+                explicit: Some("ultra-mega-high"),
+                ..FieldInputs::default()
+            },
+        };
+        let resolved = resolve_agent_config(&caps, inputs);
+        assert!(
+            resolved.effort.is_none(),
+            "out-of-vocabulary effort must be dropped at the resolver; got {:?}",
+            resolved.effort
+        );
+
+        // End-to-end: a resolved-None effort produces no --effort flag.
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &resolved,
+            prefill: Some("tail prompt"),
+            sandbox: false,
+        };
+        let prepared = default_prepare(&GROK, input);
+        assert!(
+            !prepared.recipe.base_args.iter().any(|a| a == "--effort"),
+            "masked-out effort must not reach the recipe; got {:?}",
+            prepared.recipe.base_args
+        );
+        // ...but the prefill still lands — capability masking is
+        // per-field, not "all or nothing".
+        assert_eq!(
+            prepared.recipe.base_args.last().map(String::as_str),
+            Some("tail prompt"),
+            "prefill must not be lost when effort is masked; got {:?}",
+            prepared.recipe.base_args
+        );
     }
 
     // -----------------------------------------------------------------

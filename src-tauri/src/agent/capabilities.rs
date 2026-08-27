@@ -311,6 +311,17 @@ pub const CODEX_EFFORT_KEY: &str = "model_reasoning_effort";
 /// #1143 research).
 pub const CODEX_EFFORT_ALLOWED: &[&str] = &["none", "low", "medium", "high", "xhigh"];
 
+/// Grok Code (1.0.5) accepts `--reasoning-effort <level>` (alias `--effort`)
+/// with the seven canonical levels documented at
+/// `~/.grok/docs/user-guide/14-headless-mode.md` (issue #1280 research, also
+/// `docs/learning/grok-harness-capabilities.md`). A given model only honours
+/// the levels its menu advertises — the seven-value vocabulary is the
+/// superset of every model's allowed set; the resolver drops anything the
+/// active model doesn't accept.
+pub const GROK_EFFORT_ALLOWED: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -472,9 +483,18 @@ mod tests {
         // Grok and the Coordinator Node Digest hydrates it.
         assert!(grok.produces_readable_transcript);
         assert!(grok.supports_model_override);
-        assert!(!grok.supports_effort_override);
+        // Issue #1280: Grok 1.0.5 accepts `--reasoning-effort` (alias
+        // `--effort`) with the seven canonical levels — see
+        // `docs/learning/grok-harness-capabilities.md` and the
+        // `GROK_EFFORT_ALLOWED` constant above.
+        assert!(grok.supports_effort_override);
         assert!(grok.supports_prefill);
-        assert_eq!(grok.effort_control, EffortControlKind::None);
+        assert_eq!(
+            grok.effort_control,
+            EffortControlKind::Closed {
+                allowed: GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            }
+        );
 
         let mcode = mcode_caps();
         // Issue #1179: mcode's interactive TUI rejects `--model`, so
