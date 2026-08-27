@@ -608,7 +608,8 @@ pub async fn regenerate(
     let node = db::get_agent_node_by_id(node_id)?;
 
     // 6. Decide whether the intent is a same-harness resume. The spawner
-    //    reloads the node and owns the actual session-id/adapter policy.
+    //    reloads the node and owns the actual session-id/adapter policy,
+    //    including clearing a stale id for a Fresh intent.
     let resume = decide_resume(&old_provider, new_provider, node.cli_session_id.as_deref());
     let intent = if resume.is_some() {
         SpawnIntent::Resume {

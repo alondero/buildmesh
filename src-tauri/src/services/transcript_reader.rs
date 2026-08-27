@@ -56,6 +56,12 @@ pub enum TranscriptFormat {
     ClaudeCode,
     Cursor,
     Codex,
+    /// Antigravity CLI (issue #1283). Persisted at
+    /// `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
+    /// logs/transcript.jsonl` (with `transcript_full.jsonl` as the untruncated
+    /// fallback). One JSON object per turn — flat shape, no `message.id`
+    /// coalescing needed.
+    Agy,
 }
 
 impl TranscriptFormat {
@@ -63,13 +69,16 @@ impl TranscriptFormat {
     /// Claude-Code-backed executors (the `anthropic` adapter behind the built-in
     /// subscription and all custom MiniMax/DeepSeek profiles) share the Claude
     /// Code format. Cursor has the same message shape but a workspace-scoped
-    /// path, while Codex writes its own rollout format. Kimi Code
-    /// (wayfinder #918) writes standard JSONL (`~/.kimi/sessions/wire.jsonl`)
-    /// but the path resolver isn't wired yet — tracked as a follow-up.
+    /// path, while Codex writes its own rollout format. Antigravity's
+    /// per-conversation JSONL is parsed via `TranscriptFormat::Agy`
+    /// (issue #1283). Kimi Code (wayfinder #918) writes standard JSONL
+    /// (`~/.kimi/sessions/wire.jsonl`) but the path resolver isn't wired yet
+    /// — tracked as a follow-up.
     pub fn for_harness(harness_id: &str) -> Self {
         match harness_id {
             "codex" => TranscriptFormat::Codex,
             "cursor" => TranscriptFormat::Cursor,
+            "agy" => TranscriptFormat::Agy,
             _ => TranscriptFormat::ClaudeCode,
         }
     }
@@ -281,7 +290,39 @@ fn locate_transcript(
         TranscriptFormat::ClaudeCode => Some(transcript_path(session_id, node_path)),
         TranscriptFormat::Cursor => Some(cursor_transcript_path(session_id, node_path)),
         TranscriptFormat::Codex => find_codex_rollout(session_id),
+        TranscriptFormat::Agy => find_agy_transcript(session_id),
     }
+}
+
+/// Find the on-disk JSONL for an AGY conversation. AGY keeps the
+/// token-efficient `transcript.jsonl` first and the untruncated
+/// `transcript_full.jsonl` as a fallback (issue #1283); both live at
+/// `<brain_dir>/<conversation-id>/.system_generated/logs/`. The session id
+/// itself is the `conversation-id` and the brain root comes from
+/// `env::agy_brain_dir()` — globally keyed (not project-scoped).
+fn find_agy_transcript(session_id: &str) -> Option<PathBuf> {
+    agy_locator_in(&env::agy_brain_dir(), session_id)
+}
+
+/// Pure AGY locator — split from [`find_agy_transcript`] so the contract
+/// test drives the resolve against a temp brain root instead of touching
+/// `~/.gemini`. The path it returns (when both files exist) is
+/// `transcript.jsonl` first, falling back to `transcript_full.jsonl` when
+/// the short variant is missing — issue #1283 acceptance criterion #2.
+fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<PathBuf> {
+    let logs = brain_root
+        .join(session_id)
+        .join(".system_generated")
+        .join("logs");
+    let short = logs.join("transcript.jsonl");
+    if short.exists() {
+        return Some(short);
+    }
+    let full = logs.join("transcript_full.jsonl");
+    if full.exists() {
+        return Some(full);
+    }
+    None
 }
 /// Build the expected on-disk path of a Claude Code session transcript:
 /// `<claude_dir>/projects/<encoded node_path>/<session_id>.jsonl`.
@@ -416,6 +457,7 @@ fn parse_transcript(
     match format {
         TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => parse_turns(lines, keep),
         TranscriptFormat::Codex => parse_codex_turns(lines, keep),
+        TranscriptFormat::Agy => parse_agy_turns(lines, keep),
     }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
@@ -908,6 +950,147 @@ fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed
         last_assistant_message,
         saw_malformed,
     }
+}
+
+// --- Antigravity transcript parser (issue #1283) ---
+//
+// Antigravity's `transcript.jsonl` is a flat one-line-per-turn shape (no
+// `message.id` coalescing across lines). Each line carries:
+//
+//   - `source`: USER_EXPLICIT | MODEL | SYSTEM  — who wrote this turn
+//   - `type`:   USER_INPUT | PLANNER_RESPONSE | TASK_NOTIFICATION — coarse kind
+//   - `content`: the prompt or reply text (always a bare string)
+//   - `thinking`: optional chain-of-thought (not surfaced as text)
+//   - `tool_calls`: [{name, args}]  — args is the raw input shape
+//
+// Mapping onto [`Turn`]:
+//
+//   USER_EXPLICIT     → user turn with `role: "user"`
+//   MODEL             → assistant turn with `role: "assistant"`, content + tools
+//   SYSTEM            → skipped (TASK_NOTIFICATION is harness plumbing, like
+//                       Claude's `<task-notification>` injection)
+//
+// A MODEL line with neither content nor tool_calls is a `thinking`-only turn —
+// skip it (nothing for the Coordinator to use), don't flag malformed. A
+// USER_EXPLICIT line missing `content` is flagged malformed so a renamed-shape
+// drift degrades loudly as `ShapeChanged` instead of silently surfacing
+// nothing.
+
+/// Parse Antigravity JSONL lines into logical turns, honouring the same
+/// [`Parsed`] contract as [`parse_turns`] (rolling `keep`-bounded turn window,
+/// whole-stream last-assistant-message tracking, malformed flag). Each line
+/// is one self-contained turn — no message-id coalescing is needed for AGY
+/// because its emission shape never splits a single assistant message across
+/// multiple JSONL lines.
+fn parse_agy_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    let keep = keep.max(1);
+    let mut turns: VecDeque<Turn> = VecDeque::new();
+    let mut last_assistant_message: Option<String> = None;
+    let mut saw_malformed = false;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        // SYSTEM-side TASK_NOTIFICATION injections are harness plumbing, not
+        // a turn — skip before the role gate, so a session whose only lines
+        // are notifications degrades as `Empty`, not `ShapeChanged`.
+        match val.get("source").and_then(|s| s.as_str()) {
+            Some("USER_EXPLICIT") => {
+                let Some(text) = val.get("content").and_then(|c| c.as_str()) else {
+                    saw_malformed = true;
+                    continue;
+                };
+                if is_agy_synthetic(text) || text.trim().is_empty() {
+                    continue;
+                }
+                push_bounded(
+                    &mut turns,
+                    Turn {
+                        role: "user".to_string(),
+                        text: truncate(text, MAX_TURN_TEXT),
+                        tool_calls: Vec::new(),
+                    },
+                    keep,
+                );
+            }
+            Some("MODEL") => {
+                // AGY emits one assistant line per turn (the `type` field is
+                // typically `PLANNER_RESPONSE`; we don't gate on it — a
+                // renamed type would still be a recognized assistant turn,
+                // only the role-by-source gate flags the shape break).
+                let text = val
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                let mut tool_calls = extract_agy_tool_calls(val.get("tool_calls"));
+                if text.trim().is_empty() && tool_calls.is_empty() {
+                    // thinking-only turn — nothing the Coordinator can use.
+                    continue;
+                }
+                cap_tool_calls(&mut tool_calls);
+                let turn = Turn {
+                    role: "assistant".to_string(),
+                    text: truncate(text, MAX_TURN_TEXT),
+                    tool_calls,
+                };
+                if !turn.text.is_empty() {
+                    last_assistant_message = Some(turn.text.clone());
+                }
+                push_bounded(&mut turns, turn, keep);
+            }
+            // SYSTEM (TASK_NOTIFICATION) and unknown sources are silently
+            // skipped — the source gate is the only place we recognize a
+            // turn, so a missing `source` on a line that would otherwise be
+            // one falls through here without flagging malformed. Real shape
+            // breaks (renamed USER_EXPLICIT, etc.) are detected via the
+            // explicit guards above.
+            _ => {}
+        }
+    }
+    Parsed {
+        turns: turns.into(),
+        last_assistant_message,
+        saw_malformed,
+    }
+}
+
+/// Synthetic AGY user injections — the AGY equivalent of Claude Code's
+/// `<local-command-caveat>` wrapper. Today's transcripts don't carry
+/// any of these (issue #1283 research); the predicate is a forward-
+/// compat shim so an environment-injected row never masquerades as a
+/// real user prompt.
+fn is_agy_synthetic(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("<local-command-caveat>")
+        || t.starts_with("<system>")
+        || t.starts_with("<environment_context>")
+        || t.starts_with("<task-notification>")
+}
+
+/// Pull AGY `tool_calls` (`{name, args}`) into the same [`ToolCall`] wire
+/// shape Claude / Codex emit: `{name, input}`. Each `args` object's
+/// string leaves are truncated via the shared [`truncate_json_strings`]
+/// helper so a `run_command` carrying a multi-megabyte body doesn't blow
+/// up the payload while the args *structure* is still delivered raw.
+fn extract_agy_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let input = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
+            Some(ToolCall {
+                name: name.to_string(),
+                input: truncate_json_strings(input, MAX_TOOL_STRING),
+            })
+        })
+        .collect()
 }
 
 // --- Pending background tasks (issue #878) ---
@@ -1646,13 +1829,15 @@ mod tests {
         std::fs::remove_dir_all(&temp).ok();
     }
 
-    /// `for_harness` routes only the codex harness to the Codex format —
-    /// every Claude-backed executor id stays on Claude Code.
+    /// `for_harness` routes each harness to its native format — codex to
+    /// Codex, cursor to Cursor, and (issue #1283) agy to a dedicated AGY
+    /// shape. Every Claude-backed executor id stays on Claude Code.
     #[test]
-    fn transcript_format_for_harness_routes_codex_only() {
+    fn transcript_format_for_harness_routes_each_format() {
         assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
         assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
-        for id in ["anthropic", "claude", "agy", "opencode", "terminal", ""] {
+        assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
+        for id in ["anthropic", "claude", "opencode", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
         }
     }
@@ -1707,5 +1892,239 @@ mod tests {
         assert_eq!(turns[0].role, "user");
         assert_eq!(turns[1].text, "The path is wired.");
         assert_eq!(turns[1].tool_calls[0].name, "Read");
+    }
+
+    // ---------------------------------------------------------------
+    // Antigravity transcript parser (issue #1283)
+    //
+    // The contract test exercises the *real* AGY shape with one of each
+    // line type: USER_INPUT (user prompt), two MODEL turns (one with
+    // a tool call, the next with text + a tool call), a SYSTEM
+    // TASK_NOTIFICATION (harness plumbing — must be dropped), a follow-up
+    // USER_INPUT, and a final MODEL turn flagged with `status: ERROR`.
+    // The cheap digest reader must agree with the full reader on the
+    // last assistant message — same contract as the Codex / Claude cases.
+    // ---------------------------------------------------------------
+
+    /// Contract test over the checked-in AGY fixture: noise lines
+    /// (SYSTEM `TASK_NOTIFICATION`) are dropped; MODEL turns keep both
+    /// their text and their tool calls (mapped from `args` to the shared
+    /// `input` wire shape); the last assistant text is recovered from
+    /// the full stream regardless of how small a tail the caller asks
+    /// for.
+    #[test]
+    fn agy_contract_parses_tail_and_last_assistant_message() {
+        let tail = read_tail_from_file(
+            &fixture("agy_transcript.jsonl"),
+            10,
+            TranscriptFormat::Agy,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("AGY fixture should parse to an available tail, got {tail:?}");
+        };
+        // Two user prompts + three MODEL turns = five surviving turns
+        // (the SYSTEM TASK_NOTIFICATION is dropped). The final MODEL turn
+        // carries `status: ERROR` because the harness flagged the search
+        // replacement as failed, but the parser still surfaces the line —
+        // it's a real assistant reply and the Coordinator needs to see it.
+        let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "assistant", "user", "assistant"],
+            "turns: {turns:#?}"
+        );
+        // First user prompt is the genuine opening turn.
+        assert_eq!(turns[0].text, "Inspect src/login.ts for the redirect bug.");
+        // The first MODEL turn opens with text + a single tool call.
+        assert_eq!(turns[1].text, "I'll read the file first.");
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "read_file");
+        assert_eq!(
+            turns[1].tool_calls[0].input["file_path"],
+            "src/login.ts",
+            "AGY's `args` field is mapped onto the shared `input` wire shape"
+        );
+        // The second MODEL turn has text + a different tool call shape.
+        assert_eq!(
+            turns[2].text,
+            "Found it — the redirect drops the query string. Shall I apply the fix?"
+        );
+        assert_eq!(turns[2].tool_calls[0].name, "search_replace");
+        assert_eq!(
+            turns[2].tool_calls[0].input["file_path"],
+            "src/login.ts"
+        );
+        // The SYSTEM TASK_NOTIFICATION is silently dropped before the
+        // user prompt that follows it.
+        assert_eq!(turns[3].text, "Yes, apply the fix.");
+        // The closing assistant turn (status=ERROR) still surfaces — the
+        // Coordinator needs to see the failure, not have the rich layer
+        // degrade silently.
+        assert!(turns[4].text.contains("Patch applied"));
+        assert_eq!(turns[4].tool_calls[0].name, "edit_file");
+        // last_assistant_message is the FULL final text, regardless of
+        // the bounded turn window — same contract as the Codex / Claude
+        // paths.
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Patch applied. The redirect now preserves the query string."),
+        );
+    }
+
+    /// The cheap digest path must agree with the full reader for AGY —
+    /// when an `AwaitingInput` AGY node is reading its blocking question,
+    /// the digest endpoint can land on either path.
+    #[test]
+    fn agy_cheap_digest_reader_matches_full_reader() {
+        let cheap = read_last_assistant_message_from_file(
+            &fixture("agy_transcript.jsonl"),
+            TranscriptFormat::Agy,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = cheap
+        else {
+            panic!("expected available, got {cheap:?}");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Patch applied. The redirect now preserves the query string."),
+        );
+    }
+
+    /// SYSTEM `TASK_NOTIFICATION` lines are harness plumbing — same as
+    /// Claude's `<task-notification>` injection. A session whose only
+    /// lines are notifications (plus a stray user turn whose text happens
+    /// to be wrapped in a synthetic tag) is a genuinely-quiet session,
+    /// `Empty` not `ShapeChanged`.
+    #[test]
+    fn agy_notification_only_session_degrades_to_empty() {
+        let lines = vec![
+            r#"{"source":"SYSTEM","type":"TASK_NOTIFICATION","status":"DONE","content":"<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n</task-notification>"}"#.to_string(),
+            r#"{"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<local-command-caveat>noise</local-command-caveat>"}"#.to_string(),
+        ];
+        let parsed = parse_agy_turns(lines.into_iter(), 10);
+        assert!(parsed.turns.is_empty());
+        assert!(!parsed.saw_malformed);
+        assert_eq!(
+            empty_or_shape_changed(parsed.saw_malformed),
+            UnavailableReason::Empty
+        );
+    }
+
+    /// A renamed `source` value (e.g. `HUMAN_EXPLICIT` after an AGY
+    /// upgrade, or `source` removed entirely) on a line that should
+    /// carry a turn is malformed: the parser can't classify it, so the
+    /// degraded result must be `ShapeChanged` rather than `Empty`.
+    #[test]
+    fn agy_renamed_source_field_degrades_to_shape_changed() {
+        // A USER_EXPLICIT-style line whose `content` field was renamed
+        // `prompt_text` — every line fails to surface, but the missing-
+        // content case is the load-bearing one (a future `source: HUMAN`
+        // variant would likewise fail the `Some(source) == USER_EXPLICIT`
+        // gate and silently degrade to `Empty`; that's intentional — the
+        // *role gate* is the shape pin).
+        let lines = vec![
+            r#"{"source":"USER_EXPLICIT","prompt_text":"the content was renamed"}"#.to_string(),
+        ];
+        let parsed = parse_agy_turns(lines.into_iter(), 10);
+        assert!(parsed.turns.is_empty());
+        assert!(
+            parsed.saw_malformed,
+            "a USER_EXPLICIT line missing `content` is malformed"
+        );
+        assert_eq!(
+            empty_or_shape_changed(parsed.saw_malformed),
+            UnavailableReason::ShapeChanged
+        );
+    }
+
+    /// A MODEL line with no content AND no tool calls is a `thinking`-
+    /// only turn — silently dropped so a session whose MODEL replies are
+    /// just chain-of-thought doesn't false-positive `ShapeChanged`.
+    #[test]
+    fn agy_thinking_only_turn_is_skipped() {
+        let lines = vec![
+            r#"{"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"hi","tool_calls":[]}"#.to_string(),
+            r#"{"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"","thinking":"just thinking","tool_calls":[]}"#.to_string(),
+            r#"{"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Hello!","thinking":"","tool_calls":[]}"#.to_string(),
+        ];
+        let parsed = parse_agy_turns(lines.into_iter(), 10);
+        let roles: Vec<&str> = parsed.turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant"]);
+        assert_eq!(parsed.turns[1].text, "Hello!");
+        assert!(!parsed.saw_malformed);
+    }
+
+    /// A single MODEL turn carrying `MAX_TURN_TOOL_CALLS + extra` tool
+    /// calls is bounded at the cap — same defensive rule as the Claude
+    /// / Codex parsers — so no single turn dominates the payload.
+    #[test]
+    fn agy_tool_calls_per_turn_are_capped() {
+        let mut calls = String::new();
+        for i in 0..(MAX_TURN_TOOL_CALLS + 10) {
+            if i > 0 {
+                calls.push(',');
+            }
+            calls.push_str(&format!(
+                r#"{{"name":"run_command","args":{{"line":"{i}"}}}}"#
+            ));
+        }
+        let line = format!(
+            r#"{{"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"running","tool_calls":[{calls}]}}"#
+        );
+        let parsed = parse_agy_turns(std::iter::once(line), 10);
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(
+            parsed.turns[0].tool_calls.len(),
+            MAX_TURN_TOOL_CALLS,
+            "AGY tool calls per turn are bounded by the shared cap"
+        );
+    }
+
+    /// Pure path builder split from the env-lookup wrapper so tests
+    /// drive the resolve with a synthetic brain root instead of touching
+    /// `~/.gemini`. Mirrors the cursor/codex split — the locator can
+    /// validate `transcript.jsonl` → `transcript_full.jsonl` fallback
+    /// under a tempdir without depending on the process-global
+    /// `ANTIGRAVITY_HOME`.
+    #[test]
+    fn agy_locator_prefers_short_transcript_then_falls_back_to_full() {
+        let suffix = std::process::id();
+        let temp = std::env::temp_dir().join(format!(
+            "buildmesh_test_agy_locator_{suffix}"
+        ));
+        let conv = temp.join("conv-123").join(".system_generated").join("logs");
+        std::fs::create_dir_all(&conv).unwrap();
+
+        // Neither file yet → None (callers degrade to NoTranscript).
+        let resolved = agy_locator_in(&temp, "conv-123");
+        assert!(
+            resolved.is_none(),
+            "no transcript files yet, locator must report missing (None), got {:?}",
+            resolved
+        );
+
+        // Only the full file present → it wins (the short variant doesn't
+        // exist; the issue's fallback ranks `transcript_full.jsonl` second).
+        let full_only = conv.join("transcript_full.jsonl");
+        std::fs::write(&full_only, "{}\n").unwrap();
+        let resolved = agy_locator_in(&temp, "conv-123");
+        assert_eq!(resolved.as_deref(), Some(full_only.as_path()));
+
+        // Both present → short wins (AGY keeps `transcript.jsonl` as the
+        // primary and `transcript_full.jsonl` as the untruncated fallback).
+        let short = conv.join("transcript.jsonl");
+        std::fs::write(&short, "{}\n").unwrap();
+        let resolved = agy_locator_in(&temp, "conv-123");
+        assert_eq!(resolved.as_deref(), Some(short.as_path()));
+
+        std::fs::remove_dir_all(&temp).ok();
     }
 }

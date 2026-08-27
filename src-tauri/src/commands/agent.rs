@@ -684,6 +684,10 @@ pub async fn spawn_handover_agent(
 /// empty string behind.
 #[command]
 pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String> {
+    if let Err(error) = crate::services::codex_session::backfill_legacy_suspended_nodes_once().await {
+        tracing::warn!("auto_resume_agent_nodes: legacy Codex session migration failed: {error}");
+    }
+
     let nodes = db::list_suspended_nodes().map_err(|e| e.to_string())?;
 
     if nodes.is_empty() {

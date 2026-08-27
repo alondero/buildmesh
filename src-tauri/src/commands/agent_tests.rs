@@ -819,12 +819,15 @@ mod tests {
             &SessionIdMode::None,
             SESSION_ID,
             Some("opus"),
-            // Agy has no effort control; the capability mask drops this
-            // value before it reaches the process. Pinning the absence of
-            // `--effort` here is the regression test for issue #1149
-            // acceptance criteria 6 ("Unsupported model or effort values
-            // never reach a harness process").
-            Some("high"),
+            // Issue #1286: AGY's CLI accepts `--effort <low|medium|high>`.
+            // This test focuses on model + prefill only (effort layer is
+            // None). The end-to-end pin that AGY *does* forward `--effort`
+            // when the layer is set lives in
+            // `adapters::agy::tests::agy_recipe_appends_effort_arg_when_resolved`;
+            // the "non-effort harness drops effort" pin is the matrix-level
+            // `resolver_drops_effort_for_harness_without_effort_control` in
+            // `capabilities::tests`.
+            None,
             Some("prefill text"),
             false,
         );
@@ -845,7 +848,7 @@ mod tests {
         );
         assert!(
             !args.iter().any(|a| a == "--effort"),
-            "Agy's capability mask must drop effort values; got argv = {:?}",
+            "Agy with no effort layer must not emit --effort; got argv = {:?}",
             args
         );
     }

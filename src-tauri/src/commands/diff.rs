@@ -1489,21 +1489,28 @@ mod tests {
     /// before the no-cancel baseline completes. The bound is loose
     /// (1s) — CI flake guard — but must be well under the no-cancel
     /// baseline on any reasonable machine, otherwise pool-pressure
-    /// mitigation is moot. 50 small files is enough that the walk
-    /// takes >0ms of highlight work; if even that flips within 1s
-    /// the poll is in the right place.
+    /// mitigation is moot. Each file carries enough lines that the
+    /// syntect highlight pass dominates the cost (50 files × 100 lines
+    /// ≈ several hundred ms on a fast machine), so the 1ms flipper
+    /// delay is unambiguously mid-walk on any reasonable host — if
+    /// the test still flips within 1s the poll is in the right place.
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
         let tmp = tempdir_via_env();
         let _repo = init_repo_with_base(&tmp);
 
-        // Enough files that the no-cancel walk is non-trivial.
+        // Enough files × lines that the highlight pass dominates the
+        // cost and the 1ms flipper delay fires unambiguously mid-walk.
+        // Without the per-line weight, a fast SSD + a single-file diff
+        // walker can complete 50 small files in under 1ms and miss the
+        // flip — see the historical regression that motivated the
+        // heavier workload (issue #149 regression class).
         for i in 0..50 {
-            std::fs::write(
-                tmp.join(format!("f{i}.txt")),
-                format!("line {} {}\n", i, "x".repeat(40)),
-            )
-            .unwrap();
+            let mut body = String::new();
+            for line in 0..100 {
+                body.push_str(&format!("file {} line {} {}\n", i, line, "x".repeat(40)));
+            }
+            std::fs::write(tmp.join(format!("f{i}.txt")), body).unwrap();
         }
 
         let token = Arc::new(AtomicBool::new(false));

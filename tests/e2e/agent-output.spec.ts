@@ -9,222 +9,250 @@
  * Run with: npx playwright test tests/e2e/agent-output.spec.ts --config playwright.config.ts
  */
 import { test, expect } from '@playwright/test';
-import { spawn } from 'child_process';
-import { exec } from 'child_process';
-import util from 'util';
-import { invokeViaHttp } from './utils/tauri-http';
+import fs from 'fs';
+import { invokeViaHttp, waitForPort, waitForPortClosed } from './utils/tauri-http';
+import {
+  spawnBuildmesh,
+  terminate,
+  LOG_PATH,
+  hasLogPath,
+  TEST_SERVER_PORT,
+  type BuildmeshProcess,
+} from './utils/buildmesh-launcher';
 
-const execPromise = util.promisify(exec);
+// The process we last spawned. Tracked by PID so cleanup can target THAT
+// process instead of falling back to `taskkill /IM buildmesh.exe /F`
+// (an image-name sledgehammer that would also murder the user's stable
+// hub — see `terminate()` for the deterministic shutdown handshake).
+let proc: BuildmeshProcess | null = null;
 
-const EXE_PATH = 'X:/src/buildmesh/src-tauri/target/release/buildmesh.exe';
-const LOG_PATH = 'C:/Users/alond/AppData/Roaming/com.alond.buildmesh/logs/buildmesh.log';
-
-async function killAllBuildmeshProcesses() {
+async function readNewLogLines(fromByte: number): Promise<string[]> {
+  if (!LOG_PATH) return [];
+  let stat: fs.Stats;
   try {
-    await execPromise('taskkill /IM buildmesh.exe /F');
+    stat = await fs.promises.stat(LOG_PATH);
   } catch {
-    // Ignore
+    return [];
+  }
+  if (fromByte >= stat.size) return [];
+  const fd = await fs.promises.open(LOG_PATH, 'r');
+  try {
+    const length = stat.size - fromByte;
+    const buf = Buffer.alloc(length);
+    await fd.read(buf, 0, length, fromByte);
+    return buf.toString('utf-8').split('\n').filter((l) => l.trim().length > 0);
+  } finally {
+    await fd.close();
   }
 }
 
-async function waitForPort(port: number, timeoutMs: number = 10000): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
-      if (response.ok) return true;
-    } catch {
-      // Not ready yet
-    }
-    await new Promise(r => setTimeout(r, 200));
+async function logSize(): Promise<number> {
+  if (!LOG_PATH) return 0;
+  try {
+    return (await fs.promises.stat(LOG_PATH)).size;
+  } catch {
+    return 0;
   }
-  return false;
 }
 
+// Captures full RFC3339 incl. fractional seconds + timezone so time-diff
+// math isn't truncated to the second.
 function getLogTimestamp(line: string): string | null {
-  const match = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+)/);
+  const match = line.match(
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))/,
+  );
   return match ? match[1] : null;
 }
 
 test.describe('agent output', () => {
+  // The agent-output tests assert against `buildmesh.log` content. Without
+  // an env hint or platform-appropriate default we can't find it — skip the
+  // whole suite rather than pretending the asserts are conditional.
+  test.skip(!hasLogPath(), 'LOG_PATH unresolvable: set BUILDMESH_LOG_DIR (Windows needs %APPDATA%)');
 
   test.beforeEach(async () => {
-    await killAllBuildmeshProcesses();
-    await new Promise(r => setTimeout(r, 1000));
+    // Same pre-flight as mobile-spa.spec.ts: skip cleanly when 1991 is
+    // bound (the stable hub is up). Per CLAUDE.local.md, this spec needs
+    // the hub paused — but we make that an intentional skip rather than a
+    // hard failure, so a running hub doesn't cause this spec to crash
+    // the worker's teardown or signal anything that would kill processes.
+    test.skip(
+      await isPortBound(TEST_SERVER_PORT),
+      `port ${TEST_SERVER_PORT} is bound (likely the stable hub) — pause it first per CLAUDE.local.md before this spec can run.`,
+    );
+
+    // Belt-and-braces: drain the previous run's child (if any) AND wait
+    // for the kernel to release 1991. terminate() throws if the port
+    // doesn't free within 5s — that surfaces as a clear beforeEach
+    // failure rather than a vague spawn error downstream.
+    if (proc) {
+      await terminate(proc);
+      proc = null;
+    }
+    const portReleased = await waitForPortClosed('127.0.0.1', TEST_SERVER_PORT, 5000);
+    expect(portReleased, 'port 1991 should be free before the next test spawns the exe').toBe(true);
   });
 
   test.afterEach(async () => {
-    // Clean up test project and sessions
     try {
-      // List projects and delete ones with test-related names
-      const projects = await invokeViaHttp('list_meshes') as Array<{id: number; name: string}>;
+      const projects = (await invokeViaHttp('list_meshes')) as Array<{ id: number; name: string }>;
       for (const project of projects) {
-        if (project.name.includes('Test') || project.name.includes('Agent Output') || project.name.includes('Claude Code') || project.name.includes('Cwrap')) {
+        if (
+          project.name.includes('Test') ||
+          project.name.includes('Agent Output') ||
+          project.name.includes('Claude Code') ||
+          project.name.includes('Cwrap')
+        ) {
           await invokeViaHttp('delete_mesh', { meshId: project.id });
         }
       }
     } catch (e) {
       console.error('Cleanup failed:', e);
     }
-    await killAllBuildmeshProcesses();
+    if (proc) {
+      await terminate(proc);
+      proc = null;
+    }
   });
 
   test('spawned agent produces terminal output', async () => {
-    // Start the built exe directly
-    const appProcess = spawn(EXE_PATH, [], {
-      stdio: 'ignore',
-      windowsHide: true,
-      detached: true
-    });
-    appProcess.unref();
+    proc = spawnBuildmesh();
 
-    // Give the app time to start and bind to port
-    await new Promise(r => setTimeout(r, 3000));
-
-    // Wait for HTTP test server to be ready
-    const serverReady = await waitForPort(1991, 15000);
+    const serverReady = await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000);
     expect(serverReady, 'HTTP test server should be ready').toBe(true);
 
-    // Clear or note the current log position
-    const logContentBefore = await fs.promises.readFile(LOG_PATH, 'utf-8').catch(() => '');
-    const lastLineBefore = logContentBefore.split('\n').filter(l => l.trim()).slice(-1)[0] || '';
-    const lastTimeBefore = getLogTimestamp(lastLineBefore);
+    const offsetBefore = await logSize();
 
-    // Create a test project
-    const project = await invokeViaHttp('create_test_mesh', { name: 'Agent Output Test' }) as { id: number };
+    // Use the temp dir `create_test_mesh` provisioned — never a
+    // machine-locked path (issue #1255).
+    const project = (await invokeViaHttp('create_test_mesh', {
+      name: 'Agent Output Test',
+    })) as { id: number; path: string };
     expect(project.id).toBeGreaterThan(0);
 
-    // Create a session
-    const session = await invokeViaHttp('create_agent_node', {
+    const session = (await invokeViaHttp('create_agent_node', {
       meshId: project.id,
       name: 'Test Session',
-      path: 'X:\\src\\playbook',
+      path: project.path,
       branch: 'main',
-    }) as { id: number };
-
+    })) as { id: number };
     expect(session.id).toBeGreaterThan(0);
 
-    // Spawn an agent
     const spawnResult = await invokeViaHttp('spawn_agent', {
       nodeId: session.id,
       provider: 'anthropic',
     });
-
     expect(spawnResult).toBeTruthy();
 
-    // Wait for agent to initialize and produce output
-    await new Promise(r => setTimeout(r, 5000));
-
-    // Check log file for evidence
-    const logContent = await fs.promises.readFile(LOG_PATH, 'utf-8');
-    const newLines = logContent.split('\n').filter(l => {
-      if (!l.trim()) return false;
-      const ts = getLogTimestamp(l);
-      if (!ts) return false;
-      if (lastTimeBefore && ts <= lastTimeBefore) return false;
-      return true;
-    });
+    // Poll the log until BOTH the synchronous spawn-success line AND
+    // the async reader-start line are present. The two come from
+    // different threads; resolving on the first would race the second.
+    // From PR #1271's polling refactor — preserved verbatim.
+    let newLines: string[] = [];
+    await expect
+      .poll(
+        async () => {
+          const lines = await readNewLogLines(offsetBefore);
+          const hasSpawn = lines.some((l) => l.includes('process spawned successfully'));
+          const hasReaderStart = lines.some((l) => l.includes('starting reader thread'));
+          if (hasSpawn && hasReaderStart) {
+            newLines = lines;
+            return true;
+          }
+          return null;
+        },
+        {
+          timeout: 15000,
+          intervals: [200, 500, 1000],
+          message: 'log should record both spawn success and reader-thread start within 15s',
+        },
+      )
+      .not.toBeNull();
 
     console.log('New log entries since spawn:');
-    newLines.forEach(l => console.log(l));
+    newLines.forEach((l) => console.log(l));
 
-    // Backend should have spawned successfully
-    const spawnLogs = newLines.filter(l => l.includes('process spawned successfully'));
-    expect(spawnLogs.length, 'Backend should log "process spawned successfully"').toBeGreaterThan(0);
+    expect(newLines.filter((l) => l.includes('process spawned successfully')).length).toBeGreaterThan(0);
+    expect(newLines.filter((l) => l.includes('starting reader thread')).length).toBeGreaterThan(0);
 
-    // Check for "starting reader thread"
-    const readerStartLogs = newLines.filter(l => l.includes('starting reader thread'));
-    expect(readerStartLogs.length, 'Backend should log "starting reader thread"').toBeGreaterThan(0);
-
-    // KEY CHECK: Did the reader thread exit quickly (EOF) without emitting output?
-    // If we see "PTY reader thread exited" quickly after "starting reader thread",
-    // it means the spawned process exited immediately without output
-    const readerStartMatch = newLines.filter(l => l.includes('starting reader thread'));
-    const readerExitMatch = newLines.filter(l => l.includes('PTY reader thread exited'));
+    // Reader thread lifetime check against the same snapshot — no
+    // separate read needed.
+    const readerStartMatch = newLines.filter((l) => l.includes('starting reader thread'));
+    const readerExitMatch = newLines.filter((l) => l.includes('PTY reader thread exited'));
 
     if (readerStartMatch.length > 0 && readerExitMatch.length > 0) {
-      // Extract timestamps
-      const firstStartLine = readerStartMatch[0];
-      const lastExitLine = readerExitMatch[readerExitMatch.length - 1];
-
-      const startTime = getLogTimestamp(firstStartLine);
-      const exitTime = getLogTimestamp(lastExitLine);
-
-      if (startTime && exitTime) {
-        const startMs = new Date(startTime).getTime();
-        const exitMs = new Date(exitTime).getTime();
-        const timeDiff = exitMs - startMs;
-
-        console.log(`Reader thread lifetime: ${timeDiff}ms`);
-
-        // If reader exits in less than 1000ms, it likely got EOF immediately
-        // This would indicate the spawned process exited without producing output
-        expect(timeDiff, `Reader thread should not exit immediately (was ${timeDiff}ms). Process likely crashed without output.`).toBeGreaterThan(1000);
-      }
+      const startMs = new Date(getLogTimestamp(readerStartMatch[0])!).getTime();
+      const exitMs = new Date(getLogTimestamp(readerExitMatch[readerExitMatch.length - 1])!).getTime();
+      const timeDiff = exitMs - startMs;
+      console.log(`Reader thread lifetime: ${timeDiff}ms`);
+      expect(timeDiff, `Reader thread should not exit immediately (was ${timeDiff}ms). Process likely crashed without output.`).toBeGreaterThan(1000);
     }
   });
 
   test('Claude Code agent process does not exit immediately when spawned', async () => {
-    // Start the built exe directly
-    const appProcess = spawn(EXE_PATH, [], {
-      stdio: 'ignore',
-      windowsHide: true,
-      detached: true
-    });
-    appProcess.unref();
+    proc = spawnBuildmesh();
 
-    // Give the app time to start and bind to port
-    await new Promise(r => setTimeout(r, 3000));
-
-    // Wait for server
-    const serverReady = await waitForPort(1991, 15000);
+    const serverReady = await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000);
     expect(serverReady).toBe(true);
 
-    // Create project and session
-    const project = await invokeViaHttp('create_test_mesh', { name: 'Claude Code Exit Test' }) as { id: number };
-    const session = await invokeViaHttp('create_agent_node', {
+    const offsetBefore = await logSize();
+
+    const project = (await invokeViaHttp('create_test_mesh', {
+      name: 'Claude Code Exit Test',
+    })) as { id: number; path: string };
+    const session = (await invokeViaHttp('create_agent_node', {
       meshId: project.id,
       name: 'Claude Code Test',
-      path: 'X:\\src\\playbook',
+      path: project.path,
       branch: 'main',
-    }) as { id: number };
+    })) as { id: number };
 
-    // Spawn agent
-    const spawnResult = await invokeViaHttp('spawn_agent', { sessionId: session.id, provider: 'anthropic' });
+    const spawnResult = await invokeViaHttp('spawn_agent', {
+      nodeId: session.id,
+      provider: 'anthropic',
+    });
     expect(spawnResult).toBeTruthy();
 
-    // Wait 5 seconds for any potential output
-    await new Promise(r => setTimeout(r, 5000));
-
-    // Check logs for reader thread behavior
-    const logContent = await fs.promises.readFile(LOG_PATH, 'utf-8');
-    const lines = logContent.split('\n');
-
-    // Find reader start and exit for our session
-    const sessionReaderStarts = lines.filter(l => l.includes(`starting reader thread`) && l.includes(`session ${session.id}`));
-    const sessionReaderExits = lines.filter(l => l.includes(`PTY reader thread exited`) && l.includes(`session ${session.id}`));
-
-    console.log(`Session ${session.id} reader starts: ${sessionReaderStarts.length}`);
-    console.log(`Session ${session.id} reader exits: ${sessionReaderExits.length}`);
-
-    if (sessionReaderStarts.length > 0 && sessionReaderExits.length > 0) {
-      // Check how quickly it exited
-      const firstStart = sessionReaderStarts[0];
-      const lastExit = sessionReaderExits[sessionReaderExits.length - 1];
-
-      const startTime = getLogTimestamp(firstStart);
-      const exitTime = getLogTimestamp(lastExit);
-
-      if (startTime && exitTime) {
-        const timeDiff = new Date(exitTime).getTime() - new Date(startTime).getTime();
-        console.log(`Reader lifetime for session ${session.id}: ${timeDiff}ms`);
-
-        // This assertion will fail if the Claude Code agent exits immediately (the bug we're testing for)
-        expect(timeDiff, `Claude Code agent should keep running, not exit after ${timeDiff}ms`).toBeGreaterThan(2000);
+    // Bounded grace-window poll: a fast-crashing agent exits within
+    // hundreds of ms; a healthy one keeps the reader alive. After 5 s
+    // we know which class the agent is in:
+    //   - Both lines present: assert timeDiff > 2000ms (bug detected).
+    //   - Only start present:  healthy, test passes.
+    //   - Neither present:     spawn failure, fail.
+    const graceDeadline = Date.now() + 5000;
+    let snapshot: { starts: string[]; exits: string[] } | null = null;
+    while (Date.now() < graceDeadline) {
+      const lines = await readNewLogLines(offsetBefore);
+      const starts = lines.filter(
+        (l) => l.includes('starting reader thread') && l.includes(`session ${session.id}`),
+      );
+      const exits = lines.filter(
+        (l) => l.includes('PTY reader thread exited') && l.includes(`session ${session.id}`),
+      );
+      if (starts.length > 0 && exits.length > 0) {
+        snapshot = { starts, exits };
+        break;
       }
-    } else {
-      // If we don't see both, something is wrong with the spawn
-      expect(sessionReaderStarts.length, 'Should have seen reader thread start').toBeGreaterThan(0);
+      await new Promise((r) => setTimeout(r, 200));
     }
+
+    if (snapshot === null) {
+      const lines = await readNewLogLines(offsetBefore);
+      const starts = lines.filter(
+        (l) => l.includes('starting reader thread') && l.includes(`session ${session.id}`),
+      );
+      expect(starts.length, 'Should have seen reader thread start').toBeGreaterThan(0);
+      return;
+    }
+
+    const firstStart = snapshot.starts[0];
+    const lastExit = snapshot.exits[snapshot.exits.length - 1];
+    const startTime = getLogTimestamp(firstStart);
+    const exitTime = getLogTimestamp(lastExit);
+    expect(startTime, `first start line should have a parseable RFC3339 timestamp: ${firstStart}`).not.toBeNull();
+    expect(exitTime, `last exit line should have a parseable RFC3339 timestamp: ${lastExit}`).not.toBeNull();
+    const timeDiff = new Date(exitTime!).getTime() - new Date(startTime!).getTime();
+    console.log(`Reader lifetime for session ${session.id}: ${timeDiff}ms`);
+    expect(timeDiff, `Claude Code agent should keep running, not exit after ${timeDiff}ms`).toBeGreaterThan(2000);
   });
 });

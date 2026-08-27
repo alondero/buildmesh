@@ -116,6 +116,54 @@ pub fn to_host_path(path: &str) -> String {
     }
 }
 
+/// The host-accessible Codex rollout directory for an agent environment.
+/// CLI-home selection belongs to `environment`; this module owns the WSL path
+/// conversion needed before the host reads that directory.
+pub(crate) fn codex_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    let home = super::environment::codex_dir_for_env(env_type, spawn_path)?;
+    match env_type {
+        EnvType::Windows => Some(home.join("sessions")),
+        EnvType::Wsl => Some(
+            PathBuf::from(to_host_path(&home.to_string_lossy())).join("sessions"),
+        ),
+    }
+}
+
+/// Compare CLI-recorded working directories across Windows, WSL, and native
+/// Unix path syntax. APFS/HFS+ is usually case-insensitive too.
+pub fn directories_match(recorded: &str, spawn: &str) -> bool {
+    let recorded = normalize_directory(recorded);
+    let spawn = normalize_directory(spawn);
+    if case_insensitive_fs(&recorded) || case_insensitive_fs(&spawn) {
+        recorded.eq_ignore_ascii_case(&spawn)
+    } else {
+        recorded == spawn
+    }
+}
+
+fn normalize_directory(path: &str) -> String {
+    let mut normalized = path.replace('\\', "/");
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn case_insensitive_fs(path: &str) -> bool {
+    cfg!(target_os = "macos") || looks_windows_volume(path)
+}
+
+fn looks_windows_volume(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 2 && bytes[1] == b':')
+        || path.starts_with("//")
+        || (path.len() >= 7
+            && path
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("/mnt/"))
+            && path.as_bytes().get(6) == Some(&b'/'))
+}
+
 // ── ResolvedPath — high-level path resolution for agent operations ─────────
 
 /// A fully-resolved set of paths for an agent node, ready for use by callers

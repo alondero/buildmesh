@@ -22,6 +22,7 @@ use std::env;
 use once_cell::sync::Lazy;
 
 use crate::process_util::command_no_window;
+use crate::models::EnvType;
 
 // ── WSL distro lookup ──────────────────────────────────────────────────────
 
@@ -263,6 +264,33 @@ pub fn cursor_dir() -> PathBuf {
     }
 }
 
+/// The Antigravity (`agy`) CLI home directory, mirroring [`claude_dir`]. The
+/// home is `<home>/.gemini/antigravity-cli/` (confirmed by `workspace_trust`,
+/// which writes its trust settings there). Conversational sessions live under
+/// `brain/<conversation_id>/.system_generated/logs/transcript.jsonl`; the
+/// discovery scanner in `services::agent_node_discovery` walks this dir.
+pub fn agy_home_dir() -> PathBuf {
+    match current_env() {
+        Environment::Wsl => {
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
+            } else {
+                PathBuf::from("/root/.gemini/antigravity-cli")
+            }
+        }
+        Environment::Windows => {
+            if let Ok(home) = env::var("USERPROFILE") {
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
+            } else if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
+            } else {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}\\.gemini\\antigravity-cli"))
+            }
+        }
+    }
+}
+
 /// The Codex CLI home directory, mirroring [`claude_dir`]. Codex honours a
 /// `CODEX_HOME` override for its *entire* state directory (sessions, auth,
 /// config — issue #885), so that takes precedence; otherwise `~/.codex` in the
@@ -293,4 +321,84 @@ pub fn codex_dir() -> PathBuf {
             }
         }
     }
+}
+
+/// The Codex CLI home for an agent environment, expressed in that
+/// environment's native path syntax. This deliberately derives the WSL home
+/// from the host username instead of launching a WSL shell.
+pub(crate) fn codex_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    match env_type {
+        EnvType::Windows => Some(codex_dir()),
+        EnvType::Wsl => {
+            if let Ok(home) = env::var("CODEX_HOME") {
+                if home.starts_with('/') {
+                    return Some(PathBuf::from(home));
+                }
+            }
+            if let Some(user) = spawn_path.strip_prefix("/home/").and_then(|path| path.split('/').next()) {
+                return Some(PathBuf::from(format!("/home/{user}/.codex")));
+            }
+            let user = env::var("USERNAME")
+                .ok()
+                .or_else(|| env::var("USER").ok())?;
+            Some(PathBuf::from(format!("/home/{user}/.codex")))
+        }
+    }
+}
+
+/// The Antigravity CLI home directory, mirroring [`claude_dir`]. AGY stores
+/// its config under `<home>/.gemini/antigravity-cli/` and its session
+/// transcripts under `<home>/.gemini/antigravity-cli/brain/<conversation-id>/
+/// .system_generated/logs/transcript.jsonl` (issue #1283). Unlike Claude
+/// Code / Cursor this is *globally* keyed — not project-scoped — so the
+/// transcript reader and the AGY session scanner walk the brain dir directly.
+///
+/// Honours a `GEMINI_HOME` / `ANTIGRAVITY_HOME` override (checked in that
+/// order) so a user who relocates the gemini tree keeps their transcripts
+/// reachable; falls through to `~/.gemini/antigravity-cli` under the current
+/// environment.
+pub fn agy_dir() -> PathBuf {
+    if let Ok(home) = env::var("GEMINI_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home).join("antigravity-cli");
+        }
+    }
+    if let Ok(home) = env::var("ANTIGRAVITY_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    match current_env() {
+        Environment::Wsl => {
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home)
+                    .join(".gemini")
+                    .join("antigravity-cli")
+            } else {
+                PathBuf::from("/root/.gemini/antigravity-cli")
+            }
+        }
+        Environment::Windows => {
+            if let Ok(home) = env::var("USERPROFILE") {
+                PathBuf::from(home)
+                    .join(".gemini")
+                    .join("antigravity-cli")
+            } else if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home)
+                    .join(".gemini")
+                    .join("antigravity-cli")
+            } else {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}\\.gemini\\antigravity-cli"))
+            }
+        }
+    }
+}
+
+/// The AGY "brain" directory that holds one subdirectory per conversation.
+/// Sessions live at `<brain>/<conversation-id>/.system_generated/logs/
+/// transcript.jsonl` (issue #1283) — globally keyed, so this is the single
+/// shared root every AGY session scanner and the transcript reader consult.
+pub fn agy_brain_dir() -> PathBuf {
+    agy_dir().join("brain")
 }

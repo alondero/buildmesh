@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { TerminalRegistry } from '../../src/components/Terminal/TerminalRegistry';
+
+const terminalTestState = vi.hoisted(() => ({
+  latestTerminalOptions: undefined as {
+    linkHandler?: { activate: (event: MouseEvent, text: string, range: unknown) => void };
+  } | undefined,
+}));
 
 globalThis.ResizeObserver = class {
   observe() {}
@@ -92,7 +99,9 @@ vi.mock('@xterm/xterm', () => {
     cols = 80;
     options = { fontSize: 10 };
     element: HTMLElement | null = null;
-    constructor(_options?: unknown) {}
+    constructor(options?: typeof terminalTestState.latestTerminalOptions) {
+      terminalTestState.latestTerminalOptions = options;
+    }
   }
   return { Terminal: MockTerminal };
 });
@@ -155,6 +164,7 @@ describe('TerminalRegistry', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    terminalTestState.latestTerminalOptions = undefined;
     registry = new TerminalRegistry();
   });
 
@@ -205,6 +215,18 @@ describe('TerminalRegistry', () => {
     it('activates Unicode 11 glyph widths', async () => {
       const inst = await registry.getOrCreate(1);
       expect(inst!.term.unicode.activeVersion).toBe('11');
+    });
+
+    it('opens OSC 8 hyperlinks in the default browser', async () => {
+      await registry.getOrCreate(1);
+
+      terminalTestState.latestTerminalOptions!.linkHandler!.activate(
+        new MouseEvent('click'),
+        'https://example.com/codex-link',
+        {},
+      );
+
+      expect(openUrl).toHaveBeenCalledWith('https://example.com/codex-link');
     });
   });
 

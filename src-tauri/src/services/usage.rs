@@ -1122,17 +1122,16 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
 // OpenRouter exposes a simple "Anthropic Skin" for Claude Code (set
 // `ANTHROPIC_BASE_URL=https://openrouter.ai/api` + `ANTHROPIC_AUTH_TOKEN=$key`)
 // and a separate `GET /api/v1/credits` Bearer-authenticated endpoint that
-// reports `total_credits` (remaining wallet balance) and `total_usage` (lifetime
+// reports `total_credits` (all credits purchased) and `total_usage` (lifetime
 // spend). Mirrors the `kimi_usage` shape — keyed fetcher, balance-style response,
 // no Anthropic-side windows to harvest — so the `ProviderUsage.balance` field is
 // the canonical surface.
 
 /// Response envelope from `GET https://openrouter.ai/api/v1/credits`.
-/// `total_usage` is also returned by OpenRouter but we intentionally drop it
-/// — it's a lifetime-cumulative figure, not a current-month spend, and the
-/// `BalanceCard` would label any number we put in `monthly_spend` as
-/// "Spent this month" (misleading). Serde ignores unknown fields by default,
-/// so the JSON's `total_usage` key is harmlessly discarded.
+/// `total_usage` is required to derive the remaining wallet balance;
+/// it is lifetime-cumulative, not current-month, spend.
+/// `BalanceCard` would label any value there as "Spent this month", so we
+/// leave `monthly_spend` unset.
 #[derive(Deserialize, Debug)]
 struct OpenRouterResp {
     data: OpenRouterData,
@@ -1141,23 +1140,23 @@ struct OpenRouterResp {
 #[derive(Deserialize, Debug)]
 struct OpenRouterData {
     total_credits: f64,
+    total_usage: f64,
 }
 
 /// Parses the OpenRouter `/api/v1/credits` body into a `BillingBalance`. The
-/// endpoint contract is simple: `data.total_credits` is the remaining wallet
-/// balance in USD. The endpoint ALSO returns `data.total_usage`, but it's
-/// **lifetime cumulative spend** (not a current-month figure) — labelling
-/// that as "Spent this month" in the Usage tab would overstate the user's
-/// current-month spend by an order of magnitude. Until OpenRouter exposes a
-/// billing-period filter, we leave `monthly_spend = None` and let the
-/// "remaining" figure carry the visible signal. A missing required field is
-/// a hard parse error rather than a silent zero — OpenRouter might evolve
-/// the response and we want the failure to be obvious.
+/// `data.total_credits` is total wallet funding in USD, not remaining balance;
+/// `data.total_usage` is lifetime spend, so their difference is the remaining
+/// balance.
+/// Lifetime cumulative spend is not a current-month figure; labelling it as
+/// "Spent this month" would be misleading.
+/// We leave `monthly_spend = None` because OpenRouter provides lifetime usage,
+/// not a billing-period figure. Missing required fields are hard parse errors
+/// rather than silent zeros so response-shape changes are visible.
 fn parse_openrouter_response(body: &str) -> Result<BillingBalance, UsageError> {
     let resp: OpenRouterResp =
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
     Ok(BillingBalance {
-        remaining: resp.data.total_credits,
+        remaining: resp.data.total_credits - resp.data.total_usage,
         monthly_spend: None,
         // OpenRouter bills in USD per the platform's published pricing; the
         // endpoint does not return a currency field.
@@ -3917,20 +3916,18 @@ mod tests {
     // mode is missing required fields.
 
     #[test]
-    fn parse_openrouter_response_extracts_credits_as_usd_balance_and_omits_monthly_spend() {
-        // The endpoint returns `total_credits` (remaining wallet) AND
-        // `total_usage` (lifetime cumulative), but lifetime figure can't be
-        // rendered as "Spent this month" without misleading the user. Pin
-        // `monthly_spend = None` so a future contributor can't silently
-        // re-enable the mislabel.
+    fn parse_openrouter_response_calculates_remaining_balance_and_omits_monthly_spend() {
+        // `total_credits` is funding, not remaining balance. Pin the
+        // subtraction so a future contributor can't regress to displaying the
+        // original deposit after it has been spent.
         let json = r#"{
             "data": {
-                "total_credits": 50.0,
-                "total_usage": 12.34
+                "total_credits": 10.0,
+                "total_usage": 8.5
             }
         }"#;
         let b = parse_openrouter_response(json).unwrap();
-        assert_eq!(b.remaining, 50.0);
+        assert_eq!(b.remaining, 1.5);
         assert_eq!(b.monthly_spend, None);
         assert_eq!(b.currency, "USD");
     }
@@ -3947,6 +3944,14 @@ mod tests {
     fn parse_openrouter_response_rejects_missing_total_credits() {
         // Required-field failure — every successful response carries a balance.
         let json = r#"{"data": {"total_usage": 12.34}}"#;
+        let err = parse_openrouter_response(json).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)));
+    }
+
+    #[test]
+    fn parse_openrouter_response_rejects_missing_total_usage() {
+        // Usage is required because it is needed to derive the balance.
+        let json = r#"{"data": {"total_credits": 50.0}}"#;
         let err = parse_openrouter_response(json).unwrap_err();
         assert!(matches!(err, UsageError::Shape(_)));
     }
@@ -5535,4 +5540,3 @@ mod tests {
         assert!(usage.balance.is_none());
     }
 }
-

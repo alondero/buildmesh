@@ -1056,9 +1056,15 @@ fn start_reader(
 
             if !session_captured.load(Ordering::Relaxed) {
                 if let Some(uuid) = crate::session_capture::try_extract_session_id(&text) {
-                    let _ = db::update_cli_session_id(session_id, uuid);
+                    // The structured hook and Codex rollout fallback can
+                    // capture the same self-assigned ID first. Do not let a
+                    // delayed PTY banner replace an already-verified value.
+                    let captured = db::set_cli_session_id_if_missing(session_id, uuid)
+                        .unwrap_or(false);
                     session_captured.store(true, Ordering::Relaxed);
-                    tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
+                    if captured {
+                        tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
+                    }
                 }
             }
 
@@ -1273,16 +1279,13 @@ pub(crate) async fn spawn_with_intent(
                 }
                 // Adapter cannot honour a resume arg (OpenCode,
                 // Terminal -- no --resume flag) under an Explicit
-                // cause: fall through to resume = None, which routes
-                // the spawn via the _ => None arm below into
-                // SpawnIntent::Fresh semantics. Same philosophy as
-                // decide_resume returning None on cross-harness: the
-                // captured cli_session_id is preserved in the DB so
-                // a future Regenerate to a resumable harness can
-                // still pick it up. Without this, the user-driven
-                // Resume button on a Suspended OpenCode node would
-                // surface a toast instead of starting fresh on the
-                // same worktree.
+                // cause: fall through to a fresh process launch while
+                // retaining the captured id. Unlike an explicit Fresh
+                // intent, this preserves the identity so a future
+                // Regenerate to a resumable harness can still pick it up.
+                // Without this, the user-driven Resume button on a
+                // Suspended OpenCode node would surface a toast instead
+                // of starting fresh on the same worktree.
                 ResumeSkipDecision::Proceed(id) => Some(id),
             }
         }
@@ -1314,6 +1317,14 @@ pub(crate) async fn spawn_with_intent(
 
     if is_agent_already_running(&node_id) {
         return Ok(SpawnOutcome::AlreadyActive(node));
+    }
+
+    if intent_replaces_conversation(&intent) {
+        // Every non-resume intent is a deliberate new conversation, so no old harness identity
+        // may survive it. In particular, self-assigning providers persist
+        // their new id fill-only after launch; retaining an old id here would
+        // make the next startup resume the wrong conversation.
+        db::clear_cli_session_id(node_id).map_err(|e| e.to_string())?;
     }
 
     let result = spawn_agent_inner(
@@ -1363,6 +1374,13 @@ pub(crate) async fn spawn_with_intent(
             Err(error)
         }
     }
+}
+
+/// Whether this request intentionally discards the node's prior conversation.
+/// A Resume request can still launch a fresh process for a non-resumable
+/// adapter, but that is not user intent to replace the captured identity.
+fn intent_replaces_conversation(intent: &SpawnIntent) -> bool {
+    !matches!(intent, SpawnIntent::Resume { .. })
 }
 
 /// Build the per-field cascade inputs the spawn pipeline hands to
@@ -2939,6 +2957,20 @@ mod tests {
         assert_eq!(req.explicit, ExplicitSpawnOverrides::default());
         assert_eq!(req.explicit.model, None);
         assert_eq!(req.explicit.effort, None);
+    }
+
+    #[test]
+    fn every_non_resume_intent_replaces_a_stored_conversation() {
+        assert!(intent_replaces_conversation(&SpawnIntent::Fresh));
+        assert!(intent_replaces_conversation(&SpawnIntent::Loop {
+            initial_prompt: "continue".into(),
+        }));
+        assert!(intent_replaces_conversation(&SpawnIntent::Handover {
+            selected_text: "context".into(),
+        }));
+        assert!(!intent_replaces_conversation(&SpawnIntent::Resume {
+            cause: ResumeCause::Explicit,
+        }));
     }
 
     /// AC #4 pin: a `SpawnRequest` with a populated layer-1 override

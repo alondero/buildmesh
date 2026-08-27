@@ -1429,11 +1429,11 @@ mod tests {
 
     /// The "produces a readable transcript" capability (#317) — the
     /// Claude-backed `anthropic` adapter (which also runs custom
-    /// MiniMax/DeepSeek profiles), Codex, and Cursor write transcripts the
-    /// coordinator read API can drill into. Kimi Code's `wire.jsonl` is
-    /// standard JSONL (#911 research), but the reader's path resolver isn't
-    /// wired for `~/.kimi/` yet. Everything else degrades to spine-only with
-    /// `unsupported`; this matrix is load-bearing.
+    /// MiniMax/DeepSeek profiles), Codex, Cursor, and Antigravity write
+    /// transcripts the coordinator read API can drill into. Kimi Code's
+    /// `wire.jsonl` is standard JSONL (#911 research), but the reader's path
+    /// resolver isn't wired for `~/.kimi/` yet. Everything else degrades to
+    /// spine-only with `unsupported`; this matrix is load-bearing.
     #[test]
     fn only_transcript_writing_providers_produce_a_readable_transcript() {
         assert!(Provider::Anthropic.adapter().produces_readable_transcript());
@@ -1446,7 +1446,13 @@ mod tests {
         assert!(Provider::Cursor.adapter().produces_readable_transcript());
         assert!(!Provider::Mcode.adapter().produces_readable_transcript());
         assert!(!Provider::Dsh.adapter().produces_readable_transcript());
-        assert!(!Provider::Agy.adapter().produces_readable_transcript());
+        // Issue #1283: AGY's per-conversation JSONL is parsed via
+        // TranscriptFormat::Agy, so the archive resume picker surfaces it.
+        assert!(
+            Provider::Agy.adapter().produces_readable_transcript(),
+            "AGY must advertise produces_readable_transcript=true so the \
+             archived-node resume picker surfaces it (#1283)",
+        );
         assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
         assert!(!Provider::Terminal.adapter().produces_readable_transcript());
     }

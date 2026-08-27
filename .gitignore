@@ -70,6 +70,7 @@ test-results/
 docs/superpowers/
 
 # Claude worktrees and local settings (local only)
+.codex/
 .claude/worktrees/
 .claude/settings.local.json
 .claude/tasks/

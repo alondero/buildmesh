@@ -390,6 +390,131 @@ describe("NodeList", () => {
     expect(screen.queryByTestId("create-error")).toBeNull();
   });
 
+  it("pauses the 5s poll while document.hidden and refreshes on becoming visible (issue #1261)", async () => {
+    // The polling lifecycle lives in `useVisibilityPolling`. This test
+    // pins it end-to-end through NodeList: the hook must not start the
+    // 5s tick when mounted with `document.hidden === true`, must fire
+    // ONE refresh immediately on becoming visible, and must stop the
+    // tick again when re-hidden.
+    //
+    // jsdom defaults `document.hidden` to false. Save the existing
+    // descriptor (so other tests / the afterEach unstub don't have to
+    // know we ever touched it) and force it true BEFORE render so the
+    // mount-time `if (visibilityState === "visible")` guard skips the
+    // initial refresh + interval start.
+    const originalHidden = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    });
+
+    vi.useFakeTimers();
+    let nodesCalls = 0;
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        nodesCalls += 1;
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/providers")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "events" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    // Local helpers — keep the assertions below free of microtask plumbing.
+    // `drain()` flushes the pending microtasks without touching timers, which
+    // is what we want after firing a `visibilitychange` event: the hook's
+    // handler is synchronous, but the `await refresh()` inside it parks on
+    // a microtask boundary before its fetch lands. Two hops cover the handler
+    // + the fetch + `.json()` + the `Promise.all` join inside `refresh`.
+    const drain = async () => {
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+
+    try {
+      render(
+        <NodeList
+          onOpenNode={noop}
+          onOpenAgentNodes={noop}
+          onOpenIssues={noop}
+          onOffline={noop}
+          onAuthFailed={noop}
+        />,
+      );
+
+      // Mount while hidden: the hook's `if (visibilityState === "visible")`
+      // guard skips BOTH the initial refresh and the interval start. So
+      // we expect zero fetches against /api/nodes — not even one.
+      await drain();
+      expect(nodesCalls).toBe(0);
+
+      // 15s while hidden: still zero (the interval was never armed).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(nodesCalls).toBe(0);
+
+      // Become visible: hook fires ONE refresh immediately + starts the
+      // interval. The WS hook's reconnect (also triggered by
+      // visibilitychange) only hits /api/ws-ticket, not /api/nodes,
+      // so the count strictly increases by 1.
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => false,
+      });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await drain();
+      expect(nodesCalls).toBe(1);
+
+      // Polling is active: the next 5s tick should fire ANOTHER refresh.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      await drain();
+      expect(nodesCalls).toBe(2);
+
+      // Background again → polling stops. Capture the baseline RIGHT
+      // BEFORE the next tick — if the interval was cleared cleanly, the
+      // 15s advance must not bump it.
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => true,
+      });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      const baselineWhileHidden = nodesCalls;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(nodesCalls).toBe(baselineWhileHidden);
+    } finally {
+      vi.useRealTimers();
+      // Restore the ORIGINAL descriptor — not a fresh `{ get: () => false }`
+      // — so any other test in this file or any later suite sees the
+      // same jsdom `document.hidden` it had at process start (other
+      // paths may have set it via prototype chain, which a redefine
+      // would silently drop).
+      if (originalHidden) {
+        Object.defineProperty(document, "hidden", originalHidden);
+      } else {
+        delete (document as { hidden?: unknown }).hidden;
+      }
+    }
+  });
+
   it("treats a network failure as offline", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network")));
     const onOffline = vi.fn();

@@ -1,3 +1,4 @@
+use crate::agent::capabilities::EffortControlKind;
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 
@@ -26,6 +27,16 @@ impl AgentProvider for AgyAdapter {
     }
 
     fn supports_resume(&self) -> bool {
+        true
+    }
+
+    fn produces_readable_transcript(&self) -> bool {
+        // Issue #1283: AGY writes per-conversation JSONL under
+        // `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
+        // logs/transcript.jsonl`. `services::transcript_reader` knows the
+        // shape (`TranscriptFormat::Agy`), so the Node Digest rich layer,
+        // the `read_last_assistant_message` cheap digest, and the
+        // archived-node resume picker all hydrate AGY sessions.
         true
     }
 
@@ -69,6 +80,18 @@ impl AgentProvider for AgyAdapter {
         vec![]
     }
 
+    /// Antigravity CLI exposes a closed-vocab reasoning-effort knob via
+    /// `--effort <low|medium|high>` (`agy --help` verified). The trait
+    /// default `effort_args` already emits `["--effort", effort]`, which
+    /// matches AGY's flag exactly; advertising `Closed` here lets the
+    /// capability mask forward resolved effort values from the resolver
+    /// (issue #1286).
+    fn effort_control(&self) -> EffortControlKind {
+        EffortControlKind::Closed {
+            allowed: vec!["low".into(), "medium".into(), "high".into()],
+        }
+    }
+
     /// Issue #1287 — Antigravity's CLI accepts a native `--sandbox`
     /// flag ("Run in a sandbox with terminal restrictions enabled").
     /// Forwarded when the parent mesh has its `sandbox` toggle on, in
@@ -84,8 +107,59 @@ impl AgentProvider for AgyAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::capabilities::ResolvedAgentConfig;
-    use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+    use crate::agent::capabilities::{EffortControlKind, ResolvedAgentConfig};
+    use crate::agent::launch::{
+        assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+    };
+
+    /// Issue #1286: end-to-end descriptor pin. The Spawn Menu,
+    /// resolver, and autopilot compatibility gate all consume this
+    /// descriptor — drift here means the menu misroutes Antigravity.
+    /// Mirrors the equivalent pin in `grok::tests`.
+    #[test]
+    fn capabilities_descriptor_advertises_effort_override() {
+        let caps = AGY.capabilities();
+        assert_eq!(caps.harness_id, "agy");
+        assert!(caps.supports_resume);
+        assert!(caps.supports_model_override);
+        // Issue #1286: `--effort <low|medium|high>` is now advertised.
+        assert!(caps.supports_effort_override);
+        assert!(caps.supports_prefill);
+        assert!(caps.requires_attention_hook);
+        // Issue #1283: AGY now ships a transcript the reader parses
+        // (`TranscriptFormat::Agy`); flip from the pre-#1283 negative.
+        assert!(caps.produces_readable_transcript);
+        assert!(!caps.is_plain_terminal);
+        assert_eq!(
+            caps.effort_control,
+            EffortControlKind::Closed {
+                allowed: vec!["low".into(), "medium".into(), "high".into()],
+            }
+        );
+    }
+
+    /// Recipe pin: when the resolver forwards an effort value for agy,
+    /// `default_prepare` must append `--effort <level>` to the recipe
+    /// (issue #1286 acceptance criteria 5). The table-driven
+    /// `capability_recipe_coherence` test covers this for every
+    /// adapter; this focused pin makes the agy shape explicit.
+    #[test]
+    fn agy_recipe_appends_effort_arg_when_resolved() {
+        let config = ResolvedAgentConfig {
+            model: None,
+            effort: Some("high".to_string()),
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(&AGY, input);
+        assert_flag_followed_by_value(&prepared.recipe.base_args, "--effort", "high");
+    }
 
     /// Issue #1287 — when the mesh has its `sandbox` toggle ON, the
     /// prepared recipe must carry `--sandbox` so the agy process

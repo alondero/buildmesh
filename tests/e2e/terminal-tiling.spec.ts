@@ -4,23 +4,22 @@
  * Tests that verify tiled terminal grid behavior via Playwright.
  * Uses HTTP test server on port 1991 to call Tauri commands.
  */
-import { test, expect, Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { waitForTauriReady, createTestSessionViaHttp } from './utils/tauri-http';
-
-async function waitForTerminalFit(page: Page, _nodeId: number, timeout = 300): Promise<void> {
-  await page.waitForTimeout(timeout);
-}
+import { waitForAppBoot, waitForTerminalFit } from './utils/state-waits';
 
 test.describe('terminal tiling E2E', () => {
 
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    await page.waitForTimeout(1000);
 
     const tauriReady = await waitForTauriReady(8000);
     if (!tauriReady) {
       test.skip();
+      return;
     }
+
+    await waitForAppBoot(page);
   });
 
   test('app loads without crashing', async ({ page }) => {
@@ -29,10 +28,12 @@ test.describe('terminal tiling E2E', () => {
       if (msg.type() === 'error') errors.push(msg.text());
     });
 
-    await page.waitForTimeout(2000);
-
-    const body = await page.locator('body').innerHTML();
-    expect(body.length, 'Page body is empty - app may have crashed').toBeGreaterThan(100);
+    // Brief settle so late-arriving console errors (async chunks) have
+    // a chance to flush. No DOM state to poll against — the listener
+    // is stream-based. The beforeEach's `waitForAppBoot` already
+    // proved the React shell mounted; this test only cares that no
+    // console errors fired during the boot window.
+    await page.waitForTimeout(200);
 
     const realErrors = errors.filter(e =>
       !e.includes('Warning:') &&
@@ -46,31 +47,28 @@ test.describe('terminal tiling E2E', () => {
     for (let i = 1; i <= 3; i++) {
       await createTestSessionViaHttp(i);
     }
-    await page.waitForTimeout(500);
+
+    const tabs = page.locator('[data-session-tab]');
+    await expect(tabs, 'tab bar should hold 3 tabs after creating 3 sessions').toHaveCount(3, { timeout: 10000 });
+    const tabCount = await tabs.count();
 
     const gridBtn = page.locator('button:has-text("GRID VIEW")');
     if (await gridBtn.isVisible()) {
       await gridBtn.click();
-      await page.waitForTimeout(300);
     }
-
-    const tabs = page.locator('[data-session-tab]');
-    const tabCount = await tabs.count();
 
     for (let i = 0; i < tabCount; i++) {
       const gridToggle = page.locator('button:has-text("□")').nth(i);
       if (await gridToggle.isVisible()) {
         await gridToggle.click();
-        await page.waitForTimeout(100);
       }
     }
 
-    await waitForTerminalFit(page, 0, 600);
+    await waitForTerminalFit(page.locator('.xterm').first());
+    await expect(page.locator('.xterm'), `tiled grid should mount ${tabCount} xterms`).toHaveCount(tabCount, { timeout: 10000 });
 
     const xterms = page.locator('.xterm');
     const count = await xterms.count();
-
-    expect(count, `Expected ${tabCount} xterms in tiled grid, found ${count}`).toBe(tabCount);
 
     for (let i = 0; i < count; i++) {
       const box = await xterms.nth(i).boundingBox();
@@ -81,11 +79,7 @@ test.describe('terminal tiling E2E', () => {
 
   test('AgentTerminal produces expected DOM structure', async ({ page }) => {
     await createTestSessionViaHttp(1);
-    await page.waitForTimeout(500);
 
-    const terminalStacks = page.locator('[class*="bg-\\[#0f0f0f\\]"]');
-    const count = await terminalStacks.count();
-
-    expect(count, `Expected at least 1 terminal stack, found ${count}`).toBeGreaterThan(0);
+    await expect(page.locator('[class*="bg-\\[#0f0f0f\\]"]'), 'AgentTerminal should render at least one styled stack div').toHaveCount(1, { timeout: 10000 });
   });
 });

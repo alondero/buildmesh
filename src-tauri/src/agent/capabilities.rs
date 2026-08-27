@@ -417,11 +417,22 @@ mod tests {
         assert_eq!(agy.harness_id, "agy");
         assert!(agy.supports_resume);
         assert!(agy.requires_attention_hook);
-        assert!(!agy.produces_readable_transcript);
+        // Issue #1283: AGY writes per-conversation JSONL, so the
+        // transcript reader can hydrate the Node Digest / archive picker.
+        assert!(agy.produces_readable_transcript);
         assert!(agy.supports_model_override);
-        assert!(!agy.supports_effort_override);
+        // Issue #1286: agy's CLI accepts `--effort <low|medium|high>`
+        // (verified against `agy --help`). The closed vocabulary
+        // mirrors Anthropic's; only the vocabulary differs from a
+        // vocabulary-superset perspective (both use `low|medium|high`).
+        assert!(agy.supports_effort_override);
         assert!(agy.supports_prefill);
-        assert_eq!(agy.effort_control, EffortControlKind::None);
+        assert_eq!(
+            agy.effort_control,
+            EffortControlKind::Closed {
+                allowed: vec!["low".into(), "medium".into(), "high".into()],
+            }
+        );
 
         let opencode = opencode_caps();
         assert_eq!(opencode.harness_id, "opencode");
@@ -625,7 +636,11 @@ mod tests {
     /// control, regardless of which precedence layer supplied it".
     #[test]
     fn resolver_drops_effort_for_harness_without_effort_control() {
-        for caps in [agy_caps(), opencode_caps(), terminal_caps(), kimi_caps()] {
+        // agy_caps() dropped from this list in issue #1286: agy's CLI
+        // accepts `--effort <low|medium|high>`, so the mask now keeps
+        // matching values. The non-effort harnesses (opencode, terminal,
+        // kimi) still drop every layer.
+        for caps in [opencode_caps(), terminal_caps(), kimi_caps()] {
             let inputs = AgentConfigInputs {
                 model: FieldInputs::default(),
                 effort: FieldInputs {
@@ -904,13 +919,19 @@ mod tests {
                 application: Some("high"),
             },
         };
-        let resolved = resolve_agent_config(&agy_caps(), inputs);
+        // Issue #1286: agy now accepts `--effort <low|medium|high>`, so
+        // the application's `high` value passes the mask. Switch the
+        // harness under test to `kimi` (advertises `supports_model_override`
+        // but not effort), preserving the original "model passes,
+        // effort drops" shape. `opencode` would also work but lacks
+        // model override; kimi is the closest match.
+        let resolved = resolve_agent_config(&kimi_caps(), inputs);
         assert_eq!(
             resolved.model.as_deref(),
             Some("some-model"),
-            "Agy accepts model override (per the capability inventory)"
+            "Kimi accepts model override (per the capability inventory)"
         );
-        assert!(resolved.effort.is_none(), "Agy doesn't accept effort");
+        assert!(resolved.effort.is_none(), "Kimi doesn't accept effort");
     }
 
     /// Application slot falls through when None (issue #1148 AC #11: "With

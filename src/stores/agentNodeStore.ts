@@ -100,6 +100,12 @@ export interface ScheduledTask {
   timeoutId: ReturnType<typeof setTimeout>;
 }
 
+export interface SpawnAgentOptions {
+  rows?: number;
+  cols?: number;
+  fresh?: boolean;
+}
+
 interface AgentNodeState {
   agentNodes: AgentNode[];
   // Autopilot pipeline state per piloted node id ('implementing' /
@@ -152,13 +158,27 @@ interface AgentNodeState {
   reorderAgentNode: (nodeId: number, insertIndex: number) => Promise<void>;
   swapAgentNodes: (aId: number, bId: number) => Promise<void>;
   setActiveNode: (id: number | null) => void;
-  spawnAgent: (nodeId: number, provider: string, rows?: number, cols?: number) => Promise<void>;
+  spawnAgent: (
+    nodeId: number,
+    provider: string,
+    rowsOrOptions?: number | SpawnAgentOptions,
+    cols?: number,
+  ) => Promise<void>;
   /// Issue #774 — swap a node's Model Provider. The backend preserves
   /// worktree / branch / name / position; only `provider` changes. The
   /// returned `AgentNode` reflects the post-swap state (the backend has
   /// already updated the row), so the caller can patch the local entry
   /// without an extra `fetchAgentNodes` round-trip on the happy path.
   regenerateAgentNode: (nodeId: number, newProviderId: string) => Promise<AgentNode>;
+  /// Issue #1306 — "Start Fresh" escape hatch. Discards the stale
+  /// `cli_session_id` and boots a new session in the same existing worktree.
+  /// Invokes `spawnAgent` with `options.fresh: true` (passing `resume: null`
+  /// to the backend), causing `spawn_with_intent` to emit `SpawnIntent::Fresh`
+  /// which clears `cli_session_id` in SQLite and spawns without `--resume`.
+  restartFreshAgent: (
+    nodeId: number,
+    options?: { rows?: number; cols?: number },
+  ) => Promise<void>;
   spawnHandoverAgent: (meshId: number, prefill: string, provider?: string) => Promise<AgentNode>;
   killAgent: (nodeId: number) => Promise<void>;
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
@@ -538,10 +558,18 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     set({ activeNodeId: id });
   },
 
-  spawnAgent: async (nodeId, provider, rows?: number, cols?: number) => {
+  spawnAgent: async (nodeId, provider, rowsOrOptions, maybeCols) => {
     try {
+      const options: SpawnAgentOptions =
+        typeof rowsOrOptions === 'object' && rowsOrOptions !== null
+          ? rowsOrOptions
+          : {
+              rows: typeof rowsOrOptions === 'number' ? rowsOrOptions : undefined,
+              cols: maybeCols,
+            };
       const node = get().agentNodes.find(s => s.id === nodeId);
-      await api.spawnAgent(nodeId, provider, node?.cli_session_id, rows, cols);
+      const resume = options.fresh ? null : (node?.cli_session_id ?? null);
+      await api.spawnAgent(nodeId, provider, resume, options.rows, options.cols);
       await get().fetchAgentNodes();
     } catch (e) {
       // The central IPC wrapper (src/lib/tauri.ts → _invoke) already logs
@@ -577,6 +605,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       set({ error: formatError(e) });
       throw e;
     }
+  },
+
+  restartFreshAgent: async (nodeId, options) => {
+    const node = get().agentNodes.find(s => s.id === nodeId);
+    if (!node) {
+      throw new Error(`Node ${nodeId} not found`);
+    }
+    return get().spawnAgent(nodeId, node.provider, { ...options, fresh: true });
   },
 
   spawnHandoverAgent: async (meshId: number, prefill: string, provider?: string) => {
