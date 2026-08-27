@@ -42,7 +42,7 @@ pub enum SessionIdModeRef<'a> {
     Resume(&'a str),
     /// No session id — the harness self-assigns (e.g. mcode, grok, kimi,
     /// OpenCode) and the orchestrator learns the ID after spawn (PTY
-    /// capture, or OpenCode's `session list` poller).
+    /// capture, or OpenCode's `after_fresh_spawn` SQLite poller).
     None,
 }
 

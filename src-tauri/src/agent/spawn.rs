@@ -448,7 +448,7 @@ pub enum SessionIdMode {
 /// * `None` — orchestrator did not pre-write (Codex / Agy self-assign
 ///   internally). Capture is allowed only if the provider's adapter
 ///   declares `captures_session_id_from_pty() = true`; otherwise any UUID
-///   match would be spurious noise (OpenCode captures via `session list`).
+///   match would be spurious noise (OpenCode captures via `after_fresh_spawn`).
 fn reader_should_capture_session_id(
     session_id_mode: &SessionIdMode,
     pty_capture: bool,
@@ -2335,15 +2335,8 @@ pub(crate) async fn spawn_agent_inner(
         entry.set_reader_handle(reader_handle);
     }
 
-    if adapter.captures_session_id_from_cli_list()
-        && matches!(session_id_mode, SessionIdMode::None)
-    {
-        crate::services::opencode_session::start_capture_poller(
-            session_id,
-            resolved.spawn_path.clone(),
-            resolved.env_type,
-            crate::services::opencode_session::now_epoch_ms(),
-        );
+    if matches!(session_id_mode, SessionIdMode::None) {
+        adapter.after_fresh_spawn(session_id, &resolved.spawn_path, resolved.env_type);
     }
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
@@ -4619,8 +4612,8 @@ mod tests {
 
     /// `None` mode is the only mode where reader capture is allowed — and only
     /// for providers that print a labeled UUID on the PTY (Codex, Agy).
-    /// OpenCode self-assigns `ses_…` IDs but captures them via
-    /// `opencode session list`, so its PTY-capture flag is false.
+    /// OpenCode self-assigns `ses_…` IDs but captures them in
+    /// `after_fresh_spawn` (SQLite), so its PTY-capture flag is false.
     #[test]
     fn reader_should_capture_when_provider_self_assigns_and_mode_is_none() {
         assert!(
@@ -4631,9 +4624,9 @@ mod tests {
     }
 
     /// Self-assigning capability is necessary but not sufficient — if the
-    /// provider accepts `--session-id` (Anthropic) or captures via a CLI
-    /// list (OpenCode), the PTY regex is not the source of truth even when
-    /// the orchestrator didn't pre-write.
+    /// provider accepts `--session-id` (Anthropic) or captures in
+    /// `after_fresh_spawn` (OpenCode), the PTY regex is not the source of
+    /// truth even when the orchestrator didn't pre-write.
     #[test]
     fn reader_should_not_capture_when_provider_does_not_self_assign() {
         assert!(

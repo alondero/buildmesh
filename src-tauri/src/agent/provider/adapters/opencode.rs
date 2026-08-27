@@ -22,12 +22,15 @@
 //! rejected as an invalid ID, and `--session ses_unknown` fails with
 //! "Session not found" rather than creating that ID. Resume uses
 //! `--session <id>` / `-s <id>` (not `--resume`). Capture is *not* the
-//! PTY UUID regex — those IDs never match — it is `opencode session list
-//! --format json` filtered by the node's spawn directory
-//! (`services::opencode_session`).
+//! PTY UUID regex — those IDs never match — it is a post-spawn SQLite
+//! read of OpenCode's local `opencode.db` (`services::opencode_session`),
+//! started from [`AgentProvider::after_fresh_spawn`].
 //!
 //! **Model / prefill**: TUI accepts `--model provider/model` and `--prompt`.
 //! There is no TUI `--variant` / `--effort` flag (that's `opencode run` only).
+//! Windows still wraps with `cmd.exe /c` (`.cmd` shim); `--prompt` therefore
+//! flattens CR/LF to spaces so a multi-line handover cannot split the
+//! `cmd.exe` command line.
 
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
@@ -95,14 +98,18 @@ impl AgentProvider for OpenCodeAdapter {
     }
 
     /// The PTY UUID regex (`session id: 01a0-…`) cannot see `ses_…` IDs, and
-    /// the TUI is not documented to print them. Capture is the session-list
-    /// poller in `services::opencode_session`, not the reader thread.
+    /// the TUI is not documented to print them. Capture runs from
+    /// [`Self::after_fresh_spawn`].
     fn captures_session_id_from_pty(&self) -> bool {
         false
     }
 
-    fn captures_session_id_from_cli_list(&self) -> bool {
-        true
+    fn after_fresh_spawn(&self, node_id: i64, spawn_path: &str, env_type: EnvType) {
+        crate::services::opencode_session::start_capture_poller(
+            node_id,
+            spawn_path.to_string(),
+            env_type,
+        );
     }
 
     fn resume_args(&self, id: &str) -> Vec<String> {
@@ -114,8 +121,19 @@ impl AgentProvider for OpenCodeAdapter {
     }
 
     fn prefill_args(&self, text: &str) -> Vec<String> {
-        vec!["--prompt".into(), text.into()]
+        // `cmd.exe /c` treats a newline as end-of-command. Flatten so a
+        // multi-line handover/issue prefill cannot split the argv.
+        vec!["--prompt".into(), flatten_cmd_prefill(text)]
     }
+}
+
+/// Collapse CR/LF so `--prompt` stays a single `cmd.exe /c` argument.
+fn flatten_cmd_prefill(text: &str) -> String {
+    text.split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -209,9 +227,8 @@ mod tests {
         assert!(OPENCODE.self_assigns_session_id());
         assert!(
             !OPENCODE.captures_session_id_from_pty(),
-            "OpenCode ses_ IDs are not PTY UUID banners; capture is session-list"
+            "OpenCode ses_ IDs are not PTY UUID banners; capture is after_fresh_spawn"
         );
-        assert!(OPENCODE.captures_session_id_from_cli_list());
     }
 
     #[test]
@@ -237,6 +254,17 @@ mod tests {
     fn prefill_args_use_prompt_flag() {
         let args = OPENCODE.prefill_args("fix the auth bug");
         assert_eq!(args, vec!["--prompt", "fix the auth bug"]);
+    }
+
+    #[test]
+    fn prefill_args_flatten_newlines_for_cmd_exe() {
+        let args = OPENCODE.prefill_args("fix auth\nthen run tests\r\nand push");
+        assert_eq!(args, vec!["--prompt", "fix auth then run tests and push"]);
+        assert!(
+            !args[1].contains('\n') && !args[1].contains('\r'),
+            "cmd.exe /c must not see a newline in --prompt; got {:?}",
+            args[1]
+        );
     }
 
     #[test]

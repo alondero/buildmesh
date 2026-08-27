@@ -347,17 +347,17 @@ pub trait AgentProvider: Send + Sync {
     /// output (the labeled-UUID regex in `session_capture`). Defaults to
     /// [`Self::self_assigns_session_id`]. Harnesses that self-assign but
     /// whose IDs are not UUID-shaped (OpenCode's `ses_…`) override this
-    /// to `false` and capture through a harness-specific CLI instead.
+    /// to `false` and capture in [`Self::after_fresh_spawn`] instead.
     fn captures_session_id_from_pty(&self) -> bool {
         self.self_assigns_session_id()
     }
 
-    /// Whether spawn should poll this harness's `session list` CLI to
-    /// learn the self-assigned ID (OpenCode). Defaults false — most
-    /// self-assigning harnesses print a labeled UUID on the PTY.
-    fn captures_session_id_from_cli_list(&self) -> bool {
-        false
-    }
+    /// Hook after a **fresh** spawn (`SessionIdMode::None`) has registered
+    /// the PTY. Default is a no-op. OpenCode uses it to poll its local
+    /// SQLite store for the `ses_…` id the TUI just minted. Adapters own
+    /// the capture implementation — spawn must not hard-code a provider
+    /// service behind a boolean flag.
+    fn after_fresh_spawn(&self, _node_id: i64, _spawn_path: &str, _env_type: EnvType) {}
 
     /// Alternative recipe for resume (subcommand-style providers like Codex).
     /// If Some, `build_spawn_command()` uses this instead of `spawn_recipe()` + `resume_args()`.

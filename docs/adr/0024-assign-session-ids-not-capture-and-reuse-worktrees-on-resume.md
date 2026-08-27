@@ -5,9 +5,10 @@ For providers whose session ID we control (Anthropic), Buildmesh
 `--session-id <uuid>`, rather than sniffing the ID back out of PTY output.
 PTY regex capture survives only for *self-assigning* providers that print a
 labeled UUID (Codex, Antigravity). OpenCode also self-assigns, but its IDs
-are `ses_…` (not UUIDs) and are not printed on the TUI — capture is
-`opencode session list --format json` filtered by spawn directory, and
-resume is `--session <id>` (see `docs/learning/opencode-harness-capabilities.md`).
+are `ses_…` (not UUIDs) and are not printed on the TUI — capture is a
+post-spawn read of OpenCode's local `opencode.db` for a row created in
+the spawn time window (`services::opencode_session`), and resume is
+`--session <id>` (see `docs/learning/opencode-harness-capabilities.md`).
 `CLAUDE_CODE_SESSION_ID` is deliberately **not** used. Resume re-spawns
 inside the worktree that already exists on disk rather than re-creating it.
 
@@ -72,7 +73,7 @@ architecture and are moot today. The relevant history:
 - **Cons / limits:** Self-assigning providers that print a labeled UUID
   (Codex, Antigravity) still depend on PTY regex capture; if that capture
   path ever proves flaky, the fix lives in `session_capture.rs`, not in an
-  env var. OpenCode captures via `opencode session list` (`services::opencode_session`)
+  env var. OpenCode captures via its local SQLite store (`services::opencode_session`)
   because its `ses_…` IDs never match the UUID regex.
 - **Unchanged / already covered:** Resume worktree reuse is pinned by
   `provision_for_spawn_reused_when_path_already_exists` (existing worktree →

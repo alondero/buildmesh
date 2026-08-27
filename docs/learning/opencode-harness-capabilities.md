@@ -24,7 +24,7 @@ OpenCode **can resume a specific session by ID**. It **cannot** accept a Buildme
 
 IDs look like `ses_fc52ccfb9ffek1jl23ZwpRuSP7`. Live 1.18.3 rejects UUID-shaped IDs (`Invalid session ID`) and rejects unknown `ses_…` IDs (`Session not found`) rather than creating them.
 
-**First slice (shipped):** adapter is the Kimi shape (`supports_resume` + `self_assigns_session_id` + `--session` / `--model` / `--prompt`). Capture is `opencode session list --format json` filtered by spawn directory. Attention and transcript stay off (Autopilot and the archive picker remain closed).
+**First slice (shipped):** adapter is the Kimi shape (`supports_resume` + `self_assigns_session_id` + `--session` / `--model` / `--prompt`). Capture is a post-spawn SQLite read of `opencode.db` for a session created in the spawn time window whose `directory` matches the node. Attention and transcript stay off (Autopilot and the archive picker remain closed).
 
 ADR-0024 previously grouped OpenCode with Anthropic as an assign-mode `--session-id` provider; that sentence is corrected.
 
@@ -47,7 +47,7 @@ The `AgentProvider` trait / `HarnessCapabilities` descriptor is the contract. Sp
 | `requires_attention_hook` + `inject_attention_hook` | Turn-ended / permission POST to localhost | Claude, Codex |
 | `produces_readable_transcript` | Coordinator rich layer + **archive resume picker** (`resumable = resume && transcript`) | Claude JSONL, Codex rollouts, Cursor JSONL |
 | `captures_session_id_from_pty` | PTY labeled-UUID regex | Codex / Agy; **OpenCode false** |
-| `captures_session_id_from_cli_list` | Poll `session list` JSON | **OpenCode true** |
+| `after_fresh_spawn` | Post-spawn capture hook | **OpenCode** reads `opencode.db` |
 
 Spawn-mode decision (`spawn.rs`):
 
@@ -111,7 +111,7 @@ TUI `validateSession` decodes the ID then `session.get({ throwOnError: true })` 
 | **Resume by ID** | Yes — `--session` / `-s` | **Yes** | Self-assign, not `--session-id`. |
 | **Auto-resume on startup** | Yes once ID is stored | **Yes** | Depends on session-list capture succeeding. |
 | **Assign ID at spawn** | **No** | unused | ADR-0024 corrected. |
-| **PTY UUID capture** | IDs are `ses_…` | Off | Capture is `session list`. |
+| **PTY UUID capture** | IDs are `ses_…` | Off | Capture is SQLite via `after_fresh_spawn`. |
 | **Model override** | Yes — `--model provider/model` | **Yes** | Format is `provider/model`. |
 | **Effort / variant** | `run --variant`; TUI `ctrl+t` | **No** | Honest for TUI spawn. |
 | **Prefill** | Yes — TUI `--prompt` | **Yes** | Autopilot still blocked on attention. |
@@ -127,7 +127,7 @@ TUI `validateSession` decodes the ID then `session.get({ throwOnError: true })` 
 
 Because OpenCode mints the ID, Buildmesh learns it after spawn and stores `agent_nodes.cli_session_id`.
 
-Shipped: `services::opencode_session` polls `opencode session list --format json -n 50`, matches `directory` to `resolved.spawn_path`, prefers rows created after spawn (10s skew), falls back to newest directory match. IDs must start with `ses_`. PTY capture is off so a labeled UUID cannot poison the column.
+Shipped: `services::opencode_session` reads the local `opencode.db` (same file as the usage meter), matches `directory` to `resolved.spawn_path`, and requires `time_created` in the spawn window (2s skew). **No historical fallback** — empty window means retry, then give up. IDs must start with `ses_`. Child/archived rows are ignored. PTY capture is off. The poller is a Tokio task that stops if the node leaves the process registry.
 
 ### What will not work
 
@@ -152,7 +152,7 @@ supports_resume: true
 auto_resume_on_startup: true
 self_assigns_session_id: true
 captures_session_id_from_pty: false
-captures_session_id_from_cli_list: true
+after_fresh_spawn: OpenCode SQLite poller
 session_assign_args: []
 resume_args(id): ["--session", id]
 supports_model_override: true
@@ -170,7 +170,7 @@ Closest siblings: **Kimi** (`-S` / `--session`, self-assign, model yes) plus **m
 
 ## Remaining follow-ups
 
-- Harden capture: plugin `session.created`, `--port` + HTTP, or SQLite. Session-list polling is racy for two Root Nodes in the same directory.
+- Harden capture further: plugin `session.created` or `--port` + HTTP. SQLite polling still cannot distinguish two Root Nodes in the same directory.
 - Attention plugin (`session.idle` / `permission.asked`) so Autopilot can run.
 - Transcript reader (`opencode export` JSON) so the archive picker and coordinator rich layer work.
 - Remaining CLI: `--auto`, `--agent`, `--fork`, `run --variant`.
