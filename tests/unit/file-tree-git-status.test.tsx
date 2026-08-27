@@ -5,6 +5,26 @@ import { emit } from '@tauri-apps/api/event';
 import { FileTree } from '../../src/components/FileTree/FileTree';
 import type { FileNode, GitStatus, DiffResult } from '../../src/lib/tauri';
 
+// Issue #1245 — the diff-load failure path now surfaces the error via
+// the shared `addToast` wrapper AND rolls back the optimistic highlight
+// so the row doesn't keep claiming an open diff with nothing actually
+// loaded. Mock the wrapper with the same `vi.hoisted` + named-export
+// pattern used by `agent-node-store.test.ts` and
+// `git-issues-tab.test.tsx` — production code imports the named
+// export, tests capture the spy via `vi.mocked(addToast)`.
+const { addToastMock } = vi.hoisted(() => ({
+  addToastMock: vi.fn(),
+}));
+vi.mock('../../src/stores/toastStore', () => ({
+  addToast: addToastMock,
+  // `dismissToast` is exported by the module but isn't exercised here;
+  // pass through to keep the module shape intact.
+  dismissToast: vi.fn(),
+}));
+import { addToast } from '../../src/stores/toastStore';
+
+const mockAddToast = vi.mocked(addToast);
+
 // list_directory returns ABSOLUTE node paths; get_git_status returns paths
 // RELATIVE to the repo root. The tree must reconcile the two so changed files
 // are badged and their diffs load.
@@ -46,6 +66,7 @@ describe('FileTree git status reconciliation', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     mockBackend();
+    mockAddToast.mockReset();
   });
 
   afterEach(() => {
@@ -142,5 +163,87 @@ describe('FileTree git status reconciliation', () => {
     // still visible — the tree was never unmounted underneath it.
     expect(screen.getByTestId('folder-expanded')).toBeTruthy();
     expect(screen.getByText('app.ts')).toBeTruthy();
+  });
+
+  // Issue #1245 — clicking a changed file used to set the highlight
+  // optimistically, then swallow the diff-load failure into
+  // `console.error`. The row sat selected as if a diff had opened while
+  // nothing actually did. The fix surfaces the error through `addToast`
+  // AND rolls the optimistic `onFileSelect` back so the highlight
+  // disappears. The rollback target is whatever `selectedFile` was
+  // *before* the click — a bare `onFileSelect(null)` would clobber any
+  // pre-existing selection, so we restore the previous value.
+  it('rolls back the optimistic selection when diff_file_against_head rejects', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'list_directory') return Promise.resolve(TREE);
+      if (cmd === 'get_git_status') return Promise.resolve(STATUS);
+      // Reject the diff load — the realistic case (worktree lock,
+      // oversized binary, transient git error).
+      if (cmd === 'diff_file_against_head') return Promise.reject(new Error('worktree lock'));
+      return Promise.resolve({});
+    });
+
+    const onChangedFileSelect = vi.fn();
+    const onFileSelect = vi.fn();
+    render(
+      <FileTree
+        rootPath="/repo"
+        showGitStatus={true}
+        onChangedFileSelect={onChangedFileSelect}
+        onUnchangedFileSelect={noop}
+        // Pre-existing selection: user already had README open. A bare
+        // `onFileSelect(null)` rollback would clobber it too — the
+        // implementation captures `selectedFile` and restores it.
+        selectedFile="/repo/README.md"
+        onFileSelect={onFileSelect}
+      />
+    );
+
+    fireEvent.click(await screen.findByText('src'));
+    fireEvent.click(await screen.findByText('app.ts'));
+
+    // Diff load was attempted with the repo-relative path.
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('diff_file_against_head', {
+        sessionPath: '/repo',
+        filePath: 'src/app.ts',
+      }),
+    );
+    // Toast surfaces the failure (provider + message + severity match
+    // the sibling ChangedFilesSection call site so identical failures
+    // dedup under one slot).
+    await waitFor(() =>
+      expect(mockAddToast).toHaveBeenCalledWith(
+        'Review',
+        expect.stringContaining('Failed to load diff for src/app.ts'),
+        'error',
+      ),
+    );
+    // `formatError` unwraps `e.message` — the toast body carries the
+    // raw backend string, not the bogus 'Error: ' prefix.
+    await waitFor(() =>
+      expect(mockAddToast).toHaveBeenCalledWith(
+        'Review',
+        expect.stringContaining('worktree lock'),
+        'error',
+      ),
+    );
+    // The callback that would have shown the diff in the Review pane
+    // was NEVER invoked — nothing to forward.
+    expect(onChangedFileSelect).not.toHaveBeenCalled();
+    // The optimistic `onFileSelect(app.ts)` fires first, then the
+    // rollback restores the previous selection. The capture is read at
+    // click time so the rollback target is `/repo/README.md`, not null.
+    await waitFor(() =>
+      expect(onFileSelect).toHaveBeenNthCalledWith(1, '/repo/src/app.ts'),
+    );
+    // The second `onFileSelect` call is the rollback. Critically, it
+    // restores the prior selection rather than passing null — that
+    // distinction is what makes the highlight stop lying without also
+    // stomping a different row the user already had open.
+    await waitFor(() =>
+      expect(onFileSelect).toHaveBeenNthCalledWith(2, '/repo/README.md'),
+    );
+    expect(onFileSelect).not.toHaveBeenCalledWith(null);
   });
 });
