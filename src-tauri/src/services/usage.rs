@@ -38,6 +38,7 @@ use crate::services::opencode_oauth::OpenCodeConsoleCred;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_CRED_TARGET;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_HOST;
 use crate::services::opencode_oauth::device_flow;
+use crate::process_util::{command_no_window, run_command_with_timeout};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "UsageWindow.ts")]
@@ -2016,6 +2017,10 @@ const AGY_HOST: &str = "https://daily-cloudcode-pa.googleapis.com";
 const AGY_USER_AGENT: &str = "antigravity/cli/1.0.3 windows/amd64";
 /// Credential Manager target the agy CLI stores its OAuth token under.
 const AGY_CRED_TARGET: &str = "gemini:antigravity";
+/// The CLI's read-only `/usage` command reloads quotas before emitting its JSON
+/// report. Bound both the CLI's work and the child-process wait so a network stall
+/// cannot occupy a Usage Probe worker indefinitely.
+const AGY_USAGE_PROCESS_TIMEOUT: Duration = Duration::from_secs(25);
 
 // ─── OpenCode Go (live `_server billing.get` probe) ────────────────────────
 //
@@ -2258,6 +2263,111 @@ struct AgyModelsResp {
     agent_model_sorts: Vec<AgySort>,
 }
 
+/// Structured output from `agy --print /usage --output-format json`. This is the
+/// canonical quota surface: unlike `fetchAvailableModels`, it reports both the
+/// five-hour and weekly shared buckets for each model group.
+#[derive(Deserialize)]
+struct AgyUsageCommandResp {
+    status: String,
+    command: Option<AgyUsageCommand>,
+}
+
+#[derive(Deserialize)]
+struct AgyUsageCommand {
+    name: String,
+    data: AgyUsageData,
+}
+
+#[derive(Deserialize)]
+struct AgyUsageData {
+    #[serde(default)]
+    groups: Vec<AgyUsageGroup>,
+}
+
+#[derive(Deserialize)]
+struct AgyUsageGroup {
+    name: String,
+    #[serde(default)]
+    buckets: Vec<AgyUsageBucket>,
+}
+
+#[derive(Deserialize)]
+struct AgyUsageBucket {
+    window: String,
+    remaining_fraction: Option<f64>,
+    reset_time: Option<String>,
+}
+
+fn agy_window_label(window: &str) -> String {
+    match window {
+        "weekly" => "Weekly".to_string(),
+        "5h" => "5-hour".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn parse_agy_usage_command(
+    body: &str,
+) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
+    let resp: AgyUsageCommandResp =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+    if resp.status != "SUCCESS" {
+        return Err(UsageError::Shape(format!(
+            "agy /usage returned status {}",
+            resp.status
+        )));
+    }
+    let command = resp
+        .command
+        .filter(|command| command.name == "usage")
+        .ok_or_else(|| UsageError::Shape("agy /usage returned no usage payload".to_string()))?;
+
+    let windows: Vec<UsageWindow> = command
+        .data
+        .groups
+        .into_iter()
+        .flat_map(|group| {
+            group.buckets.into_iter().filter_map(move |bucket| {
+                bucket.remaining_fraction.map(|fraction| UsageWindow {
+                    label: format!("{} — {}", group.name, agy_window_label(&bucket.window)),
+                    used_percent: Some((1.0 - fraction) * 100.0),
+                    resets_at: bucket.reset_time,
+                })
+            })
+        })
+        .collect();
+    if windows.is_empty() {
+        return Err(UsageError::Shape(
+            "agy /usage returned no quota buckets".to_string(),
+        ));
+    }
+    Ok((windows, None))
+}
+
+fn agy_cli_usage() -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
+    let mut command = command_no_window("agy");
+    command.args([
+        "--print",
+        "/usage",
+        "--output-format",
+        "json",
+        "--print-timeout",
+        "20s",
+    ]);
+    let output = run_command_with_timeout(command, "agy /usage", AGY_USAGE_PROCESS_TIMEOUT)
+        .map_err(UsageError::Shape)?;
+    if !output.status.success() {
+        return Err(UsageError::Shape(format!(
+            "agy /usage exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let stdout =
+        std::str::from_utf8(&output.stdout).map_err(|e| UsageError::Shape(e.to_string()))?;
+    parse_agy_usage_command(stdout)
+}
+
 /// Models whose `displayName` starts with this prefix all draw from one shared
 /// Gemini bucket on Google's side (verified live 2026-06-04), even though the
 /// API reports them as separate effort-level entries (Flash Low/Medium/High,
@@ -2327,11 +2437,38 @@ fn parse_agy_models(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), Us
 }
 
 pub fn agy_usage() -> ProviderUsage {
+    // Antigravity 1.1.22+ exposes its own read-only `/usage` command in print
+    // mode. It is the only public client surface that includes Gemini's weekly
+    // quota; `fetchAvailableModels` below still has only the five-hour bucket.
+    match agy_cli_usage() {
+        Ok((windows, detail)) => {
+            return ProviderUsage {
+                provider: "agy".to_string(),
+                logged_in: true,
+                windows,
+                balance: None,
+                detail,
+                error: None,
+            };
+        }
+        Err(error) => {
+            // Older CLIs do not support structured `/usage` output. Retain the
+            // direct API probe as a best-effort compatibility fallback rather
+            // than turning an upgrade gap into a missing Usage card.
+            tracing::debug!(
+                "Antigravity CLI usage probe unavailable; falling back to model API: {error}"
+            );
+        }
+    }
+
     let token = match read_agy_token() {
         Ok(t) => t,
         Err(e) => return logged_out("agy", e.to_string()),
     };
-    let client = match Client::builder().build() {
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
         Ok(c) => c,
         Err(e) => return logged_out("agy", format!("Client error: {e}")),
     };
@@ -3744,6 +3881,55 @@ mod tests {
     fn parse_agy_token_missing_is_error() {
         assert!(parse_agy_token(br#"{"auth_method":"consumer"}"#).is_err());
         assert!(parse_agy_token(br#"{"token":{"access_token":""}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_agy_usage_command_keeps_gemini_weekly_and_five_hour_buckets() {
+        // `agy --print /usage --output-format json` is the authoritative
+        // surface: unlike fetchAvailableModels, it returns both quota windows.
+        let json = r#"{
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.46,"reset_time":"2026-08-29T17:48:59Z"},
+                                {"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.99,"reset_time":"2026-08-28T00:03:11Z"}
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.67,"reset_time":"2026-09-03T16:17:33Z"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let (windows, detail) = parse_agy_usage_command(json).unwrap();
+
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].label, "Gemini Models — Weekly");
+        assert_eq!(windows[0].used_percent, Some((1.0 - 0.46) * 100.0));
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-08-29T17:48:59Z"));
+        assert_eq!(windows[1].label, "Gemini Models — 5-hour");
+        assert_eq!(windows[1].used_percent, Some((1.0 - 0.99) * 100.0));
+        assert_eq!(windows[2].label, "Claude and GPT models — Weekly");
+        assert_eq!(detail, None);
+    }
+
+    #[test]
+    fn parse_agy_usage_command_empty_result_falls_back_to_model_api() {
+        // An empty but successful response is transient upstream state, not a
+        // meaningful zero-quota reading. Returning an error lets `agy_usage`
+        // retain the older model-API meter instead of caching a blank card.
+        let json = r#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[]}}}"#;
+        assert!(parse_agy_usage_command(json).is_err());
     }
 
     #[test]
