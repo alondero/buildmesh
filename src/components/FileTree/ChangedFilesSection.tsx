@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { diffFileAgainstHead, type DiffResult } from '../../lib/tauri';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { fileDiffStatusMeta } from '../../lib/status';
+import { addToast } from '../../stores/toastStore';
+import { formatError } from '../../lib/errorUtils';
 
 /** Lucide chevron-right, rotated 90° when the section is expanded.
  *  Matches the FileTree rows' chevron — keeps the probe body's expand
@@ -51,7 +53,14 @@ export function ChangedFilesSection({
       const diff = await diffFileAgainstHead(rootPath, path);
       onChangedFileSelect(path, diff);
     } catch (e) {
-      console.error('Failed to load diff:', e);
+      // Issue #1245 — surface the failure instead of swallowing it. A
+      // worktree lock, oversized binary, or transient git error used to
+      // leave the row highlight looking like an open diff with nothing
+      // actually loaded. The toast matches the `addToast(provider, ...)`
+      // convention used by NodeItem.tsx (e.g. `'Regenerate failed'`,
+      // `'Restart failed'`) so a user sees the same toast shape across
+      // every diff-load / spawn / restart failure in the app.
+      addToast('Review', `Failed to load diff for ${path}: ${formatError(e)}`, 'error');
     }
   };
 

@@ -17,6 +17,7 @@ import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { fileDiffStatusMeta as statusMeta } from '../../lib/status';
 import { LoadingState } from '../shared/Spinner';
+import { addToast } from '../../stores/toastStore';
 
 /** Lucide-style glyphs for the tree rows. */
 function ChevronRightIcon({ className }: { className?: string }) {
@@ -145,6 +146,12 @@ export function FileTree({
   const handleFileClick = useCallback(
     async (path: string, relPath: string, isChanged: boolean) => {
       if (isChanged && onChangedFileSelect) {
+        // Capture the previous selection so the failure branch can roll
+        // it back. A bare `onFileSelect(null)` would clear any pre-existing
+        // highlight — the user might have had a different file open before
+        // clicking, and clobbering that one too looks like two dead clicks
+        // (issue #1245).
+        const previousSelection = selectedFile;
         onFileSelect(path);
         try {
           // diff_file_against_head joins session_path + file_path, so the
@@ -152,13 +159,25 @@ export function FileTree({
           const diff = await diffFileAgainstHead(rootPath, relPath);
           onChangedFileSelect(path, diff);
         } catch (e) {
-          console.error('Failed to load diff:', e);
+          // Issue #1245 — surface the failure AND undo the optimistic
+          // highlight. Without the rollback the row sits selected as if a
+          // diff had opened, while nothing actually did — the highlight
+          // would lie about an open diff for the rest of the session.
+          // Toast mirrors the convention used by NodeItem.tsx and the
+          // sibling ChangedFilesSection call site so all diff-load
+          // failures dedup under one 'Review' provider slot.
+          addToast(
+            'Review',
+            `Failed to load diff for ${relPath}: ${formatError(e)}`,
+            'error',
+          );
+          onFileSelect(previousSelection);
         }
       } else if (onUnchangedFileSelect) {
         onUnchangedFileSelect(path);
       }
     },
-    [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect]
+    [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect, selectedFile]
   );
 
   // Flatten the tree to the rows the user can see right now. The keyboard
