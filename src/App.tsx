@@ -18,6 +18,8 @@ import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
+import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
+import { formatError } from './lib/errorUtils';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
@@ -67,6 +69,14 @@ function App() {
   // Issue #1001 — toast list lives in the shared store.
   const toasts = useToastStore((s) => s.toasts);
   const [isReady, setIsReady] = useState(false);
+  // Issue #1250 — when one of the boot IPCs rejects, we surface the
+  // formatted error via `<BootErrorPanel>` and let the user retry.
+  // Previously a rejected invoke was caught, logged, and discarded —
+  // `isReady` stayed false and the pulsing splash was the only signal,
+  // making the app look hung. `initBusy` gates the Retry button so a
+  // panicking backend can't be hit with overlapping inits.
+  const [initError, setInitError] = useState<string | null>(null);
+  const [initBusy, setInitBusy] = useState(false);
   // Cheatsheet open state (issue #731). The <ShortcutCheatsheet> component
   // mounts only while true, which is what arms the <Modal>-owned Escape
   // listener — otherwise Escape would be stolen from agent terminals in
@@ -388,33 +398,64 @@ function App() {
     }
   }, [storeError, addToast]);
 
-  useEffect(() => {
-    const init = async () => {
-      try {
-        // No data dependency between these — run the IPC round-trips
-        // concurrently so first paint isn't gated on three serial calls.
-        await Promise.all([initAttentionListeners(), fetchMeshes(), fetchAgentNodes()]);
-        setIsReady(true);
-
-        // Auto-resume suspended sessions after a brief delay to ensure
-        // terminals and event listeners are mounted
-        setTimeout(async () => {
-          try {
-            const resumed = await api.autoResumeAgentNodes();
-            if (resumed.length > 0) {
-              console.log(`[App] Auto-resumed ${resumed.length} sessions`);
-              await fetchAgentNodes();
-            }
-          } catch (e) {
-            console.error('[App] Auto-resume failed:', e);
-          }
-        }, 1000);
-      } catch (e) {
-        console.error('[App] Init failed:', e);
+  // Issue #1250 — extract init into a callback so the BootErrorPanel's
+  // Retry button can re-run it without unmounting the whole App.
+  // Promise.allSettled (not Promise.all) so a single rejection doesn't
+  // mask the other two outcomes — we need to know exactly which call
+  // failed so the error message is meaningful. If one succeeds and
+  // another fails, the partial state in the stores is fine: a retry
+  // re-runs all three and overwrites whatever was loaded.
+  const init = useCallback(async () => {
+    setInitError(null);
+    setInitBusy(true);
+    try {
+      // No data dependency between these — run the IPC round-trips
+      // concurrently so first paint isn't gated on three serial calls.
+      const results = await Promise.allSettled([
+        initAttentionListeners(),
+        fetchMeshes(),
+        fetchAgentNodes(),
+      ]);
+      const failures = results.filter(
+        (r): r is PromiseRejectedResult => r.status === 'rejected',
+      );
+      if (failures.length > 0) {
+        // Surface the first rejection. formatError strips the
+        // "Error: " prefix that String(e) would otherwise prepend
+        // (issue #663).
+        setInitError(formatError(failures[0].reason));
+        return;
       }
-    };
+      setIsReady(true);
+
+      // Auto-resume suspended sessions after a brief delay to ensure
+      // terminals and event listeners are mounted
+      setTimeout(async () => {
+        try {
+          const resumed = await api.autoResumeAgentNodes();
+          if (resumed.length > 0) {
+            console.log(`[App] Auto-resumed ${resumed.length} sessions`);
+            await fetchAgentNodes();
+          }
+        } catch (e) {
+          console.error('[App] Auto-resume failed:', e);
+        }
+      }, 1000);
+    } catch (e) {
+      // Defense in depth: Promise.allSettled never rejects, but if a
+      // future refactor swaps it back to Promise.all or any of these
+      // calls throw synchronously, we still surface the error instead
+      // of leaving the splash up forever.
+      console.error('[App] Init failed:', e);
+      setInitError(formatError(e));
+    } finally {
+      setInitBusy(false);
+    }
+  }, [initAttentionListeners, fetchMeshes, fetchAgentNodes]);
+
+  useEffect(() => {
     init();
-  }, []);
+  }, [init]);
 
   useEffect(() => {
     const unlisten = listen<ResumeFailedPayload>('resume-failed', (event) => {
@@ -556,6 +597,20 @@ function App() {
     [],
   );
   useNamingBackendFailureToast(handleNamingBackendFailure);
+
+  if (initError) {
+    // Issue #1250 — instead of an infinite pulsing splash, surface the
+    // formatted init error with a Retry button. The user can re-trigger
+    // `init` (the same callback the mount effect ran) without a full
+    // app restart.
+    return (
+      <BootErrorPanel
+        error={initError}
+        onRetry={init}
+        busy={initBusy}
+      />
+    );
+  }
 
   if (!isReady) {
     return (
