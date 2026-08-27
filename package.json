@@ -1,7 +1,7 @@
 {
   "name": "app",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.3.0-0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "build:mobile": "vite build --mode mobile",
     "preview": "vite preview",
     "tauri": "tauri",
+    "version:set": "node scripts/set-version.mjs",
     "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json",
     "test": "vitest run",
     "test:watch": "vitest",

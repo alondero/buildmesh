@@ -121,7 +121,23 @@ export default function ArchivedNodesScreen({
               key={s.session_id}
               role="button"
               tabIndex={0}
+              // Issue #1259 — mirror native <button> activation keys for
+              // the role="button" wrapper so keyboard / switch-access users
+              // can actually expand the card (WCAG 2.1.1, 4.1.2).
+              // preventDefault stops Space from scrolling the page between
+              // repeated activations.
               onClick={() => setSelectedId(open ? null : s.session_id)}
+              onKeyDown={(e) => {
+                // Only respond when the card itself is the focused element.
+                // The nested "Resume node" button handles its own keyboard
+                // activation; without this guard, a bubbled keydown from it
+                // would collapse the card on top of the spawn action.
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSelectedId(open ? null : s.session_id);
+                }
+              }}
               data-testid={`node-${s.session_id}`}
               className="card"
               style={{

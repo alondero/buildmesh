@@ -190,8 +190,15 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     action: 'zoom-in',
     group: 'terminal',
     description: 'Increase terminal font size',
-    winKey: 'Ctrl++',
-    macKey: '⌘++',
+    // Issue #1264 — the previous `Ctrl++` label was the literal "press
+    // Ctrl and the + key" rendering, but the actual US-keyboard chord
+    // is `Ctrl+=` (the unshifted key) and the matcher in
+    // `terminalKeyAction.ts:60` accepts both `=` and `+` for
+    // tolerance. `Ctrl+=` is what the user actually types and matches
+    // the convention used for `Ctrl+0` / `Ctrl+-` in the rows above
+    // and below, so flip the label to match the real chord.
+    winKey: 'Ctrl+=',
+    macKey: '⌘+=',
   },
   {
     action: 'zoom-out',

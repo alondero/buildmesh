@@ -109,7 +109,24 @@ export default function IssuesScreen({
               key={issue.number}
               role="button"
               tabIndex={0}
+              // Issue #1259 — the card announces role="button" but ignored
+              // Enter and Space, so keyboard / switch-access users could
+              // focus but not expand (WCAG 2.1.1, 4.1.2). Mirror the native
+              // <button> activation keys; preventDefault stops Space from
+              // scrolling the page between repeated activations.
               onClick={() => setSelectedIssue(open ? null : issue.number)}
+              onKeyDown={(e) => {
+                // Only respond when the card itself is the focused element.
+                // The nested "Start agent" button and "View ↗" link handle
+                // their own keyboard activation; without this guard, a
+                // bubbled keydown from them would collapse the card on top
+                // of their own action.
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSelectedIssue(open ? null : issue.number);
+                }
+              }}
               data-testid={`issue-${issue.number}`}
               className="card"
               style={{

@@ -51,6 +51,13 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.();
   }
+  /// Move the socket into CLOSING without firing `onclose`. Mirrors the
+  /// real-browser state during a normal close handshake, where the browser
+  /// sets readyState = CLOSING first and only fires `onclose` on a later
+  /// tick. Used by the #1256 resume-race tests.
+  simulateClosing() {
+    this.readyState = FakeWebSocket.CLOSING;
+  }
 }
 
 const node: AgentNode = {
@@ -318,4 +325,76 @@ describe("TerminalScreen reconnect on foreground/online", () => {
       utils.unmount();
     },
   );
+
+  // Issue #1256 — resume race creates duplicate live sockets.
+  //
+  // On mobile, the browser enters CLOSING when it begins a close handshake
+  // and only fires `onclose` on a later tick. If the user foregrounds the
+  // app in that window, the old code created a new socket while the old
+  // one's handlers were still attached — both wrote to xterm (duplicated
+  // PTY output) and the late `onclose` scheduled a parallel reconnect.
+  // The fix treats CLOSING as a pending state: resume skips and waits for
+  // the normal reconnect path to handle the close event.
+  describe("resume race while socket is CLOSING (issue #1256)", () => {
+    it("does NOT open a second socket when the current one is mid-close and the document is foregrounded", async () => {
+      const utils = await mountAndConnect();
+      expect(sockets.length).toBe(1);
+      const initialCalls = (fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+
+      // Socket enters the browser's close handshake (CLOSING) but `onclose`
+      // has not fired yet — the gap the old code fell through.
+      act(() => sockets[0].simulateClosing());
+
+      // Foregrounding during CLOSING must NOT mint a new ticket + open a
+      // second socket. If it did, the old socket's onmessage would keep
+      // writing to the same xterm (duplicated bytes) and its late
+      // onclose would schedule a parallel reconnect ladder.
+      act(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+
+      // Let any stray microtask flush so a (theoretical) leaked reconnect
+      // would have a chance to fire before we assert.
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(sockets.length).toBe(1);
+      expect((fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(initialCalls);
+
+      // Once CLOSING completes (onclose fires → readyState CLOSED), the
+      // normal reconnect path takes over and we get exactly one new socket.
+      // Foregrounding here drives an immediate retry (no 1s backoff tick to
+      // race the waitFor default 1s timeout against).
+      act(() => sockets[0].simulateDrop());
+      act(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await waitFor(() => expect(sockets.length).toBe(2));
+
+      utils.unmount();
+    });
+
+    it("does NOT open a second socket when the current one is mid-close and the network returns", async () => {
+      const utils = await mountAndConnect();
+      expect(sockets.length).toBe(1);
+      const initialCalls = (fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+
+      act(() => sockets[0].simulateClosing());
+
+      act(() => {
+        window.dispatchEvent(new Event("online"));
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(sockets.length).toBe(1);
+      expect((fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(initialCalls);
+
+      utils.unmount();
+    });
+  });
 });

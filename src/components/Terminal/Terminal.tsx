@@ -9,6 +9,7 @@ import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { dropdownId } from '../../lib/dropdownId';
 
 export { type TerminalInstance } from './TerminalRegistry';
 export const terminalManager = new TerminalRegistry();
@@ -27,6 +28,65 @@ declare global {
   }
 }
 window.__terminalManager = terminalManager;
+
+// Module-level guard so the window keydown listener is installed
+// exactly once across the lifetime of the app — see `installTerminalZoomListener`
+// below. Tests that swap `window.setTimeout` etc. still see this fire
+// once at first mount.
+let terminalZoomListenerInstalled = false;
+
+/**
+ * Idempotently installs the window-level Ctrl/Cmd+0/+/- zoom listener
+ * (issue #1264). Mirrors the `installListener()` pattern in
+ * `src/lib/pathInvalidatedCache.ts:337` — the first `AgentTerminal` to
+ * mount registers the listener, every subsequent mount early-returns
+ * because the global is already `true`. We never uninstall because:
+ *
+ *   1. The handler is a pure read of `terminalFontSize()` + a write
+ *      to the same module variable; it's safe to leave armed even
+ *      when no terminal pane is mounted (keystrokes are silently
+ *      dropped because `setTerminalFontSize` is a setter on a module
+ *      variable that nothing else reads).
+ *   2. The `AgentTerminal` component is the only consumer and it
+ *      mounts/unmounts frequently in grid reshuffles — installing
+ *      per-mount would register N listeners for N panes and add
+ *      N× window teardown cost.
+ */
+function installTerminalZoomListener(): void {
+  if (terminalZoomListenerInstalled) return;
+  terminalZoomListenerInstalled = true;
+  const handler = (e: KeyboardEvent) => {
+    // Cheap out for the overwhelming majority of keystrokes that don't carry
+    // a modifier at all — keeps this window-level listener off the hot path
+    // for plain text input.
+    if (!e.ctrlKey && !e.metaKey) return;
+    const action = resolveZoomKeyAction({
+      key: e.key,
+      ctrlKey: e.ctrlKey,
+      shiftKey: e.shiftKey,
+      metaKey: e.metaKey,
+      isMac,
+    });
+    if (action === 'reset') {
+      e.preventDefault();
+      setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT);
+    } else if (action === 'in') {
+      e.preventDefault();
+      setTerminalFontSize(terminalFontSize() + 2);
+    } else if (action === 'out') {
+      e.preventDefault();
+      setTerminalFontSize(terminalFontSize() - 2);
+    }
+  };
+  window.addEventListener('keydown', handler);
+}
+
+/** Test-only: reset the singleton guard so each test can re-install
+ * the listener fresh. Mirrors `resetPathInvalidatedCacheForTests` in
+ * `pathInvalidatedCache.ts:371`. */
+export function resetTerminalZoomListenerForTests(): void {
+  terminalZoomListenerInstalled = false;
+}
 
 export function AgentTerminal({ nodeId }: { nodeId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -131,7 +191,12 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   // `nodeId` scopes the selector (`[data-dropdown-for="<nodeId>"]`)
   // so two terminals with open context menus wouldn't interfere. The
   // Escape handler is separate — `useClickOutside` doesn't cover keys.
-  useClickOutside<number>(contextMenu ? nodeId : null, () => setContextMenu(null));
+  //
+  // Issue #1264 — prefix with the surface tag so a terminal-keyed
+  // context menu can't collide with a mesh- or node-keyed menu that
+  // shares the same numeric id (mesh and node ids both autoincrement
+  // from the same SQLite sequence, so collisions are routine).
+  useClickOutside<string>(contextMenu ? dropdownId('terminal', nodeId) : null, () => setContextMenu(null));
   useEffect(() => {
     if (!contextMenu) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -194,32 +259,17 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
 
   // Keyboard shortcuts: Ctrl+0 reset, Ctrl++ zoom in, Ctrl+- zoom out
   // (Cmd on macOS — see resolveZoomKeyAction in terminalKeyAction.ts.)
+  //
+  // Issue #1264 — N terminal panes previously registered N identical
+  // window listeners (the handler was inside a `useEffect(() => ...)`
+  // with `[]` deps that ran on every mount). The behaviour is
+  // naturally idempotent (`setTerminalFontSize(x)` is a no-op for an
+  // unchanged value), so the duplicate listeners only cost N× window
+  // teardown on every grid reshuffle — wasteful, not broken. Hoist to
+  // a module-level singleton installed once, mirroring the
+  // `installListener()` pattern in `pathInvalidatedCache.ts:337`.
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      // Cheap out for the overwhelming majority of keystrokes that don't carry
-      // a modifier at all — keeps this window-level listener off the hot path
-      // for plain text input.
-      if (!e.ctrlKey && !e.metaKey) return;
-      const action = resolveZoomKeyAction({
-        key: e.key,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        metaKey: e.metaKey,
-        isMac,
-      });
-      if (action === 'reset') {
-        e.preventDefault();
-        setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT);
-      } else if (action === 'in') {
-        e.preventDefault();
-        setTerminalFontSize(terminalFontSize() + 2);
-      } else if (action === 'out') {
-        e.preventDefault();
-        setTerminalFontSize(terminalFontSize() - 2);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    installTerminalZoomListener();
   }, []);
 
   useEffect(() => {
@@ -449,7 +499,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
 
       {contextMenu && (
         <div
-          data-dropdown-for={nodeId}
+          data-dropdown-for={dropdownId('terminal', nodeId)}
           className="fixed bg-bg-card border border-border-default rounded-md shadow-md z-[100] py-1 min-w-[160px] animate-scale-in origin-top-left"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}

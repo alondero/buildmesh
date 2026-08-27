@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { login, readStoredToken, rememberToken } from "../api";
 
 type Props = {
@@ -18,10 +18,22 @@ export default function Connect({ onConnected, notice }: Props) {
   // token from the URL via JS, exchange it for the bm_session cookie, then
   // strip it from the URL (issue #500 — the token is never sent to the server
   // as a query param it validates). The shell loaded publicly to run this code.
+  //
+  // The `consumedTokenRef` guard (issue #1260) makes the side-effect
+  // idempotent across React StrictMode's simulated remount in development:
+  // refs persist across the simulated unmount/remount cycle, while the
+  // replaceState below ALSO strips the token from window.location.search,
+  // so either barrier is sufficient in a well-behaved environment — both
+  // together make a single POST /api/session per page load guaranteed even
+  // if the URL ever survives between the two effect runs (older React
+  // versions, browser quirks, future changes).
+  const consumedTokenRef = useRef(false);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const urlToken = params.get("token");
     if (!urlToken) return;
+    if (consumedTokenRef.current) return;
+    consumedTokenRef.current = true;
     // Drop the token from the address bar regardless of outcome — it should
     // never linger in history.
     params.delete("token");

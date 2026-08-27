@@ -29,7 +29,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={false}
         onToggleDropdown={() => {}}
         onSpawnDefault={() => {}}
@@ -55,7 +55,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={false}
         onToggleDropdown={() => {}}
         onSpawnDefault={onSpawnDefault}
@@ -84,7 +84,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={false}
         onToggleDropdown={() => {}}
         onSpawnDefault={onSpawnDefault}
@@ -102,7 +102,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={false}
         onToggleDropdown={onToggleDropdown}
         onSpawnDefault={() => {}}
@@ -119,7 +119,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={false}
         onToggleDropdown={() => {}}
         onSpawnDefault={() => {}}
@@ -139,7 +139,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={false}
         onToggleDropdown={() => {}}
         onSpawnDefault={() => {}}
@@ -163,7 +163,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={true}
         onToggleDropdown={() => {}}
         onSpawnDefault={() => {}}
@@ -185,7 +185,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={false}
         onToggleDropdown={() => {}}
         onSpawnDefault={() => {}}
@@ -214,7 +214,7 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
-        meshId={1}
+        dropdownKey="mesh-1"
         isOpen={false}
         onToggleDropdown={() => {}}
         onSpawnDefault={() => {}}

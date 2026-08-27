@@ -86,9 +86,7 @@ impl CircuitContext {
     }
 
     /// Populate the `pr.*` namespace for a GitHub PR-triggered run.
-    // Each field is a logically distinct PR attribute (number, title, body,
-    // author, URL, head branch, labels) that callers pass individually.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // mirrors the pr.* field set 1:1
     pub fn with_pr(
         &mut self,
         number: i64,

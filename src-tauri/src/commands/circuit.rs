@@ -95,6 +95,7 @@ pub fn list_circuits_with_runs(
 // collapsing into a struct would change the wire shape and is out of scope.
 #[allow(clippy::too_many_arguments)]
 #[command]
+#[allow(clippy::too_many_arguments)] // Tauri command surface — one arg per UI field
 pub fn create_circuit(
     mesh_id: i64,
     name: String,

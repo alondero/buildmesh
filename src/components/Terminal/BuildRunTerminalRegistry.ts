@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import * as api from '../../lib/tauri';
 import { createTerminalOptions } from './terminalConfig';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
-import { loadWebglRenderer } from './loadWebglRenderer';
+import { terminalWebglPool } from './WebglRendererPool';
 import { TerminalWriter } from './TerminalWriter';
 import { decodeBase64Bytes } from '../../lib/base64';
 import type { BuildRunOutputPayload } from '../../types/generated/BuildRunOutputPayload';
@@ -266,11 +266,19 @@ export class BuildRunTerminalRegistry {
       inst.term.refresh(0, inst.term.rows - 1);
     });
 
+    // GPU context budget: this pane just became visible, so it earns a
+    // WebGL renderer (LRU-capped pool; hidden panes fall back to DOM).
+    terminalWebglPool.activate(
+      `buildRun:${instanceKey(inst.sessionId, inst.mode, inst.useWorktree)}`,
+      inst.term,
+    );
+
     return inst;
   }
 
   detach(sessionId: number, mode: BuildRunMode, useWorktree: boolean): void {
-    const inst = this.instances.get(instanceKey(sessionId, mode, useWorktree));
+    const key = instanceKey(sessionId, mode, useWorktree);
+    const inst = this.instances.get(key);
     if (!inst) return;
 
     if (inst.resizeObserver) {
@@ -279,6 +287,7 @@ export class BuildRunTerminalRegistry {
     }
     inst.term.element?.remove();
     inst.attachedContainer = null;
+    terminalWebglPool.release(`buildRun:${key}`);
   }
 
   /** Full teardown — called from the X button. Kills the Rust PTY,
@@ -295,6 +304,7 @@ export class BuildRunTerminalRegistry {
       inst.resizeObserver.disconnect();
       inst.resizeObserver = null;
     }
+    terminalWebglPool.release(`buildRun:${key}`);
     if (inst.outputUnlisten) inst.outputUnlisten();
     if (inst.exitUnlisten) inst.exitUnlisten();
     inst.writer.unregister(inst.sessionId);
@@ -366,11 +376,9 @@ export class BuildRunTerminalRegistry {
       // shear box-drawing borders (xterm defaults to Unicode 6 widths).
       // createTerminalOptions sets allowProposedApi, which this addon requires.
       loadUnicode11Widths(term);
-      // Issue #1122: attach the WebGL renderer for the same reason as the
-      // agent terminal — without it, the build-run pane slows to 30-60ms
-      // per frame after a long `cargo build -v` or `npm install` dumps
-      // thousands of styled lines into the scrollback.
-      loadWebglRenderer(term);
+      // Issue #1122: the WebGL renderer is attached LAZILY by
+      // `WebglRendererPool.activate` on DOM attach (same GPU context budget
+      // as the agent terminal — see TerminalRegistry.ts / WebglRendererPool.ts).
 
       // Per-instance writer (NOT the shared registry writer — see class
       // header comment about key namespace collision).

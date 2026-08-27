@@ -21,14 +21,18 @@ interface SpawnButtonClusterProps {
   /** Provider list — already filtered/sorted by the parent (per ADR-0016 §2
    *  the parent must NOT re-derive the order/grouping). */
   providers: SpawnOption[];
-  /** Stable key for this cluster — passed through to `ProviderDropdown`'s
-   *  `data-dropdown-for` attribute so click-outside handlers can scope to
-   *  a single cluster when many rows share the same page. For meshes /
-   *  issues / PRs this is `number`; for archived-session resumption
-   *  (issue #813) the natural key is the string `session_id`. The value
-   *  is string-coerced when assigned to the DOM attribute, so either
-   *  shape works at runtime. */
-  meshId: number | string;
+  /**
+   * Issue #1264 — pre-prefixed stable key for this cluster. Passed
+   * through to `ProviderDropdown`'s `data-dropdown-for` attribute so
+   * the shared `useClickOutside` hook can scope to a single cluster.
+   * The caller is responsible for building the value via
+   * `dropdownId(surface, id)` (e.g. `mesh-5`, `issue-3`,
+   * `session-abc`) so the per-surface namespace can't collide with
+   * another surface that happens to share the same numeric id. The
+   * prop is renamed from the misleading `meshId` (it was never mesh-
+   * specific — issues, PRs, and archived sessions all used it too) so
+   * the prefix-contract is obvious at the call site. */
+  dropdownKey: string;
   /** Visible label on the primary (+ default) action button. Defaults
    *  to "+" — the canonical spawn idiom across the sidebar / issues /
    *  PRs probe rows. Override for surfaces where the spawn is a
@@ -79,7 +83,7 @@ interface SpawnButtonClusterProps {
 
 export function SpawnButtonCluster({
   providers,
-  meshId,
+  dropdownKey,
   isOpen,
   primaryLabel = '+',
   busyLabel = 'Spawning...',
@@ -198,7 +202,7 @@ export function SpawnButtonCluster({
       </div>
       {isOpen && !isSpawning && (
         <ProviderDropdown
-          meshId={meshId}
+          dropdownKey={dropdownKey}
           providers={providers}
           onSelect={onSelectProvider}
           // Issue #814 — Escape closes the dropdown. The cluster re-uses

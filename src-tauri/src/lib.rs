@@ -25,6 +25,11 @@ mod session_naming;
 
 use tauri::Manager;
 
+/// Handle the private external-crash-watchdog CLI before Tauri initialises.
+pub fn run_crash_watchdog_if_requested() -> bool {
+    diagnostics::run_crash_watchdog_if_requested()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Early panic hook — captures panics that fire BEFORE the main panic
@@ -269,6 +274,10 @@ pub fn run() {
             Box::leak(Box::new(_guard));
 
             tracing::info!("Buildmesh started — db at {:?}", db_path);
+
+            if let Err(error) = diagnostics::start_crash_watchdog(&log_dir) {
+                tracing::error!("failed to start external crash watchdog: {error}");
+            }
 
             // Crash recovery: any sessions still marked 'running' from a previous
             // crash have no live process. Mark them suspended for auto-resume.
@@ -666,20 +675,99 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = &event {
-                tracing::info!("App exit requested, marking running sessions as suspended");
-                // Routes through SessionLifecycle (issue #132, #949) —
-                // single owner of every `agent_nodes.status` write,
-                // including the exit-time suspend sweep. `on_exit_sweep()`
-                // wraps `db::mark_running_nodes_suspended()` exactly the
-                // same way `recover_from_crash()` does for the startup
-                // path; the wrappers are named separately so the trigger
-                // (crash vs graceful shutdown) stays distinguishable in
-                // logs and history.
-                if let Err(e) = crate::agent::session_lifecycle::on_exit_sweep() {
-                    tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
+            match &event {
+                tauri::RunEvent::ExitRequested { code, .. } => {
+                    diagnostics::mark_expected_exit(diagnostics::ExpectedExitReason::ExitRequested);
+                    tracing::info!(
+                        "App exit requested (code={:?}), marking running sessions as suspended",
+                        code
+                    );
+                    // Routes through SessionLifecycle (issue #132, #949) —
+                    // single owner of every `agent_nodes.status` write,
+                    // including the exit-time suspend sweep. `on_exit_sweep()`
+                    // wraps `db::mark_running_nodes_suspended()` exactly the
+                    // same way `recover_from_crash()` does for the startup
+                    // path; the wrappers are named separately so the trigger
+                    // (crash vs graceful shutdown) stays distinguishable in
+                    // logs and history.
+                    if let Err(e) = crate::agent::session_lifecycle::on_exit_sweep() {
+                        tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
+                    }
+                    agent::process::kill_all_sessions();
                 }
-                agent::process::kill_all_sessions();
+                tauri::RunEvent::Exit => {
+                    tracing::info!("App exit complete");
+                }
+                tauri::RunEvent::WindowEvent { label, event, .. } => match event {
+                    tauri::WindowEvent::CloseRequested { .. } => {
+                        USER_CLOSE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        diagnostics::mark_expected_exit(
+                            diagnostics::ExpectedExitReason::CloseRequested,
+                        );
+                        tracing::info!(window = %label, "Window close requested by user");
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        let user_initiated =
+                            USER_CLOSE_REQUESTED.load(std::sync::atomic::Ordering::SeqCst);
+                        if user_initiated {
+                            tracing::info!(window = %label, "Window destroyed after user close request");
+                        } else {
+                            // Forensics for the silent-exit class of failures
+                            // seen on 2026-08-26: NVIDIA driver resets killed
+                            // WebView2 twice and Buildmesh quit without ever
+                            // reaching ExitRequested, leaving no fingerprint.
+                            // A Destroyed-without-CloseRequested is that
+                            // failure mode surfacing through an observable
+                            // seam. Log loudly, then bounce the hub back so
+                            // agents keep running (guarded against loops).
+                            tracing::error!(
+                                window = %label,
+                                "Window destroyed WITHOUT a user close request — \
+                                 webview/GPU process death suspected"
+                            );
+                            #[cfg(target_os = "windows")]
+                            tracing::info!(
+                                "Deferring unexpected-exit recovery to the external watchdog"
+                            );
+
+                            #[cfg(not(target_os = "windows"))]
+                            match _app_handle.path().app_data_dir() {
+                                Ok(app_dir) => match diagnostics::relaunch_detached(
+                                    &app_dir.join("logs"),
+                                ) {
+                                    Ok(true) => {
+                                        tracing::info!("Auto-relaunch spawned (guard passed)");
+                                    }
+                                    Ok(false) => {
+                                        tracing::warn!(
+                                            "Auto-relaunch skipped — another auto-relaunch \
+                                             fired less than {}s ago",
+                                            diagnostics::AUTO_RELAUNCH_COOLDOWN_SECS
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Auto-relaunch failed: {}", e);
+                                    }
+                                },
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Auto-relaunch failed (no app dir): {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
         });
 }
+
+/// Set when the user (or frontend) closes a window through the normal
+/// `CloseRequested` path. A later `Destroyed` for that window is expected;
+/// a `Destroyed` without this flag means something external killed the
+/// window's webview — the silent-exit signature.
+static USER_CLOSE_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
