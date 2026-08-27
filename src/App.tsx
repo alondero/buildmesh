@@ -60,8 +60,17 @@ const cheatsheetGuard = createShortcutGuard(300);
 const arrowThrottle = createKeyRepeatThrottle(200);
 
 function App() {
-  const { fetchMeshes } = useMeshStore();
-  const { fetchAgentNodes, initAttentionListeners } = useAgentNodeStore();
+  // Issue #1246 — select actions individually. Subscribing to the bare
+  // store (no selector) subscribes the component to the *entire* state
+  // object, so every patchAgentNode (attention flip, status update, etc.)
+  // re-rendered the whole app even though App only consumes action refs.
+  // Action refs are stable across renders in Zustand, so per-action
+  // selectors short-circuit change detection and App stays quiet during
+  // high-frequency agent events. `storeError` is the one state field we
+  // actually render on, so it stays as a direct selector.
+  const fetchMeshes = useMeshStore((s) => s.fetchMeshes);
+  const fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
+  const initAttentionListeners = useAgentNodeStore((s) => s.initAttentionListeners);
   const storeError = useAgentNodeStore(state => state.error);
 
   // Issue #1001 — toast list lives in the shared store.
