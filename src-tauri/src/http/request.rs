@@ -289,6 +289,30 @@ pub async fn send_json_error(
     let _ = write_json(lines, status, &body).await;
 }
 
+/// Parse and canonicalise a string as the `cli_session_id` column value
+/// (issue #1237).
+///
+/// Returns `Some(canonical_lowercase_uuid)` on success or `None` if the
+/// input is not a well-formed UUID. The two routes that accept
+/// `cli_session_id` from external input — `POST /api/attention/{id}` (hook
+/// payload, loopback peer) and
+/// `POST /api/meshes/{id}/agent-nodes/import-and-resume` (mobile client) —
+/// share this validator so an arbitrary string can never reach a harness
+/// argv. The resume path appends `id` raw to the CLI as `--resume <id>`
+/// (`crate::agent::provider::AgentProvider::resume_args`); a value beginning
+/// with `-` would land in flag position and the harness would interpret it
+/// as an additional flag (`--dangerously-skip-permissions`,
+/// `--output-format=...`, etc.) — the issue's injection vector.
+///
+/// Canonicalisation to lowercase happens here rather than only at the hook
+/// boundary so the value stored in `agent_nodes.cli_session_id` matches the
+/// form the orchestrator's spawn pipeline writes (`Uuid::to_string()` is
+/// already lowercase), and downstream resume lookups don't need a separate
+/// case-fold step.
+pub fn parse_cli_session_id(s: &str) -> Option<String> {
+    uuid::Uuid::parse_str(s).ok().map(|u| u.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +330,66 @@ mod tests {
         assert_eq!(bearer_token("Authorization: Basic abc\r\n"), None);
         // Empty after the scheme is rejected.
         assert_eq!(bearer_token("Authorization: Bearer \r\n"), None);
+    }
+
+    // ---- parse_cli_session_id (issue #1237) ----------------------------
+    //
+    // The validator closes the argv flag-position injection vector for the
+    // `--resume <id>` resume path. A well-formed UUID is the only accepted
+    // shape; everything else (flag-like strings, garbage, shell
+    // metacharacters) returns None so the route returns 400.
+
+    #[test]
+    fn parse_cli_session_id_canonicalises_mixed_case_uuid() {
+        // The exact payload from the issue spec's "valid UUID" example.
+        assert_eq!(
+            parse_cli_session_id("C1234567-89AB-CDEF-0123-456789ABCDEF"),
+            Some("c1234567-89ab-cdef-0123-456789abcdef".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_cli_session_id_passes_through_lowercase_uuid() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(parse_cli_session_id(id), Some(id.to_string()));
+    }
+
+    #[test]
+    fn parse_cli_session_id_rejects_flag_like_string() {
+        // The exact attack from issue #1237: a string beginning with `-`
+        // would land in argv flag position. The validator must reject it.
+        assert_eq!(parse_cli_session_id("--dangerously-skip-permissions"), None);
+        assert_eq!(parse_cli_session_id("--resume"), None);
+        assert_eq!(parse_cli_session_id("-x"), None);
+    }
+
+    #[test]
+    fn parse_cli_session_id_rejects_empty_and_garbage() {
+        assert_eq!(parse_cli_session_id(""), None);
+        assert_eq!(parse_cli_session_id("not-a-uuid"), None);
+        // Same value the attention route's pre-validator was already
+        // rejecting — regression-pin so the move to a shared helper doesn't
+        // drop a coverage branch.
+        assert_eq!(parse_cli_session_id("most-recent"), None);
+        assert_eq!(parse_cli_session_id("1234"), None);
+        // Truncated UUID (missing the final segment) — `Uuid::parse_str` is
+        // strict about the hyphenated 8-4-4-4-12 shape.
+        assert_eq!(
+            parse_cli_session_id("550e8400-e29b-41d4-a716"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_cli_session_id_rejects_shell_metacharacters() {
+        // Belt-and-braces: even if a future bypass tried to slip a UUID with
+        // extra payload past the parser, the format check rejects it.
+        assert_eq!(
+            parse_cli_session_id("550e8400-e29b-41d4-a716-446655440000; rm -rf /"),
+            None
+        );
+        assert_eq!(parse_cli_session_id("$(whoami)"), None);
+        assert_eq!(parse_cli_session_id("`id`"), None);
     }
 
     #[test]
