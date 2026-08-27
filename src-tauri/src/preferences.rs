@@ -4633,10 +4633,13 @@ mod tests {
     #[test]
     fn upsert_harness_default_rejects_effort_on_harness_without_effort_control() {
         let mut prefs = AppPreferences::default();
-        // Agy supports model override but NOT effort (per capabilities).
+        // Kimi supports model override but NOT effort (per capabilities);
+        // issue #1286 switched this from "agy" because AGY now advertises
+        // `--effort <low|medium|high>` and the validator must NOT reject
+        // a valid effort value on it.
         let result = upsert_harness_default(
             &mut prefs,
-            "agy",
+            "kimi",
             HarnessConfigValue {
                 model: Some("some-model".into()),
                 effort: Some("high".into()),
@@ -4650,7 +4653,7 @@ mod tests {
     }
 
     /// Validator accepts a model-only value for a non-effort harness (the
-    /// model path is independent of effort — Agy accepts `--model` but not
+    /// model path is independent of effort — Kimi accepts `--model` but not
     /// `--effort`). The blank-after-trim effort is rejected here because the
     /// input carries an effort value at all; a pure model-only write
     /// succeeds.
@@ -4659,14 +4662,14 @@ mod tests {
         let mut prefs = AppPreferences::default();
         upsert_harness_default(
             &mut prefs,
-            "agy",
+            "kimi",
             HarnessConfigValue {
                 model: Some("some-model".into()),
                 effort: None,
             },
         )
         .unwrap();
-        let stored = prefs.harness_defaults.get("agy").unwrap();
+        let stored = prefs.harness_defaults.get("kimi").unwrap();
         assert_eq!(stored.model.as_deref(), Some("some-model"));
         assert!(stored.effort.is_none());
     }
