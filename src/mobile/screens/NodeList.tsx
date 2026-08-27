@@ -13,6 +13,7 @@ import {
 import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { useWsEvents } from "../useWsEvents";
+import { useVisibilityPolling } from "../useVisibilityPolling";
 import { groupByHarness } from "../../lib/groups";
 import { STATUS_CONFIG } from "../../lib/status";
 
@@ -66,14 +67,18 @@ export default function NodeList({
     };
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (isLatest: () => boolean) => {
     try {
       const [m, n] = await Promise.all([listMeshes(), listNodes()]);
-      if (!mountedRef.current) return;
+      // `isLatest()` is the sequence-token check from `useVisibilityPolling`:
+      // if a newer refresh started while this fetch was in flight, drop
+      // our setState so the hung-fetch-during-mobile-suspend case doesn't
+      // clobber fresh data. `mountedRef` is the unmount check.
+      if (!isLatest() || !mountedRef.current) return;
       setMeshes(m);
       setNodes(n);
     } catch (e) {
-      if (!mountedRef.current) return;
+      if (!isLatest() || !mountedRef.current) return;
       // A 401 means the token was revoked/expired — bounce to Connect
       // instead of claiming the desktop is offline.
       if (isAuthError(e)) onAuthFailed();
@@ -81,16 +86,26 @@ export default function NodeList({
     }
   }, [onOffline, onAuthFailed]);
 
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
-  }, [refresh]);
+  // 5s poll is the WS-fallback safety net — `useWsEvents` below drives
+  // instant refreshes while the socket is up; the poll catches the gap
+  // between WS drops and reconnects (and the case where WS is up but the
+  // server has state we haven't heard an event for). The lifecycle /
+  // visibility gating lives in `useVisibilityPolling` (issue #1261)
+  // so any other mobile screen can reuse it without copy-pasting the
+  // 30-line timer dance that used to live inline here.
+  useVisibilityPolling(refresh, 5000);
 
   // Live attention events via /ws/events. On any event, refetch so the
   // list reflects the new status immediately rather than waiting for the
   // 5-second poll. WS drop falls back to polling silently.
-  useWsEvents(refresh, onAuthFailed);
+  //
+  // `useWsEvents` invokes its callback with NO arguments — WS events
+  // are inherently "latest" (they ARE the most recent server state),
+  // so we wrap `refresh` to feed it an `isLatest` that always returns
+  // true. The polling hook's sequence-token check still applies to
+  // its own ticks; this wrapper just keeps the WS path from passing
+  // `undefined` as `isLatest`.
+  useWsEvents(() => { void refresh(() => true); }, onAuthFailed);
 
   // Lazy-load the provider list; fallback gives the user something to tap
   // even if the request 401s or the server hasn't woken up yet.
