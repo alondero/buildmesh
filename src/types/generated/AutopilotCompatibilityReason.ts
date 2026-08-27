@@ -10,7 +10,7 @@
  * update, but that's the point: every reason is stable and testable.
  *
  * `serde(rename_all = "snake_case")` keeps the wire form simple for the
- * renderer (`{ kind: "missing_prefill", harness_id: "opencode" }`) and
+ * renderer (`{ kind: "missing_attention_hook", harness_id: "opencode" }`) and
  * `ts-rs` reads the same attribute so the generated TS discriminated union
  * matches by `kind`.
  */

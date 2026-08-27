@@ -1190,6 +1190,11 @@ mod tests {
         use crate::services::windows_cred;
         use uuid::Uuid;
 
+        if !windows_cred::credential_manager_available() {
+            eprintln!("SKIP: Windows Credential Manager not accessible from this session");
+            return;
+        }
+
         let target = format!(
             "buildmesh-test-opencode-persist-{}",
             Uuid::new_v4().simple()
@@ -1971,6 +1976,11 @@ mod tests {
         use crate::services::windows_cred;
         use uuid::Uuid;
 
+        if !windows_cred::credential_manager_available() {
+            eprintln!("SKIP: Windows Credential Manager not accessible from this session");
+            return;
+        }
+
         let target = format!(
             "buildmesh-test-opencode-ws-{}",
             Uuid::new_v4().simple()
@@ -2000,6 +2010,11 @@ mod tests {
         // React flow) must supply it explicitly.
         use crate::services::windows_cred;
         use uuid::Uuid;
+
+        if !windows_cred::credential_manager_available() {
+            eprintln!("SKIP: Windows Credential Manager not accessible from this session");
+            return;
+        }
 
         let target = format!(
             "buildmesh-test-opencode-srv-{}",
@@ -2031,6 +2046,11 @@ mod tests {
         //    unchanged.
         use crate::services::windows_cred;
         use uuid::Uuid;
+
+        if !windows_cred::credential_manager_available() {
+            eprintln!("SKIP: Windows Credential Manager not accessible from this session");
+            return;
+        }
 
         let target = format!(
             "buildmesh-test-opencode-set-ws-{}",
@@ -2087,6 +2107,11 @@ mod tests {
         // negative case (the parser/router must recognise an unusable
         // session and downgrade) so the test targets it directly.
         use uuid::Uuid;
+
+        if !crate::services::windows_cred::credential_manager_available() {
+            eprintln!("SKIP: Windows Credential Manager not accessible from this session");
+            return;
+        }
 
         let target = format!(
             "buildmesh-test-opencode-status-{}",
