@@ -154,13 +154,42 @@ pub(crate) async fn handle_ws_connection(
     }
 
     let write_task = tauri::async_runtime::spawn(async move {
-        while let Ok(data) = rx.recv().await {
-            if write
-                .send(tungstenite::Message::Binary(data.into()))
-                .await
-                .is_err()
-            {
-                break;
+        loop {
+            match rx.recv().await {
+                Ok(data) => {
+                    if write
+                        .send(tungstenite::Message::Binary(data.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    // Issue #1238: PTY output outpaced the 1024-slot
+                    // broadcast buffer. Re-send the tail of history so the
+                    // mobile client doesn't sit on a frozen terminal until
+                    // the user manually reconnects. The next `recv()` resumes
+                    // at the post-lag cursor; the tail may overlap with bytes
+                    // already in xterm.js scrollback — accepted as a
+                    // worse-is-better recovery compared to the silent death
+                    // that `while let Ok(...)` caused here before the fix.
+                    tracing::warn!(
+                        "WS for node {} lagged, dropped {} chunks — resending history tail",
+                        node_id,
+                        skipped
+                    );
+                    let tail = get_pty_history(node_id);
+                    if !tail.is_empty()
+                        && write
+                            .send(tungstenite::Message::Binary(tail.into()))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -524,6 +553,84 @@ mod tests {
         let msg = ws.next().await.unwrap().unwrap();
         assert!(msg.is_binary());
         assert_eq!(msg.into_data(), b"live data\r\n".to_vec());
+    }
+
+    // Issue #1238 regression: the WS write_task must survive a broadcast
+    // `Lagged` (1024-slot overflow under a flood of PTY output). Pre-fix,
+    // `while let Ok(data) = rx.recv().await` exited on the Lagged variant
+    // and the task died silently — the socket stayed open but no PTY bytes
+    // flowed until the user manually reconnected. Post-fix, the task logs
+    // the gap, re-sends the history tail, and keeps forwarding.
+    #[tokio::test]
+    async fn ws_write_task_survives_broadcast_lag() {
+        let node_id = 20006_i64;
+        ensure_pty_channel(node_id);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
+            handle_ws_connection(ws, node_id, None).await;
+        });
+
+        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        // Let the handler subscribe to the broadcast + finish initial-state
+        // negotiation before we start flooding.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Overflow the 1024-slot broadcast buffer. The handler's write_task
+        // interleaves `rx.recv()` (advances the receiver position) with
+        // `write.send()` (blocks once the TCP/WS sink fills). Because the
+        // client never calls `ws.next()` the sink fills, `write.send()`
+        // blocks, and during the block these sends accumulate past capacity
+        // — so the next `rx.recv()` on the handler's receiver returns
+        // `RecvError::Lagged`.
+        for i in 0..1100 {
+            send_pty_output(node_id, format!("flood {}\n", i).into_bytes());
+        }
+
+        // Let the runtime service the handler so the Lagged event fires
+        // and the recovery (history tail re-send) lands before we look for
+        // the marker.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Send a unique marker the test can grep for in the downstream
+        // frames. If the write_task survived the Lagged, this is forwarded;
+        // if it died (the pre-fix bug), the marker never reaches the client
+        // and the loop below runs out the deadline.
+        let marker = b"MARKER_AFTER_LAG";
+        send_pty_output(node_id, marker.to_vec());
+
+        // Drain the client. Per-iteration timeouts so we keep reading past
+        // the history-tail re-send frame(s) without bailing on the first
+        // quiet stretch.
+        let mut received_marker = false;
+        let mut all_data = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), ws.next()).await {
+                Ok(Some(Ok(msg))) => {
+                    let data = msg.into_data();
+                    all_data.extend_from_slice(&data);
+                    if data.windows(marker.len()).any(|w| w == marker) {
+                        received_marker = true;
+                        break;
+                    }
+                }
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => continue, // quiet stretch — keep waiting
+            }
+        }
+        assert!(
+            received_marker,
+            "WS write_task died after Lagged — marker never reached client. \
+             Received {} bytes before deadline.",
+            all_data.len()
+        );
     }
 
     #[tokio::test]
