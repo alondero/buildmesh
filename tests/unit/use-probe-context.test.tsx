@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { renderHook } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
 import { useProbeContext } from '../../src/hooks/useProbeContext';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { useUIStore } from '../../src/stores/uiStore';
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
@@ -59,6 +60,7 @@ describe('useProbeContext (issue #373)', () => {
       error: null,
       closingNodeIds: new Set(),
     });
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
   });
 
   it('returns an empty context when nothing is selected or focused', () => {
@@ -134,6 +136,38 @@ describe('useProbeContext (issue #373)', () => {
       activeNodeId: 22,
     });
     const { result } = renderHook(() => useProbeContext());
+    expect(result.current).toEqual({
+      activeMeshId: 2,
+      activeNodeId: 22,
+      activePath: '/b/.claude/worktrees/y',
+      activeMeshPath: '/b',
+      activeMeshName: 'mesh-2',
+    });
+  });
+
+  it('uses the focused node mesh in Single mode when it differs from the sidebar mesh', () => {
+    useMeshStore.setState({
+      meshes: [makeMesh(1, '/a'), makeMesh(2, '/b')],
+      meshesById: new Map([
+        [1, makeMesh(1, '/a')],
+        [2, makeMesh(2, '/b')],
+      ]),
+      selectedMeshId: 1,
+    });
+    useAgentNodeStore.setState({
+      agentNodes: [
+        makeNode({ id: 11, mesh_id: 1, path: '/a', worktree_name: 'x' }),
+        makeNode({ id: 22, mesh_id: 2, path: '/b', worktree_name: 'y' }),
+      ],
+      activeNodeId: 11,
+    });
+    useUIStore.setState({ viewMode: 'single' });
+
+    const { result } = renderHook(() => useProbeContext());
+    act(() => {
+      useAgentNodeStore.getState().setActiveNode(22);
+    });
+
     expect(result.current).toEqual({
       activeMeshId: 2,
       activeNodeId: 22,
