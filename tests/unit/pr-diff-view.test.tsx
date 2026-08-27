@@ -207,6 +207,54 @@ describe('PrDiffView (#421)', () => {
     ).toBeTruthy();
   });
 
+  it('does not violate Rules-of-Hooks when prNumber flips from undefined to defined (#1242)', async () => {
+    // Issue #1242: a Rules-of-Hooks crash the moment a single mounted
+    // overlay re-renders with a different prNumber shape. Before the fix,
+    // the `prNumber === undefined` guard short-circuited BEFORE the
+    // useState/useRef/useCallback/useEffect declarations, so the first
+    // render called 0 hooks and the second called 4 — React logs
+    // "Rendered more hooks than during the previous render" and the
+    // ErrorBoundary blanks the whole workspace.
+    //
+    // The fix must let the SAME fiber instance serve both shapes, with
+    // every hook running unconditionally and the placeholder chosen via
+    // post-hook JSX (not pre-hook early-return).
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const broken: DiffContext = { ...LIST_CTX, prNumber: undefined };
+      const { rerender } = render(<CenterDiffOverlay diff={broken} />);
+      expect(
+        await screen.findByText(/PR diff opened without a prNumber/),
+      ).toBeTruthy();
+
+      // The bug surfaces on this rerender — React throws the hook-order
+      // error which trips the ErrorBoundary above us.
+      expect(() => rerender(<CenterDiffOverlay diff={LIST_CTX} />)).not.toThrow();
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('get_pr_files', {
+          meshId: 42,
+          prNumber: 421,
+        });
+      });
+      expect(screen.getByText('PR #421')).toBeTruthy();
+      expect(
+        screen.queryByText(/PR diff opened without a prNumber/),
+      ).toBeNull();
+
+      // Pin the symptom React's reconciler logs when a fiber's hook
+      // count changes between renders — "more" when the new render
+      // declared more hooks than the previous one, "fewer" for the
+      // reverse. Our bug lands on "more"; we match both for robustness.
+      const hookOrderComplaint = errSpy.mock.calls.some((args) =>
+        /Rendered (more|fewer) hooks than/.test(String(args[0] ?? '')),
+      );
+      expect(hookOrderComplaint).toBe(false);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it('auto-closes when a different project is selected', async () => {
     render(<CenterDiffOverlay diff={LIST_CTX} />);
     await screen.findByText('PR #421');
