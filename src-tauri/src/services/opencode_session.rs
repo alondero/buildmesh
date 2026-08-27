@@ -47,7 +47,7 @@ pub fn select_id_for_directory<'a>(
     sessions
         .iter()
         .filter(|s| is_opencode_session_id(&s.id))
-        .filter(|s| directories_match(&s.directory, spawn_directory))
+        .filter(|s| crate::env::directories_match(&s.directory, spawn_directory))
         .filter(|s| s.created >= created_not_before_ms)
         .max_by_key(|s| (s.created, s.updated))
         .map(|s| s.id.as_str())
@@ -58,47 +58,7 @@ pub fn is_opencode_session_id(id: &str) -> bool {
     id.starts_with("ses_") && id.len() > 4
 }
 
-fn directories_match(listed: &str, spawn: &str) -> bool {
-    let a = normalize_directory(listed);
-    let b = normalize_directory(spawn);
-    if case_insensitive_fs(&a) || case_insensitive_fs(&b) {
-        a.eq_ignore_ascii_case(&b)
-    } else {
-        a == b
-    }
-}
-
-fn normalize_directory(path: &str) -> String {
-    let mut s = path.replace('\\', "/");
-    while s.len() > 1 && s.ends_with('/') {
-        s.pop();
-    }
-    s
-}
-
-/// Drive-letter, UNC (`//wsl$/…`, `//?/C:/…`), and WSL `/mnt/<drive>/`
-/// paths live on a case-insensitive volume. macOS APFS/HFS+ is
-/// case-insensitive by default even though the paths look Unix.
-fn case_insensitive_fs(path: &str) -> bool {
-    cfg!(target_os = "macos") || looks_windows_volume(path)
-}
-
-fn looks_windows_volume(path: &str) -> bool {
-    let b = path.as_bytes();
-    // `C:` / `c:` after slash-normalise.
-    if b.len() >= 2 && b[1] == b':' {
-        return true;
-    }
-    // UNC (`\\wsl$\Ubuntu\…` / `\\?\C:\…`) becomes `//wsl$/…` / `//?/…`.
-    if path.starts_with("//") {
-        return true;
-    }
-    // WSL bind of a Windows drive: `/mnt/c/…` / `/mnt/F/…`.
-    path.len() >= 7
-        && path.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("/mnt/"))
-        && path.as_bytes().get(6) == Some(&b'/')
-}
-
+#[allow(dead_code)]
 /// Wall-clock ms subtracted from spawn time so a TUI that minted the row
 /// a few ms before we sampled still matches. Must stay small: a large
 /// window would admit a session the user closed seconds earlier in the

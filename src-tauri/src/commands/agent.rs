@@ -684,25 +684,8 @@ pub async fn spawn_handover_agent(
 /// empty string behind.
 #[command]
 pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String> {
-    // Codex records its conversation ID in durable rollout metadata. Repair
-    // only legacy rows created before live capture existed, and only when the
-    // rollout history gives us exactly one safe answer.
-    let missing_nodes = db::list_suspended_nodes_without_cli_session_id().map_err(|e| e.to_string())?;
-    for node in missing_nodes {
-        if crate::preferences::resolve_harness_provider(&node.provider)
-            != crate::models::Provider::Codex
-        {
-            continue;
-        }
-        crate::services::codex_session::backfill_suspended_node(
-            node.id,
-            // Rollouts record the CLI's resolved worktree directory, not the
-            // mesh root persisted in `AgentNode::path`.
-            crate::env::node_working_path(&node).raw_path,
-            node.env,
-            node.created_at.timestamp_millis(),
-        )
-        .await;
+    if let Err(error) = crate::services::codex_session::backfill_legacy_suspended_nodes_once().await {
+        tracing::warn!("auto_resume_agent_nodes: legacy Codex session migration failed: {error}");
     }
 
     let nodes = db::list_suspended_nodes().map_err(|e| e.to_string())?;

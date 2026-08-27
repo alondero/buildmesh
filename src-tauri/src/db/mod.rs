@@ -2874,17 +2874,54 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
     rows.collect()
 }
 
-/// Suspended rows with no usable identity, eligible only for a provider's
-/// explicitly safe historic-recovery path before startup resume begins.
-pub fn list_suspended_nodes_without_cli_session_id() -> SqlResult<Vec<AgentNode>> {
+const CODEX_LEGACY_SESSION_BACKFILL_KEY: &str = "codex_legacy_session_backfill_v1";
+
+pub fn list_suspended_codex_nodes_without_cli_session_id() -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
-    let mut stmt = db.prepare(&format!(
+    list_suspended_codex_nodes_without_cli_session_id_inner(&db)
+}
+
+pub(crate) fn list_suspended_codex_nodes_without_cli_session_id_inner(
+    conn: &Connection,
+) -> SqlResult<Vec<AgentNode>> {
+    let mut stmt = conn.prepare(&format!(
         "SELECT {} FROM agent_nodes WHERE status = 'suspended' \
-         AND (cli_session_id IS NULL OR cli_session_id = '')",
+         AND (cli_session_id IS NULL OR cli_session_id = '') \
+         AND (provider = 'codex' OR provider LIKE 'codex:%')",
         AGENT_NODE_COLUMNS
     ))?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
+}
+
+pub fn codex_legacy_session_backfill_completed() -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    codex_legacy_session_backfill_completed_inner(&db)
+}
+
+pub(crate) fn codex_legacy_session_backfill_completed_inner(
+    conn: &Connection,
+) -> SqlResult<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM app_settings WHERE key = ?1",
+        params![CODEX_LEGACY_SESSION_BACKFILL_KEY],
+        |row| row.get::<_, i64>(0).map(|count| count > 0),
+    )
+}
+
+pub fn mark_codex_legacy_session_backfill_completed() -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    mark_codex_legacy_session_backfill_completed_inner(&db)
+}
+
+pub(crate) fn mark_codex_legacy_session_backfill_completed_inner(
+    conn: &Connection,
+) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+        params![CODEX_LEGACY_SESSION_BACKFILL_KEY],
+    )?;
+    Ok(())
 }
 
 // --- Pending worktree removal queue ---

@@ -22,6 +22,7 @@ use std::env;
 use once_cell::sync::Lazy;
 
 use crate::process_util::command_no_window;
+use crate::models::EnvType;
 
 // ── WSL distro lookup ──────────────────────────────────────────────────────
 
@@ -291,6 +292,29 @@ pub fn codex_dir() -> PathBuf {
                 let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
                 PathBuf::from(format!("C:\\Users\\{user}\\.codex"))
             }
+        }
+    }
+}
+
+/// The Codex CLI home for an agent environment, expressed in that
+/// environment's native path syntax. This deliberately derives the WSL home
+/// from the host username instead of launching a WSL shell.
+pub(crate) fn codex_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    match env_type {
+        EnvType::Windows => Some(codex_dir()),
+        EnvType::Wsl => {
+            if let Ok(home) = env::var("CODEX_HOME") {
+                if home.starts_with('/') {
+                    return Some(PathBuf::from(home));
+                }
+            }
+            if let Some(user) = spawn_path.strip_prefix("/home/").and_then(|path| path.split('/').next()) {
+                return Some(PathBuf::from(format!("/home/{user}/.codex")));
+            }
+            let user = env::var("USERNAME")
+                .ok()
+                .or_else(|| env::var("USER").ok())?;
+            Some(PathBuf::from(format!("/home/{user}/.codex")))
         }
     }
 }

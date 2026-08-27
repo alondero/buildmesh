@@ -1319,7 +1319,7 @@ pub(crate) async fn spawn_with_intent(
     }
 
     if intent_replaces_conversation(&intent) {
-        // Fresh is a deliberate new conversation, so no old harness identity
+        // Every non-resume intent is a deliberate new conversation, so no old harness identity
         // may survive it. In particular, self-assigning providers persist
         // their new id fill-only after launch; retaining an old id here would
         // make the next startup resume the wrong conversation.
@@ -1379,7 +1379,7 @@ pub(crate) async fn spawn_with_intent(
 /// A Resume request can still launch a fresh process for a non-resumable
 /// adapter, but that is not user intent to replace the captured identity.
 fn intent_replaces_conversation(intent: &SpawnIntent) -> bool {
-    matches!(intent, SpawnIntent::Fresh)
+    !matches!(intent, SpawnIntent::Resume { .. })
 }
 
 /// Build the per-field cascade inputs the spawn pipeline hands to
@@ -2959,8 +2959,14 @@ mod tests {
     }
 
     #[test]
-    fn only_explicit_fresh_intent_replaces_a_stored_conversation() {
+    fn every_non_resume_intent_replaces_a_stored_conversation() {
         assert!(intent_replaces_conversation(&SpawnIntent::Fresh));
+        assert!(intent_replaces_conversation(&SpawnIntent::Loop {
+            initial_prompt: "continue".into(),
+        }));
+        assert!(intent_replaces_conversation(&SpawnIntent::Handover {
+            selected_text: "context".into(),
+        }));
         assert!(!intent_replaces_conversation(&SpawnIntent::Resume {
             cause: ResumeCause::Explicit,
         }));

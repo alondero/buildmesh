@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{Datelike, Days, NaiveDate};
 use serde::Deserialize;
 
 use crate::models::EnvType;
@@ -47,10 +48,26 @@ pub fn find_id_for_directory_in(
     spawn_directory: &str,
     created_not_before_ms: i64,
 ) -> Option<String> {
-    find_candidates(sessions_dir, spawn_directory, created_not_before_ms)
+    find_candidates(sessions_dir, spawn_directory, created_not_before_ms, None)
         .into_iter()
         .max_by_key(|candidate| candidate.timestamp_ms)
         .map(|candidate| candidate.id)
+}
+
+fn find_fresh_id_for_directory_in(
+    sessions_dir: &Path,
+    spawn_directory: &str,
+    created_not_before_ms: i64,
+) -> Option<String> {
+    find_candidates(
+        sessions_dir,
+        spawn_directory,
+        created_not_before_ms,
+        Some(created_not_before_ms),
+    )
+    .into_iter()
+    .max_by_key(|candidate| candidate.timestamp_ms)
+    .map(|candidate| candidate.id)
 }
 
 /// Find an unambiguous historic rollout for a suspended node. The caller only
@@ -61,7 +78,7 @@ pub fn find_unique_id_for_directory_in(
     spawn_directory: &str,
     created_not_before_ms: i64,
 ) -> Option<String> {
-    let mut ids = find_candidates(sessions_dir, spawn_directory, created_not_before_ms)
+    let mut ids = find_candidates(sessions_dir, spawn_directory, created_not_before_ms, None)
         .into_iter()
         .map(|candidate| candidate.id)
         .collect::<Vec<_>>();
@@ -74,24 +91,24 @@ fn find_candidates(
     sessions_dir: &Path,
     spawn_directory: &str,
     created_not_before_ms: i64,
+    written_not_before_ms: Option<i64>,
 ) -> Vec<Candidate> {
     let mut candidates = Vec::new();
-    for year in subdirs(sessions_dir) {
-        for month in subdirs(&year) {
-            for day in subdirs(&month) {
-                let Ok(entries) = fs::read_dir(day) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    if let Some(candidate) = read_session_meta(&path, spawn_directory) {
-                        if candidate.timestamp_ms >= created_not_before_ms {
-                            candidates.push(candidate);
-                        }
-                    }
+    for day in rollout_days_newest_first(sessions_dir, created_not_before_ms) {
+        let Ok(entries) = fs::read_dir(day) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if written_not_before_ms.is_some_and(|not_before| !was_written_since(&path, not_before)) {
+                continue;
+            }
+            if let Some(candidate) = read_session_meta(&path, spawn_directory) {
+                if candidate.timestamp_ms >= created_not_before_ms {
+                    candidates.push(candidate);
                 }
             }
         }
@@ -99,14 +116,46 @@ fn find_candidates(
     candidates
 }
 
-fn subdirs(path: &Path) -> Vec<PathBuf> {
-    fs::read_dir(path)
-        .into_iter()
+fn was_written_since(path: &Path, not_before_ms: i64) -> bool {
+    path.metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|time| time.as_millis() >= not_before_ms as u128)
+}
+
+fn rollout_days_newest_first(sessions_dir: &Path, created_not_before_ms: i64) -> Vec<PathBuf> {
+    let cutoff = chrono::DateTime::from_timestamp_millis(created_not_before_ms)
+        .map(|time| time.date_naive().checked_sub_days(Days::new(1)))
         .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect()
+        .unwrap_or(NaiveDate::MIN);
+    let mut days = Vec::new();
+    for year in subdirs_sorted_desc(sessions_dir) {
+        let Some(year_number) = directory_number(&year) else { continue; };
+        if year_number < cutoff.year() { break; }
+        for month in subdirs_sorted_desc(&year) {
+            let Some(month_number) = directory_number(&month) else { continue; };
+            if year_number == cutoff.year() && month_number < cutoff.month() as i32 { break; }
+            for day in subdirs_sorted_desc(&month) {
+                let Some(day_number) = directory_number(&day) else { continue; };
+                let Some(date) = NaiveDate::from_ymd_opt(year_number, month_number as u32, day_number as u32) else { continue; };
+                if date < cutoff { break; }
+                days.push(day);
+            }
+        }
+    }
+    days
+}
+
+fn subdirs_sorted_desc(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new(); };
+    let mut dirs = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect::<Vec<_>>();
+    dirs.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    dirs
+}
+
+fn directory_number(path: &Path) -> Option<i32> {
+    path.file_name()?.to_str()?.parse().ok()
 }
 
 fn read_session_meta(path: &Path, spawn_directory: &str) -> Option<Candidate> {
@@ -121,7 +170,7 @@ fn read_session_meta(path: &Path, spawn_directory: &str) -> Option<Candidate> {
         .ok()?
         .to_string();
     let cwd = record.payload.cwd?;
-    if !directories_match(&cwd, spawn_directory) {
+    if !crate::env::directories_match(&cwd, spawn_directory) {
         return None;
     }
     let timestamp_ms = chrono::DateTime::parse_from_rfc3339(record.payload.timestamp.as_deref()?)
@@ -130,77 +179,29 @@ fn read_session_meta(path: &Path, spawn_directory: &str) -> Option<Candidate> {
     Some(Candidate { id, timestamp_ms })
 }
 
-fn directories_match(recorded: &str, spawn: &str) -> bool {
-    let recorded = normalize_directory(recorded);
-    let spawn = normalize_directory(spawn);
-    if looks_windows_volume(&recorded) || looks_windows_volume(&spawn) {
-        recorded.eq_ignore_ascii_case(&spawn)
-    } else {
-        recorded == spawn
-    }
-}
-
-fn normalize_directory(path: &str) -> String {
-    let mut normalized = path.replace('\\', "/");
-    while normalized.len() > 1 && normalized.ends_with('/') {
-        normalized.pop();
-    }
-    normalized
-}
-
-fn looks_windows_volume(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    (bytes.len() >= 2 && bytes[1] == b':') || path.starts_with("//") || path.starts_with("/mnt/")
-}
-
-fn sessions_dir(env_type: EnvType) -> Option<PathBuf> {
-    match env_type {
-        EnvType::Windows => Some(crate::env::codex_dir().join("sessions")),
-        EnvType::Wsl => {
-            let output = crate::process_util::command_no_window("wsl.exe")
-                .args([
-                    "--exec",
-                    "sh",
-                    "-c",
-                    "printf %s \"${CODEX_HOME:-$HOME/.codex}\"",
-                ])
-                .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (!home.is_empty())
-                .then(|| PathBuf::from(crate::env::to_host_path(&home)).join("sessions"))
-        }
-    }
-}
-
 /// Poll briefly for Codex's rollout metadata, then fill an otherwise empty
 /// `cli_session_id`. The PTY and hook paths may win first; the DB predicate
 /// keeps this delayed fallback from overwriting them.
 pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: EnvType) {
     let spawn_epoch_ms = chrono::Utc::now().timestamp_millis();
     tauri::async_runtime::spawn(async move {
-        let Some(sessions_dir) =
-            tauri::async_runtime::spawn_blocking(move || sessions_dir(env_type))
-                .await
-                .ok()
-                .flatten()
-        else {
-            tracing::warn!("codex session capture: no sessions directory for env {env_type:?}");
-            return;
-        };
         let not_before = spawn_epoch_ms.saturating_sub(CAPTURE_SKEW_MS);
         for (attempt, delay) in RETRY_DELAYS_MS.iter().enumerate() {
             tokio::time::sleep(Duration::from_millis(*delay)).await;
             if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
                 return;
             }
+            if node_has_cli_session_id(node_id) {
+                return;
+            }
+            let Some(sessions_dir) = crate::env::codex_sessions_dir(env_type, &spawn_directory) else {
+                tracing::warn!("codex session capture: no sessions directory for env {env_type:?}");
+                return;
+            };
             let path = sessions_dir.clone();
             let directory = spawn_directory.clone();
             let captured = tauri::async_runtime::spawn_blocking(move || {
-                find_id_for_directory_in(&path, &directory, not_before)
+                find_fresh_id_for_directory_in(&path, &directory, not_before)
             })
             .await
             .ok()
@@ -227,6 +228,13 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
     });
 }
 
+fn node_has_cli_session_id(node_id: i64) -> bool {
+    crate::db::get_agent_node_by_id(node_id)
+        .ok()
+        .and_then(|node| node.cli_session_id)
+        .is_some_and(|id| !id.trim().is_empty())
+}
+
 /// Restore a missing pre-capture Codex identity for an existing suspended
 /// node. This only accepts a single matching conversation ID, so ambiguity
 /// remains visible and never causes a surprise resume.
@@ -236,11 +244,7 @@ pub async fn backfill_suspended_node(
     env_type: EnvType,
     created_at_ms: i64,
 ) -> bool {
-    let Some(sessions_dir) = tauri::async_runtime::spawn_blocking(move || sessions_dir(env_type))
-        .await
-        .ok()
-        .flatten()
-    else {
+    let Some(sessions_dir) = crate::env::codex_sessions_dir(env_type, &node_directory) else {
         return false;
     };
     let not_before = created_at_ms.saturating_sub(CAPTURE_SKEW_MS);
@@ -264,6 +268,25 @@ pub async fn backfill_suspended_node(
             false
         }
     }
+}
+
+/// One-time recovery for rows created before Codex rollout capture existed.
+pub async fn backfill_legacy_suspended_nodes_once() -> Result<(), String> {
+    if crate::db::codex_legacy_session_backfill_completed().map_err(|error| error.to_string())? {
+        return Ok(());
+    }
+    let nodes = crate::db::list_suspended_codex_nodes_without_cli_session_id()
+        .map_err(|error| error.to_string())?;
+    for node in nodes {
+        let _ = backfill_suspended_node(
+            node.id,
+            crate::env::node_working_path(&node).spawn_path,
+            node.env,
+            node.created_at.timestamp_millis(),
+        )
+        .await;
+    }
+    crate::db::mark_codex_legacy_session_backfill_completed().map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -353,5 +376,30 @@ mod tests {
             find_unique_id_for_directory_in(temp.path(), directory, 1_787_830_000_000),
             None
         );
+    }
+
+    #[test]
+    fn traversal_is_descending_and_prunes_old_rollout_days() {
+        let temp = tempfile::TempDir::new().unwrap();
+        for date in [("2024", "01", "01"), ("2026", "08", "26"), ("2026", "08", "27")] {
+            fs::create_dir_all(temp.path().join(date.0).join(date.1).join(date.2)).unwrap();
+        }
+        let names = rollout_days_newest_first(temp.path(), 1_787_830_399_000)
+            .iter()
+            .map(|day| day.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["27", "26"]);
+    }
+
+    #[test]
+    fn shared_directory_matcher_accepts_windows_and_wsl_spawn_forms() {
+        assert!(crate::env::directories_match(
+            r"F:\src\buildmesh\.claude\worktrees\node",
+            "f:/src/buildmesh/.claude/worktrees/node/"
+        ));
+        assert!(crate::env::directories_match(
+            "/home/alond/src/buildmesh/.claude/worktrees/node",
+            "/home/alond/src/buildmesh/.claude/worktrees/node/"
+        ));
     }
 }
