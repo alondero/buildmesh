@@ -86,8 +86,8 @@ pub fn platform_name(platform: Platform) -> &'static str {
 ///    values before they reach `build_spawn_command`.
 /// 2. The Spawn Menu (`ProviderInfo.capabilities`): the frontend can render
 ///    only the controls each harness actually supports, so a Codex row offers
-///    the inline-config effort knob and an OpenCode row offers neither model
-///    nor effort.
+///    the inline-config effort knob and an OpenCode row offers model (but
+///    not effort — TUI has no `--variant`).
 ///
 /// Generated to `src/types/generated/HarnessCapabilities.ts`.
 ///
@@ -425,11 +425,12 @@ mod tests {
 
         let opencode = opencode_caps();
         assert_eq!(opencode.harness_id, "opencode");
-        assert!(!opencode.supports_resume);
+        assert!(opencode.supports_resume);
+        assert!(opencode.auto_resume_on_startup);
         assert!(!opencode.requires_attention_hook);
-        assert!(!opencode.supports_model_override);
+        assert!(opencode.supports_model_override);
         assert!(!opencode.supports_effort_override);
-        assert!(!opencode.supports_prefill);
+        assert!(opencode.supports_prefill);
         assert_eq!(opencode.effort_control, EffortControlKind::None);
 
         let terminal = terminal_caps();
@@ -594,10 +595,12 @@ mod tests {
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
 
-    /// Mask: an open-code harness never receives a model arg even when the
-    /// Mesh layer supplied one. The capability mask is the contract that
-    /// unsupported values never reach a harness process. Now extended
-    /// through the new `mesh_override` layer (issue #1151).
+    /// Mask: a harness without model override never receives a model arg
+    /// even when the Mesh layer supplied one. Terminal is the standing
+    /// example (OpenCode now advertises `--model`). The capability mask
+    /// is the contract that unsupported values never reach a harness
+    /// process. Now extended through the new `mesh_override` layer
+    /// (issue #1151).
     #[test]
     fn resolver_drops_model_for_harness_without_model_override() {
         let inputs = AgentConfigInputs {
@@ -609,10 +612,10 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&opencode_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs);
         assert!(
             resolved.model.is_none(),
-            "OpenCode doesn't support model overrides; the mask must drop any value"
+            "Terminal doesn't support model overrides; the mask must drop any value"
         );
     }
 
@@ -1117,7 +1120,7 @@ mod tests {
     }
 
     /// Mesh override is masked by the capability contract: a harness
-    /// without `supports_model_override` (e.g. OpenCode) drops the Mesh
+    /// without `supports_model_override` (e.g. Terminal) drops the Mesh
     /// override layer at the resolver, even when the user (or an IPC
     /// write) supplied a value. Mirrors the application-default mask
     /// (`resolver_application_slot_dropped_when_capability_masks_it`).
@@ -1135,10 +1138,10 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&opencode_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs);
         assert!(
             resolved.model.is_none(),
-            "OpenCode doesn't support model overrides; the mask must drop the mesh override layer"
+            "Terminal doesn't support model overrides; the mask must drop the mesh override layer"
         );
     }
 

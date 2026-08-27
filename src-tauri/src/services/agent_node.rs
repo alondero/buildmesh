@@ -1245,12 +1245,25 @@ mod tests {
 
     #[test]
     fn decide_resume_starts_fresh_when_new_provider_lacks_resume() {
-        // The OpenCode adapter doesn't support resume. Even a same-
-        // harness OpenCode → OpenCode swap is fresh.
+        // Terminal has no session identity. Even a same-harness
+        // Terminal → Terminal swap is fresh.
         assert_eq!(
-            decide_resume("opencode", "opencode", Some("oc-session")),
+            decide_resume("terminal", "terminal", Some("oc-session")),
             None,
             "a same-harness swap to a non-resumable adapter must start fresh",
+        );
+    }
+
+    #[test]
+    fn decide_resume_continues_opencode_with_captured_ses_id() {
+        assert_eq!(
+            decide_resume(
+                "opencode",
+                "opencode",
+                Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            ),
+            Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7".to_string()),
+            "OpenCode now supports --session resume; a captured ses_ id must continue",
         );
     }
 

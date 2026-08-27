@@ -447,13 +447,13 @@ pub enum SessionIdMode {
 ///   `claude --resume <id>` with a possibly-different UUID.
 /// * `None` — orchestrator did not pre-write (Codex / Agy self-assign
 ///   internally). Capture is allowed only if the provider's adapter
-///   declares `self_assigns_session_id() = true`; otherwise any UUID
-///   match would be spurious noise from a non-resumable shell.
+///   declares `captures_session_id_from_pty() = true`; otherwise any UUID
+///   match would be spurious noise (OpenCode captures via `after_fresh_spawn`).
 fn reader_should_capture_session_id(
     session_id_mode: &SessionIdMode,
-    adapter_self_assigns: bool,
+    pty_capture: bool,
 ) -> bool {
-    adapter_self_assigns && matches!(session_id_mode, SessionIdMode::None)
+    pty_capture && matches!(session_id_mode, SessionIdMode::None)
 }
 
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
@@ -2300,7 +2300,7 @@ pub(crate) async fn spawn_agent_inner(
     // unsynchronised; only one path must own the column for any given spawn.
     let needs_session_capture = reader_should_capture_session_id(
         &session_id_mode,
-        adapter.self_assigns_session_id(),
+        adapter.captures_session_id_from_pty(),
     );
     let reader_handle = start_reader(
         app.clone(),
@@ -2333,6 +2333,10 @@ pub(crate) async fn spawn_agent_inner(
     //     is race-free (see `process.rs::kill_session`).
     if let Some(entry) = PROCESS_REGISTRY.get(&session_id) {
         entry.set_reader_handle(reader_handle);
+    }
+
+    if matches!(session_id_mode, SessionIdMode::None) {
+        adapter.after_fresh_spawn(session_id, &resolved.spawn_path, resolved.env_type);
     }
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
@@ -2825,11 +2829,11 @@ mod tests {
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
 
-    /// Mesh override is masked by the harness's capability contract:
-    /// values outside the allowed vocabulary are dropped before reaching
-    /// the resolver's resolution (issue #1151 / #1148 AC #21).
+    /// Mesh override is masked per-field by the harness's capability
+    /// contract: OpenCode accepts model (`--model provider/model`) but
+    /// has no effort control, so effort drops and model passes.
     #[test]
-    fn cascade_inputs_for_mesh_override_masked_for_opencode() {
+    fn cascade_inputs_for_mesh_override_drops_effort_for_opencode() {
         let mesh_override = HarnessConfigValue {
             model: Some("some-model".into()),
             effort: Some("high".into()),
@@ -2849,10 +2853,9 @@ mod tests {
             ),
             inputs,
         );
-        // OpenCode's capability mask drops both model and effort since
-        // it advertises `supports_model_override = false` and
-        // `EffortControlKind::None`.
-        assert_eq!(resolved.model, None);
+        // OpenCode accepts `--model provider/model` and has no effort
+        // control. The mesh override model must pass; effort must drop.
+        assert_eq!(resolved.model.as_deref(), Some("some-model"));
         assert_eq!(resolved.effort, None);
     }
 
@@ -4608,9 +4611,9 @@ mod tests {
     }
 
     /// `None` mode is the only mode where reader capture is allowed — and only
-    /// for providers that self-assign session IDs (Codex, Agy). Anthropic,
-    /// OpenCode, and Terminal accept `--session-id` (or don't track sessions
-    /// at all), so the regex match would be spurious noise.
+    /// for providers that print a labeled UUID on the PTY (Codex, Agy).
+    /// OpenCode self-assigns `ses_…` IDs but captures them in
+    /// `after_fresh_spawn` (SQLite), so its PTY-capture flag is false.
     #[test]
     fn reader_should_capture_when_provider_self_assigns_and_mode_is_none() {
         assert!(
@@ -4621,10 +4624,9 @@ mod tests {
     }
 
     /// Self-assigning capability is necessary but not sufficient — if the
-    /// provider accepts `--session-id` (Anthropic / OpenCode), the regex
-    /// match is not the source of truth even when the orchestrator didn't
-    /// pre-write (e.g. a Terminal-style provider that doesn't accept
-    /// `--session-id`).
+    /// provider accepts `--session-id` (Anthropic) or captures in
+    /// `after_fresh_spawn` (OpenCode), the PTY regex is not the source of
+    /// truth even when the orchestrator didn't pre-write.
     #[test]
     fn reader_should_not_capture_when_provider_does_not_self_assign() {
         assert!(
@@ -4788,7 +4790,7 @@ https://github.com/alondero/buildmesh/issues/247"
                 "grok" => "grok-3",
                 "agy" => "claude-sonnet",
                 "cursor" => "claude-3-7-sonnet",
-                "opencode" => "gpt-4o",
+                "opencode" => "anthropic/claude-sonnet-4-5",
                 "anthropic" => "claude-sonnet-4-5",
                 "terminal" => "irrelevant",
                 _ => "model",
@@ -4857,7 +4859,8 @@ https://github.com/alondero/buildmesh/issues/247"
             let has_prefill_text = args.last().map(|a| a.as_str()) == Some(prefill_text);
             let has_prefill_flag = args.iter().any(|a| a == "--prefill");
             let has_prefill_marker = has_prefill_text || has_prefill_flag
-                || args.iter().any(|a| a == "--prompt-interactive");
+                || args.iter().any(|a| a == "--prompt-interactive")
+                || args.iter().any(|a| a == "--prompt");
             assert_eq!(
                 has_prefill_marker, caps.supports_prefill,
                 "prefill-marker / supports_prefill mismatch for {}: \

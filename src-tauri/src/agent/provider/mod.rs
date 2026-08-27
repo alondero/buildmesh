@@ -318,7 +318,7 @@ pub trait AgentProvider: Send + Sync {
     /// `services::transcript_reader` knows how to read. Codex's rollout format
     /// is parsed via `TranscriptFormat::Codex` (issue #887), and Cursor's
     /// workspace-scoped JSONL via `TranscriptFormat::Cursor`.
-    /// Providers with no readable transcript (OpenCode, Agy, Terminal) return
+    /// Providers with no wired transcript reader (OpenCode, Agy, Terminal) return
     /// `false`; their digest degrades to spine-only with enrichment explicitly
     /// flagged `unsupported`, never silently omitted.
     fn produces_readable_transcript(&self) -> bool {
@@ -342,6 +342,22 @@ pub trait AgentProvider: Send + Sync {
     fn self_assigns_session_id(&self) -> bool {
         false
     }
+
+    /// Whether the PTY reader thread should sniff a session ID from live
+    /// output (the labeled-UUID regex in `session_capture`). Defaults to
+    /// [`Self::self_assigns_session_id`]. Harnesses that self-assign but
+    /// whose IDs are not UUID-shaped (OpenCode's `ses_…`) override this
+    /// to `false` and capture in [`Self::after_fresh_spawn`] instead.
+    fn captures_session_id_from_pty(&self) -> bool {
+        self.self_assigns_session_id()
+    }
+
+    /// Hook after a **fresh** spawn (`SessionIdMode::None`) has registered
+    /// the PTY. Default is a no-op. OpenCode uses it to poll its local
+    /// SQLite store for the `ses_…` id the TUI just minted. Adapters own
+    /// the capture implementation — spawn must not hard-code a provider
+    /// service behind a boolean flag.
+    fn after_fresh_spawn(&self, _node_id: i64, _spawn_path: &str, _env_type: EnvType) {}
 
     /// Alternative recipe for resume (subcommand-style providers like Codex).
     /// If Some, `build_spawn_command()` uses this instead of `spawn_recipe()` + `resume_args()`.

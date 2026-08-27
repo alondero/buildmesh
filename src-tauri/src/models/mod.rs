@@ -1404,7 +1404,11 @@ mod tests {
     fn provider_capabilities_split_correctly() {
         assert!(Provider::Anthropic.adapter().supports_resume());
         assert!(Provider::Agy.adapter().supports_resume());
-        assert!(!Provider::OpenCode.adapter().supports_resume());
+        assert!(Provider::OpenCode.adapter().supports_resume());
+        assert!(Provider::OpenCode.adapter().supports_model_override());
+        assert!(Provider::OpenCode.adapter().supports_prefill());
+        assert!(Provider::OpenCode.adapter().auto_resume_on_startup());
+        assert!(!Provider::OpenCode.adapter().requires_attention_hook());
         assert!(Provider::Codex.adapter().supports_resume());
         // Kimi Code (wayfinder #918) is a native TUI harness like Codex/Grok
         // — its adapter declares resume + model override, no prefill, no
@@ -1710,9 +1714,10 @@ mod tests {
     }
 
     #[test]
-    fn other_providers_do_not_self_assign() {
+    fn anthropic_and_terminal_do_not_self_assign() {
         assert!(!Provider::Anthropic.adapter().self_assigns_session_id());
-        assert!(!Provider::OpenCode.adapter().self_assigns_session_id());
+        assert!(Provider::OpenCode.adapter().self_assigns_session_id());
+        assert!(!Provider::OpenCode.adapter().captures_session_id_from_pty());
         assert!(!Provider::Terminal.adapter().self_assigns_session_id());
     }
 
