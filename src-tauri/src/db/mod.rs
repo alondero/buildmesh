@@ -58,6 +58,9 @@ mod harness_overrides_tests;
 #[cfg(test)]
 mod circuit_tests;
 
+#[cfg(test)]
+mod ct_eq_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -786,6 +789,37 @@ pub(crate) fn hash_token(raw: &str) -> String {
     hex::encode(Sha256::digest(raw.as_bytes()))
 }
 
+/// Constant-time byte-slice equality (issue #1240).
+///
+/// Why hand-rolled rather than the `subtle` crate: a 10-line helper avoids a
+/// new dependency for one call shape, and the algorithm here is the textbook
+/// one (golang `crypto/subtle.ConstantTimeCompare`, libsodium's
+/// `sodium_memcmp`) — well-vetted and easy to audit.
+///
+/// Security property: the runtime depends only on `max(a.len(), b.len())`,
+/// not on whether or where the inputs differ. We achieve that by:
+/// 1. Looping over the **max** of the two lengths rather than bailing on a
+///    length mismatch — an early length check would still leak "same length"
+///    via timing.
+/// 2. Seeding the accumulator with `(a.len() ^ b.len())` cast to `u8`, so a
+///    length mismatch produces a non-zero `diff` regardless of byte content.
+/// 3. Reading `0` for out-of-bounds indices via `unwrap_or(0)`, so the loop
+///    body is identical for short/long pairs and equal-length pairs.
+///
+/// Like all software CT-compares, this is best-effort: the optimiser or
+/// surrounding code (branch predictors, cache) can still introduce
+/// data-dependent timing. It is, however, materially better than `==`, which
+/// short-circuits on the first byte mismatch and lets an attacker measure
+/// prefix match length over many requests.
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    let len = a.len().max(b.len());
+    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    for i in 0..len {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
+}
+
 /// Get or create the root remote access token (stored in app_settings).
 pub fn get_or_create_root_token() -> SqlResult<String> {
     let db = get().lock().unwrap();
@@ -836,7 +870,12 @@ pub fn validate_root_token_inner(conn: &Connection, token: &str) -> SqlResult<bo
             |row| row.get(0),
         )
         .ok();
-    Ok(stored.as_deref() == Some(token))
+    // Constant-time compare (issue #1240): the root token is the highest-value
+    // credential here, and unlike the coordinator tokens it is still stored
+    // cleartext (Keychain slice, #495), so a regular `==` would leak matching
+    // prefix length via timing. Behaviour is unchanged: an empty presented
+    // token already returned above; a missing stored value never matches.
+    Ok(stored.is_some_and(|s| ct_eq(s.as_bytes(), token.as_bytes())))
 }
 
 // --- Coordinator read API auth (ADR-0008) ---
@@ -976,8 +1015,11 @@ pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> 
     }
     // The DB holds only the hash (#495), so hash the presented token and compare
     // hashes. The raw token never has to be reconstructed to authenticate.
+    // Constant-time compare (issue #1240): less critical than the root token
+    // since the stored value is already a SHA-256 hash, but cheap to apply and
+    // closes the timing side-channel uniformly across all three validators.
     match coordinator_read_token_inner(conn)? {
-        Some(stored) => Ok(stored == hash_token(token)),
+        Some(stored) => Ok(ct_eq(stored.as_bytes(), hash_token(token).as_bytes())),
         None => Ok(false),
     }
 }
@@ -1060,8 +1102,9 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
         return Ok(false);
     }
     // Stored value is the hash (#495); compare against the hashed presentation.
+    // Constant-time compare (issue #1240); see validate_coordinator_read_token_inner.
     match coordinator_drive_token_inner(conn)? {
-        Some(stored) => Ok(stored == hash_token(token)),
+        Some(stored) => Ok(ct_eq(stored.as_bytes(), hash_token(token).as_bytes())),
         None => Ok(false),
     }
 }
