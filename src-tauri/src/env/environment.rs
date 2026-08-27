@@ -264,42 +264,6 @@ pub fn cursor_dir() -> PathBuf {
     }
 }
 
-/// The Antigravity (`agy`) CLI home directory, mirroring [`claude_dir`]. The
-/// home is `<home>/.gemini/antigravity-cli/` (confirmed by `workspace_trust`,
-/// which writes its trust settings there). Conversational sessions live under
-/// `brain/<conversation_id>/.system_generated/logs/transcript.jsonl`; the
-/// discovery scanner in `services::agent_node_discovery` walks this dir.
-pub fn agy_home_dir() -> PathBuf {
-    match current_env() {
-        Environment::Wsl => {
-            if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home).join(".gemini").join("antigravity-cli")
-            } else {
-                PathBuf::from("/root/.gemini/antigravity-cli")
-            }
-        }
-        Environment::Windows => {
-            if let Ok(home) = env::var("USERPROFILE") {
-                PathBuf::from(home).join(".gemini").join("antigravity-cli")
-            } else if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home).join(".gemini").join("antigravity-cli")
-            } else {
-                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
-                PathBuf::from(format!("C:\\Users\\{user}\\.gemini\\antigravity-cli"))
-            }
-        }
-    }
-}
-
-/// The Antigravity brain directory — `<agy_home>/brain/`. Each conversation
-/// is a sibling directory holding `.system_generated/logs/transcript.jsonl`
-/// (issue #1284). Sessions are stored globally here, not scoped to a project,
-/// so discovery walks every entry and trusts the transcript's workspace
-/// metadata to associate with the calling mesh.
-pub fn agy_brain_dir() -> PathBuf {
-    agy_home_dir().join("brain")
-}
-
 /// The Codex CLI home directory, mirroring [`claude_dir`]. Codex honours a
 /// `CODEX_HOME` override for its *entire* state directory (sessions, auth,
 /// config — issue #885), so that takes precedence; otherwise `~/.codex` in the
