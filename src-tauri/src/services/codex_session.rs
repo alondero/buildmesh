@@ -277,14 +277,23 @@ pub async fn backfill_legacy_suspended_nodes_once() -> Result<(), String> {
     }
     let nodes = crate::db::list_suspended_codex_nodes_without_cli_session_id()
         .map_err(|error| error.to_string())?;
+    let mut inspected_all_sources = true;
     for node in nodes {
+        let spawn_path = crate::env::node_working_path(&node).spawn_path;
+        if crate::env::codex_sessions_dir(node.env, &spawn_path).is_none() {
+            inspected_all_sources = false;
+            continue;
+        }
         let _ = backfill_suspended_node(
             node.id,
-            crate::env::node_working_path(&node).spawn_path,
+            spawn_path,
             node.env,
             node.created_at.timestamp_millis(),
         )
         .await;
+    }
+    if !inspected_all_sources {
+        return Ok(());
     }
     crate::db::mark_codex_legacy_session_backfill_completed().map_err(|error| error.to_string())
 }
