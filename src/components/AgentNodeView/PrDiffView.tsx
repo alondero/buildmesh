@@ -48,16 +48,17 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
   const openDiff = useUIStore((s) => s.openDiff);
   const prNumber = diff.prNumber;
 
-  // Defensive: callers should only mount us with `source === 'pr'`, but a
-  // missing prNumber is a programming error worth surfacing instead of
-  // silently rendering empty state.
-  if (prNumber === undefined) {
-    return (
-      <div className="h-full flex items-center justify-center text-accent-red text-xs px-3 text-center">
-        PR diff opened without a prNumber
-      </div>
-    );
-  }
+  // Issue #1242: every hook below runs unconditionally, regardless of
+  // `prNumber`. The earlier shape had an early `return` for the
+  // prNumber-undefined case BEFORE the hook declarations, which is a
+  // Rules-of-Hooks violation — React records the hook count per fiber
+  // and a later render that calls a different number of hooks throws
+  // "Rendered more hooks than during the previous render" and trips the
+  // workspace-wide ErrorBoundary. Today the placeholder text stays put
+  // for any mounted overlay that ever sees prNumber===undefined (a
+  // malformed `openDiff({source:'pr'})`, or a future refactor that
+  // flips the lens), so the defensive guard must live BELOW the hooks
+  // and decide what to *render*, not whether to *run*.
 
   const [files, setFiles] = useState<PrFileEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +69,12 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
   const reqId = useRef(0);
 
   const fetchFiles = useCallback(() => {
+    // Defensive: callers should only mount us with `source === 'pr'`,
+    // but a missing prNumber is a programming error worth surfacing
+    // instead of silently rendering empty state. No-op the fetch — the
+    // placeholder JSX below explains why — rather than throwing into a
+    // then/catch that would mask the real problem.
+    if (prNumber === undefined) return;
     const myId = ++reqId.current;
     setFiles(null);
     setError(null);
@@ -85,6 +92,18 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
   useEffect(() => {
     fetchFiles();
   }, [fetchFiles]);
+
+  // Now — and only now — is it safe to short-circuit on prNumber===undefined.
+  // The hooks above have already run, so this branch renders the
+  // placeholder without changing the fiber's hook count for the next
+  // render.
+  if (prNumber === undefined) {
+    return (
+      <div className="h-full flex items-center justify-center text-accent-red text-xs px-3 text-center">
+        PR diff opened without a prNumber
+      </div>
+    );
+  }
 
   if (error) {
     return (
