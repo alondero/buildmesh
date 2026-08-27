@@ -36,9 +36,16 @@ const MAX_HOOK_BODY: usize = 64 * 1024;
 /// `permission_prompt`, `task_complete`, …). The `#[serde(alias)]`
 /// attributes accept either casing so the same parser handles Claude
 /// and Grok payloads.
+///
+/// Antigravity (agy, issue #1285) sends the same payload shape in
+/// camelCase too, but uses different key names than Grok:
+/// `conversationId` (not `sessionId`), `transcriptPath`, `fullyIdle`,
+/// `terminationReason`. All four aliases accept both forms against the
+/// same canonical snake_case fields; a payload that mixes casings also
+/// parses — the first matching key wins per field.
 #[derive(serde::Deserialize, Default)]
 struct HookPayload {
-    #[serde(alias = "sessionId")]
+    #[serde(alias = "sessionId", alias = "conversationId")]
     session_id: Option<String>,
     #[serde(alias = "hookEventName")]
     hook_event_name: Option<String>,
@@ -55,11 +62,27 @@ struct HookPayload {
     /// Notification hooks carry the human-readable notification text, e.g.
     /// "Claude needs your permission to use Bash".
     message: Option<String>,
+    /// AGY signals "the turn truly settled" with `fullyIdle: true` and
+    /// "the harness is still busy on background work" with `fullyIdle:
+    /// false` (issue #1285). The latter is the false-yield analogue of
+    /// Claude Code's background-task detection (issue #878): we
+    /// publish the turn (naming / autopilot still fire) but suppress
+    /// the attention marking. Missing / unknown defaults to "idle"
+    /// so a future harness that omits the field keeps working.
+    #[serde(alias = "fullyIdle", default)]
+    fully_idle: Option<bool>,
+    /// AGY's `terminationReason` (e.g. `"model_stop"`,
+    /// `"tool_execution_limit_reached"`) is opaque to Buildmesh today —
+    /// recorded for future debugging but not a decision input.
+    #[serde(alias = "terminationReason", default)]
+    termination_reason: Option<String>,
 }
 
 /// Extract the provider-owned UUID from a structured hook callback. An
 /// arbitrary string must never enter `cli_session_id`: resume treats that
-/// column as an executable CLI argument. Codex and Claude both use UUIDs.
+/// column as an executable CLI argument. Codex, Claude, and AGY all use
+/// UUIDs; the alias on `HookPayload::session_id` makes
+/// `conversationId` (AGY) parse through the same code path.
 fn hook_session_id(body: &[u8]) -> Option<String> {
     let id = serde_json::from_slice::<HookPayload>(body).ok()?.session_id?;
     uuid::Uuid::parse_str(&id).ok().map(|parsed| parsed.to_string())
@@ -83,25 +106,35 @@ enum Decision {
 /// The rules, in order:
 /// 1. Unparseable/absent body → `Mark` (pre-#878 behaviour; old hook configs
 ///    that post no body keep working until the next spawn migrates them).
-/// 2. A permission-prompt Notification (Claude Code) or a `PermissionRequest`
-///    event (Codex's dedicated hook for tool approval, issue #884), or a
+/// 2. A permission-prompt Notification (Claude Code), a `PermissionRequest`
+///    event (Codex's dedicated hook for tool approval, issue #884), a
 ///    Grok `Notification` with `notificationType == "permission_prompt"`
-///    (issue #1282) → `Mark` always. The agent is blocked on a tool-approval
-///    decision — that needs the user even while background tasks run.
-/// 3. Anything else (Stop, idle Notification) with launched-but-unfinished
+///    (issue #1282), or an AGY `PreToolUse` event (the harness's pre-tool
+///    approval hook, issue #1285) → `Mark` always. The agent is blocked
+///    on a tool-approval decision — that needs the user even while
+///    background tasks run.
+/// 3. AGY's `Stop` with `fullyIdle: false` (issue #1285) → suppress. The
+///    harness signalled the turn ended but the agent is still busy on
+///    background work. Same false-yield semantic as Claude Code's
+///    transcript-scan path (rule 4), but signalled directly by the harness
+///    because AGY has no transcript reader.
+/// 4. Anything else (Stop, idle Notification) with launched-but-unfinished
 ///    background tasks in the transcript → `SuppressPendingBackground`.
-/// 4. No transcript path, unreadable transcript, or no pending tasks → `Mark`.
+/// 5. No transcript path, unreadable transcript, or no pending tasks → `Mark`.
 ///    "Unknown" must never read as "no attention needed".
 ///
 /// Grok's wire form has no `transcript_path` (the transcript reader is
-/// #1281, out of scope), so every Grok payload falls through to step 4
+/// #1281, out of scope), so every Grok payload falls through to step 5
 /// and marks — which is the correct behaviour for a Node Turn signal we
 /// have no transcript to disambiguate.
 fn decide(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> Decision {
     let Ok(payload) = serde_json::from_slice::<HookPayload>(body) else {
         return Decision::Mark;
     };
-    if payload.hook_event_name.as_deref() == Some("PermissionRequest") {
+    if matches!(
+        payload.hook_event_name.as_deref(),
+        Some("PermissionRequest") | Some("PreToolUse")
+    ) {
         return Decision::Mark;
     }
     if payload.hook_event_name.as_deref() == Some("Notification") {
@@ -120,6 +153,15 @@ fn decide(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> De
         if payload.notification_type.as_deref() == Some("permission_prompt") {
             return Decision::Mark;
         }
+    }
+    // AGY `Stop` with `fullyIdle: false` is a direct false-yield signal
+    // from the harness — short-circuit before the transcript scan so an
+    // AGY node (which has no transcript reader) still gets correct
+    // suppression. A Stop with `fullyIdle: true` or absent falls through
+    // to the transcript-scan path so any future transcript reader hooks
+    // in normally.
+    if payload.hook_event_name.as_deref() == Some("Stop") && payload.fully_idle == Some(false) {
+        return Decision::SuppressPendingBackground;
     }
     let Some(transcript_path) = payload.transcript_path.filter(|p| !p.is_empty()) else {
         return Decision::Mark;
@@ -185,6 +227,23 @@ pub async fn handle_post(
                 error
             ),
         }
+    }
+
+    // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
+    // `"tool_execution_limit_reached"`) so a future debugging session can
+    // distinguish "the model finished its turn" from "the harness
+    // aborted the turn" — log at debug so it's there when needed without
+    // polluting the happy path (issue #1285).
+    if let Some(reason) = serde_json::from_slice::<HookPayload>(&body)
+        .ok()
+        .and_then(|p| p.termination_reason)
+        .filter(|r| !r.is_empty())
+    {
+        tracing::debug!(
+            "attention webhook for node {} reported terminationReason={}",
+            session_id,
+            reason
+        );
     }
 
     match decide(&body, crate::services::transcript_reader::count_pending_background_tasks) {
@@ -328,10 +387,10 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
+    // -------------------------------------------------------------------
     // Grok Code (issue #1282) — camelCase wire, no transcript_path,
     // Notification carries structured `notificationType`.
-    // -----------------------------------------------------------------
+    // -------------------------------------------------------------------
 
     /// Grok's permission prompt: the matcher fires `Notification` with
     /// `notificationType = "permission_prompt"`. We mark the node
@@ -423,5 +482,156 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+    }
+
+    // -------------------------------------------------------------------
+    // Antigravity (agy) payload shape — issue #1285.
+    //
+    // AGY sends camelCase fields (`conversationId`, `transcriptPath`,
+    // `fullyIdle`, `terminationReason`) and two event kinds (`Stop` and
+    // `PreToolUse`). The route's `HookPayload` accepts both via serde
+    // aliases; `decide` short-circuits `PreToolUse` to always-mark and
+    // `Stop` with `fullyIdle: false` to always-suppress.
+    // -------------------------------------------------------------------
+
+    /// AGY's `Stop` with `fullyIdle: false` is a direct false-yield signal
+    /// from the harness — the turn ended but background work is still
+    /// running. Short-circuits before the transcript scan so an AGY node
+    /// (which has no transcript reader) gets correct suppression. Even
+    /// when `count_pending` reports zero tasks (the harness said so), the
+    /// harness's own signal wins — AGY's view is authoritative for AGY.
+    #[test]
+    fn agy_stop_with_fully_idle_false_suppresses() {
+        let body = serde_json::json!({
+            "conversationId": "abc-123",
+            "transcriptPath": "/tmp/session.jsonl",
+            "hook_event_name": "Stop",
+            "fullyIdle": false,
+            "terminationReason": "model_stop",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(
+            decide(&body, |_| Some(0)),
+            Decision::SuppressPendingBackground
+        );
+    }
+
+    /// AGY's `Stop` with `fullyIdle: true` is a genuine yield — falls
+    /// through to the transcript-scan path. No pending tasks → Mark.
+    #[test]
+    fn agy_stop_with_fully_idle_true_marks() {
+        let body = serde_json::json!({
+            "conversationId": "abc-123",
+            "transcriptPath": "/tmp/session.jsonl",
+            "hook_event_name": "Stop",
+            "fullyIdle": true,
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(decide(&body, |_| Some(0)), Decision::Mark);
+    }
+
+    /// `fullyIdle: true` with pending tasks still suppresses — the
+    /// transcript scan is consulted, not skipped, when the harness says
+    /// the turn actually settled.
+    #[test]
+    fn agy_stop_with_fully_idle_true_and_pending_tasks_suppresses() {
+        let body = serde_json::json!({
+            "conversationId": "abc-123",
+            "transcriptPath": "/tmp/session.jsonl",
+            "hook_event_name": "Stop",
+            "fullyIdle": true,
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(
+            decide(&body, |_| Some(2)),
+            Decision::SuppressPendingBackground
+        );
+    }
+
+    /// An older AGY payload that omits `fullyIdle` entirely (or any
+    /// future harness that doesn't set it) falls through to the
+    /// transcript-scan path — `Stop` with no transcript path → Mark,
+    /// matching the pre-#1285 safe default. The new field is additive,
+    /// not breaking.
+    #[test]
+    fn agy_stop_without_fully_idle_uses_transcript_scan() {
+        let body = serde_json::json!({
+            "conversationId": "abc-123",
+            "transcriptPath": "/tmp/session.jsonl",
+            "hook_event_name": "Stop",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(decide(&body, |_| Some(0)), Decision::Mark);
+
+        let missing_transcript = serde_json::json!({
+            "conversationId": "abc-123",
+            "hook_event_name": "Stop",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(
+            decide(&missing_transcript, |_| Some(3)),
+            Decision::Mark
+        );
+    }
+
+    /// AGY's `PreToolUse` fires before a tool call — analogous to Codex's
+    /// `PermissionRequest`. The agent is at a tool-approval decision, so
+    /// the user is needed regardless of background work. Always marks.
+    #[test]
+    fn agy_pre_tool_use_marks_even_with_pending_tasks() {
+        let body = serde_json::json!({
+            "conversationId": "abc-123",
+            "transcriptPath": "/tmp/session.jsonl",
+            "hook_event_name": "PreToolUse",
+            "toolCall": {"name": "run_command", "args": {"cmd": "ls"}},
+            "stepIdx": 5,
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(decide(&body, |_| Some(5)), Decision::Mark);
+    }
+
+    /// `hook_session_id` extracts the AGY UUID from `conversationId` via
+    /// the alias, just like Claude Code's `session_id`. Lower-cased so
+    /// the value matches what the orchestrator's spawn pipeline writes
+    /// into `agent_nodes.cli_session_id`.
+    #[test]
+    fn hook_session_id_reads_agy_conversation_id() {
+        let body = serde_json::json!({
+            "conversationId": "C1234567-89AB-CDEF-0123-456789ABCDEF",
+            "transcriptPath": "/tmp/session.jsonl",
+            "hook_event_name": "Stop",
+            "fullyIdle": true,
+        })
+        .to_string();
+        assert_eq!(
+            hook_session_id(body.as_bytes()).as_deref(),
+            Some("c1234567-89ab-cdef-0123-456789abcdef")
+        );
+    }
+
+    /// A payload that mixes snake_case (Claude Code shape) and
+    /// camelCase (AGY shape) for different fields still parses — the
+    /// alias is per-field, not per-payload. Both Grok's `sessionId` and
+    /// AGY's `conversationId` flow through the same `session_id` field
+    /// via stacked aliases.
+    #[test]
+    fn hook_payload_tolerates_mixed_case_field_names() {
+        let body = serde_json::json!({
+            "session_id": "C1234567-89AB-CDEF-0123-456789ABCDEF",
+            "transcriptPath": "/tmp/session.jsonl",
+            "hook_event_name": "Stop",
+            "fullyIdle": true,
+        })
+        .to_string();
+        assert_eq!(
+            hook_session_id(body.as_bytes()).as_deref(),
+            Some("c1234567-89ab-cdef-0123-456789abcdef")
+        );
     }
 }

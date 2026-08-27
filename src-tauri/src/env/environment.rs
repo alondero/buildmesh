@@ -264,33 +264,6 @@ pub fn cursor_dir() -> PathBuf {
     }
 }
 
-/// The Antigravity (`agy`) CLI home directory, mirroring [`claude_dir`]. The
-/// home is `<home>/.gemini/antigravity-cli/` (confirmed by `workspace_trust`,
-/// which writes its trust settings there). Conversational sessions live under
-/// `brain/<conversation_id>/.system_generated/logs/transcript.jsonl`; the
-/// discovery scanner in `services::agent_node_discovery` walks this dir.
-pub fn agy_home_dir() -> PathBuf {
-    match current_env() {
-        Environment::Wsl => {
-            if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home).join(".gemini").join("antigravity-cli")
-            } else {
-                PathBuf::from("/root/.gemini/antigravity-cli")
-            }
-        }
-        Environment::Windows => {
-            if let Ok(home) = env::var("USERPROFILE") {
-                PathBuf::from(home).join(".gemini").join("antigravity-cli")
-            } else if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home).join(".gemini").join("antigravity-cli")
-            } else {
-                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
-                PathBuf::from(format!("C:\\Users\\{user}\\.gemini\\antigravity-cli"))
-            }
-        }
-    }
-}
-
 /// The Codex CLI home directory, mirroring [`claude_dir`]. Codex honours a
 /// `CODEX_HOME` override for its *entire* state directory (sessions, auth,
 /// config — issue #885), so that takes precedence; otherwise `~/.codex` in the
@@ -365,7 +338,7 @@ pub fn agy_dir() -> PathBuf {
     }
     if let Ok(home) = env::var("ANTIGRAVITY_HOME") {
         if !home.trim().is_empty() {
-            return PathBuf::from(home).join("antigravity-cli");
+            return PathBuf::from(home);
         }
     }
     match current_env() {
@@ -395,34 +368,32 @@ pub fn agy_dir() -> PathBuf {
     }
 }
 
-/// The Grok Code home directory, mirroring [`claude_dir`] / [`cursor_dir`].
-/// Issue #1281: Grok writes per-session directories under
-/// `<grok home>/sessions/<urlencoded-cwd>/<session-id>/`. A `GROK_HOME`
-/// environment override (mirroring `CODEX_HOME`) shifts the entire home —
-/// useful for tests and for agents whose `~/.grok` was relocated.
+/// The AGY "brain" directory that holds one subdirectory per conversation.
+/// Sessions live at `<brain>/<conversation-id>/.system_generated/logs/
+/// transcript.jsonl` (issue #1283) — globally keyed, so this is the single
+/// shared root every AGY session scanner and the transcript reader consult.
+pub fn agy_brain_dir() -> PathBuf {
+    agy_dir().join("brain")
+}
+
+/// The Grok Code CLI home directory — `<home>/.grok/`. Sessions land under
+/// `<grok>/sessions/<session_id>/chat_history.jsonl` (issue #1281) and
+/// updates stream to `<grok>/sessions/<session_id>/updates.jsonl`. Mirrors
+/// the structure of [`agy_dir`] (no `GROK_HOME` override yet — pinned by
+/// `env::tests::grok_dir_uses_the_current_environment_home`).
 pub fn grok_dir() -> PathBuf {
-    if let Ok(home) = env::var("GROK_HOME") {
-        if !home.trim().is_empty() {
-            return PathBuf::from(home);
-        }
-    }
     match current_env() {
-        Environment::Wsl => {
-            if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home).join(".grok")
-            } else {
-                PathBuf::from("/root/.grok")
-            }
-        }
-        Environment::Windows => {
-            if let Ok(home) = env::var("USERPROFILE") {
-                PathBuf::from(home).join(".grok")
-            } else if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home).join(".grok")
-            } else {
+        Environment::Wsl => env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/root"))
+            .join(".grok"),
+        Environment::Windows => env::var("USERPROFILE")
+            .or_else(|_| env::var("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
                 let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
-                PathBuf::from(format!("C:\\Users\\{user}\\.grok"))
-            }
-        }
+                PathBuf::from(format!("C:\\Users\\{user}"))
+            })
+            .join(".grok"),
     }
 }
