@@ -417,7 +417,9 @@ mod tests {
         assert_eq!(agy.harness_id, "agy");
         assert!(agy.supports_resume);
         assert!(agy.requires_attention_hook);
-        assert!(!agy.produces_readable_transcript);
+        // Issue #1283: AGY writes per-conversation JSONL, so the
+        // transcript reader can hydrate the Node Digest / archive picker.
+        assert!(agy.produces_readable_transcript);
         assert!(agy.supports_model_override);
         assert!(!agy.supports_effort_override);
         assert!(agy.supports_prefill);

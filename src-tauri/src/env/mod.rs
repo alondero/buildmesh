@@ -180,6 +180,37 @@ mod tests {
         assert_eq!(cursor_dir(), expected);
     }
 
+    /// Issue #1283: the AGY brain directory lives under the same home
+    /// directory every other CLI helper consults — `~/.gemini/antigravity-cli/
+    /// brain/`. Pin the path shape so the transcript reader's locator can
+    /// rely on `env::agy_brain_dir()` returning exactly
+    /// `<home>/.gemini/antigravity-cli/brain` (or `GEMINI_HOME` /
+    /// `ANTIGRAVITY_HOME` overrides, but those aren't tested because the
+    /// bare-env expectation matches every supported platform).
+    #[test]
+    fn agy_brain_dir_uses_the_current_environment_home() {
+        let brain = agy_brain_dir();
+        let dir = agy_dir();
+        assert_eq!(
+            brain,
+            dir.join("brain"),
+            "brain dir must always sit under the AGY home ({dir:?})"
+        );
+        let expected_suffix = match current_env() {
+            Environment::Wsl => ".gemini/antigravity-cli/brain",
+            Environment::Windows => ".gemini\\antigravity-cli\\brain",
+        };
+        // Path-builder/separator normalization makes a literal contains
+        // check the right pin — Windows separators and posix separators
+        // both match via `ends_with` after the path was constructed.
+        let path_str = brain.to_string_lossy().replace('\\', "/");
+        assert!(
+            path_str.ends_with(&expected_suffix.replace('\\', "/")),
+            "agy_brain_dir should end with `{expected_suffix}`, got `{}`",
+            path_str
+        );
+    }
+
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
     #[test]
