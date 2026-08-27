@@ -25,6 +25,7 @@ pub mod provision;
 
 use git2::{Oid, Reference, Repository};
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::env::to_host_path;
 use crate::git::primitives;
@@ -495,7 +496,13 @@ pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Res
 // ── Inspect (close-safety) ──────────────────────────────────────────────────
 
 /// Whether closing an Agent Node can remove its worktree without risking work.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Wire type — generated to `src/types/generated/WorktreeCloseSafety.ts` and
+/// imported by `src/lib/worktreeClose.ts` (issue #1248). The previous hand-
+/// declared TS interface in that file drifted from this struct; deriving `TS`
+/// here and removing the hand-declared one keeps both sides in lockstep.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "WorktreeCloseSafety.ts")]
 pub struct WorktreeCloseSafety {
     pub worktree_path: Option<String>,
     pub has_uncommitted: bool,
