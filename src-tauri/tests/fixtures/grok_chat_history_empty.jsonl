@@ -1,0 +1,2 @@
+{"session_id":"g1100000-0000-0000-0000-000000000003","type":"command_status","status":"running","timestamp":"2026-07-14T10:00:00.000Z"}
+{"session_id":"g1100000-0000-0000-0000-000000000003","type":"telemetry","latency_ms":42,"timestamp":"2026-07-14T10:00:01.000Z"}

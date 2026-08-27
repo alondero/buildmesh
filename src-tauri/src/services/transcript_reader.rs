@@ -8,9 +8,10 @@
 //! Three harness formats are supported, selected by [`TranscriptFormat`]:
 //! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, Cursor's
 //! `~/.cursor/projects/<workspace>/agent-transcripts/<session>/<session>.jsonl`,
-//! and Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
-//! #885). All map onto the same [`Turn`]/[`ToolCall`] wire shape, so the
-//! Coordinator never learns which harness wrote the file.
+//! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
+//! #885), and Grok Code's `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl,
+//! updates.jsonl}` (issue #1281). All map onto the same [`Turn`]/[`ToolCall`]
+//! wire shape, so the Coordinator never learns which harness wrote the file.
 //!
 //! **All transcript-format brittleness is quarantined here.** Both this reader
 //! and `services::session_discovery` share the Claude-Code JSONL primitives
@@ -62,6 +63,11 @@ pub enum TranscriptFormat {
     /// fallback). One JSON object per turn — flat shape, no `message.id`
     /// coalescing needed.
     Agy,
+    /// Grok Code writes per-session directories under
+    /// `~/.grok/sessions/<urlencoded-cwd>/<session-id>/` carrying
+    /// `chat_history.jsonl` (the per-message conversation log) and
+    /// `updates.jsonl` (event-level telemetry). Issue #1281.
+    Grok,
 }
 
 impl TranscriptFormat {
@@ -71,7 +77,8 @@ impl TranscriptFormat {
     /// Code format. Cursor has the same message shape but a workspace-scoped
     /// path, while Codex writes its own rollout format. Antigravity's
     /// per-conversation JSONL is parsed via `TranscriptFormat::Agy`
-    /// (issue #1283). Kimi Code (wayfinder #918) writes standard JSONL
+    /// (issue #1283); Grok writes its own flat per-role JSONL (issue #1281).
+    /// Kimi Code (wayfinder #918) writes standard JSONL
     /// (`~/.kimi/sessions/wire.jsonl`) but the path resolver isn't wired yet
     /// — tracked as a follow-up.
     pub fn for_harness(harness_id: &str) -> Self {
@@ -79,6 +86,7 @@ impl TranscriptFormat {
             "codex" => TranscriptFormat::Codex,
             "cursor" => TranscriptFormat::Cursor,
             "agy" => TranscriptFormat::Agy,
+            "grok" => TranscriptFormat::Grok,
             _ => TranscriptFormat::ClaudeCode,
         }
     }
@@ -291,6 +299,7 @@ fn locate_transcript(
         TranscriptFormat::Cursor => Some(cursor_transcript_path(session_id, node_path)),
         TranscriptFormat::Codex => find_codex_rollout(session_id),
         TranscriptFormat::Agy => find_agy_transcript(session_id),
+        TranscriptFormat::Grok => find_grok_transcript(session_id, node_path),
     }
 }
 
@@ -458,6 +467,7 @@ fn parse_transcript(
         TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => parse_turns(lines, keep),
         TranscriptFormat::Codex => parse_codex_turns(lines, keep),
         TranscriptFormat::Agy => parse_agy_turns(lines, keep),
+        TranscriptFormat::Grok => parse_grok_turns(lines, keep),
     }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
@@ -1091,6 +1101,189 @@ fn extract_agy_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
             })
         })
         .collect()
+}
+
+
+// --- Grok Code parser (issue #1281) ---
+//
+// Grok Code writes per-session directories at
+//   ~/.grok/sessions/<urlencoded-cwd>/<session-id>/
+// containing `chat_history.jsonl` (the per-message conversation log — primary
+// transcript) and `updates.jsonl` (event-level telemetry). The wire shape per
+// line is flat JSONL (no envelope), so unlike Codex the per-harness parser
+// doesn't need to dispatch on an outer envelope; it dispatches on the `role`
+// field instead. Grok stores each tool call inline on the assistant turn
+// itself (`{role:"assistant", content:"...", tool_calls:[{name, args}]}`) —
+// not as a separate tool-result event line — so the parser only needs to read
+// per-line `role` + `content` + `tool_calls`. Tool-result echoes arrive as
+// `{role:"tool", content:"..."}` lines; the parser drops them, like Claude's
+// tool_result.
+//
+// Unknown event types (`command_status`, `telemetry`, `heartbeat`, …) are
+// silently skipped — issue #1281 acceptance criterion: "graceful failure on
+// unknown event types". They are never flagged as malformed.
+
+/// Resolve a Grok session directory to its primary transcript file.
+///
+/// `sessions_root` is the `~/.grok/sessions` directory (split from the env
+/// lookup so the layout can be tested with a temp dir). The result prefers
+/// `chat_history.jsonl` (the per-message log, which carries the assistant
+/// text the Coordinator reasons over) and falls back to `updates.jsonl`
+/// (event-level telemetry is still better than nothing). Neither file
+/// present yields `None` (→ `NoTranscript` degrade).
+pub(crate) fn grok_locator_in(
+    sessions_root: &Path,
+    session_id: &str,
+    node_path: &str,
+) -> Option<PathBuf> {
+    let session = sessions_root
+        .join(grok_urlencode_cwd(node_path))
+        .join(session_id);
+    let chat = session.join("chat_history.jsonl");
+    if chat.exists() {
+        return Some(chat);
+    }
+    let updates = session.join("updates.jsonl");
+    if updates.exists() {
+        return Some(updates);
+    }
+    None
+}
+
+/// Wrapper that mixes the env lookup back in. Env-keyed so a process-global
+/// `GROK_HOME` override reaches the reader without a signature change.
+fn find_grok_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
+    grok_locator_in(&env::grok_dir().join("sessions"), session_id, node_path)
+}
+
+/// Percent-encode the harness-cwd path Grok uses as its session-directory
+/// segment. Distinct from Claude Code's `encode_path` (which replaces
+/// non-alphanumeric with `-`): Grok carries the Windows drive colon and
+/// backslashes through as `%3A`/`%5C` etc. so a `C:\Users\…` cwd round-trips
+/// deterministically. Reserved characters `-_.~` stay literal (RFC 3986);
+/// space becomes `%20`. `pub(crate)` so tests can pin the encoding scheme.
+pub(crate) fn grok_urlencode_cwd(node_path: &str) -> String {
+    let mut out = String::with_capacity(node_path.len());
+    for byte in node_path.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    out
+}
+
+/// Pull tool calls out of a Grok assistant line's `tool_calls` array. Grok
+/// names the input field `args` (not `input` like Claude), and the parser
+/// honours the same shared `MAX_TOOL_STRING` truncation so a `Write` carrying
+/// a multi-MB body doesn't blow up the payload.
+fn extract_grok_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let name = obj
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let input = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
+            Some(ToolCall {
+                name,
+                input: truncate_json_strings(input, MAX_TOOL_STRING),
+            })
+        })
+        .collect()
+}
+
+/// Parse Grok Code JSONL lines into logical turns, honouring the same
+/// [`Parsed`] contract as the other parsers: rolling `keep`-bounded turn
+/// window, whole-stream last-assistant-message tracking, malformed flag so a
+/// renamed-shape line degrades loudly as `ShapeChanged`. Unknown event
+/// types (tool echoes, telemetry, status, …) are silently skipped — never
+/// flagged.
+fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    let keep = keep.max(1);
+    let mut turns: VecDeque<Turn> = VecDeque::new();
+    let mut last_assistant_message: Option<String> = None;
+    let mut saw_malformed = false;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        // Grok lines are not gated on an outer `type` discriminator (no
+        // Codex-style envelope), so dispatch on the inner `role` field.
+        let role = match val.get("role").and_then(|r| r.as_str()) {
+            Some("user") => "user",
+            Some("assistant") => "assistant",
+            // `tool` (tool-result echoes), `system`, plus every unknown event
+            // type — silently dropped, never flagged as malformed. This is
+            // the "graceful failure on unknown event types" clause of #1281.
+            _ => continue,
+        };
+        let Some(content) = val.get("content") else {
+            saw_malformed = true;
+            continue;
+        };
+        let text = match content {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => String::new(),
+            // Defensive: if Grok ever switches to a block-array `content`
+            // shape, fall back to joining all `text` blocks — same convention
+            // as the Claude/Codex parsers.
+            serde_json::Value::Array(blocks) => blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => {
+                saw_malformed = true;
+                continue;
+            }
+        };
+        let mut tool_calls = extract_grok_tool_calls(val.get("tool_calls"));
+        // An assistant line with neither text nor tool calls is a no-op
+        // (e.g. a heartbeat variant that picked up `role: "assistant"`
+        // somehow) — silently skip without flagging malformed.
+        if role == "assistant" && text.trim().is_empty() && tool_calls.is_empty() {
+            continue;
+        }
+        if role == "assistant" {
+            cap_tool_calls(&mut tool_calls);
+            let turn = Turn {
+                role: "assistant".to_string(),
+                text: truncate(&text, MAX_TURN_TEXT),
+                tool_calls,
+            };
+            if !turn.text.is_empty() {
+                last_assistant_message = Some(turn.text.clone());
+            }
+            push_bounded(&mut turns, turn, keep);
+        } else {
+            push_bounded(
+                &mut turns,
+                Turn {
+                    role: "user".to_string(),
+                    text: truncate(&text, MAX_TURN_TEXT),
+                    tool_calls: Vec::new(),
+                },
+                keep,
+            );
+        }
+    }
+    Parsed {
+        turns: turns.into(),
+        last_assistant_message,
+        saw_malformed,
+    }
 }
 
 // --- Pending background tasks (issue #878) ---
@@ -1830,13 +2023,17 @@ mod tests {
     }
 
     /// `for_harness` routes each harness to its native format — codex to
-    /// Codex, cursor to Cursor, and (issue #1283) agy to a dedicated AGY
-    /// shape. Every Claude-backed executor id stays on Claude Code.
+    /// Codex, cursor to Cursor, agy to a dedicated AGY shape (#1283), and
+    /// grok to its own Grok shape (#1281). Every Claude-backed executor id
+    /// stays on Claude Code. The Claude-routed list deliberately excludes
+    /// "agy" and "grok" so the catch-all ClaudeCode assertion can't mask a
+    /// future routing regression.
     #[test]
     fn transcript_format_for_harness_routes_each_format() {
         assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
         assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
         assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
+        assert_eq!(TranscriptFormat::for_harness("grok"), TranscriptFormat::Grok);
         for id in ["anthropic", "claude", "opencode", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
         }
@@ -1894,7 +2091,6 @@ mod tests {
         assert_eq!(turns[1].tool_calls[0].name, "Read");
     }
 
-    // ---------------------------------------------------------------
     // Antigravity transcript parser (issue #1283)
     //
     // The contract test exercises the *real* AGY shape with one of each
@@ -2126,5 +2322,292 @@ mod tests {
         assert_eq!(resolved.as_deref(), Some(short.as_path()));
 
         std::fs::remove_dir_all(&temp).ok();
+    }
+}
+
+    // --- Grok transcript format (issue #1281) ---
+    //
+    // Grok Code stores per-session directories at
+    //   ~/.grok/sessions/<percent-encoded-cwd>/<session-id>/
+    // containing `summary.json`, `chat_history.jsonl`, and `updates.jsonl`.
+    // `chat_history.jsonl` is the per-message conversation log (primary
+    // transcript); `updates.jsonl` carries event-level telemetry (which the
+    // issue pins as "graceful failure on unknown event types").
+
+    /// A Grok fixture spanning user prompt → assistant tool call → tool result
+    /// (skipped, like Claude tool_result echoes) → user follow-up → assistant
+    /// final answer that names the blocking question. Plus an unknown event
+    /// type (`command_status`) that must be silently dropped, never flagged
+    /// as malformed.
+    #[test]
+    fn grok_contract_parses_tail_and_last_assistant_message() {
+        let tail = read_tail_from_file(
+            &fixture("grok_chat_history.jsonl"),
+            10,
+            TranscriptFormat::Grok,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("fixture should parse to an available tail, got {tail:?}");
+        };
+        let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "assistant", "user", "assistant"],
+            "tool_result echo and command_status must be skipped; turns: {turns:#?}"
+        );
+        assert_eq!(turns[0].text, "Fix the login redirect bug");
+        // First assistant turn carries a tool call (Read).
+        assert_eq!(turns[1].text, "I'll look into the login redirect.");
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "Read");
+        assert_eq!(turns[1].tool_calls[0].input["file_path"], "src/login.ts");
+        // The blocking question is the most recent assistant text.
+        assert_eq!(
+            turns[4].text,
+            "Found it — the redirect drops the query string. Shall I apply the fix?"
+        );
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Found it — the redirect drops the query string. Shall I apply the fix?")
+        );
+    }
+
+    #[test]
+    fn grok_cheap_digest_reader_matches_full_reader() {
+        let cheap = read_last_assistant_message_from_file(
+            &fixture("grok_chat_history.jsonl"),
+            TranscriptFormat::Grok,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = cheap
+        else {
+            panic!("expected available, got {cheap:?}");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Found it — the redirect drops the query string. Shall I apply the fix?")
+        );
+    }
+
+    /// Unknown event types (e.g. `command_status`, `telemetry`) must be
+    /// silently skipped — never flagged as malformed. Issue #1281 acceptance
+    /// criterion: "graceful failure on unknown event types".
+    #[test]
+    fn grok_unknown_event_types_are_silently_skipped() {
+        let lines = vec![
+            r#"{"role":"command_status","status":"completed"}"#.to_string(),
+            r#"{"role":"telemetry","latency_ms":42}"#.to_string(),
+            r#"{"role":"user","content":"real prompt"}"#.to_string(),
+            r#"{"role":"assistant","content":"real reply"}"#.to_string(),
+            r#"{"role":"heartbeat","seq":7}"#.to_string(),
+        ];
+        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        assert_eq!(parsed.turns.len(), 2);
+        assert!(!parsed.saw_malformed, "unknown event types must not flag malformed");
+        assert_eq!(parsed.last_assistant_message.as_deref(), Some("real reply"));
+    }
+
+    /// A recognized `role` with a malformed `content` field (the Claude code
+    /// breakage analogue) degrades loudly as `ShapeChanged`, never as the
+    /// quiet `Empty`. A missing `role` field is treated as an unknown event
+    /// type per issue #1281 ("graceful failure on unknown event types") and
+    /// is therefore silently skipped, not flagged.
+    #[test]
+    fn grok_renamed_role_field_degrades_to_shape_changed() {
+        let lines = vec![
+            // Recognized role + content shape we don't understand (a nested
+            // object instead of string/array/null) — this IS a structural
+            // break in the Grok format, so it must degrade loudly.
+            r#"{"role":"assistant","content":{"unexpected":"object"}}"#.to_string(),
+            r#"{"role":"assistant","content":42}"#.to_string(),
+        ];
+        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        assert!(parsed.turns.is_empty());
+        assert!(parsed.saw_malformed, "recognized role with wrong content type is malformed");
+        assert_eq!(
+            empty_or_shape_changed(parsed.saw_malformed),
+            UnavailableReason::ShapeChanged
+        );
+    }
+
+    /// Conversely, lines *without* a `role` field (or with an unrecognized
+    /// `role`) are treated as unknown event types and silently skipped —
+    /// the issue #1281 acceptance "graceful failure on unknown event types".
+    #[test]
+    fn grok_missing_role_field_is_skipped_not_flagged() {
+        let lines = vec![
+            r#"{"author":"assistant","blocks":[{"type":"text","text":"renamed"}]}"#.to_string(),
+            r#"{"type":"command_status","status":"running"}"#.to_string(),
+            r#"{"latency_ms":42,"transport":"stream"}"#.to_string(),
+        ];
+        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        assert!(parsed.turns.is_empty(), "no recognized-role lines yields no turns");
+        assert!(
+            !parsed.saw_malformed,
+            "unknown event types must NOT flag malformed"
+        );
+        assert_eq!(
+            empty_or_shape_changed(parsed.saw_malformed),
+            UnavailableReason::Empty
+        );
+    }
+
+    /// A file whose only lines are non-message events is a genuinely-quiet
+    /// session — `Empty`, not `ShapeChanged`.
+    #[test]
+    fn grok_only_unknown_events_degrade_to_empty() {
+        let tail = read_tail_from_file(
+            &fixture("grok_chat_history_empty.jsonl"),
+            10,
+            TranscriptFormat::Grok,
+        );
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::Empty),
+            "a turn-less file of unknown event types is Empty, not ShapeChanged"
+        );
+    }
+
+    /// `parse_grok_turns` honours the contract: a `tail=1` request retains
+    /// only the last turn but still tracks the last assistant message across
+    /// the whole stream (issue #335 invariant).
+    #[test]
+    fn grok_rolling_buffer_retains_only_the_last_keep_turns() {
+        let mut lines = Vec::new();
+        for i in 0..50 {
+            lines.push(format!(r#"{{"role":"user","content":"prompt {i}"}}"#));
+            lines.push(format!(r#"{{"role":"assistant","content":"reply {i}"}}"#));
+        }
+        let parsed = parse_grok_turns(lines.into_iter(), 3);
+        assert_eq!(parsed.turns.len(), 3, "buffer never exceeds keep");
+        assert_eq!(parsed.turns[2].text, "reply 49");
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("reply 49"),
+            "last assistant message survives eviction"
+        );
+    }
+
+    /// Tool call `args` are run through `truncate_json_strings` so a single
+    /// huge `args` body doesn't blow up the payload.
+    #[test]
+    fn grok_tool_call_args_are_truncated_through_truncate_json_strings() {
+        let big = "x".repeat(MAX_TOOL_STRING + 50);
+        let lines = vec![format!(
+            r#"{{"role":"assistant","content":"with a big tool call","tool_calls":[{{"name":"Read","args":{{"file_path":"a","content":"{big}"}}}}]}}"#
+        )];
+        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        assert_eq!(parsed.turns.len(), 1);
+        let call = &parsed.turns[0].tool_calls[0];
+        assert_eq!(call.name, "Read");
+        let content = call.input["content"].as_str().unwrap();
+        assert!(content.ends_with('…'), "large args body must be truncated");
+    }
+
+    /// `grok_locator_in` prefers `chat_history.jsonl` over `updates.jsonl`
+    /// when both exist (chat_history is the primary conversation log).
+    /// Layout: `<sessions_root>/<urlencoded-cwd>/<id>/{chat_history.jsonl,
+    /// updates.jsonl}`. Passing an empty `node_path` leaves the cwd segment
+    /// empty so the session id sits directly under `sessions_root`.
+    #[test]
+    fn grok_locator_prefers_chat_history_over_updates() {
+        let suffix = std::process::id();
+        let temp = std::env::temp_dir().join(format!(
+            "buildmesh_test_grok_locator_prefer_{suffix}"
+        ));
+        let session = temp.join("session-abc");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("chat_history.jsonl"), "{}").unwrap();
+        std::fs::write(session.join("updates.jsonl"), "{}").unwrap();
+        let found = grok_locator_in(&temp, "session-abc", "");
+        assert_eq!(
+            found.as_deref(),
+            Some(session.join("chat_history.jsonl").as_path()),
+            "chat_history.jsonl wins when both exist"
+        );
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    /// When `chat_history.jsonl` is absent, `grok_locator_in` falls back to
+    /// `updates.jsonl` (event-level telemetry is still better than nothing).
+    #[test]
+    fn grok_locator_falls_back_to_updates_when_chat_history_missing() {
+        let suffix = std::process::id();
+        let temp = std::env::temp_dir().join(format!(
+            "buildmesh_test_grok_locator_fallback_{suffix}"
+        ));
+        let session = temp.join("session-abc");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("updates.jsonl"), "{}").unwrap();
+        let found = grok_locator_in(&temp, "session-abc", "");
+        assert_eq!(
+            found.as_deref(),
+            Some(session.join("updates.jsonl").as_path()),
+            "updates.jsonl fallback when chat_history.jsonl missing"
+        );
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    /// When neither file exists, the locator returns `None` so the reader
+    /// degrades to `NoTranscript` — not an I/O error.
+    #[test]
+    fn grok_locator_returns_none_when_both_files_missing() {
+        let suffix = std::process::id();
+        let temp = std::env::temp_dir()
+            .join(format!("buildmesh_test_grok_locator_none_{suffix}"));
+        let session = temp.join("session-abc");
+        std::fs::create_dir_all(&session).unwrap();
+        assert!(grok_locator_in(&temp, "session-abc", "").is_none());
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    // `for_harness` routes "grok" to the Grok format (issue #1281 acceptance
+    // criterion: `TranscriptFormat::for_harness("grok")` returns the Grok
+    // variant). The Claude-routed loop above excludes "grok" so the catch-all
+    // `ClaudeCode` assertion cannot mask a future routing regression — the
+    // explicit `for_harness("grok") == Grok` assertion in `routes_each_format`
+    // pins that.
+
+    /// `grok_urlencode_cwd` percent-encodes the cwd segment Grok uses as its
+    /// session-directory name. Pin the scheme so a future refactor that
+    /// silently drops (say) the colon encoding produces a compile-time test
+    /// failure rather than silently misrouting sessions on Windows drives.
+    #[test]
+    fn grok_urlencode_cwd_matches_rfc3986_unreserved_only() {
+        // RFC 3986 unreserved set: ALPHA / DIGIT / "-" / "." / "_" / "~".
+        // Everything else becomes %XX, uppercase hex (the form Grok emits).
+        assert_eq!(
+            grok_urlencode_cwd(r"C:\Users\adam\src\buildmesh"),
+            "C%3A%5CUsers%5Cadam%5Csrc%5Cbuildmesh",
+            "Windows drive colon and backslashes must be percent-encoded so the \
+             session-directory segment is filesystem-safe"
+        );
+        assert_eq!(
+            grok_urlencode_cwd("/home/adam/src/buildmesh"),
+            "%2Fhome%2Fadam%2Fsrc%2Fbuildmesh",
+            "POSIX slashes also percent-encoded"
+        );
+        // Unreserved per RFC 3986 stays literal; the locator only encodes
+        // non-unreserved bytes.
+        assert_eq!(
+            grok_urlencode_cwd("project-with_under.dots~tildas"),
+            "project-with_under.dots~tildas",
+            "RFC 3986 unreserved chars pass through unchanged"
+        );
+        assert_eq!(grok_urlencode_cwd(""), "");
+        assert_eq!(
+            grok_urlencode_cwd("with space"),
+            "with%20space",
+            "space encodes to %20, not '+' (RFC 3986, not form-style)"
+        );
+    }
+}
     }
 }

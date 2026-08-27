@@ -374,7 +374,7 @@ pub fn agy_dir() -> PathBuf {
     }
     if let Ok(home) = env::var("ANTIGRAVITY_HOME") {
         if !home.trim().is_empty() {
-            return PathBuf::from(home);
+            return PathBuf::from(home).join("antigravity-cli");
         }
     }
     match current_env() {
@@ -410,4 +410,36 @@ pub fn agy_dir() -> PathBuf {
 /// shared root every AGY session scanner and the transcript reader consult.
 pub fn agy_brain_dir() -> PathBuf {
     agy_dir().join("brain")
+}
+
+/// The Grok Code home directory, mirroring [`claude_dir`] / [`cursor_dir`].
+/// Issue #1281: Grok writes per-session directories under
+/// `<grok home>/sessions/<urlencoded-cwd>/<session-id>/`. A `GROK_HOME`
+/// environment override (mirroring `CODEX_HOME`) shifts the entire home —
+/// useful for tests and for agents whose `~/.grok` was relocated.
+pub fn grok_dir() -> PathBuf {
+    if let Ok(home) = env::var("GROK_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    match current_env() {
+        Environment::Wsl => {
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".grok")
+            } else {
+                PathBuf::from("/root/.grok")
+            }
+        }
+        Environment::Windows => {
+            if let Ok(home) = env::var("USERPROFILE") {
+                PathBuf::from(home).join(".grok")
+            } else if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".grok")
+            } else {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}\\.grok"))
+            }
+        }
+    }
 }

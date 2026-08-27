@@ -465,6 +465,12 @@ mod tests {
         let grok = grok_caps();
         assert!(grok.supports_resume);
         assert!(grok.auto_resume_on_startup);
+        // Issue #1281: Grok Code writes per-session directories under
+        // ~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl,
+        // updates.jsonl}. TranscriptFormat::Grok parses both into the shared
+        // Turn/ToolCall wire shape, so the archived-node picker surfaces
+        // Grok and the Coordinator Node Digest hydrates it.
+        assert!(grok.produces_readable_transcript);
         assert!(grok.supports_model_override);
         assert!(!grok.supports_effort_override);
         assert!(grok.supports_prefill);

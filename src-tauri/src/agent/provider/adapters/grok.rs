@@ -153,6 +153,16 @@ impl AgentProvider for GrokAdapter {
         true
     }
 
+    fn produces_readable_transcript(&self) -> bool {
+        // Issue #1281: Grok Code writes per-session directories at
+        // `~/.grok/sessions/<urlencoded-cwd>/<session-id>/{chat_history.jsonl,
+        // updates.jsonl}` (and `summary.json`). Buildmesh's transcript
+        // reader now parses both files via `TranscriptFormat::Grok`, so the
+        // archived-node resume picker surfaces Grok sessions and the
+        // Coordinator Node Digest rich layer hydrates them.
+        true
+    }
+
     fn requires_attention_hook(&self) -> bool {
         true
     }
@@ -407,7 +417,10 @@ mod tests {
 
     /// Issue #1179 (mirror): end-to-end descriptor pin. The Spawn Menu,
     /// resolver, and autopilot compatibility gate all consume this
-    /// descriptor — drift here means the menu misroutes Grok.
+    /// descriptor — drift here means the menu misroutes Grok. Issue #1281:
+    /// Grok now writes a transcript Buildmesh can read (`TranscriptFormat::Grok`
+    /// in `services::transcript_reader`), so `produces_readable_transcript`
+    /// flips to true and the archived-node resume picker surfaces Grok.
     #[test]
     fn capabilities_descriptor_advertises_model_override() {
         let caps = GROK.capabilities();
@@ -416,8 +429,12 @@ mod tests {
         assert!(caps.supports_model_override);
         assert!(!caps.supports_effort_override);
         assert!(caps.supports_prefill);
+        // Issue #1282: Grok now ships attention hooks.
         assert!(caps.requires_attention_hook, "issue #1282: Grok now ships attention hooks");
-        assert!(!caps.produces_readable_transcript);
+        // Issue #1281: Grok's per-session chat_history.jsonl / updates.jsonl
+        // are parsed via TranscriptFormat::Grok, so the archived-node picker
+        // and Node Digest rich layer surface Grok.
+        assert!(caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(caps.effort_control, crate::agent::capabilities::EffortControlKind::None);
     }
