@@ -68,6 +68,13 @@ pub struct HarnessLaunchInput<'a> {
     /// reports `supports_prefill`. The shared default trims and
     /// normalises CRLF before forwarding.
     pub prefill: Option<&'a str>,
+    /// `true` when the parent mesh has its `sandbox` toggle on. The
+    /// shared default appends the adapter's [`AgentProvider::sandbox_args`]
+    /// contribution when this is set; the orchestrator's outer wrapper
+    /// (`spawn_environment::wrap`) consults it independently for its
+    /// own platform-level containment (macOS Seatbelt, Windows
+    /// restricted-token). Issue #1287.
+    pub sandbox: bool,
 }
 
 /// The environment policy a harness declares for its launch. A future
@@ -187,6 +194,20 @@ pub fn default_prepare(
         }
     }
 
+    // Issue #1287 — adapter-level sandbox flag. When the parent mesh
+    // has its `sandbox` toggle on, append the adapter's declared
+    // sandbox contribution (e.g. Antigravity's `--sandbox`). Layered
+    // on top of the orchestrator's outer containment wrapper (macOS
+    // Seatbelt / Windows restricted-token) — the two are independent
+    // layers: the outer wrapper confines the filesystem, the adapter
+    // flag confines the agent's own terminal-side operations.
+    if input.sandbox {
+        let sandbox = adapter.sandbox_args();
+        if !sandbox.is_empty() {
+            recipe.base_args.extend(sandbox);
+        }
+    }
+
     if capabilities.supports_prefill {
         if let Some(text) = input.prefill.filter(|s| !s.is_empty()) {
             let normalized = normalize_prefill_newlines(text);
@@ -259,6 +280,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(adapter, input);
         let base = adapter.spawn_recipe(Platform::Windows, EnvType::Windows);
@@ -286,6 +308,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: Some("first\r\nsecond\rthird"),
+            sandbox: false,
         };
         let prepared = default_prepare(adapter, input);
         let last = prepared
@@ -308,6 +331,7 @@ mod tests {
             session: SessionIdModeRef::Assign("abc-uuid"),
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(adapter, input);
         let base = adapter.spawn_recipe(Platform::Windows, EnvType::Windows);
@@ -329,6 +353,7 @@ mod tests {
             session: SessionIdModeRef::Resume("sess-xyz"),
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(adapter, input);
         // Codex's resume recipe is `codex resume sess-xyz ...base_flags`
@@ -362,6 +387,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(adapter, input);
         // Anthropic's default model_args is `["--model", m]`.
@@ -390,6 +416,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(adapter, input);
         let found = prepared

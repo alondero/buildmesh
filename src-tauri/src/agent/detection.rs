@@ -70,7 +70,17 @@ const DETECTABLE: &[Detectable] = &[
         name: "Antigravity",
         harness: "agy",
         binaries: &["agy"],
-        config_dirs: &[],
+        // Antigravity-only signals — issue #1287. `.gemini/antigravity-cli/`
+        // is the CLI's canonical home (conversations, brain, log, bin);
+        // `.antigravity/` is the IDE fork's home (extensions/, argv.json);
+        // `.antigravitycli/` is the symlink layer some installs use to
+        // mirror config under a shorter name. Deliberately NOT `.gemini/`:
+        // that directory is shared with Google Gemini CLI (oauth_creds,
+        // google_accounts, settings), so a bare `.gemini` entry would
+        // false-positive Antigravity onto machines with only Gemini CLI
+        // installed — the same class of bug the cursor-agent stem note
+        // above documents.
+        config_dirs: &[".gemini/antigravity-cli", ".antigravity", ".antigravitycli"],
     },
     Detectable {
         id: "opencode",
@@ -329,15 +339,79 @@ mod tests {
         assert_eq!(profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["dsh"]);
     }
 
+    /// Antigravity (issue #1287) declares Antigravity-only config dirs
+    /// (`.gemini/antigravity-cli/`, `.antigravity/`, `.antigravitycli/`).
+    /// A bare `.agy` directory is NOT one of them, so a stray `.agy`
+    /// subfolder in $HOME can't conjure it — the same anti-false-positive
+    /// discipline the cursor-agent stem note at the top of this file
+    /// applies. Regression pin for the explicit `.agy` exclusion: if a
+    /// future change ever adds `.agy` as a declared config dir, this test
+    /// trips and the reviewer is forced to consider the false-positive
+    /// surface that opens up.
     #[test]
-    fn agy_has_no_config_dir_so_needs_the_binary() {
-        // Antigravity declares no config dir, so a stray home dir can't conjure
-        // it — only a binary on PATH detects it.
+    fn agy_does_not_recognise_a_bare_dot_agy_dir() {
         let path_dirs = dirs(&["/usr/bin"]);
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.agy"]); // not a declared config dir
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert!(profiles.is_empty());
+        assert!(
+            profiles.is_empty(),
+            ".agy/ alone must NOT detect Antigravity (false-positive risk — \
+             e.g. another tool using that name); got {profiles:?}"
+        );
+    }
+
+    /// Antigravity (issue #1287) installs its CLI under
+    /// `~/.gemini/antigravity-cli/`. A shell-function / alias install that
+    /// exposes only the config dir (no PATH entry) must still surface as
+    /// an Antigravity harness. Mirrors the rationale in the kimi and
+    /// mcode config-dir tests above.
+    #[test]
+    fn agy_config_dir_alone_counts_as_installed() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.gemini/antigravity-cli"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["agy"]);
+
+        // The IDE-fork home and the symlink-layer home must count too —
+        // mirrors the dual-`.kimi` / dual-`.mcode` pattern used for
+        // installs that surface under more than one name.
+        let exists_alt = fake_fs(&["/home/me/.antigravity"]);
+        let profiles_alt = detect_profiles(&path_dirs, &[""], Some(&home), &exists_alt);
+        assert_eq!(
+            profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["agy"]
+        );
+
+        let exists_sym = fake_fs(&["/home/me/.antigravitycli"]);
+        let profiles_sym = detect_profiles(&path_dirs, &[""], Some(&home), &exists_sym);
+        assert_eq!(
+            profiles_sym.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["agy"]
+        );
+    }
+
+    /// Antigravity's detection signals are scoped to Antigravity-specific
+    /// subdirs — `.gemini/` *alone* is deliberately NOT in the list, because
+    /// that directory is shared with Google Gemini CLI. A user with only
+    /// Gemini CLI installed (no Antigravity CLI anywhere) must not see
+    /// Antigravity appear in the launch menu — false positives there cascade
+    /// into a launch-time failure ("command not found") that no schema
+    /// check would catch.
+    #[test]
+    fn agy_does_not_recognise_a_bare_dot_gemini_dir() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        // ~/.gemini exists but ~/.gemini/antigravity-cli does not — Gemini
+        // CLI only, no Antigravity. Must NOT detect.
+        let exists = fake_fs(&["/home/me/.gemini"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert!(
+            profiles.is_empty(),
+            ".gemini/ alone must NOT detect Antigravity (shared with Gemini CLI); \
+             got {profiles:?}"
+        );
     }
 
     #[test]

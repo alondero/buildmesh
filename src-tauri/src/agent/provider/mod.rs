@@ -390,6 +390,25 @@ pub trait AgentProvider: Send + Sync {
         vec!["--prefill".into(), text.into()]
     }
 
+    /// Args appended when the parent mesh has its `sandbox` toggle on.
+    /// The orchestrator consults this independently for its own
+    /// platform-level containment (macOS Seatbelt — see
+    /// [`crate::agent::sandbox`]; Windows restricted-token in
+    /// `spawn::sandbox_spawn`); this method is the *adapter-level* knob,
+    /// so a harness whose CLI exposes a native sandbox flag (e.g.
+    /// Antigravity's `--sandbox`, issue #1287) can opt into forwarding
+    /// it without the orchestrator knowing the flag vocabulary.
+    ///
+    /// Default is empty — every harness that doesn't override inherits
+    /// "no native sandbox flag"; the orchestrator's outer wrapper is the
+    /// sole containment layer. Appended in `default_prepare` between
+    /// `effort_args` and `prefill_args` so security-shaped flags land
+    /// with the capability-driven contributions, ahead of the trailing
+    /// prefill text.
+    fn sandbox_args(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// True for plain shell providers (e.g. a node whose PTY runs
     /// `powershell.exe` / `sh` directly, with no LLM agent loop).
     /// When `true`, `start_reader` skips the LLM-specific EOF tail:

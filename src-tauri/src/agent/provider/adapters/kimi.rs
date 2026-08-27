@@ -229,6 +229,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(&KIMI, input);
         let args = &prepared.recipe.base_args;

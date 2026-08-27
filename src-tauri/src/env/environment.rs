@@ -291,15 +291,6 @@ pub fn agy_home_dir() -> PathBuf {
     }
 }
 
-/// The Antigravity brain directory — `<agy_home>/brain/`. Each conversation
-/// is a sibling directory holding `.system_generated/logs/transcript.jsonl`
-/// (issue #1284). Sessions are stored globally here, not scoped to a project,
-/// so discovery walks every entry and trusts the transcript's workspace
-/// metadata to associate with the calling mesh.
-pub fn agy_brain_dir() -> PathBuf {
-    agy_home_dir().join("brain")
-}
-
 /// The Codex CLI home directory, mirroring [`claude_dir`]. Codex honours a
 /// `CODEX_HOME` override for its *entire* state directory (sessions, auth,
 /// config — issue #885), so that takes precedence; otherwise `~/.codex` in the
