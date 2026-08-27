@@ -542,6 +542,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(&GROK, input);
         assert_flag_followed_by_value(&prepared.recipe.base_args, "--effort", "high");
@@ -564,6 +565,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: Some("continue from where we left off"),
+            sandbox: false,
         };
         let prepared = default_prepare(&GROK, input);
         assert!(
@@ -614,6 +616,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &resolved,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(&GROK, input);
         assert!(
@@ -647,6 +650,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &resolved,
             prefill: Some("tail prompt"),
+            sandbox: false,
         };
         let prepared = default_prepare(&GROK, input);
         assert!(
