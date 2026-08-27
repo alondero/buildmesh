@@ -13,7 +13,7 @@
  * without leaving, and traversed edges glow cyan.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -398,6 +398,60 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
     [nodes, edges, savedJson]
   );
 
+  // -- dirty guard (issue #1244) ---------------------------------------------
+  // Mirror `<Modal dirty>`'s discard-banner pattern inline: a reflexive
+  // Escape or ✕ click on an unsaved editor must NOT silently destroy the
+  // graph (muscle memory guarantees Escape hits — the overlay sits above
+  // live terminals). Only the explicit Discard button calls onClose.
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  // Mirror `dirty` into a ref so the once-armed Escape listener sees the
+  // live value (without this, a dirty toggle landing after mount would be
+  // invisible — captured closure still holds the mount-time `dirty = false`).
+  // useLayoutEffect so the ref updates synchronously before the browser
+  // commits the new render and the next Escape fires.
+  const dirtyRef = useRef(dirty);
+  useLayoutEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+  // Mirror `confirmingDiscard` so the Escape listener can read "is the
+  // banner already up?" without re-subscribing on every toggle
+  // (re-subscribing would race with the keystroke that triggered it).
+  const confirmingDiscardRef = useRef(false);
+  useEffect(() => {
+    confirmingDiscardRef.current = confirmingDiscard;
+  }, [confirmingDiscard]);
+  // When `dirty` flips false while the banner is up (e.g. Save succeeds
+  // and the parent re-emits the canonical graph_json), auto-dismiss so a
+  // fresh Escape doesn't strand the user behind a stale discard prompt
+  // for content they just persisted.
+  useEffect(() => {
+    if (!dirty) setConfirmingDiscard(false);
+  }, [dirty]);
+
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  // WAI-ARIA APG alertdialog: when the banner appears, move focus to the
+  // safer action so keyboard users can hit Space/Enter to dismiss without
+  // reaching for the mouse.
+  useEffect(() => {
+    if (confirmingDiscard) cancelButtonRef.current?.focus();
+  }, [confirmingDiscard]);
+
+  const handleCancelDiscard = () => setConfirmingDiscard(false);
+  const handleConfirmDiscard = () => {
+    setConfirmingDiscard(false);
+    onClose();
+  };
+  // ✕ click routes through the same guard as Escape (mirrors Modal's
+  // `requestClose`, issue #808).
+  const requestClose = () => {
+    if (confirmingDiscard) return; // banner is up; its buttons decide
+    if (dirty) {
+      setConfirmingDiscard(true);
+      return;
+    }
+    onClose();
+  };
+
   const handleSave = async () => {
     setSaving(true);
     setEditorError(null);
@@ -412,10 +466,25 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
     }
   };
 
-  // Esc closes (menus clear first via their own Escape handlers).
+  // Esc closes (menus clear first via their own Escape handlers). When
+  // the editor is dirty, route through the discard banner instead of
+  // closing — matches `<Modal dirty>` (issue #1244).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      if (confirmingDiscardRef.current) {
+        // Banner is up — Escape dismisses the prompt (Keep editing), it
+        // must NOT confirm the discard. Reflexively pressing Escape to
+        // dismiss a confirmation is the universal OS gesture, and it
+        // maps to the safe option.
+        setConfirmingDiscard(false);
+        return;
+      }
+      if (dirtyRef.current) {
+        setConfirmingDiscard(true);
+        return;
+      }
+      onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -426,6 +495,37 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
       className="absolute inset-0 z-40 flex flex-col bg-bg-base"
       data-testid="circuit-flow-editor"
     >
+      {confirmingDiscard && (
+        <div
+          role="alertdialog"
+          aria-labelledby="editor-discard-title"
+          data-testid="editor-discard-banner"
+          className="m-4 mb-0 border border-status-warning/40 bg-status-warning/10 rounded-md px-4 py-3 text-status-warning shrink-0"
+        >
+          <p id="editor-discard-title" className="text-base mb-2">
+            Discard unsaved changes?
+          </p>
+          <div className="flex gap-2 justify-end">
+            <button
+              ref={cancelButtonRef}
+              type="button"
+              onClick={handleCancelDiscard}
+              data-testid="editor-discard-cancel"
+              className="px-3 py-1 text-sm rounded-md bg-bg-card text-text-secondary hover:bg-border-subtle"
+            >
+              Keep editing
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmDiscard}
+              data-testid="editor-discard-confirm"
+              className="px-3 py-1 text-sm rounded-md bg-status-error text-white hover:bg-status-error/90"
+            >
+              Discard changes
+            </button>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-subtle bg-bg-surface shrink-0">
         <span className="text-sm font-semibold text-text-primary">{circuit.name}</span>
@@ -479,7 +579,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
         </button>
         <button
           type="button"
-          onClick={onClose}
+          onClick={requestClose}
           data-testid="editor-close"
           aria-label="Close editor"
           className="px-2 py-0.5 rounded-md text-text-muted hover:text-status-error text-xs"

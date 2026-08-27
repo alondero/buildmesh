@@ -369,4 +369,145 @@ describe('CircuitFlowEditor', () => {
     fireEvent.click(screen.getByTestId('editor-save'));
     expect(await screen.findByTestId('editor-error')).toBeTruthy();
   });
+
+  // -- dirty guard (issue #1244) ---------------------------------------------
+  // A reflexive Escape or ✕ click must not silently destroy an unsaved
+  // graph — the editor mirrors `<Modal dirty>`'s discard-banner contract.
+
+  it('Escape with an unsaved edit shows the discard banner and does NOT close', async () => {
+    const onClose = vi.fn();
+    render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
+
+    fireEvent.click(await screen.findByTestId('palette-add-notify'));
+    expect(screen.getByTestId('editor-dirty')).toBeTruthy();
+    expect(screen.queryByTestId('editor-discard-banner')).toBeNull();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
+    expect(screen.getByTestId('circuit-flow-editor')).toBeTruthy();
+  });
+
+  it('Escape with no unsaved edit still closes (existing behaviour preserved)', () => {
+    const onClose = vi.fn();
+    render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('second Escape while the banner is up dismisses only the banner', async () => {
+    const onClose = vi.fn();
+    render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
+
+    fireEvent.click(await screen.findByTestId('palette-add-notify'));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('editor-discard-banner')).toBeNull();
+    expect(screen.getByTestId('circuit-flow-editor')).toBeTruthy();
+  });
+
+  it('clicking Discard closes the editor and removes the banner', async () => {
+    const onClose = vi.fn();
+    render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
+
+    fireEvent.click(await screen.findByTestId('palette-add-notify'));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    const banner = screen.getByTestId('editor-discard-banner');
+    expect(banner).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('editor-discard-confirm'));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('editor-discard-banner')).toBeNull();
+  });
+
+  it('clicking Keep editing hides the banner and does NOT close', async () => {
+    const onClose = vi.fn();
+    render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
+
+    fireEvent.click(await screen.findByTestId('palette-add-notify'));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('editor-discard-cancel'));
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('editor-discard-banner')).toBeNull();
+    expect(screen.getByTestId('circuit-flow-editor')).toBeTruthy();
+  });
+
+  it('✕ click with an unsaved edit shows the discard banner and does NOT close', async () => {
+    const onClose = vi.fn();
+    render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
+
+    fireEvent.click(await screen.findByTestId('palette-add-notify'));
+    expect(screen.getByTestId('editor-dirty')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('editor-close'));
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
+  });
+
+  it('✕ click with no unsaved edit still closes (existing behaviour preserved)', () => {
+    const onClose = vi.fn();
+    render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
+
+    fireEvent.click(screen.getByTestId('editor-close'));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('banner auto-dismisses when the parent re-emits a graph_json that matches the working copy', async () => {
+    // Mirrors `<Modal dirty>`'s regression test: after Save succeeds the
+    // parent refetches the canonical row and re-emits the graph_json, so
+    // dirty flips false. The banner must go away — otherwise the user
+    // sits behind "Discard unsaved changes?" for content they just saved.
+    const onClose = vi.fn();
+    const original = JSON.parse(CIRCUIT.graph_json) as {
+      version: number;
+      nodes: Array<{ id: string; type: unknown }>;
+      edges: unknown[];
+    };
+    const updatedGraphJson = JSON.stringify({
+      ...original,
+      nodes: [
+        ...original.nodes,
+        { id: 'notify_1', type: { type: 'notify', message: '' } },
+      ],
+    });
+
+    const { rerender } = render(
+      <CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />
+    );
+    fireEvent.click(await screen.findByTestId('palette-add-notify'));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
+
+    rerender(
+      <CircuitFlowEditor
+        circuit={{ ...CIRCUIT, graph_json: updatedGraphJson }}
+        runs={[]}
+        onClose={onClose}
+      />
+    );
+
+    expect(screen.queryByTestId('editor-discard-banner')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('moves focus to the Keep-editing button when the banner appears (WAI-ARIA APG alertdialog)', async () => {
+    render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={() => {}} />);
+    fireEvent.click(await screen.findByTestId('palette-add-notify'));
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(document.activeElement).toBe(screen.getByTestId('editor-discard-cancel'));
+  });
 });
