@@ -12,7 +12,7 @@ metadata:
 
 Review of what the `grok` binary actually exposes, versus what Buildmesh's Grok adapter advertises and uses. Primary concerns: **session resume** and **prefill**.
 
-**Status (2026-08-26):** items 1 (positional prefill) and 2 (assign `--session-id`) landed on this branch. Remaining follow-ups: #1280 (effort), #1281 (transcripts), #1282 (attention hooks).
+**Status (2026-08-27):** items 1 (positional prefill), 2 (assign `--session-id`), and 3 (effort, issue #1280) landed on this branch. Remaining follow-ups: #1281 (transcripts), #1282 (attention hooks).
 
 ## Sources (primary only)
 
@@ -59,7 +59,7 @@ From `adapters/grok.rs` and the inventory pin in `capabilities.rs` **after** pre
 | `self_assigns_session_id` | `false` | Trait default `--session-id <uuid>` on fresh spawn (ADR-0024) |
 | `supports_prefill` | `true` | Trailing positional `[PROMPT]`; not `--prefill`, not `-p` |
 | `supports_model_override` | `true` | `--model <id>` |
-| `effort_control` | `None` | Grok CLI has `--effort`; unwired — #1280 |
+| `effort_control` | `Closed { none, minimal, low, medium, high, xhigh, max }` | Grok CLI has `--effort`; wired in #1280 (`--effort` alias of `--reasoning-effort`) |
 | `requires_attention_hook` | `false` | Grok has Notification/Stop/HTTP; unwired — #1282 |
 | `produces_readable_transcript` | `false` | On-disk ACP JSONL exists; unwired — #1281. Archived picker `resumable: false` |
 | Shell | `WindowsShell::Direct` | Correct — native binary, not a `.cmd` shim |
@@ -186,7 +186,7 @@ The inventory pin now treats Kimi as the remaining interactive TUI without prefi
 
 Headless docs show `grok -p "continue" --resume <id>`. Interactive equivalent is `grok --resume <id> "follow-up prompt"`. Buildmesh's launch helper appends prefill after resume args (`default_prepare`: session flags, then model/effort, then prefill). That argument order is `grok --resume <id> --model … <prompt>`, which matches the CLI. Whether the TUI submits that prompt as a new turn on resume is not separately documented for interactive mode; headless clearly does. Worth a one-line PTY smoke test before relying on handover-into-a-resumed-Grok-node.
 
-## Effort — Grok has a closed vocabulary; we advertise `None`
+## Effort — Grok has a closed vocabulary; we now advertise `Closed { none | minimal | low | medium | high | xhigh | max }` (landed #1280)
 
 `grok --help`:
 
@@ -208,9 +208,9 @@ Compared with existing `EffortControlKind::Closed` vocabularies:
 |---|---|
 | Claude Code | `low`, `medium`, `high` |
 | Codex | `none`, `low`, `medium`, `high`, `xhigh` |
-| **Grok (unwired)** | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| **Grok** | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 
-Trait default `effort_args` already emits `--effort <level>`, which is a documented Grok alias. Wiring this is: override `effort_control()` with `Closed { allowed: GROK_EFFORT_ALLOWED }`. The inventory pin currently expects Grok `None`; that test and the `#1179` coherence table's `effort_value` match arm (`_ => "high"`) would need a Grok case.
+Trait default `effort_args` already emits `--effort <level>`, which is a documented Grok alias. The wiring is exactly what we landed in #1280: override `effort_control()` with `Closed { allowed: GROK_EFFORT_ALLOWED }`, and the resolver mask (`resolve_effort` in `agent::capabilities`) drops anything outside the seven levels. The coherence table's `effort_value` match (`_ => "high"`) keeps working because `"high"` is in every Closed harness's vocabulary here.
 
 Not a resume/prefill blocker, but it is a capability Grok has that Buildmesh's resolver will currently drop.
 
@@ -260,7 +260,7 @@ These are real, first-party, and unused. None of them are required for resume/pr
 | Continue most-recent | unused | `-c` cwd-scoped | Keep unused |
 | Prefill | positional `[PROMPT]` (landed) | positional on interactive TUI | Done |
 | Model override | `--model` | Yes | Keep |
-| Effort | **None** | **`--effort` / `--reasoning-effort` closed vocab** | #1280 |
+| Effort | **`Closed { none, minimal, low, medium, high, xhigh, max }`** | **`--effort` / `--reasoning-effort` closed vocab** | Done (#1280) |
 | Attention hook | false | Notification + Stop + HTTP; Claude-compat files | #1282 |
 | Readable transcript | false | `~/.grok/sessions/<enc-cwd>/<id>/updates.jsonl` | #1281 |
 | Worktree flag | not passed | `-w` exists | Keep not passing |
@@ -269,7 +269,7 @@ These are real, first-party, and unused. None of them are required for resume/pr
 
 1. **Prefill — landed.** `supports_prefill = true`, positional `prefill_args`.
 2. **Assign session IDs — landed.** Trait default `--session-id`; resume still `--resume <id>`.
-3. **Effort — #1280.** `EffortControlKind::Closed` with `none|minimal|low|medium|high|xhigh|max`. Trait-default `--effort` already matches.
+3. **Effort — landed (#1280).** `EffortControlKind::Closed` with `none|minimal|low|medium|high|xhigh|max`. Trait-default `--effort` already matches.
 4. **Transcript reader — #1281.** New `TranscriptFormat`; unblocks archived-picker `resumable`.
 5. **Attention hooks — #1282.** Grok-native Notification + Stop HTTP.
 6. **Not in this pass:** ACP, `--fork-session`, `--restore-code`, `-w`, `-p`.

@@ -4625,11 +4625,14 @@ mod tests {
     }
 
     /// Validator rejects effort on a harness without effort control (Agy,
-    /// OpenCode, Terminal, Kimi, Grok, Mcode) — the harness has no place
+    /// OpenCode, Terminal, Kimi, Mcode) — the harness has no place
     /// for the value, so the write is refused at the boundary rather than
     /// silently storing a field the resolver would never forward (issue
     /// #1148 AC #5: "Accept effort only when the harness declares effort
     /// support").
+    ///
+    /// Note: Grok (issue #1280) and Codex now accept effort, so they
+    /// must be excluded from this test set.
     #[test]
     fn upsert_harness_default_rejects_effort_on_harness_without_effort_control() {
         let mut prefs = AppPreferences::default();
