@@ -8,35 +8,31 @@ pub static AGY: AgyAdapter = AgyAdapter;
 
 /// The callback command Antigravity (agy) lifecycle hooks run. AGY pipes
 /// the hook's stdin JSON — `{conversationId, transcriptPath, fullyIdle,
-/// terminationReason, …}` on `Stop`, `{toolCall, stepIdx, conversationId,
-/// transcriptPath, …}` on `PreToolUse` (issue #1285) — into the command;
+/// terminationReason, …}` on `Stop` (issue #1285) — into the command;
 /// `--data-binary @-` forwards it as the POST body so the attention route
 /// can classify the event. The port/session env vars are set per-agent
-/// in `spawn_environment` and inherited by the hook process; AGY executes
-/// the command string itself (no implicit login shell), so each platform
-/// wraps in the shell that expands its own env-var syntax.
+/// in `spawn_environment` and inherited by the hook process. AGY supplies
+/// the platform shell, so this function returns a bare shell command
+/// rather than adding a second `cmd.exe /c` or `sh -c` wrapper.
 fn hook_command(platform: Platform) -> String {
     match platform {
         Platform::Windows => {
-            "cmd.exe /c \"curl -sf -X POST --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID%\""
+            "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul & echo {\"decision\":\"allow\"}"
                 .to_string()
         }
         _ => {
-            "sh -c \"curl -sf -X POST --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true\""
+            "curl -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID >/dev/null 2>/dev/null; printf '%s\\n' '{\"decision\":\"allow\"}'"
                 .to_string()
         }
     }
 }
 
-/// Ensure `<project>/.agents/hooks.json` carries the Stop + PreToolUse
-/// attention webhooks under the `buildmesh-attention` namespace. AGY's
-/// schema mixes two shapes (issue #1285): `Stop` is the simple
-/// `[{type, command}]` form, while `PreToolUse` carries the
-/// `[{matcher, hooks: [{type, command}]}]` shape so the harness can
-/// filter by tool name. Both events mean "the user may be needed" —
-/// `Stop` with `fullyIdle: false` and any tool-driven `PreToolUse`
-/// prompt get sorted from background-task waits by the backend's
-/// `decide`. Idempotent, and preserves any unrelated top-level keys the
+/// Ensure `<project>/.agents/hooks.json` carries the Stop attention webhook
+/// under the `buildmesh-attention` namespace. `Stop` uses the simple
+/// `[{type, command}]` form. `PreToolUse` fires before every tool and its
+/// required decision response makes it a blocking gate. Buildmesh launches
+/// AGY with permissions skipped, so Stop is the unambiguous Node Turn
+/// signal here. Idempotent, and preserves any unrelated top-level keys the
 /// user added.
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     let mut settings: serde_json::Value = std::fs::read_to_string(path)
@@ -52,18 +48,7 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     // is the event) and the `[{type, command}]` form is the one the
     // spec documents for end-of-turn.
     let stop_hook = serde_json::json!({ "type": "command", "command": command });
-    // PreToolUse fires before each tool call — including the run_command
-    // / permission cases where AGY pauses for the user. Matcher is `*`
-    // so every tool gets forwarded; the backend's `decide` filters by
-    // event kind. The nested `[{matcher, hooks}]` form is what AGY uses
-    // for PreToolUse per the lifecycle spec.
-    let expected = serde_json::json!({
-        "Stop": [stop_hook],
-        "PreToolUse": [{
-            "matcher": "*",
-            "hooks": [{ "type": "command", "command": command }],
-        }],
-    });
+    let expected = serde_json::json!({ "Stop": [stop_hook] });
     if settings.get("buildmesh-attention") == Some(&expected) {
         return Ok(());
     }
@@ -329,12 +314,10 @@ mod tests {
 
     /// AGY's Stop payload carries the turn-end event in the simple
     /// `[{type, command}]` shape (no tool matcher — the whole turn is
-    /// the event), while PreToolUse uses the nested
-    /// `[{matcher, hooks}]` shape so the harness can filter by tool name.
-    /// Both must POST to the attention endpoint and forward the hook's
-    /// stdin as the body (`--data-binary @-`).
+    /// the event). It must POST to the attention endpoint and forward the
+    /// hook's stdin as the body (`--data-binary @-`).
     #[test]
-    fn inject_writes_stop_and_pre_tool_use_webhooks() {
+    fn inject_writes_stop_webhook() {
         let temp = TempDir::new().unwrap();
         AGY.inject_attention_hook(temp.path()).unwrap();
 
@@ -357,23 +340,7 @@ mod tests {
             "Stop must forward the hook stdin as the POST body: {stop_command}"
         );
 
-        // PreToolUse nests under matcher → hooks → command.
-        let pretool_command = attention["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .expect("PreToolUse command missing");
-        assert!(
-            pretool_command.contains("/api/attention/"),
-            "PreToolUse must POST to the attention endpoint: {pretool_command}"
-        );
-        assert!(
-            pretool_command.contains("--data-binary @-"),
-            "PreToolUse must forward the hook stdin as the POST body: {pretool_command}"
-        );
-
-        // The PreToolUse matcher is `*` (every tool forwarded; backend
-        // filters). Belt-and-braces: assert the literal so a future
-        // refactor that narrows it accidentally is caught.
-        assert_eq!(attention["PreToolUse"][0]["matcher"], "*");
+        assert!(attention.get("PreToolUse").is_none());
     }
 
     /// Re-running injection over an already-correct project is a no-op —
@@ -436,23 +403,46 @@ mod tests {
         assert_eq!(hooks["other"], "kept");
     }
 
-    /// The Windows hook command must expand env vars with cmd syntax
-    /// (`%VAR%`) under an explicit `cmd.exe /c`, and the Unix one with
-    /// sh syntax — AGY executes the command string without a login shell
-    /// of its own.
+    /// The Windows hook command uses cmd environment syntax (`%VAR%`) and
+    /// is a bare command because AGY supplies the shell. Unix uses `$VAR`
+    /// syntax and likewise does not add a nested shell wrapper.
     #[test]
     fn hook_command_uses_platform_env_syntax() {
         let win = hook_command(Platform::Windows);
-        assert!(win.starts_with("cmd.exe /c"), "win: {win}");
+        assert!(win.starts_with("curl.exe "), "win: {win}");
+        assert!(!win.contains("cmd.exe /c"), "win: {win}");
         assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
         assert!(win.contains("%BUILDMESH_SESSION_ID%"), "win: {win}");
 
         for platform in [Platform::Macos, Platform::Linux] {
             let unix = hook_command(platform);
-            assert!(unix.starts_with("sh -c"), "unix: {unix}");
+            assert!(unix.starts_with("curl "), "unix: {unix}");
+            assert!(!unix.contains("sh -c"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
         }
+    }
+
+    /// AGY invokes hook commands through its own Windows shell wrapper. The
+    /// command stored in hooks.json must therefore be a bare command rather
+    /// than a second `cmd.exe /c "..."` wrapper. AGY also requires JSON on
+    /// stdout for hook decisions, so the callback must fail open with allow
+    /// even when Buildmesh is not reachable.
+    #[test]
+    fn hook_command_is_bare_and_fail_open() {
+        let win = hook_command(Platform::Windows);
+        assert!(!win.starts_with("cmd.exe /c"), "win: {win}");
+        assert!(!win.starts_with('"') && !win.ends_with('"'), "win: {win}");
+        assert!(win.contains("curl.exe"), "win: {win}");
+        assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
+        assert!(win.contains("echo {\"decision\":\"allow\"}"), "win: {win}");
+
+        let unix = hook_command(Platform::Linux);
+        assert!(!unix.starts_with("sh -c"), "unix: {unix}");
+        assert!(
+            unix.contains("printf '%s\\n' '{\"decision\":\"allow\"}'"),
+            "unix: {unix}"
+        );
     }
 
     /// AGY's adapter contract: the harness still requires an attention
