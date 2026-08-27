@@ -235,6 +235,13 @@ On app restart, the frontend calls `auto_resume_nodes` which iterates all `Suspe
 ### Early-Exit Detection
 The PTY reader thread records `spawned_at`. If the reader exits within 3 seconds, the agent node is marked `Error` and a `resume-failed` event is emitted. This catches failed `--resume` attempts where the agent CLI exits because the session has expired.
 
+### Expired Session Recovery & Start Fresh (issue #1306)
+When a node transitions to `Error` status after an expired or invalid session ID fails to resume, `session_lifecycle::on_resume_failed` marks the status as `Error` but intentionally leaves `cli_session_id` intact (since `on_resume_failed` is a status-only writer, preserving the ID for transient-failure retries).
+
+To break unrecoverable restart loops where an expired session ID would otherwise be retried indefinitely:
+- **Retry Resume (`↻` inline button):** Re-attempts spawning via `spawnAgent(node.id, node.provider)` with the existing `cli_session_id` (`SpawnIntent::Resume`) for transient failures (e.g. network blips or race conditions).
+- **Start Fresh (Context Menu item):** Invokes `restartFreshAgent(node.id)` which calls `spawn_agent` with `resume = null` (`SpawnIntent::Fresh`). The backend `spawn_with_intent` pipeline detects `intent_replaces_conversation(&intent)` and executes `db::clear_cli_session_id(node_id)`, resetting `cli_session_id` to `NULL` in SQLite and launching the agent fresh in the existing worktree with correct terminal dimensions.
+
 ### `AgentNode.branch` is overloaded (base ref vs PR head ref)
 The `branch` field on `AgentNode` (see Rust doc comment at `src-tauri/src/models/mod.rs`) means two different things depending on spawn source:
 
