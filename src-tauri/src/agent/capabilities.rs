@@ -442,9 +442,9 @@ mod tests {
         assert!(!terminal.supports_prefill);
         assert_eq!(terminal.effort_control, EffortControlKind::None);
 
-        // Interactive-TUI harnesses — model override, no effort, no prefill,
-        // and no attention hook (issue #886). Cursor is the exception for
-        // transcript support because its workspace JSONL reader is wired.
+        // Kimi Code is the remaining interactive TUI without prefill
+        // (positional prompt is a Grok / Cursor / mcode shape). No
+        // effort, no attention hook (issue #886).
         let kimi = kimi_caps();
         assert!(kimi.supports_model_override);
         assert!(!kimi.supports_effort_override);
@@ -452,8 +452,11 @@ mod tests {
         assert_eq!(kimi.effort_control, EffortControlKind::None);
 
         let grok = grok_caps();
+        assert!(grok.supports_resume);
+        assert!(grok.auto_resume_on_startup);
         assert!(grok.supports_model_override);
         assert!(!grok.supports_effort_override);
+        assert!(grok.supports_prefill);
         assert_eq!(grok.effort_control, EffortControlKind::None);
 
         let mcode = mcode_caps();
@@ -853,6 +856,7 @@ mod tests {
 
     /// The application slot drives the resolved value when explicit + mesh_override
     /// + mesh are empty (issue #1148 cascade layer 4: `explicit > mesh_override > mesh > application > native`).
+    ///
     /// The spawn path in `spawn_agent_inner` populates this slot from
     /// `preferences::harness_default_for(&node.provider)`; this test pins the resolver
     /// contract that the spawn path relies on.

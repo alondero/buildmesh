@@ -83,12 +83,39 @@ pub fn request_circuit_approval(run_id: i64, node_id: String) {
 }
 
 /// Take this run's queued approvals (leaving other runs' entries alone).
+/// Uses `Vec::extract_if` (Rust 1.87+) to partition in-place — no
+/// allocation for the rest-list, no re-assignment. The returned `Vec`
+/// holds only the taken entries' `node_id`s.
 fn drain_approvals_for(run_id: i64) -> Vec<String> {
     let mut queue = APPROVALS.lock().unwrap();
-    let (mine, rest): (Vec<_>, Vec<_>) =
-        queue.drain(..).partition(|(r, _)| *r == run_id);
-    *queue = rest;
-    mine.into_iter().map(|(_, node_id)| node_id).collect()
+    queue
+        .extract_if(.., |(r, _)| *r == run_id)
+        .map(|(_, node_id)| node_id)
+        .collect()
+}
+
+/// Sweep the approvals queue against the current active-run set
+/// (issue #1263). A user can click "Approve" for a run that completes,
+/// fails, or gets deleted before the next pass — without this sweep
+/// its queued approval would sit forever for a vanished run. Click-bounded
+/// volume (a few approvals per app lifetime at most), so the cost must
+/// stay at zero allocations on the hot 2-second tick: early-return on
+/// empty queue, and a linear scan over the active-runs slice for tiny
+/// lists (avoids building a HashSet just to test membership).
+fn sweep_stale_approvals(active_runs: &[db::ActiveCircuitRun]) {
+    let mut queue = APPROVALS.lock().unwrap();
+    if queue.is_empty() {
+        return;
+    }
+    let before = queue.len();
+    queue.retain(|(run_id, _)| active_runs.iter().any(|r| r.run.id == *run_id));
+    let dropped = before - queue.len();
+    if dropped > 0 {
+        tracing::debug!(
+            "circuits: dropped {} stale approval(s) for vanished runs",
+            dropped
+        );
+    }
 }
 
 /// Wake the circuit worker immediately (manual trigger dispatch).
@@ -132,6 +159,11 @@ fn run_pass(app: &AppHandle) {
             return;
         }
     };
+    // Issue #1263: drain approvals queued for runs that vanished
+    // (deleted, completed, failed) between this user and last pass.
+    // Borrows the already-loaded active-run slice so the sweep costs
+    // zero heap on the hot 2-second tick.
+    sweep_stale_approvals(&runs);
     for active in runs {
         if !active.circuit_enabled {
             continue; // disabled mid-flight: park the run until re-enabled
@@ -1157,5 +1189,81 @@ mod tests {
         ] {
             assert!(!should_synthesize_turn(true, Some(LOST_TURN_QUIET_MS), status));
         }
+    }
+
+    // -- approvals sweep (issue #1263) -----------------------------------------
+
+    /// Build a minimal `ActiveCircuitRun` fixture with only `run.id`
+    /// populated — the sweep only reads `r.run.id`, every other field is
+    /// a placeholder. Avoids sprawling struct literals across the three
+    /// tests below.
+    fn active_run(id: i64) -> db::ActiveCircuitRun {
+        db::ActiveCircuitRun {
+            run: crate::models::AutopilotCircuitRun {
+                id,
+                circuit_id: 0,
+                mesh_id: 0,
+                trigger_identity: String::new(),
+                state: String::new(),
+                context_json: String::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            circuit_enabled: true,
+            circuit_concurrency_limit: 0,
+            circuit_graph_json: String::new(),
+            circuit_name: String::new(),
+        }
+    }
+
+    // -- Sweep test isolation ----------------------------------------------
+    //
+    // `APPROVALS` is a process-global `Lazy<Mutex<Vec<...>>>` shared by
+    // every parallel `cargo test` worker. Tests cannot rely on the queue
+    // being empty or on `clear_approvals_queue()` for isolation — another
+    // test running concurrently may mutate it between our ops. The fix:
+    // unique run-id namespaces per test, asserts only about OUR entries,
+    // and a per-test tidying pass so our entries don't leak.
+    // This mirrors the PLANNER_TEST_MESH constant pattern used by
+    // services::autopilot::tests for the same reason.
+
+    #[test]
+    fn approvals_sweep_drops_entries_for_vanished_runs() {
+        const RUN_A: i64 = 910_001;
+        const RUN_B: i64 = 910_002;
+        const RUN_C: i64 = 910_003;
+        request_circuit_approval(RUN_A, "node-a".into());
+        request_circuit_approval(RUN_B, "node-b".into());
+        request_circuit_approval(RUN_C, "node-c".into());
+
+        // RUN_B vanished (deleted/completed) between the click and this
+        // pass. The sweep must drop ONLY its entry; RUN_A and RUN_C
+        // survive. Use a 910_xxx namespace so other parallel tests' ops
+        // don't touch our entries (and ours don't touch theirs).
+        let active = vec![active_run(RUN_A), active_run(RUN_C)];
+        sweep_stale_approvals(&active);
+
+        // Scope the lock so it drops before the trailing tidy (the mutex
+        // is not reentrant — holding the guard across another lock would
+        // deadlock).
+        let queue = APPROVALS.lock().unwrap();
+        assert!(
+            !queue.iter().any(|(r, _)| *r == RUN_B),
+            "the vanished run's approval must be evicted"
+        );
+        assert!(
+            queue.iter().any(|(r, _)| *r == RUN_A),
+            "live run A's approval must survive the sweep"
+        );
+        assert!(
+            queue.iter().any(|(r, _)| *r == RUN_C),
+            "live run C's approval must survive the sweep"
+        );
+        // Tidy our test's entries so they don't leak into other tests.
+        drop(queue);
+        APPROVALS
+            .lock()
+            .unwrap()
+            .retain(|(r, _)| *r != RUN_A && *r != RUN_C);
     }
 }

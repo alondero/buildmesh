@@ -75,13 +75,65 @@ describe("app version manifests", () => {
     const { pkg } = manifestVersions();
     const latestRelease = latestTagVersion();
     // Equal is allowed transiently (the stripped commit between tagging a
-    // release and bumping back to the next -dev version), but the manifests
+    // release and bumping back to the next -0 version), but the manifests
     // must never fall behind the published release.
     expect(gt(pkg, latestRelease) || pkg === latestRelease).toBe(true);
   });
 
+  // WiX ProductVersion is major.minor.patch[.build] with numeric-only fields
+  // (each <= 65535). Tauri maps a semver prerelease into the 4th field, so
+  // `1.3.0-dev` fails MSI bundling with "optional pre-release identifier in
+  // app version must be numeric-only". The between-release marker is `-0`.
+  it("prerelease identifier is MSI-safe (numeric-only, <= 65535)", () => {
+    const { pkg } = manifestVersions();
+    const { pre } = parseSemver(pkg);
+    if (pre !== null) {
+      expect(pre).toMatch(/^\d+$/);
+      expect(Number(pre)).toBeLessThanOrEqual(65535);
+    }
+  });
+
+  it("between-release prerelease is sticky -0, not a counter", () => {
+    const { pre } = parseSemver(manifestVersions().pkg);
+    // Null is the transient stripped-for-tag window; otherwise the marker
+    // stays at 0 until the next release. `-1` / `-dev` must not land.
+    expect(pre === null || pre === "0").toBe(true);
+  });
+
   it("prerelease compares above its base's previous minor but below its own release", () => {
-    expect(gt("1.3.0-dev", "1.2.0")).toBe(true);
-    expect(gt("1.3.0", "1.3.0-dev")).toBe(true);
+    expect(gt("1.3.0-0", "1.2.0")).toBe(true);
+    expect(gt("1.3.0", "1.3.0-0")).toBe(true);
+  });
+});
+
+function runVersionSet(version: string): { status: number; stderr: string } {
+  try {
+    execSync(`node scripts/set-version.mjs ${version}`, {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { status: 0, stderr: "" };
+  } catch (e: unknown) {
+    const err = e as { status?: number; stderr?: string };
+    return { status: err.status ?? 1, stderr: String(err.stderr ?? "") };
+  }
+}
+
+describe("version:set", () => {
+  it("rejects a non-numeric prerelease without writing manifests", () => {
+    const before = manifestVersions();
+    const result = runVersionSet("1.3.0-dev");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/MSI-safe/);
+    expect(manifestVersions()).toEqual(before);
+  });
+
+  it("rejects a prerelease above the WiX 65535 cap without writing manifests", () => {
+    const before = manifestVersions();
+    const result = runVersionSet("1.3.0-65536");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/MSI-safe/);
+    expect(manifestVersions()).toEqual(before);
   });
 });

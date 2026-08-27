@@ -419,9 +419,8 @@ mod tests {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.
-        for id in ["glm"] {
-            assert!(!usage_tracked(id), "{id} should not be tracked");
-        }
+        let id = "glm";
+        assert!(!usage_tracked(id), "{id} should not be tracked");
     }
 
     #[test]

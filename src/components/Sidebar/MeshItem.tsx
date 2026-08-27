@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -176,7 +177,7 @@ export function MeshItem({
   const closeContextMenu = () => {
     const trigger = triggerRef.current;
     setContextMenu(null);
-    requestAnimationFrame(() => trigger?.focus());
+    requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
   };
 
   // Issue #1264 — the `setSyncMessage(null)` timeout in `handleSync` is
@@ -414,8 +415,11 @@ export function MeshItem({
         />
       )}
 
-      {/* Context menu — periphery actions */}
-      {contextMenu && (
+      {/* Context menu — periphery actions.
+          Portaled to `document.body` so `position:fixed` is not
+          retargeted by this row's dnd-kit `transform` (sortable
+          containing block). */}
+      {contextMenu && createPortal(
         <div
           ref={menuRef}
           // Issue #814 — scoped attribute for `useClickOutside`. `mesh.id`
@@ -437,6 +441,7 @@ export function MeshItem({
           className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-left z-[100] py-1 min-w-[180px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
           <button
             // Roving tabindex — only the active item is in the Tab order.
@@ -530,7 +535,8 @@ export function MeshItem({
               View on GitHub
             </button>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

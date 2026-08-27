@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
@@ -31,6 +32,14 @@ const REGENERATE_DISABLED_STATUSES: readonly SessionStatus[] = [
   'pending',
   'archived',
 ];
+
+// Focus a menuitem without scrolling overflow ancestors. Nested inside
+// the sidebar list, `.focus()` scrolled that ancestor to the item's
+// layout box and the menu jumped. Belt-and-suspenders now that the
+// menu is portaled to `document.body`.
+function focusWithoutScroll(el: HTMLElement | null | undefined) {
+  el?.focus({ preventScroll: true });
+}
 
 interface NodeItemProps {
   node: AgentNode;
@@ -150,7 +159,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     const trigger = triggerRef.current;
     setSubmenuOpen(false);
     setContextMenu(null);
-    requestAnimationFrame(() => trigger?.focus());
+    requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
   };
 
   // Issue #778 — in-flight confirmation dialog. Carries both the
@@ -267,13 +276,13 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
         // focus call inside the same event loop turn as the React
         // commit, so a tight `await waitFor(...)` in the test can
         // observe the moved focus in the same tick.
-        queueMicrotask(() => submenuItemRefs.current[0]?.focus());
+        queueMicrotask(() => focusWithoutScroll(submenuItemRefs.current[0]));
         return;
       }
       if (e.key === 'ArrowLeft' && (inSubmenu || (inMenu && submenuOpen))) {
         e.preventDefault();
         setSubmenuOpen(false);
-        menuItemRefs.current[0]?.focus();
+        focusWithoutScroll(menuItemRefs.current[0]);
         return;
       }
       if (e.key === 'ArrowDown') {
@@ -285,11 +294,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           const current = submenuItemRefs.current.findIndex((el) => el === active);
           const start = current === -1 ? 0 : current;
           const next = (start + 1) % Math.max(1, submenuItemRefs.current.length);
-          submenuItemRefs.current[next]?.focus();
+          focusWithoutScroll(submenuItemRefs.current[next]);
         } else {
           setActiveIndex((i) => {
             const next = (i + 1) % itemCountRef.current;
-            menuItemRefs.current[next]?.focus();
+            focusWithoutScroll(menuItemRefs.current[next]);
             return next;
           });
         }
@@ -302,11 +311,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           const start = current === -1 ? submenuItemRefs.current.length - 1 : current;
           const len = Math.max(1, submenuItemRefs.current.length);
           const next = (start - 1 + len) % len;
-          submenuItemRefs.current[next]?.focus();
+          focusWithoutScroll(submenuItemRefs.current[next]);
         } else {
           setActiveIndex((i) => {
             const next = (i - 1 + itemCountRef.current) % itemCountRef.current;
-            menuItemRefs.current[next]?.focus();
+            focusWithoutScroll(menuItemRefs.current[next]);
             return next;
           });
         }
@@ -315,14 +324,14 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
       if (e.key === 'Home' && !inSubmenu) {
         e.preventDefault();
         setActiveIndex(0);
-        menuItemRefs.current[0]?.focus();
+        focusWithoutScroll(menuItemRefs.current[0]);
         return;
       }
       if (e.key === 'End' && !inSubmenu) {
         e.preventDefault();
         const last = itemCountRef.current - 1;
         setActiveIndex(last);
-        menuItemRefs.current[last]?.focus();
+        focusWithoutScroll(menuItemRefs.current[last]);
         return;
       }
     };
@@ -363,7 +372,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   useLayoutEffect(() => {
     if (!contextMenu) return;
     setActiveIndex(0);
-    menuItemRefs.current[0]?.focus();
+    focusWithoutScroll(menuItemRefs.current[0]);
   }, [contextMenu !== null]);
 
   return (
@@ -473,8 +482,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           `onMouseDown stopPropagation` keeps row clicks from bubbling
           to the document-level close handler when the user clicks an
           item (otherwise the click would close the menu AND fire the
-          row's `onSelect`). */}
-      {contextMenu && (
+          row's `onSelect`).
+          Portaled to `document.body` so `position:fixed` stays in
+          viewport coordinates. Nested inside the row, `hover:brightness-125`
+          (`filter`) and the parent MeshItem's dnd-kit `transform`
+          retarget `fixed` onto those boxes. */}
+      {contextMenu && createPortal(
         <div
           ref={menuRef}
           // Issue #814 — scoped attribute for `useClickOutside`. The
@@ -489,6 +502,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-left z-[100] py-1 min-w-[180px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
           {/* Issue #774 — Regenerate submenu container. The wrapper
               div shares `onMouseEnter` / `onMouseLeave` so the cursor
@@ -682,7 +696,8 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
             </svg>
             {node.is_pinned ? 'Unpin node' : 'Pin node'}
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* Issue #778 — confirmation dialog for running-node Regenerate.

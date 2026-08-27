@@ -662,6 +662,21 @@ describe('MeshItem', () => {
       expect(document.activeElement).not.toBe(items[1]);
     });
 
+    it('renders the menu on document.body, not inside the sortable mesh row', () => {
+      // Same containing-block trap as NodeItem: MeshItem is a dnd-kit
+      // sortable, so `style.transform` (during/after drag) retargets
+      // `position:fixed` onto the row. Portaling to `document.body`
+      // keeps the click-point `top`/`left` in viewport coordinates.
+      renderMeshItem();
+      openContextMenu();
+      const header = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
+      const sortableRoot = header.parentElement!;
+      const menu = document.querySelector('[role="menu"]') as HTMLElement;
+      expect(menu).toBeTruthy();
+      expect(sortableRoot.contains(menu)).toBe(false);
+      expect(menu.parentElement).toBe(document.body);
+    });
+
     it('repositions the menu inside the viewport when overflowing the right edge (#735)', async () => {
       renderMeshItem();
       openContextMenu(950, 100);

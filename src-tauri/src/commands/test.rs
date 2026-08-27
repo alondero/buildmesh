@@ -10,7 +10,7 @@
 //! to exercise the real Rust backend without needing Tauri APIs in the browser.
 
 use serde::{Deserialize, Serialize};
-use tauri::{command, Emitter};
+use tauri::Emitter;
 use tauri::AppHandle;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -57,12 +57,6 @@ impl JsonRpcResponse {
     fn error(msg: &str) -> String {
         serde_json::to_string(&JsonRpcResponse { ok: false, data: None, error: Some(msg.to_string()) }).unwrap()
     }
-}
-
-#[allow(dead_code)]
-#[command]
-pub fn is_test_server_running() -> bool {
-    TEST_SERVER_RUNNING.load(Ordering::SeqCst)
 }
 
 /// Listen addresses for the test server: one IPv4, one IPv6 (Windows requires

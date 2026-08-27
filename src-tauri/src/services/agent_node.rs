@@ -299,6 +299,11 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     };
 
     crate::session_naming::cleanup(session_id);
+    // Drop the auto-clear guard too: an awaiting-input node being deleted
+    // without first being disarmed would otherwise leak its ARMED entry
+    // forever (issue #1263). `disarm` is a no-op on an unarmed node, so
+    // sibling-positioning with the other per-node cleanups is safe.
+    crate::attention_autoclear::disarm(session_id);
     // Drop autopilot state too. The ledger delete must be explicit: the
     // table's ON DELETE CASCADE never fires because the connection doesn't
     // enable SQLite's `foreign_keys` pragma. Removing the row also frees

@@ -7,10 +7,14 @@
 //! PTY backend (ConPTY on Windows, native PTY on macOS/Linux) fully supports
 //! Grok's TUI, so we launch in interactive mode everywhere.
 //!
-//! **Session resumption** uses `--resume [<id>]` / `--continue` (cwd-scoped).
-//! Grok auto-assigns its own session ids (captured from PTY output by
-//! `session_naming`), so `self_assigns_session_id()` is `true` and
-//! `session_assign_args()` is a no-op.
+//! **Session IDs** follow ADR-0024. Fresh spawns mint a UUID and pass
+//! `--session-id <uuid>` (Grok 1.0.5: create-only; errors if the ID already
+//! exists under the cwd). Resume uses `--resume <id>`. `--continue` exists
+//! but is unused — auto-resume always passes the stored id explicitly.
+//!
+//! **Prefill** is the trailing positional `[PROMPT]` on the interactive TUI
+//! (`grok "fix the bug"`). There is no `--prefill` flag; `-p`/`--single` is
+//! headless (print and exit) and is not used here.
 //!
 //! **Model override** uses `-m <model-id>` / `--model <model-id>` (`grok
 //! --help` advertises the long form; the adapter emits it). Grok Code
@@ -73,16 +77,15 @@ impl AgentProvider for GrokAdapter {
     }
 
     fn supports_prefill(&self) -> bool {
-        false
+        // Interactive TUI accepts a trailing positional [PROMPT] as the
+        // first turn (`grok "fix the bug"`). There is no `--prefill` flag;
+        // override `prefill_args` below. Headless `-p`/`--single` is a
+        // different mode (print and exit) and is not used here.
+        true
     }
 
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Linux, Platform::Macos]
-    }
-
-    /// Grok auto-assigns session ids — captured from PTY output.
-    fn self_assigns_session_id(&self) -> bool {
-        true
     }
 
     fn resume_args(&self, id: &str) -> Vec<String> {
@@ -93,9 +96,10 @@ impl AgentProvider for GrokAdapter {
         vec!["--model".into(), model.into()]
     }
 
-    /// No `--session-id` flag — Grok assigns its own.
-    fn session_assign_args(&self, _id: &str) -> Vec<String> {
-        vec![]
+    fn prefill_args(&self, text: &str) -> Vec<String> {
+        // Trailing positional [PROMPT] on the interactive TUI. The trait
+        // default would emit `["--prefill", text]`, which grok rejects.
+        vec![text.into()]
     }
 }
 
@@ -142,8 +146,15 @@ mod tests {
     }
 
     #[test]
-    fn self_assigns_session_id() {
-        assert!(GROK.self_assigns_session_id());
+    fn assigns_session_id_via_cli_flag() {
+        // Grok 1.0.5 accepts `-s/--session-id <UUID>` to create a new
+        // session (create-only; resume is `--resume`). ADR-0024: we mint
+        // the UUID and pass it, rather than scraping PTY output.
+        assert!(!GROK.self_assigns_session_id());
+        assert_eq!(
+            GROK.session_assign_args("550e8400-e29b-41d4-a716-446655440000"),
+            vec!["--session-id", "550e8400-e29b-41d4-a716-446655440000"]
+        );
     }
 
     #[test]
@@ -159,14 +170,108 @@ mod tests {
     }
 
     #[test]
-    fn session_assign_args_empty() {
-        let args = GROK.session_assign_args("any-id");
-        assert!(args.is_empty(), "Grok self-assigns; session_assign_args must be empty");
+    fn supports_prefill_via_positional() {
+        // Interactive TUI takes a trailing [PROMPT] as the first turn
+        // (`grok "fix the bug"`). There is no `--prefill` flag; emitting
+        // the trait default would be rejected upstream.
+        assert!(GROK.supports_prefill());
+        assert_eq!(GROK.prefill_args("fix the auth bug"), vec!["fix the auth bug"]);
     }
 
     #[test]
-    fn no_prefill_support() {
-        assert!(!GROK.supports_prefill());
+    fn prefill_args_preserves_multiline_text() {
+        let multi = "first line\nsecond line\n  indented";
+        assert_eq!(GROK.prefill_args(multi), vec![multi]);
+    }
+
+    /// Interactive TUI prefill is the trailing positional, never
+    /// `--prefill`. The table-driven coherence check accepts either
+    /// shape; this pin forbids the Claude-shaped flag.
+    #[test]
+    fn grok_interactive_recipe_carries_positional_prefill() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let config = ResolvedAgentConfig::default();
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: Some("fix the auth bug in handler.rs"),
+        };
+        let prepared = default_prepare(&GROK, input);
+        let args = &prepared.recipe.base_args;
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("fix the auth bug in handler.rs"),
+            "Grok prefill must be the trailing positional; got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--prefill"),
+            "Grok has no --prefill flag; got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "-p" || a == "--single"),
+            "Grok prefill must stay on the interactive TUI, not headless -p; got {args:?}"
+        );
+    }
+
+    /// Fresh spawn (Assign) must pass `--session-id <uuid>` so the
+    /// orchestrator owns the ID before launch. `--resume` must not appear.
+    #[test]
+    fn grok_assign_recipe_carries_session_id_flag() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let config = ResolvedAgentConfig::default();
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Assign(id),
+            config: &config,
+            prefill: None,
+        };
+        let prepared = default_prepare(&GROK, input);
+        let args = &prepared.recipe.base_args;
+        assert_flag_followed_by_value(args, "--session-id", id);
+        assert!(
+            !args.iter().any(|a| a == "--resume"),
+            "Assign must not emit --resume; got {args:?}"
+        );
+    }
+
+    /// Resume keeps `--resume <id>` (not `-s`) and still appends a
+    /// positional prefill as the trailing arg.
+    #[test]
+    fn grok_resume_recipe_keeps_resume_flag_and_positional_prefill() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let config = ResolvedAgentConfig {
+            model: Some("grok-3".to_string()),
+            effort: None,
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume("01a0400a-6ac5-7d90-a1a6-b5397ff81d62"),
+            config: &config,
+            prefill: Some("continue from the last turn"),
+        };
+        let prepared = default_prepare(&GROK, input);
+        let args = &prepared.recipe.base_args;
+        assert_flag_followed_by_value(args, "--resume", "01a0400a-6ac5-7d90-a1a6-b5397ff81d62");
+        assert_flag_followed_by_value(args, "--model", "grok-3");
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("continue from the last turn")
+        );
+        assert!(
+            !args.iter().any(|a| a == "--session-id"),
+            "Resume must not also assign; got {args:?}"
+        );
     }
 
     /// Issue #1186: pin the harness-specific model-flag shape. The
@@ -204,7 +309,7 @@ mod tests {
         assert!(caps.supports_resume);
         assert!(caps.supports_model_override);
         assert!(!caps.supports_effort_override);
-        assert!(!caps.supports_prefill);
+        assert!(caps.supports_prefill);
         assert!(!caps.requires_attention_hook);
         assert!(!caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
