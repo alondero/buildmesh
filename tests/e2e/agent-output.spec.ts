@@ -12,13 +12,25 @@ import { test, expect } from '@playwright/test';
 import { spawn } from 'child_process';
 import { exec } from 'child_process';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import util from 'util';
 import { invokeViaHttp, waitForPort, waitForPortClosed } from './utils/tauri-http';
+import { EXE_PATH } from './utils/buildmesh-launcher';
 
 const execPromise = util.promisify(exec);
 
-const EXE_PATH = 'X:/src/buildmesh/src-tauri/target/release/buildmesh.exe';
-const LOG_PATH = 'C:/Users/alond/AppData/Roaming/com.alond.buildmesh/logs/buildmesh.log';
+// Path resolution per issue #1255: derive from env / platform-appropriate
+// defaults rather than hardcoding `X:/` and `C:/Users/alond/...`. The
+// dev-profile exe writes to `com.alond.buildmesh.dev/logs/buildmesh.log`
+// (see CLAUDE.local.md); override `BUILDMESH_LOG_DIR` for that case.
+const APPDATA =
+  process.env.APPDATA ??
+  (process.platform === 'win32' ? null : path.join(os.homedir(), '.config'));
+const LOG_DIR =
+  process.env.BUILDMESH_LOG_DIR ??
+  (APPDATA ? path.join(APPDATA, 'com.alond.buildmesh', 'logs') : null);
+const LOG_PATH = LOG_DIR ? path.join(LOG_DIR, 'buildmesh.log') : null;
 
 async function killAllBuildmeshProcesses() {
   try {
@@ -29,6 +41,7 @@ async function killAllBuildmeshProcesses() {
 }
 
 async function readNewLogLines(fromByte: number): Promise<string[]> {
+  if (!LOG_PATH) return [];
   let stat: fs.Stats;
   try {
     stat = await fs.promises.stat(LOG_PATH);
@@ -48,6 +61,7 @@ async function readNewLogLines(fromByte: number): Promise<string[]> {
 }
 
 async function logSize(): Promise<number> {
+  if (!LOG_PATH) return 0;
   try {
     return (await fs.promises.stat(LOG_PATH)).size;
   } catch {
@@ -63,6 +77,13 @@ function getLogTimestamp(line: string): string | null {
 }
 
 test.describe('agent output', () => {
+  // The agent-output tests assert against `buildmesh.log` content. Without
+  // an env hint or platform-appropriate defaults we can't find it — skip the
+  // whole suite rather than pretending the asserts are conditional.
+  test.skip(
+    !LOG_PATH,
+    'LOG_PATH unresolvable: set BUILDMESH_LOG_DIR or run on Windows with %APPDATA% available',
+  );
 
   test.beforeEach(async () => {
     await killAllBuildmeshProcesses();
@@ -97,13 +118,15 @@ test.describe('agent output', () => {
 
     const offsetBefore = await logSize();
 
-    const project = await invokeViaHttp('create_test_mesh', { name: 'Agent Output Test' }) as { id: number };
+    const project = await invokeViaHttp('create_test_mesh', { name: 'Agent Output Test' }) as { id: number; path: string };
     expect(project.id).toBeGreaterThan(0);
 
     const session = await invokeViaHttp('create_agent_node', {
       meshId: project.id,
       name: 'Test Session',
-      path: 'X:\\src\\playbook',
+      // Use the temp dir that `create_test_mesh` provisioned — no
+      // machine-locked path (issue #1255).
+      path: project.path,
       branch: 'main',
     }) as { id: number };
     expect(session.id).toBeGreaterThan(0);
@@ -167,11 +190,13 @@ test.describe('agent output', () => {
 
     const offsetBefore = await logSize();
 
-    const project = await invokeViaHttp('create_test_mesh', { name: 'Claude Code Exit Test' }) as { id: number };
+    const project = await invokeViaHttp('create_test_mesh', { name: 'Claude Code Exit Test' }) as { id: number; path: string };
     const session = await invokeViaHttp('create_agent_node', {
       meshId: project.id,
       name: 'Claude Code Test',
-      path: 'X:\\src\\playbook',
+      // Use the temp dir that `create_test_mesh` provisioned — no
+      // machine-locked path (issue #1255).
+      path: project.path,
       branch: 'main',
     }) as { id: number };
 
