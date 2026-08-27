@@ -15,6 +15,19 @@
 //! at spawn time. The adapter also omitted `Platform::Macos` from
 //! `available_on()`, so the spawn menu on macOS never showed OpenCode even
 //! when the binary was installed — users on macOS were told nothing.
+//!
+//! **Session identity** (2026-08 research, `docs/learning/opencode-harness-capabilities.md`):
+//! OpenCode *self-assigns* IDs of the form `ses_<hex+base62>`. There is no
+//! Claude-style `--session-id` assign flag; `opencode --session <uuid>` is
+//! rejected as an invalid ID, and `--session ses_unknown` fails with
+//! "Session not found" rather than creating that ID. Resume uses
+//! `--session <id>` / `-s <id>` (not `--resume`). Capture is *not* the
+//! PTY UUID regex — those IDs never match — it is `opencode session list
+//! --format json` filtered by the node's spawn directory
+//! (`services::opencode_session`).
+//!
+//! **Model / prefill**: TUI accepts `--model provider/model` and `--prompt`.
+//! There is no TUI `--variant` / `--effort` flag (that's `opencode run` only).
 
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
@@ -52,11 +65,11 @@ impl AgentProvider for OpenCodeAdapter {
     }
 
     fn supports_resume(&self) -> bool {
-        false
+        true
     }
 
     fn auto_resume_on_startup(&self) -> bool {
-        false
+        true
     }
 
     fn requires_attention_hook(&self) -> bool {
@@ -64,15 +77,44 @@ impl AgentProvider for OpenCodeAdapter {
     }
 
     fn supports_model_override(&self) -> bool {
-        false
+        true
     }
 
     fn supports_prefill(&self) -> bool {
-        false
+        true
     }
 
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Linux, Platform::Macos]
+    }
+
+    /// OpenCode mints `ses_…` IDs itself. There is no `--session-id` assign
+    /// flag; a fresh spawn must capture the ID after the TUI starts.
+    fn self_assigns_session_id(&self) -> bool {
+        true
+    }
+
+    /// The PTY UUID regex (`session id: 01a0-…`) cannot see `ses_…` IDs, and
+    /// the TUI is not documented to print them. Capture is the session-list
+    /// poller in `services::opencode_session`, not the reader thread.
+    fn captures_session_id_from_pty(&self) -> bool {
+        false
+    }
+
+    fn captures_session_id_from_cli_list(&self) -> bool {
+        true
+    }
+
+    fn resume_args(&self, id: &str) -> Vec<String> {
+        vec!["--session".into(), id.into()]
+    }
+
+    fn session_assign_args(&self, _id: &str) -> Vec<String> {
+        vec![]
+    }
+
+    fn prefill_args(&self, text: &str) -> Vec<String> {
+        vec!["--prompt".into(), text.into()]
     }
 }
 
@@ -160,5 +202,128 @@ mod tests {
         assert_eq!(ui.label, "OpenCode");
         assert_eq!(ui.color, "#f59e0b");
         assert_eq!(ui.icon, "O");
+    }
+
+    #[test]
+    fn self_assigns_session_id() {
+        assert!(OPENCODE.self_assigns_session_id());
+        assert!(
+            !OPENCODE.captures_session_id_from_pty(),
+            "OpenCode ses_ IDs are not PTY UUID banners; capture is session-list"
+        );
+        assert!(OPENCODE.captures_session_id_from_cli_list());
+    }
+
+    #[test]
+    fn resume_args_format() {
+        let args = OPENCODE.resume_args("ses_fc52ccfb9ffek1jl23ZwpRuSP7");
+        assert_eq!(
+            args,
+            vec!["--session", "ses_fc52ccfb9ffek1jl23ZwpRuSP7"],
+            "OpenCode resume is --session <id>, not --resume"
+        );
+    }
+
+    #[test]
+    fn session_assign_args_empty() {
+        let args = OPENCODE.session_assign_args("any-id");
+        assert!(
+            args.is_empty(),
+            "OpenCode self-assigns; session_assign_args must be empty (no --session-id)"
+        );
+    }
+
+    #[test]
+    fn prefill_args_use_prompt_flag() {
+        let args = OPENCODE.prefill_args("fix the auth bug");
+        assert_eq!(args, vec!["--prompt", "fix the auth bug"]);
+    }
+
+    #[test]
+    fn model_args_use_long_form() {
+        let args = OPENCODE.model_args("anthropic/claude-sonnet-4-5");
+        assert_eq!(args, vec!["--model", "anthropic/claude-sonnet-4-5"]);
+    }
+
+    #[test]
+    fn supports_resume_model_and_prefill_but_no_attention_hook() {
+        assert!(OPENCODE.supports_resume());
+        assert!(OPENCODE.auto_resume_on_startup());
+        assert!(OPENCODE.supports_model_override());
+        assert!(OPENCODE.supports_prefill());
+        assert!(!OPENCODE.requires_attention_hook());
+        assert!(!OPENCODE.produces_readable_transcript());
+    }
+
+    #[test]
+    fn capabilities_descriptor_advertises_resume_model_prefill() {
+        let caps = OPENCODE.capabilities();
+        assert_eq!(caps.harness_id, "opencode");
+        assert!(caps.supports_resume);
+        assert!(caps.auto_resume_on_startup);
+        assert!(caps.supports_model_override);
+        assert!(caps.supports_prefill);
+        assert!(!caps.supports_effort_override);
+        assert!(!caps.requires_attention_hook);
+        assert!(!caps.produces_readable_transcript);
+        assert!(!caps.is_plain_terminal);
+        assert_eq!(
+            caps.effort_control,
+            crate::agent::capabilities::EffortControlKind::None
+        );
+    }
+
+    /// Resume recipe is `opencode --session <id>` (flag, not a subcommand).
+    #[test]
+    fn resume_recipe_carries_session_flag() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let config = ResolvedAgentConfig::default();
+        let input = HarnessLaunchInput {
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            config: &config,
+            prefill: None,
+        };
+        let prepared = default_prepare(&OPENCODE, input);
+        let args = &prepared.recipe.base_args;
+        assert_eq!(
+            args,
+            &["--session".to_string(), "ses_fc52ccfb9ffek1jl23ZwpRuSP7".to_string()]
+        );
+        assert!(
+            !args.iter().any(|a| a == "--resume" || a == "--session-id"),
+            "must not emit Claude/Codex resume flags; got {args:?}"
+        );
+    }
+
+    /// Fresh spawn with model + prefill: `--model provider/model --prompt text`.
+    /// No session-assign flag (self-assign).
+    #[test]
+    fn fresh_recipe_forwards_model_and_prompt_without_session_id() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let config = ResolvedAgentConfig {
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            effort: None,
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: Some("fix the auth bug"),
+        };
+        let prepared = default_prepare(&OPENCODE, input);
+        let args = &prepared.recipe.base_args;
+        assert_flag_followed_by_value(args, "--model", "anthropic/claude-sonnet-4-5");
+        assert_flag_followed_by_value(args, "--prompt", "fix the auth bug");
+        assert!(
+            !args.iter().any(|a| a == "--session" || a == "--session-id" || a == "--prefill"),
+            "fresh spawn must not assign a session id or emit --prefill; got {args:?}"
+        );
     }
 }

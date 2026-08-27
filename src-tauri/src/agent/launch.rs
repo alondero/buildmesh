@@ -40,8 +40,9 @@ pub enum SessionIdModeRef<'a> {
     /// Resume an existing session id (orchestrator already has it; harness
     /// CLI consumes it via `--resume <uuid>` / `--session <id>` / subcommand).
     Resume(&'a str),
-    /// No session id — the harness self-assigns (e.g. mcode, grok, kimi)
-    /// and the orchestrator relies on the reader's PTY capture to learn it.
+    /// No session id — the harness self-assigns (e.g. mcode, grok, kimi,
+    /// OpenCode) and the orchestrator learns the ID after spawn (PTY
+    /// capture, or OpenCode's `session list` poller).
     None,
 }
 

@@ -1,12 +1,15 @@
 # 24. Assign Session IDs Rather Than Capture Them; Resume Reuses the Existing Worktree
 
-For providers whose session ID we control (Anthropic, OpenCode), Buildmesh
+For providers whose session ID we control (Anthropic), Buildmesh
 **assigns** a UUID at spawn time and passes it to the CLI via
 `--session-id <uuid>`, rather than sniffing the ID back out of PTY output.
-PTY regex capture survives only for *self-assigning* providers (Codex,
-Antigravity). `CLAUDE_CODE_SESSION_ID` is deliberately **not** used. Resume
-re-spawns inside the worktree that already exists on disk rather than
-re-creating it.
+PTY regex capture survives only for *self-assigning* providers that print a
+labeled UUID (Codex, Antigravity). OpenCode also self-assigns, but its IDs
+are `ses_…` (not UUIDs) and are not printed on the TUI — capture is
+`opencode session list --format json` filtered by spawn directory, and
+resume is `--session <id>` (see `docs/learning/opencode-harness-capabilities.md`).
+`CLAUDE_CODE_SESSION_ID` is deliberately **not** used. Resume re-spawns
+inside the worktree that already exists on disk rather than re-creating it.
 
 ## Context
 
@@ -17,11 +20,13 @@ worktrees on resume. Both proposals were written against an earlier
 architecture and are moot today. The relevant history:
 
 1. **`61090a4` (2026-05-01) flipped capture to assignment.** For the
-   `anthropic` provider (and other providers we control) Buildmesh now mints a
-   `Uuid::new_v4()` in the orchestrator, writes it to `agent_nodes.cli_session_id`
-   *before* launch, and passes it as `--session-id <uuid>` (`agent/spawn.rs`,
-   `SessionIdMode::Assign`). There is nothing to capture: we already know the
-   ID because we chose it.
+   `anthropic` provider (and other providers whose CLI accepts `--session-id`)
+   Buildmesh now mints a `Uuid::new_v4()` in the orchestrator, writes it to
+   `agent_nodes.cli_session_id` *before* launch, and passes it as
+   `--session-id <uuid>` (`agent/spawn.rs`, `SessionIdMode::Assign`). There
+   is nothing to capture: we already know the ID because we chose it.
+   OpenCode is **not** in this set — its CLI rejects caller-chosen UUIDs
+   (`Invalid session ID`) and unknown `ses_…` IDs (`Session not found`).
 2. **PTY regex capture (`session_capture.rs`) now runs only for self-assigning
    providers** — Codex and Antigravity — where the CLI picks its own ID and we
    have no way to know it up front. `ac47f9e` (issue #651) added
@@ -64,10 +69,11 @@ architecture and are moot today. The relevant history:
   timing or format of PTY output for the providers we control. There is one
   authoritative writer per spawn. Resume never re-cuts a worktree, so prior
   commits and uncommitted work are preserved.
-- **Cons / limits:** Self-assigning providers (Codex, Antigravity) still depend
-  on PTY regex capture; if that capture path ever proves flaky, the fix lives
-  in `session_capture.rs`, not in an env var. That is the only place the
-  original issue-#36 motivation could still apply.
+- **Cons / limits:** Self-assigning providers that print a labeled UUID
+  (Codex, Antigravity) still depend on PTY regex capture; if that capture
+  path ever proves flaky, the fix lives in `session_capture.rs`, not in an
+  env var. OpenCode captures via `opencode session list` (`services::opencode_session`)
+  because its `ses_…` IDs never match the UUID regex.
 - **Unchanged / already covered:** Resume worktree reuse is pinned by
   `provision_for_spawn_reused_when_path_already_exists` (existing worktree →
   `Reused`, prior work preserved) and the cold path by

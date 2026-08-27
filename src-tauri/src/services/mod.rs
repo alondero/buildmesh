@@ -10,6 +10,7 @@ pub mod fetch_freshness;
 pub mod github;
 pub mod mesh;
 pub mod opencode_oauth;
+pub mod opencode_session;
 pub mod pool_worker;
 pub mod provider_verification;
 pub mod sync_lock;

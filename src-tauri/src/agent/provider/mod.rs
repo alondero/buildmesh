@@ -318,7 +318,7 @@ pub trait AgentProvider: Send + Sync {
     /// `services::transcript_reader` knows how to read. Codex's rollout format
     /// is parsed via `TranscriptFormat::Codex` (issue #887), and Cursor's
     /// workspace-scoped JSONL via `TranscriptFormat::Cursor`.
-    /// Providers with no readable transcript (OpenCode, Agy, Terminal) return
+    /// Providers with no wired transcript reader (OpenCode, Agy, Terminal) return
     /// `false`; their digest degrades to spine-only with enrichment explicitly
     /// flagged `unsupported`, never silently omitted.
     fn produces_readable_transcript(&self) -> bool {
@@ -340,6 +340,22 @@ pub trait AgentProvider: Send + Sync {
     /// Whether this provider auto-assigns session IDs (captured from PTY output)
     /// rather than accepting one via CLI flag.
     fn self_assigns_session_id(&self) -> bool {
+        false
+    }
+
+    /// Whether the PTY reader thread should sniff a session ID from live
+    /// output (the labeled-UUID regex in `session_capture`). Defaults to
+    /// [`Self::self_assigns_session_id`]. Harnesses that self-assign but
+    /// whose IDs are not UUID-shaped (OpenCode's `ses_…`) override this
+    /// to `false` and capture through a harness-specific CLI instead.
+    fn captures_session_id_from_pty(&self) -> bool {
+        self.self_assigns_session_id()
+    }
+
+    /// Whether spawn should poll this harness's `session list` CLI to
+    /// learn the self-assigned ID (OpenCode). Defaults false — most
+    /// self-assigning harnesses print a labeled UUID on the PTY.
+    fn captures_session_id_from_cli_list(&self) -> bool {
         false
     }
 

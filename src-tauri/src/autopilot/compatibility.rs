@@ -83,7 +83,7 @@ use crate::models::Provider;
 /// update, but that's the point: every reason is stable and testable.
 ///
 /// `serde(rename_all = "snake_case")` keeps the wire form simple for the
-/// renderer (`{ kind: "missing_prefill", harness_id: "opencode" }`) and
+/// renderer (`{ kind: "missing_attention_hook", harness_id: "opencode" }`) and
 /// `ts-rs` reads the same attribute so the generated TS discriminated union
 /// matches by `kind`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -553,13 +553,12 @@ mod tests {
             .any(|r| matches!(r, AutopilotCompatibilityReason::PlainTerminal)));
     }
 
-    /// OpenCode: not plain terminal, but supports_prefill = false AND
-    /// requires_attention_hook = false. Both sub-reasons surface so the UI
-    /// can list every capability gap.
+    /// OpenCode now accepts `--prompt` (prefill) but still has no attention
+    /// hook, so Autopilot stays blocked on the remaining gap.
     #[test]
-    fn evaluate_opencode_emits_prefill_and_attention_reasons() {
+    fn evaluate_opencode_emits_attention_reason_only() {
         let caps = lookup_capabilities("opencode").expect("opencode known");
-        assert!(!caps.supports_prefill);
+        assert!(caps.supports_prefill);
         assert!(!caps.requires_attention_hook);
         assert!(!caps.is_plain_terminal);
         let result = evaluate(AutopilotCompatibilityInput {
@@ -579,7 +578,11 @@ mod tests {
                 _ => "other",
             })
             .collect();
-        assert!(kinds.contains(&"prefill"), "got reasons: {:?}", result.reasons);
+        assert!(
+            !kinds.contains(&"prefill"),
+            "OpenCode advertises --prompt; prefill must not block Autopilot. got {:?}",
+            result.reasons
+        );
         assert!(kinds.contains(&"attention"), "got reasons: {:?}", result.reasons);
     }
 
@@ -718,9 +721,10 @@ mod tests {
 
     // -- Combined reasons --------------------------------------------------
 
-    /// A harness that's missing both attention and prefill, *and* a mesh
-    /// with worktrees disabled, surfaces all three reasons. The UI
-    /// renders them as a bulleted list so the user sees every gap.
+    /// A harness that's missing attention, *and* a mesh with worktrees
+    /// disabled, surfaces both reasons. The UI renders them as a
+    /// bulleted list so the user sees every gap. (OpenCode now has
+    /// prefill, so that reason no longer appears.)
     #[test]
     fn evaluate_combines_harness_and_mesh_reasons() {
         let result = evaluate(AutopilotCompatibilityInput {
@@ -731,8 +735,8 @@ mod tests {
             explicit_autopilot_provider: true,
         });
         assert!(!result.allowed);
-        // Three reasons: MissingPrefill + MissingAttentionHook + WorktreeDisabled.
-        assert_eq!(result.reasons.len(), 3, "got {:?}", result.reasons);
+        // Two reasons: MissingAttentionHook + WorktreeDisabled.
+        assert_eq!(result.reasons.len(), 2, "got {:?}", result.reasons);
     }
 
     /// The `explicit_autopilot_provider` flag round-trips through the
