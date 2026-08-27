@@ -11,6 +11,7 @@
  */
 import { test, expect } from '@playwright/test';
 import { invokeViaHttp, waitForTauriReady } from './utils/tauri-http';
+import { waitForAppBoot } from './utils/state-waits';
 
 test.describe('file explorer', () => {
   test.beforeAll(async () => {
@@ -21,36 +22,26 @@ test.describe('file explorer', () => {
   });
 
   test('folder icon does NOT crash when mesh has no nodes', async ({ page }) => {
-    // Create a mesh via HTTP
-    const mesh = await invokeViaHttp<{ id: number; name: string; path: string }>(
+    await invokeViaHttp<{ id: number; name: string; path: string }>(
       'create_test_mesh',
       { name: 'folder-test-empty' }
     );
 
-    // Navigate to app
-    await page.goto('http://localhost:1420');
-    await page.waitForSelector('img[alt="Buildmesh"]', { timeout: 15000 });
-    await page.waitForTimeout(3000);
+    await page.goto('/');
+    await waitForAppBoot(page);
 
-    // Find mesh row and hover
     const meshRow = page.locator('text="folder-test-empty"');
-    if (await meshRow.isVisible({ timeout: 3000 })) {
-      await meshRow.hover();
-      await page.waitForTimeout(500);
+    await expect(meshRow).toBeVisible({ timeout: 10000 });
+    await meshRow.hover();
 
-      const folderBtn = page.locator('button[title="Open file explorer"]');
-      if (await folderBtn.isVisible()) {
-        await folderBtn.click();
-        await page.waitForTimeout(2000);
+    const folderBtn = page.locator('button[title="Open file explorer"]');
+    await expect(folderBtn).toBeVisible({ timeout: 5000 });
+    await folderBtn.click();
 
-        // Should still be showing the app
-        expect(await page.locator('img[alt="Buildmesh"]').isVisible()).toBe(true);
-      }
-    }
+    await expect(page.locator('img[alt="Buildmesh"]'), 'app should remain mounted after the folder click').toBeVisible({ timeout: 10000 });
   });
 
   test('folder icon does NOT crash when mesh has active agent node', async ({ page }) => {
-    // Collect console errors
     const consoleErrors: string[] = [];
     page.on('console', msg => {
       if (msg.type() === 'error') {
@@ -58,13 +49,11 @@ test.describe('file explorer', () => {
       }
     });
 
-    // Create a mesh with agent node via HTTP
     const mesh = await invokeViaHttp<{ id: number; name: string; path: string }>(
       'create_test_mesh',
       { name: 'folder-test-with-agent' }
     );
 
-    // Create an agent node
     await invokeViaHttp('create_agent_node', {
       meshId: mesh.id,
       name: 'Test Agent',
@@ -72,39 +61,29 @@ test.describe('file explorer', () => {
       branch: 'main',
     });
 
-    // Navigate to app
-    await page.goto('http://localhost:1420');
-    await page.waitForSelector('img[alt="Buildmesh"]', { timeout: 15000 });
-    await page.waitForTimeout(3000);
+    await page.goto('/');
+    await waitForAppBoot(page);
 
-    // Click on an agent node first (user reported this triggers the bug)
     const agentNode = page.locator('text="Test Agent"');
-    if (await agentNode.isVisible({ timeout: 3000 })) {
-      await agentNode.click();
-      await page.waitForTimeout(1000);
-    }
+    await expect(agentNode).toBeVisible({ timeout: 10000 });
+    await agentNode.click();
 
-    // Find mesh row and hover
     const meshRow = page.locator('text="folder-test-with-agent"');
-    if (await meshRow.isVisible({ timeout: 3000 })) {
-      await meshRow.hover();
-      await page.waitForTimeout(500);
+    await expect(meshRow).toBeVisible({ timeout: 10000 });
+    await meshRow.hover();
 
-      // Click the folder icon on the mesh row (NOT on a node)
-      const folderBtn = page.locator('button[title="Open file explorer"]');
-      if (await folderBtn.isVisible()) {
-        await folderBtn.click();
-        await page.waitForTimeout(3000);
+    const folderBtn = page.locator('button[title="Open file explorer"]');
+    await expect(folderBtn).toBeVisible({ timeout: 5000 });
+    await folderBtn.click();
 
-        // Should still be showing the app
-        expect(await page.locator('img[alt="Buildmesh"]').isVisible()).toBe(true);
+    await expect(page.locator('img[alt="Buildmesh"]'), 'app should remain mounted after the folder click').toBeVisible({ timeout: 10000 });
 
-        // Check for React error #321
-        const react321Errors = consoleErrors.filter(e => e.includes('321') || e.includes('word-wrap'));
-        console.log('Console errors during folder click:', react321Errors);
-        expect(react321Errors, 'React error #321 should NOT fire').toHaveLength(0);
-      }
-    }
+    // Brief settle so late console errors (async chunks triggered by
+    // the click) have a chance to flush — stream-based, no DOM state.
+    await page.waitForTimeout(200);
+    const react321Errors = consoleErrors.filter(e => e.includes('321') || e.includes('word-wrap'));
+    console.log('Console errors during folder click:', react321Errors);
+    expect(react321Errors, 'React error #321 should NOT fire').toHaveLength(0);
   });
 
   test.afterAll(async () => {

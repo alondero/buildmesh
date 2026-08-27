@@ -8,75 +8,63 @@
  *
  * Run with: npx playwright test tests/e2e/sidebar-provider-dropdown.spec.ts
  */
-import { test, expect, Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { waitForTauriReady, invokeViaHttp } from './utils/tauri-http';
+import { waitForAppBoot } from './utils/state-waits';
 
 test.describe('sidebar provider dropdown', () => {
 
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    await page.waitForTimeout(1000);
 
     const tauriReady = await waitForTauriReady(8000);
     if (!tauriReady) {
       test.skip();
+      return;
     }
+
+    await waitForAppBoot(page);
   });
 
   test('clicking + button shows provider dropdown', async ({ page }) => {
-    // Create a project first so we have something to click +
-    const project = await invokeViaHttp<{ id: number; name: string; path: string }>(
+    await invokeViaHttp<{ id: number; name: string; path: string }>(
       'create_test_mesh',
       { name: `Provider Dropdown Test ${Date.now()}` }
     );
-    await page.waitForTimeout(500);
 
-    // Find the + button - it's the button inside the project row with title "New session"
     const plusButton = page.locator('[title="New session"]').first();
+    await expect(plusButton, '+ button should render once the project row arrives').toBeVisible({ timeout: 10000 });
     await plusButton.click();
-    await page.waitForTimeout(300);
 
     // Dropdown shows dynamic harness profiles. Terminal is the always-present
     // default; the retired legacy enum rows ("Minimax"/"Kimi") and the "Legacy"
     // header must NOT appear (issue #538).
-    await expect(page.locator('text=Terminal').first()).toBeVisible();
+    await expect(page.locator('text=Terminal').first()).toBeVisible({ timeout: 5000 });
     await expect(page.locator('text=Minimax')).toHaveCount(0);
     await expect(page.locator('text=Kimi')).toHaveCount(0);
     await expect(page.locator('text=Legacy')).toHaveCount(0);
   });
 
   test('selecting provider creates session and spawns agent', async ({ page }) => {
-    const project = await invokeViaHttp<{ id: number; name: string; path: string }>(
+    await invokeViaHttp<{ id: number; name: string; path: string }>(
       'create_test_mesh',
       { name: `Spawn Test ${Date.now()}` }
     );
-    await page.waitForTimeout(500);
 
-    // Click + to open dropdown
     const plusButton = page.locator('[title="New session"]').first();
+    await expect(plusButton, '+ button should render once the project row arrives').toBeVisible({ timeout: 10000 });
     await plusButton.click();
-    await page.waitForTimeout(300);
 
-    // Click Terminal (the always-present default profile) to spawn a session.
     await page.locator('text=Terminal').first().click();
-    await page.waitForTimeout(1500);
 
-    // A session should now appear in the sidebar
     const sessionItems = page.locator('[data-session-item]');
-    await expect(sessionItems).toHaveCount(1, { timeout: 5000 });
+    await expect(sessionItems, 'a new session row should appear after clicking Terminal').toHaveCount(1, { timeout: 10000 });
 
-    // The session should be active (click it to verify)
-    const firstSession = sessionItems.first();
-    await firstSession.click();
-    await page.waitForTimeout(500);
-
-    // A terminal should be visible
-    const terminals = page.locator('.xterm');
-    await expect(terminals).toHaveCount(1, { timeout: 5000 });
+    await sessionItems.first().click();
+    await expect(page.locator('.xterm'), 'terminal should mount for the active session').toHaveCount(1, { timeout: 10000 });
   });
 
   test('session has cross button to archive it', async ({ page }) => {
-    // Create project and session
     const project = await invokeViaHttp<{ id: number; name: string; path: string }>(
       'create_test_mesh',
       { name: `Archive Test ${Date.now()}` }
@@ -88,22 +76,17 @@ test.describe('sidebar provider dropdown', () => {
       path: project.path,
       branch: 'main',
     });
-    await page.waitForTimeout(500);
 
-    // Find the session item - it should have a × (cross) button
     const sessionItem = page.locator('[data-session-item]').first();
+    await expect(sessionItem, 'session row should appear after WS push').toBeVisible({ timeout: 10000 });
 
-    // The session item should have a × button (title="Archive session")
     const archiveButton = sessionItem.locator('[title="Archive session"]');
-    await expect(archiveButton).toBeVisible({ timeout: 3000 });
-
-    // Click the archive button
+    await expect(archiveButton).toBeVisible({ timeout: 5000 });
     await archiveButton.click();
-    await page.waitForTimeout(500);
 
-    // Session should be gone from sidebar
-    const sessionItems = page.locator('[data-session-item]');
-    const count = await sessionItems.count();
-    expect(count, 'Session should be archived and removed from sidebar').toBe(0);
+    await expect(
+      page.locator('[data-session-item]'),
+      'session row should disappear after Archive click',
+    ).toHaveCount(0, { timeout: 5000 });
   });
 });

@@ -64,28 +64,67 @@ export async function isTestServerReady(): Promise<boolean> {
 }
 
 /**
- * Wait for the HTTP test server to be ready.
+ * Poll `/health` until the test server binds its socket. Returns `false`
+ * on timeout. `fetch` carries a 1 s `AbortSignal` so a half-open socket
+ * after `taskkill` doesn't pin the loop for the full timeout.
  */
 export async function waitForTestServer(timeout = 15000): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    if (await isTestServerReady()) return true;
-    await new Promise(resolve => setTimeout(resolve, 500));
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${TEST_SERVER_URL}/health`, { signal: AbortSignal.timeout(1000) });
+      if (res.ok && (await res.text()).trim().startsWith('OK')) return true;
+    } catch {
+      // not ready
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
   }
   return false;
 }
 
 /**
- * Wait for Tauri app to be fully initialized by polling the test server.
- * Tauri commands won't work until setup() has run and the app window is ready.
+ * Tauri commands won't work until `setup()` has run and the exe is
+ * listening on the test server port. Today that's the same check as
+ * `waitForTestServer` — kept as a separate symbol so the two can
+ * diverge if the readyness check ever grows.
  */
 export async function waitForTauriReady(timeout = 30000): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    if (await isTestServerReady()) {
+  return waitForTestServer(timeout);
+}
+
+/**
+ * Poll a TCP port until a TCP probe (or `fetch /health`) succeeds.
+ * `fetch` carries a 1 s `AbortSignal` so a half-open socket after
+ * `taskkill` doesn't pin the loop for the full timeout.
+ */
+export async function waitForPort(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(1000) });
+      if (res.ok) return true;
+    } catch {
+      // not ready
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
+/**
+ * Inverse of `waitForPort`: returns `true` once the port refuses
+ * connections. Replaces the historical `setTimeout(500)` "let the OS
+ * release the port" guess in `beforeEach` after `taskkill`.
+ */
+export async function waitForPortClosed(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(1000) });
+    } catch {
       return true;
     }
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 100));
   }
   return false;
 }

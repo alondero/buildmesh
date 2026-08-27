@@ -148,34 +148,48 @@ async function pushAgentOutput(page: Page, nodeId: number, lines: string[]) {
  * fallback varies across hosts) while the mirror is what every TUI
  * integration test reads (see src/mobile/screens/attachTouchPan.ts:19
  * — same `.xterm-rows > *` selector for row height measurement).
+ *
+ * Row textContent is read in a single browser-context `evaluate` per
+ * poll tick rather than N Playwright IPC calls — N×interval latency
+ * otherwise makes 10 s timeouts racy on slower hosts. Returns the
+ * captured counts so the test body can assert on them without
+ * re-evaluating.
  */
-async function assertXtermHasRenderedBytes(page: Page, nodeId: number, timeoutMs = 10000) {
+async function assertXtermHasRenderedBytes(page: Page, nodeId: number, timeoutMs = 10000): Promise<{ rowCount: number; nonEmpty: number }> {
   const container = page.locator(`[data-node-id="${nodeId}"]`);
   await expect(container, `AgentTerminal container for node ${nodeId} should mount`).toBeVisible({ timeout: 10000 });
 
   const xterm = container.locator('.xterm');
   await expect(xterm, `xterm should attach inside the AgentTerminal container`).toBeVisible({ timeout: 10000 });
 
-  const deadline = Date.now() + timeoutMs;
-  let lastRowCount = 0;
-  while (Date.now() < deadline) {
-    const rows = xterm.locator('.xterm-rows > div');
-    const rowCount = await rows.count();
-    lastRowCount = rowCount;
-    let nonEmpty = 0;
-    for (let i = 0; i < rowCount; i++) {
-      const text = (await rows.nth(i).textContent()) ?? '';
-      if (text.trim().length > 0) nonEmpty++;
-    }
-    if (nonEmpty > 0) return { rowCount, nonEmpty };
-    await page.waitForTimeout(150);
-  }
-  throw new Error(
-    `xterm for node ${nodeId} rendered ${lastRowCount} rows but none had non-empty textContent ` +
-    `within ${timeoutMs}ms. The PTY->xterm pipeline did not deliver bytes — likely the ` +
-    `agent-output listener wrapper is throwing (issue #149 regression: a ` +
-    `bare requestAnimationFrame stored on TerminalWriter loses its window receiver).`
+  // Throwing inside the poll fn is the documented way to signal
+  // "not yet, retry" — expect.poll retries on thrown errors and
+  // surfaces the `message` we pass on timeout.
+  const captured: { rowCount: number; nonEmpty: number } = { rowCount: 0, nonEmpty: 0 };
+  await expect.poll(
+    async () => {
+      const counts = await xterm.locator('.xterm-rows').evaluate((el) => {
+        const lines = Array.from(el.children).map(c => c.textContent?.trim() ?? '');
+        return { rowCount: lines.length, nonEmpty: lines.filter(l => l.length > 0).length };
+      });
+      if (counts.nonEmpty === 0) {
+        throw new Error('xterm-rows has no non-empty text yet');
+      }
+      captured.rowCount = counts.rowCount;
+      captured.nonEmpty = counts.nonEmpty;
+      return counts;
+    },
+    {
+      timeout: timeoutMs,
+      intervals: [100, 200, 500],
+      message:
+        `xterm for node ${nodeId} should render at least one row with non-empty textContent. ` +
+        `PTY->xterm pipeline did not deliver bytes — likely the agent-output listener wrapper is ` +
+        `throwing (issue #149 regression: a bare requestAnimationFrame stored on TerminalWriter ` +
+        `loses its window receiver).`,
+    },
   );
+  return captured;
 }
 
 test.describe('verify-smoke (issue #157)', () => {
@@ -231,8 +245,8 @@ test.describe('verify-smoke (issue #157)', () => {
 
     // The actual assertion (issue spec step 4): xterm mounted AND at
     // least one rendered row has non-empty textContent.
-    const { rowCount, nonEmpty } = await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
-    expect(rowCount, 'xterm should render rows').toBeGreaterThan(0);
-    expect(nonEmpty, 'at least one rendered row should have non-empty textContent').toBeGreaterThan(0);
+    const counts = await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
+    expect(counts.rowCount, 'xterm should render rows').toBeGreaterThan(0);
+    expect(counts.nonEmpty, 'at least one rendered row should have non-empty textContent').toBeGreaterThan(0);
   });
 });
