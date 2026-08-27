@@ -43,6 +43,14 @@ function terminalDataFromPayload(payload: AgentOutputPayload): TerminalWriteData
   return null;
 }
 
+// Claude Code prints plain URLs, which WebLinksAddon recognises. Codex uses
+// OSC 8 terminal hyperlinks; xterm routes those through `linkHandler`
+// instead. Keep both paths on the opener plugin so the Tauri WebView never
+// tries to navigate away from Buildmesh.
+function openTerminalLink(_event: MouseEvent, uri: string): void {
+  openUrl(uri).catch(console.error);
+}
+
 function measureAndFit(inst: TerminalInstance): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
@@ -308,7 +316,12 @@ export class TerminalRegistry {
 
   private async doCreate(nodeId: number): Promise<TerminalInstance | null> {
     try {
-      const term = new Terminal(createTerminalOptions());
+      const term = new Terminal({
+        ...createTerminalOptions(),
+        // xterm accepts HTTP(S) OSC 8 links by default. Do not opt in to
+        // non-HTTP protocols here; terminal output is untrusted agent text.
+        linkHandler: { activate: openTerminalLink },
+      });
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
@@ -316,9 +329,7 @@ export class TerminalRegistry {
       term.loadAddon(serializeAddon);
       const searchAddon = new SearchAddon();
       term.loadAddon(searchAddon);
-      const webLinksAddon = new WebLinksAddon((_event, uri) => {
-        openUrl(uri).catch(console.error);
-      });
+      const webLinksAddon = new WebLinksAddon(openTerminalLink);
       term.loadAddon(webLinksAddon);
       // Align glyph widths with the Unicode 11+ tables that modern agent CLIs
       // (string-width) use to lay out tables/box-drawing. Without this, xterm
