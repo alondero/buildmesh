@@ -25,15 +25,100 @@
 //! session). Custom models are configured via `[model.<name>]` blocks
 //! in `~/.grok/config.toml`; Buildmesh does not manage those.
 //!
-//! **Shell wrapping**: `grok` is a native binary on all platforms (not a
-//! `.cmd` shim), so `WindowsShell::Direct` is correct everywhere — matching
-//! the AGY adapter pattern.
+//! **Attention hooks** (issue #1282). Grok's hook surface
+//! (`~/.grok/docs/user-guide/10-hooks.md`) exposes both `Notification`
+//! (idle_prompt / permission_prompt / task_complete) and `Stop` events
+//! with a native HTTP handler — no curl wrapper. We inject a single
+//! global hook file at `~/.grok/hooks/buildmesh-attention.json`,
+//! always trusted. Project-local `.grok/hooks/` requires folder trust
+//! (`/hooks-trust` or `--trust`); `--trust` is documented but **not**
+//! in `grok --help` 1.0.5, so there is no flag we can pass at spawn to
+//! unblock the project path. The URL expands `$BUILDMESH_PORT` and
+//! `$BUILDMESH_SESSION_ID` at hook runner time (set per-agent by
+//! `spawn_environment`), so the file is reusable across nodes — every
+//! runner carries the session id and port from its own environment.
 
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
+use std::path::Path;
 
 pub struct GrokAdapter;
 pub static GROK: GrokAdapter = GrokAdapter;
+
+/// The HTTP URL the Grok hook runner POSTs the event envelope to. Both
+/// `$BUILDMESH_PORT` and `$BUILDMESH_SESSION_ID` expand at hook-run time
+/// (set per-agent by `spawn_environment`) — the file is therefore
+/// reusable across nodes without rewriting the literal session id or
+/// port. The Grok docs (`~/.grok/docs/user-guide/10-hooks.md`,
+/// "Using variables in `command` and `url` fields") explicitly state
+/// that both `command` and `url` support `${VAR}` and `$VAR` expansion.
+const HOOK_URL: &str =
+    "http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID";
+
+/// File name we own under `~/.grok/hooks/`. Namespaced so a user's
+/// existing hooks (and any future Buildmesh hook with a different
+/// shape) never collide on the always-trusted global path.
+const HOOK_FILE: &str = "buildmesh-attention.json";
+
+/// Resolve the always-trusted global Grok hooks directory. Mirrors
+/// Codex's `native_codex_home_from` pattern: `USERPROFILE` on Windows,
+/// `HOME` on Unix. Returns `<home>/.grok/hooks`. The hook file lives
+/// here — not under the project cwd — because project-local Grok
+/// hooks require folder trust and `--trust` is not in `grok --help`.
+fn grok_home() -> Result<std::path::PathBuf, String> {
+    let key = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+    std::env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| format!("could not resolve grok home — ${key} is unset"))
+        .map(|p| p.join(".grok").join("hooks"))
+}
+
+/// Write the attention hook file. Idempotent — preserves unrelated
+/// top-level keys the user may have authored. Uses Grok's native HTTP
+/// handler type — the runner POSTs the event envelope directly as
+/// JSON (camelCase: `hookEventName`, `sessionId`, …), no curl wrapper.
+///
+/// `Notification` uses an **empty matcher** (the docs say "An empty or
+/// omitted matcher matches everything"), catching `idle_prompt`,
+/// `permission_prompt`, `task_complete`, and any future notification
+/// type in one entry. `Stop` has no matcher — the docs warn "A matcher
+/// on `Stop` or `UserPromptSubmit` is ignored with a warning".
+fn ensure_hooks_json(path: &Path) -> Result<(), String> {
+    let mut settings: serde_json::Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !settings.is_object() {
+        settings = serde_json::json!({});
+    }
+
+    let hook = serde_json::json!({
+        "type": "http",
+        "url": HOOK_URL,
+    });
+    let expected_hooks = serde_json::json!({
+        "Notification": [{
+            "hooks": [hook.clone()]
+        }],
+        "Stop": [{
+            "hooks": [hook]
+        }]
+    });
+    if settings.get("hooks") == Some(&expected_hooks) {
+        return Ok(());
+    }
+    settings["hooks"] = expected_hooks;
+    let content = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
+    std::fs::write(path, content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
+    tracing::info!("grok inject_attention_hook: wrote {:?}", path);
+    Ok(())
+}
 
 impl AgentProvider for GrokAdapter {
     fn id(&self) -> &'static str {
@@ -69,7 +154,27 @@ impl AgentProvider for GrokAdapter {
     }
 
     fn requires_attention_hook(&self) -> bool {
-        false
+        true
+    }
+
+    /// Inject Buildmesh attention hooks into Grok's always-trusted
+    /// global hooks directory (issue #1282). The file lives in the
+    /// user's `~/.grok/hooks/`, NOT under the project cwd: project-local
+    /// `.grok/hooks/` requires folder trust via `/hooks-trust` /
+    /// `--trust`, and `--trust` is **not** in `grok --help` 1.0.5 —
+    /// there is no spawn flag we can use to bypass the gate.
+    ///
+    /// The HTTP handler POSTs the event envelope to the attention
+    /// endpoint with `$BUILDMESH_PORT` and `$BUILDMESH_SESSION_ID`
+    /// expanded at runner time (set per-agent by `spawn_environment`).
+    /// `project_path` is unused — present to satisfy the trait so a
+    /// future migration to a project-local path doesn't change the
+    /// call site.
+    fn inject_attention_hook(&self, _project_path: &Path) -> Result<(), String> {
+        let dir = grok_home()?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create .grok/hooks dir: {e}"))?;
+        ensure_hooks_json(&dir.join(HOOK_FILE))
     }
 
     fn supports_model_override(&self) -> bool {
@@ -106,6 +211,7 @@ impl AgentProvider for GrokAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn id_and_ui_metadata() {
@@ -310,9 +416,212 @@ mod tests {
         assert!(caps.supports_model_override);
         assert!(!caps.supports_effort_override);
         assert!(caps.supports_prefill);
-        assert!(!caps.requires_attention_hook);
+        assert!(caps.requires_attention_hook, "issue #1282: Grok now ships attention hooks");
         assert!(!caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(caps.effort_control, crate::agent::capabilities::EffortControlKind::None);
     }
+
+    // -----------------------------------------------------------------
+    // Attention hook injection (issue #1282)
+    // -----------------------------------------------------------------
+
+    /// End-to-end: injection writes the namespaced always-trusted global
+    /// file at `<home>/.grok/hooks/buildmesh-attention.json`, with
+    /// Notification (empty matcher = catch-all) and Stop entries pointing
+    /// at the attention endpoint via the env-var indirection that
+    /// `spawn_environment` sets per agent.
+    #[test]
+    fn inject_writes_notification_and_stop_hooks() {
+        let temp = with_user_home_redirect();
+        GROK.inject_attention_hook(std::path::Path::new("/any"))
+            .expect("inject should succeed");
+
+        let path = temp.path().join(".grok").join("hooks").join("buildmesh-attention.json");
+        let content = std::fs::read_to_string(&path).expect("hook file not written");
+        let value: serde_json::Value =
+            serde_json::from_str(&content).expect("hook file is not valid JSON");
+        let hooks = value.get("hooks").expect("hooks key missing");
+
+        for event in ["Notification", "Stop"] {
+            let url = hooks[event][0]["hooks"][0]["url"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} hook missing or wrong shape: {value:#}"));
+            assert!(
+                url.contains("$BUILDMESH_PORT"),
+                "{event} url must expand BUILDMESH_PORT at runner time: {url}"
+            );
+            assert!(
+                url.contains("$BUILDMESH_SESSION_ID"),
+                "{event} url must expand BUILDMESH_SESSION_ID at runner time: {url}"
+            );
+            assert!(
+                url.contains("/api/attention/"),
+                "{event} url must POST to the attention endpoint: {url}"
+            );
+            assert!(
+                hooks[event][0]["hooks"][0]["type"].as_str() == Some("http"),
+                "{event} must use the native http handler (no curl wrapper): {value:#}"
+            );
+        }
+    }
+
+    /// Re-running injection is a no-op once the file matches the
+    /// expected shape — important because the spawn path calls this on
+    /// every fresh spawn (issue #886's idempotency invariant).
+    #[test]
+    fn inject_is_idempotent() {
+        let temp = with_user_home_redirect();
+        GROK.inject_attention_hook(std::path::Path::new("/any")).unwrap();
+        let first = std::fs::read_to_string(
+            temp.path().join(".grok").join("hooks").join("buildmesh-attention.json"),
+        )
+        .unwrap();
+
+        GROK.inject_attention_hook(std::path::Path::new("/any")).unwrap();
+        let second = std::fs::read_to_string(
+            temp.path().join(".grok").join("hooks").join("buildmesh-attention.json"),
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    /// Injection only owns the `hooks` key — unrelated top-level keys
+    /// the user (or another Buildmesh hook with a different shape)
+    /// authored survive.
+    #[test]
+    fn inject_preserves_unrelated_top_level_keys() {
+        let temp = with_user_home_redirect();
+        let dir = temp.path().join(".grok").join("hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("buildmesh-attention.json"),
+            r#"{"custom":"kept","other":[1,2,3]}"#,
+        )
+        .unwrap();
+
+        GROK.inject_attention_hook(std::path::Path::new("/any")).unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("buildmesh-attention.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["custom"], "kept");
+        assert_eq!(value["other"], serde_json::json!([1, 2, 3]));
+        assert!(value["hooks"]["Notification"].is_array());
+        assert!(value["hooks"]["Stop"].is_array());
+    }
+
+    /// The URL template is the single source of truth for the
+    /// attention endpoint — both events reference the same one, and
+    /// both env vars (port + session id) appear so the runner expands
+    /// them per agent.
+    #[test]
+    fn hook_url_targets_attention_endpoint_with_env_expansion() {
+        assert!(HOOK_URL.starts_with("http://localhost:$BUILDMESH_PORT/"));
+        assert!(HOOK_URL.contains("/api/attention/$BUILDMESH_SESSION_ID"));
+        assert!(
+            !HOOK_URL.contains("127.0.0.1"),
+            "use `localhost` so the loopback-only peer check accepts the runner: {HOOK_URL}"
+        );
+    }
+
+    /// The hook file lives in the user's home Grok hooks dir, not in
+    /// the project cwd — project-local hooks require folder trust,
+    /// which we have no spawn flag to bypass.
+    #[test]
+    fn inject_targets_global_grok_hooks_dir_not_project() {
+        let temp = with_user_home_redirect();
+        let project = TempDir::new().unwrap();
+        GROK.inject_attention_hook(project.path()).unwrap();
+
+        // No hook file landed under the project cwd.
+        assert!(
+            !project.path().join(".grok").exists(),
+            "project-local path should be skipped — folder-trust gate has no spawn flag"
+        );
+        // The global one did land.
+        assert!(
+            temp.path()
+                .join(".grok")
+                .join("hooks")
+                .join("buildmesh-attention.json")
+                .exists()
+        );
+    }
+
+    /// `grok_home()` resolves to `<USERPROFILE|HOME>/.grok/hooks/`. A
+    /// missing/empty env var is a hard error (the spawn path logs and
+    /// continues, but the agent runs without attention callbacks).
+    #[test]
+    fn grok_home_resolves_under_user_profile() {
+        let temp = with_user_home_redirect();
+        let resolved = grok_home().expect("home should resolve");
+        assert_eq!(resolved, temp.path().join(".grok").join("hooks"));
+    }
+
+    /// `with_user_home_redirect` is the test scaffolding for every test
+    /// that needs `grok_home()` to land in a temp dir. It serializes
+    /// access to USERPROFILE (Windows) / HOME (Unix) via a process-wide
+    /// mutex so parallel tests can't stomp on each other's env value —
+    /// `grok_home()` reads USERPROFILE, so the only way to keep two
+    /// parallel tests deterministic is to let one mutate it at a time.
+    /// The lock is held for the lifetime of the returned guard; Drop
+    /// restores the prior value and releases the lock together.
+    struct HomeRedirect {
+        temp: TempDir,
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+        /// Declared last so the lock is the last field dropped. Drop::drop
+        /// runs before field drops, so the env restore in our impl
+        /// happens before this guard releases — without that ordering,
+        /// a parallel test could observe the *other* test's temp path.
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeRedirect {
+        fn path(&self) -> &std::path::Path {
+            self.temp.path()
+        }
+    }
+
+    impl Drop for HomeRedirect {
+        fn drop(&mut self) {
+            // Drop::drop runs before any field drops, so the env
+            // restore here happens before `_lock` releases — the
+            // ordering prevents a parallel test from racing on
+            // USERPROFILE mid-shutdown.
+            match self.previous.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn home_key() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "USERPROFILE"
+        } else {
+            "HOME"
+        }
+    }
+
+    fn with_user_home_redirect() -> HomeRedirect {
+        let lock = USER_HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().unwrap();
+        let key = home_key();
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, temp.path());
+        HomeRedirect { temp, key, previous, _lock: lock }
+    }
+
+    /// Process-wide lock for tests that mutate USERPROFILE / HOME.
+    /// Without this, two tests in parallel racing on `set_var` can
+    /// leave the value pointing at the *other* test's temp dir when
+    /// either side calls `grok_home()`, which then writes to the
+    /// wrong location and fails the assertion.
+    static USER_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
