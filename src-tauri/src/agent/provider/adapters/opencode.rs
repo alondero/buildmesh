@@ -314,6 +314,7 @@ mod tests {
             session: SessionIdModeRef::Resume("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(&OPENCODE, input);
         let args = &prepared.recipe.base_args;
@@ -344,6 +345,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: Some("fix the auth bug"),
+            sandbox: false,
         };
         let prepared = default_prepare(&OPENCODE, input);
         let args = &prepared.recipe.base_args;

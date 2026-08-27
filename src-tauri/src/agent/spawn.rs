@@ -531,6 +531,7 @@ pub fn build_spawn_command_prepared(
         session: session_ref,
         config,
         prefill,
+        sandbox,
     };
     let prepared = crate::agent::launch::default_prepare(adapter, input);
 
@@ -4751,6 +4752,7 @@ https://github.com/alondero/buildmesh/issues/247"
             session,
             config,
             prefill,
+            sandbox: false,
         }
     }
 
@@ -4866,6 +4868,41 @@ https://github.com/alondero/buildmesh/issues/247"
                 "prefill-marker / supports_prefill mismatch for {}: \
                  recipe has prefill marker = {}, caps.supports_prefill = {}; args = {:?}",
                 adapter.id(), has_prefill_marker, caps.supports_prefill, args
+            );
+
+            // 4. Sandbox-flag coherence (issue #1287). The orchestrator's
+            //    outer containment (macOS Seatbelt / Windows restricted-
+            //    token) applies uniformly regardless of adapter; the
+            //    adapter-level flag only applies when the adapter itself
+            //    declared a `sandbox_args()` contribution. A second pass
+            //    with `sandbox: true` must therefore add the flag iff
+            //    `adapter.sandbox_args()` is non-empty. Any adapter that
+            //    silently starts emitting `--sandbox` (or fails to emit
+            //    it after overriding `sandbox_args`) trips this pin.
+            let sandbox_input = make_input(
+                Platform::Linux,
+                SessionIdModeRef::None,
+                &config,
+                Some(prefill_text),
+            );
+            let sandbox_input = HarnessLaunchInput { sandbox: true, ..sandbox_input };
+            let sandbox_prepared = crate::agent::launch::default_prepare(adapter, sandbox_input);
+            let sandbox_args = sandbox_prepared
+                .recipe
+                .base_args
+                .iter()
+                .filter(|a| adapter.sandbox_args().contains(a))
+                .count();
+            let sandbox_vocab = adapter.sandbox_args().len();
+            assert_eq!(
+                sandbox_args, sandbox_vocab,
+                "sandbox-flag / sandbox_args mismatch for {}: \
+                 recipe should carry all {} declared sandbox args when sandbox=true, \
+                 got {} matches; args = {:?}",
+                adapter.id(),
+                sandbox_vocab,
+                sandbox_args,
+                sandbox_prepared.recipe.base_args
             );
         }
         assert!(any_adapters >= 9, "expected at least 9 adapters in the matrix");

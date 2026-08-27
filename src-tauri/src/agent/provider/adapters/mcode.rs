@@ -274,6 +274,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(&MCODE, input);
         assert!(
@@ -298,6 +299,7 @@ mod tests {
             session: SessionIdModeRef::Resume("abc-123"),
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(&MCODE, input);
         assert!(

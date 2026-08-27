@@ -9,8 +9,8 @@ import type { EffortControlKind } from "./EffortControlKind";
  *    values before they reach `build_spawn_command`.
  * 2. The Spawn Menu (`ProviderInfo.capabilities`): the frontend can render
  *    only the controls each harness actually supports, so a Codex row offers
- *    the inline-config effort knob and an OpenCode row offers neither model
- *    nor effort.
+ *    the inline-config effort knob and an OpenCode row offers model (but
+ *    not effort — TUI has no `--variant`).
  *
  * Generated to `src/types/generated/HarnessCapabilities.ts`.
  *

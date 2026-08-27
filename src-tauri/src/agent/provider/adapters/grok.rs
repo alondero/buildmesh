@@ -199,6 +199,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: Some("fix the auth bug in handler.rs"),
+            sandbox: false,
         };
         let prepared = default_prepare(&GROK, input);
         let args = &prepared.recipe.base_args;
@@ -232,6 +233,7 @@ mod tests {
             session: SessionIdModeRef::Assign(id),
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(&GROK, input);
         let args = &prepared.recipe.base_args;
@@ -259,6 +261,7 @@ mod tests {
             session: SessionIdModeRef::Resume("01a0400a-6ac5-7d90-a1a6-b5397ff81d62"),
             config: &config,
             prefill: Some("continue from the last turn"),
+            sandbox: false,
         };
         let prepared = default_prepare(&GROK, input);
         let args = &prepared.recipe.base_args;
@@ -294,6 +297,7 @@ mod tests {
             session: SessionIdModeRef::None,
             config: &config,
             prefill: None,
+            sandbox: false,
         };
         let prepared = default_prepare(&GROK, input);
         assert_flag_followed_by_value(&prepared.recipe.base_args, "--model", "grok-3");
