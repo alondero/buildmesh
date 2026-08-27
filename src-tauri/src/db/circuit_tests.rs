@@ -65,7 +65,7 @@ fn circuit_crud_round_trips_all_fields() {
     assert!(get_autopilot_circuit(created.id).unwrap().is_none());
     assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty());
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -115,7 +115,7 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     let missing = update_autopilot_circuit_graph(999_999, &sample_graph_json());
     assert!(missing.is_err());
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -139,7 +139,7 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     assert_eq!(after.name, "survivor");
     assert!(after.enabled);
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -231,7 +231,7 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     let runs = list_circuit_runs(circuit.id, 10).unwrap();
     assert_eq!(runs[0].state, "completed");
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -263,7 +263,7 @@ for _ in 0..3 {
     assert_eq!(steps.len(), 1, "UNIQUE(run_id, node_id) must dedupe");
     assert_eq!(steps[0].agent_node_id, Some(7));
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -320,7 +320,7 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
     assert_eq!(remaining_runs, 0, "runs must cascade with their circuit");
     assert_eq!(remaining_steps, 0, "steps must cascade with their run");
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -362,7 +362,7 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
     };
     assert_eq!(remaining_runs, 0);
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -463,7 +463,7 @@ let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
     );
     assert_eq!(count_active_circuit_agent_nodes(mesh_b.id).unwrap(), 1);
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -500,7 +500,7 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
         4
     );
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -525,7 +525,7 @@ fn duplicate_trigger_identity_replays_the_existing_run() {
         "a second circuit may process the same source independently"
     );
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -555,7 +555,7 @@ fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
     assert_eq!(listed.len(), 2, "disabled circuits must not appear");
     assert!(listed.contains(&on_a.id) && listed.contains(&on_b.id), "listing spans meshes");
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -587,7 +587,7 @@ fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
     assert!(identities.contains(&"interval:1000".to_string()));
     assert!(identities.contains(&"interval:2500".to_string()));
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -709,7 +709,7 @@ fn paused_runs_stay_active_and_counters_count_them() {
     let mine: Vec<_> = active.iter().filter(|a| a.run.circuit_id == circuit.id).collect();
     assert_eq!(mine[0].run.state, "running");
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -763,7 +763,7 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
     assert!(work.started_at.is_some());
     assert!(work.completed_at.is_none(), "a reset step is back in flight");
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }
 
@@ -824,6 +824,6 @@ fn gate_outcomes_stamp_completed_at_and_round_trip() {
         "a blocked status parks without completing"
     );
 
-    drop(get());
+    let _ = get();
     std::fs::remove_file(&path).ok();
 }

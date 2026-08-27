@@ -613,8 +613,6 @@ fn windows_natural_child_exit_unblocks_reader_via_watcher() {
 #[cfg(windows)]
 #[test]
 fn windows_pi_interactive_tui() {
-    use std::io::Write;
-
     let recipe = SpawnRecipe {
         binary: "pi.cmd",
         base_args: vec![
@@ -722,8 +720,6 @@ fn windows_pi_interactive_tui() {
 #[cfg(windows)]
 #[test]
 fn wsl_pi_interactive_tui() {
-    use std::io::Write;
-
     let recipe = SpawnRecipe {
         binary: "/mnt/c/Users/alond/AppData/Roaming/npm/pi",
         base_args: vec![

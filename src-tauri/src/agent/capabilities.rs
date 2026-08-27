@@ -853,6 +853,7 @@ mod tests {
 
     /// The application slot drives the resolved value when explicit + mesh_override
     /// + mesh are empty (issue #1148 cascade layer 4: `explicit > mesh_override > mesh > application > native`).
+    ///
     /// The spawn path in `spawn_agent_inner` populates this slot from
     /// `preferences::harness_default_for(&node.provider)`; this test pins the resolver
     /// contract that the spawn path relies on.
