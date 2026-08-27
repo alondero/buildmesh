@@ -13,6 +13,7 @@ import {
 import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { useWsEvents } from "../useWsEvents";
+import { useVisibilityPolling } from "../useVisibilityPolling";
 import { groupByHarness } from "../../lib/groups";
 import { STATUS_CONFIG } from "../../lib/status";
 
@@ -84,46 +85,11 @@ export default function NodeList({
   // 5s poll is the WS-fallback safety net — `useWsEvents` below drives
   // instant refreshes while the socket is up; the poll catches the gap
   // between WS drops and reconnects (and the case where WS is up but the
-  // server has state we haven't heard an event for).
-  //
-  // Issue #1261 — pause the poll when the tab is backgrounded. Mobile
-  // backgrounding suspends timers AND drops the WS (useWsEvents already
-  // reconnects on foreground, per issue #806), so polling a hidden tab
-  // is pure battery + server churn. Mirror the WS hook's resume-on-
-  // foreground shape: on becoming visible, fire ONE refresh so the user
-  // sees fresh state without waiting out the next tick, then resume
-  // polling. On hiding, just stop the interval.
-  useEffect(() => {
-    refresh();
-    let timer: number | null = null;
-
-    const start = () => {
-      if (timer !== null) return;
-      timer = window.setInterval(refresh, 5000);
-    };
-    const stop = () => {
-      if (timer === null) return;
-      window.clearInterval(timer);
-      timer = null;
-    };
-    const onVisibility = () => {
-      stop();
-      if (document.hidden) return;
-      refresh();
-      start();
-    };
-
-    // Only start the poll if the tab is already in front at mount —
-    // otherwise a user opening the app then backgrounding it would burn
-    // an interval for nothing until they foreground again.
-    if (!document.hidden) start();
-    document.addEventListener("visibilitychange", onVisibility);
-
-    return () => {
-      stop();
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [refresh]);
+  // server has state we haven't heard an event for). The lifecycle /
+  // visibility gating lives in `useVisibilityPolling` (issue #1261)
+  // so any other mobile screen can reuse it without copy-pasting the
+  // 30-line timer dance that used to live inline here.
+  useVisibilityPolling(refresh, 5000);
 
   // Live attention events via /ws/events. On any event, refetch so the
   // list reflects the new status immediately rather than waiting for the

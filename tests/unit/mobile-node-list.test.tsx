@@ -391,20 +391,18 @@ describe("NodeList", () => {
   });
 
   it("pauses the 5s poll while document.hidden and refreshes on becoming visible (issue #1261)", async () => {
-    // Backgrounded tab poll would burn battery + server churn for state
-    // the user can't see — mirror the WS hook's resume-on-foreground
-    // shape (useWsEvents / issue #806): on `visibilitychange` to
-    // `hidden`, stop the interval; on the way back, fire ONE refresh
-    // immediately and resume polling.
+    // The polling lifecycle lives in `useVisibilityPolling`. This test
+    // pins it end-to-end through NodeList: the hook must not start the
+    // 5s tick when mounted with `document.hidden === true`, must fire
+    // ONE refresh immediately on becoming visible, and must stop the
+    // tick again when re-hidden.
     //
-    // jsdom defaults `document.hidden` to false. Force it true BEFORE
-    // render so the mount-time `if (!document.hidden) start()` skips
-    // the interval entirely.
-    //
-    // NOTE: under `vi.useFakeTimers()`, `waitFor` polls on a faked
-    // `setTimeout` so it can never wake up. Match the existing
-    // 5-second-poll test's shape — drain microtasks with `await
-    // Promise.resolve()` chains inside `act()` rather than `waitFor`.
+    // jsdom defaults `document.hidden` to false. Save the existing
+    // descriptor (so other tests / the afterEach unstub don't have to
+    // know we ever touched it) and force it true BEFORE render so the
+    // mount-time `if (visibilityState === "visible")` guard skips the
+    // initial refresh + interval start.
+    const originalHidden = Object.getOwnPropertyDescriptor(document, "hidden");
     Object.defineProperty(document, "hidden", {
       configurable: true,
       get: () => true,
@@ -430,6 +428,19 @@ describe("NodeList", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
+    // Local helpers — keep the assertions below free of microtask plumbing.
+    // `drain()` flushes the pending microtasks without touching timers, which
+    // is what we want after firing a `visibilitychange` event: the hook's
+    // handler is synchronous, but the `await refresh()` inside it parks on
+    // a microtask boundary before its fetch lands. Two hops cover the handler
+    // + the fetch + `.json()` + the `Promise.all` join inside `refresh`.
+    const drain = async () => {
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+
     try {
       render(
         <NodeList
@@ -441,56 +452,49 @@ describe("NodeList", () => {
         />,
       );
 
-      // Initial mount: ONE refresh (the unconditional mount fetch), no
-      // polling started because `document.hidden === true`.
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(nodesCalls).toBe(1);
+      // Mount while hidden: the hook's `if (visibilityState === "visible")`
+      // guard skips BOTH the initial refresh and the interval start. So
+      // we expect zero fetches against /api/nodes — not even one.
+      await drain();
+      expect(nodesCalls).toBe(0);
 
-      // 15s while hidden → still 1. The interval was never armed.
+      // 15s while hidden: still zero (the interval was never armed).
       await act(async () => {
         await vi.advanceTimersByTimeAsync(15000);
       });
-      expect(nodesCalls).toBe(1);
+      expect(nodesCalls).toBe(0);
 
-      // Become visible → visibilitychange handler refreshes once
-      // immediately, then starts the interval.
+      // Become visible: hook fires ONE refresh immediately + starts the
+      // interval. The WS hook's reconnect (also triggered by
+      // visibilitychange) only hits /api/ws-ticket, not /api/nodes,
+      // so the count strictly increases by 1.
       Object.defineProperty(document, "hidden", {
         configurable: true,
         get: () => false,
       });
       await act(async () => {
         document.dispatchEvent(new Event("visibilitychange"));
-        // Drain microtasks for refresh() + the WS hook's reconnect
-        // fetch that visibilitychange also fires.
-        await Promise.resolve();
-        await Promise.resolve();
-        await Promise.resolve();
-        await Promise.resolve();
       });
-      expect(nodesCalls).toBe(2);
+      await drain();
+      expect(nodesCalls).toBe(1);
 
-      // Now polling is active: the next 5s tick should fire ANOTHER
-      // refresh.
+      // Polling is active: the next 5s tick should fire ANOTHER refresh.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5000);
       });
-      expect(nodesCalls).toBe(3);
+      await drain();
+      expect(nodesCalls).toBe(2);
 
-      // Background again → polling stops. No further fetch on the tick.
+      // Background again → polling stops. Capture the baseline RIGHT
+      // BEFORE the next tick — if the interval was cleared cleanly, the
+      // 15s advance must not bump it.
       Object.defineProperty(document, "hidden", {
         configurable: true,
         get: () => true,
       });
       await act(async () => {
         document.dispatchEvent(new Event("visibilitychange"));
-        await Promise.resolve();
       });
-      // (Use the count captured RIGHT BEFORE the next tick — if the
-      // interval was cleared cleanly, 15s shouldn't bump it.)
       const baselineWhileHidden = nodesCalls;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(15000);
@@ -498,13 +502,16 @@ describe("NodeList", () => {
       expect(nodesCalls).toBe(baselineWhileHidden);
     } finally {
       vi.useRealTimers();
-      // jsdom exposes document.hidden as a getter — restore the default
-      // so subsequent tests in the file (which don't expect a hidden
-      // document) aren't surprised.
-      Object.defineProperty(document, "hidden", {
-        configurable: true,
-        get: () => false,
-      });
+      // Restore the ORIGINAL descriptor — not a fresh `{ get: () => false }`
+      // — so any other test in this file or any later suite sees the
+      // same jsdom `document.hidden` it had at process start (other
+      // paths may have set it via prototype chain, which a redefine
+      // would silently drop).
+      if (originalHidden) {
+        Object.defineProperty(document, "hidden", originalHidden);
+      } else {
+        delete (document as { hidden?: unknown }).hidden;
+      }
     }
   });
 

@@ -370,15 +370,21 @@ button {
   color: var(--text-dim);
   font-size: 12px;
   font-family: "JetBrains Mono", "Cascadia Code", "Fira Code", monospace;
-  /* padding + line-height + 2px borders = ~44px hit-target floor
+  /* Flex-center the label inside an explicit 44×44 hit-target box
      (Apple HIG 44pt / Material 48dp). An Esc / ^C mis-tap on this
-     strip costs real time with live agents (issue #1261). */
-  padding: 14px 0;
+     strip costs real time with live agents (issue #1261). Flex
+     centering is chosen over padding math so the floor holds across
+     font substitutions and line-height variants — iOS Safari's
+     monospace fallback metrics on Android webview occasionally
+     shift the effective glyph baseline by a few px. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
   min-width: 44px;
   min-height: 44px;
   text-align: center;
   cursor: pointer;
-  line-height: 1.2;
 }
 .qk-btn:active {
   background: var(--surface-3);
