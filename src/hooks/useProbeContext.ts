@@ -5,15 +5,17 @@
  *
  * Why this is a hook and not another store
  * ----------------------------------------
- * The three values are *fully determined* by `meshStore.selectedMeshId`,
- * `agentNodeStore.activeNodeId`, and the two stores' data. Caching them in
+ * The values are *fully determined* by `meshStore.selectedMeshId`,
+ * `agentNodeStore.activeNodeId`, `uiStore.viewMode`, and the stores' data.
+ * Caching this derived context in
  * a third store would just invite drift — every writer would have to keep
  * the cache in sync. A selector-style hook means there's exactly one
  * source of truth for each input and the answer is recomputed on read.
  *
  * Resolution rules
  * ----------------
- *   activeMeshId    =  selectedMeshId ?? (activeNode?.mesh_id ?? null)
+ *   activeMeshId    =  in Single mode, activeNode?.mesh_id ?? selectedMeshId
+ *                     otherwise, selectedMeshId ?? (activeNode?.mesh_id ?? null)
  *   activeNodeId    =  activeNodeId from agentNodeStore (the focused card,
  *                      independent of which mesh the sidebar is on)
  *   activePath      =  when a node is focused, the node's working
@@ -39,6 +41,7 @@
 import { useMemo } from 'react';
 import { useMeshStore } from '../stores/meshStore';
 import { useAgentNodeStore } from '../stores/agentNodeStore';
+import { useUIStore } from '../stores/uiStore';
 import { getNodeGitPath } from '../lib/paths';
 
 export interface ProbeContext {
@@ -73,6 +76,7 @@ export function useProbeContext(): ProbeContext {
   const meshesById = useMeshStore((s) => s.meshesById);
   const activeNodeId = useAgentNodeStore((s) => s.activeNodeId);
   const agentNodes = useAgentNodeStore((s) => s.agentNodes);
+  const viewMode = useUIStore((s) => s.viewMode);
 
   return useMemo<ProbeContext>(() => {
     const activeNode =
@@ -80,12 +84,15 @@ export function useProbeContext(): ProbeContext {
         ? agentNodes.find((n) => n.id === activeNodeId) ?? null
         : null;
 
-    // Explicit mesh selection wins; the global-view fallback derives mesh
-    // from whichever node card the user last focused.
+    // Single mode is an explicit node lens: the focused node can belong to a
+    // different mesh than the sidebar selection because selecting a sidebar
+    // node deliberately does not leave Single mode. Outside Single mode,
+    // explicit mesh selection remains authoritative and the global-view
+    // fallback derives mesh from whichever node card the user last focused.
     const activeMeshId =
-      selectedMeshId !== null
-        ? selectedMeshId
-        : activeNode?.mesh_id ?? null;
+      viewMode === 'single'
+        ? activeNode?.mesh_id ?? selectedMeshId
+        : selectedMeshId ?? activeNode?.mesh_id ?? null;
 
     if (activeMeshId === null) return EMPTY_CONTEXT;
 
@@ -112,5 +119,5 @@ export function useProbeContext(): ProbeContext {
     const activeMeshName = mesh?.name ?? null;
 
     return { activeMeshId, activeNodeId, activePath, activeMeshPath, activeMeshName };
-  }, [selectedMeshId, meshesById, activeNodeId, agentNodes]);
+  }, [selectedMeshId, meshesById, activeNodeId, agentNodes, viewMode]);
 }
