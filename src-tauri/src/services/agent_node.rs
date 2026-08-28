@@ -304,10 +304,14 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     // forever (issue #1263). `disarm` is a no-op on an unarmed node, so
     // sibling-positioning with the other per-node cleanups is safe.
     crate::attention_autoclear::disarm(session_id);
-    // Drop autopilot state too. The ledger delete must be explicit: the
-    // table's ON DELETE CASCADE never fires because the connection doesn't
-    // enable SQLite's `foreign_keys` pragma. Removing the row also frees
-    // the issue for a poller retry if it is still open + labelled.
+    // Drop autopilot state too. The ledger delete is explicit as a
+    // defensive belt: the table declares ON DELETE CASCADE and the
+    // bundled SQLite build (rusqlite 0.32 / SQLite 3.46.0) has FK
+    // enforcement on by default, so the parent agent_nodes DELETE
+    // below already cascades — but a future system-libsqlite link
+    // would have FK off by default and need this explicit DELETE to
+    // avoid an orphan. Removing the row also frees the issue for a
+    // poller retry if it is still open + labelled.
     crate::autopilot::evaluator::unregister(session_id);
     db::delete_autopilot_run(session_id)?;
 

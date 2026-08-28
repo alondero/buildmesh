@@ -500,6 +500,80 @@ mod tests {
         std::fs::remove_file(&temp_path).ok();
     }
 
+    /// Issue #1231 — `delete_mesh` must clear the mesh's `autopilot_runs`
+    /// rows. The schema declares `ON DELETE CASCADE` on
+    /// `autopilot_runs.node_id`, and the bundled SQLite build (rusqlite
+    /// 0.32 / SQLite 3.46.0) has FK enforcement on by default — so the
+    /// `agent_nodes` DELETE below already cascades, and the explicit
+    /// `autopilot_runs` DELETE in `delete_mesh` is a defensive belt for
+    /// a future system-libsqlite link (where FK is per-connection opt-in
+    /// and defaults OFF). This test pins the externally-observable
+    /// contract (`list_active_autopilot_node_ids` empty,
+    /// `list_known_autopilot_issue_numbers` empty for the mesh) so it
+    /// stays green whichever mechanism delivers it — and fails if a
+    /// future change removes BOTH the cascade AND the explicit delete.
+    #[test]
+    fn test_delete_mesh_removes_autopilot_runs_rows() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path =
+            std::env::temp_dir().join(format!("buildmesh_delete_mesh_autopilot_{}.db", test_id));
+        crate::db::init(&temp_path).unwrap();
+
+        let path = format!("/tmp/delete-mesh-autopilot-{}", test_id);
+        let mesh = crate::db::create_mesh("Delete Mesh", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "gh7-node",
+            &mesh.path,
+            "origin/main",
+            crate::models::EnvType::Windows,
+            "anthropic",
+            None,
+            Some(7),
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::db::create_autopilot_run(node.id, mesh.id, 7).unwrap();
+
+        // Pre-delete sanity: the run row exists and the issue is known.
+        assert!(crate::db::list_active_autopilot_node_ids()
+            .unwrap()
+            .contains(&node.id));
+        assert!(crate::db::list_known_autopilot_issue_numbers(mesh.id)
+            .unwrap()
+            .contains(&7));
+
+        // Act: delete the mesh. Whatever the FK-enforcement state of
+        // the connection, no autopilot_runs row for `node.id` may
+        // survive.
+        crate::db::delete_mesh(mesh.id).unwrap();
+
+        // Post-delete: no ghost node ids in the active list …
+        assert!(
+            !crate::db::list_active_autopilot_node_ids()
+                .unwrap()
+                .contains(&node.id),
+            "delete_mesh left an orphaned active autopilot row for node {}",
+            node.id
+        );
+        // … and no ghost issue numbers keeping the poller from retrying.
+        assert!(
+            crate::db::list_known_autopilot_issue_numbers(mesh.id)
+                .unwrap()
+                .is_empty(),
+            "delete_mesh left an orphaned issue dedupe row"
+        );
+
+        std::fs::remove_file(&temp_path).ok();
+    }
+
     /// Issue #993 — a loop iteration that has passed deterministic wrap-up
     /// remains active while its optional suffix turn runs. The same ledger row
     /// must retain its iteration/PR context, then release capacity only when

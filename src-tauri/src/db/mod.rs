@@ -2187,13 +2187,15 @@ pub fn list_completed_autopilot_runs_with_pr(mesh_id: i64) -> SqlResult<Vec<(i64
 }
 
 /// Remove a node's Autopilot ledger row. Called from the node-delete path
-/// (`services::agent_node::delete`) — the table declares `ON DELETE
-/// CASCADE`, but this codebase never turns on SQLite's `foreign_keys`
-/// pragma (see `apply_connection_pragmas`), so the cascade is decorative
-/// and the delete must be explicit. Deleting the row also un-dedupes the
-/// issue (`list_known_autopilot_issue_numbers`), which is the intended
-/// behaviour: closing a bad autopilot node while the issue stays labelled
-/// lets the poller retry it.
+/// (`services::agent_node::delete`). The table declares `ON DELETE
+/// CASCADE` and the bundled SQLite build (rusqlite 0.32 / SQLite
+/// 3.46.0) has FK enforcement on by default, so the parent `agent_nodes`
+/// DELETE already cascades — we DELETE explicitly anyway as a defensive
+/// belt against a future link against system libsqlite (where FK is
+/// per-connection opt-in and defaults OFF). Deleting the row also
+/// un-dedupes the issue (`list_known_autopilot_issue_numbers`), which is
+/// the intended behaviour: closing a bad autopilot node while the issue
+/// stays labelled lets the poller retry it.
 pub fn delete_autopilot_run(node_id: i64) -> SqlResult<()> {
     let db = get().lock().unwrap();
     db.execute(
@@ -2450,11 +2452,24 @@ pub fn delete_mesh(id: i64) -> SqlResult<()> {
     // Autopilot Circuits ledger (spec #1205): explicit child deletes —
     // same defensive rule as the warm pool below.
     circuit::delete_circuits_for_mesh_inner(&db, id)?;
+    // Autopilot Runs ledger (issue #1231): explicit child delete. The
+    // schema declares `ON DELETE CASCADE` on `autopilot_runs.node_id`,
+    // and the bundled SQLite build (rusqlite 0.32 / SQLite 3.46.0)
+    // has FK enforcement on by default, so the agent_nodes DELETE
+    // below already cascades. We DELETE explicitly anyway as a
+    // defensive belt against a future link against system libsqlite
+    // (where FK is per-connection opt-in and defaults OFF): an orphan
+    // row here would feed `list_active_autopilot_node_ids` and
+    // `list_known_autopilot_issue_numbers` with ghost node ids /
+    // issue numbers the poller would never respawn.
+    db.execute("DELETE FROM autopilot_runs WHERE mesh_id = ?1", params![id])?;
     db.execute("DELETE FROM agent_nodes WHERE mesh_id = ?1", params![id])?;
-    // The `warm_worktrees.mesh_id` FK declares ON DELETE CASCADE, but SQLite
-    // leaves foreign-key enforcement off by default (no `PRAGMA foreign_keys`
-    // is set), so the cascade never fires — drop the mesh's pool rows
-    // explicitly or they outlive the mesh as orphans (issue #609).
+    // The `warm_worktrees.mesh_id` FK declares ON DELETE CASCADE, and
+    // the bundled SQLite build has FK enforcement on by default, so
+    // the `meshes` DELETE at the bottom would cascade — we DELETE
+    // explicitly anyway as a defensive belt against a future system
+    // libsqlite link (issue #609). Same pattern as
+    // `delete_autopilot_run` above.
     delete_warm_worktrees_for_mesh_inner(&db, id)?;
     db.execute("DELETE FROM meshes WHERE id = ?1", params![id])?;
     Ok(())
