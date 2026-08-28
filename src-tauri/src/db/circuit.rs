@@ -29,7 +29,7 @@ pub fn create_autopilot_circuit(
     concurrency_limit: i64,
     graph_json: &str,
 ) -> SqlResult<AutopilotCircuit> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     db.execute(
         "INSERT INTO autopilot_circuits \
              (mesh_id, name, description, concurrency_limit, graph_json) \
@@ -54,7 +54,7 @@ fn get_autopilot_circuit_inner(
 }
 
 pub fn get_autopilot_circuit(id: i64) -> SqlResult<Option<AutopilotCircuit>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     get_autopilot_circuit_inner(&db, id)
 }
 
@@ -73,7 +73,7 @@ fn map_circuit_row(row: &rusqlite::Row<'_>) -> SqlResult<AutopilotCircuit> {
 }
 
 pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at \
@@ -88,7 +88,7 @@ pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>>
 /// mesh-scoped at the trigger layer: a circuit carries its own mesh_id,
 /// so one query serves the whole worker pass.
 pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at \
@@ -104,7 +104,7 @@ pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
 /// Deliberately trigger-kind agnostic: ANY run (manual Trigger Now
 /// included) restarts the cadence, because the user just intervened.
 pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     db.query_row(
         "SELECT MAX(created_at) FROM autopilot_circuit_runs WHERE circuit_id = ?1",
         params![circuit_id],
@@ -117,7 +117,7 @@ pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String
 /// constraint stays the authoritative backstop; this just keeps the pass
 /// from rewriting identical rows every cycle.
 pub fn list_circuit_trigger_identities(circuit_id: i64) -> SqlResult<Vec<String>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let mut stmt = db.prepare(
         "SELECT trigger_identity FROM autopilot_circuit_runs WHERE circuit_id = ?1",
     )?;
@@ -139,7 +139,7 @@ pub fn list_circuits_with_recent_runs(
     mesh_id: i64,
     runs_per_circuit: i64,
 ) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at \
@@ -199,7 +199,7 @@ pub fn list_circuits_with_recent_runs(
 }
 
 pub fn set_autopilot_circuit_enabled(id: i64, enabled: bool) -> SqlResult<()> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     db.execute(
         "UPDATE autopilot_circuits SET enabled = ?2, updated_at = datetime('now') WHERE id = ?1",
         params![id, i64::from(enabled)],
@@ -213,7 +213,7 @@ pub fn set_autopilot_circuit_enabled(id: i64, enabled: bool) -> SqlResult<()> {
 /// the row doesn't exist (a stale editor must not silently no-op).
 /// `updated_at` stamps so the Probe list shows fresh edit times.
 pub fn update_autopilot_circuit_graph(id: i64, graph_json: &str) -> SqlResult<()> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let changed = db.execute(
         "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
         params![id, graph_json],
@@ -231,7 +231,7 @@ pub fn update_autopilot_circuit_graph(id: i64, graph_json: &str) -> SqlResult<()
 /// off-by-default for a system-libsqlite link — the same defensive rule
 /// `delete_mesh` follows for `warm_worktrees`.
 pub fn delete_autopilot_circuit(id: i64) -> SqlResult<()> {
-    let mut db = super::get().lock().unwrap();
+    let mut db = super::lock_db();
     let tx = db.transaction()?;
     tx.execute(
         "DELETE FROM autopilot_circuit_run_steps WHERE run_id IN \
@@ -277,7 +277,7 @@ pub fn create_circuit_run(
     trigger_identity: &str,
     context_json: &str,
 ) -> SqlResult<i64> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     db.execute(
         "INSERT OR IGNORE INTO autopilot_circuit_runs \
              (circuit_id, mesh_id, trigger_identity, context_json) \
@@ -304,7 +304,7 @@ pub struct ActiveCircuitRun {
 }
 
 pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
                 r.context_json, r.created_at, r.updated_at, \
@@ -336,7 +336,7 @@ pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
 }
 
 pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<AutopilotCircuitRun>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, created_at, updated_at \
@@ -362,7 +362,7 @@ pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<Autopilot
 /// pause/resume (#1207) and the effect-failure path. The worker wakes on
 /// the condvar afterwards; the next pass reads the new state.
 pub fn set_circuit_run_state(run_id: i64, state: &str) -> SqlResult<()> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     db.execute(
         "UPDATE autopilot_circuit_runs SET state = ?2, updated_at = datetime('now') WHERE id = ?1",
         params![run_id, state],
@@ -372,7 +372,7 @@ pub fn set_circuit_run_state(run_id: i64, state: &str) -> SqlResult<()> {
 
 /// One run row by id, or `None` when the id is unknown.
 pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, created_at, updated_at \
@@ -394,7 +394,7 @@ pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
 }
 
 pub fn list_circuit_run_steps(run_id: i64) -> SqlResult<Vec<AutopilotCircuitRunStep>> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     let mut stmt = db.prepare(
         "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
                 outcome, error_message, started_at, completed_at \
@@ -452,7 +452,7 @@ pub fn commit_circuit_advance(
     context_json: Option<&str>,
     step_ops: &[CircuitStepOp],
 ) -> SqlResult<()> {
-    let mut db = super::get().lock().unwrap();
+    let mut db = super::lock_db();
     let tx = db.transaction()?;
     match (run_state, context_json) {
         (Some(state), ctx) => {
@@ -521,7 +521,7 @@ pub fn set_circuit_step_agent_node(
     node_id: &str,
     agent_node_id: i64,
 ) -> SqlResult<()> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     db.execute(
         "UPDATE autopilot_circuit_run_steps SET agent_node_id = ?3 \
          WHERE run_id = ?1 AND node_id = ?2",
@@ -538,7 +538,7 @@ pub fn set_circuit_step_agent_node(
 /// against `autopilot_circuits.concurrency_limit`. Paused runs count:
 /// their steps still hold real agents even though the graph is parked.
 pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     db.query_row(
         "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
@@ -553,7 +553,7 @@ pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
 /// (the mesh-wide auto-spawned-agent cap). NULL agent ids don't count.
 /// Paused runs count (see [`count_running_circuit_steps`]).
 pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
-    let db = super::get().lock().unwrap();
+    let db = super::lock_db();
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \

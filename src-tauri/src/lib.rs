@@ -176,17 +176,15 @@ pub fn run() {
             // custom accounts (e.g. a user-typed "deepseek" account).
             // Idempotent — the underlying UPDATE has a `provider NOT LIKE
             // '%:%'` guard, so re-running on a v19+ DB is a no-op.
-            if let Ok(conn) = db::get().lock() {
-                if let Err(e) = db::ensure_agent_node_provider_id_custom_accounts_migrated(
-                    &conn,
-                    &preferences::provider_accounts(),
-                ) {
-                    tracing::warn!(
-                        "v19 custom-account migration failed (non-fatal, archived nodes \
-                         will keep legacy bare ids until the next launch): {}",
-                        e
-                    );
-                }
+            if let Err(e) = db::ensure_agent_node_provider_id_custom_accounts_migrated(
+                &db::lock_db(),
+                &preferences::provider_accounts(),
+            ) {
+                tracing::warn!(
+                    "v19 custom-account migration failed (non-fatal, archived nodes \
+                     will keep legacy bare ids until the next launch): {}",
+                    e
+                );
             }
 
             // Mesh-default Spawn Option composite-id safety net (v19 follow-up).
@@ -199,14 +197,12 @@ pub fn run() {
             // spawning Claude-CLI sessions against the wrong endpoint.
             // Idempotent — the `WHERE default_provider IN (...)` guard is a
             // no-op on already-migrated rows.
-            if let Ok(conn) = db::get().lock() {
-                if let Err(e) = db::ensure_mesh_default_provider_normalized(&conn) {
-                    tracing::warn!(
-                        "mesh-default provider normalization failed (non-fatal, meshes \
-                         will keep legacy bare ids until the next launch): {}",
-                        e
-                    );
-                }
+            if let Err(e) = db::ensure_mesh_default_provider_normalized(&db::lock_db()) {
+                tracing::warn!(
+                    "mesh-default provider normalization failed (non-fatal, meshes \
+                     will keep legacy bare ids until the next launch): {}",
+                    e
+                );
             }
 
             // App-wide default-provider Spawn Option composite-id safety net.

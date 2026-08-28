@@ -82,7 +82,7 @@ pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshRow, String> {
 
 #[tauri::command]
 pub async fn update_mesh_name(mesh_id: i64, name: String) -> Result<(), String> {
-    let db = db::get().lock().unwrap();
+    let db = db::lock_db();
     db.execute(
         "UPDATE meshes SET name = ?1 WHERE id = ?2",
         rusqlite::params![name, mesh_id],
@@ -121,7 +121,7 @@ pub async fn update_mesh_column(
         return Err(format!("unknown mesh column: {}", column));
     }
 
-    let db = db::get().lock().unwrap();
+    let db = db::lock_db();
     db.execute(
         &format!("UPDATE meshes SET {} = ?1 WHERE id = ?2", column),
         rusqlite::params![value, mesh_id],
@@ -133,7 +133,7 @@ pub async fn update_mesh_column(
 #[tauri::command]
 pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
     let rows = {
-        let db = db::get().lock().unwrap();
+        let db = db::lock_db();
         db.execute(
             "UPDATE meshes SET use_worktree = ?1 WHERE id = ?2",
             rusqlite::params![use_worktree as i32, mesh_id],
@@ -204,7 +204,7 @@ pub async fn update_mesh_pool_size(
             pool_size
         ));
     }
-    let db = db::get().lock().unwrap();
+    let db = db::lock_db();
     let rows = db
         .execute(
             "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = ?2",
@@ -568,7 +568,7 @@ pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<
 
     // Write to both DB and settings.json
     {
-        let db = db::get().lock().unwrap();
+        let db = db::lock_db();
         db.execute(
             "UPDATE meshes SET base_ref = ?1 WHERE id = ?2",
             rusqlite::params![resolved, mesh_id],
@@ -586,7 +586,7 @@ pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
 
     // Write default to DB and remove from settings.json
     {
-        let db = db::get().lock().unwrap();
+        let db = db::lock_db();
         db.execute(
             "UPDATE meshes SET base_ref = 'origin/main' WHERE id = ?1",
             rusqlite::params![mesh_id],

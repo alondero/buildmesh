@@ -29,7 +29,7 @@ mod tests {
         let second_result = crate::db::create_mesh("Second Project", "/tmp/dup-test");
 
         // Cleanup
-        drop(crate::db::get().lock().unwrap());
+        drop(crate::db::lock_db());
         std::fs::remove_file(&temp_path).ok();
 
         // Assert: should return Ok(existing_mesh), NOT Err(UNIQUE constraint)
@@ -250,7 +250,7 @@ mod tests {
         // as SessionStatus::from_db_str. Defensive: the poller refuses to
         // crash on a malformed row.
         {
-            let db = crate::db::get().lock().unwrap();
+            let db = crate::db::lock_db();
             db.execute(
                 "UPDATE meshes SET autopilot_mode = 'tomorrow' WHERE id = ?1",
                 rusqlite::params![mesh.id],
@@ -408,7 +408,7 @@ mod tests {
 
         // Backdate the row as if no pipeline activity happened for 10 minutes.
         {
-            let db = crate::db::get().lock().unwrap();
+            let db = crate::db::lock_db();
             db.execute(
                 "UPDATE autopilot_runs SET updated_at = datetime('now', '-10 minutes') \
                  WHERE node_id = ?1",
@@ -561,7 +561,7 @@ mod tests {
         // `suffix_pending` is active but is not another stale wrap-up
         // verification candidate, even when its timestamp is old.
         {
-            let db = crate::db::get().lock().unwrap();
+            let db = crate::db::lock_db();
             db.execute(
                 "UPDATE autopilot_runs SET updated_at = datetime('now', '-10 minutes') \
                  WHERE node_id = ?1",

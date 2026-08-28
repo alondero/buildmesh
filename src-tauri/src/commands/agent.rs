@@ -1100,7 +1100,7 @@ mod tests {
         // through `commands::mesh_properties`, not a `db::` helper).
         let (_tmp2, mesh_id2) =
             create_test_mesh("pr-provider-mesh", "https://github.com/x/y.git");
-        let db = crate::db::get().lock().unwrap();
+        let db = crate::db::lock_db();
         db.execute(
             "UPDATE meshes SET default_provider = ?1 WHERE id = ?2",
             rusqlite::params!["agy", mesh_id2],

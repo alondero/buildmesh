@@ -834,3 +834,80 @@ fn ensure_mesh_default_provider_normalized_is_idempotent() {
         "re-running the safety net must not change any default_provider"
     );
 }
+
+/// Issue #1224 — poison-recovery regression. A panic while holding the
+/// global DB `Mutex` used to permanently poison it: every subsequent
+/// caller re-panicked with "poisoned lock" and persistence, preferences,
+/// and the worker reads that go through `lock_db()` all bricked. The
+/// helper `lock_db()` now calls `into_inner()` instead, so the DB stays
+/// usable across transient panics.
+///
+/// This test pins that path against the actual singleton. The `DB`
+/// OnceCell is process-wide, so the poison sets the global state for
+/// every other test in the binary — that's the bug class the issue
+/// describes. The recovery helper must hand back a usable guard, and
+/// a round-trip read must still see the rows we wrote.
+#[test]
+fn lock_db_recovers_from_poison() {
+    // The global DB must be initialized before the test can lock it.
+    // Other db-tests use a per-test temp file; we follow that pattern
+    // so this test stays self-contained and cleans up after itself.
+    let test_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_path =
+        std::env::temp_dir().join(format!("buildmesh_issue_1224_poison_test_{}.db", test_id));
+    crate::db::init(&temp_path).expect("test setup: db::init must succeed");
+
+    // Poison the singleton. `catch_unwind` keeps the test binary alive;
+    // the panic payload is the assertion that the inner path panicked.
+    let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = crate::db::lock_db();
+        panic!("intentional db singleton poison for issue #1224 regression test");
+    }));
+    assert!(
+        poison_result.is_err(),
+        "test fixture must panic to poison the DB mutex"
+    );
+
+    // After the panic, the OLD `get().lock().unwrap()` form would now
+    // return `Err(Poisoned)` for every subsequent caller until the
+    // process restarts. The recovery helper must hand back a usable
+    // guard, and the underlying `Connection` must still answer
+    // queries correctly. We round-trip through a write+read pair so
+    // the test fails loudly if the recovery shape regresses.
+    crate::db::lock_db()
+        .execute(
+            "CREATE TABLE IF NOT EXISTS issue_1224_poison_probe (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+    crate::db::lock_db()
+        .execute(
+            "INSERT OR REPLACE INTO issue_1224_poison_probe (id, label) VALUES (1, 'after-poison')",
+            [],
+        )
+        .unwrap();
+    let label: String = crate::db::lock_db()
+        .query_row(
+            "SELECT label FROM issue_1224_poison_probe WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        label, "after-poison",
+        "DB writes must survive the poison (issue #1224)"
+    );
+
+    // Tidy so the probe table and the temp file do not leak into
+    // other tests. The OnceCell is process-wide, so a sibling test
+    // that calls `init` against the same path would otherwise race
+    // with us — a unique path per run keeps the test re-orderable.
+    crate::db::lock_db()
+        .execute("DROP TABLE IF EXISTS issue_1224_poison_probe", [])
+        .unwrap();
+    drop(crate::db::lock_db()); // release the guard before delete
+    std::fs::remove_file(&temp_path).ok();
+}

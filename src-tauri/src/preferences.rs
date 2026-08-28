@@ -453,6 +453,38 @@ static APP_DATA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// In-process cache, refreshed on every write. Reads consult the file only if
 /// the cache is empty (first read).
 static CACHE: Mutex<Option<AppPreferences>> = Mutex::new(None);
+
+/// Lock the in-process preferences cache, recovering from a poisoned
+/// mutex instead of panicking (issue #1224).
+///
+/// `CACHE` is a process-wide static — a panic in any `load`/`save`/
+/// test helper that holds the guard permanently bricks the entire
+/// preferences surface for the rest of the process. The cache value
+/// itself is a plain `Option<AppPreferences>`; the panic cannot
+/// corrupt it (the guard drops on unwind, leaving the value in a
+/// consistent None-or-fully-populated state). `into_inner()` extracts
+/// the value and trusts the next caller to decide whether to refresh
+/// from disk. Mirrors `db::lock_db()` and `services::autopilot::
+/// lock_planner_set`.
+///
+/// Production callers use `CACHE.lock().unwrap_or_else(|p| p.into_inner())`
+/// directly so the helper is gated to `#[cfg(test)]` — clippy's lib-build
+/// dead-code check doesn't see across the test boundary, and the helper
+/// only saves the test module from repeating the recover pattern in
+/// every fixture. Mirrors the `#[allow(dead_code)]` pattern on
+/// `db::is_initialized`.
+#[cfg(test)]
+fn lock_cache() -> std::sync::MutexGuard<'static, Option<AppPreferences>> {
+    match CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "preferences CACHE mutex was poisoned by a prior panic — recovering (issue #1224)"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init(app_data_dir: PathBuf) {
@@ -792,8 +824,25 @@ fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
 }
 
 /// Load preferences, populating the in-process cache on first call.
+///
+/// Recovers from a poisoned `CACHE` mutex instead of panicking (issue
+/// #1224). The cache is a plain `Mutex<Option<AppPreferences>>` —
+/// a panic in a previous holder would have released the guard on
+/// unwind, leaving the inner value in a consistent (None-or-fully-
+/// populated) state. `.unwrap()` on `PoisonError` would brick every
+/// subsequent `load`/`save` and freeze the whole preferences surface;
+/// `into_inner()` lets the next caller decide whether to refresh
+/// from disk.
 pub fn load() -> Result<AppPreferences, String> {
-    let mut guard = CACHE.lock().unwrap();
+    let mut guard = match CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!(
+                "preferences CACHE mutex was poisoned by a prior panic — recovering (issue #1224)"
+            );
+            poisoned.into_inner()
+        }
+    };
     if let Some(cached) = guard.as_ref() {
         return Ok(cached.clone());
     }
@@ -2535,7 +2584,7 @@ mod tests {
             };
             save(prefs.clone()).unwrap();
             // Clear cache to force a disk read.
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let loaded = load().unwrap();
             assert_eq!(loaded, prefs);
         });
@@ -2606,7 +2655,7 @@ mod tests {
     fn malformed_json_falls_back_to_default() {
         with_temp_dir(|dir| {
             std::fs::write(dir.join("preferences.json"), "{not json").unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let prefs = load().unwrap();
             assert_eq!(prefs, AppPreferences::default());
         });
@@ -2635,11 +2684,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             ensure_default_provider_normalized().unwrap();
 
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let loaded = load().unwrap();
             assert_eq!(
                 loaded.default_provider,
@@ -2662,11 +2711,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             ensure_default_provider_normalized().unwrap();
 
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let loaded = load().unwrap();
             assert_eq!(
                 loaded.default_provider,
@@ -2685,11 +2734,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             ensure_default_provider_normalized().unwrap();
 
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let loaded = load().unwrap();
             assert_eq!(
                 loaded.default_provider,
@@ -2708,11 +2757,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             ensure_default_provider_normalized().unwrap();
 
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let loaded = load().unwrap();
             assert_eq!(
                 loaded.default_provider,
@@ -2731,11 +2780,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             ensure_default_provider_normalized().unwrap();
 
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let loaded = load().unwrap();
             assert_eq!(
                 loaded.default_provider, None,
@@ -2776,7 +2825,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let profiles = harness_profiles();
             // Default Terminal plus the appended user profile.
             assert!(profiles.iter().any(|p| p.id == "terminal"));
@@ -2798,7 +2847,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let profiles = harness_profiles();
             let terminals: Vec<_> = profiles.iter().filter(|p| p.id == "terminal").collect();
             assert_eq!(terminals.len(), 1, "override by id, not append");
@@ -2818,7 +2867,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let profiles = harness_profiles();
             assert!(profiles.iter().any(|p| p.id == "terminal"));
             assert!(profiles.iter().any(|p| p.id == "codex-fast"));
@@ -2846,7 +2895,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(resolve_harness_provider("claude-profile"), Provider::Anthropic);
         });
     }
@@ -2875,7 +2924,7 @@ mod tests {
             ];
             let added = merge_detected_profiles(detected).unwrap();
             assert_eq!(added, 2);
-            *CACHE.lock().unwrap() = None; // force a disk read
+            *lock_cache() = None; // force a disk read
             let profiles = harness_profiles();
             assert!(profiles.iter().any(|p| p.id == "claude"));
             assert!(profiles.iter().any(|p| p.id == "codex"));
@@ -2911,7 +2960,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             // The scan re-detects "claude" with the default label — but the
             // user's name must win (id already present → skipped).
             let added = merge_detected_profiles(vec![HarnessProfile {
@@ -2921,7 +2970,7 @@ mod tests {
             }])
             .unwrap();
             assert_eq!(added, 0);
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let claude = harness_profiles().into_iter().find(|p| p.id == "claude").unwrap();
             assert_eq!(claude.name, "My Claude (subscription)");
         });
@@ -2952,7 +3001,7 @@ mod tests {
             let mut prefs = load().unwrap();
             prefs.autopilot_pool_size = Some(4);
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None; // force a disk read
+            *lock_cache() = None; // force a disk read
             assert_eq!(autopilot_pool_size(), Some(4));
         });
     }
@@ -2970,7 +3019,7 @@ mod tests {
         with_temp_dir(|_| {
             assert_eq!(harness_order(), Vec::<String>::new());
             set_harness_order(vec!["codex".into(), "claude".into()]).unwrap();
-            *CACHE.lock().unwrap() = None; // force a disk read
+            *lock_cache() = None; // force a disk read
             assert_eq!(harness_order(), vec!["codex".to_string(), "claude".to_string()]);
         });
     }
@@ -2986,7 +3035,7 @@ mod tests {
             // minimax gets uninstalled; the user drags codex above claude. The UI
             // can only send the installed harnesses, so minimax is absent here.
             set_harness_order(vec!["codex".into(), "claude".into()]).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             // minimax keeps its middle slot; codex/claude swap around it.
             assert_eq!(
                 harness_order(),
@@ -3014,7 +3063,7 @@ mod tests {
     fn set_harness_order_drops_duplicate_ids() {
         with_temp_dir(|_| {
             set_harness_order(vec!["claude".into(), "claude".into(), "codex".into()]).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(harness_order(), vec!["claude".to_string(), "codex".to_string()]);
         });
     }
@@ -3024,7 +3073,7 @@ mod tests {
         with_temp_dir(|_| {
             // Terminal is forced last by the ordering logic, so it's never stored.
             set_harness_order(vec!["claude".into(), "terminal".into(), "codex".into()]).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(harness_order(), vec!["claude".to_string(), "codex".to_string()]);
         });
     }
@@ -3052,7 +3101,7 @@ mod tests {
     fn set_proxied_provider_order_round_trips_through_save_and_read() {
         with_temp_dir(|_| {
             set_proxied_provider_order("claude".into(), vec!["kimi".into(), "minimax".into()]).unwrap();
-            *CACHE.lock().unwrap() = None; // force a disk read
+            *lock_cache() = None; // force a disk read
             assert_eq!(
                 proxied_order_for("claude"),
                 Some(vec!["kimi".to_string(), "minimax".to_string()]),
@@ -3074,7 +3123,7 @@ mod tests {
             set_proxied_provider_order("claude".into(), vec!["minimax".into(), "kimi".into()]).unwrap();
             // Second harness appends, first is untouched.
             set_proxied_provider_order("codex".into(), vec!["minimax".into()]).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(
                 proxied_order_for("claude"),
                 Some(vec!["minimax".to_string(), "kimi".to_string()]),
@@ -3085,7 +3134,7 @@ mod tests {
             );
             // Re-setting claude overwrites just that entry.
             set_proxied_provider_order("claude".into(), vec!["kimi".into(), "minimax".into()]).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(
                 proxied_order_for("claude"),
                 Some(vec!["kimi".to_string(), "minimax".to_string()]),
@@ -3108,7 +3157,7 @@ mod tests {
                 vec!["minimax".into(), "kimi".into(), "minimax".into()],
             )
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(
                 proxied_order_for("claude"),
                 Some(vec!["minimax".to_string(), "kimi".to_string()]),
@@ -3128,7 +3177,7 @@ mod tests {
                 vec!["minimax".into(), "ghost".into(), "kimi".into()],
             )
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(
                 proxied_order_for("claude"),
                 Some(vec!["minimax".to_string(), "kimi".to_string()]),
@@ -3144,7 +3193,7 @@ mod tests {
             // natural order rather than resurrecting an empty stored slot.
             set_proxied_provider_order("claude".into(), vec!["minimax".into()]).unwrap();
             set_proxied_provider_order("claude".into(), vec![]).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(proxied_order_for("claude"), None);
             assert!(proxied_provider_order().is_empty());
         });
@@ -3314,7 +3363,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let all = provider_accounts();
             assert!(all.iter().any(|a| a.id == "glm"));
@@ -3331,7 +3380,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(minimax_api_key_resolved(), Some("legacy-key".to_string()));
 
             save(AppPreferences {
@@ -3347,11 +3396,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(minimax_api_key_resolved(), Some("account-key".to_string()));
 
             save(AppPreferences::default()).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(minimax_api_key_resolved(), None);
         });
     }
@@ -3556,7 +3605,7 @@ mod tests {
                 "model-a",
             ));
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let env = resolve_provider_env("deepseek");
             assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "https://example.com/v1".to_string())));
@@ -3577,7 +3626,7 @@ mod tests {
                 model_tiers: minimax_default_tiers(),
             });
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let env = resolve_provider_env("minimax");
             assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "https://api.minimax.io/anthropic".to_string())));
@@ -3937,7 +3986,7 @@ mod tests {
                 },
             });
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let env = resolve_provider_env("codex:minimax");
             assert!(env.contains(&("OPENAI_BASE_URL".to_string(), "https://api.minimax.io/v1".to_string())));
@@ -3959,7 +4008,7 @@ mod tests {
             };
             upsert_provider_account(&mut prefs, keyed_minimax("sk-mm"));
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             assert!(resolve_provider_env("claude:minimax").is_empty());
         });
@@ -3978,7 +4027,7 @@ mod tests {
                 model_tiers: minimax_default_tiers(),
             });
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let env = resolve_provider_env("claude:minimax");
             assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "https://api.minimax.io/anthropic".to_string())));
@@ -4016,7 +4065,7 @@ mod tests {
                 },
             });
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let env = resolve_provider_env("claude:moonshot");
             let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
@@ -4032,7 +4081,7 @@ mod tests {
             let mut prefs = AppPreferences::default();
             upsert_provider_account(&mut prefs, keyed_kimi("sk-moon"));
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let env = resolve_provider_env("claude:kimi");
             let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
@@ -4068,7 +4117,7 @@ mod tests {
                 model_tiers: kimi_default_tiers(),
             });
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let env = resolve_provider_env("claude:moonshot");
             let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
@@ -4127,7 +4176,7 @@ mod tests {
             // MiniMax not yet materialised — seeded from keyed catalog.
             assert!(set_account_key_if_absent(&mut prefs, "minimax", "sk-mm"));
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             assert_eq!(minimax_api_key_resolved(), Some("sk-mm".to_string()));
 
             let mut prefs = load().unwrap();
@@ -4200,7 +4249,7 @@ mod tests {
                 model_tiers: kimi_default_tiers(),
             });
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let env = resolve_provider_env("claude:kimi");
             let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
@@ -4329,7 +4378,7 @@ mod tests {
             let mut prefs = AppPreferences::default();
             upsert_provider_account(&mut prefs, stored_companion);
             save(prefs).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let accounts = provider_accounts();
             assert!(
@@ -4372,7 +4421,7 @@ mod tests {
                 "provider_pairings": []
             }"#;
             std::fs::write(tmp.join("preferences.json"), raw).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
 
             let prefs = load().unwrap();
             // Legacy fields stripped from account.
@@ -4510,7 +4559,7 @@ mod tests {
                 "proxied_provider_order": []
             });
             std::fs::write(dir.join("preferences.json"), raw.to_string()).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let prefs = load().unwrap();
             assert!(
                 prefs.harness_defaults.is_empty(),
@@ -4542,7 +4591,7 @@ mod tests {
             )
             .unwrap();
             save(prefs.clone()).unwrap();
-            *CACHE.lock().unwrap() = None;
+            *lock_cache() = None;
             let loaded = load().unwrap();
             assert_eq!(loaded.harness_defaults.len(), 1);
             assert_eq!(
@@ -4888,6 +4937,57 @@ mod tests {
                 !is_known_harness_id(id),
                 "id '{id}' must be rejected"
             );
+        }
+    }
+
+    /// Issue #1224 — poison-recovery regression for the preferences
+    /// `CACHE` mutex. `preferences::load()` used to lock with `.unwrap()`
+    /// — a single panic while a caller held the guard would permanently
+    /// poison the cache and every subsequent `load`/`save` would
+    /// re-panic, freezing the whole preferences surface. The new
+    /// `load` body now calls `into_inner()` so reads keep returning
+    /// `AppPreferences` after any one-off failure.
+    ///
+    /// Runs under `TEST_LOCK` (see module-level comment) because
+    /// `CACHE` is process-wide global state.
+    #[test]
+    fn preferences_load_recovers_from_cache_poison() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        // Reset to a known-empty cache so the test starts clean even if
+        // a prior test left state behind.
+        *super::lock_cache() = None;
+
+        // Poison the cache mutex. `catch_unwind` keeps the test binary
+        // alive; the panic payload is the assertion that the inner
+        // path did panic.
+        let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = super::CACHE.lock().expect("first lock must succeed (test setup)");
+            panic!("intentional preferences CACHE poison for issue #1224 regression test");
+        }));
+        assert!(
+            poison_result.is_err(),
+            "test fixture must panic to poison the CACHE mutex"
+        );
+
+        // After the panic, the OLD `.lock().unwrap()` form would now
+        // return `Err(Poisoned)` for every subsequent caller until
+        // process restart. The new `load` body must hand back the
+        // current cached value (None here) without panicking. We do
+        // not call `load()` directly because it would also hit disk
+        // (`read_from_disk`); a cache-only assertion is sufficient to
+        // pin the recovery shape, and disk-coupled tests need a
+        // writable `APP_DATA_DIR` fixture.
+        match super::CACHE.lock() {
+            Ok(g) => assert!(g.is_none(), "cache must be None after manual reset"),
+            Err(poisoned) => {
+                // The poison itself: this is the exact failure the
+                // helper in `load()` must turn into a usable guard.
+                let recovered = poisoned.into_inner();
+                assert!(
+                    recovered.is_none(),
+                    "recovered cache must observe the value the prior holder left behind"
+                );
+            }
         }
     }
 }

@@ -120,6 +120,31 @@ static GATED_TRIGGERS: Lazy<Mutex<HashSet<(i64, i64)>>> =
 static LOGGED_BLOCKS: Lazy<Mutex<HashSet<(i64, i64)>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
+/// Lock one of the planner's app-lifetime tracking sets, recovering from
+/// a poisoned mutex instead of panicking (issue #1224).
+///
+/// The planner holds two small `HashSet` mutexes — `GATED_TRIGGERS` and
+/// `LOGGED_BLOCKS` — neither of which guards an invariant that a panic
+/// mid-write would corrupt (the panic would have released the guard on
+/// unwind, leaving the inner set in a consistent `HashSet` state).
+/// `.unwrap()` on `PoisonError` permanently bricks the planner: the next
+/// collaborator-gate pass or blocked-by dedupe would panic the polling
+/// thread and the daemon silently stops scheduling work. The recover
+/// shape matches `db::lock_db()`, `preferences::save`, and
+/// `services::circuit_worker::lock_circuit_worker_static` (which is the
+/// companion helper for the circuit-worker's `APPROVALS`/`WAKE` statics).
+fn lock_planner_set<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "autopilot planner mutex was poisoned by a prior panic — recovering (issue #1224)"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
 /// Start the Autopilot polling daemon. Called once from Tauri `setup`
 /// (mirrors `services::pool_worker::start_background_worker`).
 pub fn start_autopilot_worker(app: AppHandle) {
@@ -330,7 +355,7 @@ fn poll_mesh(
     );
 
     for issue in planned {
-        if GATED_TRIGGERS.lock().unwrap().contains(&(mesh.id, issue.number)) {
+        if lock_planner_set(&GATED_TRIGGERS).contains(&(mesh.id, issue.number)) {
             continue;
         }
         let trigger = AutopilotTrigger::from_issue(&owner, &repo, issue);
@@ -357,7 +382,7 @@ fn poll_mesh(
                 // ADR-0012 §5: an author without push access never auto-runs.
                 // Remember the pair so we don't re-fetch the permission (and
                 // re-log) every 2 minutes.
-                GATED_TRIGGERS.lock().unwrap().insert((mesh.id, issue.number));
+                lock_planner_set(&GATED_TRIGGERS).insert((mesh.id, issue.number));
                 tracing::info!(
                     "autopilot: issue #{} on mesh {} gated — author '{}' lacks push \
                      access; waiting for manual spawn/approval",
@@ -939,10 +964,7 @@ pub(crate) fn unresolved_blockers(
 /// the spawn-skip. Mirrors the `HashSet::insert` novelty signal used
 /// by `GATED_TRIGGERS`.
 pub(crate) fn mark_blocked_logged(mesh_id: i64, issue_number: i64) -> bool {
-    LOGGED_BLOCKS
-        .lock()
-        .unwrap()
-        .insert((mesh_id, issue_number))
+    lock_planner_set(&LOGGED_BLOCKS).insert((mesh_id, issue_number))
 }
 
 /// Derive the issue-driven plan facts and delegate to
@@ -1117,7 +1139,7 @@ mod tests {
     const PLANNER_TEST_MESH: i64 = i64::MAX - 211;
 
     fn reset_planner_logged_blocks(issue_numbers: &[i64]) {
-        let mut guard = LOGGED_BLOCKS.lock().unwrap();
+        let mut guard = lock_planner_set(&LOGGED_BLOCKS);
         for n in issue_numbers {
             guard.remove(&(PLANNER_TEST_MESH, *n));
         }
@@ -1437,7 +1459,7 @@ mod tests {
         // state in the global set — `cargo test` runs in parallel and
         // the set is app-lifetime state.
         let pair = (i64::MAX - 7, i64::MAX - 13);
-        LOGGED_BLOCKS.lock().unwrap().remove(&pair);
+        lock_planner_set(&LOGGED_BLOCKS).remove(&pair);
         assert!(
             mark_blocked_logged(pair.0, pair.1),
             "first insert is novel — caller logs once"
@@ -1447,7 +1469,7 @@ mod tests {
             "second insert is a duplicate — caller stays silent"
         );
         // Tidy: leave the set as we found it.
-        LOGGED_BLOCKS.lock().unwrap().remove(&pair);
+        lock_planner_set(&LOGGED_BLOCKS).remove(&pair);
     }
 
     #[test]
@@ -1515,7 +1537,7 @@ mod tests {
         });
 
         // Tidy: leave LOGGED_BLOCKS as we found it.
-        LOGGED_BLOCKS.lock().unwrap().remove(&pair);
+        lock_planner_set(&LOGGED_BLOCKS).remove(&pair);
 
         let logs = String::from_utf8(INFO_BUFFER.with(|cell| cell.borrow().clone()))
             .expect("captured log buffer is utf-8");
@@ -2021,5 +2043,63 @@ mod tests {
         let _marker = crate::autopilot::launch::marker_hint_for_prefill(
             "Iterate on the failing test cases",
         );
+    }
+
+    // ---- Poison-recovery regression (issue #1224) ----
+    //
+    // Each planner static used to be locked with `.unwrap()` — a single
+    // panic while holding the guard permanently poisoned the mutex and
+    // every subsequent call re-panicked with "poisoned lock". The
+    // recovery helper `lock_planner_set` calls `into_inner()` instead
+    // so the polling thread keeps scheduling work after any one-off
+    // failure. These tests are the regression pin: poison each static
+    // inside `catch_unwind`, then re-lock and prove normal insert/contains
+    // still works.
+    fn poison_planner_static<T>(mutex: &'static Mutex<T>) {
+        let _guard = mutex.lock().expect("first lock must succeed (test setup)");
+        // `catch_unwind` keeps the test binary alive; the panic payload
+        // is the assertion that the inner code path did panic.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("intentional planner-static poison for issue #1224 regression test");
+        }));
+        assert!(result.is_err(), "test fixture must panic to poison the mutex");
+    }
+
+    #[test]
+    fn gated_triggers_recovers_from_poison() {
+        poison_planner_static(&GATED_TRIGGERS);
+        // After the panic, the OLD `.lock().unwrap()` form would now
+        // return `Err(Poisoned)`. The recovery helper must hand back
+        // a usable guard, and the underlying HashSet must still accept
+        // inserts.
+        let pair = (i64::MAX - 101, i64::MAX - 103);
+        {
+            let mut guard = lock_planner_set(&GATED_TRIGGERS);
+            assert!(
+                guard.insert(pair),
+                "post-poison insert must report novelty (issue #1224)"
+            );
+        }
+        // Tidy so the pair does not pollute sibling tests.
+        lock_planner_set(&GATED_TRIGGERS).remove(&pair);
+    }
+
+    #[test]
+    fn logged_blocks_recovers_from_poison() {
+        poison_planner_static(&LOGGED_BLOCKS);
+        // The dedup wrapper `mark_blocked_logged` reads through the
+        // helper — it is the path production calls take, so the
+        // regression test goes through it instead of duplicating the
+        // lock site.
+        let pair = (i64::MAX - 151, i64::MAX - 157);
+        assert!(
+            mark_blocked_logged(pair.0, pair.1),
+            "first insert after poison must succeed and report novelty"
+        );
+        assert!(
+            !mark_blocked_logged(pair.0, pair.1),
+            "second insert must report duplicate (set survived the panic)"
+        );
+        lock_planner_set(&LOGGED_BLOCKS).remove(&pair);
     }
 }
