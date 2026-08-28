@@ -340,6 +340,67 @@ impl Drop for JobHandle {
     }
 }
 
+/// Run a worker pass body inside `catch_unwind`, logging the panic and
+/// continuing instead of unwinding the long-lived worker thread.
+///
+/// Issue #1235: every long-lived background worker thread (`autopilot`,
+/// `circuits`, coordinator ledger GC) used the shape
+/// `loop { run_pass(); sleep(interval); }`. A single unexpected panic deep
+/// inside a pass would unwind the whole thread, kill the worker silently,
+/// and leave automation stuck forever with the UI showing idle badges. The
+/// standard library does NOT restart the thread — once the closure
+/// returns (by unwinding) the thread is dead.
+///
+/// `AssertUnwindSafe` is the documented escape hatch for this: the closure
+/// the worker passes (e.g. `|| run_poll_pass(&app)`) owns no `&mut`
+/// references that could observe a partially-mutated state across an
+/// unwind. Each pass observes + commits + emits through local values;
+/// nothing inside is `RefCell`/`MutexGuard` we'd need to defend.
+///
+/// The panic hook installed in `lib::setup` still fires BEFORE
+/// `catch_unwind` catches the unwind, so the thread/backtrace still lands
+/// in `panic.log`. This helper adds the worker-name context that the hook
+/// alone can't know — without it, a panic deep in a stepper is hard to
+/// attribute to autopilot vs. circuits vs. ledger GC.
+///
+/// Returns `true` if the pass completed normally, `false` if it panicked.
+/// Workers ignore the return value; tests use it to assert behaviour.
+///
+/// **Mutex recovery is intentionally NOT this helper's job.** Each
+/// worker-static has its own per-module lock helper
+/// (`db::lock_db()`, `services::autopilot::lock_planner_set`,
+/// `services::circuit_worker::lock_circuit_worker_static`) introduced
+/// in #1224 — those wrap the poison recovery in worker-specific logging.
+/// `run_worker_pass` covers the orthogonal concern: keep the THREAD alive
+/// when a panic bubbles up.
+pub fn run_worker_pass<F: FnOnce()>(name: &str, f: F) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(()) => true,
+        Err(payload) => {
+            let msg = panic_message(&payload);
+            tracing::error!(
+                "worker '{}' panicked in pass; recovering and continuing: {}",
+                name,
+                msg
+            );
+            false
+        }
+    }
+}
+
+/// Best-effort message extraction from a `catch_unwind` payload. Mirrors
+/// the logic in `lib::setup`'s panic hook so the log line reads the same
+/// way whether the panic hits the hook or this helper.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.as_str()
+    } else {
+        "<non-string panic payload>"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Regression tests for [`run_command_with_timeout`] (issue #762).
@@ -488,6 +549,66 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "spawn failure must short-circuit, took {elapsed:?}"
+        );
+    }
+
+    // -- run_worker_pass (issue #1235) ----------------------------------
+    //
+    // These pin the panic-isolation spine used by every long-lived worker
+    // thread. The per-worker fault-injection tests (in
+    // services::autopilot etc.) exercise the full wiring; here we only
+    // pin the helper itself. Mutex-recovery coverage lives with the
+    // per-module helpers (`db::lock_db`, `lock_planner_set`,
+    // `lock_circuit_worker_static`) introduced by issue #1224.
+
+    #[test]
+    fn run_worker_pass_returns_true_on_clean_pass() {
+        let mut called = false;
+        let ok = run_worker_pass("test-worker", || {
+            called = true;
+        });
+        assert!(ok, "clean pass returns true");
+        assert!(called, "closure was actually invoked");
+    }
+
+    #[test]
+    fn run_worker_pass_swallows_str_panic_and_returns_false() {
+        let ok = run_worker_pass("test-worker", || {
+            panic!("boom");
+        });
+        assert!(!ok, "panicking pass returns false (not unwinding)");
+    }
+
+    #[test]
+    fn run_worker_pass_swallows_string_panic() {
+        // Different payload type — confirms the message-extraction
+        // branch we share with the panic hook actually fires for both
+        // common panic payload shapes.
+        let ok = run_worker_pass("test-worker", || {
+            let owned: String = "owned boom".to_string();
+            panic!("{owned}");
+        });
+        assert!(!ok);
+    }
+
+    #[test]
+    fn run_worker_pass_lets_outer_code_continue_after_a_panic() {
+        // The whole point: a worker thread looping with run_worker_pass
+        // must NOT die on a single bad pass. Simulate the loop inline.
+        // `successes` increments only when the body completes; the
+        // panicking tick must NOT bump it.
+        let mut successes = 0;
+        for tick in 0..3 {
+            let _ = run_worker_pass("test-worker", || {
+                if tick == 0 {
+                    panic!("first tick fails");
+                }
+                successes += 1;
+            });
+        }
+        assert_eq!(
+            successes, 2,
+            "ticks 1 + 2 must succeed after tick 0 panicked"
         );
     }
 }
