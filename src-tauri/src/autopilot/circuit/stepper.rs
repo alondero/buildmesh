@@ -213,6 +213,40 @@ impl RunView {
         self.steps.iter().rev().find_map(|s| s.agent_node_id)
     }
 
+    /// Resolve the target agent node for an `InjectPty` or `SetNodeStatus` step:
+    /// - If `target_node_id` is explicitly set, lookup the step matching that `node_id`
+    ///   and return its `agent_node_id`.
+    /// - If omitted (`None`), walk backward from `node_id` through incoming edges
+    ///   in the graph's dependency lineage and return the `agent_node_id` of the
+    ///   nearest upstream `SpawnAgentNode`. Falls back to `latest_agent_node_id()`.
+    pub fn resolve_target_agent(&self, node_id: &str, target_node_id: Option<&str>) -> Option<i64> {
+        if let Some(target) = target_node_id {
+            return self.step(target).and_then(|s| s.agent_node_id);
+        }
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(node_id);
+        visited.insert(node_id);
+        while let Some(curr) = queue.pop_front() {
+            for edge in self.graph.incoming(curr) {
+                let from = edge.from.as_str();
+                if visited.insert(from) {
+                    if let Some(node) = self.graph.node(from) {
+                        if matches!(node.kind, CircuitNodeKind::SpawnAgentNode { .. }) {
+                            if let Some(step) = self.step(from) {
+                                if let Some(agent_id) = step.agent_node_id {
+                                    return Some(agent_id);
+                                }
+                            }
+                        }
+                    }
+                    queue.push_back(from);
+                }
+            }
+        }
+        self.latest_agent_node_id()
+    }
+
     /// Attach the spawned mesh agent node to its step. Called by the seam
     /// right after the synchronous stage-1 row creation succeeds.
     pub fn attach_agent_node(&mut self, node_id: &str, agent_node_id: i64) {
@@ -252,8 +286,13 @@ pub enum CircuitEvent {
     AgentReady { node_id: String },
     /// The seam observed the step's piloted agent finished its turn/work
     /// (node status `awaiting_input` / `completed`). `success=false`
-    /// covers the node landing in `error`.
-    AgentFinished { agent_node_id: i64, success: bool },
+    /// covers the node landing in `error`. `output` holds the terminal
+    /// turn text captured by the evaluator blackboard.
+    AgentFinished {
+        agent_node_id: i64,
+        success: bool,
+        output: Option<String>,
+    },
     /// The step's piloted agent was closed/archived mid-run.
     AgentLost { agent_node_id: i64 },
     // -- Milestone 2 (#1207) --
@@ -311,10 +350,22 @@ impl StepWrite {
 /// subset; gate/GitHub effects join in later milestones.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    SpawnAgentNode { node_id: String },
-    InjectPty { node_id: String, prompt: String },
-    SetNodeStatus { node_id: String, status: String },
-    Notify { message: String },
+    SpawnAgentNode {
+        node_id: String,
+    },
+    InjectPty {
+        node_id: String,
+        prompt: String,
+        target_node_id: Option<String>,
+    },
+    SetNodeStatus {
+        node_id: String,
+        status: String,
+        target_node_id: Option<String>,
+    },
+    Notify {
+        message: String,
+    },
     /// Milestone 3 (issue #1208): perform a GitHub mutation against the
     /// run's trigger repo/issue. `label`/`comment` are the raw blueprint
     /// templates — the seam resolves them against the run context at
@@ -392,12 +443,14 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
         CircuitEvent::AgentReady { node_id } => {
             // Fire the pending injection for a Running inject step whose
             // target process just became live.
-            let prompt: Option<String> = match run.graph.node(node_id) {
+            let (prompt, target_node_id) = match run.graph.node(node_id) {
                 Some(n) => match &n.kind {
-                    CircuitNodeKind::InjectPty { prompt, .. } => Some(prompt.clone()),
-                    _ => None,
+                    CircuitNodeKind::InjectPty { prompt, target_node_id } => {
+                        (Some(prompt.clone()), target_node_id.clone())
+                    }
+                    _ => (None, None),
                 },
-                None => None,
+                None => (None, None),
             };
             let is_running_inject =
                 matches!(run.step(node_id), Some(s) if s.status == StepStatus::Running);
@@ -406,6 +459,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     t.effects.push(Effect::InjectPty {
                         node_id: node_id.clone(),
                         prompt: run.context.resolve(&prompt),
+                        target_node_id,
                     });
                     set_step(run, &mut t, node_id, StepStatus::Completed);
                     cascade_after_completion(run, &mut t, 1);
@@ -416,6 +470,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
         CircuitEvent::AgentFinished {
             agent_node_id,
             success,
+            output,
         } => {
             let bound: Option<String> = run
                 .steps
@@ -423,6 +478,9 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 .find(|s| s.status == StepStatus::Running && s.agent_node_id == Some(*agent_node_id))
                 .map(|s| s.node_id.clone());
             if let Some(step_node) = bound {
+                if let Some(out) = output {
+                    run.context.set(&format!("node.{}.output", step_node), out);
+                }
                 if *success {
                     set_step(run, &mut t, &step_node, StepStatus::Completed);
                 } else {
@@ -437,7 +495,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 finish_run_if_done(run, &mut t);
             }
         }
-CircuitEvent::AgentLost { agent_node_id } => {
+        CircuitEvent::AgentLost { agent_node_id } => {
             let bound: Option<String> = run
                 .steps
                 .iter()
@@ -471,6 +529,13 @@ CircuitEvent::AgentLost { agent_node_id } => {
             );
             if waiting && run.state == RunState::Running {
                 set_step(run, &mut t, node_id, StepStatus::Completed);
+                for child in run.graph.children(node_id) {
+                    if let Some(child_step) = run.step(&child) {
+                        if child_step.status.is_terminal() {
+                            reset_step_for_retry(run, &mut t, &child, child_step.attempt + 1);
+                        }
+                    }
+                }
                 cascade_after_completion(run, &mut t, 1);
                 finish_run_if_done(run, &mut t);
             }
@@ -517,10 +582,23 @@ CircuitEvent::AgentLost { agent_node_id } => {
 }
 
 /// Mark a step (creating it if absent) with a new status. Terminal
+/// Mark a step (creating it if absent) with a new status. Terminal
 /// statuses stamp the matching outcome.
 fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepStatus) {
+    let incoming_attempt = run
+        .graph
+        .incoming(node_id)
+        .iter()
+        .filter_map(|e| run.step(&e.from).map(|ps| ps.attempt))
+        .max()
+        .unwrap_or(1);
     let changed = match run.step_mut(node_id) {
         Some(step) => {
+            if incoming_attempt > step.attempt {
+                step.attempt = incoming_attempt;
+                step.outcome = None;
+                step.error = None;
+            }
             if step.status != status {
                 step.status = status;
                 step.outcome = status.outcome();
@@ -531,11 +609,16 @@ fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepSt
         }
         None => {
             let mut step = StepView::new(node_id, status);
+            step.attempt = incoming_attempt;
             step.outcome = status.outcome();
             run.steps.push(step);
             true
         }
     };
+    if status.is_terminal() {
+        let outcome_str = status.outcome().map(|o| o.as_db_str()).unwrap_or(status.as_db_str());
+        run.context.set(&format!("node.{}.status", node_id), outcome_str);
+    }
     if changed {
         // Preserve the existing attempt count on re-transitions (a retry's
         // second run must not write attempt=1 over its reset value).
@@ -560,6 +643,7 @@ fn complete_with_outcome(
         }
         None => 1,
     };
+    run.context.set(&format!("node.{}.status", node_id), outcome.as_db_str());
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
         status: StepStatus::Completed,
@@ -585,6 +669,7 @@ fn fail_step(run: &mut RunView, t: &mut Transition, node_id: &str, error: String
         step.error = Some(error.clone());
         run.steps.push(step);
     }
+    run.context.set(&format!("node.{}.status", node_id), StepOutcome::Failed.as_db_str());
     let attempt = run.step(node_id).map(|s| s.attempt).unwrap_or(1);
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
@@ -682,6 +767,7 @@ fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
             run.steps.push(step);
         }
     }
+    run.context.set(&format!("node.{}.status", node_id), StepOutcome::Cancelled.as_db_str());
     let attempt = run.step(node_id).map(|s| s.attempt).unwrap_or(1);
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
@@ -699,19 +785,26 @@ fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
 /// Is `node_id` eligible to schedule? All incoming edges satisfied by
 /// terminal parent steps with matching conditions — except
 /// `AnyCompleted`, which satisfies on any completed parent, and except
-/// edges FROM a RetryLimit gate (#1207): a loop-back wire is control
-/// flow for the retry reset (which re-queues its target directly), not
-/// a data dependency — counting it would wedge the target forever.
+/// edges FROM a RetryLimit gate (#1207) or unrun CollaboratorCheck in a cycle.
 fn is_eligible(run: &RunView, node_id: &str) -> bool {
     let incoming: Vec<&super::model::CircuitEdge> = run
         .graph
         .incoming(node_id)
         .into_iter()
         .filter(|e| {
-            !matches!(
+            if matches!(
                 run.graph.node(&e.from).map(|n| &n.kind),
                 Some(CircuitNodeKind::RetryLimit { .. })
-            )
+            ) {
+                return false;
+            }
+            if matches!(
+                run.graph.node(&e.from).map(|n| &n.kind),
+                Some(CircuitNodeKind::CollaboratorCheck { require_approval: true })
+            ) && run.step(&e.from).is_none() {
+                return false;
+            }
+            true
         })
         .collect();
     let incoming = incoming.as_slice();
@@ -800,7 +893,8 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
             if run.state != RunState::Running {
                 break;
             }
-            let needs_agent_slot = consumes_agent_slot(&kind);
+            let already_has_agent = run.step(&node_id).and_then(|s| s.agent_node_id).is_some();
+            let needs_agent_slot = consumes_agent_slot(&kind) && !already_has_agent;
             let agent_fits = !needs_agent_slot || mesh_agent_free > 0;
             if circuit_free <= 0 || !agent_fits {
                 set_step(run, t, &node_id, StepStatus::Queued);
@@ -833,12 +927,28 @@ fn step_completed_instantly(run: &RunView, node_id: &str) -> bool {
 }
 
 /// Nodes with no step yet whose incoming edges are all satisfied, in
-/// blueprint order.
+/// blueprint order. In a loop, terminal steps whose upstream parents
+/// advanced to a higher attempt are also eligible.
 fn collect_eligible(run: &RunView) -> Vec<(String, CircuitNodeKind)> {
     run.graph
         .nodes
         .iter()
-        .filter(|n| run.step(&n.id).is_none() && is_eligible(run, &n.id))
+        .filter(|n| {
+            let eligible = is_eligible(run, &n.id);
+            if !eligible {
+                return false;
+            }
+            match run.step(&n.id) {
+                None => true,
+                Some(s) if s.status.is_terminal() => {
+                    // Stale from an earlier loop iteration: eligible if an upstream parent advanced
+                    run.graph.incoming(&n.id).iter().any(|e| {
+                        run.step(&e.from).map(|ps| ps.attempt > s.attempt && ps.status.is_terminal()).unwrap_or(false)
+                    })
+                }
+                _ => false,
+            }
+        })
         .map(|n| (n.id.clone(), n.kind.clone()))
         .collect()
 }
@@ -853,7 +963,8 @@ fn try_start(
     circuit_free: &mut i64,
     mesh_agent_free: &mut i64,
 ) -> bool {
-    let needs_agent_slot = consumes_agent_slot(kind);
+    let already_has_agent = run.step(node_id).and_then(|s| s.agent_node_id).is_some();
+    let needs_agent_slot = consumes_agent_slot(kind) && !already_has_agent;
     let agent_fits = !needs_agent_slot || *mesh_agent_free > 0;
     if *circuit_free <= 0 || !agent_fits {
         return false;
@@ -881,6 +992,20 @@ fn start_step(run: &mut RunView, t: &mut Transition, node_id: &str, kind: &Circu
         );
         return;
     }
+    let incoming_attempt = run
+        .graph
+        .incoming(node_id)
+        .iter()
+        .filter_map(|e| run.step(&e.from).map(|ps| ps.attempt))
+        .max()
+        .unwrap_or(1);
+    if let Some(step) = run.step_mut(node_id) {
+        if incoming_attempt > step.attempt {
+            step.attempt = incoming_attempt;
+            step.outcome = None;
+            step.error = None;
+        }
+    }
     set_step(run, t, node_id, StepStatus::Running);
     start_effects_and_completion(run, t, node_id, kind);
 }
@@ -902,7 +1027,7 @@ fn start_effects_and_completion(
             });
             set_step(run, t, node_id, StepStatus::Completed);
         }
-        CircuitNodeKind::SetNodeStatus { status, .. } => {
+        CircuitNodeKind::SetNodeStatus { status, target_node_id } => {
             let db_status = match status {
                 SessionStatusKind::Running => "running",
                 SessionStatusKind::Idle => "idle",
@@ -911,14 +1036,16 @@ fn start_effects_and_completion(
             t.effects.push(Effect::SetNodeStatus {
                 node_id: node_id.to_string(),
                 status: db_status.to_string(),
+                target_node_id: target_node_id.clone(),
             });
             set_step(run, t, node_id, StepStatus::Completed);
         }
-        CircuitNodeKind::InjectPty { .. }
+        CircuitNodeKind::InjectPty { target_node_id, .. }
             // Wait for AgentReady — the spawn's async stage-2 must land
-            // first. If nothing was ever spawned, fail fast instead of
-            // waiting forever.
-            if run.latest_agent_node_id().is_none() =>
+            // and the agent process be live before we write bytes.
+            // But without any earlier spawn in this run, inject has no
+            // target at all — fail fast.
+            if run.resolve_target_agent(node_id, target_node_id.as_deref()).is_none() =>
         {
             fail_step(
                 run,
@@ -927,12 +1054,10 @@ fn start_effects_and_completion(
                 "no agent node was spawned earlier in this run to inject into".to_string(),
             );
         }
+        CircuitNodeKind::InjectPty { .. } => {
+            // Stays Running until AgentReady.
+        }
         CircuitNodeKind::GithubAction { action, label, comment } => {
-            // The mutation rides the effect list; the seam performs the
-            // HTTP call after this transition commits and fails the step
-            // loudly if it errors. Instant completion keeps the step out
-            // of the concurrency counters while the call is in flight
-            // (the same contract Notify uses).
             t.effects.push(Effect::CallGithub {
                 node_id: node_id.to_string(),
                 action: *action,
@@ -942,12 +1067,15 @@ fn start_effects_and_completion(
             set_step(run, t, node_id, StepStatus::Completed);
         }
         CircuitNodeKind::SpawnAgentNode { .. } => {
-            t.effects.push(Effect::SpawnAgentNode {
-                node_id: node_id.to_string(),
-            });
+            let already_has_agent = run.step(node_id).and_then(|s| s.agent_node_id).is_some();
+            if !already_has_agent {
+                t.effects.push(Effect::SpawnAgentNode {
+                    node_id: node_id.to_string(),
+                });
+            }
             // Stays Running until AgentFinished/AgentLost.
         }
-// Joins are instant once scheduled (eligibility already proved
+        // Joins are instant once scheduled (eligibility already proved
         // their fan-in rule).
         CircuitNodeKind::AllCompleted | CircuitNodeKind::AnyCompleted => {
             set_step(run, t, node_id, StepStatus::Completed);
@@ -958,7 +1086,7 @@ fn start_effects_and_completion(
             // agent's next turn yield and feeds TurnClassified back.
             // Without any spawned agent there is nothing to classify —
             // fail fast rather than wedge.
-            if run.latest_agent_node_id().is_none() =>
+            if run.resolve_target_agent(node_id, None).is_none() =>
         {
             fail_step(
                 run,
@@ -995,38 +1123,25 @@ fn start_effects_and_completion(
         | CircuitNodeKind::GithubPullRequestLabel { .. } => {
             set_step(run, t, node_id, StepStatus::Completed);
         }
-        // GitHub actions are filtered by `is_executable` before this
-        // match; unreachable today, kept exhaustive for when a later
-        // milestone adds their effects.
-        _ => {}
     }
 }
 
-/// RetryLimit gate execution (#1207): find the most recent FAILED parent
-/// wired in through a matching edge and decide retry vs exhaustion.
+/// RetryLimit gate execution (#1207): find the target step to retry
+/// (either via outgoing edge or most recent failed parent) and decide retry vs exhaustion.
 ///
 /// Semantics: `max_retries` is the total allowed executions of the
-/// failing step. `attempt < max_retries` → reset the failed step to
+/// failing step. `attempt < max_retries` → reset the target step to
 /// Queued with `attempt + 1` (the FIFO promotion loop re-runs it) and
 /// complete the gate. Budget exhausted → the gate fails, resuming the
 /// normal fail-fast path.
 fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max_retries: i32) {
-    let target: Option<String> = run
-        .steps
-        .iter()
-        .rev()
-        .find(|s| {
-            s.status == StepStatus::Failed
-                && run.graph.incoming(node_id).iter().any(|e| {
-                    e.from == s.node_id
-                        && match e.condition {
-                            EdgeCondition::Always => true,
-                            EdgeCondition::OnOutcome(o) => o == StepOutcome::Failed,
-                        }
-                })
-        })
-        .map(|s| s.node_id.clone());
-    let Some(target) = target else {
+    let failed_parent = run.steps.iter().rev().find(|s| {
+        (s.status == StepStatus::Failed
+            || s.outcome == Some(StepOutcome::Failed)
+            || s.outcome == Some(StepOutcome::Red))
+            && run.graph.incoming(node_id).iter().any(|e| e.from == s.node_id)
+    });
+    let Some(failed_parent) = failed_parent else {
         fail_step(
             run,
             t,
@@ -1035,6 +1150,12 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
         );
         return;
     };
+    let target = run
+        .graph
+        .children(node_id)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| failed_parent.node_id.clone());
     let attempt = run.step(&target).map(|s| s.attempt).unwrap_or(1);
     if attempt < max_retries {
         reset_step_for_retry(run, t, &target, attempt + 1);
@@ -1049,8 +1170,8 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
     }
 }
 
-/// Reset a failed step for another execution: back to Queued with the
-/// attempt count bumped and error/outcome cleared.
+/// Reset a step for another execution: back to Queued with the
+/// attempt count bumped and error/outcome cleared (preserving agent_node_id).
 fn reset_step_for_retry(
     run: &mut RunView,
     t: &mut Transition,
@@ -1095,9 +1216,9 @@ fn cascade_after_completion(run: &mut RunView, t: &mut Transition, budget: usize
     }
 }
 
-/// Terminal check: the run completes when every blueprint node has a
-/// terminal step (and the blueprint is non-empty). Cancelled steps flip
-/// the run Failed instead of Completed.
+/// Terminal check: the run completes when all active branches are terminal
+/// and no further steps are eligible (and at least one step completed).
+/// Cancelled steps flip the run Failed instead of Completed.
 fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
     // A Failed run sweeps its leftovers: sibling Running/Queued steps are
     // cancelled so the ledger reflects reality and the concurrency
@@ -1125,13 +1246,13 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
         t.run_state_changed = true;
         return;
     }
-    let all_terminal = !run.graph.nodes.is_empty()
-        && run
-            .graph
-            .nodes
-            .iter()
-            .all(|n| run.step(&n.id).map(|s| s.status.is_terminal()).unwrap_or(false));
-    if all_terminal {
+    let has_non_terminal = run.steps.iter().any(|s| !s.status.is_terminal());
+    if has_non_terminal {
+        return;
+    }
+    let any_completed = run.steps.iter().any(|s| s.status == StepStatus::Completed);
+    let has_eligible = !collect_eligible(run).is_empty();
+    if any_completed && !has_eligible {
         run.state = RunState::Completed;
         t.run_state_changed = true;
     }
@@ -1159,6 +1280,14 @@ mod tests {
         CircuitNodeKind::InjectPty {
             prompt: prompt.into(),
             target_node_id: None,
+        }
+    }
+
+    fn agent_finished(agent_node_id: i64, success: bool) -> CircuitEvent {
+        CircuitEvent::AgentFinished {
+            agent_node_id,
+            success,
+            output: None,
         }
     }
 
@@ -1325,8 +1454,7 @@ mod tests {
         advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
-        let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        let t = advance(&mut run, &agent_finished(900, true));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
         // Notify is a non-agent successor — cascades immediately.
         assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
@@ -1344,7 +1472,7 @@ mod tests {
         advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        advance(&mut run, &agent_finished(900, true));
         assert_eq!(run.state, RunState::Completed);
         assert!(run.steps.iter().all(|s| s.status.is_terminal()));
     }
@@ -1371,8 +1499,7 @@ mod tests {
 
         // The agent finishes its fresh boot turn; inject schedules but
         // must not fire until the process is observed live.
-        let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        let t = advance(&mut run, &agent_finished(900, true));
         assert!(t.effects.is_empty(), "injection waits for AgentReady");
         assert_eq!(status_of(&run, "inject"), StepStatus::Running);
 
@@ -1385,6 +1512,7 @@ mod tests {
                 Effect::InjectPty {
                     node_id: "inject".to_string(),
                     prompt: "fix the flaky test".to_string(),
+                    target_node_id: None,
                 },
                 Effect::Notify {
                     message: "Circuit run started nightly-sweep".to_string()
@@ -1402,8 +1530,7 @@ mod tests {
         advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
-        let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: false });
+        let t = advance(&mut run, &agent_finished(900, false));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Failed);
         assert_eq!(run.state, RunState::Failed);
         assert!(t.run_state_changed);
@@ -1434,8 +1561,7 @@ mod tests {
         advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "b"), StepStatus::Running);
         run.attach_agent_node("a", 11);
-        let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        let t = advance(&mut run, &agent_finished(11, false));
         assert_eq!(run.state, RunState::Failed);
         assert_eq!(status_of(&run, "b"), StepStatus::Cancelled);
         assert!(
@@ -1464,8 +1590,7 @@ mod tests {
         advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("spawn", 900);
-        let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        let t = advance(&mut run, &agent_finished(900, true));
         let started = ["notify", "notify-b"]
             .iter()
             .filter(|n| matches!(run.step(n), Some(s) if s.status == StepStatus::Completed))
@@ -1480,10 +1605,7 @@ mod tests {
         advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         let before = run.clone();
-        advance(
-            &mut run,
-            &CircuitEvent::AgentFinished { agent_node_id: 12345, success: true },
-        );
+        advance(&mut run, &agent_finished(12345, true));
         advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 67890 });
         assert_eq!(run, before, "unrelated events must not mutate the run");
     }
@@ -1523,10 +1645,7 @@ mod tests {
         run.attach_agent_node("spawn", 900);
         // Spawn finished → inject schedules but must NOT fire yet (no
         // live process observed).
-        advance(
-            &mut run,
-            &CircuitEvent::AgentFinished { agent_node_id: 900, success: true },
-        );
+        advance(&mut run, &agent_finished(900, true));
         assert_eq!(status_of(&run, "inject"), StepStatus::Running);
 
         let t = advance(&mut run, &CircuitEvent::AgentReady { node_id: "inject".to_string() });
@@ -1538,6 +1657,7 @@ mod tests {
                 Effect::InjectPty {
                     node_id: "inject".to_string(),
                     prompt: "now wrap up nightly-sweep".to_string(),
+                    target_node_id: None,
                 },
                 Effect::Notify { message: "done".to_string() },
             ]
@@ -1625,12 +1745,11 @@ mod tests {
         assert!(run.step("j").is_none(), "join must wait while branches run");
 
         run.attach_agent_node("a", 11);
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: true });
+        advance(&mut run, &agent_finished(11, true));
         assert!(run.step("j").is_none(), "all_completed still waits for b");
 
         run.attach_agent_node("b", 12);
-        let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 12, success: true });
+        let t = advance(&mut run, &agent_finished(12, true));
         assert_eq!(status_of(&run, "j"), StepStatus::Completed);
         assert_eq!(run.state, RunState::Completed);
         assert!(t.run_state_changed);
@@ -1643,13 +1762,13 @@ mod tests {
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("a", 11);
         run.attach_agent_node("b", 12);
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: true });
+        advance(&mut run, &agent_finished(11, true));
         assert_eq!(status_of(&run, "j"), StepStatus::Completed);
 
         // b still runs — the join fired but the run can't be terminal
         // while a step is live.
         assert_eq!(run.state, RunState::Running);
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 12, success: true });
+        advance(&mut run, &agent_finished(12, true));
         assert_eq!(run.state, RunState::Completed);
     }
 
@@ -1688,7 +1807,7 @@ mod tests {
         advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("work", 5);
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 5, success: false });
+        advance(&mut run, &agent_finished(5, false));
         assert_eq!(run.state, RunState::Failed);
         assert!(
             run.step("on-green").is_none(),
@@ -1698,7 +1817,7 @@ mod tests {
 
     // -- gate execution (milestone 2, #1207) -----------------------------------------
 
-#[test]
+    #[test]
     fn llm_classifier_parks_running_until_classified() {
         // The milestone-1 behavior (fail with "not executed until a later
         // milestone") is replaced in #1207: the gate waits for the seam.
@@ -1755,7 +1874,7 @@ mod tests {
 
         run.attach_agent_node("spawn", 900);
         let _ =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+            advance(&mut run, &agent_finished(900, true));
         // The cascade frees exactly one slot (consumed by Notify); the
         // label step schedules on the next Tick's authoritative snapshot.
         let t = advance(&mut run, &tick(5, 5));
@@ -1979,7 +2098,7 @@ mod tests {
         advance(run, &CircuitEvent::Triggered);
         advance(run, &tick(5, 5));
         run.attach_agent_node("work", 900);
-        advance(run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        advance(run, &agent_finished(900, true));
         assert!(run.step(gate_id).is_some(), "gate {} must have started", gate_id);
     }
 
@@ -2148,7 +2267,7 @@ mod tests {
 
         // The current step may finish — but nothing cascades.
         run.attach_agent_node("spawn", 900);
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        advance(&mut run, &agent_finished(900, true));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
         assert!(run.step("notify").is_none(), "paused runs must not advance");
         assert_eq!(run.state, RunState::Paused);
@@ -2161,7 +2280,7 @@ mod tests {
         advance(&mut run, &tick(1, 1));
         run.attach_agent_node("spawn", 900);
         advance(&mut run, &CircuitEvent::Paused);
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 900, success: true });
+        advance(&mut run, &agent_finished(900, true));
 
         let t = advance(&mut run, &CircuitEvent::Resumed);
         assert!(t.run_state_changed);
@@ -2245,7 +2364,7 @@ mod tests {
         // same advance call cascades into the gate, which resets the
         // failed step for its second execution.
         let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+            advance(&mut run, &agent_finished(11, false));
         assert_eq!(status_of(&run, "retry"), StepStatus::Completed);
         assert_eq!(status_of(&run, "work"), StepStatus::Queued);
         assert_eq!(run.step("work").unwrap().attempt, 2);
@@ -2275,11 +2394,11 @@ mod tests {
         advance(&mut run, &CircuitEvent::Triggered);
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("work", 11);
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        advance(&mut run, &agent_finished(11, false));
         advance(&mut run, &tick(5, 5)); // promote the attempt-2 execution
         assert_eq!(run.step("work").unwrap().attempt, 2);
         let t =
-            advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: true });
+            advance(&mut run, &agent_finished(11, true));
         assert_eq!(status_of(&run, "work"), StepStatus::Completed);
         assert_eq!(run.state, RunState::Completed);
         assert!(t.effects.is_empty());
@@ -2292,11 +2411,11 @@ mod tests {
         advance(&mut run, &tick(5, 5));
         run.attach_agent_node("work", 11);
         // Attempt 1 fails → reset to 2.
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        advance(&mut run, &agent_finished(11, false));
         advance(&mut run, &tick(5, 5));
         // Attempt 2 fails → budget spent. The gate is re-armed by the
         // failure, then executes on the next pass and fails the run.
-        advance(&mut run, &CircuitEvent::AgentFinished { agent_node_id: 11, success: false });
+        advance(&mut run, &agent_finished(11, false));
         assert_eq!(run.state, RunState::Running, "the gate still owns the failure");
         let t = advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "retry"), StepStatus::Failed);
@@ -2322,5 +2441,293 @@ mod tests {
         assert!(run.step("retry").unwrap().error.as_deref().unwrap().contains("without a failed upstream"));
         assert_eq!(run.state, RunState::Failed);
         let _ = t;
+    }
+
+    // -- Issue #1357: Multi-agent targeted execution, Blackboard & Loop Retention --
+
+    #[test]
+    fn targeted_multi_agent_injection_targets_specified_node() {
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode { id: "agent_a".into(), kind: spawn_kind("pa") },
+                    CircuitNode { id: "agent_b".into(), kind: spawn_kind("pb") },
+                    CircuitNode {
+                        id: "inject_a".into(),
+                        kind: CircuitNodeKind::InjectPty {
+                            prompt: "msg to A".into(),
+                            target_node_id: Some("agent_a".into()),
+                        },
+                    },
+                    CircuitNode {
+                        id: "inject_b".into(),
+                        kind: CircuitNodeKind::InjectPty {
+                            prompt: "msg to B".into(),
+                            target_node_id: Some("agent_b".into()),
+                        },
+                    },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "agent_a".into(), condition: Default::default() },
+                    CircuitEdge { from: "t".into(), to: "agent_b".into(), condition: Default::default() },
+                    CircuitEdge { from: "agent_a".into(), to: "inject_a".into(), condition: Default::default() },
+                    CircuitEdge { from: "agent_b".into(), to: "inject_b".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("agent_a", 101);
+        run.attach_agent_node("agent_b", 202);
+
+        // Finish agent_a
+        advance(&mut run, &agent_finished(101, true));
+        assert_eq!(status_of(&run, "inject_a"), StepStatus::Running);
+
+        // Fire ready for inject_a
+        let t_a = advance(&mut run, &CircuitEvent::AgentReady { node_id: "inject_a".into() });
+        assert_eq!(
+            t_a.effects,
+            vec![Effect::InjectPty {
+                node_id: "inject_a".into(),
+                prompt: "msg to A".into(),
+                target_node_id: Some("agent_a".into()),
+            }]
+        );
+        assert_eq!(run.resolve_target_agent("inject_a", Some("agent_a")), Some(101));
+
+        // Finish agent_b
+        advance(&mut run, &agent_finished(202, true));
+        assert_eq!(status_of(&run, "inject_b"), StepStatus::Running);
+
+        let t_b = advance(&mut run, &CircuitEvent::AgentReady { node_id: "inject_b".into() });
+        assert_eq!(
+            t_b.effects,
+            vec![Effect::InjectPty {
+                node_id: "inject_b".into(),
+                prompt: "msg to B".into(),
+                target_node_id: Some("agent_b".into()),
+            }]
+        );
+        assert_eq!(run.resolve_target_agent("inject_b", Some("agent_b")), Some(202));
+    }
+
+    #[test]
+    fn lineage_target_agent_resolution_finds_upstream_spawn_branch() {
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode { id: "spawn_branch_1".into(), kind: spawn_kind("p1") },
+                    CircuitNode { id: "spawn_branch_2".into(), kind: spawn_kind("p2") },
+                    CircuitNode {
+                        id: "inject_branch_1".into(),
+                        kind: CircuitNodeKind::InjectPty {
+                            prompt: "lineage 1".into(),
+                            target_node_id: None,
+                        },
+                    },
+                    CircuitNode {
+                        id: "inject_branch_2".into(),
+                        kind: CircuitNodeKind::InjectPty {
+                            prompt: "lineage 2".into(),
+                            target_node_id: None,
+                        },
+                    },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "spawn_branch_1".into(), condition: Default::default() },
+                    CircuitEdge { from: "t".into(), to: "spawn_branch_2".into(), condition: Default::default() },
+                    CircuitEdge { from: "spawn_branch_1".into(), to: "inject_branch_1".into(), condition: Default::default() },
+                    CircuitEdge { from: "spawn_branch_2".into(), to: "inject_branch_2".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("spawn_branch_1", 1001);
+        run.attach_agent_node("spawn_branch_2", 2002);
+
+        // Target agent for inject_branch_1 traverses upstream and finds spawn_branch_1 (1001)
+        assert_eq!(run.resolve_target_agent("inject_branch_1", None), Some(1001));
+        // Target agent for inject_branch_2 traverses upstream and finds spawn_branch_2 (2002)
+        assert_eq!(run.resolve_target_agent("inject_branch_2", None), Some(2002));
+    }
+
+    #[test]
+    fn node_output_blackboard_captures_agent_output_and_status_in_context() {
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode { id: "worker".into(), kind: spawn_kind("do task") },
+                    CircuitNode {
+                        id: "notify_output".into(),
+                        kind: CircuitNodeKind::Notify {
+                            message: "Worker finished with status '{{ node.worker.status }}' and output: '{{ node.worker.output }}'".into(),
+                        },
+                    },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "worker".into(), condition: Default::default() },
+                    CircuitEdge { from: "worker".into(), to: "notify_output".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("worker", 777);
+
+        // Agent finishes with captured tail text
+        let t = advance(
+            &mut run,
+            &CircuitEvent::AgentFinished {
+                agent_node_id: 777,
+                success: true,
+                output: Some("All 15 tests passed with 0 errors".into()),
+            },
+        );
+
+        assert_eq!(run.context.get("node.worker.output"), Some("All 15 tests passed with 0 errors"));
+        assert_eq!(run.context.get("node.worker.status"), Some("completed"));
+
+        assert_eq!(
+            t.effects,
+            vec![Effect::Notify {
+                message: "Worker finished with status 'completed' and output: 'All 15 tests passed with 0 errors'".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn multi_iteration_feedback_loop_with_retry_limit_retains_agent_and_steps() {
+        // Blueprint: trigger -> implementer -> reviewer -> verify -> (Red) -> retry_gate -> implementer
+        //                                                         -> (Green) -> success
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode { id: "implementer".into(), kind: spawn_kind("impl") },
+                    CircuitNode { id: "reviewer".into(), kind: spawn_kind("review") },
+                    CircuitNode {
+                        id: "verify".into(),
+                        kind: CircuitNodeKind::DeterministicVerification { command: "cargo check".into() },
+                    },
+                    CircuitNode {
+                        id: "retry_gate".into(),
+                        kind: CircuitNodeKind::RetryLimit { max_retries: 3 },
+                    },
+                    CircuitNode {
+                        id: "success".into(),
+                        kind: CircuitNodeKind::Notify { message: "all good".into() },
+                    },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "implementer".into(), condition: Default::default() },
+                    CircuitEdge { from: "implementer".into(), to: "reviewer".into(), condition: Default::default() },
+                    CircuitEdge { from: "reviewer".into(), to: "verify".into(), condition: Default::default() },
+                    CircuitEdge {
+                        from: "verify".into(),
+                        to: "retry_gate".into(),
+                        condition: EdgeCondition::OnOutcome(StepOutcome::Red),
+                    },
+                    CircuitEdge {
+                        from: "verify".into(),
+                        to: "success".into(),
+                        condition: EdgeCondition::OnOutcome(StepOutcome::Green),
+                    },
+                    CircuitEdge { from: "retry_gate".into(), to: "implementer".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+
+        // --- Iteration 1 ---
+        advance(&mut run, &CircuitEvent::Triggered);
+        let t1 = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "implementer"), StepStatus::Running);
+        assert_eq!(t1.effects, vec![Effect::SpawnAgentNode { node_id: "implementer".into() }]);
+        run.attach_agent_node("implementer", 101);
+
+        // Implementer finishes iteration 1
+        advance(&mut run, &agent_finished(101, true));
+        assert_eq!(status_of(&run, "implementer"), StepStatus::Completed);
+
+        // Reviewer starts iteration 1
+        let t_rev1 = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+        assert_eq!(t_rev1.effects, vec![Effect::SpawnAgentNode { node_id: "reviewer".into() }]);
+        run.attach_agent_node("reviewer", 202);
+
+        // Reviewer finishes iteration 1
+        advance(&mut run, &agent_finished(202, true));
+        assert_eq!(status_of(&run, "reviewer"), StepStatus::Completed);
+
+        // Verify starts and returns Red (fails)
+        advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "verify"), StepStatus::Running);
+        let _t_v1 = advance(&mut run, &CircuitEvent::VerificationResult { node_id: "verify".into(), green: false });
+        assert_eq!(run.step("verify").unwrap().outcome, Some(StepOutcome::Red));
+
+        // Retry limit should trigger and reset implementer for attempt 2
+        assert_eq!(status_of(&run, "retry_gate"), StepStatus::Completed);
+        assert_eq!(status_of(&run, "implementer"), StepStatus::Queued);
+        assert_eq!(run.step("implementer").unwrap().attempt, 2);
+        // Ensure implementer kept its existing agent_node_id (no leaking or creating new agents!)
+        assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(101));
+
+        // --- Iteration 2 ---
+        // Promoting implementer attempt 2
+        let t2 = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "implementer"), StepStatus::Running);
+        // Does NOT emit SpawnAgentNode since agent 101 is already attached!
+        assert!(t2.effects.is_empty());
+
+        // Implementer finishes iteration 2
+        advance(&mut run, &agent_finished(101, true));
+        assert_eq!(status_of(&run, "implementer"), StepStatus::Completed);
+        assert_eq!(run.step("implementer").unwrap().attempt, 2);
+
+        // Reviewer re-promotes for iteration 2
+        let t_rev2 = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+        assert_eq!(run.step("reviewer").unwrap().attempt, 2);
+        assert_eq!(run.step("reviewer").unwrap().agent_node_id, Some(202));
+        assert!(t_rev2.effects.is_empty()); // Reuses existing agent node!
+
+        // Reviewer finishes iteration 2
+        advance(&mut run, &agent_finished(202, true));
+        assert_eq!(status_of(&run, "reviewer"), StepStatus::Completed);
+
+        // Verify runs again (attempt 2) and returns Green (passes!)
+        advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "verify"), StepStatus::Running);
+        let _t_v2 = advance(&mut run, &CircuitEvent::VerificationResult { node_id: "verify".into(), green: true });
+        assert_eq!(run.step("verify").unwrap().outcome, Some(StepOutcome::Green));
+        assert_eq!(status_of(&run, "success"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Completed);
     }
 }

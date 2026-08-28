@@ -402,9 +402,11 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
                     events.push(CircuitEvent::AgentLost { agent_node_id });
                 }
                 SessionStatus::Error => {
+                    let tail = crate::autopilot::evaluator::cleaned_tail(agent_node_id);
                     events.push(CircuitEvent::AgentFinished {
                         agent_node_id,
                         success: false,
+                        output: Some(tail),
                     });
                 }
                 // Milestone-1 completion heuristic: the turn detector's
@@ -416,9 +418,11 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
                 // piloted node would also read as completion here — the
                 // milestone-2 LLM classifier gate replaces this heuristic.
                 SessionStatus::AwaitingInput | SessionStatus::Completed => {
+                    let tail = crate::autopilot::evaluator::cleaned_tail(agent_node_id);
                     events.push(CircuitEvent::AgentFinished {
                         agent_node_id,
                         success: true,
+                        output: Some(tail),
                     });
                 }
                 _ => {}
@@ -428,23 +432,15 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
 
     // Injection readiness: any running InjectPty step whose target
     // process is now live fires its AgentReady event.
-    let inject_waiting = view.steps.iter().any(|s| {
-        s.status == StepStatus::Running
-            && matches!(
-                view.graph.node(&s.node_id).map(|n| &n.kind),
-                Some(CircuitNodeKind::InjectPty { .. })
-            )
-    });
-    if inject_waiting {
-        if let Some(agent_node_id) = view.latest_agent_node_id() {
-            if crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
-                for step in &view.steps {
-                    if step.status == StepStatus::Running
-                        && matches!(
-                            view.graph.node(&step.node_id).map(|n| &n.kind),
-                            Some(CircuitNodeKind::InjectPty { .. })
-                        )
-                    {
+    for step in &view.steps {
+        if step.status == StepStatus::Running {
+            if let Some(CircuitNodeKind::InjectPty { target_node_id, .. }) =
+                view.graph.node(&step.node_id).map(|n| &n.kind)
+            {
+                if let Some(agent_node_id) =
+                    view.resolve_target_agent(&step.node_id, target_node_id.as_deref())
+                {
+                    if crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
                         events.push(CircuitEvent::AgentReady {
                             node_id: step.node_id.clone(),
                         });
@@ -640,7 +636,8 @@ fn run_verification_command(mesh_path: &str, command: &str) -> bool {
 fn call_github_effect(
     run_id: i64,
     mesh_id: i64,
-    view: &RunView,
+    view: &mut RunView,
+    node_id: &str,
     action: crate::autopilot::circuit::model::GithubActionKind,
     label: Option<&str>,
     comment: Option<&str>,
@@ -703,7 +700,7 @@ fn call_github_effect(
                 .map_err(|e| e.to_string())?;
         }
         GithubActionKind::OpenPr => {
-            let head = open_pr_head_branch(view)?;
+            let head = open_pr_head_branch(view, node_id)?;
             let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
             let title = view
                 .context
@@ -712,9 +709,27 @@ fn call_github_effect(
                 .unwrap_or("Circuit run")
                 .to_string();
             let body = resolved_comment.unwrap_or_default();
-            client
+            let pr_url = client
                 .create_pull_request(&owner, &repo, &title, &body, &head, &base)
                 .map_err(|e| e.to_string())?;
+
+            let pr_num = pr_url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .and_then(|s| s.parse::<i64>().ok());
+            if let Some(num) = pr_num {
+                view.context.set("pr.number", num.to_string());
+            }
+            view.context.set("pr.url", &pr_url);
+            view.context.set("pr.head_ref", &head);
+            if !title.is_empty() {
+                view.context.set("pr.title", &title);
+            }
+
+            let ctx_json = view.context.to_json()?;
+            db::commit_circuit_advance(run_id, None, Some(&ctx_json), &[])
+                .map_err(|e| format!("failed to commit context after OpenPr: {}", e))?;
         }
     }
     tracing::info!(
@@ -734,9 +749,9 @@ fn call_github_effect(
 /// committed and pushed it (the legacy wrap-up contract) — Buildmesh
 /// opens the PR, it does not push on the agent's behalf. A root-repo
 /// spawn (no worktree) cannot open a PR and fails loudly instead.
-fn open_pr_head_branch(view: &RunView) -> Result<String, String> {
+fn open_pr_head_branch(view: &RunView, node_id: &str) -> Result<String, String> {
     let agent_node_id = view
-        .latest_agent_node_id()
+        .resolve_target_agent(node_id, None)
         .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
     let node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
     if !node.use_worktree {
@@ -767,10 +782,8 @@ fn execute_effects(
             Effect::SpawnAgentNode { node_id } => {
                 spawn_step_agent(app, run_id, mesh_id, view, node_id)?;
             }
-            Effect::InjectPty { prompt, .. } => {
-                // Target = the run's most recent piloted agent (the
-                // linear walking-skeleton contract).
-                match view.latest_agent_node_id() {
+            Effect::InjectPty { node_id, prompt, target_node_id } => {
+                match view.resolve_target_agent(node_id, target_node_id.as_deref()) {
                     Some(target) => {
                         crate::autopilot::pipeline::write_prompt_to_pty(target, prompt, app)
                             .map_err(|e| format!("PTY injection failed: {}", e))?;
@@ -781,13 +794,14 @@ fn execute_effects(
                         );
                     }
                     None => tracing::warn!(
-                        "circuits: run {} had no piloted agent to inject into",
-                        run_id
+                        "circuits: run {} had no piloted agent to inject into (node {})",
+                        run_id,
+                        node_id
                     ),
                 }
             }
-            Effect::SetNodeStatus { status, .. } => {
-                if let Some(agent_node_id) = view.latest_agent_node_id() {
+            Effect::SetNodeStatus { node_id, status, target_node_id } => {
+                if let Some(agent_node_id) = view.resolve_target_agent(node_id, target_node_id.as_deref()) {
                     let kind = SessionStatus::from_db_str(status);
                     db::update_agent_node_status(agent_node_id, kind)
                         .map_err(|e| format!("status write failed: {}", e))?;
@@ -802,8 +816,8 @@ fn execute_effects(
                     },
                 );
             }
-            Effect::CallGithub { action, label, comment, .. } => {
-                call_github_effect(run_id, mesh_id, view, *action, label.as_deref(), comment.as_deref())?;
+            Effect::CallGithub { node_id, action, label, comment } => {
+                call_github_effect(run_id, mesh_id, view, node_id, *action, label.as_deref(), comment.as_deref())?;
             }
         }
     }
@@ -830,6 +844,17 @@ fn spawn_step_agent(
         CircuitNodeKind::SpawnAgentNode { prompt, name, .. } => (prompt, name),
         _ => return Err(format!("node {} is not a spawn node", node_id)),
     };
+
+    // If step already has an agent node attached (e.g. from an earlier loop iteration), preserve it!
+    if let Some(existing_agent_id) = view.step(node_id).and_then(|s| s.agent_node_id) {
+        tracing::info!(
+            "circuits: reusing existing agent node {} for step {} in run {}",
+            existing_agent_id,
+            node_id,
+            run_id
+        );
+        return Ok(());
+    }
 
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
@@ -1438,6 +1463,36 @@ mod tests {
             successes.load(Ordering::SeqCst),
             2,
             "ticks 1 + 2 must succeed after tick 0 panicked"
+        );
+    }
+
+    // -- Issue #1357: Dynamic PR Context & Targeted Execution ----------------------
+
+    #[test]
+    fn open_pr_populates_dynamic_context_fields() {
+        let pr_url = "https://github.com/owner/repo/pull/1357";
+        let pr_num = pr_url
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.parse::<i64>().ok());
+        assert_eq!(pr_num, Some(1357));
+
+        let mut ctx = CircuitContext::new();
+        ctx.set("issue.number", "42");
+        ctx.set("issue.title", "feat: new feature");
+        if let Some(num) = pr_num {
+            ctx.set("pr.number", num.to_string());
+        }
+        ctx.set("pr.url", pr_url);
+        ctx.set("pr.head_ref", "buildmesh-auto/issue-42");
+
+        assert_eq!(ctx.get("pr.number"), Some("1357"));
+        assert_eq!(ctx.get("pr.url"), Some("https://github.com/owner/repo/pull/1357"));
+        assert_eq!(ctx.get("pr.head_ref"), Some("buildmesh-auto/issue-42"));
+        assert_eq!(
+            ctx.resolve("Created PR #{{pr.number}} at {{pr.url}} from {{pr.head_ref}}"),
+            "Created PR #1357 at https://github.com/owner/repo/pull/1357 from buildmesh-auto/issue-42"
         );
     }
 }
