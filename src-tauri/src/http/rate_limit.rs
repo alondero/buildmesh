@@ -36,6 +36,20 @@
 //! rolling 60-second window is the natural "30 per any 60 seconds" the issue
 //! asks for, and it costs the same per-mint work (a `Vec<Instant>` of recent
 //! timestamps, pruned on read).
+//!
+//! # Bounded working set (issue #1233)
+//!
+//! The bucket count itself is capped at [`MAX_BUCKETS`]. The rate-limit check
+//! on `POST /api/ws-ticket` deliberately runs BEFORE the auth guard so that a
+//! stolen-token flooder can't distinguish "rate-limited" from "bad token";
+//! the same deliberateness makes the bucket map a remote memory-exhaustion
+//! vector when a peer sends `Authorization: Bearer <garbage>` per request
+//! with distinct random tokens. Without a cap, each unique fingerprint
+//! commits one `HashMap` entry to the map forever — a sustained flood
+//! grows RSS without bound until app restart. [`check_and_record`] both
+//! drops now-empty buckets and evicts the longest-dormant buckets when
+//! the working set would otherwise exceed `MAX_BUCKETS`, so the map size
+//! is bounded independent of how many distinct credentials arrive.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -54,6 +68,25 @@ pub const WINDOW: Duration = Duration::from_secs(60);
 /// to be tuned"). Exposed as a `const` so a future knob can plumb through
 /// a config without rewriting the call sites.
 pub const DEFAULT_MAX_PER_WINDOW: usize = 30;
+
+/// Upper bound on the number of distinct fingerprint buckets held in memory
+/// at any time (issue #1233). Sized to keep the rate-limit state comfortably
+/// inside one Process Memory Info page even at saturation
+/// (10_000 SHA-256 hex keys × ~80 bytes/entry ≈ ~1 MB), and to keep the
+/// per-call eviction scan — a linear pass over the map — bounded at
+/// `O(MAX_BUCKETS)`.
+///
+/// The cap is reached only by a sustained flood of DISTINCT junk credentials:
+/// a legitimate caller (one phone = one fingerprint) occupies O(1) buckets.
+/// Beyond the cap we evict the buckets whose newest stamp is oldest — a
+/// well-behaved caller whose bucket was evicted re-creates it on the next
+/// mint at zero cost beyond one HashMap entry, the same cost their first
+/// mint already paid.
+///
+/// Exposed at crate scope (`pub(crate)`) so the bounded-growth regression
+/// test can pin "live ≤ MAX_BUCKETS" against a named constant rather than
+/// the magic number.
+pub(crate) const MAX_BUCKETS: usize = 10_000;
 
 /// Decision returned from a rate-limit check.
 #[derive(Debug, PartialEq, Eq)]
@@ -92,7 +125,7 @@ pub fn check_and_record(fingerprint: &str, now: Instant, max_per_window: usize) 
     // the worst-case per-mint work bounded by the cap (the oldest entries
     // fall out steadily; we never scan the whole window's worth).
     timestamps.retain(|t| now.duration_since(*t) < window);
-    if timestamps.len() >= max_per_window {
+    let outcome = if timestamps.len() >= max_per_window {
         // The caller is at the cap. The soonest slot frees when the OLDEST
         // timestamp ages out — `Retry-After` is computed from that, with a
         // 1-second floor so a sub-second remainder doesn't round down to
@@ -107,8 +140,76 @@ pub fn check_and_record(fingerprint: &str, now: Instant, max_per_window: usize) 
         let retry = secs.saturating_add(frac).max(1).min(u32::MAX as u64) as u32;
         Outcome::Deny { retry_after: retry }
     } else {
+        // Record FIRST so the Allow decision sees the stamp it just pushed
+        // (the issue #1233 ordering note: "recording on Allow must still
+        // push before deciding"). The post-decision hygiene below never sees
+        // an empty Vec on this branch — push guarantees `len() >= 1`.
         timestamps.push(now);
         Outcome::Allow
+    };
+
+    // Bounded-memory hygiene (issue #1233).
+    //
+    // `counters.entry(fp).or_default()` always materialises a HashMap entry,
+    // so a flood of distinct junk credentials can grow the map without bound.
+    // That matters specifically here because the rate-limit check on
+    // `POST /api/ws-ticket` runs BEFORE the auth guard
+    // (`http::mod::handle_connection`), by design — so bogus tokens get
+    // counted too. Without a hard cap, a LAN-exposed peer sending
+    // `Authorization: Bearer <random>` per request could exhaust app
+    // memory in minutes. Two complementary guards:
+    //
+    //   1. Drop empty buckets. A `timestamps` Vec that was pruned to length
+    //      zero and we didn't push (only theoretical today because `push`
+    //      always runs on Allow and Deny requires `len >= max >= 1`) leaves
+    //      an `entry` wrapper with nothing in it. Future reordering that
+    //      records AFTER decide or supports `max_per_window == 0` would
+    //      expose this branch — the early-drop is a defensive one-liner.
+    if timestamps.is_empty() {
+        counters.remove(fingerprint);
+    }
+    //
+    //   2. Hard cap on the total number of buckets. When `counters.len()`
+    //      exceeds `MAX_BUCKETS` (only reachable via a flood of distinct
+    //      credentials — legitimate callers own O(1) buckets), evict the
+    //      buckets whose NEWEST stamp is the oldest of the working set.
+    //      Eviction policy mirrors a memory-pressure cache: the longest-
+    //      dormant bucket is the least likely to be touched again soon,
+    //      and re-creating it on the next legitimate mint costs one
+    //      HashMap entry — the same cost the first mint already paid.
+    //      Linear scan under the write lock is fine at this size; a
+    //      well-behaved phone pushes the working set to 1, so the scan
+    //      runs over the junk, not over its own entries.
+    if counters.len() > MAX_BUCKETS {
+        let to_evict = counters.len() - MAX_BUCKETS;
+        evict_oldest_newest(&mut counters, to_evict);
+    }
+
+    outcome
+}
+
+/// Evict up to `n` buckets from `counters`, choosing those whose NEWEST stamp
+/// is oldest first. Empty buckets (no stamps remaining after pruning) are
+/// preferred — `Vec::last()` on an empty slice yields `None`, which sorts
+/// before any `Some(Instant)`, so they're picked automatically.
+///
+/// Called with the write lock already held by [`check_and_record`] and at
+/// most `(counters.len() - MAX_BUCKETS)` iterations of work — O(n) per
+/// scan over O(MAX_BUCKETS) entries, well under 1ms in the steady state.
+fn evict_oldest_newest(counters: &mut Counters, n: usize) {
+    for _ in 0..n {
+        if counters.is_empty() {
+            break;
+        }
+        // The clone is unavoidable: `min_by_key` borrows immutably while we
+        // need to mutate. Keys are SHA-256 hex strings (~64 bytes), so the
+        // allocation per evict is bounded and amortised.
+        let victim = counters
+            .iter()
+            .min_by_key(|(_, stamps)| stamps.last().copied())
+            .map(|(k, _)| k.clone());
+        let Some(k) = victim else { break };
+        counters.remove(&k);
     }
 }
 
@@ -120,18 +221,37 @@ pub(crate) fn reset_for_test() {
     store().write().clear();
 }
 
+/// Test seam: current map size. Used by the bounded-growth regression test
+/// (issue #1233) to assert that sustained floods of distinct junk credentials
+/// cannot grow the rate-limiter's footprint past `MAX_BUCKETS`. Mirrors
+/// `reset_for_test` in shape — same `cfg(test)` gating.
+#[cfg(test)]
+pub(crate) fn len() -> usize {
+    store().read().len()
+}
+
+/// Process-wide test mutex shared with the dispatcher-level tests in
+/// `http::tests` (which used to carry a parallel `RATE_LIMIT_DISPATCH_LOCK`
+/// for the same purpose). Because every rate-limit test — unit OR
+/// dispatcher — touches the same global counter, a single mutex is the only
+/// correct primitive; two independent locks race each other and let
+/// `reset_for_test()` wipe state mid-assertion. Lives at module scope so
+/// sibling test modules can `use` it. `cfg(test)` so it never lands in the
+/// production binary.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Serialize tests that touch the process-global rate-limit state. The
-    /// counter store is a `OnceLock<RwLock<HashMap<…>>>` (mirroring
-    /// `super::ws_ticket::TICKETS`), so concurrent tests using the same
-    /// fingerprint race each other's writes. Each test uses a unique
-    /// fingerprint prefix *and* takes this lock as defence-in-depth so a
-    /// future test that forgets the prefix doesn't silently corrupt the
-    /// state the next test expects.
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `TEST_LOCK` is the module-scoped `pub(crate) static` declared above.
+    // Each test takes it as defence-in-depth so a future test that forgets
+    // to use a unique fingerprint prefix doesn't silently corrupt the
+    // state the next test expects. The same lock is also taken by the
+    // dispatcher-level tests in `http::tests`, which used to carry their
+    // own `RATE_LIMIT_DISPATCH_LOCK` and race against this one; see the
+    // `pub(crate) static TEST_LOCK` decl above for the rationale.
 
     fn fp(s: &str) -> String {
         crate::db::hash_token(s)
@@ -270,5 +390,39 @@ mod tests {
         // is the kind of regression a hard constant breaks loudly.
         assert_eq!(DEFAULT_MAX_PER_WINDOW, 30, "issue #552 default is 30/minute/token");
         assert_eq!(WINDOW, Duration::from_secs(60), "issue #552 window is 60s");
+    }
+
+    #[test]
+    fn distinct_fingerprints_stay_bounded_under_flood() {
+        // Regression for issue #1233: a LAN-exposed peer can drive
+        // `POST /api/ws-ticket` with random `Authorization: Bearer <garbage>`
+        // headers, and the rate-limit check runs BEFORE the auth guard
+        // (`http::mod::handle_connection`). Each unique fingerprint therefore
+        // counts as a bucket owner — and the bucket map MUST stay bounded
+        // independent of how many distinct credentials arrive. Without the
+        // total-entry cap added by the fix, `counters.entry(fp).or_default()`
+        // would grow the map by ~one entry per request until the process is
+        // restarted.
+        let _g = TEST_LOCK.lock().unwrap();
+        reset_for_test();
+
+        // 1.5× the cap, deliberately oversized so any finite-but-not-capped
+        // implementation would leak the difference. With cap=1 each call is
+        // its own one-stamp bucket and the fingerprint is never reused, so
+        // per-bucket pruning (`Vec::retain`) never re-runs against it — the
+        // total-entry cap is the only thing that keeps the map bounded.
+        let n = super::MAX_BUCKETS + super::MAX_BUCKETS / 2;
+        for i in 0..n {
+            let finger = format!("flood-credential-{i:08}");
+            let _ = check_and_record(&finger, Instant::now(), 1);
+        }
+
+        let live = len();
+        assert!(
+            live <= super::MAX_BUCKETS,
+            "rate-limit map grew past MAX_BUCKETS under distinct credentials: \
+             live={live}, cap={} (issue #1233)",
+            super::MAX_BUCKETS
+        );
     }
 }
