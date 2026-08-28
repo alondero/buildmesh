@@ -136,12 +136,22 @@ pub async fn prompt(
         }
     };
 
-    // The idempotency replay lives *inside* `drive_node_with_key` and
+    // The idempotency replay lives *inside* `drive_node_with_key_async` and
     // short-circuits before any liveness check, so a duplicate key is a clean
     // no-op even for a since-vanished node. Only a genuinely fresh key that then
     // fails to find a node surfaces as `NotLive`, which we split into 404
     // (unknown) vs 409 (known but not drivable).
-    match drive::drive_node_with_key(node_id, idempotency_key, &req.prompt) {
+    //
+    // `_async` runs that fully-sync path on the blocking pool (issue #1234): the
+    // `InProgress` wait loop sleeps for up to 5s, which would otherwise pin a
+    // tokio worker and stall every other route sharing the pool.
+    match drive::drive_node_with_key_async(
+        node_id,
+        idempotency_key.to_string(),
+        req.prompt.clone(),
+    )
+    .await
+    {
         Ok(outcome) => {
             let body = serde_json::json!({
                 "verdict": outcome.verdict,
