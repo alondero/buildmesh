@@ -434,13 +434,68 @@ impl IdempotencyStore for DbIdempotencyStore {
 /// [`AgentDriver`] under a caller-supplied `idempotency_key`, replaying the
 /// original verdict on a duplicate key. The single production drive path
 /// (issues #319 + #320 + #750) — the route is a thin transport skin over this.
-pub fn drive_node_with_key(
+///
+/// Runs on the blocking pool (issue #1234) because the whole path is
+/// synchronous: see [`drive_off_runtime`]. Takes owned strings because the
+/// work moves to another thread.
+pub async fn drive_node_with_key_async(
     node_id: i64,
-    idempotency_key: &str,
-    prompt: &str,
+    idempotency_key: String,
+    prompt: String,
 ) -> Result<DriveOutcome, DriveError> {
-    let driver = PtyDriver::new(RegistryTarget);
-    drive_node_idempotent(&DbIdempotencyStore, &driver, node_id, idempotency_key, prompt)
+    drive_off_runtime(
+        DbIdempotencyStore,
+        PtyDriver::new(RegistryTarget),
+        node_id,
+        idempotency_key,
+        prompt,
+    )
+    .await
+}
+
+/// Run [`drive_node_idempotent`] on the blocking pool (issue #1234).
+///
+/// The drive path is fully synchronous and can park its thread for up to
+/// [`IN_PROGRESS_WAIT_TIMEOUT`] in the `InProgress` wait loop, on top of the
+/// synchronous SQLite it runs under the process-global DB mutex. Calling it
+/// straight from an `async fn` pins a bounded tokio worker for the whole wait,
+/// so a handful of colliding same-key retries can starve the accept/dispatch
+/// workers that every other HTTP route, WS handshake and mobile terminal
+/// shares. Same reasoning (and same remedy) as the git routes — see the
+/// threading-model note at the top of `http/routes/git.rs`.
+///
+/// Generic over the seams so the "does not stall the runtime" contract is
+/// testable against fakes; production wiring is [`drive_node_with_key_async`].
+///
+/// Moving the work off the runtime does *not* make it cancellable: if the route
+/// future is dropped (client disconnect, shutdown) the blocking closure still
+/// runs to completion, so a claimed ledger row is always either finalized or
+/// released rather than stranded `pending` — the same guarantee the inline call
+/// had.
+pub async fn drive_off_runtime<S, D>(
+    store: S,
+    driver: D,
+    node_id: i64,
+    idempotency_key: String,
+    prompt: String,
+) -> Result<DriveOutcome, DriveError>
+where
+    S: IdempotencyStore + Send + 'static,
+    D: AgentDriver + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(move || {
+        drive_node_idempotent(&store, &driver, node_id, &idempotency_key, &prompt)
+    })
+    .await
+    {
+        Ok(result) => result,
+        // The worker panicked or was cancelled. We cannot tell whether the
+        // prompt reached the PTY, so the fail-safe answer is the same one a
+        // failed ledger read gets: a retryable 503, never a silent success.
+        Err(e) => Err(DriveError::LedgerUnavailable(format!(
+            "drive task failed: {e}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -929,5 +984,87 @@ mod tests {
         store.release_claim(1, "k");
         assert_eq!(store.recorded.borrow().len(), 1);
         assert_eq!(store.recorded.borrow()[0].3, "delivered");
+    }
+
+    /// A store whose `claim` parks its thread waiting for the async side to
+    /// signal progress, standing in for the real `InProgress` wait loop (up to
+    /// `IN_PROGRESS_WAIT_TIMEOUT`) plus the synchronous SQLite under the global
+    /// DB mutex — without spending wall-clock time the rest of the suite would
+    /// have to share.
+    struct RendezvousStore {
+        /// Fires once the concurrent async task has finished its work. Receiving
+        /// it *proves* the runtime kept polling while this claim was parked.
+        ticker_done: std::sync::mpsc::Receiver<()>,
+    }
+
+    /// Only ever waited on in the *broken* case; the correct path is signalled
+    /// almost immediately. Long enough that a loaded CI box can't fake a stall.
+    const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(5);
+
+    impl IdempotencyStore for RendezvousStore {
+        fn claim(&self, _node_id: i64, _key: &str, _hash: &str) -> Result<ClaimOutcome, DriveError> {
+            match self.ticker_done.recv_timeout(RENDEZVOUS_TIMEOUT) {
+                Ok(()) => Ok(ClaimOutcome::Claimed),
+                Err(_) => Err(DriveError::LedgerUnavailable(
+                    "runtime never polled the concurrent task".to_string(),
+                )),
+            }
+        }
+        fn finalize(&self, _node_id: i64, _key: &str, _verdict: Verdict) {}
+        fn release_claim(&self, _node_id: i64, _key: &str) {}
+    }
+
+    struct OkDriver;
+
+    impl AgentDriver for OkDriver {
+        fn send_prompt(&self, _node_id: i64, _prompt: &str) -> Result<SessionStatus, DriveError> {
+            Ok(SessionStatus::AwaitingInput)
+        }
+    }
+
+    /// Issue #1234: the drive path is fully synchronous and sleeps, so the HTTP
+    /// route must reach it through [`drive_off_runtime`]. Pinned on a
+    /// *single-threaded* runtime — the harshest version of the bounded worker
+    /// pool the mobile/coordinator server actually runs on.
+    ///
+    /// The two sides rendezvous rather than race a clock: the blocking claim
+    /// only completes once the concurrent async task has run to completion.
+    /// Called inline from the async fn, the drive would own the only worker
+    /// thread, the ticker could never reach its `send`, and the claim would
+    /// time out into `LedgerUnavailable` — so this asserts an *ordering*, not a
+    /// duration, and costs no wall-clock time when the code is correct.
+    #[test]
+    fn drive_off_runtime_does_not_stall_the_async_runtime() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, ticker_done) = std::sync::mpsc::channel();
+
+        let (outcome, ticks) = rt.block_on(async {
+            let drive = drive_off_runtime(
+                RendezvousStore { ticker_done },
+                OkDriver,
+                1,
+                "k".to_string(),
+                "hi".to_string(),
+            );
+            let ticker = async {
+                let mut ticks = 0;
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                    ticks += 1;
+                }
+                let _ = tx.send(());
+                ticks
+            };
+            tokio::join!(drive, ticker)
+        });
+
+        assert_eq!(ticks, 100, "the concurrent task did not run to completion");
+        assert_eq!(
+            outcome.expect("the runtime worker was pinned by the drive"),
+            DriveOutcome { verdict: Verdict::Delivered, replayed: false }
+        );
     }
 }
