@@ -3227,11 +3227,18 @@ ANY / -> Public (SPA shell)";
     // BEFORE `auth::guard`, and the 429 path returns before the auth
     // module is touched.
 
-    /// Lock serializing rate-limit dispatcher tests. Same concern as the
-    /// `rate_limit::tests::TEST_LOCK` (the global counter is process-wide).
+    /// Lock serializing rate-limit dispatcher tests against the unit tests
+    /// in `rate_limit::tests`. Same concern as `rate_limit::TEST_LOCK`
+    /// (the global counter is process-wide). Previously this module
+    /// carried its own `RATE_LIMIT_DISPATCH_LOCK`; issue #1233 surfaced
+    /// the resulting race when the unit tests' new bounded-growth test
+    /// ran concurrently with these and a `reset_for_test()` wiped state
+    /// mid-assertion. We now take the shared lock so any test that
+    /// touches `rate_limit::COUNTERS` is correctly serialised with
+    /// every other test that does.
     // These tests intentionally hold a process-wide lock across requests so
     // parallel cases cannot reset the shared rate limiter mid-assertion.
-    static RATE_LIMIT_DISPATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static RATE_LIMIT_DISPATCH_LOCK: &std::sync::Mutex<()> = &rate_limit::TEST_LOCK;
 
     /// Send a raw HTTP/1.1 POST to `path` and parse the FIRST response line,
     /// returning the status code AND the full set of response headers (so the
