@@ -788,7 +788,7 @@ pub(crate) fn hash_token(raw: &str) -> String {
 
 /// Get or create the root remote access token (stored in app_settings).
 pub fn get_or_create_root_token() -> SqlResult<String> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     get_or_create_root_token_inner(&db)
 }
 
@@ -858,7 +858,7 @@ const COORDINATOR_DRIVE_TOKEN_KEY: &str = "coordinator_drive_token";
 /// Is the coordinator read API enabled? Defaults to `false` (off) for a fresh
 /// install, so a naive setup is never an open endpoint.
 pub fn coordinator_api_enabled() -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     coordinator_api_enabled_inner(&db)
 }
 
@@ -875,7 +875,7 @@ pub fn coordinator_api_enabled_inner(conn: &Connection) -> SqlResult<bool> {
 
 /// Flip the master enable switch for the coordinator read API.
 pub fn set_coordinator_api_enabled(enabled: bool) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     set_coordinator_api_enabled_inner(&db, enabled)
 }
 
@@ -898,7 +898,7 @@ const LAN_EXPOSURE_ENABLED_KEY: &str = "lan_exposure_enabled";
 /// Is LAN/VPN exposure enabled? Defaults to `false` (loopback-only) so a naive
 /// setup is never reachable from another machine.
 pub fn lan_exposure_enabled() -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     lan_exposure_enabled_inner(&db)
 }
 
@@ -915,7 +915,7 @@ pub fn lan_exposure_enabled_inner(conn: &Connection) -> SqlResult<bool> {
 
 /// Flip the LAN/VPN exposure switch. Takes effect on the next server start.
 pub fn set_lan_exposure_enabled(enabled: bool) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     set_lan_exposure_enabled_inner(&db, enabled)
 }
 
@@ -930,7 +930,7 @@ pub fn set_lan_exposure_enabled_inner(conn: &Connection, enabled: bool) -> SqlRe
 /// Mint (or replace) the read-scoped coordinator token, returning it. Minting a
 /// fresh token invalidates any previously issued one.
 pub fn generate_coordinator_read_token() -> SqlResult<String> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     generate_coordinator_read_token_inner(&db)
 }
 
@@ -949,7 +949,7 @@ pub fn generate_coordinator_read_token_inner(conn: &Connection) -> SqlResult<Str
 /// Used by the status command to report `has_token` — presence only; the value
 /// is a SHA-256 hash (#495), never the raw token.
 pub fn coordinator_read_token() -> SqlResult<Option<String>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     coordinator_read_token_inner(&db)
 }
 
@@ -1003,7 +1003,7 @@ pub fn coordinator_drive_enabled_inner(conn: &Connection) -> SqlResult<bool> {
 /// Flip the drive kill-switch. Off by default; killing it stops all driving
 /// while leaving the read surface untouched.
 pub fn set_coordinator_drive_enabled(enabled: bool) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     set_coordinator_drive_enabled_inner(&db, enabled)
 }
 
@@ -1018,7 +1018,7 @@ pub fn set_coordinator_drive_enabled_inner(conn: &Connection, enabled: bool) -> 
 /// Mint (or replace) the drive-scoped coordinator token. Distinct from the read
 /// token, so granting drive is an explicit, separate act from granting read.
 pub fn generate_coordinator_drive_token() -> SqlResult<String> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     generate_coordinator_drive_token_inner(&db)
 }
 
@@ -1124,7 +1124,7 @@ pub fn claim_drive_prompt(
     key: &str,
     prompt_hash: &str,
 ) -> SqlResult<ClaimOutcome> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     claim_drive_prompt_inner(&db, node_id, key, prompt_hash)
 }
 
@@ -1219,7 +1219,7 @@ pub fn finalize_drive_prompt(
     key: &str,
     verdict: VerdictStr<'_>,
 ) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     finalize_drive_prompt_inner(&db, node_id, key, verdict)
 }
 
@@ -1277,7 +1277,7 @@ impl<'a> VerdictStr<'a> {
 /// `NotLive` retry still sees the verdict if the row happens to already be
 /// terminal from a peer.
 pub fn release_drive_prompt_claim(node_id: i64, key: &str) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     release_drive_prompt_claim_inner(&db, node_id, key)
 }
 
@@ -1300,7 +1300,7 @@ pub fn release_drive_prompt_claim_inner(
 /// cadence; a startup sweep runs from the same module. Returns the number of
 /// rows deleted (informational; the worker logs non-zero results).
 pub fn prune_drive_prompts_older_than(days: i64) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     prune_drive_prompts_older_than_inner(&db, days)
 }
 
@@ -1369,7 +1369,7 @@ pub fn validate_device_token_inner(conn: &Connection, token: &str) -> SqlResult<
 /// a polling client doesn't write the DB on every poll. A no-op for an unknown
 /// id (the row may have just been revoked).
 pub fn touch_device_session(id: i64, ip: Option<&str>) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     touch_device_session_inner(&db, id, ip)
 }
 
@@ -1384,7 +1384,7 @@ pub fn touch_device_session_inner(conn: &Connection, id: i64, ip: Option<&str>) 
 /// List all paired devices, newest first, for the "Authorized Devices" panel.
 /// Returns the wire view (`DeviceSession`) — never the `token_hash`.
 pub fn list_device_sessions() -> SqlResult<Vec<DeviceSession>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_device_sessions_inner(&db)
 }
 
@@ -1410,7 +1410,7 @@ pub fn list_device_sessions_inner(conn: &Connection) -> SqlResult<Vec<DeviceSess
 /// any live WebSocket the device holds (`http::revocation::revoke`); deleting the
 /// row alone only blocks the *next* request, not an already-open socket.
 pub fn revoke_device_session(id: i64) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     revoke_device_session_inner(&db, id)
 }
 
@@ -1438,7 +1438,7 @@ pub fn login_device_session(
     label: Option<&str>,
     ip: Option<&str>,
 ) -> SqlResult<Option<(i64, String)>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     login_device_session_inner(&db, presented, label, ip)
 }
 
@@ -1472,6 +1472,42 @@ pub fn login_device_session_inner(
 
 pub fn get() -> &'static Mutex<Connection> {
     DB.get().expect("database not initialized")
+}
+
+/// Lock the global DB, recovering from a poisoned mutex instead of
+/// propagating the poison as a panic (issue #1224).
+///
+/// `Mutex::lock()` returns `Err(PoisonError)` when any previous holder
+/// panicked while holding the lock. `.unwrap()` on that error bricks
+/// the DB for the rest of the process — every subsequent caller
+/// re-panics with "poisoned lock" and persistence, preferences, and
+/// the workers that read through here all deadlock from the user's
+/// perspective.
+///
+/// For a `Connection` wrapped behind a process-wide `Mutex`, the
+/// invariant the panic might have violated is the lock itself: the
+/// panicked thread released the guard on unwind, so the
+/// `Connection` inside is back to an unheld state and the next
+/// caller can use it normally. `into_inner()` extracts that
+/// inner value and trusts the next caller to perform whatever
+/// recovery they need (sqlite rollback on the next statement, etc.).
+///
+/// All callers should use this helper instead of
+/// `get().lock().unwrap()`. The recover-on-panic shape is the
+/// project-wide convention — see `preferences::save` and
+/// `services::warm_pool::with_inner_pool` for the same idiom on
+/// smaller mutexes.
+pub fn lock_db() -> std::sync::MutexGuard<'static, Connection> {
+    let mutex = get();
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "db mutex was poisoned by a prior panic — recovering (issue #1224)"
+            );
+            poisoned.into_inner()
+        }
+    }
 }
 
 /// Whether the global DB has been initialised. Tests across the lib
@@ -1654,7 +1690,7 @@ fn parse_db_timestamp(s: &str) -> chrono::DateTime<chrono::Utc> {
 /// into a Node Digest. Spine-only — no transcript enrichment in this slice.
 pub fn list_coordinator_node_rows()
 -> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_coordinator_node_rows_inner(&db)
 }
 
@@ -1707,7 +1743,7 @@ pub(crate) fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResul
 // --- Mesh operations ---
 
 pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
 
     // Check if mesh with this path already exists (idempotent upsert)
     let existing: Option<i64> = db.query_row(
@@ -1741,7 +1777,7 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
 }
 
 pub fn get_mesh_by_id(id: i64) -> SqlResult<Mesh> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     get_mesh_by_id_inner(&db, id)
 }
 
@@ -1751,7 +1787,7 @@ pub fn get_mesh_by_id(id: i64) -> SqlResult<Mesh> {
 /// found" error rather than a silent no-op (matches the zero-rows contract
 /// used by `set_mesh_sandbox` / `update_mesh_pool_size`).
 pub fn set_mesh_color(id: i64, color: Option<&str>) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE meshes SET color = ?1 WHERE id = ?2",
         params![color, id],
@@ -1773,7 +1809,7 @@ pub fn set_mesh_autopilot(
     provider: Option<&str>,
     action_on_success: Option<&str>,
 ) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE meshes SET autopilot_enabled = ?1, autopilot_trigger_label = ?2, \
          autopilot_concurrency_limit = ?3, autopilot_provider = ?4, \
@@ -1797,7 +1833,7 @@ pub fn set_mesh_autopilot(
 /// config. Returns rows updated so the command layer can surface "mesh not
 /// found" (same zero-rows contract as `set_mesh_autopilot`).
 pub fn set_mesh_autopilot_enabled(id: i64, enabled: bool) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE meshes SET autopilot_enabled = ?1 WHERE id = ?2",
         params![if enabled { 1 } else { 0 }, id],
@@ -1825,7 +1861,7 @@ pub fn set_mesh_loop_config(
     interval_seconds: i32,
     consecutive_failures: i32,
 ) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE meshes SET autopilot_mode = ?1, loop_initial_prompt = ?2, \
          loop_suffix_prompt = ?3, loop_max_iterations = ?4, \
@@ -1866,7 +1902,7 @@ pub fn set_mesh_loop_config(
 /// Read the typed `harness_overrides` map for a Mesh. None on a missing
 /// mesh (the IPC surface maps `None` to a "mesh not found" error).
 pub fn get_mesh_harness_overrides(mesh_id: i64) -> SqlResult<Option<std::collections::HashMap<String, HarnessConfigValue>>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db
         .prepare("SELECT harness_overrides FROM meshes WHERE id = ?1")?;
     let result = stmt.query_row(params![mesh_id], |row| {
@@ -1923,7 +1959,7 @@ pub fn upsert_mesh_harness_override(
     harness_id: &str,
     value: HarnessConfigValue,
 ) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     upsert_mesh_harness_override_inner(&db, mesh_id, harness_id, value)
 }
 
@@ -1959,7 +1995,7 @@ pub(crate) fn upsert_mesh_harness_override_inner(
 /// number of rows updated so the IPC surface can surface "mesh not
 /// found" (same zero-rows contract as the upsert).
 pub fn remove_mesh_harness_override(mesh_id: i64, harness_id: &str) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     remove_mesh_harness_override_inner(&db, mesh_id, harness_id)
 }
 
@@ -1995,7 +2031,7 @@ pub(crate) fn remove_mesh_harness_override_inner(
 /// contract surfaces a real "mesh not found" rather than a confusing
 /// "no rows updated" silent success).
 pub fn clear_mesh_harness_overrides(mesh_id: i64) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE meshes SET harness_overrides = '{}' WHERE id = ?1",
         params![mesh_id],
@@ -2004,7 +2040,7 @@ pub fn clear_mesh_harness_overrides(mesh_id: i64) -> SqlResult<usize> {
 
 /// Every mesh with Autopilot enabled — the poller's work list.
 pub fn list_autopilot_enabled_meshes() -> SqlResult<Vec<Mesh>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(&format!(
         "SELECT {} FROM meshes WHERE COALESCE(autopilot_enabled, 0) = 1 ORDER BY id",
         mesh_columns()
@@ -2016,7 +2052,7 @@ pub fn list_autopilot_enabled_meshes() -> SqlResult<Vec<Mesh>> {
 /// Record an auto-spawned node in the `autopilot_runs` ledger (state
 /// `implementing`). Idempotent per node (PRIMARY KEY node_id).
 pub fn create_autopilot_run(node_id: i64, mesh_id: i64, issue_number: i64) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "INSERT OR IGNORE INTO autopilot_runs (node_id, mesh_id, issue_number) \
          VALUES (?1, ?2, ?3)",
@@ -2040,7 +2076,7 @@ pub fn create_autopilot_loop_run(
     mesh_id: i64,
     loop_iteration: i64,
 ) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "INSERT OR IGNORE INTO autopilot_runs (node_id, mesh_id, issue_number, loop_iteration) \
          VALUES (?1, ?2, 0, ?3)",
@@ -2118,7 +2154,7 @@ impl serde::Serialize for AutopilotRunState {
 pub type AutopilotRun = (i64, AutopilotRunState, i32, Option<i64>, Option<String>);
 
 pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<AutopilotRun>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         "SELECT issue_number, state, attempts, loop_iteration, pr_url \
          FROM autopilot_runs WHERE node_id = ?1",
@@ -2143,7 +2179,7 @@ pub fn set_autopilot_run_state(
     state: AutopilotRunState,
     attempts: Option<i32>,
 ) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let state_str = state.as_db_str();
     match attempts {
         Some(n) => db.execute(
@@ -2162,7 +2198,7 @@ pub fn set_autopilot_run_state(
 /// Record the wrap-up PR a completed run produced, so the merged-PR sweep
 /// can later find and close the node without re-deriving the branch.
 pub fn set_autopilot_run_pr(node_id: i64, pr_number: i64, pr_url: &str) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE autopilot_runs SET pr_number = ?1, pr_url = ?2, \
          updated_at = datetime('now') WHERE node_id = ?3",
@@ -2175,7 +2211,7 @@ pub fn set_autopilot_run_pr(node_id: i64, pr_number: i64, pr_url: &str) -> SqlRe
 /// still on the grid — the merged-PR auto-close sweep's work list:
 /// `(node_id, pr_number)`.
 pub fn list_completed_autopilot_runs_with_pr(mesh_id: i64) -> SqlResult<Vec<(i64, i64)>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         "SELECT r.node_id, r.pr_number FROM autopilot_runs r \
          JOIN agent_nodes a ON a.id = r.node_id \
@@ -2195,7 +2231,7 @@ pub fn list_completed_autopilot_runs_with_pr(mesh_id: i64) -> SqlResult<Vec<(i64
 /// behaviour: closing a bad autopilot node while the issue stays labelled
 /// lets the poller retry it.
 pub fn delete_autopilot_run(node_id: i64) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "DELETE FROM autopilot_runs WHERE node_id = ?1",
         params![node_id],
@@ -2216,7 +2252,7 @@ const COUNT_ACTIVE_AUTOPILOT_SQL: &str = "SELECT COUNT(*) FROM autopilot_runs r 
 /// poller compares against `autopilot_concurrency_limit`; completed/failed
 /// runs free their slot.
 pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.query_row(
         &format!("{} AND r.mesh_id = ?1", COUNT_ACTIVE_AUTOPILOT_SQL),
         params![mesh_id],
@@ -2230,7 +2266,7 @@ pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
 /// `autopilot_pool_size` preference: per-mesh limits bound each mesh, but
 /// only this total bounds the machine.
 pub fn count_active_autopilot_nodes_total() -> SqlResult<i64> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.query_row(COUNT_ACTIVE_AUTOPILOT_SQL, [], |row| row.get(0))
 }
 
@@ -2254,7 +2290,7 @@ pub type LoopRunSnapshot = (i64, AutopilotRunState, String);
 /// Pre-existing issue-driven rows are filtered by `loop_iteration IS
 /// NOT NULL` so the two modes never cross-contaminate the ledger view.
 pub fn list_loop_iterations(mesh_id: i64) -> SqlResult<Vec<LoopRunSnapshot>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         "SELECT loop_iteration, state, updated_at FROM autopilot_runs \
          WHERE mesh_id = ?1 AND loop_iteration IS NOT NULL \
@@ -2280,7 +2316,7 @@ pub fn list_loop_iterations(mesh_id: i64) -> SqlResult<Vec<LoopRunSnapshot>> {
 /// state/attempt write, so "stale" means "no pipeline activity", not
 /// "agent quiet".
 pub fn list_stalled_finishing_autopilot_runs(stale_minutes: i64) -> SqlResult<Vec<i64>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         "SELECT r.node_id FROM autopilot_runs r \
          JOIN agent_nodes a ON a.id = r.node_id \
@@ -2295,7 +2331,7 @@ pub fn list_stalled_finishing_autopilot_runs(stale_minutes: i64) -> SqlResult<Ve
 /// hydration for the evaluator's piloted-node registry — a restart must not
 /// silently drop live autopilot nodes out of the wrap-up loop.
 pub fn list_active_autopilot_node_ids() -> SqlResult<Vec<i64>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         "SELECT node_id FROM autopilot_runs \
          WHERE state IN ('implementing', 'finishing', 'suffix_pending')",
@@ -2308,7 +2344,7 @@ pub fn list_active_autopilot_node_ids() -> SqlResult<Vec<i64>> {
 /// autopilot-pill data (which nodes are piloted, and where in the pipeline
 /// each one is). Excludes archived nodes: their cards aren't on the grid.
 pub fn list_autopilot_run_states() -> SqlResult<Vec<(i64, AutopilotRunState)>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         "SELECT r.node_id, r.state FROM autopilot_runs r \
          JOIN agent_nodes a ON a.id = r.node_id \
@@ -2325,7 +2361,7 @@ pub fn list_autopilot_run_states() -> SqlResult<Vec<(i64, AutopilotRunState)>> {
 /// Autopilot ledger and manually issue-spawned nodes — so the poller never
 /// double-spawns an issue (including issues whose node completed or errored).
 pub fn list_known_autopilot_issue_numbers(mesh_id: i64) -> SqlResult<Vec<i64>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         "SELECT issue_number FROM autopilot_runs WHERE mesh_id = ?1 \
          UNION \
@@ -2337,7 +2373,7 @@ pub fn list_known_autopilot_issue_numbers(mesh_id: i64) -> SqlResult<Vec<i64>> {
 }
 
 pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE meshes SET layout = ?1 WHERE id = ?2",
         params![layout, id],
@@ -2350,7 +2386,7 @@ pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {
 /// editor without a second round-trip — Scratch Pad is a "type whatever
 /// you want" surface and the absence of notes is the common case.
 pub fn get_mesh_scratchpad(id: i64) -> SqlResult<String> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     get_mesh_scratchpad_inner(&db, id)
 }
 
@@ -2371,7 +2407,7 @@ pub(crate) fn get_mesh_scratchpad_inner(conn: &Connection, id: i64) -> SqlResult
 /// debounced save that fires after the mesh was deleted doesn't silently
 /// report "Saved" for a write that affected zero rows.
 pub fn set_mesh_scratchpad(id: i64, content: &str) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     set_mesh_scratchpad_inner(&db, id, content)
 }
 
@@ -2396,7 +2432,7 @@ pub(crate) fn set_mesh_scratchpad_inner(
 /// Seatbelt (#497) and Windows AppContainer (#498) toggles: the column is
 /// one, the consumer OS-sandbox policy is decided at spawn time.
 pub fn set_mesh_sandbox(id: i64, sandbox: bool) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     set_mesh_sandbox_inner(&db, id, sandbox)
 }
 
@@ -2417,7 +2453,7 @@ pub(crate) fn set_mesh_sandbox_inner(
 
 pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
     if updates.is_empty() { return Ok(()); }
-    let db = get().lock().unwrap();
+    let db = lock_db();
     for (id, pos) in updates {
         db.execute(
             "UPDATE meshes SET position = ?1 WHERE id = ?2",
@@ -2428,7 +2464,7 @@ pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
 }
 
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM meshes ORDER BY position ASC, name ASC", mesh_columns())
     )?;
@@ -2438,7 +2474,7 @@ pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
 
 /// Look up a mesh by its path.
 pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM meshes WHERE path = ?1", mesh_columns())
     )?;
@@ -2446,7 +2482,7 @@ pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
 }
 
 pub fn delete_mesh(id: i64) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     // Autopilot Circuits ledger (spec #1205): explicit child deletes —
     // same defensive rule as the warm pool below.
     circuit::delete_circuits_for_mesh_inner(&db, id)?;
@@ -2478,7 +2514,7 @@ pub fn create_agent_node(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
 ) -> SqlResult<AgentNode> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     // Append at the end of this mesh's grid order. New nodes land last so an
     // existing arrangement isn't disturbed by a fresh spawn.
     let next_position: i64 = db.query_row(
@@ -2520,7 +2556,7 @@ pub fn create_agent_node(
 /// sync with the frontend's optimistic update. Mirrors `update_mesh_positions_batch`.
 pub fn update_agent_node_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
     if updates.is_empty() { return Ok(()); }
-    let db = get().lock().unwrap();
+    let db = lock_db();
     for (id, pos) in updates {
         db.execute(
             "UPDATE agent_nodes SET position = ?1 WHERE id = ?2",
@@ -2536,7 +2572,7 @@ pub fn update_agent_node_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()
 /// removal directory cannot drift from the displayed name (#1080).
 /// Mixing the two would reintroduce the bug.
 pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE agent_nodes SET name = ?1 WHERE id = ?2",
         params![name, id],
@@ -2550,7 +2586,7 @@ pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
 /// spawns keep their own `gh{N}-`/`pr{N}-` identity; their pool dir is
 /// moved to match instead (see `git::worktree::provision`).
 pub fn adopt_manual_pool_slug(id: i64, slug: &str) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     adopt_manual_pool_slug_inner(&db, id, slug)
 }
 
@@ -2575,7 +2611,7 @@ fn adopt_manual_pool_slug_inner(conn: &Connection, id: i64, slug: &str) -> SqlRe
 /// silently drop a real rewrite if the comparison string ever drifted
 /// from the column's storage form.
 pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute(
         "UPDATE agent_nodes SET provider = ?1 WHERE id = ?2",
         params![provider, id],
@@ -2594,7 +2630,7 @@ pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
 /// guard) because writing the same value the column already carries is
 /// harmless — the trigger is a UI toggle, not a hot loop.
 pub fn set_agent_node_pinned(id: i64, pinned: bool) -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     set_agent_node_pinned_inner(&db, id, pinned)
 }
 
@@ -2628,7 +2664,7 @@ pub(crate) fn set_agent_node_pinned_inner(
 /// that to `Ok(None)` and the caller surfaces "node not found" from the
 /// surrounding `#[command]` wrapper rather than faking a flipped boolean.
 pub fn toggle_agent_node_pinned(id: i64) -> SqlResult<Option<bool>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     toggle_agent_node_pinned_inner(&db, id)
 }
 
@@ -2654,12 +2690,12 @@ pub(crate) fn toggle_agent_node_pinned_inner(
 }
 
 pub fn get_agent_node_by_id(id: i64) -> SqlResult<AgentNode> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     get_agent_node_by_id_inner(&db, id)
 }
 
 pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM agent_nodes WHERE status != 'archived' ORDER BY mesh_id ASC, position ASC, created_at ASC", AGENT_NODE_COLUMNS)
     )?;
@@ -2668,7 +2704,7 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
 }
 
 pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY position ASC, created_at ASC", AGENT_NODE_COLUMNS)
     )?;
@@ -2677,7 +2713,7 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
 }
 
 pub fn update_agent_node_status(id: i64, status: SessionStatus) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     // Single choke point for status transitions; the coordinator digest
     // reads `status_changed_at` for `last_activity`. Stored as RFC3339
     // rather than SQLite's `datetime('now')` (timezone-aware, sortable).
@@ -2709,7 +2745,7 @@ pub fn update_agent_node_status_if(
     new: SessionStatus,
     expected: SessionStatus,
 ) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     update_agent_node_status_if_inner(&db, id, new, expected)
 }
 
@@ -2747,7 +2783,7 @@ pub fn update_agent_node_status_unless_in(
     new: SessionStatus,
     forbidden: &[SessionStatus],
 ) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     update_agent_node_status_unless_in_inner(&db, id, new, forbidden)
 }
 
@@ -2799,7 +2835,7 @@ pub fn archive_agent_node(id: i64) -> SqlResult<()> {
 /// Update the persisted CLI session id for an agent node. For the fill-only
 /// variant used by attention-hook fallback, see `set_cli_session_id_if_missing`.
 pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     db.execute("UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2", params![cli_id, id])?;
     Ok(())
 }
@@ -2807,7 +2843,7 @@ pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
 /// Remove the identity of a conversation that is deliberately being replaced
 /// with a fresh spawn (for example, after a cross-harness regenerate).
 pub fn clear_cli_session_id(id: i64) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     clear_cli_session_id_inner(&db, id)
 }
 
@@ -2823,7 +2859,7 @@ pub(crate) fn clear_cli_session_id_inner(conn: &Connection, id: i64) -> SqlResul
 /// by an earlier, more immediate source. Codex hook callbacks use this as a
 /// structured fallback when PTY output did not expose the UUID (issue #1089).
 pub fn set_cli_session_id_if_missing(id: i64, cli_id: &str) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     set_cli_session_id_if_missing_inner(&db, id, cli_id)
 }
 
@@ -2850,7 +2886,7 @@ fn set_cli_session_id_if_missing_inner(
 ///   process. Without this, a stuck `pending` row would render as a
 ///   perpetual "◌ Starting…" badge with no way to recover.
 pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     // Deliberately does NOT touch `status_changed_at`: a restart-time suspend is
     // bookkeeping, not agent activity, so the coordinator digest's
     // `last_activity` should keep reporting when the node *actually* last did
@@ -2866,7 +2902,7 @@ pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
 }
 
 pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM agent_nodes WHERE status = 'suspended' AND cli_session_id IS NOT NULL", AGENT_NODE_COLUMNS)
     )?;
@@ -2877,7 +2913,7 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
 const CODEX_LEGACY_SESSION_BACKFILL_KEY: &str = "codex_legacy_session_backfill_v1";
 
 pub fn list_suspended_codex_nodes_without_cli_session_id() -> SqlResult<Vec<AgentNode>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_suspended_codex_nodes_without_cli_session_id_inner(&db)
 }
 
@@ -2895,7 +2931,7 @@ pub(crate) fn list_suspended_codex_nodes_without_cli_session_id_inner(
 }
 
 pub fn codex_legacy_session_backfill_completed() -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     codex_legacy_session_backfill_completed_inner(&db)
 }
 
@@ -2910,7 +2946,7 @@ pub(crate) fn codex_legacy_session_backfill_completed_inner(
 }
 
 pub fn mark_codex_legacy_session_backfill_completed() -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     mark_codex_legacy_session_backfill_completed_inner(&db)
 }
 
@@ -2981,19 +3017,19 @@ pub fn delete_agent_node_enqueueing_removal(
     id: i64,
     removal: Option<(&str, &str)>,
 ) -> SqlResult<()> {
-    let mut db = get().lock().unwrap();
+    let mut db = lock_db();
     let tx = db.transaction()?;
     delete_agent_node_enqueueing_removal_inner(&tx, id, removal)?;
     tx.commit()
 }
 
 pub fn list_pending_worktree_removals() -> SqlResult<Vec<PendingWorktreeRemoval>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_pending_worktree_removals_inner(&db)
 }
 
 pub fn delete_pending_worktree_removal(path: &str) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     delete_pending_worktree_removal_inner(&db, path)
 }
 
@@ -3055,7 +3091,7 @@ pub fn insert_warm_worktree(
     base_sha: Option<&str>,
     status: WarmWorktreeStatus,
 ) -> SqlResult<i64> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     insert_warm_worktree_inner(&db, mesh_id, path, preassigned_name, base_sha, status)
 }
 
@@ -3087,7 +3123,7 @@ pub(crate) fn insert_warm_worktree_inner(
 /// directory, because claimers always take the row to `claimed` BEFORE they
 /// adopt its path.
 pub fn mark_warm_worktree_available(id: i64, base_sha: Option<&str>) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     mark_warm_worktree_available_inner(&db, id, base_sha)
 }
 
@@ -3110,7 +3146,7 @@ pub(crate) fn mark_warm_worktree_available_inner(
 /// it back to `available` via `mark_warm_worktree_available`. Symmetric with
 /// `mark_warm_worktree_available` (which is what restores it).
 pub fn mark_warm_worktree_refreshing(id: i64) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     mark_warm_worktree_refreshing_inner(&db, id)
 }
 
@@ -3129,7 +3165,7 @@ pub(crate) fn mark_warm_worktree_refreshing_inner(conn: &Connection, id: i64) ->
 /// a live spawn. Returns the same `WarmWorktree` projection a claim hands back
 /// (`base_sha` is the field the freshness pass diffs against the new SHA).
 pub fn list_available_warm_for_mesh(mesh_id: i64) -> SqlResult<Vec<WarmWorktree>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_available_warm_for_mesh_inner(&db, mesh_id)
 }
 
@@ -3168,7 +3204,7 @@ pub(crate) fn list_available_warm_for_mesh_inner(
 /// Returns `None` if no `available` row exists (empty / corrupted pool, or all
 /// entries are mid-fill) — caller is expected to cold-spawn in that case.
 pub fn claim_warm_entry_for_mesh(mesh_id: i64) -> SqlResult<Option<WarmWorktree>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     claim_warm_entry_for_mesh_inner(&db, mesh_id)
 }
 
@@ -3220,7 +3256,7 @@ pub(crate) fn claim_warm_entry_for_mesh_inner(
 /// keep the row around as a 'claimed' tombstone — the directory itself
 /// becomes the node's worktree and the row's bookkeeping purpose is done).
 pub fn delete_warm_worktree(id: i64) -> SqlResult<()> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     delete_warm_worktree_inner(&db, id)
 }
 
@@ -3263,7 +3299,7 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
 /// inner.
 #[allow(dead_code)]
 pub fn list_warm_paths_for_mesh(mesh_id: i64) -> SqlResult<Vec<String>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_warm_paths_for_mesh_inner(&db, mesh_id)
 }
 
@@ -3288,7 +3324,7 @@ pub(crate) fn list_warm_paths_for_mesh_inner(
 /// NOT help here because the mesh's `agent_nodes` rows are cascade-deleted
 /// by the same transaction, so no `close` event ever fires for them.
 pub fn list_warm_paths_for_mesh_droppable(mesh_id: i64) -> SqlResult<Vec<String>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_warm_paths_for_mesh_droppable_inner(&db, mesh_id)
 }
 
@@ -3342,7 +3378,7 @@ pub struct WarmReconcileEntry {
 pub fn list_warm_worktrees_to_reconcile(
     stale_after_minutes: i64,
 ) -> SqlResult<Vec<WarmReconcileEntry>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_warm_worktrees_to_reconcile_inner(&db, stale_after_minutes)
 }
 
@@ -3450,7 +3486,7 @@ pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
     // would otherwise intermittently flip a row from "adopted" to
     // "orphan" mid-pass.
     let live_session_ids = crate::agent::process::PROCESS_REGISTRY.session_ids();
-    let db = get().lock().unwrap();
+    let db = lock_db();
     delete_orphaned_claimed_warm_worktrees_inner(&db, &live_session_ids)
 }
 
@@ -3589,7 +3625,7 @@ fn live_mesh_ids_for(
 /// by the worker (hardcoded to 1 for the v21 tracer bullet) so we don't
 /// plumb a config parameter through yet.
 pub fn count_available_warm_for_mesh(mesh_id: i64) -> SqlResult<i64> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     count_available_warm_for_mesh_inner(&db, mesh_id)
 }
 
@@ -3614,7 +3650,7 @@ pub(crate) fn count_available_warm_for_mesh_inner(
 /// `git worktree remove --force` a live agent's worktree during the window
 /// between claim and `forget_after_spawn`).
 pub fn count_droppable_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<i64> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     count_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
 }
 
@@ -3651,7 +3687,7 @@ pub fn list_oldest_warm_entries_for_mesh(
     mesh_id: i64,
     limit: i64,
 ) -> SqlResult<Vec<(i64, String)>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_oldest_warm_entries_for_mesh_inner(&db, mesh_id, limit)
 }
 
@@ -3679,7 +3715,7 @@ pub(crate) fn list_oldest_warm_entries_for_mesh_inner(
 /// (indexed on `path UNIQUE`) and side-effect free — safe to call from
 /// `collect_prune_info` for every worktree.
 pub fn is_warm_pool_path(path: &str) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     is_warm_pool_path_inner(&db, path)
 }
 
@@ -3722,7 +3758,7 @@ pub(crate) fn is_warm_pool_path_inner(
 /// to call from `services::agent_node::process_pending_removals` for every
 /// pending entry.
 pub fn warm_pool_claims_path(path: &str) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     warm_pool_claims_path_inner(&db, path)
 }
 
@@ -3744,7 +3780,7 @@ pub(crate) fn warm_pool_claims_path_inner(
 /// fill-up to the per-mesh target. Mirrors the projection `MeshRow` uses
 /// for the spawn-time read so the two paths can't drift.
 pub fn list_worktree_enabled_meshes_for_warm() -> SqlResult<Vec<WarmPoolMeshRow>> {
-    let db = get().lock().unwrap();
+    let db = lock_db();
     list_worktree_enabled_meshes_for_warm_inner(&db)
 }
 

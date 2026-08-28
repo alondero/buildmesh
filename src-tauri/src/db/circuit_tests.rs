@@ -131,7 +131,7 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
         create_autopilot_circuit(mesh.id, "survivor", "", 1, &sample_graph_json()).unwrap();
 
     {
-        let conn = get().lock().unwrap();
+        let conn = lock_db();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 
@@ -298,7 +298,7 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
     // The shared process-global DB holds other tests' rows too — count
     // only this circuit's descendants.
     let remaining_runs: i64 = {
-        let conn = get().lock().unwrap();
+        let conn = lock_db();
         conn.query_row(
             "SELECT COUNT(*) FROM autopilot_circuit_runs WHERE circuit_id = ?1",
             params![circuit.id],
@@ -307,7 +307,7 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
         .unwrap()
     };
     let remaining_steps: i64 = {
-        let conn = get().lock().unwrap();
+        let conn = lock_db();
         conn.query_row(
             "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
              JOIN autopilot_circuit_runs r ON r.id = s.run_id \
@@ -352,7 +352,7 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
 
     assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty());
     let remaining_runs: i64 = {
-        let conn = get().lock().unwrap();
+        let conn = lock_db();
         conn.query_row(
             "SELECT COUNT(*) FROM autopilot_circuit_runs WHERE mesh_id = ?1",
             params![mesh.id],

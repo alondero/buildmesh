@@ -2115,8 +2115,7 @@ mod tests {
         ensure_maintenance_db();
 
         let (_tmp, repo_path) = fresh_git_repo();
-        let db = crate::db::get();
-        let conn = db.lock().unwrap();
+        let conn = crate::db::lock_db();
         let mesh_id = insert_mesh(&conn, &repo_path);
 
         // Cut three warm worktrees in order — the first is the OLDEST.

@@ -75,10 +75,34 @@ static WAKE: Lazy<(Mutex<()>, Condvar)> = Lazy::new(|| (Mutex::new(()), Condvar:
 /// state — after an app restart the user simply approves again.
 static APPROVALS: Lazy<Mutex<Vec<(i64, String)>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+/// Lock one of the circuit worker's statics, recovering from a poisoned
+/// mutex instead of panicking (issue #1224).
+///
+/// The worker holds two small state mutexes — `WAKE` (a `Mutex<()>` used
+/// only to enter `Condvar::wait_timeout`) and `APPROVALS` (a `Vec<(i64,
+/// String)>`). Both are guarded by app-lifetime invariants that a panic
+/// mid-write does not corrupt (the guard is dropped on unwind, leaving
+/// the inner value in a consistent empty-or-fully-formed state). `.unwrap()`
+/// on `PoisonError` permanently bricks the worker: the next pass would
+/// panic the spawned thread, `wake_circuit_worker()` would silently fail
+/// to wake anyone, and the entire circuit poller would stall. The recover
+/// shape matches `db::lock_db()` and `services::autopilot::lock_planner_set`.
+fn lock_circuit_worker_static<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "circuit worker mutex was poisoned by a prior panic — recovering (issue #1224)"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
 /// Queue a collaborator approval and wake the worker immediately so the
 /// parked run advances within milliseconds.
 pub fn request_circuit_approval(run_id: i64, node_id: String) {
-    APPROVALS.lock().unwrap().push((run_id, node_id));
+    lock_circuit_worker_static(&APPROVALS).push((run_id, node_id));
     wake_circuit_worker();
 }
 
@@ -87,7 +111,7 @@ pub fn request_circuit_approval(run_id: i64, node_id: String) {
 /// allocation for the rest-list, no re-assignment. The returned `Vec`
 /// holds only the taken entries' `node_id`s.
 fn drain_approvals_for(run_id: i64) -> Vec<String> {
-    let mut queue = APPROVALS.lock().unwrap();
+    let mut queue = lock_circuit_worker_static(&APPROVALS);
     queue
         .extract_if(.., |(r, _)| *r == run_id)
         .map(|(_, node_id)| node_id)
@@ -103,7 +127,7 @@ fn drain_approvals_for(run_id: i64) -> Vec<String> {
 /// empty queue, and a linear scan over the active-runs slice for tiny
 /// lists (avoids building a HashSet just to test membership).
 fn sweep_stale_approvals(active_runs: &[db::ActiveCircuitRun]) {
-    let mut queue = APPROVALS.lock().unwrap();
+    let mut queue = lock_circuit_worker_static(&APPROVALS);
     if queue.is_empty() {
         return;
     }
@@ -142,7 +166,7 @@ pub fn start_circuit_worker(app: AppHandle) {
                 lost_turn_watchdog_pass(&app);
                 // Wait for the next tick OR an immediate wake, whichever
                 // first (`wait_timeout` returns either way).
-                let guard = lock.lock().unwrap();
+                let guard = lock_circuit_worker_static(lock);
                 let _ = cvar.wait_timeout(guard, TICK_INTERVAL).unwrap();
             }
         })
@@ -1246,7 +1270,7 @@ mod tests {
         // Scope the lock so it drops before the trailing tidy (the mutex
         // is not reentrant — holding the guard across another lock would
         // deadlock).
-        let queue = APPROVALS.lock().unwrap();
+        let queue = lock_circuit_worker_static(&APPROVALS);
         assert!(
             !queue.iter().any(|(r, _)| *r == RUN_B),
             "the vanished run's approval must be evicted"
@@ -1261,9 +1285,72 @@ mod tests {
         );
         // Tidy our test's entries so they don't leak into other tests.
         drop(queue);
-        APPROVALS
-            .lock()
-            .unwrap()
+        lock_circuit_worker_static(&APPROVALS)
             .retain(|(r, _)| *r != RUN_A && *r != RUN_C);
+    }
+
+    // ---- Poison-recovery regression (issue #1224) ----
+    //
+    // Both worker statics used to be locked with `.unwrap()` — a single
+    // panic while holding either guard permanently poisoned the mutex and
+    // every subsequent call re-panicked. The recovery helper
+    // `lock_circuit_worker_static` calls `into_inner()` instead so the
+    // circuit poller keeps waking and draining approvals after any
+    // one-off failure. These tests are the regression pin: poison each
+    // static inside `catch_unwind`, then re-lock and prove normal
+    // push/drain/wake still works.
+    fn poison_circuit_worker_static<T>(mutex: &'static Mutex<T>) {
+        let _guard = mutex.lock().expect("first lock must succeed (test setup)");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("intentional circuit-worker poison for issue #1224 regression test");
+        }));
+        assert!(result.is_err(), "test fixture must panic to poison the mutex");
+    }
+
+    #[test]
+    fn approvals_recovers_from_poison() {
+        poison_circuit_worker_static(&APPROVALS);
+        // Production path: `request_circuit_approval` is the entrypoint
+        // the IPC layer calls when a user clicks Approve. Walk through
+        // it so the regression test mirrors real traffic.
+        let run_id = i64::MAX - 401;
+        let node_id = "issue-1224-poison-node".to_string();
+        request_circuit_approval(run_id, node_id.clone());
+        // Drain must find the entry that was pushed after the panic —
+        // if the recovery shape regressed, the Vec would be empty.
+        let drained = drain_approvals_for(run_id);
+        assert_eq!(
+            drained,
+            vec![node_id],
+            "approval pushed after mutex poison must survive into the drain (issue #1224)"
+        );
+        // Re-drain proves the queue is empty, not just hidden by the
+        // recovery.
+        assert!(
+            drain_approvals_for(run_id).is_empty(),
+            "drain must be idempotent after recovery"
+        );
+    }
+
+    #[test]
+    fn wake_condvar_recovers_from_poison() {
+        // WAKE holds a `Mutex<()>` paired with a `Condvar`. The lock
+        // itself guards nothing — only the wait/notify handshake —
+        // so poisoning it freezes the worker thread on the next
+        // `wait_timeout`. The recovery shape is the same as for
+        // APPROVALS; this test pins that path.
+        let (lock, _cvar) = &*WAKE;
+        poison_circuit_worker_static(lock);
+        // After the panic, the OLD `.lock().unwrap()` form would now
+        // return `Err(Poisoned)`. The recovery helper must hand back
+        // a usable guard that can be passed to `wait_timeout` (the
+        // real production call site — issue #1207 milestone 2).
+        let guard = lock_circuit_worker_static(lock);
+        // We deliberately do NOT call `wait_timeout` here — that would
+        // block the test on the real condvar. Proving the helper
+        // returns a guard is enough to assert the recovery path is
+        // live; the `circuit_worker_smoke` integration test exercises
+        // the full wait/notify handshake end-to-end.
+        drop(guard);
     }
 }
