@@ -1014,7 +1014,22 @@ fn start_reader(
 ) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
-    let session_captured = AtomicBool::new(!needs_session_capture);
+    // Issue #1221: stateful wrapper that stitches PTY chunks so the
+    // `session id: <uuid>` regex can match a banner that straddles an
+    // 8 KiB read boundary, and so multi-byte UTF-8 sequences split
+    // across reads aren't corrupted to U+FFFD before being handed to
+    // `session_naming::on_output` and `autopilot::evaluator::on_output`.
+    // `captured` is a plain `bool` (not `AtomicBool`) because the
+    // reader thread is the only writer — the `AtomicBool` here used to
+    // be load-bearing for `start_reader`'s outer scope but it's now
+    // folded into the wrapper. Initialise pre-armed when the caller
+    // already knows no capture is needed (e.g. providers like Anthropic
+    // that we pre-assigned a UUID to).
+    let mut chunk_capture = crate::session_capture::ChunkCapture::default();
+    if !needs_session_capture {
+        // Force the latch on so post-init feeds skip the regex.
+        chunk_capture.mark_captured();
+    }
 
     std::thread::spawn(move || {
         // The SpawnTimer in spawn_agent_inner stops at process *creation*
@@ -1045,7 +1060,7 @@ fn start_reader(
             // the closure would race with `kill_session`'s `remove`.
             crate::services::pool_worker::note_activity_for_mesh(mesh_id);
 
-            let text = String::from_utf8_lossy(data);
+            let (text, uuid) = chunk_capture.feed(data);
             maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
             // Autopilot state evaluator tail (issue #483) — one in-memory
             // set lookup for non-piloted nodes.
@@ -1054,17 +1069,14 @@ fn start_reader(
             // unarmed nodes.
             crate::attention_autoclear::on_output(session_id, data.len());
 
-            if !session_captured.load(Ordering::Relaxed) {
-                if let Some(uuid) = crate::session_capture::try_extract_session_id(&text) {
-                    // The structured hook and Codex rollout fallback can
-                    // capture the same self-assigned ID first. Do not let a
-                    // delayed PTY banner replace an already-verified value.
-                    let captured = db::set_cli_session_id_if_missing(session_id, uuid)
-                        .unwrap_or(false);
-                    session_captured.store(true, Ordering::Relaxed);
-                    if captured {
-                        tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
-                    }
+            if let Some(uuid) = uuid {
+                // The structured hook and Codex rollout fallback can
+                // capture the same self-assigned ID first. Do not let a
+                // delayed PTY banner replace an already-verified value.
+                let captured = db::set_cli_session_id_if_missing(session_id, &uuid)
+                    .unwrap_or(false);
+                if captured {
+                    tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
                 }
             }
 
