@@ -75,6 +75,12 @@ which = "7"
 # above idle tunnels; non-Windows ranks by RFC-1918 range heuristic (single
 # syscall, no Windows GetAdaptersAddresses call). See issue #630.
 local-ip-address = "0.6"
+# `subtle` is already in the dep tree via `rustls` (issue #1240). Used directly
+# for constant-time credential comparison — its `ConstantTimeEq` impl uses
+# compiler-fence barriers (`core::hint::black_box`, volatile reads) so the
+# inner loop cannot be optimised into a short-circuit under our
+# `lto = "thin"` release profile, which a hand-rolled byte XOR loop can be.
+subtle = "2"
 
 # OS-level interface-change notifications for issue #591.
 # Windows: `NotifyAddrChange` from Iphlpapi.dll. The crate is already in the

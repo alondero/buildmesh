@@ -58,9 +58,6 @@ mod harness_overrides_tests;
 #[cfg(test)]
 mod circuit_tests;
 
-#[cfg(test)]
-mod ct_eq_tests;
-
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -789,41 +786,6 @@ pub(crate) fn hash_token(raw: &str) -> String {
     hex::encode(Sha256::digest(raw.as_bytes()))
 }
 
-/// Constant-time byte-slice equality (issue #1240).
-///
-/// Why hand-rolled rather than the `subtle` crate: a 10-line helper avoids a
-/// new dependency for one call shape, and the algorithm here is the textbook
-/// one (golang `crypto/subtle.ConstantTimeCompare`, libsodium's
-/// `sodium_memcmp`) — well-vetted and easy to audit.
-///
-/// Security property: the byte-XOR loop runs in time proportional to the
-/// common length and does **not** short-circuit on the first mismatch, so
-/// timing does not leak how many leading bytes match. The early length
-/// check is data-dependent (different-length inputs return false faster)
-/// but only reveals "same length" vs "different length" — a coarse
-/// property the caller already knows from the input. The earlier "max-length
-/// loop with a u8 length-XOR seed" shape was reviewed and rejected because
-/// the `u8` cast silently truncated length differences whose XOR was a
-/// multiple of 256 (e.g. 32 vs 288 → XOR 256 → 0 as u8), letting a longer
-/// input with zero-padded tail falsely match a shorter stored secret — an
-/// authentication bypass on the root-token path.
-///
-/// Like all software CT-compares, this is best-effort: the optimiser or
-/// surrounding code (branch predictors, cache) can still introduce
-/// data-dependent timing. It is, however, materially better than `==`,
-/// which short-circuits on the first byte mismatch and lets an attacker
-/// measure prefix match length over many requests.
-pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
-
 /// Get or create the root remote access token (stored in app_settings).
 pub fn get_or_create_root_token() -> SqlResult<String> {
     let db = get().lock().unwrap();
@@ -877,9 +839,14 @@ pub fn validate_root_token_inner(conn: &Connection, token: &str) -> SqlResult<bo
     // Constant-time compare (issue #1240): the root token is the highest-value
     // credential here, and unlike the coordinator tokens it is still stored
     // cleartext (Keychain slice, #495), so a regular `==` would leak matching
-    // prefix length via timing. Behaviour is unchanged: an empty presented
-    // token already returned above; a missing stored value never matches.
-    Ok(stored.is_some_and(|s| ct_eq(s.as_bytes(), token.as_bytes())))
+    // prefix length via timing. We use `subtle::ConstantTimeEq` rather than a
+    // hand-rolled loop: it inserts `core::hint::black_box` / volatile reads so
+    // LLVM cannot optimise the comparison into a short-circuit under our
+    // `lto = "thin"` release profile. The Choice → bool conversion is
+    // `From<Choice> for bool` and is itself constant-time.
+    Ok(stored.is_some_and(|s| bool::from(
+        subtle::ConstantTimeEq::ct_eq(s.as_bytes(), token.as_bytes()),
+    )))
 }
 
 // --- Coordinator read API auth (ADR-0008) ---
@@ -1019,11 +986,12 @@ pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> 
     }
     // The DB holds only the hash (#495), so hash the presented token and compare
     // hashes. The raw token never has to be reconstructed to authenticate.
-    // Constant-time compare (issue #1240): less critical than the root token
-    // since the stored value is already a SHA-256 hash, but cheap to apply and
-    // closes the timing side-channel uniformly across all three validators.
+    // Constant-time compare via `subtle::ConstantTimeEq` (issue #1240); see
+    // `validate_root_token_inner` for the rationale.
     match coordinator_read_token_inner(conn)? {
-        Some(stored) => Ok(ct_eq(stored.as_bytes(), hash_token(token).as_bytes())),
+        Some(stored) => Ok(bool::from(
+            subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash_token(token).as_bytes()),
+        )),
         None => Ok(false),
     }
 }
@@ -1106,9 +1074,12 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
         return Ok(false);
     }
     // Stored value is the hash (#495); compare against the hashed presentation.
-    // Constant-time compare (issue #1240); see validate_coordinator_read_token_inner.
+    // Constant-time compare via `subtle::ConstantTimeEq` (issue #1240); see
+    // `validate_root_token_inner` for the rationale.
     match coordinator_drive_token_inner(conn)? {
-        Some(stored) => Ok(ct_eq(stored.as_bytes(), hash_token(token).as_bytes())),
+        Some(stored) => Ok(bool::from(
+            subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash_token(token).as_bytes()),
+        )),
         None => Ok(false),
     }
 }
