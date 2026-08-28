@@ -58,6 +58,9 @@ mod harness_overrides_tests;
 #[cfg(test)]
 mod circuit_tests;
 
+#[cfg(test)]
+mod circuit_prune_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
