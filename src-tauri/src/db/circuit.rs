@@ -563,3 +563,93 @@ pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
         |row| row.get(0),
     )
 }
+
+// ---------------------------------------------------------------------------
+// Retention sweep (issue #1236) — bounding an otherwise unbounded ledger.
+// ---------------------------------------------------------------------------
+
+/// The set a retention sweep may DELETE outright: terminal runs past the cutoff
+/// whose `trigger_identity` is a throwaway timestamp, minus each circuit's
+/// newest run.
+///
+/// Two clauses here are load-bearing and easy to drop by accident:
+///
+/// * The `LIKE` filter. `interval:<ms>` and `manual:<ms>` embed the fire time,
+///   so the identity is never presented twice and the row is pure history once
+///   terminal. A GitHub row's `issue:<n>:<label>` identity is STABLE, and the
+///   row is the only memory that this circuit already handled that source —
+///   `circuit_triggers::mint_unseen_runs` reads it back through
+///   [`list_circuit_trigger_identities`] and treats a missing row as "never
+///   seen", while `ingest_issues` re-fetches every *open* labelled issue on
+///   every poll. Deleting one re-mints a run and re-spawns agents on finished
+///   work, so stable identities are compacted instead (see the sweep below).
+///   Note the filter is an allow-list: an identity family added later is
+///   retained until someone opts it in, which is the safe direction to fail.
+/// * The `created_at <` sub-select. The interval cooldown anchors on
+///   `MAX(created_at)` over the circuit's runs, and `interval_should_fire`
+///   treats `None` as "fire now" — so sweeping a circuit's last surviving row
+///   erases its cadence and fires it immediately. Keeping the newest row per
+///   circuit preserves the anchor value exactly.
+///
+/// `?1` is the retention window in days.
+const SWEEPABLE_RUNS: &str = "\
+    SELECT id FROM autopilot_circuit_runs r \
+      WHERE r.state IN ('completed', 'failed') \
+        AND r.updated_at < datetime('now', '-' || ?1 || ' days') \
+        AND (r.trigger_identity LIKE 'interval:%' OR r.trigger_identity LIKE 'manual:%') \
+        AND r.created_at < (SELECT MAX(created_at) FROM autopilot_circuit_runs n \
+                             WHERE n.circuit_id = r.circuit_id)";
+
+/// Bound `autopilot_circuit_runs` to a retention window. Returns
+/// `(rows_deleted, rows_compacted)`.
+///
+/// Wrapped in one transaction so a mid-sweep failure can't leave step rows
+/// orphaned by a half-applied delete.
+pub fn prune_terminal_circuit_runs_older_than(days: i64) -> SqlResult<(usize, usize)> {
+    let mut db = super::get().lock().unwrap();
+    let tx = db.transaction()?;
+    let counts = prune_terminal_circuit_runs_older_than_inner(&tx, days)?;
+    tx.commit()?;
+    Ok(counts)
+}
+
+/// See [`prune_terminal_circuit_runs_older_than`]. Split out on the
+/// `_inner(&Connection)` discipline so callers that already hold the lock (and
+/// the tests, against an in-memory DB) reuse one connection.
+pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
+    conn: &Connection,
+    days: i64,
+) -> SqlResult<(usize, usize)> {
+    // Steps first: the schema declares ON DELETE CASCADE, but enforcement rides
+    // on the connection's `foreign_keys` pragma — on for the bundled SQLite,
+    // off by default for a system-libsqlite link. The same defensive ordering
+    // `delete_autopilot_circuit` documents. Without it the sweep would trade a
+    // run leak for a step leak.
+    conn.execute(
+        &format!("DELETE FROM autopilot_circuit_run_steps WHERE run_id IN ({SWEEPABLE_RUNS})"),
+        params![days],
+    )?;
+    let deleted = conn.execute(
+        &format!("DELETE FROM autopilot_circuit_runs WHERE id IN ({SWEEPABLE_RUNS})"),
+        params![days],
+    )?;
+
+    // Stable-identity rows stay forever as dedupe tombstones, but the issue/PR
+    // body they carry is the actual bulk (a row is ~60 bytes empty, and bodies
+    // run to kilobytes). Emptying `context_json` keeps the once-only guarantee
+    // structural while dropping the weight. Terminal-only: an active run's
+    // context still feeds the stepper's template rendering. `updated_at` is
+    // deliberately not bumped — compaction is not a state change — and the
+    // `<> '{}'` guard keeps a steady-state sweep silent.
+    let compacted = conn.execute(
+        "UPDATE autopilot_circuit_runs SET context_json = '{}' \
+          WHERE state IN ('completed', 'failed') \
+            AND updated_at < datetime('now', '-' || ?1 || ' days') \
+            AND trigger_identity NOT LIKE 'interval:%' \
+            AND trigger_identity NOT LIKE 'manual:%' \
+            AND context_json <> '{}'",
+        params![days],
+    )?;
+
+    Ok((deleted, compacted))
+}
