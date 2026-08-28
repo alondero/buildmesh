@@ -629,6 +629,11 @@ pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, Strin
 /// `host_path` + `local_base` are passed into the blocking core, so the
 /// core doesn't pay for a second `db::get_mesh_by_id` (or `to_host_path`
 /// call). The emit payload after `run_blocking` reuses the same values.
+///
+/// Issue #1232 hardening: an adversarial `base_ref` (e.g. `-b`,
+/// `--upload-pack=evil`) is rejected by [`health::parse_local_branch`]
+/// with `None`; we surface that as a descriptive `invalid base ref`
+/// error here instead of silently handing it to git.
 #[command]
 pub async fn restore_mesh_to_base(
     mesh_id: i64,
@@ -637,8 +642,16 @@ pub async fn restore_mesh_to_base(
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let host_path = to_host_path(&mesh.path);
-    let local_base = health::parse_local_branch(&mesh.base_ref)
-        .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
+    let local_base = health::parse_local_branch(&mesh.base_ref).ok_or_else(|| {
+        if mesh.base_ref.starts_with('-') {
+            format!(
+                "invalid base ref '{}': must not start with '-'",
+                mesh.base_ref
+            )
+        } else {
+            format!("invalid base ref '{}'", mesh.base_ref)
+        }
+    })?;
 
     let host_path_for_emit = host_path.clone();
     let result =
