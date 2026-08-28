@@ -244,6 +244,25 @@ fn parse_local_branch_rejects_whitespace_only() {
     assert_eq!(parse_local_branch("   "), None);
 }
 
+/// Adversarial-ref guard (issue #1232). `base_ref` is user-editable via
+/// mesh settings; without this reject a leading `-` would reach git's
+/// option parser as a flag (`-m`, `-b`, `--upload-pack=evil`, …). The
+/// guard lives in `finalize_branch` so every `parse_local_branch`
+/// caller inherits it — `restore_mesh_to_base` already wraps the
+/// `None` return in a descriptive error.
+#[test]
+fn parse_local_branch_rejects_adversarial_dash() {
+    assert_eq!(parse_local_branch("-b"), None);
+    assert_eq!(parse_local_branch("-x"), None);
+    assert_eq!(parse_local_branch("--upload-pack=evil"), None);
+    // Only the leading character counts — a dash in the middle of a
+    // legitimate branch name is fine.
+    assert_eq!(
+        parse_local_branch("origin/feat/-strange"),
+        Some("feat/-strange".to_string())
+    );
+}
+
 // ── compute_mesh_health — drift detection ────────────────────────────────────
 
 #[test]
@@ -646,6 +665,63 @@ fn restore_no_op_when_already_on_base() {
     // Already on main; noop expected.
     let moved = restore_to_base_impl(&repo, "main").expect("noop success");
     assert!(!moved, "HEAD was already on main; nothing to move");
+}
+
+/// Adversarial-ref guard (issue #1232). `base_branch` is user-editable
+/// via mesh settings; passing a `-`-prefixed value to `git checkout`
+/// hands it to git's option parser, where `-m` / `-b` / `--upload-pack`
+/// are valid flags. The restore function must reject the input with a
+/// descriptive error BEFORE spawning `git checkout`, and HEAD must not
+/// have moved.
+#[test]
+fn restore_rejects_adversarial_dash_branch() {
+    let td = TempDir::new();
+    let repo = init_repo(td.path());
+
+    // Snapshot HEAD so we can assert it didn't move.
+    let head_before = repo
+        .head()
+        .unwrap()
+        .target()
+        .expect("repo has a commit");
+
+    let err = restore_to_base_impl(&repo, "-x").unwrap_err();
+    assert!(
+        err.contains("invalid") || err.contains("'-'") || err.contains("dash"),
+        "error must name the adversarial-ref guard (got: {})",
+        err
+    );
+
+    // HEAD must be unchanged — the guard fires before any checkout.
+    let head_after = repo
+        .head()
+        .unwrap()
+        .target()
+        .expect("repo still has a commit");
+    assert_eq!(
+        head_before, head_after,
+        "restore_to_base_impl must not move HEAD when the ref is rejected"
+    );
+}
+
+/// Defence-in-depth coverage: `parse_local_branch` already rejects `-`
+/// upstream, so a caller that flows through it (the Tauri command path)
+/// never reaches `restore_to_base_impl` with an adversarial input. This
+/// test pins the explicit guard inside the function itself with a
+/// `__`-prefixed input (the most realistic attack vector — `git
+/// upload-pack` / `git receive-pack` smuggling), so any future refactor
+/// that calls `restore_to_base_impl` directly without going through
+/// `parse_local_branch` still has the protection.
+#[test]
+fn restore_rejects_adversarial_double_dash_branch() {
+    let td = TempDir::new();
+    let repo = init_repo(td.path());
+    let err = restore_to_base_impl(&repo, "--upload-pack=evil").unwrap_err();
+    assert!(
+        err.contains("invalid") || err.contains("'-'") || err.contains("dash"),
+        "error must name the adversarial-ref guard (got: {})",
+        err
+    );
 }
 
 // ── free_base_branch_impl ───────────────────────────────────────────────────

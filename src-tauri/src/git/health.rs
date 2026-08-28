@@ -32,6 +32,14 @@ const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(30);
 ///   - empty / whitespace-only strings
 ///   - `HEAD` (case-insensitive) — anywhere it appears as the branch part
 ///   - `FETCH_HEAD`
+///   - adversarial refs whose parsed local name starts with `-`
+///     (e.g. `-b`, `--upload-pack=evil`) — issue #1232. `base_ref` is
+///     user-editable via mesh settings; without this reject a leading
+///     `-` would reach git's option parser as a flag. The guard lives
+///     in [`finalize_branch`] so every consumer inherits it; the Tauri
+///     command [`crate::commands::git::restore_mesh_to_base`] wraps the
+///     `None` return in a descriptive error before showing the
+///     "restore-to-base" button.
 ///
 /// **Limitation:** when `base_ref` is a plain nested branch name like
 /// `feature/auth` (no remote prefix, no `refs/heads/` prefix), this helper
@@ -72,11 +80,22 @@ pub(crate) fn parse_local_branch(base_ref: &str) -> Option<String> {
     finalize_branch(local)
 }
 
-/// Reject empty / HEAD / FETCH_HEAD and lowercase-normalize the result.
+/// Reject empty / HEAD / FETCH_HEAD and `-`-prefixed adversarial refs,
+/// then lowercase-normalize the result.
+///
+/// The `-`-prefix reject is the central part of the issue #1232 fix:
+/// `base_ref` is user-editable and ultimately lands in `git checkout <ref>`
+/// or `git fetch <ref>`. Without this guard a value like `-b` or
+/// `--upload-pack=evil` would reach git's option parser and be
+/// interpreted as a flag. Mirrors the explicit check in
+/// [`crate::git::worktree::provision::fetch_single_ref`] — we keep both
+/// for defence-in-depth (the wrapper there can't rely on a `--`
+/// separator).
 fn finalize_branch(local: &str) -> Option<String> {
     if local.is_empty()
         || local.eq_ignore_ascii_case("HEAD")
         || local.eq_ignore_ascii_case("FETCH_HEAD")
+        || local.starts_with('-')
     {
         return None;
     }
@@ -328,15 +347,41 @@ fn make_holder(path: &str, active_paths: &[String]) -> HoldingWorktree {
 /// for the already-on-base no-op case.
 ///
 /// Guard order (first failure short-circuits with a user-readable `Err`):
+/// 0. `base_branch` starts with `-`     — adversarial-ref guard (issue #1232);
+///                                       `base_ref` is user-editable via mesh
+///                                       settings and would otherwise reach
+///                                       git's option parser as a flag.
 /// 1. `is_dirty`                       — uncommitted changes block
 /// 2. `unpushed_ahead > 0`             — local commits would be lost
 /// 3. `find_base_branch_holder` is Some — branch is checked out elsewhere
 /// 4. `is_detached` on a non-base OID  — silent-data-loss via reflog only
 /// 5. already on base                  — no-op, returns `Ok(false)`
+///
+/// Note on the issue #1232 plan's "belt-and-braces `--`" suggestion:
+/// `git checkout -- <branch>` reinterprets `<branch>` as a pathspec and
+/// fails with `pathspec '<branch>' did not match any file(s) known to
+/// git` — i.e. it would break the happy path. The explicit `-`-prefix
+/// guard above is the primary defence; we deliberately do NOT add a
+/// `--` here (it works for `git fetch`, which the issue's provision.rs
+/// reference touches, but not for `git checkout <branch>`).
 pub(crate) fn restore_to_base_impl(
     repo: &Repository,
     base_branch: &str,
 ) -> Result<bool, String> {
+    // Guard 0: adversarial-ref check. The Tauri command path also runs
+    // `parse_local_branch` up front (which now rejects `-`-prefixed
+    // values via `finalize_branch`), but we re-check here so direct
+    // callers cannot skip the protection — mirrors the explicit check in
+    // `provision::fetch_single_ref`. `str::starts_with` is exact for
+    // ASCII `-`; branch names with a UTF-8 leading byte that happens to
+    // look like `-` are not realistic on POSIX pathsystems.
+    if base_branch.starts_with('-') {
+        return Err(format!(
+            "invalid base ref '{}': must not start with '-'",
+            base_branch
+        ));
+    }
+
     // Use base_branch as the base_ref too — `parse_local_branch` is idempotent
     // for both `main` and `origin/main`, and we need `local_base_branch` set
     // for the unpushed-ahead and drift calculations to be correct.
@@ -369,7 +414,11 @@ pub(crate) fn restore_to_base_impl(
         ));
     }
 
-    // All guards pass — run `git checkout`.
+    // All guards pass — run `git checkout`. We do NOT pass `--` before
+    // `base_branch`: `git checkout -- <ref>` reinterprets the ref as a
+    // pathspec (would fail with `pathspec '<ref>' did not match`), so it
+    // breaks the happy path. The explicit `-`-prefix guard above is the
+    // sole defence for issue #1232 — see the function-level doc.
     let host_path = repo
         .workdir()
         .ok_or_else(|| "repo has no working directory".to_string())?
