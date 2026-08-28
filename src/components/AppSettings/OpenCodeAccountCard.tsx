@@ -38,108 +38,14 @@ export function OpenCodeAccountCard() {
   const startingRef = useRef(false);
   const signingOutRef = useRef(false);
 
-  // Mount-time restore: if a credential is already sitting in
-  // Windows Credential Manager (the user previously signed in
-  // successfully and re-opens Settings), transition to `signedIn`
-  // without re-running the dance. The IPC
-  // `get_opencode_console_status` bundles the workspace list with the
-  // active workspace id and the access-token expiry epoch so the
-  // `STATUS_FETCHED` reducer arm can pick the right sub-state
-  // (`signedIn` vs `signedInExpired`).
-  //
-  // `signal.aborted` gates the setState so a fast modal close during
-  // the IPC roundtrip doesn't dispatch into a stale component
-  // instance (mirrors the `UsageTab` mount-time fetch idiom,
-  // `src/components/Probe/UsageTab.tsx:185-187`).
-  useAsyncEffect((signal) => {
-    void api
-      .getOpencodeConsoleStatus()
-      .then((status) => {
-        if (signal.aborted) return;
-        // Defensive: a unit test that pre-dates the
-        // `get_opencode_console_status` IPC may leave its mock
-        // returning `undefined`. A real backend failure
-        // (rare) would also resolve to `undefined` from
-        // `_invoke`'s error path. Either way, treat as "not
-        // signed in" — the dance is still reachable from
-        // `signedOut`, and the user can re-dance to recover.
-        if (!status || typeof status !== 'object') return;
-        dispatch({ type: 'STATUS_FETCHED', status });
-      })
-      .catch(() => {
-        // Best-effort: a credential-store read failure should not
-        // crash the Settings modal. The user sees the default
-        // `signedOut` UI and can re-dance to recover.
-      });
-  }, []);
-
-  return (
-    <div className="border border-border-subtle rounded-lg p-5">
-      <h4 className="text-base font-medium text-text-primary mb-2">
-        OpenCode Console
-      </h4>
-      <StateBody
-        state={state}
-        dispatch={dispatch}
-        startingRef={startingRef}
-        signingOutRef={signingOutRef}
-      />
-    </div>
-  );
-}
-
-function StateBody({
-  state,
-  dispatch,
-  startingRef,
-  signingOutRef,
-}: {
-  state: State;
-  dispatch: React.Dispatch<Action>;
-  startingRef: React.MutableRefObject<boolean>;
-  signingOutRef: React.MutableRefObject<boolean>;
-}) {
-  switch (state.kind) {
-    case 'signedOut':
-      return <SignedOutView dispatch={dispatch} startingRef={startingRef} />;
-    case 'awaitingActivation':
-      return (
-        <AwaitingActivationView
-          state={state}
-          dispatch={dispatch}
-        />
-      );
-    case 'signedIn':
-      return (
-        <SignedInView
-          state={state}
-          dispatch={dispatch}
-          signingOutRef={signingOutRef}
-        />
-      );
-    case 'signedInExpired':
-      return (
-        <SignedInExpiredView
-          state={state}
-          dispatch={dispatch}
-          signingOutRef={signingOutRef}
-        />
-      );
-    case 'error':
-      return <ErrorView message={state.message} dispatch={dispatch} />;
-  }
-}
-
-/* ── signedOut ─────────────────────────────────────────────────────────── */
-
-function SignedOutView({
-  dispatch,
-  startingRef,
-}: {
-  dispatch: React.Dispatch<Action>;
-  startingRef: React.MutableRefObject<boolean>;
-}) {
-  const onClick = () => {
+  // Issue #1241: the start-the-dance routine used to live inside
+  // SignedOutView.onClick only — the Retry button on the error branch
+  // and the "Sign in again" button on the signedInExpired branch both
+  // dispatched START_REQUESTED, which the reducer treats as a no-op by
+  // design. Now that all three recovery entry points must run the IPC,
+  // the routine lives at the parent (where `startingRef` lives) and is
+  // passed down to every view that needs to start a fresh dance.
+  const startSignIn = () => {
     if (startingRef.current) return;
     startingRef.current = true;
     dispatch({ type: 'START_REQUESTED' });
@@ -198,6 +104,107 @@ function SignedOutView({
       }
     })();
   };
+
+  // Mount-time restore: if a credential is already sitting in
+  // Windows Credential Manager (the user previously signed in
+  // successfully and re-opens Settings), transition to `signedIn`
+  // without re-running the dance. The IPC
+  // `get_opencode_console_status` bundles the workspace list with the
+  // active workspace id and the access-token expiry epoch so the
+  // `STATUS_FETCHED` reducer arm can pick the right sub-state
+  // (`signedIn` vs `signedInExpired`).
+  //
+  // `signal.aborted` gates the setState so a fast modal close during
+  // the IPC roundtrip doesn't dispatch into a stale component
+  // instance (mirrors the `UsageTab` mount-time fetch idiom,
+  // `src/components/Probe/UsageTab.tsx:185-187`).
+  useAsyncEffect((signal) => {
+    void api
+      .getOpencodeConsoleStatus()
+      .then((status) => {
+        if (signal.aborted) return;
+        // Defensive: a unit test that pre-dates the
+        // `get_opencode_console_status` IPC may leave its mock
+        // returning `undefined`. A real backend failure
+        // (rare) would also resolve to `undefined` from
+        // `_invoke`'s error path. Either way, treat as "not
+        // signed in" — the dance is still reachable from
+        // `signedOut`, and the user can re-dance to recover.
+        if (!status || typeof status !== 'object') return;
+        dispatch({ type: 'STATUS_FETCHED', status });
+      })
+      .catch(() => {
+        // Best-effort: a credential-store read failure should not
+        // crash the Settings modal. The user sees the default
+        // `signedOut` UI and can re-dance to recover.
+      });
+  }, []);
+
+  return (
+    <div className="border border-border-subtle rounded-lg p-5">
+      <h4 className="text-base font-medium text-text-primary mb-2">
+        OpenCode Console
+      </h4>
+      <StateBody
+        state={state}
+        dispatch={dispatch}
+        startSignIn={startSignIn}
+        signingOutRef={signingOutRef}
+      />
+    </div>
+  );
+}
+
+function StateBody({
+  state,
+  dispatch,
+  startSignIn,
+  signingOutRef,
+}: {
+  state: State;
+  dispatch: React.Dispatch<Action>;
+  startSignIn: () => void;
+  signingOutRef: React.MutableRefObject<boolean>;
+}) {
+  switch (state.kind) {
+    case 'signedOut':
+      return <SignedOutView startSignIn={startSignIn} />;
+    case 'awaitingActivation':
+      return (
+        <AwaitingActivationView
+          state={state}
+          dispatch={dispatch}
+        />
+      );
+    case 'signedIn':
+      return (
+        <SignedInView
+          state={state}
+          dispatch={dispatch}
+          signingOutRef={signingOutRef}
+        />
+      );
+    case 'signedInExpired':
+      return (
+        <SignedInExpiredView
+          state={state}
+          dispatch={dispatch}
+          startSignIn={startSignIn}
+          signingOutRef={signingOutRef}
+        />
+      );
+    case 'error':
+      return <ErrorView message={state.message} startSignIn={startSignIn} />;
+  }
+}
+
+/* ── signedOut ─────────────────────────────────────────────────────────── */
+
+function SignedOutView({
+  startSignIn,
+}: {
+  startSignIn: () => void;
+}) {
   return (
     <>
       <p className="text-base text-text-muted mb-4">
@@ -209,7 +216,7 @@ function SignedOutView({
       </p>
       <button
         type="button"
-        onClick={onClick}
+        onClick={startSignIn}
         data-testid="opencode-sign-in"
         className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
       >
@@ -554,10 +561,12 @@ function SignedInView({
 function SignedInExpiredView({
   state,
   dispatch,
+  startSignIn,
   signingOutRef,
 }: {
   state: Extract<State, { kind: 'signedInExpired' }>;
   dispatch: React.Dispatch<Action>;
+  startSignIn: () => void;
   signingOutRef: React.MutableRefObject<boolean>;
 }) {
   // Same affordances as SignedInView (switch account still works
@@ -683,7 +692,7 @@ function SignedInExpiredView({
       <div className="flex gap-3">
         <button
           type="button"
-          onClick={() => dispatch({ type: 'START_REQUESTED' })}
+          onClick={startSignIn}
           data-testid="opencode-sign-in-again"
           className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
         >
@@ -729,10 +738,10 @@ function formatAccountLabel(
 
 function ErrorView({
   message,
-  dispatch,
+  startSignIn,
 }: {
   message: string;
-  dispatch: React.Dispatch<Action>;
+  startSignIn: () => void;
 }) {
   return (
     <>
@@ -745,7 +754,7 @@ function ErrorView({
       </div>
       <button
         type="button"
-        onClick={() => dispatch({ type: 'START_REQUESTED' })}
+        onClick={startSignIn}
         data-testid="opencode-retry"
         className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
       >

@@ -16,6 +16,11 @@ import type { OpenCodeConsoleStatus } from '../../types/generated/OpenCodeConsol
  *     └─START_FAILED    → error
  *     └─STATUS_FETCHED  → signedIn | signedInExpired | signedOut (no-op)
  *
+ *   error | signedInExpired ─ START_REQUESTED → signedOut (recovery reset,
+ *     so the subsequent START_SUCCEEDED lands cleanly in awaitingActivation;
+ *     START_REQUESTED is still a no-op from signedOut/awaitingActivation/
+ *     signedIn — the user can't re-fire mid-dance)
+ *
  *   awaitingActivation ─ POLL_RESULT.Pending      → awaitingActivation
  *                    ─ POLL_RESULT.SlowDown       → awaitingActivation (interval updated)
  *                    ─ POLL_RESULT.Success        → awaitingActivation (effect needs workspaces)
@@ -29,6 +34,11 @@ import type { OpenCodeConsoleStatus } from '../../types/generated/OpenCodeConsol
  *           ─ WORKSPACE_CHOSEN_FAILED   → signedIn (rollback to previousWorkspace)
  *           ─ SIGNOUT_REQUESTED         → signedOut (optimistic)
  *           ─ SIGNOUT_FAILED            → signedIn (rollback; effect captures previous values)
+ *
+ *   signedInExpired — same transitions as `signedIn` for the
+ *     picker (PENDING/CONFIRMED/FAILED) and for SIGNOUT_REQUESTED
+ *     (optimistic flip to signedOut). The expiry banner is a UI-only
+ *     hint; the state machine otherwise mirrors `signedIn`.
  *
  *   signedInExpired (returned by STATUS_FETCHED) — same UI affordances as
  *   `signedIn` plus a "Session expired" hint; transitions to `signedOut`
@@ -129,11 +139,21 @@ export type Action =
 export function opencodeAccountReducer(state: State, action: Action): State {
   switch (action.type) {
     case 'START_REQUESTED':
-      // No-op: the click handler triggers an effect that calls
+      // From `error` and `signedInExpired`: reset to `signedOut` so
+      // the subsequent START_SUCCEEDED dispatch (fired by the shared
+      // `startSignIn` callback) lands cleanly in awaitingActivation.
+      // Without this reset, START_SUCCEEDED's `state.kind !== 'signedOut'`
+      // gate would silently drop the action and the card would stay
+      // stuck on the error/expired branch (issue #1241).
+      // From `signedOut`/`awaitingActivation`/`signedIn`: still a no-op
+      // — the click handler triggers an effect that calls
       // `startOpencodeDeviceFlowConsole`; the next dispatch is
-      // START_SUCCEEDED or START_FAILED. Keeping the click handler explicit
-      // (rather than mutating `busy: true` here) means the card's only
-      // "loading" affordances live in the IPC-level effect.
+      // START_SUCCEEDED or START_FAILED. Keeping the click handler
+      // explicit (rather than mutating `busy: true` here) means the
+      // card's only "loading" affordances live in the IPC-level effect.
+      if (state.kind === 'error' || state.kind === 'signedInExpired') {
+        return { kind: 'signedOut' };
+      }
       return state;
 
     case 'START_SUCCEEDED': {
@@ -312,7 +332,15 @@ export function opencodeAccountReducer(state: State, action: Action): State {
       };
 
     case 'SIGNOUT_REQUESTED':
-      if (state.kind !== 'signedIn') return state;
+      // Issue #1241: the gate used to read `state.kind !== 'signedIn'`,
+      // silently dropping the action from `signedInExpired`. The
+      // component effect still fired `revokeOpencodeConsole()` — so the
+      // backend credential WAS being revoked while the UI stayed in
+      // `signedInExpired` forever, trapping the user with a dead "Sign
+      // in again" button. The expired branch renders the same
+      // two-step sign-out affordance as the fresh branch, so the
+      // optimistic flip must accept either state.
+      if (state.kind !== 'signedIn' && state.kind !== 'signedInExpired') return state;
       // Optimistic flip; effect fires `revokeOpencodeConsole`. On success
       // dispatch SIGNOUT_SUCCEEDED (no-op); on failure dispatch
       // SIGNOUT_FAILED with the captured snapshot to roll back.

@@ -491,6 +491,166 @@ describe('OpenCodeAccountCard (issue #969)', () => {
     expect(openUrlMock).not.toHaveBeenCalled();
   });
 
+  it('Retry sign-in from error state re-invokes start_device_flow_console and reaches awaitingActivation', async () => {
+    // Issue #1241: pre-fix the `opencode-retry` button only dispatched
+    // START_REQUESTED (a no-op by design). The IPC-start routine lived
+    // inside SignedOutView and was never wired to ErrorView. The first
+    // click rejecting the IPC put the card in `error`; clicking retry
+    // must re-issue the IPC and reach awaitingActivation.
+    const calls = mockBackend();
+    let startCalls = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      calls[cmd] = [...(calls[cmd] ?? []), args];
+      switch (cmd) {
+        case 'start_device_flow_console':
+          startCalls += 1;
+          if (startCalls === 1) {
+            // First click: reject to land us in the error branch.
+            return Promise.reject(new Error('network unreachable'));
+          }
+          // Second click (Retry): succeed.
+          return Promise.resolve({
+            device_code: 'dc_retry',
+            user_code: 'RETRY-1234',
+            verification_uri_complete:
+              'https://console.opencode.ai/auth/device?code=RETRY-1234',
+            interval_secs: 5,
+            expires_in_secs: 600,
+          });
+        case 'poll_opencode_device_token':
+          // The retry path lands in awaitingActivation, which kicks
+          // off the polling loop. Returning a `pending` status keeps
+          // the card in awaitingActivation for the duration of the
+          // test (the user-code is what we're asserting on).
+          return Promise.resolve({ kind: 'pending' });
+        default:
+          return Promise.resolve({});
+      }
+    });
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    // 1st click — reject → error branch.
+    await user.click(screen.getByTestId('opencode-sign-in'));
+    await waitFor(() => {
+      expect(screen.getByTestId('opencode-error')).toBeTruthy();
+    });
+
+    // Click Retry — must re-fire start_device_flow_console and reach
+    // awaitingActivation (user code visible).
+    await user.click(screen.getByTestId('opencode-retry'));
+    await waitFor(() => {
+      const code = screen.getByTestId('opencode-user-code');
+      expect(code.textContent).toBe('RETRY-1234');
+    });
+    expect(calls['start_device_flow_console']).toHaveLength(2);
+    expect(openUrlMock).toHaveBeenCalledWith(
+      'https://console.opencode.ai/auth/device?code=RETRY-1234',
+    );
+  });
+
+  it('Sign in again from signedInExpired re-invokes start_device_flow_console and reaches awaitingActivation', async () => {
+    // Issue #1241: the "Sign in again" button on the expired branch
+    // dispatched START_REQUESTED only — same dead path as the error
+    // Retry button. Once the fix lands, the button must fire the IPC
+    // and reach awaitingActivation.
+    const calls = mockBackend();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      calls[cmd] = [...(calls[cmd] ?? []), args];
+      switch (cmd) {
+        case 'get_opencode_console_status':
+          return Promise.resolve({
+            signed_in: true,
+            workspaces: [{ id: 'acc_personal', name: 'alice@example.com' }],
+            active_workspace_id: 'acc_personal',
+            access_token_expires_at_ms: 1_500_000_000_000, // long past
+            session_expired: true,
+          });
+        case 'start_device_flow_console':
+          return Promise.resolve({
+            device_code: 'dc_again',
+            user_code: 'AGAIN-1234',
+            verification_uri_complete:
+              'https://console.opencode.ai/auth/device?code=AGAIN-1234',
+            interval_secs: 5,
+            expires_in_secs: 600,
+          });
+        case 'poll_opencode_device_token':
+          // Lands in awaitingActivation on click — keep the card
+          // there by returning a `pending` status (matches the
+          // baseline mockBackend() default).
+          return Promise.resolve({ kind: 'pending' });
+        default:
+          return Promise.resolve({});
+      }
+    });
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    // Wait for the expired branch.
+    await waitFor(() => {
+      expect(screen.getByTestId('opencode-session-expired')).toBeTruthy();
+    });
+
+    await user.click(screen.getByTestId('opencode-sign-in-again'));
+
+    await waitFor(() => {
+      const code = screen.getByTestId('opencode-user-code');
+      expect(code.textContent).toBe('AGAIN-1234');
+    });
+    expect(calls['start_device_flow_console']).toHaveLength(1);
+    expect(openUrlMock).toHaveBeenCalledWith(
+      'https://console.opencode.ai/auth/device?code=AGAIN-1234',
+    );
+  });
+
+  it('Confirm sign out from signedInExpired calls revoke_opencode_console and transitions to signedOut', async () => {
+    // Issue #1241: the SIGNOUT_REQUESTED gate read `state.kind !==
+    // 'signedIn'`, so the optimistic flip from signedInExpired was
+    // silently dropped. The component still called
+    // revokeOpencodeConsole — the backend credential WAS being revoked
+    // while the UI stayed in signedInExpired forever, and combined
+    // with the dead "Sign in again" path the user was trapped.
+    const calls = mockBackend();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      calls[cmd] = [...(calls[cmd] ?? []), args];
+      switch (cmd) {
+        case 'get_opencode_console_status':
+          return Promise.resolve({
+            signed_in: true,
+            workspaces: [{ id: 'acc_personal', name: 'alice@example.com' }],
+            active_workspace_id: 'acc_personal',
+            access_token_expires_at_ms: 1_500_000_000_000, // long past
+            session_expired: true,
+          });
+        case 'revoke_opencode_console':
+          return Promise.resolve(undefined);
+        default:
+          return Promise.resolve({});
+      }
+    });
+    const user = userEvent.setup();
+    render(<OpenCodeAccountCard />);
+
+    // Wait for the expired branch.
+    await waitFor(() => {
+      expect(screen.getByTestId('opencode-session-expired')).toBeTruthy();
+    });
+
+    // Two-step sign out: first click flips to "Confirm sign out";
+    // second click fires revoke.
+    await user.click(screen.getByTestId('opencode-sign-out'));
+    await user.click(screen.getByTestId('opencode-sign-out'));
+
+    // The signedOut view's "Sign in" button must render after the
+    // optimistic flip — this is what was broken pre-fix.
+    await waitFor(() => {
+      expect(screen.getByTestId('opencode-sign-in')).toBeTruthy();
+    });
+    expect(calls['revoke_opencode_console']).toHaveLength(1);
+    expect(screen.queryByTestId('opencode-session-expired')).toBeNull();
+  });
+
   it('awaitingActivation view displays the verification URL as text so the user can copy/paste it as a fallback', async () => {
     // Regression pin for "the OpenCode verification thingy doesn't open a
     // browser window, nor does clicking the link either that is shown"

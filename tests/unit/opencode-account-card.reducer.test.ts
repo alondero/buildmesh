@@ -355,6 +355,24 @@ describe('opencodeAccountReducer (issue #969)', () => {
     expect(next).toEqual({ kind: 'signedOut' });
   });
 
+  it('SIGNOUT_REQUESTED from signedInExpired also transitions to signedOut', () => {
+    // Issue #1241: the gate used to read `state.kind !== 'signedIn'`,
+    // which silently dropped the action from `signedInExpired`. The
+    // card's `SignedInExpiredView` still calls
+    // `api.revokeOpencodeConsole()` — so the credential WAS being
+    // revoked while the UI stayed in `signedInExpired` forever,
+    // trapping the user. The reducer must accept either state so the
+    // optimistic flip matches the file's own docstring (lines 33-35).
+    const before: State = {
+      kind: 'signedInExpired',
+      workspace: ws1,
+      workspaces: [ws1, ws2],
+      accessTokenExpiresAtMs: 1_500_000_000_000,
+    };
+    const next = opencodeAccountReducer(before, { type: 'SIGNOUT_REQUESTED' });
+    expect(next).toEqual({ kind: 'signedOut' });
+  });
+
   it('SIGNOUT_FAILED rolls back signedOut → signedIn with the captured snapshot', () => {
     const capturedWorkspace = ws2;
     const capturedWorkspaces = [ws2, ws3];
