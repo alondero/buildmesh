@@ -30,10 +30,15 @@ pub fn create_autopilot_circuit(
     graph_json: &str,
 ) -> SqlResult<AutopilotCircuit> {
     let db = super::lock_db();
+    // Draft-first (issue #1356): new blueprints start disabled so the
+    // GitHub/interval pollers cannot fire while the user is still
+    // authoring. Trigger Now still mints a run against a disabled row.
+    // `enabled` is written explicitly so existing v34 DBs whose column
+    // default is still 1 cannot silently enable a fresh circuit.
     db.execute(
         "INSERT INTO autopilot_circuits \
-             (mesh_id, name, description, concurrency_limit, graph_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+             (mesh_id, name, description, enabled, concurrency_limit, graph_json) \
+         VALUES (?1, ?2, ?3, 0, ?4, ?5)",
         params![mesh_id, name, description, concurrency_limit, graph_json],
     )?;
     get_autopilot_circuit_inner(&db, db.last_insert_rowid())?

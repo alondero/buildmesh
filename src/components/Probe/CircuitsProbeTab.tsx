@@ -253,7 +253,7 @@ export function CircuitsProbeTab() {
                   <button
                     type="button"
                     onClick={() => runAction(() => triggerCircuitNow(circuit.id))}
-                    disabled={busy || !circuit.enabled}
+                    disabled={busy}
                     data-testid={`circuit-trigger-${circuit.id}`}
                     className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
                   >

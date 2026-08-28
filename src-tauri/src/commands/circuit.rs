@@ -156,8 +156,8 @@ pub fn set_circuit_enabled(circuit_id: i64, enabled: bool) -> Result<(), String>
 /// Save a blueprint edited in the canvas editor (issue #1209): the
 /// whole `graph_json` is replaced after validating it parses into the
 /// AST *and* passes semantic checks (unique ids, resolvable edges,
-/// acyclic — see [`CircuitGraph::validate`]), so an editor bug can
-/// never persist a graph the stepper would walk forever. The worker
+/// bounded cycles — see [`CircuitGraph::validate`]), so an editor bug
+/// can never persist a graph the stepper would walk forever. The worker
 /// wakes so trigger passes see the new topology immediately.
 #[command]
 pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), String> {
@@ -183,6 +183,8 @@ pub fn delete_circuit(circuit_id: i64) -> Result<(), String> {
 /// Trigger Now: mint a fresh `pending` run with a `manual:<unix-ms>`
 /// dedupe identity, seed its `circuit.*` template context, and wake the
 /// worker so it starts within milliseconds. Returns the new run id.
+/// Works on disabled (draft) circuits so a graph can be dry-tested
+/// before background pollers are turned on (issue #1356).
 ///
 /// One lock acquisition: the row is inserted with its base context in a
 /// single statement. `circuit.run_id` can't be known before the insert,
@@ -193,9 +195,9 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     let circuit = crate::db::get_autopilot_circuit(circuit_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
-    if !circuit.enabled {
-        return Err("circuit is disabled — enable it before triggering".to_string());
-    }
+    // Draft-first (issue #1356): Trigger Now is the dry-run seam and
+    // must work while the circuit is still disabled. Background
+    // pollers (`list_enabled_circuits`) stay gated on `enabled`.
     let identity = format!(
         "manual:{}",
         std::time::SystemTime::now()

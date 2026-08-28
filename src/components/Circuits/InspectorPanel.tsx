@@ -1,9 +1,11 @@
 /**
  * InspectorPanel — the editor's right slide-over (issue #1209).
  *
- * One form per node kind: only the fields the AST actually carries
- * (the blueprint stays canonical in Rust). Text fields that accept
- * circuit context use `MustacheTextarea` so `{{` opens autocomplete.
+ * One form per node kind for the fields this slice edits (the
+ * blueprint stays canonical in Rust). v2 harness/target fields on
+ * Spawn/Inject/SetNodeStatus land in later Circuits v2 slices. Text
+ * fields that accept circuit context use `MustacheTextarea` so `{{`
+ * opens autocomplete.
  */
 
 import { useState } from 'react';
