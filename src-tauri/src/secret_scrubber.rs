@@ -18,11 +18,10 @@
 //!    masked only when the *key* carries a secret-word, so a benign value isn't
 //!    redacted just because it sits after an `=`.
 //!
-//! The key/value pass runs twice, in order, so multi-word *quoted* values
-//! (`APP_SECRET="correct horse battery staple"`) are masked whole rather than
-//! leaking everything after the first space (issue #1220). The second pass is
-//! the same single-word rule as before — it cleans up whatever the quoted
-//! rule left behind and remains the only rule that handles *unquoted* values.
+//! The key/value step is split in two passes run in order: a quoted-value
+//! rule masks whole-quoted values like `APP_SECRET="correct horse battery
+//! staple"` (issue #1220), and the original single-word rule then handles
+//! unquoted values and any residue from the quoted pass.
 //!
 //! Scrubbing is deliberately a *masking* pass, never a parse: it works on the
 //! structured transcript fields (turn text, tool-call inputs, last assistant
