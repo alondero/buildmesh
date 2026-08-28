@@ -484,19 +484,20 @@ export function MeshPropertiesTab() {
   };
 
   // Delete Mesh — ported from the legacy `MeshPropertiesPanel`. The store
-  // swallows IPC errors into `state.error` (mirrors the legacy try/catch),
-  // so closing the probe is unconditional on a non-throwing deleteMesh.
-  // `setShowDeleteConfirm(false)` runs first so the dialog unmounts before
-  // the probe closes (avoids a brief double-overlay flash).
+  // swallows IPC errors into `state.error` (mirrors the legacy try/catch
+  // and matches the rest of the meshStore surface), so a try/catch around
+  // `deleteMesh` was unreachable. Issue #1247 made `deleteMesh` return a
+  // boolean so callers can gate their own follow-up on the real outcome:
+  // on failure the mesh survives and the user stays in the same Probe
+  // tab to retry; on success `setShowDeleteConfirm(false)` unmounts the
+  // confirm dialog first so it disappears before `toggleProbe()` flips
+  // the probe off (avoids a brief double-overlay flash).
   const handleDelete = async () => {
     if (activeMeshId === null) return;
-    try {
-      await deleteMesh(activeMeshId);
-      setShowDeleteConfirm(false);
-      toggleProbe();
-    } catch (e) {
-      console.error('Failed to delete mesh:', e);
-    }
+    const ok = await deleteMesh(activeMeshId);
+    if (!ok) return;
+    setShowDeleteConfirm(false);
+    toggleProbe();
   };
 
   // Without a focused mesh there is nothing to edit. The probe shell
