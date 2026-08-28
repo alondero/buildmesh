@@ -82,10 +82,12 @@ struct HookPayload {
 /// arbitrary string must never enter `cli_session_id`: resume treats that
 /// column as an executable CLI argument. Codex, Claude, and AGY all use
 /// UUIDs; the alias on `HookPayload::session_id` makes
-/// `conversationId` (AGY) parse through the same code path.
+/// `conversationId` (AGY) parse through the same code path. Validation
+/// is delegated to [`request::parse_cli_session_id`] so this route and
+/// `import_and_resume` share one boundary check (issue #1237).
 fn hook_session_id(body: &[u8]) -> Option<String> {
     let id = serde_json::from_slice::<HookPayload>(body).ok()?.session_id?;
-    uuid::Uuid::parse_str(&id).ok().map(|parsed| parsed.to_string())
+    request::parse_cli_session_id(&id)
 }
 
 /// What to do with an incoming attention webhook.
