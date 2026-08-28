@@ -18,6 +18,11 @@
 //!    masked only when the *key* carries a secret-word, so a benign value isn't
 //!    redacted just because it sits after an `=`.
 //!
+//! The key/value step is split in two passes run in order: a quoted-value
+//! rule masks whole-quoted values like `APP_SECRET="correct horse battery
+//! staple"` (issue #1220), and the original single-word rule then handles
+//! unquoted values and any residue from the quoted pass.
+//!
 //! Scrubbing is deliberately a *masking* pass, never a parse: it works on the
 //! structured transcript fields (turn text, tool-call inputs, last assistant
 //! message) and never touches the JSON envelope's own keys, so it cannot
@@ -73,6 +78,39 @@ static KEY_VALUE_RE: Lazy<Regex> = Lazy::new(|| {
     .expect("key-value secret regex is valid")
 });
 
+/// `key<sep>"<value>"` (or `'…'`) for secret-word keys. Two branches — one
+/// for double-quoted, one for single-quoted — because the Rust `regex` crate
+/// is DFA-based and doesn't support backreferences, so we can't say "closing
+/// quote must match the opening one" via a single capture group. The two
+/// branches share the key/sep prefix and each captures its own value group
+/// (`dq`/`sq`); the replacement callback picks whichever matched. The
+/// alternation is wrapped in `(?:…)` so the `|` is scoped to the quote/value
+/// pair and doesn't split the whole pattern (which would leave the second
+/// branch without a key requirement). This catches a passphrase like
+/// `"correct horse battery staple"` whole instead of leaking everything
+/// after the first space. Runs **before** [`KEY_VALUE_RE`] in [`scrub_str`] —
+/// otherwise the single-word rule would mask only the first word of the
+/// passphrase and leave the trailing quote behind, after which this pass
+/// would have nothing to extend. Issue #1220.
+static QUOTED_VALUE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        concat!(
+            r"(?i)",
+            r"(?P<key>[\w.\-]*(?:{words})[\w.\-]*)",
+            // separator — optional closing quote, then : or =, with surrounding space
+            r#"(?P<sep>["']?\s*[:=]\s*)"#,
+            // Alternation scoped to the quote/value pair: `"…"` OR `'…'`.
+            // `[^"]*` and `[^']*` don't span newlines, which is the common
+            // case for quoted secret values (PEM blocks have their own
+            // whole-block rule).
+            r#"(?:""#,
+            r#"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')"#,
+        ),
+        words = SECRET_WORDS
+    ))
+    .expect("quoted-value regex is valid")
+});
+
 /// Matches a JSON object *key* that names a secret. Used by
 /// [`SecretScrubber::scrub_json`] to mask a value wholesale when its key says
 /// it's a credential — catching structured secrets (`{"password": "swordfish"}`)
@@ -111,8 +149,11 @@ static TOKEN_RES: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
         (r"\bAIza[0-9A-Za-z_\-]{35}\b", MASK),
         // Slack token.
         (r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", MASK),
-        // OpenAI-style secret key.
-        (r"\bsk-[A-Za-z0-9]{20,}\b", MASK),
+        // OpenAI-style secret key. Dashes are part of the Anthropic
+        // (`sk-ant-api03-…`) and OpenAI Platform (`sk-proj-…`, `sk-admin-…`)
+        // families; the trailing `\b` ensures the dash separator before any
+        // following word is *not* swallowed (issue #1220).
+        (r"\bsk-[A-Za-z0-9_-]{20,}\b", MASK),
     ];
     rules
         .iter()
@@ -127,9 +168,12 @@ pub struct SecretScrubber;
 
 impl SecretScrubber {
     /// Mask every secret in `input`, returning the cleaned string. Runs the
-    /// private-key, key/value, and token-format passes in turn; the passes are
-    /// ordered so a `token=ghp_…` is masked once by the key/value rule rather
-    /// than twice. Idempotent: re-scrubbing already-masked text is a no-op.
+    /// private-key, quoted-value, key/value, auth-scheme, and token-format
+    /// passes in turn; the passes are ordered so a `token=ghp_…` is masked
+    /// once by the key/value rule rather than twice, and a quoted passphrase
+    /// is masked whole by the quoted-value rule rather than leaking the words
+    /// after the first space (issue #1220). Idempotent: re-scrubbing
+    /// already-masked text is a no-op.
     pub fn scrub(input: &str) -> String {
         scrub_str(input)
     }
@@ -189,16 +233,29 @@ fn scrub_str(input: &str) -> String {
     // 1. Whole PEM blocks first, before the token rules can nibble at their
     //    base64 body.
     let step1 = PRIVATE_KEY_RE.replace_all(input, "[REDACTED PRIVATE KEY]");
-    // 2. key=value secrets — mask only the value, keep key + punctuation.
-    let step2 = KEY_VALUE_RE.replace_all(&step1, |caps: &Captures| {
+    // 2. Quoted multi-word secrets — runs BEFORE the single-word key=value
+    //    rule so a passphrase like `"correct horse battery staple"` is masked
+    //    whole. If the single-word rule ran first it would only mask the first
+    //    word, and by the time this pass saw the input the closing quote
+    //    would be detached from its opening one, leaving the rest exposed
+    //    (issue #1220). The callback picks which branch matched (`dq` vs
+    //    `sq`) so the replacement uses the right quote character on both
+    //    sides of the mask.
+    let step2 = QUOTED_VALUE_RE.replace_all(&step1, |caps: &Captures| {
+        let quote = if caps.name("dq").is_some() { '"' } else { '\'' };
+        format!("{}{}{}{}{}", &caps["key"], &caps["sep"], quote, MASK, quote)
+    });
+    // 3. Unquoted (or single-quoted) key=value secrets — mask only the value,
+    //    keep key + punctuation.
+    let step3 = KEY_VALUE_RE.replace_all(&step2, |caps: &Captures| {
         format!("{}{}{}{}", &caps["key"], &caps["sep"], &caps["q"], MASK)
     });
-    // 3. Auth-scheme credentials — mask the credential, keep the scheme word.
-    let step3 = AUTH_SCHEME_RE.replace_all(&step2, |caps: &Captures| {
+    // 4. Auth-scheme credentials — mask the credential, keep the scheme word.
+    let step4 = AUTH_SCHEME_RE.replace_all(&step3, |caps: &Captures| {
         format!("{} {}", &caps["scheme"], MASK)
     });
-    // 4. Context-free token shapes anywhere they appear.
-    let mut out = step3.into_owned();
+    // 5. Context-free token shapes anywhere they appear.
+    let mut out = step4.into_owned();
     for (re, repl) in TOKEN_RES.iter() {
         out = re.replace_all(&out, *repl).into_owned();
     }
@@ -362,5 +419,98 @@ mod tests {
         SecretScrubber::scrub_json(&mut v);
         assert_eq!(v["author"].as_str().unwrap(), "octocat");
         assert_eq!(v["title"].as_str().unwrap(), "Fix bug");
+    }
+
+    // --- #1220: multi-word quoted secrets --------------------------------
+    //
+    // A passphrase or multi-word secret under a secret-named key. The single-word
+    // value rule used `[^\s"',]+` so only the first word was masked and the rest
+    // of the secret leaked to the Coordinator.
+
+    #[test]
+    fn masks_quoted_multi_word_secret_value_in_shell_form() {
+        // Bug #1220: the regex stopped at whitespace, so `correct horse battery
+        // staple` exposed everything after the first word.
+        assert_eq!(
+            SecretScrubber::scrub(r#"APP_SECRET="correct horse battery staple""#),
+            r#"APP_SECRET="[REDACTED]""#
+        );
+    }
+
+    #[test]
+    fn masks_quoted_multi_word_secret_value_in_json_form() {
+        // Same bug, JSON shape — a passphrase under a secret-named key.
+        assert_eq!(
+            SecretScrubber::scrub(r#"{"password": "correct horse battery staple"}"#),
+            r#"{"password": "[REDACTED]"}"#
+        );
+    }
+
+    #[test]
+    fn masks_quoted_multi_word_secret_value_with_single_quotes() {
+        // The tempered-greedy regex must close on the *matching* quote.
+        assert_eq!(
+            SecretScrubber::scrub("API_KEY='multi word secret value'"),
+            "API_KEY='[REDACTED]'"
+        );
+    }
+
+    #[test]
+    fn masks_quoted_multi_word_secret_value_with_spaces_around_equals() {
+        assert_eq!(
+            SecretScrubber::scrub(r#"DB_PASSWORD  =  "phrase with spaces""#),
+            r#"DB_PASSWORD  =  "[REDACTED]""#
+        );
+    }
+
+    #[test]
+    fn quoted_multi_word_masking_is_idempotent() {
+        // Re-scrubbing already-masked output must be a no-op.
+        let once = SecretScrubber::scrub(r#"PASSWORD="hello world""#);
+        assert_eq!(once, r#"PASSWORD="[REDACTED]""#);
+        assert_eq!(SecretScrubber::scrub(&once), once);
+    }
+
+    // --- #1220: dashed `sk-` keys ----------------------------------------
+    //
+    // The `sk-` rule excluded dashes, so the Anthropic (`sk-ant-api03-…`) and
+    // OpenAI Platform (`sk-proj-…` / `sk-admin-…`) families never matched.
+
+    #[test]
+    fn masks_anthropic_sk_ant_api03_key_with_dashes() {
+        // Real Anthropic key shape — the rule must catch the full token, dashes
+        // included.
+        let raw = "sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB";
+        assert_eq!(SecretScrubber::scrub(raw), MASK);
+    }
+
+    #[test]
+    fn masks_openai_sk_proj_key_with_dashes() {
+        let raw = "sk-proj-abcdefghijklmnopqrstuv1234567890ABCD";
+        assert_eq!(SecretScrubber::scrub(raw), MASK);
+    }
+
+    #[test]
+    fn masks_openai_sk_admin_key_with_dashes() {
+        let raw = "sk-admin-abcdefghijklmnopqrstuv1234567890ABCD";
+        assert_eq!(SecretScrubber::scrub(raw), MASK);
+    }
+
+    #[test]
+    fn dashed_sk_key_does_not_swallow_trailing_word() {
+        // Greedy `[A-Za-z0-9_-]{20,}` must stop at the last word char so a
+        // dash separator between the key and the next token doesn't get eaten.
+        let scrubbed = SecretScrubber::scrub(
+            "export sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB other",
+        );
+        assert_eq!(scrubbed, "export [REDACTED] other");
+    }
+
+    #[test]
+    fn dashed_sk_key_masking_is_idempotent() {
+        let raw = "sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB";
+        let once = SecretScrubber::scrub(raw);
+        assert_eq!(once, MASK);
+        assert_eq!(SecretScrubber::scrub(&once), once);
     }
 }
