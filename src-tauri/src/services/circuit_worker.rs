@@ -54,6 +54,7 @@ use crate::autopilot::circuit::stepper::{
 };
 use crate::db;
 use crate::models::SessionStatus;
+use crate::process_util::run_worker_pass;
 
 /// Fast tick — covers interval pacing headroom, slot unblocking latency,
 /// and piloted-agent observation lag.
@@ -152,18 +153,45 @@ pub fn wake_circuit_worker() {
 /// `setup`, alongside the legacy autopilot worker. Startup order:
 /// reconcile → loop (interval pass, GitHub poll pass, drive pass,
 /// lost-turn watchdog).
+///
+/// Issue #1235: every per-pass body runs inside
+/// [`crate::process_util::run_worker_pass`] so a single panic deep in
+/// `run_pass` / `lost_turn_watchdog_pass` (e.g. an out-of-range serde
+/// tag, a DB invariant violation surfaced as a panic, a panic while
+/// holding `APPROVALS`) unwinds the pass — not the thread. Without
+/// this, the worker dies silently for the rest of the session and
+/// circuits stop advancing while the UI badge sits at idle with no
+/// signal. The lock-recovery side of #1235 is covered by
+/// [`lock_circuit_worker_static`] (issue #1224); this worker just needs
+/// the panic boundary.
 pub fn start_circuit_worker(app: AppHandle) {
     std::thread::Builder::new()
         .name("circuit-worker".to_string())
         .spawn(move || {
             std::thread::sleep(STARTUP_DELAY);
+            // Startup reconcile runs OUTSIDE the catch — a panic here
+            // means the worker can't even start, so retrying on the
+            // next pass would just panic again. The panic hook in
+            // lib::setup already captures the cause in panic.log.
             startup_reconcile_pass(&app);
             let (lock, cvar) = &*WAKE;
             loop {
-                super::circuit_triggers::run_interval_pass();
-                super::circuit_triggers::maybe_poll_github();
-                run_pass(&app);
-                lost_turn_watchdog_pass(&app);
+                // Each per-pass body is its own catch_unwind scope so
+                // a panic in the interval-pass doesn't skip the
+                // lost-turn watchdog (and vice-versa). `run_worker_pass`
+                // logs the panic with the worker name and returns
+                // false; we discard the return — recovery is the
+                // important behaviour, not the signal.
+                run_worker_pass("circuits:interval", || {
+                    super::circuit_triggers::run_interval_pass();
+                });
+                run_worker_pass("circuits:github-poll", || {
+                    super::circuit_triggers::maybe_poll_github();
+                });
+                run_worker_pass("circuits:drive", || run_pass(&app));
+                run_worker_pass("circuits:watchdog", || {
+                    lost_turn_watchdog_pass(&app);
+                });
                 // Wait for the next tick OR an immediate wake, whichever
                 // first (`wait_timeout` returns either way).
                 let guard = lock_circuit_worker_static(lock);
@@ -1352,5 +1380,36 @@ mod tests {
         // live; the `circuit_worker_smoke` integration test exercises
         // the full wait/notify handshake end-to-end.
         drop(guard);
+    }
+
+    // -- worker panic isolation (issue #1235) -----------------------------
+    //
+    // Headline regression for the circuits worker: a single panic inside
+    // `run_pass` (e.g. a serde edge case on a freshly-loaded graph)
+    // unwinds the worker thread and the circuits stop advancing forever.
+    // The fix wraps each per-pass body in `run_worker_pass`. The test
+    // below drives the same call shape as `start_circuit_worker`'s loop
+    // body and asserts the second + third tick still run after the
+    // first panicked.
+
+    #[test]
+    fn circuit_worker_loop_survives_a_panicking_drive_pass() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let successes = AtomicUsize::new(0);
+        for tick in 0..3 {
+            let successes_ref = &successes;
+            crate::process_util::run_worker_pass("circuits:drive", move || {
+                if tick == 0 {
+                    panic!("fault injection: first drive pass panics");
+                }
+                successes_ref.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        assert_eq!(
+            successes.load(Ordering::SeqCst),
+            2,
+            "ticks 1 + 2 must succeed after tick 0 panicked"
+        );
     }
 }

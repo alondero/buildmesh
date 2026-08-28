@@ -54,6 +54,8 @@
 
 use std::time::Duration;
 
+use crate::process_util::run_worker_pass;
+
 /// Maximum age (in days) a `coordinator_drive_prompts` row may sit in the
 /// ledger before the next prune sweep deletes it. Tuned in the module
 /// docstring — 7 days covers every realistic retry window while bounding
@@ -90,6 +92,14 @@ pub const CIRCUIT_RUN_RETENTION_DAYS: i64 = 30;
 /// runs forever in its own thread; failures inside either sweep are logged
 /// and swallowed so a transient error can't kill the loop.
 ///
+/// Issue #1235: `prune_once` / `prune_circuit_runs_once` return a
+/// `Result` for the recoverable SQLite errors, but a deeper panic (e.g.
+/// an unwrap inside the underlying DB helper triggered by a future
+/// schema change) would still unwind the thread. Each sweep is wrapped
+/// in its own [`crate::process_util::run_worker_pass`] scope so a panic
+/// in one sweep's body does NOT skip the other sweep on the same tick,
+/// AND so the loop body never panics past the helper.
+///
 /// No `AppHandle` parameter is taken — the GC doesn't emit events today. If
 /// a future enhancement (e.g. diagnostics emit `ledger-pruned`) needs to
 /// reach the frontend, the signature can grow the handle without breaking
@@ -104,18 +114,22 @@ pub fn start_worker() {
             // safe to run on every launch, including one whose prior session
             // crashed before the periodic sweep could fire.
             loop {
-                if let Err(e) = prune_once() {
-                    tracing::warn!(
-                        "coordinator_ledger_gc: prune sweep failed (next tick will retry): {e}"
-                    );
-                }
+                run_worker_pass("coordinator-ledger-gc:drive-prompts", || {
+                    if let Err(e) = prune_once() {
+                        tracing::warn!(
+                            "coordinator_ledger_gc: prune sweep failed (next tick will retry): {e}"
+                        );
+                    }
+                });
                 // Independent of the drive-ledger sweep on purpose: one table
                 // erroring must not skip the other's sweep for a full tick.
-                if let Err(e) = prune_circuit_runs_once() {
-                    tracing::warn!(
-                        "circuit_run_gc: prune sweep failed (next tick will retry): {e}"
-                    );
-                }
+                run_worker_pass("coordinator-ledger-gc:circuit-runs", || {
+                    if let Err(e) = prune_circuit_runs_once() {
+                        tracing::warn!(
+                            "circuit_run_gc: prune sweep failed (next tick will retry): {e}"
+                        );
+                    }
+                });
                 std::thread::sleep(PRUNE_INTERVAL);
             }
         })
@@ -273,5 +287,36 @@ mod tests {
         let pruned = crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS)
             .unwrap();
         assert_eq!(pruned, 0);
+    }
+
+    // -- worker panic isolation (issue #1235) -----------------------------
+    //
+    // The GC is the simplest of the three workers — bounded DELETE per
+    // tick, no per-mesh walks, no shared statics. The only way a panic
+    // could strand it is if one of the prune helpers itself panics
+    // (e.g. a future schema change introduces an `.unwrap()` the helper
+    // doesn't expect). The loop below injects a panic on the first
+    // call and asserts the second call still runs — same shape as the
+    // autopilot and circuits tests, just smaller.
+
+    #[test]
+    fn gc_worker_loop_survives_a_panicking_prune_pass() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let successes = AtomicUsize::new(0);
+        for tick in 0..3 {
+            let successes_ref = &successes;
+            run_worker_pass("coordinator-ledger-gc:drive-prompts", move || {
+                if tick == 0 {
+                    panic!("fault injection: first prune pass panics");
+                }
+                successes_ref.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        assert_eq!(
+            successes.load(Ordering::SeqCst),
+            2,
+            "ticks 1 + 2 must succeed after tick 0 panicked"
+        );
     }
 }

@@ -70,6 +70,7 @@ use crate::db::AutopilotRunState;
 use crate::models::{
     AutopilotMode, Mesh, DEFAULT_AUTOPILOT_TRIGGER_LABEL,
 };
+use crate::process_util::run_worker_pass;
 use crate::services::github::{parse_blocked_by, GitHubClient, Issue};
 
 /// Payload of the `autopilot-node-closed` Tauri event. Emitted from the
@@ -147,11 +148,24 @@ fn lock_planner_set<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'stati
 
 /// Start the Autopilot polling daemon. Called once from Tauri `setup`
 /// (mirrors `services::pool_worker::start_background_worker`).
+///
+/// Issue #1235: the per-pass body runs inside
+/// [`crate::process_util::run_worker_pass`] so a single unexpected panic
+/// deep in an effect (e.g. a serde edge case in an issue payload, a DB
+/// error not surfaced through `Result`) unwinds the pass, NOT the thread.
+/// Without this, autopilot dies silently for the rest of the session —
+/// issues stop spawning, runs stop advancing, the UI badge sits at idle
+/// with no signal why. The lock-recovery side of #1235 is covered by
+/// [`lock_planner_set`] (issue #1224); this worker just needs the panic
+/// boundary.
 pub fn start_autopilot_worker(app: AppHandle) {
     std::thread::spawn(move || {
         // Hydrate the evaluator's piloted-node registry from the ledger so
         // runs that were mid-pipeline before a restart keep evaluating once
-        // their node auto-resumes.
+        // their node auto-resumes. Hydration runs OUTSIDE the catch — if
+        // the very first thing the worker does panics, retrying on the
+        // next pass would be pointless, and the panic hook in lib::setup
+        // already captures the cause in panic.log.
         match db::list_active_autopilot_node_ids() {
             Ok(ids) => {
                 for id in ids {
@@ -162,7 +176,7 @@ pub fn start_autopilot_worker(app: AppHandle) {
         }
         std::thread::sleep(STARTUP_DELAY);
         loop {
-            run_poll_pass(&app);
+            run_worker_pass("autopilot", || run_poll_pass(&app));
             std::thread::sleep(POLL_INTERVAL);
         }
     });
@@ -2101,5 +2115,37 @@ mod tests {
             "second insert must report duplicate (set survived the panic)"
         );
         lock_planner_set(&LOGGED_BLOCKS).remove(&pair);
+    }
+
+    // -- worker panic isolation (issue #1235) -----------------------------
+    //
+    // Headline regression: a single panic inside `run_poll_pass` would
+    // unwind the worker thread and autopilot would die silently forever.
+    // The fix wraps the per-pass body in `run_worker_pass`, which catches
+    // the panic and continues. The test below drives the same call shape
+    // as `start_autopilot_worker`'s loop body — it injects a panic on
+    // the first call and asserts the second + third tick still run. We
+    // don't spawn a real thread; this test only needs to verify the loop
+    // primitive, not the lib::setup wiring.
+
+    #[test]
+    fn worker_loop_survives_a_panicking_pass() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let successes = AtomicUsize::new(0);
+        for tick in 0..3 {
+            let successes_ref = &successes;
+            crate::process_util::run_worker_pass("autopilot", move || {
+                if tick == 0 {
+                    panic!("fault injection: first pass panics");
+                }
+                successes_ref.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        assert_eq!(
+            successes.load(Ordering::SeqCst),
+            2,
+            "ticks 1 + 2 must succeed after tick 0 panicked"
+        );
     }
 }
