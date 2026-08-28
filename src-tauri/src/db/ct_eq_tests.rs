@@ -73,3 +73,71 @@ fn reversed_inputs_are_false() {
     // Sanity: ct_eq is not a palindrome check.
     assert!(!ct_eq(b"abcdef", b"fedcba"));
 }
+
+// --- Length-truncation regression tests (review of #1240) ---
+//
+// The original `ct_eq` cast `(a.len() ^ b.len()) as u8` truncated the length
+// difference to 8 bits. A length difference whose XOR is a multiple of 256
+// (e.g. 0 vs 256, 32 vs 288) collapsed to 0 as `u8`, allowing a malicious
+// longer input whose extra bytes are all zero to falsely match a shorter
+// stored secret. On the root-token path this is a direct authentication
+// bypass: an attacker who has learned the 32-char root token can present
+// `root_token || [0u8; 256]` and be authenticated.
+//
+// These tests are pinned so the bug cannot silently regress.
+
+#[test]
+fn empty_vs_256_zeros_is_false() {
+    // The direct reproducer: the (0, 256) length difference has XOR 256, which
+    // truncates to 0 as u8. Combined with the all-zero 256-byte payload, the
+    // original implementation returned `true` for this pair.
+    let zeros_256 = [0u8; 256];
+    assert!(!ct_eq(b"", &zeros_256));
+    assert!(!ct_eq(&zeros_256, b""));
+}
+
+#[test]
+fn root_token_plus_256_zero_bytes_does_not_match_root_token() {
+    // The realistic attack against `validate_root_token_inner`: present the
+    // 32-byte root token followed by 256 zero bytes. Lengths 32 and 288 have
+    // XOR 256, which truncates to 0 as u8. With the original implementation
+    // this falsely returned `true` — granting Admin role.
+    let root_token = b"0123456789abcdef0123456789abcdef"; // 32 hex chars
+    let mut extended = [0u8; 32 + 256];
+    extended[..32].copy_from_slice(root_token);
+    assert!(!ct_eq(root_token, &extended));
+    assert!(!ct_eq(&extended, root_token));
+}
+
+#[test]
+fn length_difference_xor_that_truncates_to_zero_u8_is_false() {
+    // Generalised: any pair of lengths (a, b) where (a ^ b) is a positive
+    // multiple of 256 must produce a non-zero length-XOR at the diff width
+    // the implementation uses. We sweep a handful of those pairs and assert
+    // the input is rejected regardless of byte content.
+    let pairs: &[(usize, usize)] = &[
+        (0, 256),
+        (1, 257),
+        (32, 288),
+        (64, 320),
+        (128, 384),
+        (255, 511),
+    ];
+    for &(la, lb) in pairs {
+        let a = vec![0u8; la];
+        let b = vec![0u8; lb];
+        assert!(
+            !ct_eq(&a, &b),
+            "ct_eq falsely matched len {} vs len {} (length-XOR 0x{:x} truncates to zero)",
+            la,
+            lb,
+            la ^ lb
+        );
+        assert!(
+            !ct_eq(&b, &a),
+            "ct_eq falsely matched len {} vs len {} (swapped)",
+            lb,
+            la
+        );
+    }
+}

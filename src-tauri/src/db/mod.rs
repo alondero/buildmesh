@@ -796,26 +796,30 @@ pub(crate) fn hash_token(raw: &str) -> String {
 /// one (golang `crypto/subtle.ConstantTimeCompare`, libsodium's
 /// `sodium_memcmp`) — well-vetted and easy to audit.
 ///
-/// Security property: the runtime depends only on `max(a.len(), b.len())`,
-/// not on whether or where the inputs differ. We achieve that by:
-/// 1. Looping over the **max** of the two lengths rather than bailing on a
-///    length mismatch — an early length check would still leak "same length"
-///    via timing.
-/// 2. Seeding the accumulator with `(a.len() ^ b.len())` cast to `u8`, so a
-///    length mismatch produces a non-zero `diff` regardless of byte content.
-/// 3. Reading `0` for out-of-bounds indices via `unwrap_or(0)`, so the loop
-///    body is identical for short/long pairs and equal-length pairs.
+/// Security property: the byte-XOR loop runs in time proportional to the
+/// common length and does **not** short-circuit on the first mismatch, so
+/// timing does not leak how many leading bytes match. The early length
+/// check is data-dependent (different-length inputs return false faster)
+/// but only reveals "same length" vs "different length" — a coarse
+/// property the caller already knows from the input. The earlier "max-length
+/// loop with a u8 length-XOR seed" shape was reviewed and rejected because
+/// the `u8` cast silently truncated length differences whose XOR was a
+/// multiple of 256 (e.g. 32 vs 288 → XOR 256 → 0 as u8), letting a longer
+/// input with zero-padded tail falsely match a shorter stored secret — an
+/// authentication bypass on the root-token path.
 ///
 /// Like all software CT-compares, this is best-effort: the optimiser or
 /// surrounding code (branch predictors, cache) can still introduce
-/// data-dependent timing. It is, however, materially better than `==`, which
-/// short-circuits on the first byte mismatch and lets an attacker measure
-/// prefix match length over many requests.
+/// data-dependent timing. It is, however, materially better than `==`,
+/// which short-circuits on the first byte mismatch and lets an attacker
+/// measure prefix match length over many requests.
 pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    let len = a.len().max(b.len());
-    let mut diff: u8 = (a.len() ^ b.len()) as u8;
-    for i in 0..len {
-        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
     }
     diff == 0
 }
