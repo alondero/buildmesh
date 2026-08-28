@@ -466,6 +466,12 @@ pub async fn drive_node_with_key_async(
 ///
 /// Generic over the seams so the "does not stall the runtime" contract is
 /// testable against fakes; production wiring is [`drive_node_with_key_async`].
+///
+/// Moving the work off the runtime does *not* make it cancellable: if the route
+/// future is dropped (client disconnect, shutdown) the blocking closure still
+/// runs to completion, so a claimed ledger row is always either finalized or
+/// released rather than stranded `pending` — the same guarantee the inline call
+/// had.
 pub async fn drive_off_runtime<S, D>(
     store: S,
     driver: D,
@@ -1055,7 +1061,7 @@ mod tests {
             tokio::join!(drive, ticker)
         });
 
-        assert_eq!(ticks, 100);
+        assert_eq!(ticks, 100, "the concurrent task did not run to completion");
         assert_eq!(
             outcome.expect("the runtime worker was pinned by the drive"),
             DriveOutcome { verdict: Verdict::Delivered, replayed: false }
