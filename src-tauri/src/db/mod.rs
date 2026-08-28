@@ -839,7 +839,17 @@ pub fn validate_root_token_inner(conn: &Connection, token: &str) -> SqlResult<bo
             |row| row.get(0),
         )
         .ok();
-    Ok(stored.as_deref() == Some(token))
+    // Constant-time compare (issue #1240): the root token is the highest-value
+    // credential here, and unlike the coordinator tokens it is still stored
+    // cleartext (Keychain slice, #495), so a regular `==` would leak matching
+    // prefix length via timing. We use `subtle::ConstantTimeEq` rather than a
+    // hand-rolled loop: it inserts `core::hint::black_box` / volatile reads so
+    // LLVM cannot optimise the comparison into a short-circuit under our
+    // `lto = "thin"` release profile. The Choice → bool conversion is
+    // `From<Choice> for bool` and is itself constant-time.
+    Ok(stored.is_some_and(|s| bool::from(
+        subtle::ConstantTimeEq::ct_eq(s.as_bytes(), token.as_bytes()),
+    )))
 }
 
 // --- Coordinator read API auth (ADR-0008) ---
@@ -979,8 +989,12 @@ pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> 
     }
     // The DB holds only the hash (#495), so hash the presented token and compare
     // hashes. The raw token never has to be reconstructed to authenticate.
+    // Constant-time compare via `subtle::ConstantTimeEq` (issue #1240); see
+    // `validate_root_token_inner` for the rationale.
     match coordinator_read_token_inner(conn)? {
-        Some(stored) => Ok(stored == hash_token(token)),
+        Some(stored) => Ok(bool::from(
+            subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash_token(token).as_bytes()),
+        )),
         None => Ok(false),
     }
 }
@@ -1063,8 +1077,12 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
         return Ok(false);
     }
     // Stored value is the hash (#495); compare against the hashed presentation.
+    // Constant-time compare via `subtle::ConstantTimeEq` (issue #1240); see
+    // `validate_root_token_inner` for the rationale.
     match coordinator_drive_token_inner(conn)? {
-        Some(stored) => Ok(stored == hash_token(token)),
+        Some(stored) => Ok(bool::from(
+            subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash_token(token).as_bytes()),
+        )),
         None => Ok(false),
     }
 }
