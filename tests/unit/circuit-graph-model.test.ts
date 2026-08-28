@@ -17,6 +17,8 @@ import {
   makeNodeId,
   configSummary,
   parseGraph,
+  toGraph,
+  CIRCUIT_GRAPH_VERSION,
   fuzzyScore,
   fuzzyFilterSpecs,
   MUSTACHE_PATHS,
@@ -81,6 +83,20 @@ describe('node catalogue', () => {
       type: 'spawn_agent_node',
       prompt: '',
       name: null,
+      provider: null,
+      model: null,
+      effort: null,
+      extra_args: null,
+    });
+    expect(defaultKind('inject_pty')).toEqual({
+      type: 'inject_pty',
+      prompt: '',
+      target_node_id: null,
+    });
+    expect(defaultKind('set_node_status')).toEqual({
+      type: 'set_node_status',
+      status: 'completed',
+      target_node_id: null,
     });
     expect(defaultKind('collaborator_check')).toEqual({
       type: 'collaborator_check',
@@ -111,10 +127,16 @@ describe('config summaries', () => {
       type: 'spawn_agent_node',
       prompt: '',
       name: null,
+      provider: null,
+      model: null,
+      effort: null,
+      extra_args: null,
     };
     expect(configSummary(emptySpawn)).toBe('(no prompt)');
     expect(configSummary({ ...emptySpawn, name: 'fix-it' })).toContain('fix-it');
-    expect(configSummary({ type: 'inject_pty', prompt: 'wrap up' })).toContain('wrap up');
+    expect(
+      configSummary({ type: 'inject_pty', prompt: 'wrap up', target_node_id: null })
+    ).toContain('wrap up');
     expect(
       configSummary({ type: 'deterministic_verification', command: 'cargo test' })
     ).toContain('cargo test');
@@ -135,7 +157,52 @@ describe('parseGraph', () => {
     );
     expect(g.nodes).toHaveLength(1);
     expect(g.edges[0].condition).toBe('always');
+    expect(g.version).toBe(CIRCUIT_GRAPH_VERSION);
     expect(() => parseGraph('not json at all')).toThrow();
+  });
+
+  it('upgrades a v1 spawn/inject/status payload with the v2 optional fields', () => {
+    const g = parseGraph(
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: 's', type: { type: 'spawn_agent_node', prompt: 'p', name: 'fix-it' } },
+          { id: 'i', type: { type: 'inject_pty', prompt: 'hi' } },
+          { id: 'st', type: { type: 'set_node_status', status: 'completed' } },
+        ],
+        edges: [],
+      })
+    );
+    expect(g.version).toBe(CIRCUIT_GRAPH_VERSION);
+    expect(g.nodes[0].type).toEqual({
+      type: 'spawn_agent_node',
+      prompt: 'p',
+      name: 'fix-it',
+      provider: null,
+      model: null,
+      effort: null,
+      extra_args: null,
+    });
+    expect(g.nodes[1].type).toEqual({
+      type: 'inject_pty',
+      prompt: 'hi',
+      target_node_id: null,
+    });
+    expect(g.nodes[2].type).toEqual({
+      type: 'set_node_status',
+      status: 'completed',
+      target_node_id: null,
+    });
+  });
+
+  it('toGraph emits the current AST version', () => {
+    const graph = toGraph(
+      [{ data: { circuitNode: { id: 't', type: { type: 'manual' } } } }],
+      [{ source: 't', target: 't' }]
+    );
+    expect(graph.version).toBe(CIRCUIT_GRAPH_VERSION);
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.edges[0].condition).toBe('always');
   });
 
   it('stableGraphJson is order-insensitive — an add+delete round-trip is not dirty', () => {

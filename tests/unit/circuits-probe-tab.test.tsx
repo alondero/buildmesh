@@ -235,6 +235,19 @@ describe('CircuitsProbeTab', () => {
     });
   });
 
+  it('Trigger Now stays available on a disabled draft circuit', async () => {
+    mockBackend({ circuits: [{ ...CIRCUIT, enabled: false }] });
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    const trigger = (await screen.findByTestId('circuit-trigger-7')) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(false);
+    await user.click(trigger);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('trigger_circuit_now', { circuitId: 7 });
+    });
+  });
+
   it('toggling enable writes the flag', async () => {
     mockBackend();
     const user = userEvent.setup();

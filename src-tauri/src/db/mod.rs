@@ -416,7 +416,9 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
         --   * autopilot_circuits — the blueprint rows. `graph_json` holds
         --     the serialised Graph Blueprint AST (see
         --     autopilot::circuit::model); no per-node-kind migration — the
-        --     AST evolves inside the JSON.
+        --     AST evolves inside the JSON. `enabled` defaults to 0
+        --     (draft-first, issue #1356) so a freshly created circuit
+        --     cannot fire GitHub/interval pollers until the user opts in.
         --   * autopilot_circuit_runs — one execution instance per row.
         --     UNIQUE (circuit_id, trigger_identity) enforces the spec's
         --     dedupe: re-reporting an identity replays the existing run,
@@ -433,7 +435,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
-            enabled INTEGER NOT NULL DEFAULT 1,
+            enabled INTEGER NOT NULL DEFAULT 0,
             concurrency_limit INTEGER NOT NULL DEFAULT 1,
             graph_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),

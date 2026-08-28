@@ -46,7 +46,7 @@ fn circuit_crud_round_trips_all_fields() {
     assert_eq!(created.name, "nightly-sweep");
     assert_eq!(created.description, "desc");
     assert_eq!(created.concurrency_limit, 3);
-    assert!(created.enabled, "circuits default to enabled");
+    assert!(!created.enabled, "circuits default to disabled (draft-first, issue #1356)");
     // graph_json round-trips back into the parsed AST.
     let parsed = CircuitGraph::from_json(&created.graph_json).unwrap();
     assert_eq!(parsed.nodes.len(), 4);
@@ -56,7 +56,10 @@ fn circuit_crud_round_trips_all_fields() {
     assert_eq!(listed[0].id, created.id);
 
     // Enable/disable round-trips (the Probe tab's toggle).
-    assert!(listed[0].enabled);
+    assert!(!listed[0].enabled);
+    set_autopilot_circuit_enabled(created.id, true).unwrap();
+    let enabled = get_autopilot_circuit(created.id).unwrap().unwrap();
+    assert!(enabled.enabled);
     set_autopilot_circuit_enabled(created.id, false).unwrap();
     let disabled = get_autopilot_circuit(created.id).unwrap().unwrap();
     assert!(!disabled.enabled);
@@ -64,6 +67,41 @@ fn circuit_crud_round_trips_all_fields() {
     delete_autopilot_circuit(created.id).unwrap();
     assert!(get_autopilot_circuit(created.id).unwrap().is_none());
     assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty());
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn create_autopilot_circuit_is_draft_first_disabled() {
+    let path = init_temp_db("draft_first");
+    let mesh = create_mesh("circuit-draft-mesh", "/tmp/circuit-draft").unwrap();
+    let created =
+        create_autopilot_circuit(mesh.id, "still-authoring", "", 1, &sample_graph_json()).unwrap();
+    assert!(!created.enabled);
+
+    // Fresh-DB column default matches the INSERT (issue #1356).
+    let dflt: Option<String> = {
+        let db = lock_db();
+        db.query_row(
+            "SELECT dflt_value FROM pragma_table_info('autopilot_circuits') WHERE name = 'enabled'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(dflt.as_deref(), Some("0"));
+
+    // Trigger Now is the dry-run seam and must mint a run while disabled.
+    let run_id = crate::commands::circuit::trigger_circuit_now(created.id).unwrap();
+    let run = get_circuit_run(run_id).unwrap().unwrap();
+    assert_eq!(run.circuit_id, created.id);
+    assert_eq!(run.state, "pending");
+    assert!(
+        run.trigger_identity.starts_with("manual:"),
+        "manual identity, got {}",
+        run.trigger_identity
+    );
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -106,7 +144,7 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     let reloaded = get_autopilot_circuit(created.id).unwrap().unwrap();
     assert_eq!(reloaded.name, "editable");
     assert_eq!(reloaded.concurrency_limit, 2);
-    assert!(reloaded.enabled);
+    assert!(!reloaded.enabled, "graph save must not flip the draft-first enabled flag");
     let parsed = CircuitGraph::from_json(&reloaded.graph_json).unwrap();
     assert_eq!(parsed, new_graph);
 
@@ -129,6 +167,7 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     let mesh = create_mesh("circuit-persist-mesh", "/tmp/circuit-persist").unwrap();
     let created =
         create_autopilot_circuit(mesh.id, "survivor", "", 1, &sample_graph_json()).unwrap();
+    set_autopilot_circuit_enabled(created.id, true).unwrap();
 
     {
         let conn = lock_db();
@@ -137,7 +176,7 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
 
     let after = get_autopilot_circuit(created.id).unwrap().unwrap();
     assert_eq!(after.name, "survivor");
-    assert!(after.enabled);
+    assert!(after.enabled, "an explicitly enabled circuit must survive evolve_to");
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -477,6 +516,7 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     let mesh = create_mesh("circuit-active-mesh", "/tmp/circuit-active").unwrap();
     let circuit =
         create_autopilot_circuit(mesh.id, "watched", "", 3, &sample_graph_json()).unwrap();
+    set_autopilot_circuit_enabled(circuit.id, true).unwrap();
 
     let done = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
     commit_circuit_advance(done, Some("completed"), Some("{}"), &[]).unwrap();
@@ -542,7 +582,8 @@ fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
     let on_a = create_autopilot_circuit(mesh_a.id, "on-a", "", 1, "{}").unwrap();
     let on_b = create_autopilot_circuit(mesh_b.id, "on-b", "", 1, "{}").unwrap();
     let off = create_autopilot_circuit(mesh_a.id, "off", "", 1, "{}").unwrap();
-    set_autopilot_circuit_enabled(off.id, false).unwrap();
+    set_autopilot_circuit_enabled(on_a.id, true).unwrap();
+    set_autopilot_circuit_enabled(on_b.id, true).unwrap();
 
     // The shared process-global DB holds other tests' circuits — scope
     // to the ids this test created.

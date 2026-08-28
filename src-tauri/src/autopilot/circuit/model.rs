@@ -24,6 +24,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Current blueprint AST version (issue #1356). v1 `graph_json` still
+/// parses: new optional fields default to `None`. Writers emit this
+/// version so a save upgrades the stored blueprint.
+pub const CIRCUIT_GRAPH_VERSION: i32 = 2;
+
 /// The full blueprint AST for one circuit.
 ///
 // Milestone 4 (#1209): the canvas editor is the first TypeScript
@@ -74,13 +79,32 @@ pub enum CircuitNodeKind {
     // ---- Actions ----
     /// Spawn a new agent node into the mesh with `prompt` as the initial
     /// prompt (routed through `SpawnIntent::Loop`, so it stages as prefill).
+    /// Optional harness fields (issue #1356) cascade through the same
+    /// Node > Mesh > App > Native resolver later slices wire up; v1
+    /// JSON without them deserialises as `None`.
     SpawnAgentNode {
         prompt: String,
+        #[serde(default)]
         name: Option<String>,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
+        extra_args: Option<String>,
     },
-    /// Inject `prompt` into the agent node spawned earlier in this run,
-    /// over PTY, once that process is live.
-    InjectPty { prompt: String },
+    /// Inject `prompt` into an agent node over PTY, once that process is
+    /// live. `target_node_id` names an upstream `SpawnAgentNode` id for
+    /// later slices; `None` keeps the v1 "latest agent in this run"
+    /// behaviour. The worker still falls back to latest until that
+    /// resolution lands.
+    InjectPty {
+        prompt: String,
+        #[serde(default)]
+        target_node_id: Option<String>,
+    },
     /// GitHub mutation (add/remove label, comment, open PR, close issue).
     /// Parsed but not yet executed.
     GithubAction {
@@ -88,8 +112,15 @@ pub enum CircuitNodeKind {
         label: Option<String>,
         comment: Option<String>,
     },
-    /// Set the run's piloted agent node's status.
-    SetNodeStatus { status: SessionStatusKind },
+    /// Set an agent node's status. `target_node_id` names an upstream
+    /// `SpawnAgentNode` id for later slices; `None` keeps the v1 "latest
+    /// agent in this run" behaviour. The worker still falls back to
+    /// latest until that resolution lands.
+    SetNodeStatus {
+        status: SessionStatusKind,
+        #[serde(default)]
+        target_node_id: Option<String>,
+    },
     /// Surface a message to the user (toast / notification event).
     Notify { message: String },
 
@@ -226,6 +257,18 @@ pub fn consumes_agent_slot(kind: &CircuitNodeKind) -> bool {
     matches!(kind, CircuitNodeKind::SpawnAgentNode { .. })
 }
 
+/// A gate that structurally bounds a directed cycle so the stepper
+/// cannot walk it forever. `CollaboratorCheck` only counts when it
+/// actually parks for a human (`require_approval`); auto-pass is not
+/// a bound. Used by [`CircuitGraph::validate`].
+fn is_bounded_gate(kind: &CircuitNodeKind) -> bool {
+    matches!(
+        kind,
+        CircuitNodeKind::RetryLimit { .. }
+            | CircuitNodeKind::CollaboratorCheck { require_approval: true }
+    )
+}
+
 /// Is this kind executable by the engine? Since #1207 every gate kind
 /// and since #1208 (#1206's follow-ups) the GitHub actions too — the
 /// whole AST vocabulary executes.
@@ -265,10 +308,12 @@ impl CircuitGraph {
     }
 
     /// Semantic checks beyond what serde can express: no duplicate node
-    /// ids, every edge endpoint resolves, and the graph is acyclic (the
-    /// stepper walks edges forward; a cycle would park a run forever).
-    /// Writers at trust boundaries (the canvas editor's save command)
-    /// must call this after `from_json`.
+    /// ids, every edge endpoint resolves, no self-loops, and every
+    /// directed cycle is bounded by a [`CircuitNodeKind::RetryLimit`] or
+    /// a [`CircuitNodeKind::CollaboratorCheck`] with `require_approval`.
+    /// Unbounded cycles are rejected — the stepper would otherwise walk
+    /// them forever. Writers at trust boundaries (the canvas editor's
+    /// save command) must call this after `from_json`.
     pub fn validate(&self) -> Result<(), String> {
         let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for node in &self.nodes {
@@ -293,33 +338,69 @@ impl CircuitGraph {
                 return Err(format!("node '{}' connects to itself", edge.from));
             }
         }
-        // Kahn's algorithm — leftover nodes mean a cycle.
-        let mut indegree: std::collections::HashMap<&str, usize> =
-            self.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
-        for edge in &self.edges {
-            *indegree.get_mut(edge.to.as_str()).unwrap() += 1;
+        self.reject_unbounded_cycles()
+    }
+
+    /// Enumerate every simple directed cycle (Johnson-style: start at
+    /// each node, only walk nodes at or after that start index so each
+    /// cycle is reported once). Permit the cycle iff it contains a
+    /// bounded gate; otherwise return an actionable error naming the
+    /// nodes.
+    fn reject_unbounded_cycles(&self) -> Result<(), String> {
+        let n = self.nodes.len();
+        if n == 0 {
+            return Ok(());
         }
-        let mut queue: Vec<&str> = indegree
+        let index_of: std::collections::HashMap<&str, usize> = self
+            .nodes
             .iter()
-            .filter(|(_, &d)| d == 0)
-            .map(|(&id, _)| id)
+            .enumerate()
+            .map(|(i, node)| (node.id.as_str(), i))
             .collect();
-        let mut visited = 0usize;
-        while let Some(id) = queue.pop() {
-            visited += 1;
-            for edge in &self.edges {
-                if edge.from == id {
-                    let d = indegree.get_mut(edge.to.as_str()).unwrap();
-                    *d -= 1;
-                    if *d == 0 {
-                        queue.push(edge.to.as_str());
-                    }
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for edge in &self.edges {
+            let from = index_of[edge.from.as_str()];
+            let to = index_of[edge.to.as_str()];
+            adj[from].push(to);
+        }
+        let kinds: Vec<&CircuitNodeKind> = self.nodes.iter().map(|node| &node.kind).collect();
+        let ids: Vec<&str> = self.nodes.iter().map(|node| node.id.as_str()).collect();
+
+        for start in 0..n {
+            let mut path = Vec::new();
+            let mut in_path = vec![false; n];
+            Self::walk_simple_cycles(start, start, &adj, &mut path, &mut in_path, &kinds, &ids)?;
+        }
+        Ok(())
+    }
+
+    fn walk_simple_cycles(
+        start: usize,
+        current: usize,
+        adj: &[Vec<usize>],
+        path: &mut Vec<usize>,
+        in_path: &mut [bool],
+        kinds: &[&CircuitNodeKind],
+        ids: &[&str],
+    ) -> Result<(), String> {
+        path.push(current);
+        in_path[current] = true;
+        for &nxt in &adj[current] {
+            if nxt == start && path.len() >= 2 {
+                if !path.iter().any(|&i| is_bounded_gate(kinds[i])) {
+                    let mut names: Vec<&str> = path.iter().map(|&i| ids[i]).collect();
+                    names.push(ids[start]);
+                    return Err(format!(
+                        "unbounded cycle {} — add a RetryLimit or a CollaboratorCheck with require_approval so the loop cannot run forever",
+                        names.join(" → ")
+                    ));
                 }
+            } else if nxt >= start && !in_path[nxt] {
+                Self::walk_simple_cycles(start, nxt, adj, path, in_path, kinds, ids)?;
             }
         }
-        if visited != self.nodes.len() {
-            return Err("graph contains a cycle — runs could never terminate".to_string());
-        }
+        in_path[current] = false;
+        path.pop();
         Ok(())
     }
 
@@ -381,7 +462,7 @@ impl CircuitGraph {
                 | CircuitNodeKind::GithubPullRequestLabel { .. }
         ));
         Self {
-            version: 1,
+            version: CIRCUIT_GRAPH_VERSION,
             nodes: vec![
                 CircuitNode { id: "trigger".to_string(), kind: trigger },
                 CircuitNode {
@@ -389,11 +470,18 @@ impl CircuitGraph {
                     kind: CircuitNodeKind::SpawnAgentNode {
                         prompt: String::new(),
                         name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
                     },
                 },
                 CircuitNode {
                     id: "inject".to_string(),
-                    kind: CircuitNodeKind::InjectPty { prompt: prompt.to_string() },
+                    kind: CircuitNodeKind::InjectPty {
+                        prompt: prompt.to_string(),
+                        target_node_id: None,
+                    },
                 },
                 CircuitNode {
                     id: "notify".to_string(),
@@ -415,6 +503,39 @@ impl CircuitGraph {
 mod tests {
     use super::*;
 
+    fn spawn_kind(prompt: &str, name: Option<&str>) -> CircuitNodeKind {
+        CircuitNodeKind::SpawnAgentNode {
+            prompt: prompt.into(),
+            name: name.map(str::to_string),
+            provider: None,
+            model: None,
+            effort: None,
+            extra_args: None,
+        }
+    }
+
+    fn inject_kind(prompt: &str) -> CircuitNodeKind {
+        CircuitNodeKind::InjectPty {
+            prompt: prompt.into(),
+            target_node_id: None,
+        }
+    }
+
+    fn set_status_kind(status: SessionStatusKind) -> CircuitNodeKind {
+        CircuitNodeKind::SetNodeStatus {
+            status,
+            target_node_id: None,
+        }
+    }
+
+    fn always(from: &str, to: &str) -> CircuitEdge {
+        CircuitEdge {
+            from: from.into(),
+            to: to.into(),
+            condition: EdgeCondition::default(),
+        }
+    }
+
     // -- serde round-trip ---------------------------------------------------
 
     #[test]
@@ -432,10 +553,10 @@ mod tests {
             CircuitNodeKind::Interval { interval_seconds: 300 },
             CircuitNodeKind::GithubIssueLabel { label: "buildmesh:run".into() },
             CircuitNodeKind::GithubPullRequestLabel { label: "review-me".into() },
-            CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: Some("fix-it".into()) },
-            CircuitNodeKind::InjectPty { prompt: "wrap up".into() },
+            spawn_kind("p", Some("fix-it")),
+            inject_kind("wrap up"),
             CircuitNodeKind::GithubAction { action: GithubActionKind::AddLabel, label: Some("done".into()), comment: None },
-            CircuitNodeKind::SetNodeStatus { status: SessionStatusKind::Completed },
+            set_status_kind(SessionStatusKind::Completed),
             CircuitNodeKind::Notify { message: "hi".into() },
             CircuitNodeKind::LlmTurnClassifier,
             CircuitNodeKind::DeterministicVerification { command: "cargo test".into() },
@@ -461,7 +582,7 @@ mod tests {
             condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
         };
         let json = serde_json::to_string(&edge).unwrap();
-        assert_eq!(CircuitGraph::from_json(&format!("{{\"version\":1,\"nodes\":[],\"edges\":[{}]}}", json)).unwrap().edges[0].condition, EdgeCondition::OnOutcome(StepOutcome::Failed));
+        assert_eq!(CircuitGraph::from_json(&format!("{{\"version\":2,\"nodes\":[],\"edges\":[{}]}}", json)).unwrap().edges[0].condition, EdgeCondition::OnOutcome(StepOutcome::Failed));
     }
 
     #[test]
@@ -537,8 +658,8 @@ mod tests {
 
     #[test]
     fn only_spawn_consumes_an_agent_slot() {
-        assert!(consumes_agent_slot(&CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None }));
-        assert!(!consumes_agent_slot(&CircuitNodeKind::InjectPty { prompt: "p".into() }));
+        assert!(consumes_agent_slot(&spawn_kind("p", None)));
+        assert!(!consumes_agent_slot(&inject_kind("p")));
         assert!(!consumes_agent_slot(&CircuitNodeKind::Notify { message: "n".into() }));
         assert!(!consumes_agent_slot(&CircuitNodeKind::AllCompleted));
     }
@@ -546,8 +667,8 @@ mod tests {
     #[test]
     fn executability_vocabulary() {
         assert!(is_executable(&CircuitNodeKind::Manual));
-        assert!(is_executable(&CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None }));
-        assert!(is_executable(&CircuitNodeKind::InjectPty { prompt: "p".into() }));
+        assert!(is_executable(&spawn_kind("p", None)));
+        assert!(is_executable(&inject_kind("p")));
         assert!(is_executable(&CircuitNodeKind::Notify { message: "n".into() }));
         // Milestone 2 (#1207): gates execute.
         assert!(is_executable(&CircuitNodeKind::LlmTurnClassifier));
@@ -644,10 +765,24 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_cycles_but_accepts_diamonds() {
+    fn validate_accepts_a_linear_graph() {
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            nodes: vec![
+                node("a", CircuitNodeKind::Manual),
+                node("b", CircuitNodeKind::Notify { message: String::new() }),
+                node("c", CircuitNodeKind::Notify { message: String::new() }),
+            ],
+            edges: vec![always("a", "b"), always("b", "c")],
+        };
+        g.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_diamond_joins() {
         // Diamond (valid): a -> b -> d, a -> c -> d.
         let diamond = CircuitGraph {
-            version: 1,
+            version: CIRCUIT_GRAPH_VERSION,
             nodes: vec![
                 node("a", CircuitNodeKind::Manual),
                 node("b", CircuitNodeKind::Notify { message: String::new() }),
@@ -655,29 +790,202 @@ mod tests {
                 node("d", CircuitNodeKind::AllCompleted),
             ],
             edges: vec![
-                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::default() },
-                CircuitEdge { from: "a".into(), to: "c".into(), condition: EdgeCondition::default() },
-                CircuitEdge { from: "b".into(), to: "d".into(), condition: EdgeCondition::default() },
-                CircuitEdge { from: "c".into(), to: "d".into(), condition: EdgeCondition::default() },
+                always("a", "b"),
+                always("a", "c"),
+                always("b", "d"),
+                always("c", "d"),
             ],
         };
         diamond.validate().unwrap();
+    }
 
-        // Cycle: a -> b -> c -> a.
+    #[test]
+    fn validate_accepts_a_cycle_bounded_by_retry_limit() {
+        // implement -> review -> retry -> implement
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            nodes: vec![
+                node("implement", spawn_kind("write it", Some("implementer"))),
+                node("review", spawn_kind("review it", Some("reviewer"))),
+                node("retry", CircuitNodeKind::RetryLimit { max_retries: 3 }),
+            ],
+            edges: vec![
+                always("implement", "review"),
+                always("review", "retry"),
+                always("retry", "implement"),
+            ],
+        };
+        g.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_a_cycle_bounded_by_collaborator_check() {
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            nodes: vec![
+                node("work", spawn_kind("p", None)),
+                node("gate", CircuitNodeKind::CollaboratorCheck { require_approval: true }),
+            ],
+            edges: vec![always("work", "gate"), always("gate", "work")],
+        };
+        g.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_unbounded_cycles_with_actionable_message() {
         let cyclic = CircuitGraph {
-            version: 1,
+            version: CIRCUIT_GRAPH_VERSION,
             nodes: vec![
                 node("a", CircuitNodeKind::Manual),
                 node("b", CircuitNodeKind::Notify { message: String::new() }),
                 node("c", CircuitNodeKind::Notify { message: String::new() }),
             ],
+            edges: vec![always("a", "b"), always("b", "c"), always("c", "a")],
+        };
+        let err = cyclic.validate().unwrap_err();
+        assert!(err.contains("unbounded cycle"), "{err}");
+        assert!(err.contains("RetryLimit"), "{err}");
+        assert!(err.contains("CollaboratorCheck"), "{err}");
+        for id in ["a", "b", "c"] {
+            assert!(err.contains(id), "cycle message must name node {id}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_auto_pass_collaborator_check_as_a_bound() {
+        // require_approval: false is not a bound — the gate auto-completes.
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            nodes: vec![
+                node("work", spawn_kind("p", None)),
+                node("gate", CircuitNodeKind::CollaboratorCheck { require_approval: false }),
+            ],
+            edges: vec![always("work", "gate"), always("gate", "work")],
+        };
+        let err = g.validate().unwrap_err();
+        assert!(err.contains("unbounded cycle"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_a_graph_with_one_bounded_and_one_unbounded_cycle() {
+        // A bounded loop must not launder a sibling unbounded loop.
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            nodes: vec![
+                node("a", spawn_kind("p", None)),
+                node("retry", CircuitNodeKind::RetryLimit { max_retries: 2 }),
+                node("c", CircuitNodeKind::Notify { message: "x".into() }),
+                node("d", CircuitNodeKind::Notify { message: "y".into() }),
+            ],
             edges: vec![
-                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::default() },
-                CircuitEdge { from: "b".into(), to: "c".into(), condition: EdgeCondition::default() },
-                CircuitEdge { from: "c".into(), to: "a".into(), condition: EdgeCondition::default() },
+                always("a", "retry"),
+                always("retry", "a"),
+                always("c", "d"),
+                always("d", "c"),
             ],
         };
-        assert!(cyclic.validate().unwrap_err().contains("cycle"));
+        let err = g.validate().unwrap_err();
+        assert!(err.contains("unbounded cycle"), "{err}");
+        assert!(
+            err.contains("c → d") || err.contains("d → c"),
+            "unbounded cycle must name the c/d loop: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_self_loop_even_on_a_retry_limit() {
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            nodes: vec![node("retry", CircuitNodeKind::RetryLimit { max_retries: 3 })],
+            edges: vec![always("retry", "retry")],
+        };
+        assert!(g.validate().unwrap_err().contains("connects to itself"));
+    }
+
+    // -- v1 → v2 field defaults ----------------------------------------------
+
+    #[test]
+    fn v1_spawn_inject_and_status_json_default_the_new_optional_fields() {
+        // Internally-tagged `CircuitNodeKind` sits in CircuitNode's `type`
+        // field, so a v1 payload looks like `{id, type: {type, ...}}`.
+        let parsed = CircuitGraph::from_json(
+            r#"{"version":1,"nodes":[
+                {"id":"s","type":{"type":"spawn_agent_node","prompt":"p","name":"fix-it"}},
+                {"id":"i","type":{"type":"inject_pty","prompt":"hi"}},
+                {"id":"st","type":{"type":"set_node_status","status":"completed"}}
+            ],"edges":[]}"#,
+        )
+        .unwrap();
+        match &parsed.node("s").unwrap().kind {
+            CircuitNodeKind::SpawnAgentNode {
+                prompt,
+                name,
+                provider,
+                model,
+                effort,
+                extra_args,
+            } => {
+                assert_eq!(prompt, "p");
+                assert_eq!(name.as_deref(), Some("fix-it"));
+                assert_eq!(provider, &None);
+                assert_eq!(model, &None);
+                assert_eq!(effort, &None);
+                assert_eq!(extra_args, &None);
+            }
+            other => panic!("expected spawn, got {other:?}"),
+        }
+        match &parsed.node("i").unwrap().kind {
+            CircuitNodeKind::InjectPty { prompt, target_node_id } => {
+                assert_eq!(prompt, "hi");
+                assert_eq!(target_node_id, &None);
+            }
+            other => panic!("expected inject, got {other:?}"),
+        }
+        match &parsed.node("st").unwrap().kind {
+            CircuitNodeKind::SetNodeStatus { status, target_node_id } => {
+                assert_eq!(*status, SessionStatusKind::Completed);
+                assert_eq!(target_node_id, &None);
+            }
+            other => panic!("expected set_node_status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v2_targeted_and_harness_fields_round_trip() {
+        let graph = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            nodes: vec![
+                node(
+                    "spawn",
+                    CircuitNodeKind::SpawnAgentNode {
+                        prompt: "implement".into(),
+                        name: Some("implementer".into()),
+                        provider: Some("anthropic".into()),
+                        model: Some("opus-4-1".into()),
+                        effort: Some("high".into()),
+                        extra_args: Some("--dangerously-skip-permissions".into()),
+                    },
+                ),
+                node(
+                    "inject",
+                    CircuitNodeKind::InjectPty {
+                        prompt: "address review".into(),
+                        target_node_id: Some("spawn".into()),
+                    },
+                ),
+                node(
+                    "done",
+                    CircuitNodeKind::SetNodeStatus {
+                        status: SessionStatusKind::Completed,
+                        target_node_id: Some("spawn".into()),
+                    },
+                ),
+            ],
+            edges: vec![always("spawn", "inject"), always("inject", "done")],
+        };
+        let parsed = CircuitGraph::from_json(&graph.to_json().unwrap()).unwrap();
+        assert_eq!(parsed, graph);
+        assert_eq!(parsed.version, 2);
     }
 
     // -- walking skeleton shape ----------------------------------------------
@@ -685,6 +993,7 @@ mod tests {
     #[test]
     fn walking_skeleton_is_the_manual_spawn_inject_notify_chain() {
         let g = CircuitGraph::walking_skeleton("do the thing");
+        assert_eq!(g.version, CIRCUIT_GRAPH_VERSION);
         let ids: Vec<&str> = g.nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["trigger", "spawn", "inject", "notify"]);
         assert_eq!(
@@ -692,14 +1001,28 @@ mod tests {
             vec![("trigger", "spawn"), ("spawn", "inject"), ("inject", "notify")]
         );
         match &g.node("spawn").unwrap().kind {
-            CircuitNodeKind::SpawnAgentNode { prompt, name } => {
+            CircuitNodeKind::SpawnAgentNode {
+                prompt,
+                name,
+                provider,
+                model,
+                effort,
+                extra_args,
+            } => {
                 assert_eq!(prompt, "", "spawn starts fresh — the prompt rides InjectPty");
                 assert_eq!(*name, None);
+                assert_eq!(provider, &None);
+                assert_eq!(model, &None);
+                assert_eq!(effort, &None);
+                assert_eq!(extra_args, &None);
             }
             other => panic!("expected spawn node, got {:?}", other),
         }
         match &g.node("inject").unwrap().kind {
-            CircuitNodeKind::InjectPty { prompt } => assert_eq!(prompt, "do the thing"),
+            CircuitNodeKind::InjectPty { prompt, target_node_id } => {
+                assert_eq!(prompt, "do the thing");
+                assert_eq!(target_node_id, &None);
+            }
             other => panic!("expected inject node, got {:?}", other),
         }
     }

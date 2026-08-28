@@ -22,6 +22,9 @@ import type { StepOutcome } from '../../types/generated/StepOutcome';
 export type NodeCategory = 'trigger' | 'action' | 'gate' | 'join';
 export type KindDiscriminator = CircuitNodeKind['type'];
 
+/** Mirrors Rust `CIRCUIT_GRAPH_VERSION`. Writers emit this; parse upgrades v1. */
+export const CIRCUIT_GRAPH_VERSION = 2;
+
 /** One palette entry: a node kind plus its presentation grouping. */
 export interface NodeKindSpec {
   discriminator: KindDiscriminator;
@@ -95,13 +98,21 @@ export function defaultKind(discriminator: string): CircuitNodeKind {
     case 'github_pull_request_label':
       return { type: 'github_pull_request_label', label: '' };
     case 'spawn_agent_node':
-      return { type: 'spawn_agent_node', prompt: '', name: null };
+      return {
+        type: 'spawn_agent_node',
+        prompt: '',
+        name: null,
+        provider: null,
+        model: null,
+        effort: null,
+        extra_args: null,
+      };
     case 'inject_pty':
-      return { type: 'inject_pty', prompt: '' };
+      return { type: 'inject_pty', prompt: '', target_node_id: null };
     case 'github_action':
       return { type: 'github_action', action: 'add_label', label: null, comment: null };
     case 'set_node_status':
-      return { type: 'set_node_status', status: 'completed' };
+      return { type: 'set_node_status', status: 'completed', target_node_id: null };
     case 'notify':
       return { type: 'notify', message: '' };
     case 'llm_turn_classifier':
@@ -187,10 +198,49 @@ export function parseGraph(json: string): CircuitGraph {
   const graph = parsed as CircuitGraph;
   // The Rust boundary defaults a missing edge condition to `always`
   // (`#[serde(default)]`); hand-edited JSON gets the same grace here.
+  // v1 blueprints upgrade in-memory to v2 (version stamp + optional
+  // field defaults) so a canvas save persists the current AST without
+  // looking dirty on open (issue #1356).
+  const version =
+    typeof graph.version === 'number' && graph.version >= CIRCUIT_GRAPH_VERSION
+      ? graph.version
+      : CIRCUIT_GRAPH_VERSION;
   return {
     ...graph,
+    version,
+    nodes: graph.nodes.map((n) => ({ ...n, type: normalizeKind(n.type) })),
     edges: graph.edges.map((e) => ({ ...e, condition: e.condition ?? 'always' })),
   };
+}
+
+/** Fill v2 optional fields so a stored v1 node satisfies the generated type. */
+function normalizeKind(kind: CircuitNodeKind): CircuitNodeKind {
+  switch (kind.type) {
+    case 'spawn_agent_node':
+      return {
+        type: 'spawn_agent_node',
+        prompt: kind.prompt,
+        name: kind.name ?? null,
+        provider: kind.provider ?? null,
+        model: kind.model ?? null,
+        effort: kind.effort ?? null,
+        extra_args: kind.extra_args ?? null,
+      };
+    case 'inject_pty':
+      return {
+        type: 'inject_pty',
+        prompt: kind.prompt,
+        target_node_id: kind.target_node_id ?? null,
+      };
+    case 'set_node_status':
+      return {
+        type: 'set_node_status',
+        status: kind.status,
+        target_node_id: kind.target_node_id ?? null,
+      };
+    default:
+      return kind;
+  }
 }
 
 /**
@@ -427,7 +477,7 @@ export function toGraph(
   edges: Array<{ source: string; target: string; data?: { condition?: EdgeCondition } }>
 ): CircuitGraph {
   return {
-    version: 1,
+    version: CIRCUIT_GRAPH_VERSION,
     nodes: nodes.map((n) => n.data.circuitNode),
     edges: edges.map((e) => ({
       from: e.source,

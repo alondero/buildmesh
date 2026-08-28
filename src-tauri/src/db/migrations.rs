@@ -94,6 +94,13 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// `CREATE TABLE IF NOT EXISTS` in `init()` for fresh DBs plus an
 /// [`AlwaysStep`] safety net for DBs whose version was bumped past 34 by
 /// a build that didn't yet contain the inline CREATE.
+///
+/// Issue #1356 flipped `autopilot_circuits.enabled` default from 1 to 0
+/// (draft-first) in the inline CREATE / AlwaysStep DDL. No version bump:
+/// existing v34 DBs keep their on-disk DEFAULT 1, and
+/// `create_autopilot_circuit` writes `enabled = 0` explicitly so new
+/// rows are disabled regardless. Existing enabled circuits are left
+/// enabled.
 pub(crate) const SCHEMA_VERSION: u32 = 34;
 
 // ---------------------------------------------------------------------------
@@ -804,7 +811,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
                     name TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
-                    enabled INTEGER NOT NULL DEFAULT 1,
+                    enabled INTEGER NOT NULL DEFAULT 0,
                     concurrency_limit INTEGER NOT NULL DEFAULT 1,
                     graph_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),

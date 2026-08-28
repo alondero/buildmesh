@@ -394,7 +394,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
             // target process just became live.
             let prompt: Option<String> = match run.graph.node(node_id) {
                 Some(n) => match &n.kind {
-                    CircuitNodeKind::InjectPty { prompt } => Some(prompt.clone()),
+                    CircuitNodeKind::InjectPty { prompt, .. } => Some(prompt.clone()),
                     _ => None,
                 },
                 None => None,
@@ -902,7 +902,7 @@ fn start_effects_and_completion(
             });
             set_step(run, t, node_id, StepStatus::Completed);
         }
-        CircuitNodeKind::SetNodeStatus { status } => {
+        CircuitNodeKind::SetNodeStatus { status, .. } => {
             let db_status = match status {
                 SessionStatusKind::Running => "running",
                 SessionStatusKind::Idle => "idle",
@@ -1144,6 +1144,24 @@ mod tests {
         CircuitEdge, CircuitNode, GithubActionKind,
     };
 
+    fn spawn_kind(prompt: &str) -> CircuitNodeKind {
+        CircuitNodeKind::SpawnAgentNode {
+            prompt: prompt.into(),
+            name: None,
+            provider: None,
+            model: None,
+            effort: None,
+            extra_args: None,
+        }
+    }
+
+    fn inject_kind(prompt: &str) -> CircuitNodeKind {
+        CircuitNodeKind::InjectPty {
+            prompt: prompt.into(),
+            target_node_id: None,
+        }
+    }
+
     // -- fixtures -------------------------------------------------------------
 
     /// A minimal trigger → spawn → notify chain, built inline so the
@@ -1161,7 +1179,7 @@ mod tests {
                     CircuitNode { id: "trigger".into(), kind: CircuitNodeKind::Manual },
                     CircuitNode {
                         id: "spawn".into(),
-                        kind: CircuitNodeKind::SpawnAgentNode { prompt: "fix it".into(), name: None },
+                        kind: spawn_kind("fix it"),
                     },
                     CircuitNode {
                         id: "notify".into(),
@@ -1481,11 +1499,11 @@ mod tests {
         run.graph.nodes.push(CircuitNode { id: "trigger".into(), kind: CircuitNodeKind::Manual });
         run.graph.nodes.push(CircuitNode {
             id: "spawn".into(),
-            kind: CircuitNodeKind::SpawnAgentNode { prompt: "fix it".into(), name: None },
+            kind: spawn_kind("fix it"),
         });
         run.graph.nodes.push(CircuitNode {
             id: "inject".to_string(),
-            kind: CircuitNodeKind::InjectPty { prompt: "now wrap up {{circuit.name}}".to_string() },
+            kind: inject_kind("now wrap up {{circuit.name}}"),
         });
         run.graph.nodes.push(CircuitNode {
             id: "final".to_string(),
@@ -1544,7 +1562,7 @@ mod tests {
             1,
             CircuitNode {
                 id: "early-inject".to_string(),
-                kind: CircuitNodeKind::InjectPty { prompt: "hi".to_string() },
+                kind: inject_kind("hi"),
             },
         );
         run.graph.edges.insert(
@@ -1576,11 +1594,11 @@ mod tests {
                     CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
                     CircuitNode {
                         id: "a".into(),
-                        kind: CircuitNodeKind::SpawnAgentNode { prompt: "pa".into(), name: None },
+                        kind: spawn_kind("pa"),
                     },
                     CircuitNode {
                         id: "b".into(),
-                        kind: CircuitNodeKind::SpawnAgentNode { prompt: "pb".into(), name: None },
+                        kind: spawn_kind("pb"),
                     },
                     CircuitNode { id: "j".into(), kind: join_kind },
                 ],
@@ -1647,7 +1665,7 @@ mod tests {
                     CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
                     CircuitNode {
                         id: "work".into(),
-                        kind: CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None },
+                        kind: spawn_kind("p"),
                     },
                     CircuitNode {
                         id: "on-green".into(),
@@ -1926,7 +1944,7 @@ mod tests {
             CircuitNode { id: "trigger".into(), kind: CircuitNodeKind::Manual },
             CircuitNode {
                 id: "work".into(),
-                kind: CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None },
+                kind: spawn_kind("p"),
             },
             CircuitNode { id: gate_id.to_string(), kind },
         ];
@@ -2196,7 +2214,7 @@ mod tests {
                     CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
                     CircuitNode {
                         id: "work".into(),
-                        kind: CircuitNodeKind::SpawnAgentNode { prompt: "p".into(), name: None },
+                        kind: spawn_kind("p"),
                     },
                     CircuitNode { id: "retry".into(), kind: CircuitNodeKind::RetryLimit { max_retries } },
                 ],

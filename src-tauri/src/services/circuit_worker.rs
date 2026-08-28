@@ -201,6 +201,15 @@ pub fn start_circuit_worker(app: AppHandle) {
         .expect("circuit-worker thread spawn failed");
 }
 
+/// Drive this run even if its circuit is a draft. Background pollers
+/// (`list_enabled_circuits`) never mint `manual:` identities; Trigger
+/// Now does, and issue #1356 keeps that dry-run seam independent of
+/// the enabled flag. Interval/GitHub runs on a disabled circuit stay
+/// parked until the user opts in.
+fn should_drive_circuit_run(enabled: bool, trigger_identity: &str) -> bool {
+    enabled || trigger_identity.starts_with("manual:")
+}
+
 /// One full pass over every active circuit run. Per-run failures are
 /// logged and isolated — one broken run must not starve the others.
 fn run_pass(app: &AppHandle) {
@@ -217,8 +226,8 @@ fn run_pass(app: &AppHandle) {
     // zero heap on the hot 2-second tick.
     sweep_stale_approvals(&runs);
     for active in runs {
-        if !active.circuit_enabled {
-            continue; // disabled mid-flight: park the run until re-enabled
+        if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
+            continue; // disabled mid-flight: park auto runs until re-enabled
         }
         if let Err(e) = drive_run(app, &active) {
             tracing::warn!("circuits: run {} pass failed: {}", active.run.id, e);
@@ -818,7 +827,7 @@ fn spawn_step_agent(
         .map(|n| n.kind.clone())
         .ok_or_else(|| format!("node {} not in blueprint", node_id))?;
     let (prompt, name) = match kind {
-        CircuitNodeKind::SpawnAgentNode { prompt, name } => (prompt, name),
+        CircuitNodeKind::SpawnAgentNode { prompt, name, .. } => (prompt, name),
         _ => return Err(format!("node {} is not a spawn node", node_id)),
     };
 
@@ -972,7 +981,7 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
         if active.run.state != "running" {
             continue; // pending runs start via the normal trigger path
         }
-        if !active.circuit_enabled {
+        if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
             continue; // parked mid-flight; re-enabled circuits resume normally
         }
         let graph = match CircuitGraph::from_json(&active.circuit_graph_json) {
@@ -1099,7 +1108,9 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
         }
     };
     for active in runs {
-        if active.run.state != "running" || !active.circuit_enabled {
+        if active.run.state != "running"
+            || !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity)
+        {
             continue;
         }
         let steps = match load_steps(active.run.id) {
@@ -1154,6 +1165,23 @@ pub struct CircuitNotificationPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- draft-first drive gate (issue #1356) ----------------------------------
+
+    #[test]
+    fn disabled_circuits_still_drive_manual_trigger_now_runs() {
+        assert!(should_drive_circuit_run(true, "interval:1"));
+        assert!(should_drive_circuit_run(true, "manual:1"));
+        assert!(
+            should_drive_circuit_run(false, "manual:1724000000000"),
+            "Trigger Now is the dry-run seam on a draft circuit"
+        );
+        assert!(
+            !should_drive_circuit_run(false, "interval:1"),
+            "background interval runs stay parked while disabled"
+        );
+        assert!(!should_drive_circuit_run(false, "issue:42:buildmesh:run"));
+    }
 
     // -- startup reconciliation -------------------------------------------------
 
