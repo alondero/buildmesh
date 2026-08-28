@@ -33,7 +33,7 @@
 use rand::seq::IndexedRandom;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
@@ -793,10 +793,14 @@ struct RenameTrigger {
 
 /// Record a completed turn for a node. Triggers async LLM rename if buffer is sufficient.
 pub fn on_turn(node_id: i64, app: AppHandle) {
-    on_turn_with(&DbSessionNamingRepository, node_id, app);
+    on_turn_with(Arc::new(DbSessionNamingRepository), node_id, app);
 }
 
-fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle) {
+fn on_turn_with(
+    repo: Arc<dyn SessionNamingRepository>,
+    node_id: i64,
+    app: AppHandle,
+) {
     // User-config gate (issue #824 v2): auto-naming is opt-in via
     // Settings → Auto-naming. `None` (the default for users who never
     // visited that page) skips the rename entirely — the node keeps its
@@ -808,7 +812,7 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
         return;
     };
 
-    let Some(trigger) = should_trigger_rename(repo, node_id) else {
+    let Some(trigger) = should_trigger_rename(&*repo, node_id) else {
         return;
     };
     let RenameTrigger { buffer } = trigger;
@@ -823,6 +827,12 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
     let backend_env = naming_backend_env(&user_naming_provider);
 
     let app_for_task = app.clone();
+    // Clone the Arc so the spawned future owns its own handle; the
+    // `Arc<dyn SessionNamingRepository>` shape satisfies the
+    // `'static` bound `tauri::async_runtime::spawn` requires, and
+    // also lets the unit tests pass a mock repo in (see
+    // `commit_rename_preserves_state_on_db_write_failure`).
+    let repo_for_task = repo.clone();
     tauri::async_runtime::spawn(async move {
         match summarize_and_rename_with(node_id, &buffer, backend_env).await {
             Ok(slug) => {
@@ -841,20 +851,19 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
                     clear_node_state(node_id);
                     return;
                 }
-                if let Err(e) =
-                    DbSessionNamingRepository.update_agent_node_name(node_id, &slug)
-                {
-                    tracing::warn!("Node {} rename write failed: {}", node_id, e);
-                }
-                clear_node_state(node_id);
-                let _ = app_for_task.emit(
-                    "node-renamed",
-                    NodeRenamedPayload {
-                        node_id,
-                        name: slug.clone(),
-                    },
-                );
-                tracing::info!("Node {} renamed to '{}'", node_id, slug);
+                // Route the DB write through the injected `repo` so the
+                // mock-repo tests can exercise this commit path. The
+                // production caller (see `on_turn` above) passes the
+                // real `DbSessionNamingRepository`.
+                commit_rename(&*repo_for_task, node_id, &slug, |name| {
+                    let _ = app_for_task.emit(
+                        "node-renamed",
+                        NodeRenamedPayload {
+                            node_id,
+                            name: name.to_string(),
+                        },
+                    );
+                });
             }
             Err(e) => {
                 // `record_failed_attempt` bumps the counter and, on reaching the
@@ -916,6 +925,41 @@ pub(crate) fn user_renamed_mid_flight(
 /// Clear the buffer for a node. Called on kill so the node can resume fresh.
 pub fn reset_buffers(node_id: i64) {
     clear_node_state(node_id);
+}
+
+/// Commit an LLM-derived slug to the DB and notify the frontend.
+///
+/// Extracted from the `Ok(slug)` arm of `on_turn_with` so the
+/// write-or-skip behaviour is unit-testable through `MockRepo` without
+/// having to spawn `claude --print`. The emit callback is injected so
+/// the test can observe whether a `node-renamed` event would have
+/// been broadcast.
+///
+/// Failure path (issue #1223): when the DB write errors — e.g. transient
+/// write-lock contention with the pool worker — we log a warning and
+/// leave the node's naming state intact. The frontend MUST NOT see a
+/// `node-renamed` event for a name SQLite never persisted: the prior
+/// behaviour cleared state and emitted regardless, so the UI patched
+/// its in-memory list to a name the DB never accepted AND the retry
+/// buffer was wiped, so the next Node Turn couldn't naturally retry.
+/// This mirrors the LLM-error arm above, which preserves state across
+/// transient backend failures.
+fn commit_rename(
+    repo: &dyn SessionNamingRepository,
+    node_id: i64,
+    slug: &str,
+    emit_renamed: impl FnOnce(&str),
+) {
+    if let Err(e) = repo.update_agent_node_name(node_id, slug) {
+        tracing::warn!("Node {} rename write failed: {}", node_id, e);
+        // Skip clear_node_state and the emit — the rename was never
+        // persisted, so the UI must not see it, and the retry state
+        // must remain intact for the next Node Turn to re-attempt.
+        return;
+    }
+    clear_node_state(node_id);
+    emit_renamed(slug);
+    tracing::info!("Node {} renamed to '{}'", node_id, slug);
 }
 
 /// Clear all state for a node. Called on delete/archive.
@@ -2057,6 +2101,12 @@ mod tests {
     struct MockRepo {
         node_name: String,
         should_fail: bool,
+        /// When true, `update_agent_node_name` returns `Err` without
+        /// recording the call in `updates`. Distinct from `should_fail`
+        /// (which only affects `get_agent_node_by_id`) so a test can
+        /// simulate "read works, write transiently fails" — the exact
+        /// shape of the issue #1223 bug.
+        update_should_fail: bool,
         updates: std::sync::Mutex<Vec<(i64, String)>>,
     }
 
@@ -2065,6 +2115,18 @@ mod tests {
             Self {
                 node_name: name.to_string(),
                 should_fail: false,
+                update_should_fail: false,
+                updates: std::sync::Mutex::new(vec![]),
+            }
+        }
+
+        /// Repo whose `update_agent_node_name` always errors, simulating
+        /// transient write-lock contention with the pool worker.
+        fn with_failing_update(name: &str) -> Self {
+            Self {
+                node_name: name.to_string(),
+                should_fail: false,
+                update_should_fail: true,
                 updates: std::sync::Mutex::new(vec![]),
             }
         }
@@ -2084,6 +2146,9 @@ mod tests {
             })
         }
         fn update_agent_node_name(&self, id: i64, name: &str) -> Result<(), String> {
+            if self.update_should_fail {
+                return Err("mock update error".into());
+            }
             self.updates.lock().unwrap().push((id, name.to_string()));
             Ok(())
         }
@@ -2281,6 +2346,139 @@ mod tests {
         assert_eq!(calls[0], (42, "test-slug-name".to_string()));
     }
 
+    // --- issue #1223: DB-write-failure path must not emit node-renamed ---
+
+    /// Regression for issue #1223: when `update_agent_node_name` errors
+    /// after the LLM has returned a slug, the rename-pipeline MUST
+    /// leave the node's naming state intact (so the next Node Turn can
+    /// retry) and MUST NOT call the emit callback. The previous
+    /// inline implementation logged a warning, then unconditionally
+    /// cleared state and emitted — the frontend patched its in-memory
+    /// node list to a name SQLite never persisted, and the retry
+    /// buffer was wiped.
+    ///
+    /// Asserts the contract on `commit_rename` directly, since the
+    /// inline `Ok(slug)` arm of `on_turn_with` is otherwise hidden
+    /// behind a real `summarize_and_rename_with` call (the unit-test
+    /// cannot spawn `claude --print`). The helper is the same code
+    /// path the async arm executes against the production repo.
+    #[test]
+    fn commit_rename_preserves_state_on_db_write_failure() {
+        let node_id = 71100;
+        cleanup(node_id);
+        // Seed a "rename-eligible" state: gate open, buffer present.
+        // Without this, `has_state` would be false trivially and the
+        // test couldn't distinguish "we preserved state" from "there
+        // was no state to preserve".
+        open_gate(node_id);
+        on_output(node_id, "transient write-lock contention simulation");
+
+        let repo = MockRepo::with_failing_update("bold-keen-brook");
+        let mut emitted: Option<String> = None;
+
+        commit_rename(&repo, node_id, "fix-test-slug-bug", |name| {
+            emitted = Some(name.to_string())
+        });
+
+        assert!(
+            emitted.is_none(),
+            "commit_rename must NOT call the emit callback when the DB \
+             write failed (issue #1223); the UI would otherwise patch to \
+             a name that was never persisted"
+        );
+        assert!(
+            has_state(node_id),
+            "commit_rename must leave naming state intact on DB write \
+             failure so the next Node Turn can retry (issue #1223)"
+        );
+
+        cleanup(node_id);
+    }
+
+    /// Companion to `commit_rename_preserves_state_on_db_write_failure`:
+    /// pin the happy path so a future regression that over-eagerly
+    /// swallows success (e.g. returning on every code path) trips here.
+    /// On a successful DB write the helper MUST emit the rename and
+    /// clear the buffer/gate.
+    #[test]
+    fn commit_rename_emits_and_clears_on_db_write_success() {
+        let node_id = 71101;
+        cleanup(node_id);
+        open_gate(node_id);
+        on_output(node_id, "happy path buffer");
+
+        let repo = MockRepo::with_name("bold-keen-brook");
+        let mut emitted: Option<String> = None;
+
+        commit_rename(&repo, node_id, "fix-auth-token-refresh", |name| {
+            emitted = Some(name.to_string())
+        });
+
+        assert_eq!(
+            emitted.as_deref(),
+            Some("fix-auth-token-refresh"),
+            "commit_rename must call the emit callback with the slug \
+             the DB just accepted"
+        );
+        assert!(
+            !has_state(node_id),
+            "commit_rename must drop naming state once the DB write \
+             succeeded — the rename is done"
+        );
+
+        let calls = repo.updates.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[(node_id, "fix-auth-token-refresh".to_string())],
+            "the successful write must be recorded in the repo's \
+             update channel (MockRepo stand-in for the SQL UPDATE)"
+        );
+
+        cleanup(node_id);
+    }
+
+    /// Static guard: the `Ok(slug)` arm of `on_turn_with` MUST route
+    /// the rename commit through the injected `repo` (via the
+    /// `commit_rename` helper) — historically it called the hardcoded
+    /// `DbSessionNamingRepository`, which is why the mock-repo tests
+    /// couldn't reach the commit path at all (the production DB
+    /// would always have been invoked instead). This regression test
+    /// makes that wiring a compile-time invariant: a refactor that
+    /// inlines a direct `DbSessionNamingRepository.update_agent_node_name`
+    /// call (or skips `commit_rename`) trips this assertion.
+    #[test]
+    fn on_turn_with_ok_arm_routes_through_commit_rename_not_hardcoded_db() {
+        let source = include_str!("session_naming.rs");
+        // Find the Ok(slug) arm body — the call inside the Ok match must
+        // go through `commit_rename(...)`, never through
+        // `DbSessionNamingRepository.update_agent_node_name` directly.
+        let ok_marker = "Ok(slug) =>";
+        let ok_idx = source.find(ok_marker).expect("Ok(slug) arm must exist");
+        // Limit the search to the body of the Ok arm (ends at the next
+        // `Err(e) =>` arm of the same match). Brace-counting isn't needed
+        // here because the Ok arm is short and the next `Err(e) =>` is a
+        // unique marker.
+        let err_idx = source[ok_idx..]
+            .find("Err(e) =>")
+            .expect("Err(e) => arm must exist after Ok(slug)");
+        let arm_body = &source[ok_idx..ok_idx + err_idx];
+
+        assert!(
+            arm_body.contains("commit_rename("),
+            "Ok(slug) arm must route the rename commit through the \
+             `commit_rename` helper, which is what lets the mock-repo \
+             tests exercise the write-or-skip path (issue #1223). A direct \
+             DbSessionNamingRepository.update_agent_node_name here would \
+             bypass every test in this module"
+        );
+        assert!(
+            !arm_body.contains("DbSessionNamingRepository.update_agent_node_name"),
+            "Ok(slug) arm must NOT call DbSessionNamingRepository directly — \
+             route the DB write through the `repo` parameter / commit_rename \
+             helper instead"
+        );
+    }
+
     #[test]
     fn strip_claude_code_banner_removes_logo_and_cwd_lines() {
         let input = "\u{2590}\u{259B}\u{2588}\u{2588}\u{2588}\u{259C}\u{258C}   Claude Code v2.1.145\n\
@@ -2338,6 +2536,7 @@ mod tests {
         let repo = MockRepo {
             node_name: String::new(),
             should_fail: true,
+            update_should_fail: false,
             updates: std::sync::Mutex::new(vec![]),
         };
         assert!(!user_renamed_mid_flight(&repo, 1));
