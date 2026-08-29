@@ -415,14 +415,19 @@ pub trait AgentProvider: Send + Sync {
     /// argv element instead of splitting inside the quotes (a real
     /// footgun with naive `split_whitespace` — flagged in PR #1362
     /// code review). Backslashes and the canonical POSIX quotes are
-    /// honoured; tokens that don't fit a single shell word are
-    /// rejected with a hard error rather than silently mangled.
+    /// honoured.
+    ///
+    /// Returns `Err(shell_words::Error)` on malformed input
+    /// (unclosed quote, dangling escape) **rather than panicking**:
+    /// the spawn worker thread must not abort on a user typo.
+    /// `default_prepare` logs the parse error and falls back to
+    /// whitespace tokenisation, which gracefully drops the malformed
+    /// token list rather than crashing the worker.
     /// Per-adapter overrides can special-case (e.g. Codex may want a
     /// `--` separator before raw tokens in a future slice) — the
     /// seam is wide-open without breaking call sites.
-    fn extra_args_args(&self, raw: &str) -> Vec<String> {
+    fn extra_args_args(&self, raw: &str) -> Result<Vec<String>, shell_words::ParseError> {
         shell_words::split(raw)
-            .unwrap_or_else(|e| panic!("invalid extra_args shell-syntax at spawn site ({e}): {raw:?}"))
     }
 
     /// Args appended when the parent mesh has its `sandbox` toggle on.

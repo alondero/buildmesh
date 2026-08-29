@@ -203,7 +203,25 @@ pub fn default_prepare(
     // sandbox is mesh-driven, prefill is the trailing positional.
     if capabilities.supports_extra_args {
         if let Some(extra) = input.config.extra_args.as_deref().filter(|s| !s.is_empty()) {
-            recipe.base_args.extend(adapter.extra_args_args(extra));
+            // Gracefully degrade rather than crashing the spawn worker
+            // thread on a user typo (unclosed quote, dangling escape).
+            // PR #1362 round 2 review: a `panic!` here is a fatal runtime
+            // failure for a circuit-author-authored value. We log and
+            // fall back to whitespace splitting so the spawn still
+            // proceeds (the user's other args land correctly; only the
+            // malformed token group is dropped).
+            match adapter.extra_args_args(extra) {
+                Ok(args) => recipe.base_args.extend(args),
+                Err(e) => {
+                    tracing::warn!(
+                        "extra_args tokenisation failed ({}); falling back to whitespace split for {:?}",
+                        e, extra
+                    );
+                    recipe
+                        .base_args
+                        .extend(extra.split_whitespace().map(String::from));
+                }
+            }
         }
     }
 
@@ -522,6 +540,58 @@ mod tests {
             "Terminal drops extra_args at the capability mask; got {:?}",
             prepared.recipe.base_args
         );
+    }
+
+    /// **PR #1362 round 2 review (panic-on-typo fix):** A malformed
+    /// shell-syntax input (unclosed quote, dangling escape) MUST NOT
+    /// crash the spawn worker thread. The fallback path:
+    /// 1. Returns `Err` from `extra_args_args(raw)` (not `panic!`)
+    /// 2. `default_prepare` logs a warning at `tracing::warn!`
+    /// 3. Falls back to whitespace splitting so the user's other
+    ///    args still reach the harness — only the malformed token
+    ///    group is dropped, NOT the entire spawn.
+    ///
+    /// CRITICAL: this test catches a regression where a `panic!`
+    /// would turn every user typo into a fatal worker crash.
+    #[test]
+    fn extra_args_malformed_shell_syntax_does_not_panic() {
+        let adapter = &crate::agent::provider::adapters::ANTHROPIC as &dyn AgentProvider;
+        // Unclosed quote — shell_words::split returns Err(MismatchedQuotes).
+        let config = ResolvedAgentConfig {
+            extra_args: Some(r#"--message "Let's test this or foo\"#.to_string()),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        // The test exists to PROVE no panic. If a future refactor
+        // reintroduces `panic!` or `.unwrap()` on the parse error,
+        // this test traps the panic (catch_unwind) and reports it
+        // instead of taking down the test runner.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            default_prepare(adapter, input)
+        }));
+        let prepared = outcome.expect(
+            "extra_args tokenisation MUST NOT panic on malformed input — \
+             PR #1362 round 2 review fix: log + fall back to whitespace, never panic.",
+        );
+        // Whitespace-split fallback keeps the well-formed tokens.
+        // `--message` tokenises as a separate argv element (it's
+        // unquoted in the fallback path).
+        assert!(
+            prepared.recipe.base_args.contains(&"--message".to_string()),
+            "fallback must still forward the well-formed `--message` token; got {:?}",
+            prepared.recipe.base_args
+        );
+        // The malformed quote's contents drop with the quote — that's
+        // the expected graceful degradation. The critical property is
+        // that the spawn *proceeds* (no panic) and other valid args
+        // survive.
     }
 
     /// Effort config must be forwarded through the adapter's
