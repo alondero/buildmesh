@@ -122,22 +122,27 @@ export function MustacheTextarea({
   }, [reachable, suggestions]);
 
   // Flat list of paths in render order so keyboard navigation can
-  // step through every visible chip regardless of grouping.
+  // step through every visible chip regardless of grouping. The
+  // highlight index is always an offset into `flatPaths` — NOT into
+  // `suggestions`, which is sorted by fuzzy score and disagrees with
+  // the DOM order once grouping kicks in (review feedback #1359
+  // round 2: pressing Enter on a chip highlighted via ArrowDown
+  // must insert the highlighted chip, not the raw fuzzy top).
   const flatPaths = useMemo(() => {
     if (grouped === null) return suggestions;
     return grouped.flatMap((g) => g.paths);
   }, [grouped, suggestions]);
 
-  // Clamp the highlight into the new suggestions range whenever the
+  // Clamp the highlight into the new render-order range whenever the
   // list shrinks or the menu reopens — otherwise ArrowDown could
   // escape the end and Enter would `pick(undefined)`.
   useEffect(() => {
-    if (suggestions.length === 0) {
+    if (flatPaths.length === 0) {
       if (highlight !== -1) setHighlight(-1);
       return;
     }
-    if (highlight >= suggestions.length) setHighlight(suggestions.length - 1);
-  }, [suggestions.length, highlight]);
+    if (highlight >= flatPaths.length) setHighlight(flatPaths.length - 1);
+  }, [flatPaths.length, highlight]);
 
   const handleChange = (next: string) => {
     onChange(next);
@@ -172,23 +177,26 @@ export function MustacheTextarea({
         return;
       case 'ArrowDown': {
         e.preventDefault();
-        if (suggestions.length === 0) return;
-        setHighlight((h) => (h + 1 >= suggestions.length ? 0 : h + 1));
+        if (flatPaths.length === 0) return;
+        setHighlight((h) => (h + 1 >= flatPaths.length ? 0 : h + 1));
         return;
       }
       case 'ArrowUp': {
         e.preventDefault();
-        if (suggestions.length === 0) return;
-        setHighlight((h) => (h <= 0 ? suggestions.length - 1 : h - 1));
+        if (flatPaths.length === 0) return;
+        setHighlight((h) => (h <= 0 ? flatPaths.length - 1 : h - 1));
         return;
       }
       case 'Enter':
       case 'Tab': {
-        // Pick the highlighted chip, or the top suggestion if none.
-        if (suggestions.length === 0) return;
+        // Pick the highlighted chip, or the top chip if none
+        // highlighted. Always index into `flatPaths` — the render
+        // order — so the picked chip matches the highlighted one in
+        // the DOM (issue #1359 review round 2).
+        if (flatPaths.length === 0) return;
         const idx = highlight >= 0 ? highlight : 0;
         e.preventDefault();
-        pick(suggestions[idx]);
+        pick(flatPaths[idx]);
         return;
       }
       default:

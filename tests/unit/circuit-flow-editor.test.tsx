@@ -368,6 +368,64 @@ describe('CircuitFlowEditor', () => {
     expect(wrapped?.getAttribute('data-testid')).toBe(last?.getAttribute('data-testid'));
   });
 
+  it('Enter picks the highlighted chip, NOT the raw fuzzy top (round-2 review regression)', async () => {
+    // The bug: when the menu was grouped by namespace but pick()
+    // indexed into the fuzzy-sorted `suggestions` array, ArrowDown
+    // highlighted a grouped-first chip (e.g. circuit.id at DOM index
+    // 0) but Enter inserted the fuzzy-top chip (issue.author for an
+    // `{{ issue` query). The previous test passed because with an
+    // empty query both orderings happened to start with circuit.id.
+    // Type a non-empty prefix so the orderings diverge.
+    const user = userEvent.setup();
+    renderEditor();
+
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt = await screen.findByTestId('inspector-prompt') as HTMLTextAreaElement;
+    fireEvent.change(prompt, {
+      target: { value: 'review the diffFix {{ issue ', selectionStart: 28 },
+    });
+    prompt.focus();
+    const menu = await screen.findByTestId('mustache-menu');
+
+    // Without any arrow press, Enter should pick the DOM first chip
+    // (whatever the render order is — in grouped mode, that's the
+    // first chip of the first non-empty group, which for `{{ issue`
+    // is in the issue.* group).
+    await user.keyboard('{Enter}');
+    const highlighted = (menu.querySelector('[data-highlighted="true"]') ??
+      menu.querySelector('[data-testid^="mustache-chip-"]')) as HTMLElement;
+    const expectedId = highlighted.getAttribute('data-testid')?.replace('mustache-chip-', '');
+    const expectedPath = expectedId ?? '';
+    expect((screen.getByTestId('inspector-prompt') as HTMLTextAreaElement).value).toBe(
+      `review the diffFix {{ ${expectedPath} }}`
+    );
+
+    // Now ArrowDown to a chip whose position is NOT 0, then Enter —
+    // the inserted chip must match the highlighted one, not the
+    // fuzzy-top chip. For `{{ issue`, every issue.* chip is in the
+    // same group, so the render order matches the fuzzy order for
+    // the issue.* group. Pick a prefix that mixes two groups
+    // instead: `{{ issue` will still group everything together.
+    // Use `{{ c` — sorted by fuzzy, `circuit.*` ranks above
+    // `issue.*`/`pr.*` etc. because every chip matches.
+    fireEvent.change(prompt, {
+      target: { value: 'review the diffFix {{ c', selectionStart: 24 },
+    });
+    prompt.focus();
+    const menu2 = await screen.findByTestId('mustache-menu');
+    // ArrowDown to the SECOND chip in the menu (grouped order:
+    // circuit.id, circuit.name, …). Then Enter.
+    await user.keyboard('{ArrowDown}'); // -> first chip
+    await user.keyboard('{ArrowDown}'); // -> second chip
+    const second = menu2.querySelector('[data-highlighted="true"]') as HTMLElement;
+    expect(second).not.toBeNull();
+    const secondId = second.getAttribute('data-testid')?.replace('mustache-chip-', '');
+    await user.keyboard('{Enter}');
+    expect((screen.getByTestId('inspector-prompt') as HTMLTextAreaElement).value).toBe(
+      `review the diffFix {{ ${secondId} }}`
+    );
+  });
+
   it('Escape closes the mustache menu without picking a chip', async () => {
     const user = userEvent.setup();
     renderEditor();

@@ -250,11 +250,18 @@ export function InspectorPanel(props: InspectorPanelProps) {
   // with "Rendered more hooks than during the previous render" the
   // moment the user selects their first node after opening the
   // editor with nothing selected — issue #1359 review feedback).
+  //
+  // Dep on `props.node?.id` (not `props.node`) so the BFS only re-
+  // walks when the selected node identity changes — not on every
+  // parent re-render where the node object reference shifts but the
+  // id is identical (review feedback round 2: a `props.node` dep
+  // busts the memo on every keystroke because the canvas editor's
+  // working copy mints a fresh React Flow node each render).
   const reachable = useMemo(
     () => (props.graph !== undefined && props.node !== null
       ? getReachableContext(props.node.id, props.graph)
       : undefined),
-    [props.graph, props.node]
+    [props.graph, props.node?.id]
   );
 
   if (props.node === null) {
