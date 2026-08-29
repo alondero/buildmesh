@@ -55,6 +55,7 @@ use crate::autopilot::circuit::stepper::{
 use crate::db;
 use crate::models::SessionStatus;
 use crate::process_util::run_worker_pass;
+use crate::agent::spawn::ExplicitSpawnOverrides;
 
 /// Fast tick — covers interval pacing headroom, slot unblocking latency,
 /// and piloted-agent observation lag.
@@ -930,6 +931,98 @@ fn execute_effects(
     Ok(())
 }
 
+/// Pure seam of [`spawn_step_agent`] — translates a
+/// [`CircuitNodeKind::SpawnAgentNode`] into the inputs the impure wrapper
+/// threads into `create_pending` (for the `provider` column) and
+/// `SpawnRequest::with_explicit(...)` (for cascade layer-1 model/effort/extra_args).
+///
+/// Mirrors the existing impure-wrapper / pure-core pattern this file uses
+/// for `reconcile_spawn_step` (line ~947) so the cascade + capability-mask
+/// contract can be tested without a Tauri runtime, AppHandle, or DB.
+/// Issue #1358 / slice 3 of #1355 — `provider` / `model` / `effort` /
+/// `extra_args` flow off the v2 AST here.
+fn resolve_circuit_spawn_inputs(
+    kind: &CircuitNodeKind,
+) -> Result<ResolvedCircuitSpawn, String> {
+    let CircuitNodeKind::SpawnAgentNode {
+        prompt,
+        name,
+        provider,
+        model,
+        effort,
+        extra_args,
+    } = kind
+    else {
+        return Err(format!(
+            "node is not a spawn node (got {:?})",
+            std::mem::discriminant(kind)
+        ));
+    };
+    // Provider: preserve the user-authored string for the `agent_nodes.provider`
+    // row column. An unknown id stays as-is — the row carries the
+    // user-authored value, and `Provider::from_db_str`'s Anthropic
+    // fallback in `spawn_with_intent` handles legacy / mistyped ids.
+    let provider_str = provider.clone();
+    let prompt = prompt.clone();
+    let name = name.clone();
+    let explicit = ExplicitSpawnOverrides {
+        model: model
+            .as_deref()
+            .and_then(non_empty_trim)
+            .map(str::to_string),
+        effort: effort
+            .as_deref()
+            .and_then(non_empty_trim)
+            .map(str::to_string),
+        extra_args: extra_args
+            .as_deref()
+            .and_then(non_empty_trim)
+            .map(str::to_string),
+    };
+    Ok(ResolvedCircuitSpawn {
+        prompt,
+        name,
+        provider_str,
+        explicit,
+    })
+}
+
+/// Mirrors `cascade_inputs_for`'s whitespace trim so the seam collapses
+/// "   " / "\t\n" / "" to `None` before reaching the cascade (issue
+/// #1148 AC #32). Inline rather than reaching into `crate::agent::spawn`
+/// — this is the seam boundary for the cascade, not a place to deepen
+/// the dependency surface.
+fn non_empty_trim(s: &str) -> Option<&str> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// The output of [`resolve_circuit_spawn_inputs`]: the prompt + name
+/// carried through verbatim, the optional per-step provider string for
+/// `create_pending`, the layer-1 cascade override for
+/// `SpawnRequest::with_explicit(...)`. The orchestrator doesn't
+/// surface a resolved `Provider` here because `spawn_with_intent`
+/// recomputes it from the `agent_nodes.provider` row it just wrote —
+/// carrying a duplicate would be speculative generality.
+#[derive(Debug)]
+struct ResolvedCircuitSpawn {
+    /// Author-authored prompt, carried verbatim — Mustache resolution
+    /// happens in the wrapper against `view.context`.
+    prompt: String,
+    /// Author-authored agent node name, carried verbatim.
+    name: Option<String>,
+    /// User-authored provider string for the `agent_nodes.provider`
+    /// column. `None` = fall through to the mesh's default at spawn.
+    provider_str: Option<String>,
+    /// Per-step cascade layer-1 override; passed to
+    /// `SpawnRequest::with_explicit(...)`.
+    explicit: ExplicitSpawnOverrides,
+}
+
 /// The SpawnAgentNode effect: create the pending row (stage-1), wire it
 /// to the step, then schedule stage-2 in the background — mirroring the
 /// autopilot launch order minus the GitHub ledger.
@@ -946,10 +1039,17 @@ fn spawn_step_agent(
         .node(node_id)
         .map(|n| n.kind.clone())
         .ok_or_else(|| format!("node {} not in blueprint", node_id))?;
-    let (prompt, name) = match kind {
-        CircuitNodeKind::SpawnAgentNode { prompt, name, .. } => (prompt, name),
-        _ => return Err(format!("node {} is not a spawn node", node_id)),
-    };
+    // Pure seam (issue #1358): translate the AST kind into the
+    // provider column value + cascade layer-1 overrides that the spawn
+    // pipeline consumes downstream. Whitespace-only model/effort/extra_args
+    // collapse to `None` here so the cascade falls through to the mesh or
+    // application layer (mirrors `cascade_inputs_for`'s trim behaviour).
+    let ResolvedCircuitSpawn {
+        prompt,
+        name,
+        provider_str,
+        explicit,
+    } = resolve_circuit_spawn_inputs(&kind)?;
 
     let resolved_prompt = view.context.resolve(&prompt);
 
@@ -980,7 +1080,7 @@ fn spawn_step_agent(
                 mesh_id,
                 &old_node.path,
                 &old_node.branch,
-                None,
+                provider_str.as_deref(),
                 None,
                 None,
                 None,
@@ -1011,7 +1111,8 @@ fn spawn_step_agent(
                 };
                 if let Err(error) = crate::agent::spawn::spawn_with_intent(
                     &app_for_spawn,
-                    SpawnRequest::new(new_node.id, intent, Default::default()),
+                    SpawnRequest::new(new_node.id, intent, Default::default())
+                        .with_explicit(explicit.clone()),
                 )
                 .await
                 {
@@ -1030,7 +1131,8 @@ fn spawn_step_agent(
         mesh.id,
         &mesh.path,
         &branch,
-        None, // provider falls through the mesh/app cascade
+        // Issue #1358: per-node provider override flows here.
+        provider_str.as_deref(),
         None,
         None,
         None,
@@ -1080,7 +1182,13 @@ fn spawn_step_agent(
         };
         if let Err(error) = crate::agent::spawn::spawn_with_intent(
             &app_for_spawn,
-            SpawnRequest::new(node.id, intent, Default::default()),
+            // Issue #1358: per-step model / effort / extra_args ride the
+            // explicit layer through to `spawn_with_intent`, where
+            // `resolve_spawn_config` capability-masks them against
+            // `HarnessCapabilities.supports_extra_args` (Terminal drops;
+            // every interactive harness keeps).
+            SpawnRequest::new(node.id, intent, Default::default())
+                .with_explicit(explicit.clone()),
         )
         .await
         {
@@ -1693,5 +1801,135 @@ mod tests {
         // CloseIssue explicitly targets the issue (#42)
         let close_target = determine_github_target(&view, "post_label", GithubActionKind::CloseIssue).unwrap();
         assert_eq!(close_target, ("issue", 42));
+    }
+
+    // -----------------------------------------------------------------------
+    // `resolve_circuit_spawn_inputs` (issue #1358 / slice 3 of #1355)
+    //
+    // The pure seam that translates a `CircuitNodeKind::SpawnAgentNode` into
+    // the inputs the worker's impure wrapper threads into `create_pending`
+    // (for the `provider` column) and `SpawnRequest::with_explicit(...)`
+    // (for cascade layer-1 model/effort/extra_args). Mirrors the existing
+    // impure-wrapper / pure-core pattern this file uses for
+    // `reconcile_spawn_step` (line ~947) so the cascade + capability-mask
+    // contract can be tested without a Tauri runtime, AppHandle, or DB.
+    // -----------------------------------------------------------------------
+
+    fn spawn_kind(
+        provider: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        extra_args: Option<&str>,
+    ) -> CircuitNodeKind {
+        CircuitNodeKind::SpawnAgentNode {
+            prompt: "implement the fix".to_string(),
+            name: Some("implementer".to_string()),
+            provider: provider.map(str::to_string),
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
+            extra_args: extra_args.map(str::to_string),
+        }
+    }
+
+    /// A node-authored `provider: Some("codex")` flows through into the
+    /// row column AND into the resolved Provider the capability mask uses.
+    /// Without this seam the worker would never honour a per-step
+    /// provider override.
+    #[test]
+    fn circuit_spawn_resolves_provider_override() {
+        let kind = spawn_kind(Some("codex"), None, None, None);
+        let resolved = resolve_circuit_spawn_inputs(&kind).expect("valid spawn");
+        assert_eq!(resolved.provider_str.as_deref(), Some("codex"));
+    }
+
+    /// The cascade layer-1 (explicit) override slot must carry the per-node
+    /// `model`. Empty / whitespace-only inputs collapse to absent so the
+    /// cascade falls through (issue #1148 AC #32).
+    #[test]
+    fn circuit_spawn_passes_model_through_explicit_override() {
+        let kind = spawn_kind(Some("anthropic"), Some("opus-4-1"), None, None);
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert_eq!(resolved.explicit.model.as_deref(), Some("opus-4-1"));
+        assert_eq!(resolved.explicit.effort, None);
+    }
+
+    /// `effort` and `extra_args` ride the same explicit slot — pin both so
+    /// the seam doesn't accidentally drop one of them on its way through.
+    #[test]
+    fn circuit_spawn_passes_effort_and_extra_args_through_explicit_override() {
+        let kind = spawn_kind(
+            Some("anthropic"),
+            None,
+            Some("high"),
+            Some("--dangerously-skip-permissions"),
+        );
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert_eq!(resolved.explicit.effort.as_deref(), Some("high"));
+        assert_eq!(
+            resolved.explicit.extra_args.as_deref(),
+            Some("--dangerously-skip-permissions")
+        );
+    }
+
+    /// Unknown provider strings stay as-is in the seam so the row
+    /// carries the user-authored value. The Anthropic fallback
+    /// (`Provider::from_db_str("...")` returning `Anthropic` for unknown
+    /// ids) runs downstream in `spawn_with_intent` against the row —
+    /// the seam does not parse it. Pin that contract so a future
+    /// refactor can't normalize the value too early and break the row's
+    /// author-visible identity.
+    #[test]
+    fn circuit_spawn_preserves_unknown_provider_string() {
+        let kind = spawn_kind(Some("not-a-real-thing"), None, None, None);
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert_eq!(resolved.provider_str.as_deref(), Some("not-a-real-thing"));
+    }
+
+    /// Whitespace-only model / effort / extra_args collapse to absent so
+    /// the cascade falls through.
+    #[test]
+    fn circuit_spawn_whitespace_overrides_collapse_to_absent() {
+        let kind = spawn_kind(None, Some("   "), Some("\t\n"), Some("   \t  "));
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert!(resolved.explicit.model.is_none());
+        assert!(resolved.explicit.effort.is_none());
+        assert!(resolved.explicit.extra_args.is_none());
+    }
+
+    /// `name` is pass-through (no cascade layer owns it).
+    #[test]
+    fn circuit_spawn_name_passes_through_unchanged() {
+        let kind = spawn_kind(Some("claude_code"), None, None, None);
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert_eq!(resolved.name.as_deref(), Some("implementer"));
+    }
+
+    /// A non-SpawnAgentNode kind is a hard error — the seam narrows
+    /// before destructuring.
+    #[test]
+    fn circuit_spawn_rejects_non_spawn_kind() {
+        let inject = CircuitNodeKind::InjectPty {
+            prompt: "hi".into(),
+            target_node_id: None,
+        };
+        let err = resolve_circuit_spawn_inputs(&inject).unwrap_err();
+        assert!(
+            err.contains("not a spawn"),
+            "rejection message must name the kind: {err}"
+        );
+    }
+
+    /// `provider: None` resolves to `Provider::Anthropic` (the standing
+    /// default — matches `Provider::from_db_str("")`'s fallback and the
+    /// mesh-row compatibility default). The `provider_str` MUST be `None`
+    /// so the row uses the mesh's default provider.
+    #[test]
+    fn circuit_spawn_default_provider_is_none_when_unset() {
+        let kind = spawn_kind(None, None, None, None);
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert!(
+            resolved.provider_str.is_none(),
+            "None ⇒ fall through to mesh default at `create_pending` time"
+        );
     }
 }

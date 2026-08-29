@@ -57,6 +57,19 @@ supports_model_override: boolean,
  */
 supports_effort_override: boolean, 
 /**
+ * Whether the harness accepts verbatim CLI flag args from configuration
+ * (issue #1358). Every interactive harness advertises `true` (it owns
+ * its argv shape; the orchestrator simply forwards the string and
+ * lets the adapter's `extra_args_args` helper tokenise it). Terminal
+ * — the plain-shell harness, with no LLM-driven recipe — advertises
+ * `false` because splicing synthetic flags into a user's interactive
+ * shell session would be a footgun. The capability mask drops the
+ * layer-1 `extra_args` value at the resolver, never at the
+ * orchestrator, so a future harness can opt in by overriding
+ * `supports_extra_args` on its adapter.
+ */
+supports_extra_args: boolean, 
+/**
  * Whether `--prefill <text>` (or equivalent positional) is accepted.
  */
 supports_prefill: boolean, 

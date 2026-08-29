@@ -206,6 +206,10 @@ impl AgentProvider for GrokAdapter {
         true
     }
 
+    fn supports_extra_args(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         // Interactive TUI accepts a trailing positional [PROMPT] as the
         // first turn (`grok "fix the bug"`). There is no `--prefill` flag;
@@ -397,6 +401,7 @@ mod tests {
         let config = ResolvedAgentConfig {
             model: Some("grok-3".to_string()),
             effort: None,
+            extra_args: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,
@@ -433,6 +438,7 @@ mod tests {
         let config = ResolvedAgentConfig {
             model: Some("grok-3".to_string()),
             effort: None,
+            extra_args: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,
@@ -535,6 +541,7 @@ mod tests {
         let config = ResolvedAgentConfig {
             model: None,
             effort: Some("high".into()),
+            extra_args: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,

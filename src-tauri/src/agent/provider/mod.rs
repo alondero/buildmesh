@@ -328,6 +328,18 @@ pub trait AgentProvider: Send + Sync {
     /// Whether `--model <name>` / `--effort <level>` args from mesh config apply.
     fn supports_model_override(&self) -> bool;
 
+    /// Whether the harness accepts verbatim CLI flag args from
+    /// configuration (issue #1358). The orchestrator's
+    /// `default_prepare` only forwards `ResolvedAgentConfig.extra_args`
+    /// through `adapter.extra_args_args(...)` when this returns `true`;
+    /// every interactive harness declares `true` (it owns its argv
+    /// shape and the launch helper just tokenises the user's string),
+    /// while the plain-shell Terminal adapter declares `false` (splicing
+    /// synthetic flags into a user's interactive shell session would be
+    /// a footgun). Mirrors the per-adapter opt-in pattern
+    /// `supports_model_override` already uses.
+    fn supports_extra_args(&self) -> bool;
+
     /// Whether `--prefill <text>` is accepted. Used by both spawn flows:
     /// `spawn_issue_agent` (URL + title hint, ~150 bytes; never the full body —
     /// see memory: buildmesh-issue-spawn-url-only) and `spawn_handover_agent`
@@ -388,6 +400,23 @@ pub trait AgentProvider: Send + Sync {
     /// Args for prefill/prompt text.
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec!["--prefill".into(), text.into()]
+    }
+
+    /// Args appended verbatim from a circuit author's
+    /// `SpawnAgentNode.extra_args` (issue #1358). The orchestrator's
+    /// `default_prepare` only forwards `ResolvedAgentConfig.extra_args`
+    /// through this helper when the adapter's
+    /// `capabilities().supports_extra_args == true` — Terminal is the
+    /// standing example of a harness that opts out, so its invocation
+    /// never gets a synthetic flag splice.
+    ///
+    /// Default impl: tokenise on whitespace and emit each token as its
+    /// own argv element. Per-adapter overrides can special-case (e.g.
+    /// Codex may want a `--` separator before raw tokens in a future
+    /// slice) — the seam is wide-open without breaking call sites
+    /// since `#[serde(default)]` defaults carry through.
+    fn extra_args_args(&self, raw: &str) -> Vec<String> {
+        raw.split_whitespace().map(String::from).collect()
     }
 
     /// Args appended when the parent mesh has its `sandbox` toggle on.
@@ -480,6 +509,7 @@ pub trait AgentProvider: Send + Sync {
             produces_readable_transcript: self.produces_readable_transcript(),
             supports_model_override: self.supports_model_override(),
             supports_effort_override: !matches!(effort_control, EffortControlKind::None),
+            supports_extra_args: self.supports_extra_args(),
             supports_prefill: self.supports_prefill(),
             is_plain_terminal: self.is_plain_terminal(),
             effort_control,

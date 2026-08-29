@@ -193,6 +193,19 @@ pub fn default_prepare(
             recipe.base_args.extend(adapter.effort_args(effort));
         }
     }
+    // Issue #1358: forward the per-step `extra_args` verbatim through
+    // the adapter's tokenise helper. Mirrors the model / effort
+    // branches above — capability-masked at the resolver (no
+    // harness-side check needed here) and only forwarded when the
+    // capability descriptor advertises support. Placed between
+    // `effort_args` and `sandbox_args` so the semantic-then-positional
+    // layer order survives: model / effort / extras are user-supplied,
+    // sandbox is mesh-driven, prefill is the trailing positional.
+    if capabilities.supports_extra_args {
+        if let Some(extra) = input.config.extra_args.as_deref().filter(|s| !s.is_empty()) {
+            recipe.base_args.extend(adapter.extra_args_args(extra));
+        }
+    }
 
     // Issue #1287 — adapter-level sandbox flag. When the parent mesh
     // has its `sandbox` toggle on, append the adapter's declared
@@ -398,6 +411,75 @@ mod tests {
             .position(|a| a == "--model")
             .expect("forwarded model must be present in base_args");
         assert_eq!(prepared.recipe.base_args[i + 1], "claude-sonnet-4-5");
+    }
+
+    /// `extra_args` (issue #1358) must be forwarded verbatim through
+    /// the adapter's `extra_args_args`. The capability mask has already
+    /// run — the descriptor reports `supports_extra_args = true` for
+    /// Anthropic — so a `Some(raw)` value here is safe to forward
+    /// without a re-mask. Whitespace tokenisation is the default impl,
+    /// so a multi-flag string becomes multiple argv entries.
+    #[test]
+    fn default_prepare_forwards_extra_args() {
+        let adapter = &crate::agent::provider::adapters::ANTHROPIC as &dyn AgentProvider;
+        let sentinel_a = "--bm-test-extra-a";
+        let sentinel_b = "--bm-test-extra-b";
+        let config = ResolvedAgentConfig {
+            extra_args: Some(format!("{sentinel_a} {sentinel_b}")),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        let base = &prepared.recipe.base_args;
+        // Find first sentinel and assert the second follows it (so the
+        // whitespace tokenisation emitted both as separate argv entries).
+        let i = base
+            .iter()
+            .position(|a| a == sentinel_a)
+            .expect("forwarded extra_args must include the literal flag");
+        assert_eq!(
+            base[i + 1],
+            sentinel_b,
+            "whitespace tokenisation emits each token as its own argv element"
+        );
+    }
+
+    /// Terminal's `supports_extra_args = false` must drop the
+    /// `extra_args` value at the capability gate (issue #1358). Without
+    /// this pin a future regression that forgot the gate would splice
+    /// the user's flags into `powershell.exe` — a footgun.
+    #[test]
+    fn default_prepare_drops_extra_args_for_terminal() {
+        let adapter = &crate::agent::provider::adapters::TERMINAL as &dyn AgentProvider;
+        let config = ResolvedAgentConfig {
+            extra_args: Some("--anything --the-user-typed".to_string()),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        assert!(
+            !prepared.recipe.base_args.contains(&"--anything".to_string())
+                && !prepared
+                    .recipe
+                    .base_args
+                    .contains(&"--the-user-typed".to_string()),
+            "Terminal drops extra_args at the capability mask; got {:?}",
+            prepared.recipe.base_args
+        );
     }
 
     /// Effort config must be forwarded through the adapter's

@@ -5,7 +5,15 @@
  * blueprint stays canonical in Rust). Text fields that accept circuit
  * context use `MustacheTextarea` so `{{` opens autocomplete.
  *
- * Issue #1359 (Circuits v2 slice 4 — Canvas UX) adds three things:
+ * Issue #1358 (Circuits v2 slice 3 — Harness Integration) extends
+ * `SpawnAgentNode` with a Provider selector + capability-gated
+ * Model / Effort / Extra-Args overrides. The Inspector reads the
+ * capability contract from a hardcoded `harnessCapabilities.ts`
+ * table; the orchestrator applies the same contract via
+ * `resolve_agent_config` so a user-authored override that the new
+ * harness can't honour is dropped at spawn time. Issue #1359
+ * (Circuits v2 slice 4 — Canvas UX) layers a Context Variables
+ * reference drawer + `target_node_id` dropdowns on top.
  *
  *   1. `graph` prop so the panel can compute upstream reachability for
  *      the selected node and pass it into the textarea autocomplete
@@ -17,6 +25,10 @@
  *   3. A `target_node_id` dropdown for `inject_pty` and
  *      `set_node_status` listing every upstream `spawn_agent_node`
  *      (the stepper dispatches the effect at the chosen agent).
+ *   4. Provider / Model / Effort / Extra-Args controls for
+ *      `SpawnAgentNode` (issue #1358). Switching the provider
+ *      sanitises the other three fields so a stale value never
+ *      serialises into a circuit the new harness can't honour.
  */
 
 import { useMemo, useState } from 'react';
@@ -39,6 +51,26 @@ import {
   specFor,
   type ReachableContext,
 } from './circuitGraphModel';
+import {
+  effortAllowedFor,
+  getCapabilitiesFor,
+  HARNESS_LABEL,
+  type InspectorHarnessId,
+} from './harnessCapabilities';
+
+/**
+ * The five harness ids offered in the Inspector's provider dropdown.
+ * Mirrors the same surface that the Rust `BUILTIN_HARNESS_IDS`
+ * list provides; the dropdown order is stable so the user's
+ * selection persists across re-renders.
+ */
+const HARNESS_OPTIONS: { value: InspectorHarnessId; label: string }[] = [
+  { value: 'anthropic', label: HARNESS_LABEL.anthropic },
+  { value: 'codex', label: HARNESS_LABEL.codex },
+  { value: 'agy', label: HARNESS_LABEL.agy },
+  { value: 'opencode', label: HARNESS_LABEL.opencode },
+  { value: 'grok', label: HARNESS_LABEL.grok },
+];
 
 interface InspectorPanelProps {
   node: CircuitNode | null;
@@ -47,6 +79,56 @@ interface InspectorPanelProps {
    *  unit tests can mount the panel without a graph and ad-hoc reuse
    *  (e.g. embedding inside another form) still works. */
   graph?: CircuitGraph;
+}
+
+/**
+ * Compute the harness id string the Inspector uses to key into
+ * `harnessCapabilities.ts`. Mirrors `Provider::from_db_str`'s default
+ * fallback (`""` and unknown ids → `"anthropic"`) so a user-authored
+ * `provider` that hasn't been normalised by the backend still resolves
+ * to Anthropic's descriptor. `null` ⇒ no harness selected (use the
+ * mesh's default at spawn).
+ */
+function harnessIdFromProvider(provider: string | null | undefined): InspectorHarnessId | null {
+  if (provider == null) return null;
+  // Issue #1362 review: the backend's `non_empty_trim` collapses
+  // whitespace-only and empty `provider` strings to `None` (cascade
+  // falls through to the mesh's default autopilot). Mirror that
+  // semantic here so an empty / whitespace / unknown id never gets
+  // rendered as if the user had picked a harness — keep "no provider
+  // selected" honest in the UI.
+  const normalised = provider.trim().toLowerCase();
+  if (normalised === '') return null;
+  if (normalised === 'anthropic' || normalised === 'claude_code') {
+    // Inspector's selector keys on `anthropic` to match the backend id.
+    return 'anthropic';
+  }
+  if (
+    normalised === 'codex' ||
+    normalised === 'agy' ||
+    normalised === 'antigravity' ||
+    normalised === 'opencode' ||
+    normalised === 'grok'
+  ) {
+    return normalised === 'antigravity' ? 'agy' : (normalised as InspectorHarnessId);
+  }
+  // Unknown id: emit as a synthetic entry. We don't have a stable
+  // capability descriptor for it (matches the backend's
+  // `Provider::from_db_str` fallback to Anthropic, but the inspector
+  // renders the resolved id so the user sees what they authored).
+  // Return null to fall back to "no overrides".
+  return null;
+}
+
+/**
+ * Inverse of `harnessIdFromProvider` for the wire payload — keep the
+ * user's id canonical. The backend's `Provider::from_db_str` accepts
+ * both `codex` and `agy` (so does the inspector dropdown), so this
+ * just maps back to the wire shape the AST serialises.
+ */
+function providerStringFromHarnessId(id: InspectorHarnessId): string {
+  if (id === 'agy') return 'agy';
+  return id;
 }
 
 const inputClass =
@@ -308,28 +390,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
         id: <span data-testid="inspector-node-id">{node.id}</span>
       </div>
 
-      {kind.type === 'spawn_agent_node' && (
-        <>
-          <Field label="Agent name">
-            <input
-              value={kind.name ?? ''}
-              aria-label="Agent name"
-              data-testid="inspector-agent-name"
-              onChange={(e) => onChange({ ...kind, name: e.target.value || null })}
-              className={inputClass}
-            />
-          </Field>
-          <Field label="Initial prompt (via Inject PTY)">
-            <MustacheTextarea
-              value={kind.prompt}
-              onChange={(prompt) => onChange({ ...kind, prompt })}
-              rows={5}
-              ariaLabel="Spawn prompt"
-              testId="inspector-prompt"
-              reachable={reachable}
-            />
-          </Field>
-        </>
+      {kind.type === 'spawn_agent_node' && reachable && (
+        <SpawnAgentNodeFields kind={kind} onChange={onChange} reachable={reachable} />
       )}
 
       {kind.type === 'inject_pty' && (
@@ -505,5 +567,145 @@ export function InspectorPanel(props: InspectorPanelProps) {
 
       <ContextReferenceDrawer reachable={reachable} hasTemplate={hasTemplate} />
     </aside>
+  );
+}
+/**
+ * The SpawnAgentNode inspector (issue #1358). Renders the existing
+ * agent-name / prompt fields plus the four capability-gated v2
+ * overrides: provider, model, effort, extra-args. When the user
+ * hasn't selected a provider (`kind.provider == null`) we hide the
+ * model / effort / extra-args inputs entirely — the resolver falls
+ * through to the mesh / application defaults in that mode, and
+ * showing the inputs would suggest an actionable control the spec
+ * doesn't honour.
+ */
+function SpawnAgentNodeFields({
+  kind,
+  onChange,
+  reachable,
+}: {
+  kind: Extract<CircuitNodeKind, { type: 'spawn_agent_node' }>;
+  onChange: (kind: CircuitNodeKind) => void;
+  reachable: ReachableContext;
+}) {
+  const harnessId = harnessIdFromProvider(kind.provider);
+  const caps = getCapabilitiesFor(harnessId);
+
+  return (
+    <>
+      <Field label="Agent name">
+        <input
+          value={kind.name ?? ''}
+          aria-label="Agent name"
+          data-testid="inspector-agent-name"
+          onChange={(e) => onChange({ ...kind, name: e.target.value || null })}
+          className={inputClass}
+        />
+      </Field>
+      <Field label="Initial prompt (via Inject PTY)">
+        <MustacheTextarea
+          value={kind.prompt}
+          onChange={(prompt) => onChange({ ...kind, prompt })}
+          rows={5}
+          ariaLabel="Spawn prompt"
+          testId="inspector-prompt"
+          reachable={reachable}
+        />
+      </Field>
+
+      <Field label="Provider (default = mesh autopilot)">
+        <select
+          value={harnessId ?? ''}
+          aria-label="Provider"
+          data-testid="inspector-provider-select"
+          onChange={(e) => {
+            const v = e.target.value;
+            // Issue #1362 review (PR #1362): when the user switches
+            // provider, the previously-authored `model` / `effort` /
+            // `extra_args` may no longer be honoured by the new
+            // harness's capability contract. Clear them so the AST
+            // doesn't serialise dangling configuration that the
+            // resolver would silently drop at spawn time — the next
+            // edit re-populates them. The `provider` itself is the
+            // one field that legitimately persists across switches.
+            const next: Partial<typeof kind> =
+              v === ''
+                ? { provider: null }
+                : { provider: providerStringFromHarnessId(v as InspectorHarnessId) };
+            onChange({
+              ...kind,
+              ...next,
+              model: null,
+              effort: null,
+              extra_args: null,
+            });
+          }}
+          className={inputClass}
+        >
+          <option value="">Default (mesh autopilot)</option>
+          {HARNESS_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      {/* Capability-gated overrides — rendered only when a harness is
+          selected AND the descriptor advertises the control. Capability
+          contract is the authoritative source — see
+          `src-tauri/src/agent/capabilities.rs::inventory_matches_research_matrix`. */}
+      {caps?.supports_model_override && (
+        <Field label="Model override">
+          <input
+            value={kind.model ?? ''}
+            aria-label="Model override"
+            data-testid="inspector-model-input"
+            placeholder="e.g. opus-4-1"
+            onChange={(e) => onChange({ ...kind, model: e.target.value || null })}
+            className={inputClass}
+          />
+        </Field>
+      )}
+
+      {caps && caps.effort_control.kind !== 'none' && (
+        <Field label="Reasoning effort">
+          <select
+            value={kind.effort ?? ''}
+            aria-label="Effort override"
+            data-testid="inspector-effort-select"
+            onChange={(e) => onChange({ ...kind, effort: e.target.value || null })}
+            className={inputClass}
+          >
+            <option value="">— inherit default —</option>
+            {effortAllowedFor(caps).map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+
+      {caps?.supports_extra_args && (
+        <Field label="Extra CLI args (whitespace-separated)">
+          <input
+            value={kind.extra_args ?? ''}
+            aria-label="Extra CLI args"
+            data-testid="inspector-extra-args-input"
+            placeholder="e.g. --dangerously-skip-permissions"
+            onChange={(e) => onChange({ ...kind, extra_args: e.target.value || null })}
+            className={`${inputClass} font-mono`}
+          />
+        </Field>
+      )}
+
+      {!caps && harnessId == null && (
+        <p className="text-2xs text-text-muted">
+          No provider override selected — model, effort, and extra args
+          fall through to the mesh / application defaults at spawn.
+        </p>
+      )}
+    </>
   );
 }

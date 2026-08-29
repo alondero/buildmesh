@@ -118,6 +118,10 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
+    fn supports_extra_args(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         true
     }
@@ -225,6 +229,7 @@ mod tests {
         let config = ResolvedAgentConfig {
             model: None,
             effort: Some("high".to_string()),
+            extra_args: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,

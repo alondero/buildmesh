@@ -120,6 +120,17 @@ pub struct HarnessCapabilities {
     /// Mirrors `effort_control != EffortControlKind::None`; pinned by a unit
     /// test so the two can't drift.
     pub supports_effort_override: bool,
+    /// Whether the harness accepts verbatim CLI flag args from configuration
+    /// (issue #1358). Every interactive harness advertises `true` (it owns
+    /// its argv shape; the orchestrator simply forwards the string and
+    /// lets the adapter's `extra_args_args` helper tokenise it). Terminal
+    /// — the plain-shell harness, with no LLM-driven recipe — advertises
+    /// `false` because splicing synthetic flags into a user's interactive
+    /// shell session would be a footgun. The capability mask drops the
+    /// layer-1 `extra_args` value at the resolver, never at the
+    /// orchestrator, so a future harness can opt in by overriding
+    /// `supports_extra_args` on its adapter.
+    pub supports_extra_args: bool,
     /// Whether `--prefill <text>` (or equivalent positional) is accepted.
     pub supports_prefill: bool,
     /// True for plain shell providers — LLM-specific paths (naming, the
@@ -151,6 +162,11 @@ pub struct ResolvedAgentConfig {
     /// supplied one, the harness doesn't accept effort, or the value isn't
     /// in the harness's allowed vocabulary.
     pub effort: Option<String>,
+    /// Capability-masked extra CLI args, or `None` if no layer supplied one
+    /// or the harness doesn't accept extra args (issue #1358). Verbatim
+    /// string — the launch path's `adapter.extra_args_args(...)` (added in
+    /// the same slice) splits on whitespace into the final argv tokens.
+    pub extra_args: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +242,25 @@ pub fn resolve_agent_config(
 ) -> ResolvedAgentConfig {
     let model = resolve_field(inputs.model).filter(|_| capabilities.supports_model_override);
     let effort = resolve_effort(inputs.effort, &capabilities.effort_control);
-    ResolvedAgentConfig { model, effort }
+    ResolvedAgentConfig { model, effort, extra_args: None }
+}
+
+/// Capability-masked extra-args resolver (issue #1358).
+///
+/// Kept separate from `resolve_agent_config` so the four-layer cascade
+/// (`explicit > mesh_override > mesh > application`) — which doesn't own
+/// any extras layer — doesn't have to grow. `extra_args` only flows in from
+/// the cascade layer-1 explicit slot (no mesh / application layer carries
+/// per-spawn flags), so the seam collapses to a single value plus the
+/// capability mask: any harness whose descriptor reports
+/// `supports_extra_args = false` (Terminal is the only one) drops the
+/// explicit value rather than splicing a synthetic flag into its argv.
+pub fn resolve_extra_args(
+    capabilities: &HarnessCapabilities,
+    explicit: Option<&str>,
+) -> Option<String> {
+    let explicit = explicit.and_then(normalize_non_empty);
+    explicit.filter(|_| capabilities.supports_extra_args)
 }
 
 /// Whitespace-normalised first-non-empty-layer picker for one field. Every
@@ -384,6 +418,7 @@ mod tests {
         assert!(anthropic.produces_readable_transcript);
         assert!(anthropic.supports_model_override);
         assert!(anthropic.supports_effort_override);
+        assert!(anthropic.supports_extra_args);
         assert!(anthropic.supports_prefill);
         assert!(!anthropic.is_plain_terminal);
         assert_eq!(
@@ -404,6 +439,7 @@ mod tests {
         assert!(codex.produces_readable_transcript);
         assert!(codex.supports_model_override);
         assert!(codex.supports_effort_override);
+        assert!(codex.supports_extra_args);
         assert!(codex.supports_prefill);
         assert_eq!(
             codex.effort_control,
@@ -421,6 +457,7 @@ mod tests {
         assert!(cursor.produces_readable_transcript);
         assert!(cursor.supports_model_override);
         assert!(!cursor.supports_effort_override);
+        assert!(cursor.supports_extra_args);
         assert!(cursor.supports_prefill);
         assert_eq!(cursor.effort_control, EffortControlKind::None);
 
@@ -437,6 +474,7 @@ mod tests {
         // mirrors Anthropic's; only the vocabulary differs from a
         // vocabulary-superset perspective (both use `low|medium|high`).
         assert!(agy.supports_effort_override);
+        assert!(agy.supports_extra_args);
         assert!(agy.supports_prefill);
         assert_eq!(
             agy.effort_control,
@@ -452,6 +490,7 @@ mod tests {
         assert!(!opencode.requires_attention_hook);
         assert!(opencode.supports_model_override);
         assert!(!opencode.supports_effort_override);
+        assert!(opencode.supports_extra_args);
         assert!(opencode.supports_prefill);
         assert_eq!(opencode.effort_control, EffortControlKind::None);
 
@@ -461,6 +500,9 @@ mod tests {
         assert!(!terminal.requires_attention_hook);
         assert!(!terminal.supports_model_override);
         assert!(!terminal.supports_effort_override);
+        // Issue #1358: Terminal is the plain-shell harness — the
+        // resolver drops the layer-1 `extra_args` value at the mask.
+        assert!(!terminal.supports_extra_args);
         assert!(!terminal.supports_prefill);
         assert_eq!(terminal.effort_control, EffortControlKind::None);
 
@@ -470,6 +512,7 @@ mod tests {
         let kimi = kimi_caps();
         assert!(kimi.supports_model_override);
         assert!(!kimi.supports_effort_override);
+        assert!(kimi.supports_extra_args);
         assert!(!kimi.supports_prefill);
         assert_eq!(kimi.effort_control, EffortControlKind::None);
 
@@ -488,6 +531,7 @@ mod tests {
         // `docs/learning/grok-harness-capabilities.md` and the
         // `GROK_EFFORT_ALLOWED` constant above.
         assert!(grok.supports_effort_override);
+        assert!(grok.supports_extra_args);
         assert!(grok.supports_prefill);
         assert_eq!(
             grok.effort_control,
@@ -502,6 +546,9 @@ mod tests {
         // recipe now agree (see `adapters::mcode::tests`).
         assert!(!mcode.supports_model_override);
         assert!(!mcode.supports_effort_override);
+        // Issue #1358: mcode's interactive TUI still accepts arbitrary
+        // CLI flags as positional args; permissive on extras.
+        assert!(mcode.supports_extra_args);
         assert!(mcode.supports_prefill);
         assert_eq!(mcode.effort_control, EffortControlKind::None);
 
@@ -513,6 +560,7 @@ mod tests {
         assert!(!dsh.produces_readable_transcript);
         assert!(dsh.supports_model_override);
         assert!(!dsh.supports_effort_override);
+        assert!(dsh.supports_extra_args);
         assert!(!dsh.supports_prefill);
         assert_eq!(dsh.effort_control, EffortControlKind::None);
     }
