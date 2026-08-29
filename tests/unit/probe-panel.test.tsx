@@ -86,6 +86,7 @@ describe('ProbePanel', () => {
       if (cmd === 'list_directory') return Promise.resolve(TREE);
       if (cmd === 'diff_file_against_head') return Promise.resolve(DIFF);
       if (cmd === 'diff_node_against_base') return Promise.resolve(DIFF);
+      if (cmd === 'node_changed_files') return Promise.resolve(FILES);
       if (cmd === 'get_git_branch_status') return Promise.resolve(null);
       return Promise.resolve({});
     });
@@ -198,18 +199,19 @@ describe('ProbePanel', () => {
   });
 
   it('renders the Agent Changes tab body for the focused node when the 🔍 tab is active', async () => {
-    // Issue #376 — the 🔍 tab delegates to AgentReviewPanel for the focused
-    // node. The summary bar's "1 file changed" is the canary that the
-    // diffNodeAgainstBase call landed.
+    // Issue #376 — the 🔍 tab loads the focused node's lightweight
+    // base-relative file list. The file title is the canary that the
+    // nodeChangedFiles call landed without loading a full diff.
     useUIStore.setState({ probeOpen: true, probeTab: 'review' });
     render(<ProbePanel />);
 
     await waitFor(() => {
-      expect(screen.getByText(/1 file changed/)).toBeTruthy();
+      expect(screen.getByText('src/app.ts')).toBeTruthy();
     });
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('diff_node_against_base', { nodeId: NODE.id });
+      expect(invoke).toHaveBeenCalledWith('node_changed_files', { nodeId: NODE.id });
     });
+    expect(invoke).not.toHaveBeenCalledWith('diff_node_against_base', { nodeId: NODE.id });
   });
 
   it('renders the Mesh Properties form (issue #375) when the ⚙️ tab is open', () => {

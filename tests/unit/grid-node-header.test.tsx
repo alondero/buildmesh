@@ -461,7 +461,7 @@ describe('GridNodeHeader PR chip', () => {
   it('opens the probe panel on the review tab when the git-summary chip is clicked (#376)', () => {
     // Issue #376 — clicking the +/~/- chip opens the unified Probe Panel
     // on the 🔍 tab so the user lands on the active agent's
-    // AgentReviewPanel.
+    // Agent Changes list.
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     prMock.mockReturnValue(null);
     useUIStore.setState({

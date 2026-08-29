@@ -16,10 +16,8 @@
  *
  * These tests pin the wrapper-level contract: pre-aborted signal →
  * early-out, undefined signal → same behaviour as before. Component-
- * level abort-on-new-fetch (the `abortRef` in `AgentReviewPanel` /
- * `CenterDiffOverlay`) is exercised indirectly by the existing
- * `agent-changes-tab` and `center-diff-overlay` suites, which already
- * re-render on node change.
+ * level abort-on-new-fetch (the `abortRef` in `CenterDiffOverlay`) is
+ * exercised indirectly by the existing `center-diff-overlay` suite.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
