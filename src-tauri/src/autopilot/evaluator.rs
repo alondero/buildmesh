@@ -66,6 +66,12 @@ static LAST_OUTPUT: Lazy<Mutex<HashMap<i64, std::time::Instant>>> =
 static LAST_EVAL: Lazy<Mutex<HashMap<i64, std::time::Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Where each piloted node's current turn started (raw char offset in TAILS).
+/// Used by the circuits blackboard to capture strictly per-turn terminal output
+/// rather than the entire process history.
+static TURN_STARTS: Lazy<Mutex<HashMap<i64, usize>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// Start buffering PTY output for a node. Idempotent.
 pub fn register(node_id: i64) {
     PILOTED.lock().unwrap().insert(node_id);
@@ -83,6 +89,13 @@ pub fn unregister(node_id: i64) {
     TAILS.lock().unwrap().remove(&node_id);
     LAST_OUTPUT.lock().unwrap().remove(&node_id);
     LAST_EVAL.lock().unwrap().remove(&node_id);
+    TURN_STARTS.lock().unwrap().remove(&node_id);
+}
+
+/// Record the start of a fresh turn for this node (at the current tail position).
+pub fn note_turn_start(node_id: i64) {
+    let raw_len = TAILS.lock().unwrap().get(&node_id).map(|s| s.len()).unwrap_or(0);
+    TURN_STARTS.lock().unwrap().insert(node_id, raw_len);
 }
 
 /// Milliseconds since the node last produced PTY output, or `None` if it has
@@ -152,6 +165,44 @@ pub fn cleaned_tail(node_id: i64) -> String {
         .unwrap_or_default();
     let cleaned = crate::session_naming::ANSI_ESCAPE
         .replace_all(&raw, "")
+        .to_string();
+    if cleaned.len() > CLASSIFY_TAIL_CHARS {
+        let mut start = cleaned.len() - CLASSIFY_TAIL_CHARS;
+        while !cleaned.is_char_boundary(start) {
+            start += 1;
+        }
+        cleaned[start..].to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// The cleaned output produced during the current turn (since [`note_turn_start`]).
+/// If no turn start was recorded, returns the tail.
+pub fn cleaned_turn_tail(node_id: i64) -> String {
+    let raw = TAILS
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .cloned()
+        .unwrap_or_default();
+    let start_offset = TURN_STARTS
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .copied()
+        .unwrap_or(0);
+    let turn_raw = if start_offset < raw.len() {
+        let mut slice_start = start_offset;
+        while !raw.is_char_boundary(slice_start) && slice_start < raw.len() {
+            slice_start += 1;
+        }
+        &raw[slice_start..]
+    } else {
+        &raw
+    };
+    let cleaned = crate::session_naming::ANSI_ESCAPE
+        .replace_all(turn_raw, "")
         .to_string();
     if cleaned.len() > CLASSIFY_TAIL_CHARS {
         let mut start = cleaned.len() - CLASSIFY_TAIL_CHARS;
@@ -364,6 +415,25 @@ mod tests {
 
         unregister(id);
         assert_eq!(cleaned_tail(id), "", "unregister drops the tail");
+    }
+
+    #[test]
+    fn note_turn_start_isolates_current_turn_output() {
+        let id = 910_004;
+        register(id);
+        on_output(id, "turn 1 boot output\n");
+        assert_eq!(cleaned_tail(id), "turn 1 boot output\n");
+
+        note_turn_start(id);
+        on_output(id, "turn 2 work: fixed issue #1357");
+        assert_eq!(
+            cleaned_turn_tail(id),
+            "turn 2 work: fixed issue #1357",
+            "cleaned_turn_tail excludes prior turn output"
+        );
+        assert!(cleaned_tail(id).contains("turn 1 boot output"));
+
+        unregister(id);
     }
 
     #[test]

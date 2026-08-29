@@ -213,14 +213,70 @@ impl RunView {
         self.steps.iter().rev().find_map(|s| s.agent_node_id)
     }
 
+    /// Check if `ancestor` is an upstream ancestor of `descendant` via incoming edges.
+    pub fn is_upstream_ancestor(&self, descendant: &str, ancestor: &str) -> bool {
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(descendant);
+        visited.insert(descendant);
+        while let Some(curr) = queue.pop_front() {
+            for edge in self.graph.incoming(curr) {
+                let from = edge.from.as_str();
+                if from == ancestor {
+                    return true;
+                }
+                if visited.insert(from) {
+                    queue.push_back(from);
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if any upstream ancestor of `node_id` in the graph satisfies a predicate.
+    pub fn has_upstream_node_of_kind<F>(&self, node_id: &str, predicate: F) -> bool
+    where
+        F: Fn(&CircuitNodeKind) -> bool,
+    {
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(node_id);
+        visited.insert(node_id);
+        while let Some(curr) = queue.pop_front() {
+            for edge in self.graph.incoming(curr) {
+                let from = edge.from.as_str();
+                if visited.insert(from) {
+                    if let Some(node) = self.graph.node(from) {
+                        if predicate(&node.kind) {
+                            return true;
+                        }
+                    }
+                    queue.push_back(from);
+                }
+            }
+        }
+        false
+    }
+
     /// Resolve the target agent node for an `InjectPty` or `SetNodeStatus` step:
-    /// - If `target_node_id` is explicitly set, lookup the step matching that `node_id`
-    ///   and return its `agent_node_id`.
+    /// - If `target_node_id` is explicitly set, validate that it is an upstream
+    ///   `SpawnAgentNode` in this step's lineage (or is the step itself) and return its
+    ///   `agent_node_id`. If invalid or not upstream, fails closed (`None`).
     /// - If omitted (`None`), walk backward from `node_id` through incoming edges
     ///   in the graph's dependency lineage and return the `agent_node_id` of the
-    ///   nearest upstream `SpawnAgentNode`. Falls back to `latest_agent_node_id()`.
+    ///   nearest upstream `SpawnAgentNode`. Fails closed (`None`) if none exists in branch.
     pub fn resolve_target_agent(&self, node_id: &str, target_node_id: Option<&str>) -> Option<i64> {
         if let Some(target) = target_node_id {
+            let is_spawn = matches!(
+                self.graph.node(target).map(|n| &n.kind),
+                Some(CircuitNodeKind::SpawnAgentNode { .. })
+            );
+            if !is_spawn {
+                return None;
+            }
+            if target != node_id && !self.is_upstream_ancestor(node_id, target) {
+                return None;
+            }
             return self.step(target).and_then(|s| s.agent_node_id);
         }
         let mut visited = std::collections::HashSet::new();
@@ -244,7 +300,7 @@ impl RunView {
                 }
             }
         }
-        self.latest_agent_node_id()
+        None
     }
 
     /// Attach the spawned mesh agent node to its step. Called by the seam
@@ -311,6 +367,16 @@ pub enum CircuitEvent {
     },
     /// The seam ran the DeterministicVerification command.
     VerificationResult { node_id: String, green: bool },
+    /// The seam executed a GitHub action (e.g. OpenPr, AddLabel).
+    GithubActionResult {
+        node_id: String,
+        success: bool,
+        pr_number: Option<i64>,
+        pr_url: Option<String>,
+        pr_head_ref: Option<String>,
+        pr_title: Option<String>,
+        error: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +641,50 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 complete_with_outcome(run, &mut t, node_id, outcome);
                 cascade_after_completion(run, &mut t, 1);
                 finish_run_if_done(run, &mut t);
+            }
+        }
+        CircuitEvent::GithubActionResult {
+            node_id,
+            success,
+            pr_number,
+            pr_url,
+            pr_head_ref,
+            pr_title,
+            error,
+        } => {
+            let is_waiting_action = matches!(
+                run.step(node_id),
+                Some(s) if s.status == StepStatus::Running
+            ) && matches!(
+                run.graph.node(node_id).map(|n| &n.kind),
+                Some(CircuitNodeKind::GithubAction { .. })
+            );
+            if is_waiting_action && run.state == RunState::Running {
+                if *success {
+                    if let Some(num) = pr_number {
+                        run.context.set("pr.number", num.to_string());
+                    }
+                    if let Some(url) = pr_url {
+                        run.context.set("pr.url", url);
+                    }
+                    if let Some(head) = pr_head_ref {
+                        run.context.set("pr.head_ref", head);
+                    }
+                    if let Some(title) = pr_title {
+                        run.context.set("pr.title", title);
+                    }
+                    set_step(run, &mut t, node_id, StepStatus::Completed);
+                    cascade_after_completion(run, &mut t, 1);
+                    finish_run_if_done(run, &mut t);
+                } else {
+                    fail_step(
+                        run,
+                        &mut t,
+                        node_id,
+                        error.clone().unwrap_or_else(|| "GitHub action failed".to_string()),
+                    );
+                    finish_run_if_done(run, &mut t);
+                }
             }
         }
     }
@@ -1028,17 +1138,27 @@ fn start_effects_and_completion(
             set_step(run, t, node_id, StepStatus::Completed);
         }
         CircuitNodeKind::SetNodeStatus { status, target_node_id } => {
-            let db_status = match status {
-                SessionStatusKind::Running => "running",
-                SessionStatusKind::Idle => "idle",
-                SessionStatusKind::Completed => "completed",
-            };
-            t.effects.push(Effect::SetNodeStatus {
-                node_id: node_id.to_string(),
-                status: db_status.to_string(),
-                target_node_id: target_node_id.clone(),
-            });
-            set_step(run, t, node_id, StepStatus::Completed);
+            let target_agent = run.resolve_target_agent(node_id, target_node_id.as_deref());
+            if target_agent.is_none() {
+                fail_step(
+                    run,
+                    t,
+                    node_id,
+                    "no target agent node found in upstream lineage for SetNodeStatus".to_string(),
+                );
+            } else {
+                let db_status = match status {
+                    SessionStatusKind::Running => "running",
+                    SessionStatusKind::Idle => "idle",
+                    SessionStatusKind::Completed => "completed",
+                };
+                t.effects.push(Effect::SetNodeStatus {
+                    node_id: node_id.to_string(),
+                    status: db_status.to_string(),
+                    target_node_id: target_node_id.clone(),
+                });
+                set_step(run, t, node_id, StepStatus::Completed);
+            }
         }
         CircuitNodeKind::InjectPty { target_node_id, .. }
             // Wait for AgentReady — the spawn's async stage-2 must land
@@ -1064,15 +1184,12 @@ fn start_effects_and_completion(
                 label: label.clone(),
                 comment: comment.clone(),
             });
-            set_step(run, t, node_id, StepStatus::Completed);
+            // Stays Running until GithubActionResult event!
         }
         CircuitNodeKind::SpawnAgentNode { .. } => {
-            let already_has_agent = run.step(node_id).and_then(|s| s.agent_node_id).is_some();
-            if !already_has_agent {
-                t.effects.push(Effect::SpawnAgentNode {
-                    node_id: node_id.to_string(),
-                });
-            }
+            t.effects.push(Effect::SpawnAgentNode {
+                node_id: node_id.to_string(),
+            });
             // Stays Running until AgentFinished/AgentLost.
         }
         // Joins are instant once scheduled (eligibility already proved
@@ -1875,10 +1992,10 @@ mod tests {
         run.attach_agent_node("spawn", 900);
         let _ =
             advance(&mut run, &agent_finished(900, true));
-        // The cascade frees exactly one slot (consumed by Notify); the
+        // The cascade frees exactly one slot; the
         // label step schedules on the next Tick's authoritative snapshot.
         let t = advance(&mut run, &tick(5, 5));
-        assert_eq!(status_of(&run, "label"), StepStatus::Completed);
+        assert_eq!(status_of(&run, "label"), StepStatus::Running);
         assert_eq!(
             t.effects,
             vec![
@@ -1890,10 +2007,21 @@ mod tests {
                 },
             ]
         );
+        // Worker delivers the successful GitHub action result
+        advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "label".into(),
+            success: true,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: None,
+        });
+        assert_eq!(status_of(&run, "label"), StepStatus::Completed);
     }
 
     #[test]
-    fn github_action_chain_executes_within_one_tick_when_capacity_allows() {
+    fn github_action_chain_advances_and_completes_with_action_result() {
         let mut run = RunView {
             run_id: 1,
             graph: CircuitGraph {
@@ -1925,7 +2053,7 @@ mod tests {
         };
         advance(&mut run, &CircuitEvent::Triggered);
         let t = advance(&mut run, &tick(2, 2));
-        assert_eq!(status_of(&run, "comment"), StepStatus::Completed);
+        assert_eq!(status_of(&run, "comment"), StepStatus::Running);
         assert_eq!(
             t.effects,
             vec![Effect::CallGithub {
@@ -1935,6 +2063,16 @@ mod tests {
                 comment: Some("started {{issue.number}}".to_string()),
             }]
         );
+        advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "comment".into(),
+            success: true,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: None,
+        });
+        assert_eq!(status_of(&run, "comment"), StepStatus::Completed);
         assert_eq!(run.state, RunState::Completed);
     }
 
@@ -2703,8 +2841,9 @@ mod tests {
         // Promoting implementer attempt 2
         let t2 = advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "implementer"), StepStatus::Running);
-        // Does NOT emit SpawnAgentNode since agent 101 is already attached!
-        assert!(t2.effects.is_empty());
+        // Emits SpawnAgentNode so worker submits prompt to existing agent or respawns in worktree!
+        assert_eq!(t2.effects, vec![Effect::SpawnAgentNode { node_id: "implementer".into() }]);
+        assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(101));
 
         // Implementer finishes iteration 2
         advance(&mut run, &agent_finished(101, true));
@@ -2716,7 +2855,7 @@ mod tests {
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
         assert_eq!(run.step("reviewer").unwrap().attempt, 2);
         assert_eq!(run.step("reviewer").unwrap().agent_node_id, Some(202));
-        assert!(t_rev2.effects.is_empty()); // Reuses existing agent node!
+        assert_eq!(t_rev2.effects, vec![Effect::SpawnAgentNode { node_id: "reviewer".into() }]);
 
         // Reviewer finishes iteration 2
         advance(&mut run, &agent_finished(202, true));
@@ -2728,6 +2867,158 @@ mod tests {
         let _t_v2 = advance(&mut run, &CircuitEvent::VerificationResult { node_id: "verify".into(), green: true });
         assert_eq!(run.step("verify").unwrap().outcome, Some(StepOutcome::Green));
         assert_eq!(status_of(&run, "success"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Completed);
+    }
+
+    #[test]
+    fn cross_branch_target_resolution_fails_closed() {
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode { id: "branch_a".into(), kind: spawn_kind("pa") },
+                    CircuitNode { id: "branch_b".into(), kind: spawn_kind("pb") },
+                    CircuitNode {
+                        id: "step_in_a".into(),
+                        kind: CircuitNodeKind::SetNodeStatus {
+                            status: SessionStatusKind::Completed,
+                            target_node_id: Some("branch_b".into()), // cross-branch target!
+                        },
+                    },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "branch_a".into(), condition: Default::default() },
+                    CircuitEdge { from: "t".into(), to: "branch_b".into(), condition: Default::default() },
+                    CircuitEdge { from: "branch_a".into(), to: "step_in_a".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("branch_a", 101);
+        run.attach_agent_node("branch_b", 202);
+
+        // Explicit target "branch_b" is not in step_in_a's lineage -> must fail closed (None)!
+        assert_eq!(run.resolve_target_agent("step_in_a", Some("branch_b")), None);
+
+        // Advancing into step_in_a fails fast because target cannot be resolved!
+        advance(&mut run, &agent_finished(101, true));
+        let t = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "step_in_a"), StepStatus::Failed);
+        assert!(run.step("step_in_a").unwrap().error.as_deref().unwrap().contains("no target agent node found"));
+        let _ = t;
+    }
+
+    #[test]
+    fn set_node_status_fails_fast_when_target_agent_is_missing() {
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode {
+                        id: "status_step".into(),
+                        kind: CircuitNodeKind::SetNodeStatus {
+                            status: SessionStatusKind::Completed,
+                            target_node_id: None,
+                        },
+                    },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "status_step".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        advance(&mut run, &CircuitEvent::Triggered);
+        let t = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "status_step"), StepStatus::Failed);
+        assert!(run.step("status_step").unwrap().error.as_deref().unwrap().contains("no target agent node found"));
+        let _ = t;
+    }
+
+    #[test]
+    fn open_pr_result_updates_context_and_cascades_to_downstream_notify() {
+        let mut run = RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                nodes: vec![
+                    CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode {
+                        id: "open_pr".into(),
+                        kind: CircuitNodeKind::GithubAction {
+                            action: GithubActionKind::OpenPr,
+                            label: None,
+                            comment: Some("ready for review".into()),
+                        },
+                    },
+                    CircuitNode {
+                        id: "notify".into(),
+                        kind: CircuitNodeKind::Notify {
+                            message: "PR #{{pr.number}} created at {{pr.url}} for branch {{pr.head_ref}}".into(),
+                        },
+                    },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "t".into(), to: "open_pr".into(), condition: Default::default() },
+                    CircuitEdge { from: "open_pr".into(), to: "notify".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Pending,
+            context: {
+                let mut ctx = CircuitContext::new();
+                ctx.set("issue.number", "42");
+                ctx.set("issue.title", "feat: exciting new feature");
+                ctx
+            },
+            steps: vec![],
+        };
+        advance(&mut run, &CircuitEvent::Triggered);
+        let t1 = advance(&mut run, &tick(5, 5));
+        assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+        assert_eq!(
+            t1.effects,
+            vec![Effect::CallGithub {
+                node_id: "open_pr".into(),
+                action: GithubActionKind::OpenPr,
+                label: None,
+                comment: Some("ready for review".into()),
+            }]
+        );
+
+        // Worker emits GithubActionResult with PR metadata
+        let t2 = advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(1361),
+            pr_url: Some("https://github.com/owner/repo/pull/1361".into()),
+            pr_head_ref: Some("buildmesh-auto/issue-42".into()),
+            pr_title: Some("feat: exciting new feature".into()),
+            error: None,
+        });
+
+        assert_eq!(status_of(&run, "open_pr"), StepStatus::Completed);
+        assert_eq!(run.context.get("pr.number"), Some("1361"));
+        assert_eq!(run.context.get("pr.url"), Some("https://github.com/owner/repo/pull/1361"));
+        assert_eq!(run.context.get("pr.head_ref"), Some("buildmesh-auto/issue-42"));
+
+        // Cascaded Notify resolves immediately against the populated PR context!
+        assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+        assert_eq!(
+            t2.effects,
+            vec![Effect::Notify {
+                message: "PR #1361 created at https://github.com/owner/repo/pull/1361 for branch buildmesh-auto/issue-42".into(),
+            }]
+        );
         assert_eq!(run.state, RunState::Completed);
     }
 }
