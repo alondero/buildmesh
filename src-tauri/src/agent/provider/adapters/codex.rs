@@ -1,10 +1,12 @@
 use crate::agent::capabilities::{EffortControlKind, CODEX_EFFORT_ALLOWED, CODEX_EFFORT_KEY};
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::env::ResolvedPath;
 use crate::models::EnvType;
 use base64::Engine;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -31,9 +33,9 @@ fn base_flags() -> Vec<String> {
         // recipe because that subcommand rejects it.
         "--no-alt-screen".into(),
         // Run the project-local `.codex/hooks.json` hooks without Codex's
-        // interactive workspace-trust review (issue #884) — a headless spawn
-        // must never block on a trust prompt, and Buildmesh never edits the
-        // user's global ~/.codex/config.toml to trust the path instead.
+        // interactive hook-review prompt (issue #884) — a headless spawn
+        // must never block on a trust prompt. The adapter also provisions the
+        // runtime's project trust entry before launch.
         "--dangerously-bypass-hook-trust".into(),
     ]
 }
@@ -59,6 +61,8 @@ fn hook_command(platform: Platform) -> String {
     }
 }
 
+const BUILDMESH_HOOK_STATUS_MESSAGE: &str = "Buildmesh attention callback";
+
 pub const PROXY_CREDENTIAL_ENV: &str = "BUILDMESH_CODEX_PROVIDER_KEY";
 pub const MIN_PROXY_CODEX_VERSION: (u32, u32, u32) = (0, 144, 0);
 
@@ -72,6 +76,7 @@ pub struct CodexInstall {
 }
 
 static PROFILE_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static ATTENTION_CONFIG_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static CLI_CAPABILITY_CACHE: Lazy<Mutex<HashSet<String>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
@@ -293,6 +298,144 @@ fn wslenv_with_codex_home(existing: &str) -> String {
         "CODEX_HOME/u".into()
     } else {
         format!("{existing}:CODEX_HOME/u")
+    }
+}
+
+/// Resolve the Codex home used by the runtime that will execute a spawn.
+/// Native Codex reads the host environment directly; WSL Codex reads the
+/// guest environment, so ask the same default distro used by the WSL spawn
+/// wrapper instead of guessing from the Windows host.
+fn runtime_codex_home(env_type: EnvType) -> Result<(std::path::PathBuf, Option<String>), String> {
+    if env_type == EnvType::Windows {
+        return Ok((native_codex_home()?, None));
+    }
+
+    let distro = crate::env::get_default_wsl_distro()
+        .ok_or_else(|| "could not resolve the WSL distribution for Codex trust".to_string())?;
+    let mut command = crate::process_util::command_no_window("wsl.exe");
+    command.args([
+        "-d",
+        &distro,
+        "--exec",
+        "sh",
+        "-c",
+        WSL_CODEX_HOME_SCRIPT,
+    ]);
+    if std::env::var_os("CODEX_HOME").is_some() {
+        command.env(
+            "WSLENV",
+            wslenv_with_codex_home(&std::env::var("WSLENV").unwrap_or_default()),
+        );
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("failed to resolve WSL Codex home for trust: {e}"))?;
+    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || home.is_empty() {
+        return Err("WSL Codex home identity is unavailable for trust".to_string());
+    }
+    Ok((std::path::PathBuf::from(home), Some(distro)))
+}
+
+fn codex_trust_config_path(env_type: EnvType) -> Result<std::path::PathBuf, String> {
+    let (home, distro) = runtime_codex_home(env_type)?;
+    match distro {
+        Some(distro) => Ok(std::path::PathBuf::from(crate::env::to_host_path_for_distro(
+            &home.to_string_lossy(),
+            &distro,
+        ))
+        .join("config.toml")),
+        None => Ok(home.join("config.toml")),
+    }
+}
+
+fn trust_project_path(resolved: &ResolvedPath) -> String {
+    let path = if resolved.env_type == EnvType::Wsl {
+        &resolved.spawn_path
+    } else {
+        &resolved.host_path
+    };
+    if cfg!(target_os = "windows") && resolved.env_type == EnvType::Windows {
+        path.replace('/', "\\")
+    } else {
+        path.clone()
+    }
+}
+
+/// Add the exact project path to Codex's global project trust map. This is
+/// separate from `--dangerously-bypass-hook-trust`: that flag bypasses review
+/// of a hook definition, while Codex still ignores the whole project layer
+/// when the project itself is untrusted.
+fn ensure_codex_project_trusted(resolved: &ResolvedPath) -> Result<(), String> {
+    // Multiple agents can start together from different linked worktrees. A
+    // read/merge/write without a process-wide lock could atomically replace a
+    // sibling's newly added project entry even though each individual write
+    // is safe.
+    let _guard = ATTENTION_CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let config_path = codex_trust_config_path(resolved.env_type)?;
+    let project_path = trust_project_path(resolved);
+    let existing = match std::fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "failed to read Codex trust config {}: {error}",
+                config_path.display()
+            ));
+        }
+    };
+    let updated = ensure_project_trust_content(&existing, &project_path);
+    if updated == existing {
+        return Ok(());
+    }
+    write_atomic(&config_path, &updated)
+        .map_err(|e| format!("failed to write Codex trust config {}: {e}", config_path.display()))
+}
+
+/// Text-level TOML merge for one `[projects."..."]` table. We deliberately
+/// touch only that table's `trust_level` assignment, leaving every other user
+/// setting and project entry intact without adding a TOML parser dependency.
+fn ensure_project_trust_content(existing: &str, project_path: &str) -> String {
+    let header = format!("[projects.{}]", toml_string(project_path));
+    let had_trailing_newline = existing.ends_with('\n') || existing.is_empty();
+    let normalized = existing.replace("\r\n", "\n");
+    let mut lines: Vec<String> = normalized.lines().map(str::to_string).collect();
+
+    if let Some(start) = lines.iter().position(|line| line.trim() == header) {
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, line)| line.trim_start().starts_with('['))
+            .map(|(index, _)| index)
+            .unwrap_or(lines.len());
+        if let Some(trust_line) = (start + 1..end).find(|index| {
+            lines[*index]
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "trust_level")
+        }) {
+            lines[trust_line] = "trust_level = \"trusted\"".to_string();
+        } else {
+            lines.insert(end, "trust_level = \"trusted\"".to_string());
+        }
+    } else {
+        if !lines.is_empty() && lines.last().is_some_and(|line| !line.is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(header);
+        lines.push("trust_level = \"trusted\"".to_string());
+    }
+
+    let mut updated = lines.join("\n");
+    if had_trailing_newline {
+        updated.push('\n');
+    }
+    if existing.contains("\r\n") {
+        updated.replace('\n', "\r\n")
+    } else {
+        updated
     }
 }
 
@@ -534,30 +677,77 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
 /// flag no-ops; an existing `[features]` section gets the flag inserted under
 /// it; anything else gets the section appended, preserving existing content.
 fn ensure_hooks_feature(path: &Path) -> Result<(), String> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
-    // Substring check covers both `hooks = true` and `codex_hooks = true`.
-    if existing.contains("hooks = true") {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("failed to read config.toml: {error}")),
+    };
+    let updated = ensure_hooks_feature_content(&existing);
+    if updated == existing {
         return Ok(());
     }
-    let updated = if let Some(pos) = existing.find("[features]") {
-        match existing[pos..].find('\n') {
-            Some(nl) => {
-                let insert_at = pos + nl + 1;
-                format!(
-                    "{}hooks = true\n{}",
-                    &existing[..insert_at],
-                    &existing[insert_at..]
-                )
-            }
-            // `[features]` is the last line, without a trailing newline.
-            None => format!("{existing}\nhooks = true\n"),
+    write_atomic(path, &updated).map_err(|e| format!("failed to write config.toml: {e}"))
+}
+
+fn ensure_hooks_feature_content(existing: &str) -> String {
+    let had_trailing_newline = existing.ends_with('\n') || existing.is_empty();
+    let normalized = existing.replace("\r\n", "\n");
+    let mut lines: Vec<String> = normalized.lines().map(str::to_string).collect();
+    let features_start = lines.iter().position(|line| line.trim() == "[features]");
+
+    if let Some(start) = features_start {
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, line)| line.trim_start().starts_with('['))
+            .map(|(index, _)| index)
+            .unwrap_or(lines.len());
+        if (start + 1..end).any(|index| {
+            lines[index]
+                .split_once('=')
+                .is_some_and(|(key, value)| {
+                    let key = key.trim();
+                    (key == "hooks" || key == "codex_hooks")
+                        && value.split('#').next().is_some_and(|v| v.trim() == "true")
+                })
+        }) {
+            // `codex_hooks = true` is the supported legacy alias and already
+            // enables the feature. Keep the user's spelling untouched.
+        } else if let Some(flag) = (start + 1..end).find(|index| {
+            lines[*index]
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "hooks")
+        }) {
+            // A project-local `hooks = false` would otherwise be followed by
+            // a duplicate key, which makes the whole TOML file invalid.
+            lines[flag] = "hooks = true".to_string();
+        } else if let Some(flag) = (start + 1..end).find(|index| {
+            lines[*index]
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "codex_hooks")
+        }) {
+            lines[flag] = "hooks = true".to_string();
+        } else {
+            lines.insert(end, "hooks = true".to_string());
         }
-    } else if existing.trim().is_empty() {
-        "[features]\nhooks = true\n".to_string()
     } else {
-        format!("{}\n\n[features]\nhooks = true\n", existing.trim_end())
-    };
-    std::fs::write(path, updated).map_err(|e| format!("failed to write config.toml: {e}"))
+        if !lines.is_empty() && lines.last().is_some_and(|line| !line.is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push("[features]".to_string());
+        lines.push("hooks = true".to_string());
+    }
+
+    let mut updated = lines.join("\n");
+    if had_trailing_newline {
+        updated.push('\n');
+    }
+    if existing.contains("\r\n") {
+        updated.replace('\n', "\r\n")
+    } else {
+        updated
+    }
 }
 
 /// Ensure `<project>/.codex/hooks.json` carries the Stop + PermissionRequest
@@ -566,31 +756,87 @@ fn ensure_hooks_feature(path: &Path) -> Result<(), String> {
 /// carrying a `hooks` array — issue #884). Idempotent, and preserves any
 /// unrelated top-level keys the user added.
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let mut settings: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !settings.is_object() {
-        settings = serde_json::json!({});
-    }
+    let original = std::fs::read_to_string(path);
+    let mut settings: serde_json::Value = match original {
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|e| format!("failed to parse hooks.json: {e}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(format!("failed to read hooks.json: {error}")),
+    };
+    let Some(settings_object) = settings.as_object_mut() else {
+        return Err("hooks.json top level must be an object".to_string());
+    };
+    let hooks = settings_object
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(events) = hooks.as_object_mut() else {
+        return Err("hooks.json 'hooks' value must be an object".to_string());
+    };
 
-    let hook = serde_json::json!({ "type": "command", "command": command });
-    // Stop fires the instant a turn ends; PermissionRequest fires when a tool
-    // needs approval. Both mean "the user may be needed" — the backend's
-    // `decide` sorts genuine yields from background-task waits.
-    let expected = serde_json::json!({
-        "Stop": [{ "hooks": [hook.clone()] }],
-        "PermissionRequest": [{ "hooks": [hook] }],
+    let hook = serde_json::json!({
+        "type": "command",
+        "command": command,
+        "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     });
-    if settings.get("hooks") == Some(&expected) {
+    let mut changed = false;
+    for event in ["Stop", "PermissionRequest"] {
+        let groups = events
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(groups) = groups.as_array_mut() else {
+            return Err(format!("hooks.json event '{event}' must be an array"));
+        };
+
+        let mut found = false;
+        for group in groups.iter_mut() {
+            let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            if let Some(index) = handlers.iter().position(is_buildmesh_hook_handler) {
+                if handlers[index] != hook {
+                    handlers[index] = hook.clone();
+                    changed = true;
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            groups.push(serde_json::json!({ "hooks": [hook.clone()] }));
+            changed = true;
+        }
+    }
+    if !changed {
         return Ok(());
     }
-    settings["hooks"] = expected;
     let content = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    std::fs::write(path, content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
+    write_atomic(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
     tracing::info!("codex inject_attention_hook: wrote {:?}", path);
     Ok(())
+}
+
+fn is_buildmesh_hook_handler(handler: &serde_json::Value) -> bool {
+    handler.get("statusMessage").and_then(|v| v.as_str()) == Some(BUILDMESH_HOOK_STATUS_MESSAGE)
+        || handler
+            .get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|command| {
+                command.contains("BUILDMESH_PORT")
+                    && command.contains("BUILDMESH_SESSION_ID")
+                    && command.contains("/api/attention/")
+            })
+}
+
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(content.as_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 impl AgentProvider for CodexAdapter {
@@ -650,6 +896,24 @@ impl AgentProvider for CodexAdapter {
             .map_err(|e| format!("failed to create .codex dir: {e}"))?;
         ensure_hooks_feature(&codex_dir.join("config.toml"))?;
         ensure_hooks_json(&codex_dir.join("hooks.json"), &hook_command(Platform::current()))
+    }
+
+    /// Codex has two independent gates: the project `.codex/` layer must be
+    /// trusted, and each non-managed hook definition must be trusted. The
+    /// launch flag only handles the second gate, so update the runtime's
+    /// global project map before writing the project-local hooks.
+    fn provision_attention_hooks(&self, resolved: &ResolvedPath) -> Result<(), String> {
+        ensure_codex_project_trusted(resolved)?;
+        let codex_dir = Path::new(&resolved.host_path).join(".codex");
+        std::fs::create_dir_all(&codex_dir)
+            .map_err(|e| format!("failed to create .codex dir: {e}"))?;
+        ensure_hooks_feature(&codex_dir.join("config.toml"))?;
+        let platform = if resolved.env_type == EnvType::Wsl {
+            Platform::Linux
+        } else {
+            Platform::current()
+        };
+        ensure_hooks_json(&codex_dir.join("hooks.json"), &hook_command(platform))
     }
 
     /// Codex writes rollout transcripts under `~/.codex/sessions/` that
@@ -1221,6 +1485,106 @@ mod tests {
         let hooks = read_hooks_json(temp.path());
         assert_eq!(hooks["custom"], "kept");
         assert!(hooks["hooks"]["Stop"].is_array());
+    }
+
+    #[test]
+    fn hooks_json_merge_preserves_existing_event_handlers() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("hooks.json"),
+            r#"{
+                "description": "user config",
+                "hooks": {
+                    "Stop": [{"matcher":".*","hooks":[{"type":"command","command":"user-stop"}]}],
+                    "PermissionRequest": [{"matcher":"Bash","hooks":[{"type":"command","command":"user-permission"}]}]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        ensure_hooks_json(&codex_dir.join("hooks.json"), &hook_command(Platform::Windows))
+            .unwrap();
+
+        let hooks = read_hooks_json(temp.path());
+        assert_eq!(hooks["description"], "user config");
+        assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(hooks["hooks"]["PermissionRequest"].as_array().unwrap().len(), 2);
+        assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"], "user-stop");
+        assert_eq!(
+            hooks["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
+            "user-permission"
+        );
+        assert!(hooks["hooks"]["Stop"].as_array().unwrap().iter().any(|group| {
+            group["hooks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(is_buildmesh_hook_handler)
+        }));
+    }
+
+    #[test]
+    fn hooks_json_merge_does_not_overwrite_malformed_user_file() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let path = codex_dir.join("hooks.json");
+        std::fs::write(&path, "{not json").unwrap();
+
+        let error = ensure_hooks_json(&path, &hook_command(Platform::Windows)).unwrap_err();
+        assert!(error.contains("parse hooks.json"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn config_feature_merge_replaces_false_without_duplicate_keys() {
+        let existing = "model = \"gpt-5.2-codex\"\n\n[features]\nhooks = false\nweb_search = true\n";
+        let updated = ensure_hooks_feature_content(existing);
+        assert_eq!(updated.matches("hooks =").count(), 1);
+        assert!(updated.contains("hooks = true"));
+        assert!(updated.contains("web_search = true"));
+        assert!(updated.contains("model = \"gpt-5.2-codex\""));
+    }
+
+    #[test]
+    fn project_trust_merge_adds_exact_path_and_preserves_other_projects() {
+        let project = r#"F:\src\buildmesh\.claude\worktrees\linked"#;
+        let existing = "model = \"gpt-5.2-codex\"\n\n[projects.\"F:\\\\src\\\\buildmesh\"]\ntrust_level = \"trusted\"\n\n[features]\nweb_search = true\n";
+        let updated = ensure_project_trust_content(existing, project);
+
+        assert!(updated.contains("model = \"gpt-5.2-codex\""));
+        assert!(updated.contains("[projects.\"F:\\\\src\\\\buildmesh\"]"));
+        assert!(updated.contains("[features]\nweb_search = true"));
+        assert!(updated.contains(
+            "[projects.\"F:\\\\src\\\\buildmesh\\\\.claude\\\\worktrees\\\\linked\"]\ntrust_level = \"trusted\""
+        ));
+        assert_eq!(updated.matches("trust_level = \"trusted\"").count(), 2);
+    }
+
+    #[test]
+    fn project_trust_merge_updates_existing_untrusted_entry_in_place() {
+        let project = r#"F:\src\buildmesh\.claude\worktrees\linked"#;
+        let header = format!("[projects.{}]", toml_string(project));
+        let existing = format!("{header}\ntrust_level = \"untrusted\"\nother = true\n");
+        let updated = ensure_project_trust_content(&existing, project);
+
+        assert_eq!(updated.matches(&header).count(), 1);
+        assert_eq!(updated.matches("trust_level =").count(), 1);
+        assert!(updated.contains("trust_level = \"trusted\""));
+        assert!(updated.contains("other = true"));
+    }
+
+    #[test]
+    fn trust_project_path_uses_runtime_path_for_wsl() {
+        let resolved = ResolvedPath {
+            host_path: r#"\\wsl$\Ubuntu\home\alice\repo"#.to_string(), // allow-wsl-path
+            spawn_path: "/home/alice/repo".to_string(),
+            raw_path: "/home/alice/repo".to_string(),
+            env_type: EnvType::Wsl,
+        };
+        assert_eq!(trust_project_path(&resolved), "/home/alice/repo");
     }
 
     /// The Windows hook command must expand env vars with cmd syntax (`%VAR%`)

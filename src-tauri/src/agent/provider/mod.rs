@@ -9,6 +9,7 @@ pub mod compatibility;
 pub mod provider_conf;
 
 use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
+use crate::env::ResolvedPath;
 use crate::models::EnvType;
 
 /// Built-in **Harness Profile** ids that detection populates (`claude`,
@@ -288,10 +289,10 @@ pub trait AgentProvider: Send + Sync {
     /// using the stored `cli_session_id`.
     fn auto_resume_on_startup(&self) -> bool;
 
-    /// Whether the spawn path should call [`inject_attention_hook`] before
+    /// Whether the spawn path should call [`provision_attention_hooks`] before
     /// launching this provider (issue #886).
     ///
-    /// [`inject_attention_hook`]: AgentProvider::inject_attention_hook
+    /// [`provision_attention_hooks`]: AgentProvider::provision_attention_hooks
     fn requires_attention_hook(&self) -> bool;
 
     /// Provision this harness's attention hooks in the spawn cwd so the agent
@@ -299,15 +300,26 @@ pub trait AgentProvider: Send + Sync {
     /// prompts. Each adapter owns its harness's config format (issue #886):
     /// the Claude-backed `anthropic` adapter writes
     /// `.claude/settings.local.json`; Codex writes `.codex/config.toml` +
-    /// `.codex/hooks.json`. Called from `spawn_agent_inner` (gated on
-    /// [`requires_attention_hook`]) with the resolved host-side project path;
+    /// `.codex/hooks.json`. The default implementation is called through
+    /// [`provision_attention_hooks`] with the resolved host-side project path;
     /// implementations must be idempotent — they run on every spawn. A failure
     /// is logged and the spawn proceeds (the agent still works, only the
-    /// attention callback is lost).
+    /// attention callback is lost). The default implementation delegates to
+    /// this legacy host-path-only hook; adapters with runtime-specific homes
+    /// can override [`provision_attention_hooks`].
     ///
-    /// [`requires_attention_hook`]: AgentProvider::requires_attention_hook
+    /// [`provision_attention_hooks`]: AgentProvider::provision_attention_hooks
     fn inject_attention_hook(&self, _project_path: &std::path::Path) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Provision attention hooks for one resolved runtime before its process
+    /// starts. Most adapters only need the host-side project path and inherit
+    /// the legacy injector. Adapters whose configuration also lives in a
+    /// runtime-specific home (Codex, including WSL) can override this seam and
+    /// use both path forms plus the detected environment.
+    fn provision_attention_hooks(&self, resolved: &ResolvedPath) -> Result<(), String> {
+        self.inject_attention_hook(std::path::Path::new(&resolved.host_path))
     }
 
     /// Whether this provider writes a transcript the coordinator read API can

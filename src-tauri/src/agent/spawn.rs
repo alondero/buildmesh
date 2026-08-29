@@ -586,7 +586,7 @@ pub fn build_spawn_command_prepared(
     // Inject the per-profile backend env + Codex Proxy credential.
     // Extracted as helpers because the WSLENV bookkeeping is intricate
     // and was previously duplicated in two large inline blocks.
-    apply_routing_env(&mut cmd, routing, resolved.env_type);
+    apply_routing_env(&mut cmd, routing, provider_enum, resolved.env_type);
     apply_codex_proxy_credential(&mut cmd, routing, provider_enum, resolved.env_type);
     cmd
 }
@@ -594,10 +594,13 @@ pub fn build_spawn_command_prepared(
 /// Apply the per-profile backend env (`PreparedLaunchRouting::Environment`)
 /// to the child command. On WSL, appends the new key names to `WSLENV` with
 /// the `/u` suffix so values cross the WSL boundary (only WSLENV-listed
-/// vars propagate). Existing WSLENV entries are deduped by base name.
+/// vars propagate). Codex's custom `CODEX_HOME` is carried across here too,
+/// including for native (non-proxy) Codex spawns. Existing WSLENV entries are
+/// deduped by base name.
 fn apply_routing_env(
     cmd: &mut CommandBuilder,
     routing: &crate::agent::launch_routing::PreparedLaunchRouting,
+    provider: Provider,
     env_type: EnvType,
 ) {
     let backend_env: &[(String, String)] = match routing {
@@ -606,7 +609,10 @@ fn apply_routing_env(
         }
         _ => &[],
     };
-    if backend_env.is_empty() {
+    let carries_codex_home = matches!(provider, Provider::Codex)
+        && env_type == EnvType::Wsl
+        && std::env::var_os("CODEX_HOME").is_some();
+    if backend_env.is_empty() && !carries_codex_home {
         return;
     }
     for (k, v) in backend_env {
@@ -616,6 +622,9 @@ fn apply_routing_env(
         let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
         for (k, _) in backend_env {
             append_to_wslenv(&mut wslenv, k, "/u");
+        }
+        if carries_codex_home {
+            append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
         }
         if !wslenv.is_empty() {
             cmd.env("WSLENV", wslenv);
@@ -2163,6 +2172,33 @@ pub(crate) async fn spawn_agent_inner(
         }
     };
     timer.checkpoint("after_provider_preflight");
+
+    // Provision attention hooks before building/spawning the child. Codex
+    // reads its project hook registry during startup, so a post-launch write
+    // races the CLI and can leave `/hooks` showing zero active hooks. The
+    // adapter receives the full resolved runtime so Codex can trust the exact
+    // linked-worktree path in the native or WSL project map.
+    crate::agent::workspace_trust::ensure_trusted(&resolved);
+    timer.checkpoint("after_workspace_trust");
+    if adapter.requires_attention_hook() {
+        if let Err(e) = adapter.provision_attention_hooks(&resolved) {
+            tracing::warn!(
+                "spawn_agent_inner: attention hook provisioning failed for session {}: {}",
+                session_id,
+                e
+            );
+            let _ = app.emit(
+                "provider-error",
+                ProviderErrorPayload {
+                    session_id,
+                    provider,
+                    message: format!("attention hooks unavailable: {e}"),
+                },
+            );
+        }
+    }
+    timer.checkpoint("after_inject_hook");
+
     // Resolve configuration values through the per-field cascade (issue
     // #1149 prefactor; #1150 fills the application slot; #1151 fills the
     // per-Mesh override slot). The resolver applies the capability mask,
@@ -2267,23 +2303,6 @@ pub(crate) async fn spawn_agent_inner(
     let reader = master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = master.take_writer().map_err(|e| e.to_string())?;
     let reader_alive = Arc::new(AtomicBool::new(true));
-
-    // 11. Inject attention hook
-    crate::agent::workspace_trust::ensure_trusted(&resolved);
-    timer.checkpoint("after_workspace_trust");
-    if adapter.requires_attention_hook() {
-        // The adapter owns its harness's hook format (issue #886). A failure
-        // must not abort the spawn — the agent still works, only the
-        // attention callback is lost.
-        if let Err(e) = adapter.inject_attention_hook(std::path::Path::new(&resolved.host_path)) {
-            tracing::warn!(
-                "spawn_agent_inner: attention hook injection failed for session {}: {}",
-                session_id,
-                e
-            );
-        }
-    }
-    timer.checkpoint("after_inject_hook");
 
     // 12. Register BEFORE starting the reader thread. The pre-#300 order
     //     (register-then-start) is the one that closes the TOCTOU window
