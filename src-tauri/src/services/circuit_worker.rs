@@ -290,7 +290,7 @@ fn drive_run(
             .map_err(|e| format!("commit failed: {}", e))?;
         }
 
-        if let Err(e) = execute_effects(app, active.run.id, active.run.mesh_id, &mut view, &transition.effects) {
+        if let Err(e) = execute_effects(app, active, &mut view, &transition.effects) {
             // An effect that fails synchronously (e.g. the spawn row
             // creation) must not leave its step Running forever — the
             // observation loop has nothing to observe and would wedge
@@ -402,9 +402,11 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
                     events.push(CircuitEvent::AgentLost { agent_node_id });
                 }
                 SessionStatus::Error => {
+                    let tail = crate::autopilot::evaluator::cleaned_turn_tail(agent_node_id);
                     events.push(CircuitEvent::AgentFinished {
                         agent_node_id,
                         success: false,
+                        output: Some(tail),
                     });
                 }
                 // Milestone-1 completion heuristic: the turn detector's
@@ -416,9 +418,11 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
                 // piloted node would also read as completion here — the
                 // milestone-2 LLM classifier gate replaces this heuristic.
                 SessionStatus::AwaitingInput | SessionStatus::Completed => {
+                    let tail = crate::autopilot::evaluator::cleaned_turn_tail(agent_node_id);
                     events.push(CircuitEvent::AgentFinished {
                         agent_node_id,
                         success: true,
+                        output: Some(tail),
                     });
                 }
                 _ => {}
@@ -428,23 +432,15 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
 
     // Injection readiness: any running InjectPty step whose target
     // process is now live fires its AgentReady event.
-    let inject_waiting = view.steps.iter().any(|s| {
-        s.status == StepStatus::Running
-            && matches!(
-                view.graph.node(&s.node_id).map(|n| &n.kind),
-                Some(CircuitNodeKind::InjectPty { .. })
-            )
-    });
-    if inject_waiting {
-        if let Some(agent_node_id) = view.latest_agent_node_id() {
-            if crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
-                for step in &view.steps {
-                    if step.status == StepStatus::Running
-                        && matches!(
-                            view.graph.node(&step.node_id).map(|n| &n.kind),
-                            Some(CircuitNodeKind::InjectPty { .. })
-                        )
-                    {
+    for step in &view.steps {
+        if step.status == StepStatus::Running {
+            if let Some(CircuitNodeKind::InjectPty { target_node_id, .. }) =
+                view.graph.node(&step.node_id).map(|n| &n.kind)
+            {
+                if let Some(agent_node_id) =
+                    view.resolve_target_agent(&step.node_id, target_node_id.as_deref())
+                {
+                    if crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
                         events.push(CircuitEvent::AgentReady {
                             node_id: step.node_id.clone(),
                         });
@@ -510,7 +506,7 @@ fn observe_gates(active: &db::ActiveCircuitRun, view: &RunView, events: &mut Vec
         }
         match view.graph.node(&step.node_id).map(|n| &n.kind) {
             Some(CircuitNodeKind::LlmTurnClassifier) => {
-                if let Some(classification) = classify_latest_turn(active, view) {
+                if let Some(classification) = classify_step_turn(active, view, &step.node_id) {
                     events.push(CircuitEvent::TurnClassified {
                         node_id: step.node_id.clone(),
                         classification,
@@ -539,19 +535,17 @@ fn observe_gates(active: &db::ActiveCircuitRun, view: &RunView, events: &mut Vec
     }
 }
 
-/// Classify the run's piloted agent's latest turn, or `None` when there
-/// is nothing to classify yet. Fires only on a FRESH yield: the agent
-/// must be sitting at its input prompt (`awaiting_input`/`completed`)
-/// AND have produced PTY output more recently than the last evaluation
-/// started — the same lost-turn guard the legacy pipeline uses.
-/// Reactive latency comes from `evaluator::on_output` waking this
-/// worker; correctness comes from these guards.
-fn classify_latest_turn(
+/// Classify the specific branch's upstream piloted agent's latest turn, or
+/// `None` when there is nothing to classify yet. Fires only on a FRESH yield:
+/// the agent must be sitting at its input prompt (`awaiting_input`/`completed`)
+/// AND have produced PTY output more recently than the last evaluation started.
+fn classify_step_turn(
     active: &db::ActiveCircuitRun,
     view: &RunView,
+    node_id: &str,
 ) -> Option<Option<crate::autopilot::evaluator::Classification>> {
     use crate::autopilot::evaluator;
-    let agent_node_id = view.latest_agent_node_id()?;
+    let agent_node_id = view.resolve_target_agent(node_id, None)?;
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
         return None;
     }
@@ -583,8 +577,9 @@ fn classify_latest_turn(
     evaluator::note_evaluation(agent_node_id);
     let classification = evaluator::classify(agent_node_id, &backend_env);
     tracing::info!(
-        "circuits: turn classifier for run {} agent {} → {:?}",
+        "circuits: turn classifier for run {} step {} agent {} → {:?}",
         active.run.id,
+        node_id,
         agent_node_id,
         classification
     );
@@ -631,16 +626,54 @@ fn run_verification_command(mesh_path: &str, command: &str) -> bool {
     }
 }
 
-/// Perform one `CallGithub` effect (milestone 3, issue #1208): resolve
-/// the target repo from the mesh's `origin`, the target issue/PR number
-/// from the run's trigger context, and execute the mutation through the
-/// shared [`crate::services::github::GitHubClient`] seam. Templates are
-/// resolved here — node execution time — so a comment authored as
-/// `{{issue.title}}` interpolates the run's live context values.
-fn call_github_effect(
-    run_id: i64,
-    mesh_id: i64,
+///// Determine the target (issue vs PR number) for a GitHub action.
+/// If the action is CloseIssue, it explicitly requires an issue trigger.
+/// If this node has an upstream OpenPr node in its lineage, it targets that PR (pr.number).
+/// Otherwise, it falls back to issue.number if present, then pr.number.
+fn determine_github_target(
     view: &RunView,
+    node_id: &str,
+    action: crate::autopilot::circuit::model::GithubActionKind,
+) -> Result<(&'static str, i64), String> {
+    use crate::autopilot::circuit::model::GithubActionKind;
+    if action == GithubActionKind::CloseIssue {
+        let num = view
+            .context
+            .get("issue.number")
+            .and_then(|n| n.parse::<i64>().ok())
+            .ok_or_else(|| "CloseIssue requires an issue-triggered run with issue.number".to_string())?;
+        return Ok(("issue", num));
+    }
+
+    let has_upstream_open_pr = view.has_upstream_node_of_kind(node_id, |kind| {
+        matches!(kind, CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, .. })
+    });
+
+    if has_upstream_open_pr {
+        if let Some(pr_num) = view.context.get("pr.number").and_then(|n| n.parse::<i64>().ok()) {
+            return Ok(("pr", pr_num));
+        }
+    }
+
+    if let Some(issue_num) = view.context.get("issue.number").and_then(|n| n.parse::<i64>().ok()) {
+        Ok(("issue", issue_num))
+    } else if let Some(pr_num) = view.context.get("pr.number").and_then(|n| n.parse::<i64>().ok()) {
+        Ok(("pr", pr_num))
+    } else {
+        Err("GitHub action has no issue/pr context — the circuit needs a GitHub trigger upstream of this node".to_string())
+    }
+}
+
+/// Perform one `CallGithub` effect (milestone 3, issue #1208): resolve
+/// the target repo from the mesh's `origin`, execute the mutation through
+/// the shared [`crate::services::github::GitHubClient`] seam, and advance
+/// the stepper with the result so context updates (e.g. `pr.*`) commit atomically
+/// before downstream nodes cascade.
+fn call_github_effect(
+    app: &AppHandle,
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    node_id: &str,
     action: crate::autopilot::circuit::model::GithubActionKind,
     label: Option<&str>,
     comment: Option<&str>,
@@ -648,82 +681,166 @@ fn call_github_effect(
     use crate::autopilot::circuit::model::GithubActionKind;
     use crate::services::github::GitHubClient;
 
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let mesh = db::get_mesh_by_id(active.run.mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-
-    // The trigger source this run reacts to. A GithubAction without a
-    // GitHub trigger upstream has nothing to mutate — fail loudly rather
-    // than guessing.
-    let target = view
-        .context
-        .get("issue.number")
-        .and_then(|n| n.parse::<i64>().ok())
-        .map(|n| ("issue", n))
-        .or_else(|| {
-            view.context
-                .get("pr.number")
-                .and_then(|n| n.parse::<i64>().ok())
-                .map(|n| ("pr", n))
-        })
-        .ok_or_else(|| {
-            "GitHub action has no issue/pr context — the circuit needs a GitHub \
-             trigger upstream of this node"
-                .to_string()
-        })?;
     let resolved_comment = comment.map(|c| view.context.resolve(c));
 
-    match action {
-        GithubActionKind::AddLabel => {
-            let label = label.ok_or_else(|| "AddLabel requires a label".to_string())?;
-            client
-                .add_issue_label(&owner, &repo, target.1, &view.context.resolve(label))
-                .map_err(|e| e.to_string())?;
-        }
-        GithubActionKind::RemoveLabel => {
-            let label = label.ok_or_else(|| "RemoveLabel requires a label".to_string())?;
-            client
-                .remove_issue_label(&owner, &repo, target.1, &view.context.resolve(label))
-                .map_err(|e| e.to_string())?;
-        }
-        GithubActionKind::PostComment => {
-            let body = resolved_comment
-                .filter(|c| !c.trim().is_empty())
-                .ok_or_else(|| "PostComment requires a non-empty comment template".to_string())?;
-            client
-                .add_issue_comment(&owner, &repo, target.1, &body)
-                .map_err(|e| e.to_string())?;
-        }
-        GithubActionKind::CloseIssue => {
-            if target.0 != "issue" {
-                return Err("CloseIssue requires an issue-triggered run".to_string());
+    let action_res: Result<CircuitEvent, String> = (|| {
+        match action {
+            GithubActionKind::AddLabel => {
+                let target = determine_github_target(view, node_id, action)?;
+                let label = label.ok_or_else(|| "AddLabel requires a label".to_string())?;
+                client
+                    .add_issue_label(&owner, &repo, target.1, &view.context.resolve(label))
+                    .map_err(|e| e.to_string())?;
+                Ok(CircuitEvent::GithubActionResult {
+                    node_id: node_id.to_string(),
+                    success: true,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_head_ref: None,
+                    pr_title: None,
+                    error: None,
+                })
             }
-            client
-                .close_issue(&owner, &repo, target.1)
-                .map_err(|e| e.to_string())?;
+            GithubActionKind::RemoveLabel => {
+                let target = determine_github_target(view, node_id, action)?;
+                let label = label.ok_or_else(|| "RemoveLabel requires a label".to_string())?;
+                client
+                    .remove_issue_label(&owner, &repo, target.1, &view.context.resolve(label))
+                    .map_err(|e| e.to_string())?;
+                Ok(CircuitEvent::GithubActionResult {
+                    node_id: node_id.to_string(),
+                    success: true,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_head_ref: None,
+                    pr_title: None,
+                    error: None,
+                })
+            }
+            GithubActionKind::PostComment => {
+                let target = determine_github_target(view, node_id, action)?;
+                let body = resolved_comment
+                    .filter(|c| !c.trim().is_empty())
+                    .ok_or_else(|| "PostComment requires a non-empty comment template".to_string())?;
+                client
+                    .add_issue_comment(&owner, &repo, target.1, &body)
+                    .map_err(|e| e.to_string())?;
+                Ok(CircuitEvent::GithubActionResult {
+                    node_id: node_id.to_string(),
+                    success: true,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_head_ref: None,
+                    pr_title: None,
+                    error: None,
+                })
+            }
+            GithubActionKind::CloseIssue => {
+                let target = determine_github_target(view, node_id, action)?;
+                if target.0 != "issue" {
+                    return Err("CloseIssue requires an issue-triggered run".to_string());
+                }
+                client
+                    .close_issue(&owner, &repo, target.1)
+                    .map_err(|e| e.to_string())?;
+                Ok(CircuitEvent::GithubActionResult {
+                    node_id: node_id.to_string(),
+                    success: true,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_head_ref: None,
+                    pr_title: None,
+                    error: None,
+                })
+            }
+            GithubActionKind::OpenPr => {
+                let head = open_pr_head_branch(view, node_id)?;
+                let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
+                let title = view
+                    .context
+                    .get("issue.title")
+                    .or_else(|| view.context.get("pr.title"))
+                    .unwrap_or("Circuit run")
+                    .to_string();
+                let body = resolved_comment.unwrap_or_default();
+                let pr_url = client
+                    .create_pull_request(&owner, &repo, &title, &body, &head, &base)
+                    .map_err(|e| e.to_string())?;
+
+                let pr_num = pr_url
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .and_then(|s| s.parse::<i64>().ok());
+
+                Ok(CircuitEvent::GithubActionResult {
+                    node_id: node_id.to_string(),
+                    success: true,
+                    pr_number: pr_num,
+                    pr_url: Some(pr_url),
+                    pr_head_ref: Some(head),
+                    pr_title: if !title.is_empty() { Some(title) } else { None },
+                    error: None,
+                })
+            }
         }
-        GithubActionKind::OpenPr => {
-            let head = open_pr_head_branch(view)?;
-            let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
-            let title = view
-                .context
-                .get("issue.title")
-                .or_else(|| view.context.get("pr.title"))
-                .unwrap_or("Circuit run")
-                .to_string();
-            let body = resolved_comment.unwrap_or_default();
-            client
-                .create_pull_request(&owner, &repo, &title, &body, &head, &base)
-                .map_err(|e| e.to_string())?;
-        }
+    })();
+
+    let event = match action_res {
+        Ok(ev) => ev,
+        Err(err) => CircuitEvent::GithubActionResult {
+            node_id: node_id.to_string(),
+            success: false,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: Some(err),
+        },
+    };
+
+    let transition = advance(view, &event);
+    if !transition.step_writes.is_empty() || transition.run_state_changed {
+        let ops = transition
+            .step_writes
+            .iter()
+            .map(|w| db::CircuitStepOp {
+                node_id: w.node_id.clone(),
+                status: w.status.as_db_str().to_string(),
+                outcome: w.outcome.map(|o| o.map(|v| v.as_db_str().to_string())),
+                error: w.error.clone(),
+                agent_node_id: None,
+                attempt: w.attempt,
+                fresh_attempt: w.fresh_attempt,
+            })
+            .collect::<Vec<_>>();
+        let run_state = if transition.run_state_changed {
+            Some(view.state.as_db_str())
+        } else {
+            None
+        };
+        db::commit_circuit_advance(
+            active.run.id,
+            run_state,
+            Some(&view.context.to_json()?),
+            &ops,
+        )
+        .map_err(|e| format!("commit failed: {}", e))?;
     }
+
+    if !transition.effects.is_empty() {
+        execute_effects(app, active, view, &transition.effects)?;
+    }
+
     tracing::info!(
-        "circuits: run {} executed GitHub {:?} on {}/{} #{}",
-        run_id,
+        "circuits: run {} executed GitHub {:?} on {}/{}",
+        active.run.id,
         action,
         owner,
-        repo,
-        target.1
+        repo
     );
     Ok(())
 }
@@ -734,9 +851,9 @@ fn call_github_effect(
 /// committed and pushed it (the legacy wrap-up contract) — Buildmesh
 /// opens the PR, it does not push on the agent's behalf. A root-repo
 /// spawn (no worktree) cannot open a PR and fails loudly instead.
-fn open_pr_head_branch(view: &RunView) -> Result<String, String> {
+fn open_pr_head_branch(view: &RunView, node_id: &str) -> Result<String, String> {
     let agent_node_id = view
-        .latest_agent_node_id()
+        .resolve_target_agent(node_id, None)
         .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
     let node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
     if !node.use_worktree {
@@ -756,8 +873,7 @@ fn open_pr_head_branch(view: &RunView) -> Result<String, String> {
 /// re-querying SQLite.
 fn execute_effects(
     app: &AppHandle,
-    run_id: i64,
-    mesh_id: i64,
+    active: &db::ActiveCircuitRun,
     view: &mut RunView,
     effects: &[crate::autopilot::circuit::stepper::Effect],
 ) -> Result<(), String> {
@@ -765,45 +881,49 @@ fn execute_effects(
     for effect in effects {
         match effect {
             Effect::SpawnAgentNode { node_id } => {
-                spawn_step_agent(app, run_id, mesh_id, view, node_id)?;
+                spawn_step_agent(app, active.run.id, active.run.mesh_id, view, node_id)?;
             }
-            Effect::InjectPty { prompt, .. } => {
-                // Target = the run's most recent piloted agent (the
-                // linear walking-skeleton contract).
-                match view.latest_agent_node_id() {
+            Effect::InjectPty { node_id, prompt, target_node_id } => {
+                match view.resolve_target_agent(node_id, target_node_id.as_deref()) {
                     Some(target) => {
+                        crate::autopilot::evaluator::note_turn_start(target);
                         crate::autopilot::pipeline::write_prompt_to_pty(target, prompt, app)
                             .map_err(|e| format!("PTY injection failed: {}", e))?;
+                        let _ = db::update_agent_node_status(target, SessionStatus::Running);
                         tracing::info!(
                             "circuits: injected prompt into agent {} for run {}",
                             target,
-                            run_id
+                            active.run.id
                         );
                     }
-                    None => tracing::warn!(
-                        "circuits: run {} had no piloted agent to inject into",
-                        run_id
-                    ),
+                    None => {
+                        return Err(format!(
+                            "circuits: run {} had no piloted agent in lineage to inject into (node {})",
+                            active.run.id,
+                            node_id
+                        ));
+                    }
                 }
             }
-            Effect::SetNodeStatus { status, .. } => {
-                if let Some(agent_node_id) = view.latest_agent_node_id() {
-                    let kind = SessionStatus::from_db_str(status);
-                    db::update_agent_node_status(agent_node_id, kind)
-                        .map_err(|e| format!("status write failed: {}", e))?;
-                }
+            Effect::SetNodeStatus { node_id, status, target_node_id } => {
+                let agent_node_id = view
+                    .resolve_target_agent(node_id, target_node_id.as_deref())
+                    .ok_or_else(|| format!("SetNodeStatus target agent not found in lineage for node {}", node_id))?;
+                let kind = SessionStatus::from_db_str(status);
+                db::update_agent_node_status(agent_node_id, kind)
+                    .map_err(|e| format!("status write failed: {}", e))?;
             }
             Effect::Notify { message } => {
                 let _ = app.emit(
                     "circuit-notification",
                     CircuitNotificationPayload {
-                        run_id,
+                        run_id: active.run.id,
                         message: message.clone(),
                     },
                 );
             }
-            Effect::CallGithub { action, label, comment, .. } => {
-                call_github_effect(run_id, mesh_id, view, *action, label.as_deref(), comment.as_deref())?;
+            Effect::CallGithub { node_id, action, label, comment } => {
+                call_github_effect(app, active, view, node_id, *action, label.as_deref(), comment.as_deref())?;
             }
         }
     }
@@ -831,12 +951,80 @@ fn spawn_step_agent(
         _ => return Err(format!("node {} is not a spawn node", node_id)),
     };
 
+    let resolved_prompt = view.context.resolve(&prompt);
+
+    // If step already has an agent node attached (e.g. from an earlier loop iteration/retry)
+    if let Some(existing_agent_id) = view.step(node_id).and_then(|s| s.agent_node_id) {
+        if crate::agent::process::PROCESS_REGISTRY.is_alive(&existing_agent_id) {
+            tracing::info!(
+                "circuits: submitting new turn to live agent {} for step {} (run {})",
+                existing_agent_id,
+                node_id,
+                run_id
+            );
+            let _ = db::update_agent_node_status(existing_agent_id, SessionStatus::Running);
+            crate::autopilot::evaluator::note_turn_start(existing_agent_id);
+            crate::autopilot::pipeline::write_prompt_to_pty(existing_agent_id, &resolved_prompt, app)
+                .map_err(|e| format!("PTY write failed on retry: {}", e))?;
+            return Ok(());
+        }
+
+        // Process is dead/exited: reuse its worktree path/branch to spawn a fresh process
+        if let Ok(old_node) = db::get_agent_node_by_id(existing_agent_id) {
+            tracing::info!(
+                "circuits: respawning agent for step {} in existing worktree {}",
+                node_id,
+                old_node.path
+            );
+            let new_node = crate::services::agent_node::create_pending(
+                mesh_id,
+                &old_node.path,
+                &old_node.branch,
+                None,
+                None,
+                None,
+                None,
+                name.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+
+            crate::agent::session_lifecycle::on_created(
+                &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
+                new_node.id,
+            )
+            .map_err(|e| e.to_string())?;
+
+            db::set_circuit_step_agent_node(run_id, node_id, new_node.id)
+                .map_err(|e| format!("could not attach new agent to step: {}", e))?;
+            view.attach_agent_node(node_id, new_node.id);
+            crate::autopilot::evaluator::register(new_node.id);
+            crate::autopilot::evaluator::note_turn_start(new_node.id);
+
+            let app_for_spawn = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let intent = if resolved_prompt.trim().is_empty() {
+                    SpawnIntent::Fresh
+                } else {
+                    SpawnIntent::Loop {
+                        initial_prompt: resolved_prompt.clone(),
+                    }
+                };
+                if let Err(error) = crate::agent::spawn::spawn_with_intent(
+                    &app_for_spawn,
+                    SpawnRequest::new(new_node.id, intent, Default::default()),
+                )
+                .await
+                {
+                    tracing::error!("circuits: agent node {} failed: {}", new_node.id, error);
+                }
+            });
+            return Ok(());
+        }
+    }
+
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
         .unwrap_or_else(|_| "main".to_string());
-    // Prompt resolution happened in the stepper; resolve again here only
-    // if the stored template still carries placeholders (idempotent).
-    let resolved_prompt = view.context.resolve(&prompt);
 
     let node = crate::services::agent_node::create_pending(
         mesh.id,
@@ -858,14 +1046,12 @@ fn spawn_step_agent(
 
     db::set_circuit_step_agent_node(run_id, node_id, node.id)
         .map_err(|e| format!("could not attach agent to step: {}", e))?;
-    // Keep the in-memory view in sync with the committed row so later
-    // effects this pass (and the observation loop next pass) resolve the
-    // injection/status target from the view.
     view.attach_agent_node(node_id, node.id);
 
     // Track output times for this piloted node (the PTY submit watcher
     // and future classifiers read them).
     crate::autopilot::evaluator::register(node.id);
+    crate::autopilot::evaluator::note_turn_start(node.id);
 
     let _ = app.emit(
         "node-created",
@@ -904,6 +1090,8 @@ fn spawn_step_agent(
 
     Ok(())
 }
+
+
 
 // ---------------------------------------------------------------------------
 // Startup reconciliation (milestone 3, issue #1208).
@@ -1439,5 +1627,71 @@ mod tests {
             2,
             "ticks 1 + 2 must succeed after tick 0 panicked"
         );
+    }
+
+    #[test]
+    fn determine_github_target_routes_correctly() {
+        use crate::autopilot::circuit::model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind};
+        use crate::autopilot::circuit::stepper::{RunState, RunView};
+
+        let graph = CircuitGraph {
+            version: 1,
+            nodes: vec![
+                CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode {
+                    id: "pre_label".into(),
+                    kind: CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::AddLabel,
+                        label: Some("in-progress".into()),
+                        comment: None,
+                    },
+                },
+                CircuitNode {
+                    id: "open_pr".into(),
+                    kind: CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::OpenPr,
+                        label: None,
+                        comment: None,
+                    },
+                },
+                CircuitNode {
+                    id: "post_label".into(),
+                    kind: CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::AddLabel,
+                        label: Some("approved".into()),
+                        comment: None,
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge { from: "t".into(), to: "pre_label".into(), condition: Default::default() },
+                CircuitEdge { from: "pre_label".into(), to: "open_pr".into(), condition: Default::default() },
+                CircuitEdge { from: "open_pr".into(), to: "post_label".into(), condition: Default::default() },
+            ],
+        };
+
+        let mut ctx = CircuitContext::new();
+        ctx.set("issue.number", "42");
+        ctx.set("pr.number", "1361");
+
+        let view = RunView {
+            run_id: 1,
+            graph,
+            state: RunState::Running,
+            context: ctx,
+            steps: vec![],
+        };
+
+        // Before OpenPr, AddLabel targets the issue (#42)
+        let pre_target = determine_github_target(&view, "pre_label", GithubActionKind::AddLabel).unwrap();
+        assert_eq!(pre_target, ("issue", 42));
+
+        // After OpenPr, AddLabel targets the created PR (#1361)
+        let post_target = determine_github_target(&view, "post_label", GithubActionKind::AddLabel).unwrap();
+        assert_eq!(post_target, ("pr", 1361));
+
+        // CloseIssue explicitly targets the issue (#42)
+        let close_target = determine_github_target(&view, "post_label", GithubActionKind::CloseIssue).unwrap();
+        assert_eq!(close_target, ("issue", 42));
     }
 }
