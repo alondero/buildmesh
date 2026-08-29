@@ -23,6 +23,7 @@ import { useUIStore } from '../../stores/uiStore';
 export function AgentChangesTab() {
   const { activeNodeId, activePath, activeMeshId } = useProbeContext();
   const openDiff = useUIStore((s) => s.openDiff);
+  const activeDiffFile = useUIStore((s) => s.activeDiffFile);
 
   // ProbeTabBody gates on `activeNodeId !== null` (and a selected mesh) before
   // mounting this component, so the guard is a type-narrowing convenience
@@ -49,6 +50,14 @@ export function AgentChangesTab() {
       <AgentChangedFilesList
         nodeId={activeNodeId}
         rootPath={activePath}
+        selectedFile={
+          activeDiffFile?.nodeId === activeNodeId &&
+          activeDiffFile.meshId === activeMeshId &&
+          activeDiffFile.rootPath === activePath &&
+          activeDiffFile.source === 'base'
+            ? activeDiffFile.filePath
+            : null
+        }
         onOpenFile={handleOpenFile}
       />
     </div>

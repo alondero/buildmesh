@@ -103,6 +103,9 @@ describe('usePathInvalidatedQuery — error field (issue #342)', () => {
       await emit('git-changed', { path: 'k' });
     });
     await waitFor(() => expect(result.current.error).toBeInstanceOf(Error));
+    // A background failure must preserve the last successful value so callers
+    // can show stale content with a non-blocking warning.
+    expect(result.current.data).toBe('first');
   });
 
   it('clears error when a GIT_CHANGED event triggers a successful refetch after a failure', async () => {

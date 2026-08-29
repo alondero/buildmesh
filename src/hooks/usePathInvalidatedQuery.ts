@@ -217,7 +217,11 @@ export function usePathInvalidatedQuery(
       setError(null);
       client.refresh(key as never).then((result) => {
         if (signal.aborted) return;
-        setData(result);
+        // Keep the last good value visible when a background invalidation
+        // fetch fails. Consumers can then show a non-blocking stale-data
+        // warning instead of falling through to their first-load error state.
+        // A successful empty result still replaces the value with `null`.
+        if (client.lastError(key as never) === null) setData(result);
         setLoading(false);
         setError(client.lastError(key as never));
       });

@@ -1,4 +1,5 @@
 import { formatError } from '../../lib/errorUtils';
+import { fileDiffStatusMeta } from '../../lib/status';
 import type { GitStatus } from '../../lib/tauri';
 import { useAgentChangedFiles } from '../../hooks/useAgentChangedFiles';
 import { LoadingState } from '../shared/Spinner';
@@ -6,6 +7,7 @@ import { LoadingState } from '../shared/Spinner';
 interface AgentChangedFilesListProps {
   nodeId: number;
   rootPath: string;
+  selectedFile: string | null;
   onOpenFile: (path: string) => void;
 }
 
@@ -17,6 +19,7 @@ interface AgentChangedFilesListProps {
 export function AgentChangedFilesList({
   nodeId,
   rootPath,
+  selectedFile,
   onOpenFile,
 }: AgentChangedFilesListProps) {
   const { files, loading, error } = useAgentChangedFiles(nodeId, rootPath);
@@ -42,23 +45,25 @@ export function AgentChangedFilesList({
 
   return (
     <div className="flex-1 min-h-0 overflow-auto">
-      <div className="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 bg-bg-overlay border-b border-border-subtle text-xs">
-        <span className="text-text-secondary font-medium">
-          {files.length} {files.length === 1 ? 'file' : 'files'} changed
-        </span>
-        {additions > 0 && (
-          <span className="text-accent-green font-mono">+{additions}</span>
-        )}
-        {deletions > 0 && (
-          <span className="text-accent-red font-mono">-{deletions}</span>
-        )}
-        <span
-          className="ml-auto text-text-muted"
-          title="Changes since this agent branched from its base"
-        >
-          vs base
-        </span>
-      </div>
+      {files.length > 0 && (
+        <div className="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 bg-bg-overlay border-b border-border-subtle text-xs">
+          <span className="text-text-secondary font-medium">
+            {files.length} {files.length === 1 ? 'file' : 'files'} changed
+          </span>
+          {additions > 0 && (
+            <span className="text-accent-green font-mono">+{additions}</span>
+          )}
+          {deletions > 0 && (
+            <span className="text-accent-red font-mono">-{deletions}</span>
+          )}
+          <span
+            className="ml-auto text-text-muted"
+            title="Changes since this agent branched from its base"
+          >
+            vs base
+          </span>
+        </div>
+      )}
 
       {error && files.length > 0 && (
         <div
@@ -77,7 +82,12 @@ export function AgentChangedFilesList({
       ) : (
         <div>
           {files.map((file) => (
-            <ChangedFileRow key={file.path} file={file} onOpenFile={onOpenFile} />
+            <ChangedFileRow
+              key={file.path}
+              file={file}
+              selectedFile={selectedFile}
+              onOpenFile={onOpenFile}
+            />
           ))}
         </div>
       )}
@@ -87,19 +97,28 @@ export function AgentChangedFilesList({
 
 function ChangedFileRow({
   file,
+  selectedFile,
   onOpenFile,
 }: {
   file: GitStatus;
+  selectedFile: string | null;
   onOpenFile: (path: string) => void;
 }) {
+  const meta = fileDiffStatusMeta(file.status);
+
   return (
     <button
       type="button"
       onClick={() => onOpenFile(file.path)}
-      aria-label={`Open ${file.path} in the center diff overlay`}
+      aria-label={`Open ${file.path} (${meta.label}, +${file.additions}, -${file.deletions}) in the center diff overlay`}
       title={file.path}
-      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-mono text-left border-b border-border-subtle hover:bg-bg-card transition-colors"
+      className={`w-full flex items-center gap-2 px-3 py-2 text-xs font-mono text-left border-b border-border-subtle hover:bg-bg-card transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan ${
+        selectedFile === file.path ? 'bg-bg-overlay' : ''
+      }`}
     >
+      <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={meta.label}>
+        {meta.letter}
+      </span>
       <span className="flex-1 min-w-0 truncate text-text-primary">{file.path}</span>
       <span className="flex items-center gap-1.5 shrink-0">
         {file.additions > 0 && (

@@ -27,6 +27,10 @@ The mental model users actually have — the one GitHub's "Files changed" tab se
 
 ## Consequences
 
+- **The Agent Changes panel intentionally omits a second FileTree.** Project
+  Files remains the single full-tree surface, so Agent Changes stays focused on
+  the agent's changed files and does not duplicate that browse affordance.
+
 - **The cornerstone view now matches intent.** "Changed Files" answers "what did this agent do since branching," committed or not — stable across the agent committing its work.
 - **Semantics stay explicit across consumers.** The desktop Agent Changes panel, the mobile `/api` diff route, and their per-file summary counts use the merge-base; the desktop Project Files Changed Files section remains intentionally HEAD-relative. The checkpoint diff (`diff_session_checkpoint`) is unaffected — it intentionally diffs against a specific checkpoint ref, not the base.
 - **`base_ref` is now load-bearing for diffs, not just for worktree creation and PRs.** A mesh pointed at the wrong base will mis-scope its diffs; this makes the existing base_ref setting more visible in its effect, which is desirable.
