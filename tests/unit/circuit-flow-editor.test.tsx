@@ -569,6 +569,60 @@ describe('CircuitFlowEditor', () => {
     expect(drawer.querySelector('[data-testid="context-group-circuit"]')).not.toBeNull();
   });
 
+  it('downstream drawer renders spawn_output group + node.<id>.output reference rows', async () => {
+    // Fixture: trigger → spawn_1 → spawn_2 → notify. Selecting
+    // `notify` must show BOTH spawns' outputs as reachable context,
+    // routed into the dedicated `spawn_output` group (issue #1359
+    // round-3 review: previously the drawer bucketed `node.<id>.output`
+    // under the top-level `node` namespace and they ended up in the
+    // wrong bucket / were missing from the reference list).
+    const GRAPH_WITH_DOWNSTREAM = JSON.stringify({
+      version: 1,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        {
+          id: 'spawn_1',
+          type: {
+            type: 'spawn_agent_node',
+            prompt: 'first',
+            name: null,
+          },
+        },
+        {
+          id: 'spawn_2',
+          type: {
+            type: 'spawn_agent_node',
+            prompt: 'second',
+            name: null,
+          },
+        },
+        { id: 'notify', type: { type: 'notify', message: '' } },
+      ],
+      edges: [
+        { from: 'trigger', to: 'spawn_1', condition: 'always' },
+        { from: 'spawn_1', to: 'spawn_2', condition: 'always' },
+        { from: 'spawn_2', to: 'notify', condition: 'always' },
+      ],
+    });
+    render(
+      <CircuitFlowEditor
+        circuit={{ ...CIRCUIT, graph_json: GRAPH_WITH_DOWNSTREAM }}
+        runs={[]}
+        onClose={() => {}}
+      />
+    );
+
+    fireEvent.click(await screen.findByTestId('circuit-node-notify'));
+    const drawer = await screen.findByTestId('inspector-context-reference');
+    // spawn_output group exists and contains BOTH spawn ids (sorted).
+    expect(drawer.querySelector('[data-testid="context-group-spawn_output"]')).not.toBeNull();
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn_1.output"]')).not.toBeNull();
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn_2.output"]')).not.toBeNull();
+    // Both are reachable (the drawer knows they're upstream producers).
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn_1.output"]')!.getAttribute('data-reachable')).toBe('true');
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn_2.output"]')!.getAttribute('data-reachable')).toBe('true');
+  });
+
   it('offers an upstream spawn target picker on InjectPty and SetNodeStatus', async () => {
     const GRAPH_WITH_TARGETS = JSON.stringify({
       version: 1,

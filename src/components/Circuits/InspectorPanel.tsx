@@ -33,6 +33,7 @@ import {
   categoryOf,
   configSummary,
   getReachableContext,
+  groupForPath,
   isReachablePath,
   sampleValueForPath,
   specFor,
@@ -199,7 +200,10 @@ function ContextReferenceDrawer({
     const buckets = new Map<string, string[]>();
     for (const spec of MUSTACHE_GROUPS) buckets.set(spec.namespace, []);
     for (const path of allPaths) {
-      const ns = path.split('.', 1)[0];
+      // groupForPath routes `node.<id>.output` into the spawn_output
+      // bucket so spawn-output chips end up under the Node Outputs
+      // header, not under "node.id" (issue #1359 round-3 review).
+      const ns = groupForPath(path);
       const list = buckets.get(ns);
       if (list !== undefined) list.push(path);
     }

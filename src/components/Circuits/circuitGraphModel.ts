@@ -380,7 +380,13 @@ export function insertMustache(
 ): { text: string; caret: number } {
   const before = text.slice(0, caret);
   const openStart = before.lastIndexOf('{{');
-  const anchor = Math.max(openStart, 0);
+  // Anchor fallback: if there's no `{{` between the start of the text
+  // and the caret (e.g. user clicked a chip without typing one first),
+  // fall back to `caret` so `before.slice(0, anchor)` returns the
+  // entire prefix verbatim instead of erasing it (issue #1359 round-3
+  // review: `Math.max(-1, 0) = 0` silently dropped everything before
+  // the caret when no opener was present).
+  const anchor = openStart === -1 ? caret : openStart;
   // Search for `}}` starting from the caret forward. Anything past
   // the caret is preserved verbatim — including any `}}` the user
   // already typed — UNLESS that `}}` is part of the current
@@ -613,11 +619,15 @@ export function isReachablePath(
     case 'circuit':
       return true;
     case 'node':
+      // `node.id` is always live (with_node is called per step).
+      // Spawn-output chips (`node.<id>.output`) are routed to the
+      // `spawn_output` namespace by `groupForPath` and handled
+      // below — the `node` case only needs to recognise the one
+      // `node.id` chip and treat every other `node.<garbage>` as
+      // unreachable (issue #1359 round-3 review: the previous
+      // duplicate `nodeOutputIds.includes` check was dead code
+      // because the dispatch never reaches here for `.output` paths).
       if (path === 'node.id') return true;
-      if (path.endsWith('.output')) {
-        const id = path.slice('node.'.length, -'.output'.length);
-        return reachable.nodeOutputIds.includes(id);
-      }
       return false;
     case 'issue':
       return reachable.triggers.issue;

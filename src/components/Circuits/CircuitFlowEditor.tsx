@@ -157,10 +157,16 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   // highlight-sync effect below.
   const topologyJson = useMemo(() => stableGraphJson(toGraph(nodes, edges)), [nodes, edges]);
   // Stable graph object for the InspectorPanel's reachability useMemo.
-  // Without this memo, `toGraph(nodes, edges)` would mint a fresh
-  // object on every render, busting the panel's deps and re-walking
-  // the BFS on every keystroke (issue #1359 review feedback).
-  const currentGraph = useMemo(() => toGraph(nodes, edges), [nodes, edges]);
+  // Derive from `topologyJson` (a string), not `[nodes, edges]`, so
+  // the inspector's `useMemo` only re-walks the BFS when the topology
+  // actually changes — not on every keystroke where React mints fresh
+  // node references for the working copy (issue #1359 round-3 review).
+  // parseGraph is the inverse of stableGraphJson and upgrades v1
+  // blueprints to v2 if needed.
+  const currentGraph = useMemo(
+    () => parseGraph(topologyJson),
+    [topologyJson]
+  );
   const highlightedKeys = useMemo(
     () =>
       traversedEdgeKeys(

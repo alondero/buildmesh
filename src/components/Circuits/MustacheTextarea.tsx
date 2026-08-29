@@ -45,14 +45,17 @@ interface MustacheTextareaProps {
 
 /** Text after a `{{` opener that still counts as autocomplete context.
  *  Spaces are allowed — `{{ ` is exactly what insertMustache produces
- *  around the path, so typing one must not close the menu. */
+ *  around the path, so typing one must not close the menu. Hyphens,
+ *  slashes, and colons are also allowed so node ids like `spawn-1`
+ *  and branch references like `feat/circuits` keep the menu open
+ *  mid-typing. */
 function openContext(text: string, caret: number): string | null {
   const before = text.slice(0, caret);
   const open = before.lastIndexOf('{{');
   if (open === -1) return null;
   const context = before.slice(open + 2);
   // A closed brace or stray punctuation means the user moved on.
-  if (/^[a-zA-Z0-9._ ]*$/.test(context)) return context;
+  if (/^[a-zA-Z0-9._:/\- ]*$/.test(context)) return context;
   return null;
 }
 
