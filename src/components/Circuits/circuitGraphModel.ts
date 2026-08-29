@@ -363,6 +363,15 @@ export function groupForPath(path: string): string {
 /**
  * Insert `{{ path }}` at a caret sitting just after typed `{{` (the
  * autocomplete trigger). Returns the new text and caret position.
+ *
+ * If the user has already typed the matching `}}` past the caret (or
+ * has the caret anywhere inside the placeholder and a `}}` further
+ * along), consume it as part of the replacement — otherwise the
+ * insertion leaves a stray `}}` after the new path that becomes dead
+ * text in the rendered template (`{{ path }}}`). The `}}` is only
+ * consumed when it lies *between the caret and the next line break
+ * or end of text*, so an unrelated `}}` later in the line is not
+ * affected.
  */
 export function insertMustache(
   text: string,
@@ -371,10 +380,22 @@ export function insertMustache(
 ): { text: string; caret: number } {
   const before = text.slice(0, caret);
   const openStart = before.lastIndexOf('{{');
+  const anchor = Math.max(openStart, 0);
+  // Search for `}}` starting from the caret forward. Anything past
+  // the caret is preserved verbatim — including any `}}` the user
+  // already typed — UNLESS that `}}` is part of the current
+  // placeholder, in which case we consume it so the result is clean.
+  const after = text.slice(caret);
+  // `[^}\n]*` — anything except `}` and newline; then `}}`. Anchored
+  // at the start of `after` (i.e. just past the caret). If a `}}`
+  // appears earlier in the same line we still consume it because the
+  // regex matches the longest such prefix.
+  const closeMatch = after.match(/^[^}\n]*\}\}/);
+  const closeLen = closeMatch !== null ? closeMatch[0].length : 0;
   const insertion = `{{ ${path} }}`;
   return {
-    text: `${before.slice(0, Math.max(openStart, 0))}${insertion}${text.slice(caret)}`,
-    caret: Math.max(openStart, 0) + insertion.length,
+    text: `${before.slice(0, anchor)}${insertion}${after.slice(closeLen)}`,
+    caret: anchor + insertion.length,
   };
 }
 
@@ -455,6 +476,13 @@ function indexNodesById(
  * namespaces a producer upstream is capable of populating. Pure —
  * operates on the AST, never on run-time state.
  *
+ * **Important**: the BFS seeds from `nodeId`'s *immediate predecessors*
+ * — the selected node itself is never visited, because no node can
+ * read its own terminal output before it has executed. This is the
+ * reachability contract `{{ node.<id>.output }}` honours: the spawn's
+ * own initial-prompt template can NEVER interpolate its own output,
+ * only downstream consumers (after the worker writes the context).
+ *
  * Termination: the visited set keeps BFS finite on cycles (bounded or
  * not); the slice-1 validator rejects unbounded loops so any cycle the
  * editor loads has at least one bounded gate.
@@ -481,7 +509,13 @@ export function getReachableContext(
   // same spawn doesn't double-list its output chip.
   const spawnOutputs = new Set<string>();
 
-  const queue: string[] = [nodeId];
+  // Seed: every immediate predecessor of `nodeId`. We DO include the
+  // node itself when it's its own predecessor (a self-loop), because
+  // a verification gate or retry-limit looping back on itself IS a
+  // valid reachability target. The temporal-paradox guard is enforced
+  // separately for spawn outputs (a node cannot read its own
+  // terminal output before it has executed).
+  const queue: string[] = incoming.get(nodeId)?.slice() ?? [];
   const visited = new Set<string>();
   while (queue.length > 0) {
     const id = queue.shift()!;
@@ -510,7 +544,11 @@ export function getReachableContext(
         if (node.type.action === 'open_pr') reachable.pullRequest = true;
         break;
       case 'spawn_agent_node':
-        spawnOutputs.add(id);
+        // Temporal-paradox guard: `node.<id>.output` is only
+        // reachable for DOWNSTREAM nodes, not for the spawn itself.
+        // A node cannot read its own terminal output before it has
+        // executed.
+        if (id !== nodeId) spawnOutputs.add(id);
         break;
       case 'deterministic_verification':
         reachable.gates.verification = true;
@@ -547,6 +585,57 @@ export function upstreamSpawnTargets(
   graph: Pick<CircuitGraph, 'nodes' | 'edges'>
 ): string[] {
   return getReachableContext(nodeId, graph).nodeOutputIds;
+}
+
+/** Single source of truth for "is this `{{ path }}` chip live in the
+ *  selected branch?". Both the MustacheTextarea popup and the
+ *  inspector's context-reference drawer consume this — any change to
+ *  the rules MUST land here.
+ *
+ *  Reachability contract:
+ *    - `circuit.*`         → always live (trigger wrapper sets them)
+ *    - `node.id`           → always live (with_node is called per step)
+ *    - `node.<id>.output`  → live iff `id ∈ reachable.nodeOutputIds`
+ *    - `issue.*`           → live iff a github_issue_label trigger is upstream
+ *    - `pr.*`              → live iff a PR-label trigger OR `open_pr` action is upstream
+ *    - `verification.*`    → live iff a `deterministic_verification` gate is upstream
+ *    - `retry.*`           → live iff a `retry_limit` gate is upstream
+ *
+ *  Pass `reachable: undefined` to treat every chip as live (the
+ *  ad-hoc reuse case where no node id is in scope). */
+export function isReachablePath(
+  path: string,
+  reachable: ReachableContext | undefined
+): boolean {
+  if (reachable === undefined) return true;
+  const ns = groupForPath(path);
+  switch (ns) {
+    case 'circuit':
+      return true;
+    case 'node':
+      if (path === 'node.id') return true;
+      if (path.endsWith('.output')) {
+        const id = path.slice('node.'.length, -'.output'.length);
+        return reachable.nodeOutputIds.includes(id);
+      }
+      return false;
+    case 'issue':
+      return reachable.triggers.issue;
+    case 'pr':
+      return reachable.pullRequest;
+    case 'verification':
+      return reachable.gates.verification;
+    case 'retry':
+      return reachable.gates.retry;
+    case 'spawn_output':
+      if (path.endsWith('.output')) {
+        const id = path.slice('node.'.length, -'.output'.length);
+        return reachable.nodeOutputIds.includes(id);
+      }
+      return false;
+    default:
+      return false;
+  }
 }
 
 /** A static example value rendered in the inspector reference drawer so
@@ -602,7 +691,12 @@ export function sampleValueForPath(path: string): string {
     default:
       // Spawn-output chips (`node.<id>.output`) have no static example;
       // the drawer renders a contextual "<terminal text>" placeholder.
-      return '<terminal text>';
+      // Truly unknown paths (defensive — every MUSTACHE_PATHS entry has
+      // its own case above) return the empty string rather than the
+      // generic placeholder, which would be misleading for any
+      // future namespace that doesn't happen to be spawn_output-shaped.
+      if (path.endsWith('.output')) return '<terminal text>';
+      return '';
   }
 }
 

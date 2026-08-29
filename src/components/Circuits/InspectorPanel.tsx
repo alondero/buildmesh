@@ -33,7 +33,7 @@ import {
   categoryOf,
   configSummary,
   getReachableContext,
-  groupForPath,
+  isReachablePath,
   sampleValueForPath,
   specFor,
   type ReachableContext,
@@ -101,68 +101,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-/** One row of the context reference drawer. Renders the canonical path
- *  alongside the sample value the runtime will resolve; rows whose
- *  namespace isn't reachable in this branch get an "empty" badge so
- *  the user can see why their template would interpolate blank. */
-function ContextReferenceRow({
-  path,
-  reachable,
-}: {
-  path: string;
-  reachable: ReachableContext | undefined;
-}) {
-  // Mirror MustacheTextarea's reachability test so the drawer and the
-  // popup cannot disagree on which paths are live in this branch.
-  const live = useMemo(() => {
-    if (reachable === undefined) return true;
-    const ns = groupForPath(path);
-    switch (ns) {
-      case 'circuit':
-        return true;
-      case 'node':
-        return true; // node.id is always set by with_node
-      case 'issue':
-        return reachable.triggers.issue;
-      case 'pr':
-        return reachable.pullRequest;
-      case 'verification':
-        return reachable.gates.verification;
-      case 'retry':
-        return reachable.gates.retry;
-      case 'spawn_output': {
-        const id = path.slice('node.'.length, -'.output'.length);
-        return reachable.nodeOutputIds.includes(id);
-      }
-      default:
-        return false;
-    }
-  }, [path, reachable]);
-
-  return (
-    <li
-      data-testid={`context-reference-${path}`}
-      data-reachable={live ? 'true' : 'false'}
-      className="flex items-center gap-2 py-0.5"
-    >
-      <code className={`font-mono text-2xs ${live ? 'text-text-secondary' : 'text-text-muted/60'}`}>
-        {path}
-      </code>
-      <span className={`font-mono text-2xs italic ${live ? 'text-text-muted' : 'text-text-muted/50'}`}>
-        {sampleValueForPath(path)}
-      </span>
-      {!live && (
-        <span
-          aria-label="unreachable in this branch"
-          className="ml-auto text-2xs uppercase tracking-wide text-status-warning/80"
-        >
-          empty
-        </span>
-      )}
-    </li>
-  );
-}
-
 /** Dropdown for `inject_pty` / `set_node_status` to pick an upstream
  *  `spawn_agent_node` as the effect's target. The empty option lets
  *  the user fall back to the stepper's "nearest upstream spawn"
@@ -199,6 +137,42 @@ function TargetNodeSelect({
   );
 }
 
+/** One row of the context reference drawer. Renders the canonical path
+ *  alongside the sample value the runtime will resolve; rows whose
+ *  namespace isn't reachable in this branch get an "empty" badge so
+ *  the user can see why their template would interpolate blank. */
+function ContextReferenceRow({
+  path,
+  reachable,
+}: {
+  path: string;
+  reachable: ReachableContext | undefined;
+}) {
+  const live = isReachablePath(path, reachable);
+  return (
+    <li
+      data-testid={`context-reference-${path}`}
+      data-reachable={live ? 'true' : 'false'}
+      className="flex items-center gap-2 py-0.5"
+    >
+      <code className={`font-mono text-2xs ${live ? 'text-text-secondary' : 'text-text-muted/60'}`}>
+        {path}
+      </code>
+      <span className={`font-mono text-2xs italic ${live ? 'text-text-muted' : 'text-text-muted/50'}`}>
+        {sampleValueForPath(path)}
+      </span>
+      {!live && (
+        <span
+          aria-label="unreachable in this branch"
+          className="ml-auto text-2xs uppercase tracking-wide text-status-warning/80"
+        >
+          empty
+        </span>
+      )}
+    </li>
+  );
+}
+
 /** Drawer that lists every reachable context variable for the selected
  *  node. Hidden when the node has no template payload (triggers,
  *  gates, joins) so it never shows noise the user can't act on. */
@@ -225,7 +199,7 @@ function ContextReferenceDrawer({
     const buckets = new Map<string, string[]>();
     for (const spec of MUSTACHE_GROUPS) buckets.set(spec.namespace, []);
     for (const path of allPaths) {
-      const ns = groupForPath(path);
+      const ns = path.split('.', 1)[0];
       const list = buckets.get(ns);
       if (list !== undefined) list.push(path);
     }
@@ -269,8 +243,21 @@ function ContextReferenceDrawer({
   );
 }
 
-export function InspectorPanel({ node, onChange, graph }: InspectorPanelProps) {
-  if (node === null) {
+export function InspectorPanel(props: InspectorPanelProps) {
+  // Rules of Hooks: ALL hooks must run on every render, in the same
+  // order. Compute reachability up front so the null-empty-state
+  // branch doesn't change the hook count (which would crash React
+  // with "Rendered more hooks than during the previous render" the
+  // moment the user selects their first node after opening the
+  // editor with nothing selected — issue #1359 review feedback).
+  const reachable = useMemo(
+    () => (props.graph !== undefined && props.node !== null
+      ? getReachableContext(props.node.id, props.graph)
+      : undefined),
+    [props.graph, props.node]
+  );
+
+  if (props.node === null) {
     return (
       <aside
         data-testid="circuit-inspector"
@@ -281,15 +268,11 @@ export function InspectorPanel({ node, onChange, graph }: InspectorPanelProps) {
     );
   }
 
+  const { node, onChange } = props;
   const kind = node.type;
   const accent = categoryAccent(categoryOf(kind));
-  // Reachability summary for the selected node — same BFS the
-  // MustacheTextarea popup consumes. Memoised on graph + node id so
-  // the drawer, textarea, and target picker all share one walk.
-  const reachable = useMemo(
-    () => (graph !== undefined ? getReachableContext(node.id, graph) : undefined),
-    [graph, node.id]
-  );
+  // Upstream spawn nodes for the target dropdown — derived from the
+  // same reachability memo, so no second BFS walk.
   const upstreamSpawns: string[] = reachable?.nodeOutputIds ?? [];
 
   // Whether the kind surfaces any template field (so the context

@@ -5,7 +5,9 @@
  * (`issue.*`, `pr.*`, `node.*`, `verification.*`, `retry.*`,
  * `circuit.*`). Picking a chip replaces the typed braces with a
  * complete `{{ path }}`. The menu filters as the user keeps typing;
- * Escape or blur dismisses it.
+ * Escape or blur dismisses it. Arrow keys + Enter navigate without
+ * leaving the keyboard — a click-only menu is an obstacle, not
+ * autocomplete (issue #1359 review feedback).
  *
  * Issue #1359: when the parent supplies a `reachable` reachability
  * summary, suggestions are grouped by namespace (Issue Context, Pull
@@ -22,6 +24,7 @@ import {
   fuzzyScore,
   groupForPath,
   insertMustache,
+  isReachablePath,
   type ReachableContext,
 } from './circuitGraphModel';
 
@@ -53,54 +56,6 @@ function openContext(text: string, caret: number): string | null {
   return null;
 }
 
-/** True when a chip is "live" — a producer upstream guarantees the
- *  variable resolves to a non-empty value when this template fires.
- *  `circuit.*` and `node.id` are always live (the trigger wrapper sets
- *  them at run creation). `node.<id>.output` lives iff `id` is in
- *  `reachable.nodeOutputIds`. Everything else maps directly to the
- *  trigger / gate booleans on the reachability summary. */
-function isReachable(
-  path: string,
-  reachable: ReachableContext | undefined
-): boolean {
-  if (reachable === undefined) return true;
-  const ns = groupForPath(path);
-  switch (ns) {
-    case 'circuit':
-      // circuit.* is always populated by the trigger wrapper.
-      return true;
-    case 'node':
-      // `node.id` is always live (with_node); `node.<id>.output` is
-      // keyed by the spawn id, checked via the suffix match below.
-      if (path === 'node.id') return true;
-      if (path.endsWith('.output')) {
-        // Reconstruct the spawn id (path is `node.<id>.output`).
-        const id = path.slice('node.'.length, -'.output'.length);
-        return reachable.nodeOutputIds.includes(id);
-      }
-      return false;
-    case 'issue':
-      return reachable.triggers.issue;
-    case 'pr':
-      return reachable.pullRequest;
-    case 'verification':
-      return reachable.gates.verification;
-    case 'retry':
-      return reachable.gates.retry;
-    case 'spawn_output':
-      // Defensive — `groupForPath` already routes `.output` chips into
-      // the spawn_output namespace, but we still test the suffix
-      // because someone could call `isReachable` with a raw chip.
-      if (path.endsWith('.output')) {
-        const id = path.slice('node.'.length, -'.output'.length);
-        return reachable.nodeOutputIds.includes(id);
-      }
-      return false;
-    default:
-      return false;
-  }
-}
-
 export function MustacheTextarea({
   value,
   onChange,
@@ -114,6 +69,9 @@ export function MustacheTextarea({
   const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [context, setContext] = useState<string | null>(null);
   const [caret, setCaret] = useState(0);
+  // Index of the highlighted chip in `suggestions`. `-1` means no
+  // selection (the menu opens unselected, like every OS autocomplete).
+  const [highlight, setHighlight] = useState(-1);
 
   // Don't let a pending blur-close fire after unmount.
   useEffect(() => {
@@ -121,12 +79,6 @@ export function MustacheTextarea({
       if (blurTimer.current !== null) clearTimeout(blurTimer.current);
     };
   }, []);
-
-  // When the parent pre-computes reachability (the canvas inspector
-  // knows the selected node id and passes `reachable`), the popup is
-  // grouped and unreachable chips are dimmed. Without a node id (the
-  // ad-hoc reuse case outside the canvas), skip reachability so the
-  // legacy flat menu keeps working.
 
   // Flat list filtered by the user's prefix. Spawn-output chips
   // (`node.<id>.output`) are minted dynamically from
@@ -169,22 +121,79 @@ export function MustacheTextarea({
     return result;
   }, [reachable, suggestions]);
 
+  // Flat list of paths in render order so keyboard navigation can
+  // step through every visible chip regardless of grouping.
+  const flatPaths = useMemo(() => {
+    if (grouped === null) return suggestions;
+    return grouped.flatMap((g) => g.paths);
+  }, [grouped, suggestions]);
+
+  // Clamp the highlight into the new suggestions range whenever the
+  // list shrinks or the menu reopens — otherwise ArrowDown could
+  // escape the end and Enter would `pick(undefined)`.
+  useEffect(() => {
+    if (suggestions.length === 0) {
+      if (highlight !== -1) setHighlight(-1);
+      return;
+    }
+    if (highlight >= suggestions.length) setHighlight(suggestions.length - 1);
+  }, [suggestions.length, highlight]);
+
   const handleChange = (next: string) => {
     onChange(next);
     const pos = ref.current?.selectionStart ?? next.length;
     setCaret(pos);
     setContext(openContext(next, pos));
+    // Reset highlight whenever the prefix changes — the user is
+    // mid-typing and the previous selection no points to a different
+    // chip (or no chip at all).
+    setHighlight(-1);
   };
 
   const pick = (path: string) => {
     const result = insertMustache(value, caret, path);
     onChange(result.text);
     setContext(null);
+    setHighlight(-1);
     // Restore focus/caret so typing continues right after the insertion.
     requestAnimationFrame(() => {
       ref.current?.focus();
       ref.current?.setSelectionRange(result.caret, result.caret);
     });
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (context === null) return;
+    switch (e.key) {
+      case 'Escape':
+        e.stopPropagation();
+        setContext(null);
+        setHighlight(-1);
+        return;
+      case 'ArrowDown': {
+        e.preventDefault();
+        if (suggestions.length === 0) return;
+        setHighlight((h) => (h + 1 >= suggestions.length ? 0 : h + 1));
+        return;
+      }
+      case 'ArrowUp': {
+        e.preventDefault();
+        if (suggestions.length === 0) return;
+        setHighlight((h) => (h <= 0 ? suggestions.length - 1 : h - 1));
+        return;
+      }
+      case 'Enter':
+      case 'Tab': {
+        // Pick the highlighted chip, or the top suggestion if none.
+        if (suggestions.length === 0) return;
+        const idx = highlight >= 0 ? highlight : 0;
+        e.preventDefault();
+        pick(suggestions[idx]);
+        return;
+      }
+      default:
+        return;
+    }
   };
 
   return (
@@ -195,38 +204,48 @@ export function MustacheTextarea({
         rows={rows}
         placeholder={placeholder}
         aria-label={ariaLabel}
+        aria-autocomplete="list"
+        aria-controls="mustache-menu"
         data-testid={testId}
         onChange={(e) => handleChange(e.target.value)}
         onBlur={() => {
           // Let chip clicks land before the menu disappears.
           if (blurTimer.current !== null) clearTimeout(blurTimer.current);
-          blurTimer.current = setTimeout(() => setContext(null), 150);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape' && context !== null) {
-            e.stopPropagation();
+          blurTimer.current = setTimeout(() => {
             setContext(null);
-          }
+            setHighlight(-1);
+          }, 150);
         }}
+        onKeyDown={onKeyDown}
         className="w-full px-2 py-1 bg-bg-input border border-border-subtle rounded-md text-text-primary font-mono text-xs resize-none focus:outline-none focus:border-border-active"
       />
       {suggestions.length > 0 && (
         <ul
+          id="mustache-menu"
+          role="listbox"
           data-testid="mustache-menu"
           data-grouped={grouped !== null ? 'true' : 'false'}
           className="absolute z-30 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-bg-overlay border border-border-default rounded-md shadow-lg py-1"
         >
           {grouped === null ? (
             // Ungrouped fallback (legacy callers without a graph).
-            suggestions.map((path) => (
-              <li key={path}>
+            suggestions.map((path, idx) => (
+              <li key={path} role="presentation">
                 <button
                   type="button"
+                  role="option"
+                  aria-selected={highlight === idx}
                   data-testid={`mustache-chip-${path}`}
                   data-reachable="true"
+                  data-highlighted={highlight === idx ? 'true' : 'false'}
                   onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setHighlight(idx)}
                   onClick={() => pick(path)}
-                  className="w-full text-left px-2 py-1 text-xs font-mono text-text-secondary hover:bg-accent-cyan/15 hover:text-accent-cyan"
+                  className={`w-full text-left px-2 py-1 text-xs font-mono ${
+                    highlight === idx
+                      ? 'bg-accent-cyan/25 text-accent-cyan'
+                      : 'text-text-secondary hover:bg-accent-cyan/15 hover:text-accent-cyan'
+                  }`}
                 >
                   {path}
                 </button>
@@ -234,23 +253,29 @@ export function MustacheTextarea({
             ))
           ) : (
             grouped.map(({ spec, paths }) => (
-              <li key={spec.namespace} className="border-b border-border-subtle/40 last:border-b-0">
+              <li key={spec.namespace} className="border-b border-border-subtle/40 last:border-b-0" role="presentation">
                 <div
                   className="px-2 pt-1.5 pb-0.5 text-2xs uppercase tracking-wide text-text-muted"
                   data-testid={`mustache-group-${spec.namespace}`}
                 >
                   {spec.label}
                 </div>
-                <ul>
+                <ul role="group">
                   {paths.map((path) => {
-                    const live = isReachable(path, reachable);
+                    const live = isReachablePath(path, reachable);
+                    // Compute the flat index for keyboard highlight.
+                    const flatIdx = flatPaths.indexOf(path);
                     return (
-                      <li key={path}>
+                      <li key={path} role="presentation">
                         <button
                           type="button"
+                          role="option"
+                          aria-selected={highlight === flatIdx}
                           data-testid={`mustache-chip-${path}`}
                           data-reachable={live ? 'true' : 'false'}
+                          data-highlighted={highlight === flatIdx ? 'true' : 'false'}
                           onMouseDown={(e) => e.preventDefault()}
+                          onMouseEnter={() => setHighlight(flatIdx)}
                           onClick={() => pick(path)}
                           title={
                             live
@@ -258,7 +283,11 @@ export function MustacheTextarea({
                               : `${spec.description} — not reachable in this branch`
                           }
                           className={`w-full flex items-center justify-between gap-2 px-2 py-1 text-xs font-mono text-left ${
-                            live
+                            highlight === flatIdx
+                              ? live
+                                ? 'bg-accent-cyan/25 text-accent-cyan'
+                                : 'bg-bg-card text-status-warning'
+                              : live
                               ? 'text-text-secondary hover:bg-accent-cyan/15 hover:text-accent-cyan'
                               : 'text-text-muted/60 hover:bg-bg-card'
                           }`}

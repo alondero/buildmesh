@@ -25,6 +25,7 @@ import {
   MUSTACHE_GROUPS,
   groupForPath,
   getReachableContext,
+  isReachablePath,
   upstreamSpawnTargets,
   insertMustache,
   sourceOutcomes,
@@ -263,6 +264,22 @@ describe('mustache autocomplete', () => {
     expect(result.text).toBe('{{ circuit.name }} done-tail');
   });
 
+  it('consumes a }} the user already typed past the caret (no dead text)', () => {
+    // Common keyboard flow: user typed `{{ issue.number }}` then
+    // realised they wanted `circuit.name`. They put the caret right
+    // after `{{` (or any point inside) and Enter on a chip. The old
+    // code left a stray `}}` after the insertion; the fix consumes it.
+    const result = insertMustache('{{ issue.number }}', 2, 'circuit.name');
+    expect(result.text).toBe('{{ circuit.name }}');
+    expect(result.caret).toBe('{{ circuit.name }}'.length);
+  });
+
+  it('does not consume `}}` that is NOT immediately after the caret', () => {
+    // `}}` further down the text is unrelated to the active placeholder.
+    const result = insertMustache('{{ issue.number }} more', 18, 'circuit.name');
+    expect(result.text).toBe('{{ circuit.name }} more');
+  });
+
   it('groups paths by namespace for the autocomplete popup + inspector drawer', () => {
     // Each MUSTACHE_PATHS prefix is mapped to one of the catalogue
     // groups; spawn_output is the synthetic bucket for `node.<id>.output`.
@@ -340,6 +357,41 @@ describe('upstream reachability (issue #1359)', () => {
     expect(r.pullRequest).toBe(false);
     expect(r.gates.verification).toBe(false);
     expect(r.gates.retry).toBe(false);
+  });
+
+  it('a spawn cannot reach its own output — the node is NOT upstream of itself', () => {
+    // The spawn's initial prompt template runs before the agent
+    // produces any output, so `{{ node.<id>.output }}` for its own id
+    // must be unreachable. This is the temporal-paradox guard: a
+    // node reading its own terminal output makes no sense.
+    const graph = {
+      version: CIRCUIT_GRAPH_VERSION,
+      nodes: [
+        { id: 't', type: { type: 'manual' as const } },
+        {
+          id: 's',
+          type: {
+            type: 'spawn_agent_node' as const,
+            prompt: 'go',
+            name: null,
+            provider: null,
+            model: null,
+            effort: null,
+            extra_args: null,
+          },
+        },
+        { id: 'n', type: { type: 'notify' as const, message: '' } },
+      ],
+      edges: [
+        { from: 't', to: 's', condition: 'always' as const },
+        { from: 's', to: 'n', condition: 'always' as const },
+      ],
+    };
+    const r = getReachableContext('s', graph);
+    // The spawn itself is excluded; only the trigger upstream remains.
+    expect(r.nodeOutputIds).toEqual([]);
+    // Trigger still propagates.
+    expect(r.triggers.manual).toBe(true);
   });
 
   it('an issue-label trigger propagates issue.* to a downstream notify', () => {
@@ -429,11 +481,30 @@ describe('upstream reachability (issue #1359)', () => {
     };
     // BFS from n walks back through v — and would loop through r→s→v
     // forever without a visited set. Termination is the contract.
+    // `s` is upstream of `n` via `v→n` (after a green run the spawn's
+    // terminal output IS available to the downstream notify), so it
+    // appears in nodeOutputIds. In a second iteration the spawn
+    // cannot read ITSELF, only its predecessors.
     const r = getReachableContext('n', graph);
     expect(r.triggers.manual).toBe(true);
     expect(r.nodeOutputIds).toEqual(['s']);
     expect(r.gates.verification).toBe(true);
     expect(r.gates.retry).toBe(true);
+  });
+
+  it('a spawn whose only upstream is itself (1-node cycle) cannot reach its own output', () => {
+    // Pathological — the slice-1 validator rejects self-loops so
+    // this graph shape never reaches the editor. Even if it did,
+    // the BFS would mark `s` as visited on first hop and skip it.
+    const graph = {
+      version: CIRCUIT_GRAPH_VERSION,
+      nodes: [
+        { id: 's', type: { type: 'spawn_agent_node' as const, prompt: 'go', name: null, provider: null, model: null, effort: null, extra_args: null } },
+      ],
+      edges: [{ from: 's', to: 's', condition: 'always' as const }],
+    };
+    const r = getReachableContext('s', graph);
+    expect(r.nodeOutputIds).toEqual([]);
   });
 
   it('verification + retry + llm_classifier + collaborator gates all surface as reachable booleans', () => {
@@ -493,6 +564,62 @@ describe('upstream reachability (issue #1359)', () => {
     const r = getReachableContext('a', graph);
     expect(r.triggers.pullRequest).toBe(true);
     expect(r.pullRequest).toBe(true);
+  });
+});
+
+describe('isReachablePath (shared reachability test)', () => {
+  // The whole point of this helper is that BOTH the textarea popup
+  // and the inspector drawer use it. If these tests pass, the two
+  // call sites cannot disagree on which paths are live.
+  const reachable = {
+    triggers: { manual: true, interval: false, issue: true, pullRequest: false },
+    pullRequest: true,
+    nodeOutputIds: ['spawn_1'],
+    gates: { verification: true, retry: true, llmClassifier: false, collaborator: false },
+    metadata: true,
+  };
+
+  it('treats every path as live when reachability is undefined', () => {
+    expect(isReachablePath('issue.number', undefined)).toBe(true);
+    expect(isReachablePath('node.spawn_1.output', undefined)).toBe(true);
+    expect(isReachablePath('circuit.name', undefined)).toBe(true);
+  });
+
+  it('circuit.* and node.id are always live', () => {
+    expect(isReachablePath('circuit.id', reachable)).toBe(true);
+    expect(isReachablePath('circuit.name', reachable)).toBe(true);
+    expect(isReachablePath('circuit.run_id', reachable)).toBe(true);
+    expect(isReachablePath('node.id', reachable)).toBe(true);
+  });
+
+  it('node.<id>.output is live iff the id is in nodeOutputIds', () => {
+    expect(isReachablePath('node.spawn_1.output', reachable)).toBe(true);
+    expect(isReachablePath('node.spawn_2.output', reachable)).toBe(false);
+  });
+
+  it('maps trigger / action / gate booleans 1:1', () => {
+    expect(isReachablePath('issue.number', reachable)).toBe(true);
+    expect(isReachablePath('pr.number', reachable)).toBe(true);
+    expect(isReachablePath('verification.outcome', reachable)).toBe(true);
+    expect(isReachablePath('retry.attempt', reachable)).toBe(true);
+  });
+
+  it('falls back to false for an unknown namespace', () => {
+    expect(isReachablePath('totally.fake.path', reachable)).toBe(false);
+  });
+});
+
+describe('sampleValueForPath', () => {
+  it('returns <terminal text> for spawn-output chips (no static sample)', () => {
+    expect(sampleValueForPath('node.spawn_1.output')).toBe('<terminal text>');
+    expect(sampleValueForPath('node.spawn_42.output')).toBe('<terminal text>');
+  });
+
+  it('returns the empty string for a truly unknown path (defensive default)', () => {
+    // Default branch now distinguishes "spawn_output-shaped" from
+    // "no case matched"; the latter is an empty placeholder rather
+    // than the misleading "<terminal text>" used for spawn outputs.
+    expect(sampleValueForPath('totally.unknown.path')).toBe('');
   });
 });
 

@@ -156,6 +156,11 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   // only — keying this memo on the raw arrays would loop with the
   // highlight-sync effect below.
   const topologyJson = useMemo(() => stableGraphJson(toGraph(nodes, edges)), [nodes, edges]);
+  // Stable graph object for the InspectorPanel's reachability useMemo.
+  // Without this memo, `toGraph(nodes, edges)` would mint a fresh
+  // object on every render, busting the panel's deps and re-walking
+  // the BFS on every keystroke (issue #1359 review feedback).
+  const currentGraph = useMemo(() => toGraph(nodes, edges), [nodes, edges]);
   const highlightedKeys = useMemo(
     () =>
       traversedEdgeKeys(
@@ -646,7 +651,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
         <InspectorPanel
           node={currentNode}
           onChange={updateSelectedKind}
-          graph={toGraph(nodes, edges)}
+          graph={currentGraph}
         />
         {currentNode !== null && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
