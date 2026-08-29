@@ -228,21 +228,27 @@ pub struct AgentConfigInputs<'a> {
 // Resolver
 // ---------------------------------------------------------------------------
 
-/// Resolve the model and effort values for one spawn against the selected
-/// harness's capability contract.
+/// Resolve the model, effort, and extra-args values for one spawn against
+/// the selected harness's capability contract.
 ///
 /// Pure (no I/O, no globals) so the resolver is the unit-test seam for both
 /// the cascade and the capability mask. Returns a [`ResolvedAgentConfig`]
-/// every `Some` of which is safe to forward to `build_spawn_command`.
+/// every `Some` of which is safe to forward to `build_spawn_command`. All
+/// three fields are populated atomically — callers must NOT need to
+/// patch up the result post-hoc (issue #1362 code review caught a
+/// previous `resolved.extra_args = resolve_extra_args(...)` mutation
+/// that could be skipped at any other call site).
 ///
 /// Behaviour pinned by `tests::resolver_*` in the `mod tests` block below.
 pub fn resolve_agent_config(
     capabilities: &HarnessCapabilities,
     inputs: AgentConfigInputs<'_>,
+    explicit_extra_args: Option<&str>,
 ) -> ResolvedAgentConfig {
     let model = resolve_field(inputs.model).filter(|_| capabilities.supports_model_override);
     let effort = resolve_effort(inputs.effort, &capabilities.effort_control);
-    ResolvedAgentConfig { model, effort, extra_args: None }
+    let extra_args = resolve_extra_args(capabilities, explicit_extra_args);
+    ResolvedAgentConfig { model, effort, extra_args }
 }
 
 /// Capability-masked extra-args resolver (issue #1358).
@@ -649,7 +655,7 @@ mod tests {
                 application: Some("low"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -675,7 +681,7 @@ mod tests {
                 application: Some("medium"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
@@ -697,7 +703,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(
             resolved.model.is_none(),
             "Terminal doesn't support model overrides; the mask must drop any value"
@@ -724,7 +730,7 @@ mod tests {
                     application: Some("low"),
                 },
             };
-            let resolved = resolve_agent_config(&caps, inputs.clone());
+            let resolved = resolve_agent_config(&caps, inputs.clone(), None);
             assert!(
                 resolved.effort.is_none(),
                 "{} advertises EffortControlKind::None; effort must drop for every layer. \
@@ -749,7 +755,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
             resolved.effort.is_none(),
             "Claude Code rejects values outside the closed vocabulary; got {:?}",
@@ -771,13 +777,13 @@ mod tests {
                 application: None,
             },
         };
-        let codex = resolve_agent_config(&codex_caps(), inputs.clone());
+        let codex = resolve_agent_config(&codex_caps(), inputs.clone(), None);
         assert_eq!(
             codex.effort.as_deref(),
             Some("xhigh"),
             "Codex accepts xhigh via its inline-config vocabulary"
         );
-        let claude = resolve_agent_config(&anthropic_caps(), inputs);
+        let claude = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
             claude.effort.is_none(),
             "Claude's closed vocabulary rejects xhigh"
@@ -807,7 +813,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -831,7 +837,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(resolved.model.is_none());
         assert!(resolved.effort.is_none());
     }
@@ -856,7 +862,7 @@ mod tests {
                 application: Some("\t"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
     }
@@ -879,7 +885,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -907,7 +913,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
     }
@@ -934,7 +940,7 @@ mod tests {
     /// "no overrides" without constructing the struct by hand).
     #[test]
     fn empty_inputs_produce_empty_resolved_config() {
-        let resolved = resolve_agent_config(&anthropic_caps(), AgentConfigInputs::default());
+        let resolved = resolve_agent_config(&anthropic_caps(), AgentConfigInputs::default(), None);
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
     }
@@ -965,7 +971,7 @@ mod tests {
                 application: Some("high"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -999,7 +1005,7 @@ mod tests {
         // but not effort), preserving the original "model passes,
         // effort drops" shape. `opencode` would also work but lacks
         // model override; kimi is the closest match.
-        let resolved = resolve_agent_config(&kimi_caps(), inputs);
+        let resolved = resolve_agent_config(&kimi_caps(), inputs, None);
         assert_eq!(
             resolved.model.as_deref(),
             Some("some-model"),
@@ -1024,7 +1030,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
             resolved.model.is_none(),
             "empty cascade must fall through to native behaviour"
@@ -1052,7 +1058,7 @@ mod tests {
                 application: Some("  high  "),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model, None, "whitespace-only model collapses");
         assert_eq!(
             resolved.effort.as_deref(),
@@ -1075,7 +1081,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
     }
 
@@ -1109,7 +1115,7 @@ mod tests {
                 application: Some("high"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -1138,7 +1144,7 @@ mod tests {
                 application: Some("medium"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -1164,7 +1170,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -1183,7 +1189,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("ad-hoc-model"));
     }
 
@@ -1209,7 +1215,7 @@ mod tests {
                 application: Some("high"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("override-model"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -1233,7 +1239,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(
             resolved.model.is_none(),
             "Terminal doesn't support model overrides; the mask must drop the mesh override layer"
@@ -1266,7 +1272,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }

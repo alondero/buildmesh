@@ -451,6 +451,48 @@ mod tests {
         );
     }
 
+    /// Quote-aware tokenisation (issue #1362 code review): a quoted
+    /// argv element must NOT be split on the embedded whitespace. A
+    /// user-supplied `--append "fix the bug"` keeps the quoted phrase
+    /// as a single argv entry, exactly as the shell would. Without
+    /// the seam, naive `split_whitespace` would chop the value
+    /// silently and the harness would see `--append fix the bug`
+    /// (three argv elements) which has very different semantics on
+    /// most CLIs.
+    #[test]
+    fn extra_args_tokenisation_preserves_quoted_phrases() {
+        let adapter = &crate::agent::provider::adapters::ANTHROPIC as &dyn AgentProvider;
+        let config = ResolvedAgentConfig {
+            extra_args: Some(r#"--append "fix the bug" --verbose"#.to_string()),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        let i = prepared
+            .recipe
+            .base_args
+            .iter()
+            .position(|a| a == "--append")
+            .expect("--append must be tokenised as a separate argv element");
+        assert_eq!(
+            &prepared.recipe.base_args[i + 1],
+            "fix the bug",
+            "quoted phrase must remain a single argv element after shell-style tokenisation"
+        );
+        assert_eq!(
+            &prepared.recipe.base_args[i + 2],
+            "--verbose",
+            "trailing unquoted token must not be glued to the prior quoted phrase"
+        );
+    }
+
     /// Terminal's `supports_extra_args = false` must drop the
     /// `extra_args` value at the capability gate (issue #1358). Without
     /// this pin a future regression that forgot the gate would splice

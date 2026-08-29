@@ -410,13 +410,19 @@ pub trait AgentProvider: Send + Sync {
     /// standing example of a harness that opts out, so its invocation
     /// never gets a synthetic flag splice.
     ///
-    /// Default impl: tokenise on whitespace and emit each token as its
-    /// own argv element. Per-adapter overrides can special-case (e.g.
-    /// Codex may want a `--` separator before raw tokens in a future
-    /// slice) — the seam is wide-open without breaking call sites
-    /// since `#[serde(default)]` defaults carry through.
+    /// Default impl: tokenise with shell-style quoting so that
+    /// `--append "fix the bug"` keeps the quoted phrase as a single
+    /// argv element instead of splitting inside the quotes (a real
+    /// footgun with naive `split_whitespace` — flagged in PR #1362
+    /// code review). Backslashes and the canonical POSIX quotes are
+    /// honoured; tokens that don't fit a single shell word are
+    /// rejected with a hard error rather than silently mangled.
+    /// Per-adapter overrides can special-case (e.g. Codex may want a
+    /// `--` separator before raw tokens in a future slice) — the
+    /// seam is wide-open without breaking call sites.
     fn extra_args_args(&self, raw: &str) -> Vec<String> {
-        raw.split_whitespace().map(String::from).collect()
+        shell_words::split(raw)
+            .unwrap_or_else(|e| panic!("invalid extra_args shell-syntax at spawn site ({e}): {raw:?}"))
     }
 
     /// Args appended when the parent mesh has its `sandbox` toggle on.

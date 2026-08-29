@@ -2,28 +2,57 @@
  * Hardcoded mirror of the Rust per-harness capability contract for the
  * Inspector's provider/model/effort/extra-args controls (issue #1358).
  *
- * The authoritative source of truth is `src-tauri/src/agent/capabilities.rs`
- * (the `inventory_matches_research_matrix` test pins it). The Inspector
- * reads from this static table because the Spawn Menu already gates by
- * `ProviderInfo.capabilities` for its own controls — we'd rather not add
- * a new Tauri command just to render a circuit author form.
+ * **Provenance.** The authoritative source of truth is
+ * `src-tauri/src/agent/capabilities.rs::BUILTIN_HARNESS_IDS` (and
+ * the `inventory_matches_research_matrix` unit test that pins every
+ * adapter's `HarnessCapabilities`). The Inspector reads from this
+ * static table because the Spawn Menu already gates by
+ * `ProviderInfo.capabilities` for its own controls — we'd rather not
+ * add a new Tauri command just to render a circuit author form.
  *
- * Drift gate: `tests/unit/circuits-inspector-capabilities.test.ts` asserts
- * every adapter id is present and the booleans / vocabulary match the
- * Rust inventory. Both suites run in `scripts/check.ps1 all`, so a
- * unilateral inventory change in either source trips the other.
+ * **Drift gate.** `tests/unit/circuits-inspector-capabilities.test.ts`
+ * asserts TWO properties that, together, prevent the previous
+ * "placebo drift gate" flagged in PR #1362 code review:
+ *   1. Every adapter id in `BUILTIN_HARNESS_IDS` is present (otherwise
+ *      a circuit author who picks an unsupported id silently gets the
+ *      mesh-default UI).
+ *   2. Every present adapter's boolean fields match the canonical
+ *      Rust inventory.
+ * CI runs both Rust unit tests (`scripts/check.ps1 rust`) and Vitest
+ * (`scripts/check.ps1 unit`) in the same pipeline, so a unilateral
+ * change in either source trips the other.
+ *
+ * Issue #1362 review note: when a future slice grows
+ * `Provider::adapter()`'s surface (e.g. one of these 10 harnesses
+ * changes its capability boolean), both this file AND the Rust
+ * inventory must update in lockstep — the test fails closed.
  */
 
 import type { EffortControlKind } from '../../types/generated/EffortControlKind';
 import type { HarnessCapabilities } from '../../types/generated/HarnessCapabilities';
 
-/** The harness ids the Inspector offers in its provider dropdown. */
+/**
+ * The harness ids the Inspector offers in its provider dropdown.
+ *
+ * Source of truth: `src-tauri/src/agent/provider/mod.rs::BUILTIN_HARNESS_IDS`
+ * — adding a new harness there requires:
+ *   1. A new `InspectorHarnessId` variant here
+ *   2. A new entry in `HARNESS_CAPABILITIES`
+ *   3. A new entry in `HARNESS_LABEL`
+ *   4. The drift-gate test (`inspector-providers-coverage`) updated
+ *      to include the new id.
+ */
 export type InspectorHarnessId =
   | 'anthropic'
   | 'codex'
   | 'agy'
   | 'opencode'
-  | 'grok';
+  | 'grok'
+  | 'cursor'
+  | 'kimi'
+  | 'mcode'
+  | 'dsh'
+  | 'terminal';
 
 const ANTHROPIC_CAPS: HarnessCapabilities = {
   harness_id: 'anthropic',
@@ -113,6 +142,87 @@ const GROK_CAPS: HarnessCapabilities = {
   available_on: ['windows', 'macos', 'linux'],
 };
 
+// Cursor — model yes, effort no, prefill yes (issue #1143)
+const CURSOR_CAPS: HarnessCapabilities = {
+  harness_id: 'cursor',
+  supports_resume: true,
+  auto_resume_on_startup: true,
+  requires_attention_hook: false,
+  produces_readable_transcript: true,
+  supports_model_override: true,
+  supports_effort_override: false,
+  supports_extra_args: true,
+  supports_prefill: true,
+  is_plain_terminal: false,
+  effort_control: { kind: 'none' },
+  available_on: ['windows', 'macos', 'linux'],
+};
+
+// Kimi — interactive TUI like Grok/Anthropic, model yes, no effort, no prefill
+const KIMI_CAPS: HarnessCapabilities = {
+  harness_id: 'kimi',
+  supports_resume: true,
+  auto_resume_on_startup: true,
+  requires_attention_hook: false,
+  produces_readable_transcript: false,
+  supports_model_override: true,
+  supports_effort_override: false,
+  supports_extra_args: true,
+  supports_prefill: false,
+  is_plain_terminal: false,
+  effort_control: { kind: 'none' },
+  available_on: ['windows', 'macos', 'linux'],
+};
+
+// mcode — interactive TUI; model OFF (issue #1179), effort OFF, prefill yes
+const MCODE_CAPS: HarnessCapabilities = {
+  harness_id: 'mcode',
+  supports_resume: true,
+  auto_resume_on_startup: true,
+  requires_attention_hook: false,
+  produces_readable_transcript: false,
+  supports_model_override: false,
+  supports_effort_override: false,
+  supports_extra_args: true,
+  supports_prefill: true,
+  is_plain_terminal: false,
+  effort_control: { kind: 'none' },
+  available_on: ['windows', 'macos', 'linux'],
+};
+
+// dsh (DeepSeek Harness) — model yes, no effort, no prefill
+const DSH_CAPS: HarnessCapabilities = {
+  harness_id: 'dsh',
+  supports_resume: true,
+  auto_resume_on_startup: true,
+  requires_attention_hook: false,
+  produces_readable_transcript: false,
+  supports_model_override: true,
+  supports_effort_override: false,
+  supports_extra_args: true,
+  supports_prefill: false,
+  is_plain_terminal: false,
+  effort_control: { kind: 'none' },
+  available_on: ['windows', 'macos', 'linux'],
+};
+
+// Terminal — the plain-shell harness; every override OFF (issue #1358
+// declared `supports_extra_args: false` so the resolver drops it)
+const TERMINAL_CAPS: HarnessCapabilities = {
+  harness_id: 'terminal',
+  supports_resume: false,
+  auto_resume_on_startup: false,
+  requires_attention_hook: false,
+  produces_readable_transcript: false,
+  supports_model_override: false,
+  supports_effort_override: false,
+  supports_extra_args: false,
+  supports_prefill: false,
+  is_plain_terminal: true,
+  effort_control: { kind: 'none' },
+  available_on: ['windows', 'macos', 'linux'],
+};
+
 /**
  * The harness-to-capability map. Mirrors the Rust inventory table
  * exactly — see `tests/unit/circuits-inspector-capabilities.test.ts`
@@ -124,6 +234,11 @@ export const HARNESS_CAPABILITIES: Record<InspectorHarnessId, HarnessCapabilitie
   agy: AGY_CAPS,
   opencode: OPENCODE_CAPS,
   grok: GROK_CAPS,
+  cursor: CURSOR_CAPS,
+  kimi: KIMI_CAPS,
+  mcode: MCODE_CAPS,
+  dsh: DSH_CAPS,
+  terminal: TERMINAL_CAPS,
 };
 
 /**
@@ -139,6 +254,11 @@ export const HARNESS_LABEL: Record<InspectorHarnessId, string> = {
   agy: 'Antigravity',
   opencode: 'OpenCode',
   grok: 'Grok Code',
+  cursor: 'Cursor',
+  kimi: 'Kimi Code',
+  mcode: 'MiniMax Code',
+  dsh: 'DeepSeek Harness',
+  terminal: 'Terminal',
 };
 
 /**
@@ -151,7 +271,14 @@ export function getCapabilitiesFor(
   harnessId: string | null | undefined,
 ): HarnessCapabilities | null {
   if (!harnessId) return null;
-  return HARNESS_CAPABILITIES[harnessId as InspectorHarnessId] ?? null;
+  // Defensive: rather than `as InspectorHarnessId` cast, look up
+  // via `HARNESS_CAPABILITIES` whose keying is exhaustive — unknown
+  // ids (legacy IDs, mistypes, future harness not yet wired) get the
+  // same `null` shape as "no provider selected".
+  if (harnessId in HARNESS_CAPABILITIES) {
+    return HARNESS_CAPABILITIES[harnessId as InspectorHarnessId];
+  }
+  return null;
 }
 
 /**
@@ -159,9 +286,7 @@ export function getCapabilitiesFor(
  * Inspector's `<select>` children. Returns `[]` for harnesses with no
  * effort control so the dropdown renders the empty state.
  */
-export function effortAllowedFor(
-  caps: HarnessCapabilities,
-): string[] {
+export function effortAllowedFor(caps: HarnessCapabilities): string[] {
   const ctl = caps.effort_control;
   if (ctl.kind === 'none') return [];
   return ctl.allowed;

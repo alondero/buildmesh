@@ -1490,7 +1490,11 @@ pub(crate) fn resolve_spawn_config(
     mesh_override: Option<&crate::preferences::HarnessConfigValue>,
 ) -> crate::agent::capabilities::ResolvedAgentConfig {
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
-    let mut resolved = crate::agent::capabilities::resolve_agent_config(
+    // Issue #1358: all three cascaded fields (model / effort /
+    // extra-args) flow into one resolver call so `ResolvedAgentConfig`
+    // is constructed atomically (issue #1362 code review). The extra-args
+    // mask lives inside `resolve_agent_config` next to the others.
+    crate::agent::capabilities::resolve_agent_config(
         &capabilities,
         cascade_inputs_for(
             explicit_model,
@@ -1500,13 +1504,8 @@ pub(crate) fn resolve_spawn_config(
             app_default,
             mesh_override,
         ),
-    );
-    // Issue #1358: capability-mask the `extra_args` slot
-    // separately so the cascade never grows a new layer for it
-    // (no mesh / app layer carries per-spawn flags).
-    resolved.extra_args =
-        crate::agent::capabilities::resolve_extra_args(&capabilities, explicit_extra_args);
-    resolved
+        explicit_extra_args,
+    )
 }
 
 /// Transitional implementation retained while transport callers migrate to
@@ -2790,7 +2789,7 @@ mod tests {
             Some(&app_default),
             None,
         );
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(
             resolved.model.as_deref(),
             Some("sonnet-4"),
@@ -2826,7 +2825,7 @@ mod tests {
             Some(&app_default),
             None,
         );
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         // Explicit collapsed → mesh wins over application.
         assert_eq!(resolved.model.as_deref(), Some("haiku-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
@@ -2850,7 +2849,7 @@ mod tests {
             None,
             None,
         );
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
@@ -2878,7 +2877,7 @@ mod tests {
             Some(&app_default),
             Some(&mesh_override),
         );
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
@@ -2901,11 +2900,12 @@ mod tests {
             Some(&mesh_override),
         );
 
-        let resolved = resolve_agent_config(
+        let resolved = crate::agent::capabilities::resolve_agent_config(
             &crate::agent::capabilities::capabilities_for(
                 &crate::agent::provider::adapters::OPENCODE,
             ),
             inputs,
+            None,
         );
         // OpenCode accepts `--model provider/model` and has no effort
         // control. The mesh override model must pass; effort must drop.

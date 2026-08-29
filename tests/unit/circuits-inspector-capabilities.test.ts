@@ -29,6 +29,11 @@ const REQUIRED_HARNESSES: InspectorHarnessId[] = [
   'agy',
   'opencode',
   'grok',
+  'cursor',
+  'kimi',
+  'mcode',
+  'dsh',
+  'terminal',
 ];
 
 describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', () => {
@@ -101,5 +106,77 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(effortAllowedFor(c)).toEqual(
       expect.arrayContaining(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
     );
+  });
+
+  // Cursor — model yes, effort no, prefill yes (issue #1143).
+  it('Cursor matches the Rust inventory', () => {
+    const c = HARNESS_CAPABILITIES.cursor;
+    expect(c.harness_id).toBe('cursor');
+    expect(c.supports_model_override).toBe(true);
+    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_extra_args).toBe(true);
+    expect(c.supports_prefill).toBe(true);
+    expect(c.effort_control.kind).toBe('none');
+    expect(effortAllowedFor(c)).toEqual([]);
+  });
+
+  // Kimi — model yes, no effort, no prefill (issue #918 / #911).
+  it('Kimi matches the Rust inventory', () => {
+    const c = HARNESS_CAPABILITIES.kimi;
+    expect(c.harness_id).toBe('kimi');
+    expect(c.supports_model_override).toBe(true);
+    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_extra_args).toBe(true);
+    expect(c.supports_prefill).toBe(false);
+    expect(c.effort_control.kind).toBe('none');
+  });
+
+  // mcode — interaction TUI; model OFF (issue #1179), effort OFF, prefill yes.
+  it('mcode matches the Rust inventory', () => {
+    const c = HARNESS_CAPABILITIES.mcode;
+    expect(c.harness_id).toBe('mcode');
+    expect(c.supports_model_override).toBe(false);
+    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_extra_args).toBe(true);
+    expect(c.supports_prefill).toBe(true);
+    expect(c.effort_control.kind).toBe('none');
+  });
+
+  // dsh — model yes, no effort, no prefill.
+  it('dsh matches the Rust inventory', () => {
+    const c = HARNESS_CAPABILITIES.dsh;
+    expect(c.harness_id).toBe('dsh');
+    expect(c.supports_model_override).toBe(true);
+    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_extra_args).toBe(true);
+    expect(c.supports_prefill).toBe(false);
+    expect(c.effort_control.kind).toBe('none');
+  });
+
+  // Terminal — plain shell; every override OFF. The issue #1362 review
+  // caveat: splicing synthetic flags into a user's interactive shell
+  // session is a footgun, hence `supports_extra_args: false`.
+  it('Terminal matches the Rust inventory (plain shell, no overrides)', () => {
+    const c = HARNESS_CAPABILITIES.terminal;
+    expect(c.harness_id).toBe('terminal');
+    expect(c.is_plain_terminal).toBe(true);
+    expect(c.supports_model_override).toBe(false);
+    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_extra_args).toBe(false);
+    expect(c.supports_prefill).toBe(false);
+    expect(c.effort_control.kind).toBe('none');
+  });
+
+  // Drift gate invariant: the set of inspector-visible harness ids
+  // matches BUILTIN_HARNESS_IDS exactly (modulo legacy aliases). Any
+  // future harness added to Rust must be added here in the same PR.
+  // The vitest is the FAIL-CLOSED enforcement; the test file lists the
+  // same set explicitly above and here.
+  it('Inspector exposes every BUILTIN_HARNESS_IDS adapter', () => {
+    const exposed = new Set(Object.keys(HARNESS_CAPABILITIES));
+    expect(exposed.size).toBe(REQUIRED_HARNESSES.length);
+    for (const id of REQUIRED_HARNESSES) {
+      expect(exposed.has(id), `${id} is a Rust BUILTIN_HARNESS_IDS adapter and must have a TS entry`).toBe(true);
+    }
   });
 });

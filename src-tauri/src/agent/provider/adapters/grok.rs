@@ -613,7 +613,7 @@ mod tests {
                 ..FieldInputs::default()
             },
         };
-        let resolved = resolve_agent_config(&caps, inputs);
+        let resolved = resolve_agent_config(&caps, inputs, None);
         assert_eq!(resolved.effort.as_deref(), Some("xhigh"));
 
         // End-to-end: the prepared recipe carries --effort xhigh.
@@ -643,7 +643,7 @@ mod tests {
                 ..FieldInputs::default()
             },
         };
-        let resolved = resolve_agent_config(&caps, inputs);
+        let resolved = resolve_agent_config(&caps, inputs, None);
         assert!(
             resolved.effort.is_none(),
             "out-of-vocabulary effort must be dropped at the resolver; got {:?}",

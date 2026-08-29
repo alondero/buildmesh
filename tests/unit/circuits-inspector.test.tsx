@@ -194,4 +194,51 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(payload).toContain('"effort": "xhigh"');
     expect(payload).toContain('"extra_args": "--no-confirm"');
   });
+
+  // Issue #1362 review fix: switching provider must NOT leave
+  // dangling model/effort/extra_args fields from the previous
+  // harness in the AST. The Inspector clears them on the next emit
+  // so the serialised circuit JSON never contains values the new
+  // harness can't honour.
+  it('clears model/effort/extra_args on provider switch', () => {
+    const onChange = vi.fn();
+    // Codex row with Anthropic-incompatible overrides set.
+    renderNode(
+      spawnNode({
+        provider: 'codex',
+        model: 'gpt-5',
+        effort: 'xhigh',
+        extra_args: '--no-confirm',
+      }),
+      onChange,
+    );
+    // User switches to Anthropic via the dropdown.
+    const select = screen.getByTestId('inspector-provider-select');
+    fireEvent.change(select, { target: { value: 'anthropic' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toBeDefined();
+    // Provider is now Anthropic, but every prior harness-specific
+    // override is cleared so a stale value can't sneak through the
+    // capability mask at spawn time.
+    expect((lastCall as { provider: string }).provider).toBe('anthropic');
+    expect((lastCall as { model: string | null }).model).toBeNull();
+    expect((lastCall as { effort: string | null }).effort).toBeNull();
+    expect((lastCall as { extra_args: string | null }).extra_args).toBeNull();
+  });
+
+  it('clears overrides when switching back to Default (mesh autopilot)', () => {
+    const onChange = vi.fn();
+    renderNode(
+      spawnNode({
+        provider: 'opencode',
+        model: 'anthropic/claude-sonnet-4-5',
+      }),
+      onChange,
+    );
+    const select = screen.getByTestId('inspector-provider-select');
+    fireEvent.change(select, { target: { value: '' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect((lastCall as { provider: string | null }).provider).toBeNull();
+    expect((lastCall as { model: string | null }).model).toBeNull();
+  });
 });
