@@ -325,6 +325,41 @@ export const MUSTACHE_PATHS: readonly string[] = [
   'retry.max_retries',
 ];
 
+/** Display labels + order for the namespace chips that group the
+ *  autocomplete popup and the inspector's context reference. Order is
+ *  the render order top-to-bottom inside the popup / drawer — circuit
+ *  identity first (always-live), then triggers / actions, then gates. */
+export interface MustacheGroupSpec {
+  /** Top-level key this group covers (the substring before the first `.`). */
+  namespace: string;
+  /** Header label rendered above the chips. */
+  label: string;
+  /** Stable description shown in the inspector reference drawer. */
+  description: string;
+}
+
+export const MUSTACHE_GROUPS: readonly MustacheGroupSpec[] = [
+  { namespace: 'circuit', label: 'Circuit Metadata', description: 'Identity of this circuit and the current run.' },
+  { namespace: 'node', label: 'Current Node', description: 'Identifier of the node whose template is being resolved.' },
+  { namespace: 'issue', label: 'Issue Context', description: 'GitHub issue that fired the trigger (issue-label runs).' },
+  { namespace: 'pr', label: 'Pull Request', description: 'PR payload — populated when a github_action opens or a PR-label trigger fires.' },
+  { namespace: 'verification', label: 'Verification', description: 'Last verification gate outcome (Green/Red) and command.' },
+  { namespace: 'retry', label: 'Retries', description: 'Current retry attempt and the configured cap.' },
+  { namespace: 'spawn_output', label: 'Node Outputs', description: 'Terminal output of upstream agent nodes (one chip per reachable spawn).' },
+];
+
+/** Which canonical namespace a path belongs to. `spawn_output` is
+ *  virtual — there is no top-level `spawn_output` namespace in the
+ *  context map; the chip text itself encodes the node id
+ *  (`node.<id>.output`). The two `isReachable` implementations
+ *  (textarea autocomplete + inspector drawer) must use the same
+ *  prefix key here so they cannot disagree on which paths are live. */
+export function groupForPath(path: string): string {
+  const prefix = path.split('.', 1)[0];
+  if (prefix === 'node' && path.endsWith('.output')) return 'spawn_output';
+  return prefix;
+}
+
 /**
  * Insert `{{ path }}` at a caret sitting just after typed `{{` (the
  * autocomplete trigger). Returns the new text and caret position.
@@ -341,6 +376,234 @@ export function insertMustache(
     text: `${before.slice(0, Math.max(openStart, 0))}${insertion}${text.slice(caret)}`,
     caret: Math.max(openStart, 0) + insertion.length,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Upstream reachability (issue #1359).
+//
+// A pure, graph-only view of "what template variables does this node
+// actually have by the time it executes?". The stepper populates the
+// runtime `CircuitContext` from the upstream nodes it walks through, so
+// reachability is equivalent to "is there a producer upstream?":
+//
+//   - `issue.*`     ← an issue-label trigger upstream
+//   - `pr.*`        ← a PR-label trigger upstream OR an `open_pr` action
+//   - `node.<id>.*` ← every upstream `spawn_agent_node` (terminal output
+//                     / status write; the worker commits these to the
+//                     context after the agent yields or finishes)
+//   - `verification.*` ← an upstream `deterministic_verification` gate
+//   - `retry.*`     ← an upstream `retry_limit` gate
+//
+// `circuit.*` and `node.id` are always available — the trigger wrapper
+// sets them at run creation, and `with_node` is called per step.
+// ---------------------------------------------------------------------------
+
+/** Per-kind booleans so callers can render a stable schema without
+ *  leaking the BFS internals. `nodeOutputIds` lists the upstream
+ *  spawn-agent node ids (one chip per id in the autocomplete / drawer). */
+export interface ReachableContext {
+  triggers: {
+    manual: boolean;
+    interval: boolean;
+    issue: boolean;
+    pullRequest: boolean;
+  };
+  pullRequest: boolean;
+  nodeOutputIds: string[];
+  gates: {
+    verification: boolean;
+    retry: boolean;
+    llmClassifier: boolean;
+    collaborator: boolean;
+  };
+  metadata: boolean;
+}
+
+const EMPTY_REACHABLE: ReachableContext = {
+  triggers: { manual: false, interval: false, issue: false, pullRequest: false },
+  pullRequest: false,
+  nodeOutputIds: [],
+  gates: { verification: false, retry: false, llmClassifier: false, collaborator: false },
+  metadata: false,
+};
+
+/** Index edges by `to` so the BFS step is O(1) per node. Done once per
+ *  call — graphs are tiny, so allocating a fresh index is cheaper than
+ *  caching. */
+function incomingByTarget(
+  edges: ReadonlyArray<Pick<CircuitEdge, 'from' | 'to'>>
+): Map<string, string[]> {
+  const m = new Map<string, string[]>();
+  for (const e of edges) {
+    const list = m.get(e.to);
+    if (list === undefined) m.set(e.to, [e.from]);
+    else list.push(e.from);
+  }
+  return m;
+}
+
+function indexNodesById(
+  nodes: ReadonlyArray<CircuitNode>
+): Map<string, CircuitNode> {
+  const m = new Map<string, CircuitNode>();
+  for (const n of nodes) m.set(n.id, n);
+  return m;
+}
+
+/**
+ * Walk edges backwards from `nodeId` and report which context
+ * namespaces a producer upstream is capable of populating. Pure —
+ * operates on the AST, never on run-time state.
+ *
+ * Termination: the visited set keeps BFS finite on cycles (bounded or
+ * not); the slice-1 validator rejects unbounded loops so any cycle the
+ * editor loads has at least one bounded gate.
+ *
+ * Returns an all-false `ReachableContext` when `nodeId` is unknown or
+ * the graph is empty — that keeps the call site branch-free.
+ */
+export function getReachableContext(
+  nodeId: string,
+  graph: Pick<CircuitGraph, 'nodes' | 'edges'>
+): ReachableContext {
+  const byId = indexNodesById(graph.nodes);
+  if (!byId.has(nodeId)) return EMPTY_REACHABLE;
+
+  const incoming = incomingByTarget(graph.edges);
+  const reachable: ReachableContext = {
+    triggers: { manual: false, interval: false, issue: false, pullRequest: false },
+    pullRequest: false,
+    nodeOutputIds: [],
+    gates: { verification: false, retry: false, llmClassifier: false, collaborator: false },
+    metadata: true, // circuit.* + node.id are always populated by the trigger wrapper
+  };
+  // Dedupe spawn outputs by id so a diamond that re-merges onto the
+  // same spawn doesn't double-list its output chip.
+  const spawnOutputs = new Set<string>();
+
+  const queue: string[] = [nodeId];
+  const visited = new Set<string>();
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const node = byId.get(id);
+    if (node === undefined) continue;
+    switch (node.type.type) {
+      case 'manual':
+        reachable.triggers.manual = true;
+        break;
+      case 'interval':
+        reachable.triggers.interval = true;
+        break;
+      case 'github_issue_label':
+        reachable.triggers.issue = true;
+        break;
+      case 'github_pull_request_label':
+        reachable.triggers.pullRequest = true;
+        reachable.pullRequest = true;
+        break;
+      case 'github_action':
+        // `open_pr` is the only GitHub action that mutates the context
+        // (issue #1357 slice 2). Any other action still consumes
+        // existing context but contributes nothing new upstream.
+        if (node.type.action === 'open_pr') reachable.pullRequest = true;
+        break;
+      case 'spawn_agent_node':
+        spawnOutputs.add(id);
+        break;
+      case 'deterministic_verification':
+        reachable.gates.verification = true;
+        break;
+      case 'retry_limit':
+        reachable.gates.retry = true;
+        break;
+      case 'llm_turn_classifier':
+        reachable.gates.llmClassifier = true;
+        break;
+      case 'collaborator_check':
+        reachable.gates.collaborator = true;
+        break;
+      default:
+        // inject_pty / notify / set_node_status / joins contribute
+        // no new namespaces — they're consumers, not producers.
+        break;
+    }
+    for (const upstreamId of incoming.get(id) ?? []) {
+      if (!visited.has(upstreamId)) queue.push(upstreamId);
+    }
+  }
+
+  reachable.nodeOutputIds = [...spawnOutputs].sort();
+  return reachable;
+}
+
+/** Upstream spawn-agent ids for a node. A pure shortcut for the
+ *  InspectorPanel's `target_node_id` picker on InjectPty / SetNodeStatus
+ *  — both effects target an agent, so the picker is just this list.
+ *  Sorted by id for stable dropdown ordering. */
+export function upstreamSpawnTargets(
+  nodeId: string,
+  graph: Pick<CircuitGraph, 'nodes' | 'edges'>
+): string[] {
+  return getReachableContext(nodeId, graph).nodeOutputIds;
+}
+
+/** A static example value rendered in the inspector reference drawer so
+ *  the user can see the *shape* of the resolved string. The runtime
+ *  `CircuitContext` resolves to a real value at execution time; this is
+ *  purely an authoring hint. */
+export function sampleValueForPath(path: string): string {
+  switch (path) {
+    case 'circuit.id':
+      return '7';
+    case 'circuit.name':
+      return 'nightly-sweep';
+    case 'circuit.mesh_id':
+      return '42';
+    case 'circuit.run_id':
+      return '173';
+    case 'node.id':
+      return 'spawn_1';
+    case 'issue.number':
+      return '1208';
+    case 'issue.title':
+      return 'React to the world';
+    case 'issue.body':
+      return 'the body of the issue';
+    case 'issue.author':
+      return 'octocat';
+    case 'issue.url':
+      return 'https://github.com/alondero/buildmesh/issues/1208';
+    case 'issue.labels':
+      return 'bug, ready-for-agent';
+    case 'pr.number':
+      return '1213';
+    case 'pr.title':
+      return 'walking skeleton';
+    case 'pr.body':
+      return 'PR description';
+    case 'pr.author':
+      return 'octocat';
+    case 'pr.url':
+      return 'https://github.com/alondero/buildmesh/pull/1213';
+    case 'pr.head_ref':
+      return 'feat/circuits';
+    case 'pr.labels':
+      return 'buildmesh:run';
+    case 'verification.outcome':
+      return 'green';
+    case 'verification.command':
+      return 'cargo test';
+    case 'retry.attempt':
+      return '2';
+    case 'retry.max_retries':
+      return '3';
+    default:
+      // Spawn-output chips (`node.<id>.output`) have no static example;
+      // the drawer renders a contextual "<terminal text>" placeholder.
+      return '<terminal text>';
+  }
 }
 
 // ---------------------------------------------------------------------------

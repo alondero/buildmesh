@@ -313,6 +313,127 @@ describe('CircuitFlowEditor', () => {
     );
   });
 
+  it('groups mustache suggestions by namespace when reachability is available', async () => {
+    renderEditor();
+
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt = await screen.findByTestId('inspector-prompt');
+    // Mirror the original `offers {{ mustache chips` test's typing
+    // pattern: a multi-char prefix followed by `{{` opens the menu
+    // deterministically (the trailing space is part of the inserted
+    // template format and keeps the popup open across keystrokes).
+    await userEvent.setup().type(prompt, 'Fix {{{{ ');
+
+    const menu = await screen.findByTestId('mustache-menu');
+    // Group headers render for every namespace that has chips.
+    for (const group of ['circuit', 'node', 'issue', 'pr', 'verification', 'retry']) {
+      expect(menu.querySelector(`[data-testid="mustache-group-${group}"]`)).not.toBeNull();
+    }
+    // Spawn output chips appear for every spawn upstream of the
+    // selected node (the spawn node itself in this linear graph).
+    expect(menu.querySelector('[data-testid="mustache-chip-node.spawn.output"]')).not.toBeNull();
+  });
+
+  it('marks unreachable mustache chips with an "empty" badge', async () => {
+    renderEditor();
+
+    // The spawn node in the fixture has no issue-label trigger upstream
+    // (the trigger is `manual`), so `issue.*` chips must dim.
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt = await screen.findByTestId('inspector-prompt');
+    await userEvent.setup().type(prompt, 'Fix {{{{ ');
+
+    const menu = await screen.findByTestId('mustache-menu');
+    // circuit.* and node.id are always live (trigger wrapper / with_node).
+    expect(menu.querySelector('[data-testid="mustache-chip-issue.number"][data-reachable="true"]')).toBeNull();
+    expect(menu.querySelector('[data-testid="mustache-chip-issue.number"][data-reachable="false"]')).not.toBeNull();
+    expect(menu.querySelector('[data-testid="mustache-chip-issue.number-unreachable"]')).not.toBeNull();
+    // `circuit.name` is always reachable.
+    expect(menu.querySelector('[data-testid="mustache-chip-circuit.name"][data-reachable="true"]')).not.toBeNull();
+    // `node.spawn.output` is reachable because the spawn is upstream.
+    expect(menu.querySelector('[data-testid="mustache-chip-node.spawn.output"][data-reachable="true"]')).not.toBeNull();
+  });
+
+  it('renders the inspector context reference drawer with reachable/empty markers', async () => {
+    renderEditor();
+
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const drawer = await screen.findByTestId('inspector-context-reference');
+    // `node.spawn.output` is reachable (the spawn is itself upstream
+    // of itself), `circuit.name` is always reachable, and `issue.*`
+    // is empty (the trigger is `manual`, not an issue-label trigger).
+    expect(drawer.querySelector('[data-testid="context-reference-issue.number"]')!.getAttribute('data-reachable')).toBe('false');
+    expect(drawer.querySelector('[data-testid="context-reference-circuit.name"]')!.getAttribute('data-reachable')).toBe('true');
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn.output"]')!.getAttribute('data-reachable')).toBe('true');
+    // Group headers render under the spec ordering.
+    expect(drawer.querySelector('[data-testid="context-group-issue"]')).not.toBeNull();
+    expect(drawer.querySelector('[data-testid="context-group-circuit"]')).not.toBeNull();
+  });
+
+  it('offers an upstream spawn target picker on InjectPty and SetNodeStatus', async () => {
+    const GRAPH_WITH_TARGETS = JSON.stringify({
+      version: 1,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        {
+          id: 'spawn_1',
+          type: {
+            type: 'spawn_agent_node',
+            prompt: 'first',
+            name: null,
+          },
+        },
+        {
+          id: 'spawn_2',
+          type: {
+            type: 'spawn_agent_node',
+            prompt: 'second',
+            name: null,
+          },
+        },
+        { id: 'inject', type: { type: 'inject_pty', prompt: 'go' } },
+        { id: 'status', type: { type: 'set_node_status', status: 'running' } },
+      ],
+      edges: [
+        { from: 'trigger', to: 'spawn_1', condition: 'always' },
+        { from: 'spawn_1', to: 'spawn_2', condition: 'always' },
+        { from: 'spawn_2', to: 'inject', condition: 'always' },
+        { from: 'inject', to: 'status', condition: 'always' },
+      ],
+    });
+    render(
+      <CircuitFlowEditor
+        circuit={{ ...CIRCUIT, graph_json: GRAPH_WITH_TARGETS }}
+        runs={[]}
+        onClose={() => {}}
+      />
+    );
+
+    fireEvent.click(await screen.findByTestId('circuit-node-inject'));
+    const injectSelect = await screen.findByTestId('inspector-target-node') as HTMLSelectElement;
+    const injectOptions = Array.from(injectSelect.options).map((o) => o.value);
+    // Both spawns are upstream of `inject` — sorted by id.
+    expect(injectOptions).toEqual(expect.arrayContaining(['', 'spawn_1', 'spawn_2']));
+    // Picking spawn_2 commits the target.
+    fireEvent.change(injectSelect, { target: { value: 'spawn_2' } });
+    fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => {
+      const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === 'update_circuit_graph');
+      const graph = JSON.parse((call?.[1] as Record<string, unknown>).graphJson as string);
+      const inject = graph.nodes.find((n: { id: string }) => n.id === 'inject');
+      expect(inject.type.target_node_id).toBe('spawn_2');
+    });
+
+    // Now the status node — its upstream is inject + spawn_2; the
+    // picker must NOT include `inject` (it's not a spawn) but DOES
+    // include both spawns.
+    fireEvent.click(await screen.findByTestId('circuit-node-status'));
+    const statusSelect = (await screen.findByTestId('inspector-target-node')) as HTMLSelectElement;
+    const statusOptions = Array.from(statusSelect.options).map((o) => o.value);
+    expect(statusOptions).toEqual(expect.arrayContaining(['', 'spawn_1', 'spawn_2']));
+    expect(statusOptions).not.toContain('inject');
+  });
+
   it('lists runs in the history drawer with per-step logs and path highlighting', async () => {
     renderEditor();
 

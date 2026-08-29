@@ -646,6 +646,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
         <InspectorPanel
           node={currentNode}
           onChange={updateSelectedKind}
+          graph={toGraph(nodes, edges)}
         />
         {currentNode !== null && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
