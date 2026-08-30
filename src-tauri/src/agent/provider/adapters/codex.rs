@@ -47,15 +47,17 @@ fn base_flags() -> Vec<String> {
 /// vars are set per-agent by `spawn_environment` and inherited by the hook
 /// process; Codex executes the command string itself (no implicit login
 /// shell), so each platform wraps in the shell that expands its own env-var
-/// syntax.
+/// syntax. A short connect/total timeout keeps a broken local server from
+/// hanging the agent, while `-S` and the non-zero exit status expose curl,
+/// HTTP, and shell failures to Codex.
 fn hook_command(platform: Platform) -> String {
     match platform {
         Platform::Windows => {
-            "cmd.exe /c \"curl -sf -X POST --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID%\""
+            "cmd.exe /c \"curl -fsS --connect-timeout 2 --max-time 10 -X POST --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID%\""
                 .to_string()
         }
         _ => {
-            "sh -c \"curl -sf -X POST --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true\""
+            "sh -c \"curl -fsS --connect-timeout 2 --max-time 10 -X POST --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID\""
                 .to_string()
         }
     }
@@ -1596,11 +1598,15 @@ mod tests {
         assert!(win.starts_with("cmd.exe /c"), "win: {win}");
         assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
         assert!(win.contains("%BUILDMESH_SESSION_ID%"), "win: {win}");
+        assert!(win.contains("--connect-timeout 2 --max-time 10"), "win: {win}");
+        assert!(!win.contains("|| true"), "win: {win}");
         for platform in [Platform::Macos, Platform::Linux] {
             let unix = hook_command(platform);
             assert!(unix.starts_with("sh -c"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
+            assert!(unix.contains("--connect-timeout 2 --max-time 10"), "unix: {unix}");
+            assert!(!unix.contains("|| true"), "unix: {unix}");
         }
     }
 
