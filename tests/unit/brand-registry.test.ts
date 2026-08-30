@@ -49,6 +49,18 @@ describe('brandFor', () => {
     });
   });
 
+  it('registers Command Code with its official brand treatment', () => {
+    const cc = brandFor('commandcode');
+    expect(brandFor('cmdc')).toBe(cc);
+    expect(brandFor('command-code')).toBe(cc);
+    expect(brandFor('claude:commandcode')).toBe(cc);
+    expect(cc).toMatchObject({
+      id: 'commandcode',
+      chipHex: '#8C4EDD',
+      chipClass: 'bg-purple-600',
+    });
+  });
+
   it('returns undefined for an unregistered provider', () => {
     expect(brandFor('claude:custom-account')).toBeUndefined();
     expect(brandFor('mystery')).toBeUndefined();

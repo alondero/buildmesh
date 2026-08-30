@@ -53,6 +53,7 @@ pub const BUILTIN_HARNESS_IDS: &[&str] = &[
     "mcode",
     "dsh",
     "opencode",
+    "commandcode",
     "terminal",
     "anthropic",
 ];

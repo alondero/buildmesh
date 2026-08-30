@@ -198,6 +198,7 @@ describe('colorClassForProvider', () => {
     expect(colorClassForProvider('kimi')).toBe('bg-cyan-500');
     expect(colorClassForProvider('agy')).toBe('bg-emerald-500');
     expect(colorClassForProvider('opencode')).toBe('bg-amber-500');
+    expect(colorClassForProvider('commandcode')).toBe('bg-purple-600');
     expect(colorClassForProvider('terminal')).toBe('bg-gray-500');
   });
 

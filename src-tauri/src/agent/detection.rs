@@ -117,6 +117,16 @@ const DETECTABLE: &[Detectable] = &[
         binaries: &["dsh"],
         config_dirs: &[".dsh", ".deepseek-harness"],
     },
+    Detectable {
+        id: "commandcode",
+        name: "Command Code",
+        harness: "commandcode",
+        #[cfg(windows)]
+        binaries: &["cmdc"],
+        #[cfg(not(windows))]
+        binaries: &["cmd"],
+        config_dirs: &[".commandcode"],
+    },
 ];
 
 /// True if `binary` (plus any of `exts`) exists in one of the `path_dirs`.
@@ -339,6 +349,62 @@ mod tests {
         assert_eq!(profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["dsh"]);
     }
 
+    /// Command Code ships `~/.commandcode/` for config and auth credentials alongside the `cmdc`/`cmd` binary.
+    #[test]
+    fn commandcode_config_dir_alone_counts_as_installed() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.commandcode"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["commandcode"]);
+    }
+
+    /// On Windows, `cmd.exe` in System32 must NOT false-positive Command Code.
+    #[test]
+    #[cfg(windows)]
+    fn windows_cmd_exe_alone_does_not_detect_commandcode() {
+        let path_dirs = dirs(&["C:/Windows/System32"]);
+        let exists = fake_fs(&["C:/Windows/System32/cmd.exe"]);
+        let profiles = detect_profiles(&path_dirs, &["", ".EXE", ".CMD"], None, &exists);
+        assert!(
+            !profiles.iter().any(|p| p.id == "commandcode"),
+            "System32/cmd.exe must NOT detect Command Code on Windows; got {profiles:?}"
+        );
+    }
+
+    /// On Windows, `cmdc.cmd` on PATH must detect Command Code.
+    #[test]
+    #[cfg(windows)]
+    fn windows_cmdc_detects_commandcode() {
+        let path_dirs = dirs(&["C:/Users/me/AppData/Roaming/npm"]);
+        let exists = fake_fs(&["C:/Users/me/AppData/Roaming/npm/cmdc.cmd"]);
+        let profiles = detect_profiles(&path_dirs, &["", ".CMD", ".EXE"], None, &exists);
+        assert!(
+            profiles.iter().any(|p| p.id == "commandcode"),
+            "cmdc.cmd must detect Command Code on Windows; got {profiles:?}"
+        );
+    }
+
+    /// On Unix, `cmd` on PATH must detect Command Code, while `cmdc` alone does not.
+    #[test]
+    #[cfg(not(windows))]
+    fn unix_cmd_detects_commandcode() {
+        let path_dirs = dirs(&["/usr/local/bin"]);
+        let exists = fake_fs(&["/usr/local/bin/cmd"]);
+        let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
+        assert!(
+            profiles.iter().any(|p| p.id == "commandcode"),
+            "cmd on Unix must detect Command Code; got {profiles:?}"
+        );
+
+        let exists_cmdc = fake_fs(&["/usr/local/bin/cmdc"]);
+        let profiles_cmdc = detect_profiles(&path_dirs, &[""], None, &exists_cmdc);
+        assert!(
+            !profiles_cmdc.iter().any(|p| p.id == "commandcode"),
+            "cmdc alone on Unix must NOT detect Command Code; got {profiles_cmdc:?}"
+        );
+    }
+
     /// Antigravity (issue #1287) declares Antigravity-only config dirs
     /// (`.gemini/antigravity-cli/`, `.antigravity/`, `.antigravitycli/`).
     /// A bare `.agy` directory is NOT one of them, so a stray `.agy`
@@ -429,6 +495,8 @@ mod tests {
             "/bin/kimi",
             "/bin/mcode",
             "/bin/dsh",
+            "/bin/cmdc",
+            "/bin/cmd",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -445,6 +513,7 @@ mod tests {
                 "kimi" => assert_eq!(provider, Provider::Kimi),
                 "mcode" => assert_eq!(provider, Provider::Mcode),
                 "dsh" => assert_eq!(provider, Provider::Dsh),
+                "commandcode" => assert_eq!(provider, Provider::CommandCode),
                 other => panic!("unexpected detected id {other}"),
             }
         }
