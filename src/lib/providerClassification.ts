@@ -11,7 +11,7 @@
 // Self-auth first-class rows always appear and cannot be removed (ADR-0025).
 // Kept in sync with `preferences::default_provider_accounts` /
 // `BUILTIN_PROVIDER_ACCOUNTS` (self_auth: true rows).
-export const SELF_AUTH_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'grok', 'opencode'];
+export const SELF_AUTH_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'grok', 'opencode', 'commandcode'];
 
 // Keyed first-class catalog ids — removable once added. Sync with
 // `preferences::keyed_first_class_catalog` / `BUILTIN_PROVIDER_ACCOUNTS`

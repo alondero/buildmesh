@@ -1341,6 +1341,233 @@ pub fn deepseek_usage(api_key: &str) -> ProviderUsage {
     deepseek_usage_with_url(api_key, "https://api.deepseek.com/user/balance")
 }
 
+// Command Code stores its CLI-owned credential in `~/.commandcode/auth.json`.
+// Its billing endpoint exposes both rate-limit windows and the credits pool, so
+// this fetcher returns the two meter kinds from one request.
+fn commandcode_auth_path() -> PathBuf {
+    crate::env::commandcode_dir().join("auth.json")
+}
+
+#[derive(Deserialize, Debug)]
+struct CommandCodeAuth {
+    #[serde(rename = "apiKey")]
+    api_key: Option<String>,
+    #[serde(default)]
+    access_token: Option<String>,
+}
+
+fn read_commandcode_token(path: &Path) -> Result<String, UsageError> {
+    let content = fs::read_to_string(path)
+        .map_err(|_| UsageError::NoCredential(path.to_string_lossy().to_string()))?;
+    let auth: CommandCodeAuth =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
+    auth.api_key
+        .filter(|token| !token.trim().is_empty())
+        .or_else(|| auth.access_token.filter(|token| !token.trim().is_empty()))
+        .map(|token| token.trim().to_string())
+        .ok_or_else(|| UsageError::NoCredential(path.to_string_lossy().to_string()))
+}
+
+#[derive(Deserialize, Debug)]
+struct CommandCodeQuotaWindow {
+    cap: f64,
+    used: f64,
+    #[serde(rename = "resetAt", alias = "reset_at", default)]
+    reset_at: Option<i64>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CommandCodeWindowLimits {
+    #[serde(rename = "fiveHour", alias = "five_hour")]
+    five_hour: CommandCodeQuotaWindow,
+    weekly: CommandCodeQuotaWindow,
+}
+
+#[derive(Deserialize, Debug)]
+struct CommandCodeCredits {
+    #[serde(rename = "monthlyCredits", alias = "monthly_credits")]
+    monthly_credits: f64,
+    #[serde(
+        rename = "purchasedCredits",
+        alias = "purchased_credits",
+        alias = "extraCredits",
+        alias = "extra_credits",
+        default
+    )]
+    purchased_credits: f64,
+    #[serde(rename = "freeCredits", alias = "free_credits", default)]
+    free_credits: f64,
+}
+
+#[derive(Deserialize, Debug)]
+struct CommandCodeNestedCreditsResponse {
+    #[serde(rename = "windowLimits")]
+    window_limits: CommandCodeWindowLimits,
+    credits: CommandCodeCredits,
+}
+
+#[derive(Deserialize, Debug)]
+struct CommandCodeReportedWindow {
+    label: String,
+    #[serde(default, alias = "usedPercent")]
+    used_percent: Option<f64>,
+    #[serde(default, alias = "resetsAt")]
+    resets_at: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CommandCodeReportedCreditsResponse {
+    windows: Vec<CommandCodeReportedWindow>,
+    #[serde(rename = "monthly_credits", alias = "monthlyCredits")]
+    monthly_credits: f64,
+    #[serde(
+        rename = "extra_credits",
+        alias = "extraCredits",
+        alias = "purchasedCredits",
+        alias = "purchased_credits",
+        default
+    )]
+    extra_credits: f64,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum CommandCodeCreditsResponse {
+    Nested(CommandCodeNestedCreditsResponse),
+    Reported(CommandCodeReportedCreditsResponse),
+}
+
+fn commandcode_window(label: &str, window: CommandCodeQuotaWindow) -> Option<UsageWindow> {
+    if !window.cap.is_finite() || !window.used.is_finite() || window.cap <= 0.0 {
+        return None;
+    }
+    let resets_at = window
+        .reset_at
+        .filter(|timestamp| *timestamp > 0)
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|datetime| datetime.to_rfc3339());
+    Some(UsageWindow {
+        label: label.to_string(),
+        used_percent: Some(((window.used / window.cap) * 100.0).clamp(0.0, 100.0)),
+        resets_at,
+    })
+}
+
+fn parse_commandcode_credits_response(
+    body: &str,
+) -> Result<(Vec<UsageWindow>, BillingBalance), UsageError> {
+    let response: CommandCodeCreditsResponse =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+    match response {
+        CommandCodeCreditsResponse::Nested(response) => {
+            let windows = [
+                commandcode_window("5-hour", response.window_limits.five_hour),
+                commandcode_window("Weekly", response.window_limits.weekly),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let credits = response.credits;
+            Ok((
+                windows,
+                BillingBalance {
+                    remaining: credits.monthly_credits
+                        + credits.purchased_credits
+                        + credits.free_credits,
+                    monthly_spend: None,
+                    currency: "USD".to_string(),
+                },
+            ))
+        }
+        CommandCodeCreditsResponse::Reported(response) => Ok((
+            response
+                .windows
+                .into_iter()
+                .map(|window| UsageWindow {
+                    label: window.label,
+                    used_percent: window
+                        .used_percent
+                        .filter(|percent| percent.is_finite())
+                        .map(|percent| percent.clamp(0.0, 100.0)),
+                    resets_at: window.resets_at,
+                })
+                .collect(),
+            BillingBalance {
+                remaining: response.monthly_credits + response.extra_credits,
+                monthly_spend: None,
+                currency: "USD".to_string(),
+            },
+        )),
+    }
+}
+
+/// Public Command Code fetcher. Reads the CLI-managed credential and queries
+/// its billing API directly; spawning the CLI would make a usage refresh wait
+/// on an interactive process startup.
+pub fn commandcode_usage() -> ProviderUsage {
+    commandcode_usage_with_path(
+        &commandcode_auth_path(),
+        "https://api.commandcode.ai/alpha/billing/credits",
+    )
+}
+
+/// Test seam for the CLI-owned credential path and the HTTP endpoint.
+fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> ProviderUsage {
+    let token = match read_commandcode_token(auth_path) {
+        Ok(token) => token,
+        Err(error) => return logged_out("commandcode", error.to_string()),
+    };
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+        Ok(client) => client,
+        Err(error) => return unavailable("commandcode", format!("Client error: {error}")),
+    };
+    let response = match client
+        .get(live_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+    {
+        Ok(response) if response.status().as_u16() == 401 || response.status().as_u16() == 403 => {
+            return logged_out(
+                "commandcode",
+                "Command Code session expired — run 'cmdc login' to log in".to_string(),
+            );
+        }
+        Ok(response) if response.status().as_u16() == 429 => {
+            return unavailable(
+                "commandcode",
+                "Rate limited — usage data temporarily unavailable".to_string(),
+            );
+        }
+        Ok(response) if !response.status().is_success() => {
+            let code = response.status().as_u16();
+            let body = response.text().unwrap_or_default();
+            let detail = if body.trim().is_empty() {
+                "usage endpoint failed"
+            } else {
+                body.trim()
+            };
+            return unavailable("commandcode", format!("API error {code}: {detail}"));
+        }
+        Ok(response) => response,
+        Err(error) => return unavailable("commandcode", format!("Request failed: {error}")),
+    };
+    let body = match response.text() {
+        Ok(body) => body,
+        Err(error) => return unavailable("commandcode", format!("Failed to read response: {error}")),
+    };
+    match parse_commandcode_credits_response(&body) {
+        Ok((windows, balance)) => ProviderUsage {
+            provider: "commandcode".to_string(),
+            logged_in: true,
+            windows,
+            balance: Some(balance),
+            detail: None,
+            error: None,
+        },
+        Err(error) => unavailable("commandcode", format!("Failed to parse response: {error}")),
+    }
+}
+
 /// Test seam: pass an explicit loopback URL so the live-fetcher tests can
 /// stand in a `tiny_http` server for the production endpoint without
 /// hitting the real DeepSeek API. Mirrors the
@@ -5739,5 +5966,237 @@ mod tests {
             .map(|e| e.contains("parse") || e.contains("Shape"))
             .unwrap_or(false));
         assert!(usage.balance.is_none());
+    }
+
+    #[test]
+    fn commandcode_usage_reads_auth_file_and_maps_credit_windows_and_balance() {
+        let auth_dir = tempfile::tempdir().unwrap();
+        let auth_path = auth_dir.path().join("auth.json");
+        fs::write(
+            &auth_path,
+            r#"{"apiKey":"","access_token":"  cmd_live_test \n"}"#,
+        )
+        .unwrap();
+
+        let observed = Arc::new(std::sync::Mutex::new(String::new()));
+        let observed_t = observed.clone();
+        let port = spawn_loopback(1, move |req| {
+            let auth = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            *observed_t.lock().unwrap() = auth;
+            let _ = req.respond(tiny_http::Response::from_string(
+                r#"{"windows":[{"label":"5-hour","used_percent":25,"resets_at":"2026-01-01T00:00:00+00:00"},{"label":"Weekly","used_percent":20,"resets_at":"2026-01-08T00:00:00+00:00"}],"monthly_credits":10,"extra_credits":5}"#,
+            ));
+        });
+
+        let usage = commandcode_usage_with_path(
+            &auth_path,
+            &format!("http://127.0.0.1:{port}/alpha/billing/credits"),
+        );
+
+        assert!(usage.logged_in);
+        assert_eq!(usage.provider, "commandcode");
+        assert_eq!(*observed.lock().unwrap(), "Bearer cmd_live_test");
+        assert_eq!(usage.windows.len(), 2);
+        assert_eq!(usage.windows[0].label, "5-hour");
+        assert_eq!(usage.windows[0].used_percent, Some(25.0));
+        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(usage.windows[1].label, "Weekly");
+        assert_eq!(usage.windows[1].used_percent, Some(20.0));
+        let balance = usage.balance.expect("credits must surface as a balance");
+        assert_eq!(balance.remaining, 15.0);
+        assert_eq!(balance.monthly_spend, None);
+        assert_eq!(balance.currency, "USD");
+    }
+
+    #[test]
+    fn parse_commandcode_nested_response_maps_observed_api_shape() {
+        let body = r#"{
+            "windowLimits": {
+                "fiveHour": {"cap": 20, "used": 5, "resetAt": 1767225600000},
+                "weekly": {"cap": 100, "used": 20, "resetAt": 1767830400000}
+            },
+            "credits": {"monthlyCredits": 10, "purchasedCredits": 3, "freeCredits": 2}
+        }"#;
+
+        let (windows, balance) = parse_commandcode_credits_response(body).unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[0].used_percent, Some(25.0));
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[1].used_percent, Some(20.0));
+        assert_eq!(balance.remaining, 15.0);
+    }
+
+    #[test]
+    fn parse_commandcode_reported_response_accepts_camel_case_aliases() {
+        let body = r#"{
+            "windows": [
+                {"label": "5-hour", "usedPercent": 12.5, "resetsAt": "2026-01-01T00:00:00Z"}
+            ],
+            "monthlyCredits": 8,
+            "extraCredits": 2
+        }"#;
+
+        let (windows, balance) = parse_commandcode_credits_response(body).unwrap();
+        assert_eq!(windows[0].used_percent, Some(12.5));
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(balance.remaining, 10.0);
+    }
+
+    #[test]
+    fn commandcode_window_rejects_invalid_caps_and_bounds_usage() {
+        assert!(commandcode_window(
+            "invalid",
+            CommandCodeQuotaWindow {
+                cap: 0.0,
+                used: 1.0,
+                reset_at: None,
+            },
+        )
+        .is_none());
+        assert!(commandcode_window(
+            "nan-cap",
+            CommandCodeQuotaWindow {
+                cap: f64::NAN,
+                used: 1.0,
+                reset_at: None,
+            },
+        )
+        .is_none());
+        assert!(commandcode_window(
+            "nan-used",
+            CommandCodeQuotaWindow {
+                cap: 1.0,
+                used: f64::NAN,
+                reset_at: None,
+            },
+        )
+        .is_none());
+
+        let capped = commandcode_window(
+            "capped",
+            CommandCodeQuotaWindow {
+                cap: 2.0,
+                used: 3.0,
+                reset_at: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(capped.used_percent, Some(100.0));
+        let floor = commandcode_window(
+            "floor",
+            CommandCodeQuotaWindow {
+                cap: 2.0,
+                used: -1.0,
+                reset_at: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(floor.used_percent, Some(0.0));
+        assert!(floor.resets_at.is_none());
+    }
+
+    #[test]
+    fn commandcode_auth_parser_reports_missing_invalid_and_blank_credentials() {
+        let auth_dir = tempfile::tempdir().unwrap();
+        let missing = auth_dir.path().join("missing.json");
+        assert!(matches!(
+            read_commandcode_token(&missing),
+            Err(UsageError::NoCredential(_))
+        ));
+
+        let auth_path = auth_dir.path().join("auth.json");
+        fs::write(&auth_path, "not-json").unwrap();
+        assert!(matches!(
+            read_commandcode_token(&auth_path),
+            Err(UsageError::Shape(_))
+        ));
+
+        fs::write(
+            &auth_path,
+            r#"{"apiKey":"  ","access_token":"\t"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            read_commandcode_token(&auth_path),
+            Err(UsageError::NoCredential(_))
+        ));
+    }
+
+    #[test]
+    fn commandcode_usage_http_failures_preserve_auth_and_error_states() {
+        let auth_dir = tempfile::tempdir().unwrap();
+        let auth_path = auth_dir.path().join("auth.json");
+        fs::write(&auth_path, r#"{"apiKey":"cmd_live_test"}"#).unwrap();
+
+        let port_401 = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::empty(401));
+        });
+        let usage_401 = commandcode_usage_with_path(
+            &auth_path,
+            &format!("http://127.0.0.1:{port_401}/credits"),
+        );
+        assert!(!usage_401.logged_in);
+        assert!(usage_401
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("session expired") && error.contains("—")));
+
+        let port_403 = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::empty(403));
+        });
+        let usage_403 = commandcode_usage_with_path(
+            &auth_path,
+            &format!("http://127.0.0.1:{port_403}/credits"),
+        );
+        assert!(!usage_403.logged_in);
+        assert_eq!(usage_403.error, usage_401.error);
+
+        let port_429 = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::empty(429));
+        });
+        let usage_429 = commandcode_usage_with_path(
+            &auth_path,
+            &format!("http://127.0.0.1:{port_429}/credits"),
+        );
+        assert!(usage_429.logged_in);
+        assert!(usage_429
+            .error
+            .as_deref()
+            .is_some_and(|error| error == "Rate limited — usage data temporarily unavailable"));
+
+        let port_500 = spawn_loopback(1, |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string("backend unavailable").with_status_code(500),
+            );
+        });
+        let usage_500 = commandcode_usage_with_path(
+            &auth_path,
+            &format!("http://127.0.0.1:{port_500}/credits"),
+        );
+        assert!(usage_500.logged_in);
+        assert_eq!(
+            usage_500.error.as_deref(),
+            Some("API error 500: backend unavailable")
+        );
+
+        let port_malformed = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::from_string("not-json"));
+        });
+        let usage_malformed = commandcode_usage_with_path(
+            &auth_path,
+            &format!("http://127.0.0.1:{port_malformed}/credits"),
+        );
+        assert!(usage_malformed.logged_in);
+        assert!(usage_malformed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Failed to parse response")));
     }
 }

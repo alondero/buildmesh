@@ -1171,6 +1171,9 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     // Model Provider" + "Usage follows the credential, not the pairing".
     BuiltInProviderAccount { id: "kimi",      name: "Moonshot / Kimi",       self_auth: false },
     BuiltInProviderAccount { id: "opencode",  name: "OpenCode",             self_auth: true  },
+    // Command Code owns its `~/.commandcode/auth.json` credential. The same
+    // id names its native Agent Harness in the separate harness namespace.
+    BuiltInProviderAccount { id: "commandcode", name: "Command Code",         self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
     BuiltInProviderAccount { id: "cursor",    name: "Cursor",               self_auth: true  },
@@ -3248,7 +3251,7 @@ mod tests {
     #[test]
     fn default_provider_accounts_are_self_auth_only() {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode", "cursor"]);
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode", "commandcode", "cursor"]);
         for a in default_provider_accounts() {
             assert!(!a.claude_compatible, "{} must be self-auth", a.id);
             assert_eq!(a.billing_mode, BillingMode::Plan);
@@ -3261,7 +3264,7 @@ mod tests {
     fn default_provider_accounts_cover_the_builtin_providers() {
         // Retained name; ADR-0025 defaults are self-auth only.
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode", "cursor"]);
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "opencode", "commandcode", "cursor"]);
         let catalog_ids: Vec<_> = keyed_first_class_catalog().into_iter().map(|a| a.id).collect();
         // `openai` joins the keyed catalog in issue #1109 / ADR-0026 — its
         // /v1/organization/costs fetcher is admin-scoped, so the row is
@@ -3302,7 +3305,7 @@ mod tests {
     #[test]
     fn merge_provider_accounts_override_by_id_and_append() {
         let defaults = default_provider_accounts();
-        assert_eq!(defaults.len(), 6);
+        assert_eq!(defaults.len(), 7);
         let stored = vec![
             ProviderAccount {
                 id: "minimax".to_string(),
@@ -3318,14 +3321,14 @@ mod tests {
         assert_eq!(merged.iter().filter(|a| a.id == "minimax").count(), 1);
         assert!(!merged.iter().find(|a| a.id == "minimax").unwrap().enabled);
         assert!(merged.iter().any(|a| a.id == "deepseek"));
-        // 6 self-auth + minimax + deepseek
-        assert_eq!(merged.len(), 8);
-        // storing only a custom → 7
+        // 7 self-auth + minimax + deepseek
+        assert_eq!(merged.len(), 9);
+        // storing only a custom → 8
         let just_custom = merge_provider_accounts(default_provider_accounts(), vec![custom_account("x")]);
-        assert_eq!(just_custom.len(), 7);
-        // storing only minimax → 7
+        assert_eq!(just_custom.len(), 8);
+        // storing only minimax → 8
         let just_mm = merge_provider_accounts(default_provider_accounts(), vec![keyed_minimax("sk")]);
-        assert_eq!(just_mm.len(), 7);
+        assert_eq!(just_mm.len(), 8);
     }
 
     #[test]
