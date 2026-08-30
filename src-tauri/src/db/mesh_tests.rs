@@ -181,12 +181,10 @@ mod tests {
         assert_eq!(missing, 0, "no rows updated for a nonexistent mesh");
 
         // Command layer maps the zero-rows case to the "mesh not found" error
-        // contract (ticket #994) — the guard the plan calls for, exercised
-        // through the async command via the repo's `block_on` idiom.
-        let err = tauri::async_runtime::block_on(
-            crate::commands::mesh_properties::set_mesh_autopilot_enabled(999_999, true),
-        )
-        .expect_err("a missing mesh must surface an error, not a silent success");
+        // contract (ticket #994) — the guard the plan calls for, now exercised
+        // directly because the command is sync (issue #1380 review point 4).
+        let err = crate::commands::mesh_properties::set_mesh_autopilot_enabled(999_999, true)
+            .expect_err("a missing mesh must surface an error, not a silent success");
         assert!(
             err.contains("not found"),
             "command surfaces the not-found contract, got: {err}"

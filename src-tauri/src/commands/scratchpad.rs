@@ -10,6 +10,10 @@
 //! visible to spawned agents. If a future feature needs agent-readable
 //! notes, that should be a separate column / file, not a side-channel on
 //! this one.
+//!
+//! Pure sync — these commands do only a single SQLite read/write and
+//! run on Tauri's IPC worker (not the bounded tokio pool). No
+//! `run_blocking` wrapper needed (issue #1380 review point 4).
 
 use tauri::command;
 
@@ -23,15 +27,12 @@ use crate::db;
 /// SQL layer can be reasoned about; this command translates that to
 /// the wire contract.
 #[command]
-pub async fn get_mesh_scratchpad(mesh_id: i64) -> Result<String, String> {
-    crate::commands::run_blocking("get_mesh_scratchpad", move || {
-        match db::get_mesh_scratchpad(mesh_id) {
-            Ok(content) => Ok(content),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
-            Err(e) => Err(e.to_string()),
-        }
-    })
-    .await
+pub fn get_mesh_scratchpad(mesh_id: i64) -> Result<String, String> {
+    match db::get_mesh_scratchpad(mesh_id) {
+        Ok(content) => Ok(content),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Overwrite a mesh's scratch pad. Empty string is a normal value
@@ -40,9 +41,6 @@ pub async fn get_mesh_scratchpad(mesh_id: i64) -> Result<String, String> {
 /// deleted should NOT silently succeed and report "Saved" to the user,
 /// since the data went nowhere.
 #[command]
-pub async fn set_mesh_scratchpad(mesh_id: i64, content: String) -> Result<(), String> {
-    crate::commands::run_blocking("set_mesh_scratchpad", move || {
-        db::set_mesh_scratchpad(mesh_id, &content).map_err(|e| e.to_string())
-    })
-    .await
+pub fn set_mesh_scratchpad(mesh_id: i64, content: String) -> Result<(), String> {
+    db::set_mesh_scratchpad(mesh_id, &content).map_err(|e| e.to_string())
 }

@@ -27,7 +27,10 @@ const FORBIDDEN = [
   { kind: 'preferences::load', re: /\b(?:crate::)?preferences::load\s*\(/g },
   { kind: 'preferences::save', re: /\b(?:crate::)?preferences::save\s*\(/g },
   // Evidence #1 in issue #1380: create/delete do SQLite + git worktree
-  // work without a `db::` token in the command body.
+  // work without a `db::` token in the command body, so token-level
+  // matching against `db::*` alone would miss them. After the
+  // trampoline refactor, regenerate_blocking is the equivalent
+  // helper used by `regenerate_agent_node`.
   {
     kind: 'services::agent_node::create',
     re: /\bservices::agent_node::create\s*\(/g,
@@ -35,6 +38,10 @@ const FORBIDDEN = [
   {
     kind: 'services::agent_node::delete',
     re: /\bservices::agent_node::delete\s*\(/g,
+  },
+  {
+    kind: 'services::agent_node::regenerate_blocking',
+    re: /\bservices::agent_node::regenerate_blocking\s*\(/g,
   },
 ] as const;
 
@@ -99,9 +106,32 @@ function matchPair(
   let inString = false;
   let stringChar = '';
   let escaped = false;
+  let rawHashes = 0;
   for (let i = openIndex; i < source.length; i++) {
     const c = source[i];
+
+    // Inside a string literal, advance to the matching close. Skip the
+    // next character on `\\` (Rust escapes `\\`, `\"`, `\'`, `\n`, ...).
     if (inString) {
+      if (rawHashes > 0) {
+        // Raw string `r"..."` / `r#"..."#`: only `"` followed by the
+        // exact same number of `#`s closes it. No escapes inside.
+        if (c === '"') {
+          let ok = true;
+          for (let k = 0; k < rawHashes; k++) {
+            if (source[i + 1 + k] !== '#') {
+              ok = false;
+              break;
+            }
+          }
+          if (ok) {
+            rawHashes = 0;
+            inString = false;
+            i += rawHashes;
+          }
+        }
+        continue;
+      }
       if (escaped) {
         escaped = false;
         continue;
@@ -113,6 +143,53 @@ function matchPair(
       if (c === stringChar) inString = false;
       continue;
     }
+
+    // Detect raw string opener: `r"`, `r#"`, `r##"`, ... The number of
+    // `#`s before `"` is the count that must follow the closing `"`.
+    if (c === 'r' && (source[i + 1] === '"' || source[i + 1] === '#')) {
+      let j = i + 1;
+      let hashes = 0;
+      while (source[j] === '#') {
+        hashes++;
+        j++;
+      }
+      if (source[j] === '"') {
+        inString = true;
+        stringChar = '"';
+        rawHashes = hashes;
+        i = j;
+        continue;
+      }
+    }
+
+    // Detect byte literal opener: `b'x'` — exactly 1 ASCII char or
+    // single escape between `'` quotes, preceded by `b`.
+    if (c === 'b' && source[i + 1] === "'") {
+      const after1 = source[i + 2];
+      if (
+        after1 !== undefined &&
+        source[i + 3] === "'" &&
+        (after1 === '\\' || after1 === "'" || /[^'\\\n]/.test(after1))
+      ) {
+        i = i + 3; // consume `b'?'` whole
+        continue;
+      }
+    }
+
+    // Detect Rust lifetime: `'` preceded by `&` or by an identifier
+    // char (so `&'a`, `S<'static>`, `<'ctx>` are lifetimes, not char
+    // literals). Lifetimes are one identifier char — skip past the
+    // next char to consume the lifetime entirely.
+    if (c === "'" && i > 0) {
+      const prev = source[i - 1];
+      if (prev === '&' || /[A-Za-z0-9_]/.test(prev)) {
+        if (/[A-Za-z_]/.test(source[i + 1] ?? '')) {
+          i += 1; // consume `'a`
+          continue;
+        }
+      }
+    }
+
     if (c === '"' || c === "'") {
       inString = true;
       stringChar = c;
@@ -153,8 +230,13 @@ interface AsyncCommand {
 }
 
 const COMMAND_ATTR = /#\[(?:tauri::)?command(?:\(([^)]*)\))?\]/g;
+// PR #1388 review feedback 1B: the leading group captures *every*
+// intervening attribute / doc-comment run between `#[command]` and
+// `pub ... fn`, so any amount of decoration is allowed (no magic
+// window). `pub` is matched anywhere after the attribute run; the
+// greedy `(?:#\[[^\]]*\]\s*)*` consumes all `#[...]` blocks first.
 const FN_AFTER_ATTR =
-  /(?:#\[[^\]]*\]\s*)*pub(?:\s*\(\s*crate\s*\))?\s+(async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/;
+  /(?:#\[[^\]]*\][\s\S]*?)*pub(?:\s*\(\s*crate\s*\))?\s+(async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/;
 
 export function extractAsyncCommandBodies(source: string): AsyncCommand[] {
   const stripped = stripCommentsPreserveLines(source);
@@ -165,10 +247,22 @@ export function extractAsyncCommandBodies(source: string): AsyncCommand[] {
     const attrAsync = /\basync\b/.test(attr[1] ?? '');
     const after = stripped.slice(attr.index + attr[0].length);
     const fnMatch = FN_AFTER_ATTR.exec(after);
-    if (!fnMatch || fnMatch.index > 80) continue;
+    if (!fnMatch) continue;
     const isAsyncFn = Boolean(fnMatch[1]);
     if (!attrAsync && !isAsyncFn) continue;
     const name = fnMatch[2];
+    // PR #1388 review point 3 — when an async command is annotated
+    // with `#[blocking_command]` (the proc-macro that wraps the body
+    // in `run_blocking(label, move || { ... }).await`), the source
+    // body still LOOKS unguarded to this regex scanner (the macro
+    // rewrites at compile time). Skip the body so the macro user
+    // isn't penalised for the very feature that removes the
+    // boilerplate. `fnMatch[0]` is the substring the regex consumed
+    // between `#[command]` and the fn name, so any
+    // `#[blocking_command]` between them is in there.
+    if (/#\[(?:\w+::)?blocking_command\b/.test(fnMatch[0])) {
+      continue;
+    }
     const fnStart = attr.index + attr[0].length + fnMatch.index;
     const sigStart = stripped.indexOf('(', fnStart);
     if (sigStart < 0) continue;
@@ -375,5 +469,125 @@ pub async fn mixed(mesh_id: i64) -> Result<String, String> {
     const found = findBlockingInAsyncCommands('synth.rs', src);
     expect(found.map((v) => v.kind)).toEqual(['db']);
     expect(found[0].command).toBe('mixed');
+  });
+
+  // PR #1388 review feedback 1A — matchPair must distinguish Rust
+  // lifetimes (`&'a str`) and byte literals (`b'x'`) from string
+  // delimiters. The previous implementation treated every `'` as a
+  // string opener, so any async command using a lifetime was silently
+  // dropped from the audit.
+  it('flags a db:: call inside an async command body that uses a lifetime', () => {
+    const src = `
+#[command]
+pub async fn re<'a>(s: &'a str) -> Result<(), String>
+where
+    &'a str: Sized,
+{
+    db::record(s).map_err(|e| e.to_string())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('re');
+  });
+
+  it('does not break on byte literals like b\'x\'', () => {
+    // Byte literal `b'\\n'` after the same `db::` call must not split
+    // the body — the test scans for `db::` and must still find one.
+    const src = `
+#[command]
+pub async fn scan() -> Result<u8, String> {
+    let n: u8 = b'\\n';
+    db::get_count().map(|c| c + n as u64).map_err(|e| e.to_string())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('scan');
+  });
+
+  it('does not break on raw strings like r#"..."#', () => {
+    // Raw strings contain unbalanced " and # sequences; the lexer
+    // must close on r#"..."# not on a stray " inside.
+    const src = `
+#[command]
+pub async fn query() -> Result<String, String> {
+    let pattern = r#"SELECT * FROM "meshes" WHERE name = 'core'"#;
+    db::run_raw(pattern).map_err(|e| e.to_string())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('query');
+  });
+
+  // PR #1388 review feedback 1B — the magic 80-char window between
+  // #[command] and pub async fn silently dropped any command with
+  // attributes or doc comments longer than ~80 chars total. Engineered
+  // against a real example from services/agent_node.rs::regenerate
+  // (which has 13+ lines of doc comment block).
+  it('flags a db:: call in an async command with a long attribute/doc-comment run between #[command] and pub async fn', () => {
+    // The doc-comment + 3 attribute lines between #[command] and
+    // `pub async fn` push the FN_AFTER_ATTR match index well past 80
+    // chars — the historical "magic window" the reviewer flagged.
+    const src = `
+#[command]
+/// Long doc comment line one describing the function in detail.
+/// Long doc comment line two describing the function in detail.
+/// Long doc comment line three describing the function in detail.
+#[tracing::instrument(skip(app))]
+#[deprecated(note = "use regenerate_v2")]
+#[allow(dead_code)]
+pub async fn regenerate_agent_node(node_id: i64, app: tauri::AppHandle) -> Result<(), String> {
+    let _ = app;
+    db::set_provider(node_id, "anthropic").map_err(|e| e.to_string())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('regenerate_agent_node');
+  });
+
+  it('flags a db:: call in an async command with stacked attributes that exceed 80 chars', () => {
+    // Three attributes with realistic argument strings push fnMatch.index
+    // over the 80-char guard rail.
+    const src = `
+#[command]
+#[tracing::instrument(skip_all, fields(mesh_id = %mesh_id, name = %name))]
+#[allow(clippy::needless_pass_by_value)]
+#[deprecated(since = "1.3.0", note = "regenerate v3 supersedes; remove after 1.5.0")]
+pub async fn legacy_regenerate(mesh_id: i64, name: String) -> Result<(), String> {
+    db::set_provider(mesh_id, &name).map_err(|e| e.to_string())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('legacy_regenerate');
+  });
+
+  // PR #1388 review point 3 — `#[blocking_command]` is the proc-macro
+  // that wraps the body in `run_blocking(label, move || { ... }).await`.
+  // The source body still LOOKS unguarded to this scanner; the guard
+  // must recognise the macro and skip the body.
+  it('does not flag a db:: call inside an async command annotated with #[blocking_command]', () => {
+    const src = `
+#[command]
+#[blocking_command]
+pub async fn read_count() -> Result<i64, String> {
+    db::count_nodes().map_err(|e| e.to_string())
+}
+`;
+    expect(findBlockingInAsyncCommands('synth.rs', src)).toEqual([]);
+  });
+
+  it('does not flag an async command annotated with #[buildmesh_macros::blocking_command]', () => {
+    const src = `
+#[command]
+#[buildmesh_macros::blocking_command]
+pub async fn read_count() -> Result<i64, String> {
+    db::count_nodes().map_err(|e| e.to_string())
+}
+`;
+    expect(findBlockingInAsyncCommands('synth.rs', src)).toEqual([]);
   });
 });

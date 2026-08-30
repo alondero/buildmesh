@@ -5,7 +5,11 @@
 //! in-process Tauri commands. Both back onto the same `db` + `http::revocation`
 //! layer, so a revoke from the desktop kicks a live mobile socket exactly as a
 //! remote `POST /admin/devices/{id}/revoke` does.
+//!
+//! `#[blocking_command]` (PR #1388 review point 3) wraps the body in
+//! `crate::commands::run_blocking`.
 
+use buildmesh_macros::blocking_command;
 use crate::db;
 use crate::http::revocation;
 use crate::models::DeviceSession;
@@ -14,11 +18,9 @@ use tauri::command;
 /// List every paired device for the panel. The wire shape omits the token hash —
 /// the secret never crosses the IPC boundary.
 #[command]
+#[blocking_command]
 pub async fn list_device_sessions() -> Result<Vec<DeviceSession>, String> {
-    crate::commands::run_blocking("list_device_sessions", || {
-        db::list_device_sessions().map_err(|e| e.to_string())
-    })
-    .await
+    db::list_device_sessions().map_err(|e| e.to_string())
 }
 
 /// Revoke a device: delete its row (blocking future requests) and broadcast the

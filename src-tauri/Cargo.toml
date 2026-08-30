@@ -13,6 +13,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# `#[blocking_command]` proc-macro attribute — wraps async Tauri command
+# bodies in `crate::commands::run_blocking(label, move || { ... }).await`
+# so we don't hand-write the offload boilerplate across 30+ commands
+# (issue #1380 review point 3). Path dep — the crate lives in this
+# workspace alongside `buildmesh_lib`.
+buildmesh_macros = { path = "proc-macros" }
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"

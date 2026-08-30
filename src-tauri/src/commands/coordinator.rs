@@ -3,6 +3,9 @@
 //! This slice (issue #315) needs no UI — the master switch and the read-scoped
 //! token are driven entirely from these backend commands. A later slice adds
 //! the Settings surface on top of the same commands.
+//!
+//! Pure sync — single SQLite read/write per command, run on Tauri's IPC
+//! worker (not the bounded tokio pool). Issue #1380 review point 4.
 
 use crate::db;
 use tauri::command;
@@ -22,35 +25,26 @@ pub struct CoordinatorStatus {
 
 /// Read the coordinator API's enable switch and whether a read token exists.
 #[command]
-pub async fn get_coordinator_status() -> Result<CoordinatorStatus, String> {
-    crate::commands::run_blocking("get_coordinator_status", || {
-        let enabled = db::coordinator_api_enabled().map_err(|e| e.to_string())?;
-        let has_token = db::coordinator_read_token()
-            .map_err(|e| e.to_string())?
-            .is_some();
-        Ok(CoordinatorStatus { enabled, has_token })
-    })
-    .await
+pub fn get_coordinator_status() -> Result<CoordinatorStatus, String> {
+    let enabled = db::coordinator_api_enabled().map_err(|e| e.to_string())?;
+    let has_token = db::coordinator_read_token()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    Ok(CoordinatorStatus { enabled, has_token })
 }
 
 /// Flip the master enable switch for the coordinator read API. Defaults off, so
 /// the surface is closed until the user explicitly opts in.
 #[command]
-pub async fn set_coordinator_api_enabled(enabled: bool) -> Result<(), String> {
-    crate::commands::run_blocking("set_coordinator_api_enabled", move || {
-        db::set_coordinator_api_enabled(enabled).map_err(|e| e.to_string())
-    })
-    .await
+pub fn set_coordinator_api_enabled(enabled: bool) -> Result<(), String> {
+    db::set_coordinator_api_enabled(enabled).map_err(|e| e.to_string())
 }
 
 /// Mint (or replace) the read-scoped coordinator token and return it for the
 /// user to copy. Replacing invalidates any previously issued token.
 #[command]
-pub async fn generate_coordinator_read_token() -> Result<String, String> {
-    crate::commands::run_blocking("generate_coordinator_read_token", || {
-        db::generate_coordinator_read_token().map_err(|e| e.to_string())
-    })
-    .await
+pub fn generate_coordinator_read_token() -> Result<String, String> {
+    db::generate_coordinator_read_token().map_err(|e| e.to_string())
 }
 
 // --- Drive (write) side (issue #319) ---
@@ -62,19 +56,13 @@ pub async fn generate_coordinator_read_token() -> Result<String, String> {
 /// the read side, so read-only coordination can be granted without ever exposing
 /// the ability to write to a node's PTY.
 #[command]
-pub async fn set_coordinator_drive_enabled(enabled: bool) -> Result<(), String> {
-    crate::commands::run_blocking("set_coordinator_drive_enabled", move || {
-        db::set_coordinator_drive_enabled(enabled).map_err(|e| e.to_string())
-    })
-    .await
+pub fn set_coordinator_drive_enabled(enabled: bool) -> Result<(), String> {
+    db::set_coordinator_drive_enabled(enabled).map_err(|e| e.to_string())
 }
 
 /// Mint (or replace) the drive-scoped coordinator token and return it for the
 /// user to copy. Distinct from the read token: a read token can never drive.
 #[command]
-pub async fn generate_coordinator_drive_token() -> Result<String, String> {
-    crate::commands::run_blocking("generate_coordinator_drive_token", || {
-        db::generate_coordinator_drive_token().map_err(|e| e.to_string())
-    })
-    .await
+pub fn generate_coordinator_drive_token() -> Result<String, String> {
+    db::generate_coordinator_drive_token().map_err(|e| e.to_string())
 }

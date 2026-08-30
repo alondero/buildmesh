@@ -1,6 +1,10 @@
 //! Tauri commands for buildmesh-wide preferences.
 //!
 //! See `crate::preferences` for the persistence layer.
+//!
+//! Pure sync — each command is a single `preferences::load` /
+//! `save` round-trip + optional `app.emit`. They run on Tauri's IPC
+//! worker, NOT the bounded tokio pool. Issue #1380 review point 4.
 
 use crate::preferences::{
     self, AppPreferences, HarnessConfigValue, ModelTiers, PairingVerification, ProviderAccount,
@@ -11,21 +15,18 @@ use tauri::{command, AppHandle, Emitter};
 /// Read the persisted buildmesh-wide preferences. Always returns a value —
 /// a missing or malformed file yields `AppPreferences::default()`.
 #[command]
-pub async fn get_app_preferences() -> Result<AppPreferences, String> {
-    crate::commands::run_blocking("get_app_preferences", preferences::load).await
+pub fn get_app_preferences() -> Result<AppPreferences, String> {
+    preferences::load()
 }
 
 /// Set the buildmesh-wide default provider. Pass `None` (or an empty string,
 /// which is normalised away) to clear the override and restore the hardcoded
 /// `claude` fallback (post-#538 unified harness id).
 #[command]
-pub async fn set_app_default_provider(provider: Option<String>) -> Result<(), String> {
-    crate::commands::run_blocking("set_app_default_provider", move || {
-        let mut prefs = preferences::load()?;
-        prefs.default_provider = provider.filter(|s| !s.is_empty());
-        preferences::save(prefs)
-    })
-    .await
+pub fn set_app_default_provider(provider: Option<String>) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.default_provider = provider.filter(|s| !s.is_empty());
+    preferences::save(prefs)
 }
 
 /// Set the backend that summaries node PTY output into a slug (issue #824).
@@ -35,13 +36,10 @@ pub async fn set_app_default_provider(provider: Option<String>) -> Result<(), St
 /// an empty string) **disables auto-naming entirely** — nodes keep their
 /// random `adjective-adjective-noun` slugs until the user picks a value.
 #[command]
-pub async fn set_app_naming_provider(provider: Option<String>) -> Result<(), String> {
-    crate::commands::run_blocking("set_app_naming_provider", move || {
-        let mut prefs = preferences::load()?;
-        prefs.naming_provider = provider.filter(|s| !s.is_empty());
-        preferences::save(prefs)
-    })
-    .await
+pub fn set_app_naming_provider(provider: Option<String>) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.naming_provider = provider.filter(|s| !s.is_empty());
+    preferences::save(prefs)
 }
 
 /// Set the app-wide autopilot pool size — the cap on concurrently active
@@ -49,13 +47,10 @@ pub async fn set_app_naming_provider(provider: Option<String>) -> Result<(), Str
 /// limits alone apply); `Some(0)` pauses all new autopilot spawns. Takes
 /// effect on the poller's next pass — running nodes are never killed.
 #[command]
-pub async fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String> {
-    crate::commands::run_blocking("set_app_autopilot_pool_size", move || {
-        let mut prefs = preferences::load()?;
-        prefs.autopilot_pool_size = size;
-        preferences::save(prefs)
-    })
-    .await
+pub fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.autopilot_pool_size = size;
+    preferences::save(prefs)
 }
 
 /// Persist the user's spawn-menu harness order (issue #573). `order` is the list
@@ -65,11 +60,8 @@ pub async fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String
 /// and re-reads the reordered menu — the same cross-component invalidation used
 /// by the account commands.
 #[command]
-pub async fn set_harness_order(app: AppHandle, order: Vec<String>) -> Result<(), String> {
-    crate::commands::run_blocking("set_harness_order", move || {
-        preferences::set_harness_order(order)
-    })
-    .await?;
+pub fn set_harness_order(app: AppHandle, order: Vec<String>) -> Result<(), String> {
+    preferences::set_harness_order(order)?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
@@ -89,15 +81,12 @@ pub async fn set_harness_order(app: AppHandle, order: Vec<String>) -> Result<(),
 /// re-reads the reordered menu — the same invalidation [`set_harness_order`]
 /// fires for the harness-level reorder.
 #[command]
-pub async fn set_proxied_provider_order(
+pub fn set_proxied_provider_order(
     app: AppHandle,
     harness_id: String,
     provider_ids: Vec<String>,
 ) -> Result<(), String> {
-    crate::commands::run_blocking("set_proxied_provider_order", move || {
-        preferences::set_proxied_provider_order(harness_id, provider_ids)
-    })
-    .await?;
+    preferences::set_proxied_provider_order(harness_id, provider_ids)?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
@@ -105,18 +94,15 @@ pub async fn set_proxied_provider_order(
 /// The effective model-provider account list — self-auth built-ins plus any
 /// keyed first-class / generic accounts the user has added (ADR-0025).
 #[command]
-pub async fn get_provider_accounts() -> Result<Vec<ProviderAccount>, String> {
-    crate::commands::run_blocking("get_provider_accounts", || {
-        Ok(preferences::provider_accounts())
-    })
-    .await
+pub fn get_provider_accounts() -> Result<Vec<ProviderAccount>, String> {
+    Ok(preferences::provider_accounts())
 }
 
 /// Keyed first-class catalog templates (MiniMax, Kimi, OpenRouter) for the
 /// Providers-page "Add provider" picker (ADR-0025). The UI filters out ids
 /// already present in [`get_provider_accounts`].
 #[command]
-pub async fn get_keyed_first_class_catalog() -> Result<Vec<ProviderAccount>, String> {
+pub fn get_keyed_first_class_catalog() -> Result<Vec<ProviderAccount>, String> {
     Ok(preferences::keyed_first_class_catalog())
 }
 
@@ -124,14 +110,11 @@ pub async fn get_keyed_first_class_catalog() -> Result<Vec<ProviderAccount>, Str
 /// endpoint + tiers when available; `None` when the pair is incompatible
 /// (ADR-0025). Does not require a stored pairing.
 #[command]
-pub async fn get_pairing_defaults(
+pub fn get_pairing_defaults(
     harness_id: String,
     provider_id: String,
 ) -> Result<Option<ProviderPairing>, String> {
-    crate::commands::run_blocking("get_pairing_defaults", move || {
-        Ok(preferences::pairing_for(&harness_id, &provider_id))
-    })
-    .await
+    Ok(preferences::pairing_for(&harness_id, &provider_id))
 }
 
 /// Create or update a model-provider account (issue #537 / ADR-0025). For a
@@ -146,28 +129,30 @@ pub async fn get_pairing_defaults(
 /// JS wrapper, but that only helps callers within the same component — other
 /// components with their own `providerData` state need an explicit signal.
 #[command]
-pub async fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -> Result<(), String> {
+pub fn upsert_provider_account(
+    app: AppHandle,
+    account: ProviderAccount,
+) -> Result<(), String> {
     let account_id = account.id.clone();
-    let account_id_for_verify = account_id.clone();
-    let codex_harnesses = crate::commands::run_blocking("upsert_provider_account", move || {
+    let codex_harnesses = {
         let mut prefs = preferences::load()?;
         preferences::upsert_provider_account(&mut prefs, account);
-        let codex_harnesses: Vec<String> = prefs
+        let harnesses: Vec<String> = prefs
             .provider_pairings
             .iter()
             .filter(|pairing| {
-                pairing.provider_id == account_id && pairing.surface == preferences::ApiSurface::OpenAI
+                pairing.provider_id == account_id
+                    && pairing.surface == preferences::ApiSurface::OpenAI
             })
             .map(|pairing| pairing.harness_id.clone())
             .collect();
         preferences::save(prefs)?;
         crate::services::usage::invalidate_cache();
-        Ok(codex_harnesses)
-    })
-    .await?;
+        harnesses
+    };
     let _ = app.emit("provider-list-changed", ());
     for harness_id in codex_harnesses {
-        schedule_pairing_verification(app.clone(), harness_id, account_id_for_verify.clone());
+        schedule_pairing_verification(app.clone(), harness_id, account_id.clone());
     }
     Ok(())
 }
@@ -180,15 +165,11 @@ pub async fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -
 /// menu only. Emits `provider-list-changed` for cross-component
 /// invalidation (same reason as [`upsert_provider_account`]).
 #[command]
-pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), String> {
-    crate::commands::run_blocking("remove_provider_account", move || {
-        let mut prefs = preferences::load()?;
-        preferences::remove_provider_account(&mut prefs, &id);
-        preferences::save(prefs)?;
-        crate::services::usage::invalidate_cache();
-        Ok(())
-    })
-    .await?;
+pub fn remove_provider_account(app: AppHandle, id: String) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    preferences::remove_provider_account(&mut prefs, &id);
+    preferences::save(prefs)?;
+    crate::services::usage::invalidate_cache();
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
@@ -201,47 +182,41 @@ pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), S
 /// for proxiable accounts only (ADR-0025). The harness-config page renders this
 /// to show what's attached under each harness (issue #576).
 #[command]
-pub async fn get_provider_pairings() -> Result<Vec<ProviderPairing>, String> {
-    crate::commands::run_blocking("get_provider_pairings", || {
-        Ok(preferences::effective_provider_pairings())
-    })
-    .await
+pub fn get_provider_pairings() -> Result<Vec<ProviderPairing>, String> {
+    Ok(preferences::effective_provider_pairings())
 }
 
 #[command]
-pub async fn get_pairing_verifications(
+pub fn get_pairing_verifications(
     env_type: Option<crate::models::EnvType>,
 ) -> Result<Vec<PairingVerification>, String> {
     let env_type = env_type.unwrap_or(crate::models::EnvType::Windows);
-    crate::commands::run_blocking("get_pairing_verifications", move || {
-        Ok(crate::services::provider_verification::current_statuses(
-            env_type,
-        ))
-    })
-    .await
+    Ok(crate::services::provider_verification::current_statuses(env_type))
 }
 
 #[command]
-pub async fn verify_provider_pairing(
+pub fn verify_provider_pairing(
     app: AppHandle,
     harness_id: String,
     provider_id: String,
     env_type: Option<crate::models::EnvType>,
 ) -> Result<PairingVerification, String> {
     let env_type = env_type.unwrap_or(crate::models::EnvType::Windows);
-    let record = crate::commands::run_blocking("verify_provider_pairing", move || {
-        crate::services::provider_verification::verify_pairing_blocking(
-            &harness_id,
-            &provider_id,
-            env_type,
-        )
-    })
-    .await?;
+    let record = crate::services::provider_verification::verify_pairing_blocking(
+        &harness_id,
+        &provider_id,
+        env_type,
+    )?;
     let _ = app.emit("pairing-verification-changed", &record);
     let _ = app.emit("provider-list-changed", ());
     Ok(record)
 }
 
+/// Schedule a pairing-verification probe (network call) for one
+/// `(harness_id, provider_id, env_type)` tuple. Spawns an async task
+/// because the probe is HTTP-bound (can take seconds); runs the
+/// blocking verification work via `run_blocking` so the tokio worker
+/// stays free for streaming.
 pub(crate) fn schedule_pairing_verification(
     app: AppHandle,
     harness_id: String,
@@ -283,13 +258,10 @@ pub(crate) fn schedule_pairing_verification_for_runtime(
 /// surface-matched: only providers whose **Compatible API surface** that harness
 /// speaks (issue #576). Empty for a native-only harness (Terminal, etc.).
 #[command]
-pub async fn compatible_providers_for_harness(
+pub fn compatible_providers_for_harness(
     harness_id: String,
 ) -> Result<Vec<ProviderAccount>, String> {
-    crate::commands::run_blocking("compatible_providers_for_harness", move || {
-        Ok(preferences::compatible_providers_for_harness(&harness_id))
-    })
-    .await
+    Ok(preferences::compatible_providers_for_harness(&harness_id))
 }
 
 /// Attach a **Model Provider** to a harness over the harness's surface — the
@@ -300,7 +272,7 @@ pub async fn compatible_providers_for_harness(
 /// first-class or supply). `api_key`, when present, seeds the provider's
 /// **global** key only if it has none (set-if-absent).
 #[command]
-pub async fn attach_proxied_provider(
+pub fn attach_proxied_provider(
     app: AppHandle,
     harness_id: String,
     provider_id: String,
@@ -308,21 +280,21 @@ pub async fn attach_proxied_provider(
     base_url: Option<String>,
     model_tiers: Option<ModelTiers>,
 ) -> Result<(), String> {
-    let harness_id_for_verify = harness_id.clone();
-    let provider_id_for_verify = provider_id.clone();
-    let should_verify = crate::commands::run_blocking("attach_proxied_provider", move || {
-        let surface = preferences::harness_surface(&harness_id).ok_or_else(|| {
-            format!("harness '{harness_id}' does not speak a proxy-capable surface")
-        })?;
-        let mut pairing = preferences::pairing_for(&harness_id, &provider_id).unwrap_or_else(|| {
-            ProviderPairing {
-                harness_id: harness_id.clone(),
-                provider_id: provider_id.clone(),
-                surface,
-                base_url: None,
-                model_tiers: ModelTiers::default(),
-            }
-        });
+    let should_verify = {
+        let surface =
+            preferences::harness_surface(&harness_id).ok_or_else(|| {
+                format!("harness '{harness_id}' does not speak a proxy-capable surface")
+            })?;
+        let mut pairing =
+            preferences::pairing_for(&harness_id, &provider_id).unwrap_or_else(|| {
+                ProviderPairing {
+                    harness_id: harness_id.clone(),
+                    provider_id: provider_id.clone(),
+                    surface,
+                    base_url: None,
+                    model_tiers: ModelTiers::default(),
+                }
+            });
         // Surface-match gate: refuse when the provider doesn't expose this surface.
         let accounts = preferences::provider_accounts();
         let account = accounts.iter().find(|a| a.id == provider_id);
@@ -365,12 +337,11 @@ pub async fn attach_proxied_provider(
         preferences::upsert_provider_pairing(&mut prefs, pairing);
         preferences::save(prefs)?;
         crate::services::usage::invalidate_cache();
-        Ok(surface == preferences::ApiSurface::OpenAI)
-    })
-    .await?;
+        surface == preferences::ApiSurface::OpenAI
+    };
     let _ = app.emit("provider-list-changed", ());
     if should_verify {
-        schedule_pairing_verification(app.clone(), harness_id_for_verify, provider_id_for_verify);
+        schedule_pairing_verification(app, harness_id, provider_id);
     }
     Ok(())
 }
@@ -379,16 +350,14 @@ pub async fn attach_proxied_provider(
 /// (ADR-0025 — Harnesses page inline edit). Errors if no pairing is stored for
 /// the `(harness_id, provider_id)` key.
 #[command]
-pub async fn update_provider_pairing(
+pub fn update_provider_pairing(
     app: AppHandle,
     harness_id: String,
     provider_id: String,
     base_url: Option<String>,
     model_tiers: Option<ModelTiers>,
 ) -> Result<(), String> {
-    let harness_id_for_verify = harness_id.clone();
-    let provider_id_for_verify = provider_id.clone();
-    let should_verify = crate::commands::run_blocking("update_provider_pairing", move || {
+    let should_verify = {
         let mut prefs = preferences::load()?;
         let pairing = prefs
             .provider_pairings
@@ -399,7 +368,11 @@ pub async fn update_provider_pairing(
             })?;
         if let Some(url) = base_url {
             let trimmed = url.trim();
-            pairing.base_url = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+            pairing.base_url = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
         }
         if let Some(tiers) = model_tiers {
             pairing.model_tiers = tiers;
@@ -409,12 +382,11 @@ pub async fn update_provider_pairing(
         }
         let should_verify = pairing.surface == preferences::ApiSurface::OpenAI;
         preferences::save(prefs)?;
-        Ok(should_verify)
-    })
-    .await?;
+        should_verify
+    };
     let _ = app.emit("provider-list-changed", ());
     if should_verify {
-        schedule_pairing_verification(app.clone(), harness_id_for_verify, provider_id_for_verify);
+        schedule_pairing_verification(app, harness_id, provider_id);
     }
     Ok(())
 }
@@ -422,17 +394,14 @@ pub async fn update_provider_pairing(
 /// Detach a stored **Proxied Provider** pairing (issue #576 / ADR-0025). Emits
 /// `provider-list-changed` so the spawn menu drops the detached row.
 #[command]
-pub async fn remove_provider_pairing(
+pub fn remove_provider_pairing(
     app: AppHandle,
     harness_id: String,
     provider_id: String,
 ) -> Result<(), String> {
-    crate::commands::run_blocking("remove_provider_pairing", move || {
-        let mut prefs = preferences::load()?;
-        preferences::remove_provider_pairing(&mut prefs, &harness_id, &provider_id);
-        preferences::save(prefs)
-    })
-    .await?;
+    let mut prefs = preferences::load()?;
+    preferences::remove_provider_pairing(&mut prefs, &harness_id, &provider_id);
+    preferences::save(prefs)?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
@@ -468,16 +437,10 @@ pub async fn remove_provider_pairing(
 /// Claude-compatible profile (`"deepseek-via-claude"`) maps to the Anthropic
 /// capability descriptor.
 #[command]
-pub async fn set_harness_default(
-    profile_id: String,
-    value: HarnessConfigValue,
-) -> Result<(), String> {
-    crate::commands::run_blocking("set_harness_default", move || {
-        let mut prefs = preferences::load()?;
-        preferences::upsert_harness_default(&mut prefs, &profile_id, value)?;
-        preferences::save(prefs)
-    })
-    .await
+pub fn set_harness_default(profile_id: String, value: HarnessConfigValue) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    preferences::upsert_harness_default(&mut prefs, &profile_id, value)?;
+    preferences::save(prefs)
 }
 
 /// Remove the **application-level default** for one Agent Harness (issue
@@ -487,11 +450,8 @@ pub async fn set_harness_default(
 /// harness (native behaviour). Writes through the same cache-refreshing
 /// path as [`set_harness_default`].
 #[command]
-pub async fn clear_harness_default(profile_id: String) -> Result<(), String> {
-    crate::commands::run_blocking("clear_harness_default", move || {
-        let mut prefs = preferences::load()?;
-        preferences::remove_harness_default(&mut prefs, &profile_id);
-        preferences::save(prefs)
-    })
-    .await
+pub fn clear_harness_default(profile_id: String) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    preferences::remove_harness_default(&mut prefs, &profile_id);
+    preferences::save(prefs)
 }

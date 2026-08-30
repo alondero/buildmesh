@@ -10,6 +10,9 @@
 //! Status writes + Tauri events are delegated to `crate::agent::session_lifecycle`
 //! (issue #132) — this module is now a thin routing layer that builds an
 //! `AppSessionLifecycleSink` and adds the autoclear arm on top.
+//!
+//! All commands are sync `pub fn` — single SQLite read/write or
+//! in-memory state mutation. Issue #1380 review point 4.
 
 use crate::agent::session_lifecycle::AppSessionLifecycleSink;
 use crate::db;
@@ -36,14 +39,14 @@ pub fn mark_attention(node_id: i64, app: &AppHandle) {
 /// Register that a node is awaiting user input. Publishes a Node Turn so both
 /// attention-marking and session naming react.
 #[command]
-pub async fn register_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
+pub fn register_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
     crate::node_turn::publish(node_id, &app);
     Ok(())
 }
 
 /// Clear the attention state for a node — called when the user resumes it.
 #[command]
-pub async fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
+pub fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
     crate::attention_autoclear::disarm(node_id);
     let sink = AppSessionLifecycleSink { app: &app };
     crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id)
@@ -54,15 +57,16 @@ pub async fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), St
 /// in-memory set. The old set desynced two ways: it was empty after an app
 /// restart (so a persisted `awaiting_input` row read as "not pending"), and a
 /// silently-dropped status write left the set and the column disagreeing.
+///
+/// Pure sync — single SQLite read. Was `pub async fn` returning
+/// `bool` with an `Ok(...).unwrap_or(false)` false-error-channel
+/// wrapper; the conversion to `pub fn` is idiomatic because Tauri
+/// supports `bool` returns from sync commands.
 #[command]
-pub async fn is_attention_pending(session_id: i64) -> bool {
-    crate::commands::run_blocking("is_attention_pending", move || {
-        Ok(db::get_agent_node_by_id(session_id)
-            .map(|n| status_is_awaiting(&n))
-            .unwrap_or(false))
-    })
-    .await
-    .unwrap_or(false)
+pub fn is_attention_pending(session_id: i64) -> bool {
+    db::get_agent_node_by_id(session_id)
+        .map(|n| status_is_awaiting(&n))
+        .unwrap_or(false)
 }
 
 fn status_is_awaiting(node: &AgentNode) -> bool {
