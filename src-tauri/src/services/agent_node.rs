@@ -559,17 +559,25 @@ pub async fn regenerate(
     new_provider: &str,
     app: &tauri::AppHandle,
 ) -> Result<AgentNode, AgentNodeError> {
-    // 1. Read the current node (capture the old provider before the
-    //    update so `decide_resume` can compare harness ids).
-    let node = db::get_agent_node_by_id(node_id)?;
-    let old_provider = node.provider.clone();
+    let new_provider = new_provider.to_string();
 
-    // 2. Validate status eligibility. Reject mid-spawn and closed
-    //    states up front so we never leave a half-killed process
-    //    behind.
-    if let Err(e) = validate_status_eligible(node.status) {
-        return Err(AgentNodeError::Status(e));
-    }
+    // 1–2. Read the current node and validate status off the async
+    // worker (issue #1380). Capture the old provider before the update
+    // so `decide_resume` can compare harness ids. Reject mid-spawn and
+    // closed states up front so we never leave a half-killed process
+    // behind.
+    let (old_provider, skip_kill) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, bool), AgentNodeError> {
+        let node = db::get_agent_node_by_id(node_id)?;
+        if let Err(e) = validate_status_eligible(node.status) {
+            return Err(AgentNodeError::Status(e));
+        }
+        Ok((
+            node.provider.clone(),
+            should_skip_kill_for_regenerate(node.status),
+        ))
+    })
+    .await
+    .map_err(|e| AgentNodeError::Backend(format!("regenerate_load task failed: {e}")))??;
 
     // 3. Kill the live process ONLY when one is registered.
     //    `kill_agent` is idempotent — a no-op when no process is
@@ -597,25 +605,34 @@ pub async fn regenerate(
     //    the registry side effects (`kill_session` + `remove`) are
     //    already in place. The new spawn sets the status correctly
     //    anyway.
-    if !should_skip_kill_for_regenerate(node.status) {
+    if !skip_kill {
         let _ = crate::agent::process::kill_agent(node_id).await;
     }
 
-    // 4. Update the `provider` column. The next `spawn_agent_inner`
-    //    call reads `node.provider` for backend env resolution
-    //    (`preferences::resolve_provider_env(&node.provider)`,
-    //    spawn.rs:1399) and preflight, so the new value must land
-    //    BEFORE we hand off to the spawn pipeline.
-    db::set_agent_node_provider(node_id, new_provider)?;
+    // 4–6. Update the `provider` column, reload, and decide resume off
+    // the async worker. The next `spawn_agent_inner` call reads
+    // `node.provider` for backend env resolution
+    // (`preferences::resolve_provider_env(&node.provider)`,
+    // spawn.rs:1399) and preflight, so the new value must land BEFORE
+    // we hand off to the spawn pipeline. The spawner reloads the node
+    // and owns the actual session-id/adapter policy, including
+    // clearing a stale id for a Fresh intent.
+    let new_provider_for_update = new_provider.clone();
+    let old_provider_for_update = old_provider.clone();
+    let resume = tauri::async_runtime::spawn_blocking(move || -> Result<bool, AgentNodeError> {
+        db::set_agent_node_provider(node_id, &new_provider_for_update)?;
+        let node = db::get_agent_node_by_id(node_id)?;
+        Ok(decide_resume(
+            &old_provider_for_update,
+            &new_provider_for_update,
+            node.cli_session_id.as_deref(),
+        )
+        .is_some())
+    })
+    .await
+    .map_err(|e| AgentNodeError::Backend(format!("regenerate_update task failed: {e}")))??;
 
-    // 5. Reload the node so the spawn call sees the new provider.
-    let node = db::get_agent_node_by_id(node_id)?;
-
-    // 6. Decide whether the intent is a same-harness resume. The spawner
-    //    reloads the node and owns the actual session-id/adapter policy,
-    //    including clearing a stale id for a Fresh intent.
-    let resume = decide_resume(&old_provider, new_provider, node.cli_session_id.as_deref());
-    let intent = if resume.is_some() {
+    let intent = if resume {
         SpawnIntent::Resume {
             cause: crate::agent::spawn::ResumeCause::Explicit,
         }
@@ -630,7 +647,11 @@ pub async fn regenerate(
     .await
     .map_err(AgentNodeError::Backend)?;
 
-    Ok(db::get_agent_node_by_id(node_id)?)
+    tauri::async_runtime::spawn_blocking(move || {
+        db::get_agent_node_by_id(node_id).map_err(AgentNodeError::from)
+    })
+    .await
+    .map_err(|e| AgentNodeError::Backend(format!("regenerate_reload task failed: {e}")))?
 }
 
 #[cfg(test)]

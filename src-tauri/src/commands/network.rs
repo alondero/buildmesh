@@ -51,7 +51,10 @@ pub struct NetworkStatus {
 /// surface the mismatch.
 #[command]
 pub async fn get_network_status() -> Result<NetworkStatus, String> {
-    let lan_exposure_enabled = db::lan_exposure_enabled().map_err(|e| e.to_string())?;
+    let lan_exposure_enabled = crate::commands::run_blocking("get_network_status", || {
+        db::lan_exposure_enabled().map_err(|e| e.to_string())
+    })
+    .await?;
     let port = crate::http::current_http_port();
     let realized = crate::http::realized_binds();
     // Filter to non-loopback via `SocketAddr::is_loopback()` rather than
@@ -88,7 +91,10 @@ pub async fn get_network_status() -> Result<NetworkStatus, String> {
 /// unaffected; existing LAN connections drop and must reconnect over HTTPS).
 #[command]
 pub async fn set_lan_exposure_enabled(enabled: bool) -> Result<(), String> {
-    db::set_lan_exposure_enabled(enabled).map_err(|e| e.to_string())?;
+    crate::commands::run_blocking("set_lan_exposure_enabled", move || {
+        db::set_lan_exposure_enabled(enabled).map_err(|e| e.to_string())
+    })
+    .await?;
     crate::http::reapply_binding().await;
     Ok(())
 }

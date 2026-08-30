@@ -74,21 +74,26 @@ fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshRow, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-
-    Ok(MeshRow::from(&mesh))
+    crate::commands::run_blocking("get_mesh_properties", move || {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+        Ok(MeshRow::from(&mesh))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn update_mesh_name(mesh_id: i64, name: String) -> Result<(), String> {
-    let db = db::lock_db();
-    db.execute(
-        "UPDATE meshes SET name = ?1 WHERE id = ?2",
-        rusqlite::params![name, mesh_id],
-    )
-    .map_err(|e| format!("failed to update mesh name: {}", e))?;
-    Ok(())
+    crate::commands::run_blocking("update_mesh_name", move || {
+        let db = db::lock_db();
+        db.execute(
+            "UPDATE meshes SET name = ?1 WHERE id = ?2",
+            rusqlite::params![name, mesh_id],
+        )
+        .map_err(|e| format!("failed to update mesh name: {}", e))?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -121,54 +126,60 @@ pub async fn update_mesh_column(
         return Err(format!("unknown mesh column: {}", column));
     }
 
-    let db = db::lock_db();
-    db.execute(
-        &format!("UPDATE meshes SET {} = ?1 WHERE id = ?2", column),
-        rusqlite::params![value, mesh_id],
-    )
-    .map_err(|e| format!("failed to update mesh column: {}", e))?;
-    Ok(())
+    crate::commands::run_blocking("update_mesh_column", move || {
+        let db = db::lock_db();
+        db.execute(
+            &format!("UPDATE meshes SET {} = ?1 WHERE id = ?2", column),
+            rusqlite::params![value, mesh_id],
+        )
+        .map_err(|e| format!("failed to update mesh column: {}", e))?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
-    let rows = {
-        let db = db::lock_db();
-        db.execute(
-            "UPDATE meshes SET use_worktree = ?1 WHERE id = ?2",
-            rusqlite::params![use_worktree as i32, mesh_id],
-        )
-        .map_err(|e| format!("failed to update use_worktree: {}", e))?
-    };
-    if rows == 0 {
-        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
-    }
-    // Issue #1152 — turning worktrees OFF on a mesh that has Autopilot
-    // enabled makes Autopilot incompatible (it always forces a worktree
-    // for the wrap-up PR branch). Persist `autopilot_enabled = 0` through
-    // the existing narrow `set_mesh_autopilot_enabled` write so the next
-    // poll pass skips the mesh rather than scheduling an incompatible
-    // spawn. We do NOT kill running Agent Nodes — the wrap-up sequence
-    // only matters for new spawns, and an in-flight node's worktree was
-    // created when the previous setting was active (acceptance criteria
-    // 11: "Existing Agent Nodes are not killed by compatibility changes").
-    // The change is silent on success — the existing Mesh Properties
-    // save indicator covers the user feedback path for the worktree
-    // toggle; the autopilot disablement is a side effect the next refresh
-    // of the Autopilot Probe tab will reflect.
-    if !use_worktree {
-        let mesh = db::get_mesh_by_id(mesh_id)
-            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-        if mesh.autopilot_enabled {
-            crate::db::set_mesh_autopilot_enabled(mesh_id, false)
-                .map_err(|e| format!("failed to clear autopilot_enabled: {}", e))?;
-            tracing::info!(
-                "update_mesh_use_worktree: disabled autopilot on mesh {} (worktrees off)",
-                mesh_id
-            );
+    crate::commands::run_blocking("update_mesh_use_worktree", move || {
+        let rows = {
+            let db = db::lock_db();
+            db.execute(
+                "UPDATE meshes SET use_worktree = ?1 WHERE id = ?2",
+                rusqlite::params![use_worktree as i32, mesh_id],
+            )
+            .map_err(|e| format!("failed to update use_worktree: {}", e))?
+        };
+        if rows == 0 {
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
         }
-    }
-    Ok(())
+        // Issue #1152 — turning worktrees OFF on a mesh that has Autopilot
+        // enabled makes Autopilot incompatible (it always forces a worktree
+        // for the wrap-up PR branch). Persist `autopilot_enabled = 0` through
+        // the existing narrow `set_mesh_autopilot_enabled` write so the next
+        // poll pass skips the mesh rather than scheduling an incompatible
+        // spawn. We do NOT kill running Agent Nodes — the wrap-up sequence
+        // only matters for new spawns, and an in-flight node's worktree was
+        // created when the previous setting was active (acceptance criteria
+        // 11: "Existing Agent Nodes are not killed by compatibility changes").
+        // The change is silent on success — the existing Mesh Properties
+        // save indicator covers the user feedback path for the worktree
+        // toggle; the autopilot disablement is a side effect the next refresh
+        // of the Autopilot Probe tab will reflect.
+        if !use_worktree {
+            let mesh = db::get_mesh_by_id(mesh_id)
+                .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+            if mesh.autopilot_enabled {
+                crate::db::set_mesh_autopilot_enabled(mesh_id, false)
+                    .map_err(|e| format!("failed to clear autopilot_enabled: {}", e))?;
+                tracing::info!(
+                    "update_mesh_use_worktree: disabled autopilot on mesh {} (worktrees off)",
+                    mesh_id
+                );
+            }
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Set the per-mesh target for the pre-spawn Worktree Pool
@@ -204,25 +215,29 @@ pub async fn update_mesh_pool_size(
             pool_size
         ));
     }
-    let db = db::lock_db();
-    let rows = db
-        .execute(
-            "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = ?2",
-            rusqlite::params![pool_size, mesh_id],
-        )
-        .map_err(|e| format!("failed to update pre_spawn_pool_size: {}", e))?;
-    // An UPDATE that matches no rows silently succeeds otherwise —
-    // returning `Ok(())` would let the frontend believe the save
-    // succeeded when the mesh was deleted (or never existed) between
-    // the load and the save. Surfaces the same contract as
-    // `set_mesh_sandbox_inner`'s zero-rows guard.
-    if rows == 0 {
-        return Err(format!(
-            "mesh {} not found (no rows updated)",
-            mesh_id
-        ));
-    }
-    drop(db);
+    crate::commands::run_blocking("update_mesh_pool_size", move || {
+        let db = db::lock_db();
+        let rows = db
+            .execute(
+                "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = ?2",
+                rusqlite::params![pool_size, mesh_id],
+            )
+            .map_err(|e| format!("failed to update pre_spawn_pool_size: {}", e))?;
+        // An UPDATE that matches no rows silently succeeds otherwise —
+        // returning `Ok(())` would let the frontend believe the save
+        // succeeded when the mesh was deleted (or never existed) between
+        // the load and the save. Surfaces the same contract as
+        // `set_mesh_sandbox_inner`'s zero-rows guard.
+        if rows == 0 {
+            return Err(format!(
+                "mesh {} not found (no rows updated)",
+                mesh_id
+            ));
+        }
+        drop(db);
+        Ok(())
+    })
+    .await?;
 
     // Drain-then-fill runs on a dedicated OS thread so the IPC handler
     // returns immediately. Inner `drain_excess_warm_entries` /
@@ -246,8 +261,11 @@ pub async fn update_mesh_pool_size(
 /// the typed edge.
 #[tauri::command]
 pub async fn get_mesh_pool_count(mesh_id: i64) -> Result<i64, String> {
-    db::count_available_warm_for_mesh(mesh_id)
-        .map_err(|e| format!("pool count for mesh {} failed: {}", mesh_id, e))
+    crate::commands::run_blocking("get_mesh_pool_count", move || {
+        db::count_available_warm_for_mesh(mesh_id)
+            .map_err(|e| format!("pool count for mesh {} failed: {}", mesh_id, e))
+    })
+    .await
 }
 
 /// Toggle whether this mesh's agent nodes run inside an OS process sandbox
@@ -256,8 +274,11 @@ pub async fn get_mesh_pool_count(mesh_id: i64) -> Result<i64, String> {
 /// the zero-rows-is-an-error contract is enforced in `db::set_mesh_sandbox`.
 #[tauri::command]
 pub async fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
-    db::set_mesh_sandbox(mesh_id, sandbox)
-        .map_err(|e| format!("failed to update sandbox: {}", e))
+    crate::commands::run_blocking("update_mesh_sandbox", move || {
+        db::set_mesh_sandbox(mesh_id, sandbox)
+            .map_err(|e| format!("failed to update sandbox: {}", e))
+    })
+    .await
 }
 
 /// Persist a mesh's Looping Autopilot configuration (wayfinder #990 /
@@ -322,20 +343,23 @@ pub async fn update_mesh_loop_config(
         ));
     }
 
-    let rows = db::set_mesh_loop_config(
-        mesh_id,
-        mode,
-        initial_prompt.as_deref(),
-        suffix_prompt.as_deref(),
-        max_iterations,
-        interval_seconds,
-        consecutive_failures,
-    )
-    .map_err(|e| format!("failed to update loop config: {}", e))?;
-    if rows == 0 {
-        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
-    }
-    Ok(())
+    crate::commands::run_blocking("update_mesh_loop_config", move || {
+        let rows = db::set_mesh_loop_config(
+            mesh_id,
+            mode,
+            initial_prompt.as_deref(),
+            suffix_prompt.as_deref(),
+            max_iterations,
+            interval_seconds,
+            consecutive_failures,
+        )
+        .map_err(|e| format!("failed to update loop config: {}", e))?;
+        if rows == 0 {
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Persist a mesh's Autopilot Policy (issue #481, PRD #480) in one write.
@@ -381,44 +405,47 @@ pub async fn update_mesh_autopilot(
             return Err(format!("unknown autopilot action_on_success: {}", action));
         }
     }
-    // Issue #1152 — enforce compatibility on the write side. Read the
-    // mesh row to evaluate the verdict with the *new* `provider`
-    // selection in place; reject the write with the structured reason
-    // text if the new state would be incompatible and the caller is
-    // trying to enable. Disabling (`enabled = false`) is always allowed
-    // — the user is opting out, never opting in to an invalid run.
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    if enabled {
-        let app_default_provider = preferences::default_provider();
-        let verdict = crate::autopilot::compatibility::compute_for_mesh(
-            provider.as_deref().or(mesh.autopilot_provider.as_deref()),
-            mesh.default_provider.as_deref(),
-            app_default_provider.as_deref(),
-            mesh.use_worktree,
-        );
-        if !verdict.allowed {
-            let reasons = format_reasons(&verdict.reasons);
-            return Err(format!(
-                "cannot enable Autopilot on mesh {}: incompatible Spawn Option {} ({reasons}). \
-                 Pick a compatible harness, or correct the mesh configuration.",
-                mesh_id, verdict.resolved_spawn_option.as_deref().unwrap_or("<none>"),
-            ));
+    crate::commands::run_blocking("update_mesh_autopilot", move || {
+        // Issue #1152 — enforce compatibility on the write side. Read the
+        // mesh row to evaluate the verdict with the *new* `provider`
+        // selection in place; reject the write with the structured reason
+        // text if the new state would be incompatible and the caller is
+        // trying to enable. Disabling (`enabled = false`) is always allowed
+        // — the user is opting out, never opting in to an invalid run.
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+        if enabled {
+            let app_default_provider = preferences::default_provider();
+            let verdict = crate::autopilot::compatibility::compute_for_mesh(
+                provider.as_deref().or(mesh.autopilot_provider.as_deref()),
+                mesh.default_provider.as_deref(),
+                app_default_provider.as_deref(),
+                mesh.use_worktree,
+            );
+            if !verdict.allowed {
+                let reasons = format_reasons(&verdict.reasons);
+                return Err(format!(
+                    "cannot enable Autopilot on mesh {}: incompatible Spawn Option {} ({reasons}). \
+                     Pick a compatible harness, or correct the mesh configuration.",
+                    mesh_id, verdict.resolved_spawn_option.as_deref().unwrap_or("<none>"),
+                ));
+            }
         }
-    }
-    let rows = db::set_mesh_autopilot(
-        mesh_id,
-        enabled,
-        trigger_label.as_deref(),
-        concurrency_limit,
-        provider.as_deref(),
-        action_on_success.as_deref(),
-    )
-    .map_err(|e| format!("failed to update autopilot policy: {}", e))?;
-    if rows == 0 {
-        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
-    }
-    Ok(())
+        let rows = db::set_mesh_autopilot(
+            mesh_id,
+            enabled,
+            trigger_label.as_deref(),
+            concurrency_limit,
+            provider.as_deref(),
+            action_on_success.as_deref(),
+        )
+        .map_err(|e| format!("failed to update autopilot policy: {}", e))?;
+        if rows == 0 {
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Format a list of [`AutopilotCompatibilityReason`]s into a user-facing
@@ -473,34 +500,37 @@ fn format_reasons(reasons: &[crate::autopilot::compatibility::AutopilotCompatibi
 /// an error rather than a silent success.
 #[tauri::command]
 pub async fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(), String> {
-    // Issue #1152 — read-side check before the narrow write. Reject the
-    // enable when the resolved Spawn Option is incompatible (same
-    // verdict the Probe UI displays). Disabling is always allowed.
-    if enabled {
-        let mesh = db::get_mesh_by_id(mesh_id)
-            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-        let app_default_provider = preferences::default_provider();
-        let verdict = crate::autopilot::compatibility::compute_for_mesh(
-            mesh.autopilot_provider.as_deref(),
-            mesh.default_provider.as_deref(),
-            app_default_provider.as_deref(),
-            mesh.use_worktree,
-        );
-        if !verdict.allowed {
-            let reasons = format_reasons(&verdict.reasons);
-            return Err(format!(
-                "cannot enable Autopilot on mesh {}: incompatible Spawn Option {} ({reasons}). \
-                 Pick a compatible harness, or correct the mesh configuration.",
-                mesh_id, verdict.resolved_spawn_option.as_deref().unwrap_or("<none>"),
-            ));
+    crate::commands::run_blocking("set_mesh_autopilot_enabled", move || {
+        // Issue #1152 — read-side check before the narrow write. Reject the
+        // enable when the resolved Spawn Option is incompatible (same
+        // verdict the Probe UI displays). Disabling is always allowed.
+        if enabled {
+            let mesh = db::get_mesh_by_id(mesh_id)
+                .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+            let app_default_provider = preferences::default_provider();
+            let verdict = crate::autopilot::compatibility::compute_for_mesh(
+                mesh.autopilot_provider.as_deref(),
+                mesh.default_provider.as_deref(),
+                app_default_provider.as_deref(),
+                mesh.use_worktree,
+            );
+            if !verdict.allowed {
+                let reasons = format_reasons(&verdict.reasons);
+                return Err(format!(
+                    "cannot enable Autopilot on mesh {}: incompatible Spawn Option {} ({reasons}). \
+                     Pick a compatible harness, or correct the mesh configuration.",
+                    mesh_id, verdict.resolved_spawn_option.as_deref().unwrap_or("<none>"),
+                ));
+            }
         }
-    }
-    let rows = db::set_mesh_autopilot_enabled(mesh_id, enabled)
-        .map_err(|e| format!("failed to update autopilot_enabled: {}", e))?;
-    if rows == 0 {
-        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
-    }
-    Ok(())
+        let rows = db::set_mesh_autopilot_enabled(mesh_id, enabled)
+            .map_err(|e| format!("failed to update autopilot_enabled: {}", e))?;
+        if rows == 0 {
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Runtime status of a mesh's Looping Autopilot for the Probe tab's status
@@ -513,14 +543,17 @@ pub async fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(
 pub async fn get_loop_status(
     mesh_id: i64,
 ) -> Result<crate::services::autopilot::LoopStatusDto, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    let rows = db::list_loop_iterations(mesh_id)
-        .map_err(|e| format!("failed to list loop iterations for mesh {}: {}", mesh_id, e))?;
-    Ok(crate::services::autopilot::derive_loop_status(
-        mesh.autopilot_enabled,
-        &rows,
-    ))
+    crate::commands::run_blocking("get_loop_status", move || {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+        let rows = db::list_loop_iterations(mesh_id)
+            .map_err(|e| format!("failed to list loop iterations for mesh {}: {}", mesh_id, e))?;
+        Ok(crate::services::autopilot::derive_loop_status(
+            mesh.autopilot_enabled,
+            &rows,
+        ))
+    })
+    .await
 }
 
 /// Pure compatibility verdict for Autopilot on one Mesh (issue #1152).
@@ -543,58 +576,67 @@ pub async fn get_loop_status(
 pub async fn get_autopilot_compatibility(
     mesh_id: i64,
 ) -> Result<crate::autopilot::compatibility::AutopilotCompatibility, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    let app_default_provider = preferences::default_provider();
-    Ok(crate::autopilot::compatibility::compute_for_mesh(
-        mesh.autopilot_provider.as_deref(),
-        mesh.default_provider.as_deref(),
-        app_default_provider.as_deref(),
-        mesh.use_worktree,
-    ))
+    crate::commands::run_blocking("get_autopilot_compatibility", move || {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+        let app_default_provider = preferences::default_provider();
+        Ok(crate::autopilot::compatibility::compute_for_mesh(
+            mesh.autopilot_provider.as_deref(),
+            mesh.default_provider.as_deref(),
+            app_default_provider.as_deref(),
+            mesh.use_worktree,
+        ))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    crate::commands::run_blocking("update_worktree_base_ref", move || {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-    // Map 'fresh' → origin/main and 'head' → HEAD
-    let resolved = match base_ref.as_str() {
-        "fresh" => "origin/main".to_string(),
-        "head" => "HEAD".to_string(),
-        other => other.to_string(),
-    };
+        // Map 'fresh' → origin/main and 'head' → HEAD
+        let resolved = match base_ref.as_str() {
+            "fresh" => "origin/main".to_string(),
+            "head" => "HEAD".to_string(),
+            other => other.to_string(),
+        };
 
-    // Write to both DB and settings.json
-    {
-        let db = db::lock_db();
-        db.execute(
-            "UPDATE meshes SET base_ref = ?1 WHERE id = ?2",
-            rusqlite::params![resolved, mesh_id],
-        )
-        .map_err(|e| format!("failed to update base_ref in DB: {}", e))?;
-    }
+        // Write to both DB and settings.json
+        {
+            let db = db::lock_db();
+            db.execute(
+                "UPDATE meshes SET base_ref = ?1 WHERE id = ?2",
+                rusqlite::params![resolved, mesh_id],
+            )
+            .map_err(|e| format!("failed to update base_ref in DB: {}", e))?;
+        }
 
-    write_base_ref(&mesh.path, &resolved)
+        write_base_ref(&mesh.path, &resolved)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    crate::commands::run_blocking("remove_worktree_base_ref", move || {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-    // Write default to DB and remove from settings.json
-    {
-        let db = db::lock_db();
-        db.execute(
-            "UPDATE meshes SET base_ref = 'origin/main' WHERE id = ?1",
-            rusqlite::params![mesh_id],
-        )
-        .map_err(|e| format!("failed to reset base_ref in DB: {}", e))?;
-    }
+        // Write default to DB and remove from settings.json
+        {
+            let db = db::lock_db();
+            db.execute(
+                "UPDATE meshes SET base_ref = 'origin/main' WHERE id = ?1",
+                rusqlite::params![mesh_id],
+            )
+            .map_err(|e| format!("failed to reset base_ref in DB: {}", e))?;
+        }
 
-    remove_base_ref(&mesh.path)
+        remove_base_ref(&mesh.path)
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -632,21 +674,20 @@ pub async fn upsert_mesh_harness_override(
     harness_id: String,
     value: HarnessConfigValue,
 ) -> Result<(), String> {
-    // Validate first (issue #1148 AC #5). The validator trims + collapses
-    // blanks via `preferences::normalize_harness_default` so a save
-    // carrying only whitespace is rejected as an empty map entry (the
-    // helper then drops the entry to maintain the sparse invariant).
-    // The harness-id lookup is case-insensitive for built-ins (matches
-    // `preferences::is_known_harness_id`) and case-sensitive for stored
-    // custom profiles — matching the same keying the application-default
-    // map uses.
-    let validated = preferences::validate_harness_default(&harness_id, value)?;
-    let rows = db::upsert_mesh_harness_override(mesh_id, &harness_id, validated)
-        .map_err(|e| format!("failed to upsert mesh harness override: {}", e))?;
-    if rows == 0 {
-        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
-    }
-    Ok(())
+    crate::commands::run_blocking("upsert_mesh_harness_override", move || {
+        // Validate first (issue #1148 AC #5). The validator trims + collapses
+        // blanks via `preferences::normalize_harness_default` so a save
+        // carrying only whitespace is rejected as an empty map entry (the
+        // helper then drops the entry to maintain the sparse invariant).
+        let validated = preferences::validate_harness_default(&harness_id, value)?;
+        let rows = db::upsert_mesh_harness_override(mesh_id, &harness_id, validated)
+            .map_err(|e| format!("failed to upsert mesh harness override: {}", e))?;
+        if rows == 0 {
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Remove one harness's entry from the mesh's `harness_overrides` map
@@ -664,12 +705,15 @@ pub async fn remove_mesh_harness_override(
     mesh_id: i64,
     harness_id: String,
 ) -> Result<(), String> {
-    let rows = db::remove_mesh_harness_override(mesh_id, &harness_id)
-        .map_err(|e| format!("failed to remove mesh harness override: {}", e))?;
-    if rows == 0 {
-        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
-    }
-    Ok(())
+    crate::commands::run_blocking("remove_mesh_harness_override", move || {
+        let rows = db::remove_mesh_harness_override(mesh_id, &harness_id)
+            .map_err(|e| format!("failed to remove mesh harness override: {}", e))?;
+        if rows == 0 {
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Reset every entry in the mesh's `harness_overrides` map (issue #1151)
@@ -681,10 +725,13 @@ pub async fn remove_mesh_harness_override(
 /// the Mesh will inherit them cleanly after the reset.
 #[tauri::command]
 pub async fn clear_mesh_harness_overrides(mesh_id: i64) -> Result<(), String> {
-    let rows = db::clear_mesh_harness_overrides(mesh_id)
-        .map_err(|e| format!("failed to clear mesh harness overrides: {}", e))?;
-    if rows == 0 {
-        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
-    }
-    Ok(())
+    crate::commands::run_blocking("clear_mesh_harness_overrides", move || {
+        let rows = db::clear_mesh_harness_overrides(mesh_id)
+            .map_err(|e| format!("failed to clear mesh harness overrides: {}", e))?;
+        if rows == 0 {
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+        }
+        Ok(())
+    })
+    .await
 }

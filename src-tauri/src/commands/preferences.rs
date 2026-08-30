@@ -12,7 +12,7 @@ use tauri::{command, AppHandle, Emitter};
 /// a missing or malformed file yields `AppPreferences::default()`.
 #[command]
 pub async fn get_app_preferences() -> Result<AppPreferences, String> {
-    preferences::load()
+    crate::commands::run_blocking("get_app_preferences", preferences::load).await
 }
 
 /// Set the buildmesh-wide default provider. Pass `None` (or an empty string,
@@ -20,9 +20,12 @@ pub async fn get_app_preferences() -> Result<AppPreferences, String> {
 /// `claude` fallback (post-#538 unified harness id).
 #[command]
 pub async fn set_app_default_provider(provider: Option<String>) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    prefs.default_provider = provider.filter(|s| !s.is_empty());
-    preferences::save(prefs)
+    crate::commands::run_blocking("set_app_default_provider", move || {
+        let mut prefs = preferences::load()?;
+        prefs.default_provider = provider.filter(|s| !s.is_empty());
+        preferences::save(prefs)
+    })
+    .await
 }
 
 /// Set the backend that summaries node PTY output into a slug (issue #824).
@@ -33,9 +36,12 @@ pub async fn set_app_default_provider(provider: Option<String>) -> Result<(), St
 /// random `adjective-adjective-noun` slugs until the user picks a value.
 #[command]
 pub async fn set_app_naming_provider(provider: Option<String>) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    prefs.naming_provider = provider.filter(|s| !s.is_empty());
-    preferences::save(prefs)
+    crate::commands::run_blocking("set_app_naming_provider", move || {
+        let mut prefs = preferences::load()?;
+        prefs.naming_provider = provider.filter(|s| !s.is_empty());
+        preferences::save(prefs)
+    })
+    .await
 }
 
 /// Set the app-wide autopilot pool size — the cap on concurrently active
@@ -44,9 +50,12 @@ pub async fn set_app_naming_provider(provider: Option<String>) -> Result<(), Str
 /// effect on the poller's next pass — running nodes are never killed.
 #[command]
 pub async fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    prefs.autopilot_pool_size = size;
-    preferences::save(prefs)
+    crate::commands::run_blocking("set_app_autopilot_pool_size", move || {
+        let mut prefs = preferences::load()?;
+        prefs.autopilot_pool_size = size;
+        preferences::save(prefs)
+    })
+    .await
 }
 
 /// Persist the user's spawn-menu harness order (issue #573). `order` is the list
@@ -57,7 +66,10 @@ pub async fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String
 /// by the account commands.
 #[command]
 pub async fn set_harness_order(app: AppHandle, order: Vec<String>) -> Result<(), String> {
-    preferences::set_harness_order(order)?;
+    crate::commands::run_blocking("set_harness_order", move || {
+        preferences::set_harness_order(order)
+    })
+    .await?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
@@ -82,7 +94,10 @@ pub async fn set_proxied_provider_order(
     harness_id: String,
     provider_ids: Vec<String>,
 ) -> Result<(), String> {
-    preferences::set_proxied_provider_order(harness_id, provider_ids)?;
+    crate::commands::run_blocking("set_proxied_provider_order", move || {
+        preferences::set_proxied_provider_order(harness_id, provider_ids)
+    })
+    .await?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
@@ -91,7 +106,10 @@ pub async fn set_proxied_provider_order(
 /// keyed first-class / generic accounts the user has added (ADR-0025).
 #[command]
 pub async fn get_provider_accounts() -> Result<Vec<ProviderAccount>, String> {
-    Ok(preferences::provider_accounts())
+    crate::commands::run_blocking("get_provider_accounts", || {
+        Ok(preferences::provider_accounts())
+    })
+    .await
 }
 
 /// Keyed first-class catalog templates (MiniMax, Kimi, OpenRouter) for the
@@ -110,7 +128,10 @@ pub async fn get_pairing_defaults(
     harness_id: String,
     provider_id: String,
 ) -> Result<Option<ProviderPairing>, String> {
-    Ok(preferences::pairing_for(&harness_id, &provider_id))
+    crate::commands::run_blocking("get_pairing_defaults", move || {
+        Ok(preferences::pairing_for(&harness_id, &provider_id))
+    })
+    .await
 }
 
 /// Create or update a model-provider account (issue #537 / ADR-0025). For a
@@ -127,21 +148,26 @@ pub async fn get_pairing_defaults(
 #[command]
 pub async fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -> Result<(), String> {
     let account_id = account.id.clone();
-    let mut prefs = preferences::load()?;
-    preferences::upsert_provider_account(&mut prefs, account);
-    let codex_harnesses: Vec<String> = prefs
-        .provider_pairings
-        .iter()
-        .filter(|pairing| {
-            pairing.provider_id == account_id && pairing.surface == preferences::ApiSurface::OpenAI
-        })
-        .map(|pairing| pairing.harness_id.clone())
-        .collect();
-    preferences::save(prefs)?;
-    crate::services::usage::invalidate_cache();
+    let account_id_for_verify = account_id.clone();
+    let codex_harnesses = crate::commands::run_blocking("upsert_provider_account", move || {
+        let mut prefs = preferences::load()?;
+        preferences::upsert_provider_account(&mut prefs, account);
+        let codex_harnesses: Vec<String> = prefs
+            .provider_pairings
+            .iter()
+            .filter(|pairing| {
+                pairing.provider_id == account_id && pairing.surface == preferences::ApiSurface::OpenAI
+            })
+            .map(|pairing| pairing.harness_id.clone())
+            .collect();
+        preferences::save(prefs)?;
+        crate::services::usage::invalidate_cache();
+        Ok(codex_harnesses)
+    })
+    .await?;
     let _ = app.emit("provider-list-changed", ());
     for harness_id in codex_harnesses {
-        schedule_pairing_verification(app.clone(), harness_id, account_id.clone());
+        schedule_pairing_verification(app.clone(), harness_id, account_id_for_verify.clone());
     }
     Ok(())
 }
@@ -155,10 +181,14 @@ pub async fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -
 /// invalidation (same reason as [`upsert_provider_account`]).
 #[command]
 pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    preferences::remove_provider_account(&mut prefs, &id);
-    preferences::save(prefs)?;
-    crate::services::usage::invalidate_cache();
+    crate::commands::run_blocking("remove_provider_account", move || {
+        let mut prefs = preferences::load()?;
+        preferences::remove_provider_account(&mut prefs, &id);
+        preferences::save(prefs)?;
+        crate::services::usage::invalidate_cache();
+        Ok(())
+    })
+    .await?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
@@ -172,7 +202,10 @@ pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), S
 /// to show what's attached under each harness (issue #576).
 #[command]
 pub async fn get_provider_pairings() -> Result<Vec<ProviderPairing>, String> {
-    Ok(preferences::effective_provider_pairings())
+    crate::commands::run_blocking("get_provider_pairings", || {
+        Ok(preferences::effective_provider_pairings())
+    })
+    .await
 }
 
 #[command]
@@ -253,7 +286,10 @@ pub(crate) fn schedule_pairing_verification_for_runtime(
 pub async fn compatible_providers_for_harness(
     harness_id: String,
 ) -> Result<Vec<ProviderAccount>, String> {
-    Ok(preferences::compatible_providers_for_harness(&harness_id))
+    crate::commands::run_blocking("compatible_providers_for_harness", move || {
+        Ok(preferences::compatible_providers_for_harness(&harness_id))
+    })
+    .await
 }
 
 /// Attach a **Model Provider** to a harness over the harness's surface — the
@@ -272,63 +308,69 @@ pub async fn attach_proxied_provider(
     base_url: Option<String>,
     model_tiers: Option<ModelTiers>,
 ) -> Result<(), String> {
-    let surface = preferences::harness_surface(&harness_id).ok_or_else(|| {
-        format!("harness '{harness_id}' does not speak a proxy-capable surface")
-    })?;
-    let mut pairing = preferences::pairing_for(&harness_id, &provider_id).unwrap_or_else(|| {
-        ProviderPairing {
-            harness_id: harness_id.clone(),
-            provider_id: provider_id.clone(),
-            surface,
-            base_url: None,
-            model_tiers: ModelTiers::default(),
+    let harness_id_for_verify = harness_id.clone();
+    let provider_id_for_verify = provider_id.clone();
+    let should_verify = crate::commands::run_blocking("attach_proxied_provider", move || {
+        let surface = preferences::harness_surface(&harness_id).ok_or_else(|| {
+            format!("harness '{harness_id}' does not speak a proxy-capable surface")
+        })?;
+        let mut pairing = preferences::pairing_for(&harness_id, &provider_id).unwrap_or_else(|| {
+            ProviderPairing {
+                harness_id: harness_id.clone(),
+                provider_id: provider_id.clone(),
+                surface,
+                base_url: None,
+                model_tiers: ModelTiers::default(),
+            }
+        });
+        // Surface-match gate: refuse when the provider doesn't expose this surface.
+        let accounts = preferences::provider_accounts();
+        let account = accounts.iter().find(|a| a.id == provider_id);
+        // Keyed first-class may not be materialised yet — check catalog too.
+        let surfaces = account
+            .map(preferences::provider_surfaces)
+            .or_else(|| {
+                preferences::keyed_first_class_catalog()
+                    .into_iter()
+                    .find(|a| a.id == provider_id)
+                    .map(|a| preferences::provider_surfaces(&a))
+            })
+            .unwrap_or_default();
+        if !surfaces.contains(&surface) {
+            return Err(format!(
+                "provider '{provider_id}' is not compatible with harness '{harness_id}'"
+            ));
         }
-    });
-    // Surface-match gate: refuse when the provider doesn't expose this surface.
-    let accounts = preferences::provider_accounts();
-    let account = accounts.iter().find(|a| a.id == provider_id);
-    // Keyed first-class may not be materialised yet — check catalog too.
-    let surfaces = account
-        .map(preferences::provider_surfaces)
-        .or_else(|| {
-            preferences::keyed_first_class_catalog()
-                .into_iter()
-                .find(|a| a.id == provider_id)
-                .map(|a| preferences::provider_surfaces(&a))
-        })
-        .unwrap_or_default();
-    if !surfaces.contains(&surface) {
-        return Err(format!(
-            "provider '{provider_id}' is not compatible with harness '{harness_id}'"
-        ));
-    }
-    if let Some(url) = base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        pairing.base_url = Some(url.to_string());
-    }
-    if let Some(tiers) = model_tiers {
-        pairing.model_tiers = tiers;
-    }
-    if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
-        return Err(format!(
-            "base_url is required to attach provider '{provider_id}' to harness '{harness_id}'"
-        ));
-    }
-    let compatibility = preferences::pairing_compatibility(&pairing);
-    if !compatibility.compatible {
-        return Err(compatibility
-            .reason
-            .unwrap_or_else(|| "pairing does not satisfy the harness capability contract".into()));
-    }
-    let mut prefs = preferences::load()?;
-    if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
-        preferences::set_account_key_if_absent(&mut prefs, &provider_id, key);
-    }
-    preferences::upsert_provider_pairing(&mut prefs, pairing);
-    preferences::save(prefs)?;
-    crate::services::usage::invalidate_cache();
+        if let Some(url) = base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            pairing.base_url = Some(url.to_string());
+        }
+        if let Some(tiers) = model_tiers {
+            pairing.model_tiers = tiers;
+        }
+        if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            return Err(format!(
+                "base_url is required to attach provider '{provider_id}' to harness '{harness_id}'"
+            ));
+        }
+        let compatibility = preferences::pairing_compatibility(&pairing);
+        if !compatibility.compatible {
+            return Err(compatibility
+                .reason
+                .unwrap_or_else(|| "pairing does not satisfy the harness capability contract".into()));
+        }
+        let mut prefs = preferences::load()?;
+        if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
+            preferences::set_account_key_if_absent(&mut prefs, &provider_id, key);
+        }
+        preferences::upsert_provider_pairing(&mut prefs, pairing);
+        preferences::save(prefs)?;
+        crate::services::usage::invalidate_cache();
+        Ok(surface == preferences::ApiSurface::OpenAI)
+    })
+    .await?;
     let _ = app.emit("provider-list-changed", ());
-    if surface == preferences::ApiSurface::OpenAI {
-        schedule_pairing_verification(app.clone(), harness_id, provider_id);
+    if should_verify {
+        schedule_pairing_verification(app.clone(), harness_id_for_verify, provider_id_for_verify);
     }
     Ok(())
 }
@@ -344,29 +386,35 @@ pub async fn update_provider_pairing(
     base_url: Option<String>,
     model_tiers: Option<ModelTiers>,
 ) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    let pairing = prefs
-        .provider_pairings
-        .iter_mut()
-        .find(|p| p.harness_id == harness_id && p.provider_id == provider_id)
-        .ok_or_else(|| {
-            format!("no stored pairing for harness '{harness_id}' / provider '{provider_id}'")
-        })?;
-    if let Some(url) = base_url {
-        let trimmed = url.trim();
-        pairing.base_url = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
-    }
-    if let Some(tiers) = model_tiers {
-        pairing.model_tiers = tiers;
-    }
-    if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
-        return Err("base_url must be non-empty".to_string());
-    }
-    let should_verify = pairing.surface == preferences::ApiSurface::OpenAI;
-    preferences::save(prefs)?;
+    let harness_id_for_verify = harness_id.clone();
+    let provider_id_for_verify = provider_id.clone();
+    let should_verify = crate::commands::run_blocking("update_provider_pairing", move || {
+        let mut prefs = preferences::load()?;
+        let pairing = prefs
+            .provider_pairings
+            .iter_mut()
+            .find(|p| p.harness_id == harness_id && p.provider_id == provider_id)
+            .ok_or_else(|| {
+                format!("no stored pairing for harness '{harness_id}' / provider '{provider_id}'")
+            })?;
+        if let Some(url) = base_url {
+            let trimmed = url.trim();
+            pairing.base_url = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+        }
+        if let Some(tiers) = model_tiers {
+            pairing.model_tiers = tiers;
+        }
+        if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            return Err("base_url must be non-empty".to_string());
+        }
+        let should_verify = pairing.surface == preferences::ApiSurface::OpenAI;
+        preferences::save(prefs)?;
+        Ok(should_verify)
+    })
+    .await?;
     let _ = app.emit("provider-list-changed", ());
     if should_verify {
-        schedule_pairing_verification(app.clone(), harness_id, provider_id);
+        schedule_pairing_verification(app.clone(), harness_id_for_verify, provider_id_for_verify);
     }
     Ok(())
 }
@@ -379,9 +427,12 @@ pub async fn remove_provider_pairing(
     harness_id: String,
     provider_id: String,
 ) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    preferences::remove_provider_pairing(&mut prefs, &harness_id, &provider_id);
-    preferences::save(prefs)?;
+    crate::commands::run_blocking("remove_provider_pairing", move || {
+        let mut prefs = preferences::load()?;
+        preferences::remove_provider_pairing(&mut prefs, &harness_id, &provider_id);
+        preferences::save(prefs)
+    })
+    .await?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
@@ -421,9 +472,12 @@ pub async fn set_harness_default(
     profile_id: String,
     value: HarnessConfigValue,
 ) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    preferences::upsert_harness_default(&mut prefs, &profile_id, value)?;
-    preferences::save(prefs)
+    crate::commands::run_blocking("set_harness_default", move || {
+        let mut prefs = preferences::load()?;
+        preferences::upsert_harness_default(&mut prefs, &profile_id, value)?;
+        preferences::save(prefs)
+    })
+    .await
 }
 
 /// Remove the **application-level default** for one Agent Harness (issue
@@ -434,7 +488,10 @@ pub async fn set_harness_default(
 /// path as [`set_harness_default`].
 #[command]
 pub async fn clear_harness_default(profile_id: String) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    preferences::remove_harness_default(&mut prefs, &profile_id);
-    preferences::save(prefs)
+    crate::commands::run_blocking("clear_harness_default", move || {
+        let mut prefs = preferences::load()?;
+        preferences::remove_harness_default(&mut prefs, &profile_id);
+        preferences::save(prefs)
+    })
+    .await
 }

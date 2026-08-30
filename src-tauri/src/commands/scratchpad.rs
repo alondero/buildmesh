@@ -24,11 +24,14 @@ use crate::db;
 /// the wire contract.
 #[command]
 pub async fn get_mesh_scratchpad(mesh_id: i64) -> Result<String, String> {
-    match db::get_mesh_scratchpad(mesh_id) {
-        Ok(content) => Ok(content),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
-        Err(e) => Err(e.to_string()),
-    }
+    crate::commands::run_blocking("get_mesh_scratchpad", move || {
+        match db::get_mesh_scratchpad(mesh_id) {
+            Ok(content) => Ok(content),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
 }
 
 /// Overwrite a mesh's scratch pad. Empty string is a normal value
@@ -38,5 +41,8 @@ pub async fn get_mesh_scratchpad(mesh_id: i64) -> Result<String, String> {
 /// since the data went nowhere.
 #[command]
 pub async fn set_mesh_scratchpad(mesh_id: i64, content: String) -> Result<(), String> {
-    db::set_mesh_scratchpad(mesh_id, &content).map_err(|e| e.to_string())
+    crate::commands::run_blocking("set_mesh_scratchpad", move || {
+        db::set_mesh_scratchpad(mesh_id, &content).map_err(|e| e.to_string())
+    })
+    .await
 }

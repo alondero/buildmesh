@@ -56,9 +56,13 @@ pub async fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), St
 /// silently-dropped status write left the set and the column disagreeing.
 #[command]
 pub async fn is_attention_pending(session_id: i64) -> bool {
-    db::get_agent_node_by_id(session_id)
-        .map(|n| status_is_awaiting(&n))
-        .unwrap_or(false)
+    crate::commands::run_blocking("is_attention_pending", move || {
+        Ok(db::get_agent_node_by_id(session_id)
+            .map(|n| status_is_awaiting(&n))
+            .unwrap_or(false))
+    })
+    .await
+    .unwrap_or(false)
 }
 
 fn status_is_awaiting(node: &AgentNode) -> bool {

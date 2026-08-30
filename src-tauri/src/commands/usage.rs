@@ -300,13 +300,18 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
 /// providers carry `usage_tracked = false`. Reuses the `ProviderUsage` wire shape.
 #[command]
 pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMeters>, String> {
-    let profiles = preferences::harness_profiles();
-    let accounts = preferences::provider_accounts();
-    let ids = poll_ids(&accounts, &profiles);
-    // Resolve once which keyed providers have a credential configured —
-    // threaded into the gate so a 401/403 from Kimi/OpenRouter doesn't
-    // silently hide the row (see `assemble_meters` docstring).
-    let configured_keys = configured_keyed_providers(&accounts);
+    let (profiles, accounts, ids, configured_keys) =
+        crate::commands::run_blocking("get_provider_meters_ids", || {
+            let profiles = preferences::harness_profiles();
+            let accounts = preferences::provider_accounts();
+            let ids = poll_ids(&accounts, &profiles);
+            // Resolve once which keyed providers have a credential configured —
+            // threaded into the gate so a 401/403 from Kimi/OpenRouter doesn't
+            // silently hide the row (see `assemble_meters` docstring).
+            let configured_keys = configured_keyed_providers(&accounts);
+            Ok((profiles, accounts, ids, configured_keys))
+        })
+        .await?;
 
     // Each fetch is a blocking HTTP round-trip to a different vendor; running
     // them serially made the panel wait for the sum of all of them. Fan out on
@@ -334,11 +339,14 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
 
 #[command]
 pub async fn set_minimax_api_key(key: Option<String>) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
-    prefs.minimax_api_key = key;
-    preferences::save(prefs)?;
-    usage::invalidate_cache();
-    Ok(())
+    crate::commands::run_blocking("set_minimax_api_key", move || {
+        let mut prefs = preferences::load()?;
+        prefs.minimax_api_key = key;
+        preferences::save(prefs)?;
+        usage::invalidate_cache();
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]

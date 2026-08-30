@@ -15,7 +15,10 @@ use tauri::command;
 /// the secret never crosses the IPC boundary.
 #[command]
 pub async fn list_device_sessions() -> Result<Vec<DeviceSession>, String> {
-    db::list_device_sessions().map_err(|e| e.to_string())
+    crate::commands::run_blocking("list_device_sessions", || {
+        db::list_device_sessions().map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Revoke a device: delete its row (blocking future requests) and broadcast the
@@ -24,7 +27,10 @@ pub async fn list_device_sessions() -> Result<Vec<DeviceSession>, String> {
 /// authorized) already holds.
 #[command]
 pub async fn revoke_device_session(id: i64) -> Result<(), String> {
-    let removed = db::revoke_device_session(id).map_err(|e| e.to_string())?;
+    let removed = crate::commands::run_blocking("revoke_device_session", move || {
+        db::revoke_device_session(id).map_err(|e| e.to_string())
+    })
+    .await?;
     if removed {
         revocation::revoke(id);
     }

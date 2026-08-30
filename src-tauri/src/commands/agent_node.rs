@@ -39,33 +39,44 @@ pub async fn create_agent_node(
     // Tauri command surface has no PR-spawn plumbing; PR flows go via
     // `commands::pr::create_pr_node`. If we ever expose PR spawn here,
     // this is the call site to grow.
-    services::agent_node::create(
-        mesh_id,
-        &path,
-        &branch,
-        provider.as_deref(),
-        None, // source_issue
-        None, // source_pr — non-PR spawn (issue #450)
-        None, // source_pr_pinned_sha — non-PR spawn (issue #444)
-        use_worktree,
-        None, // name_override — Tauri surface doesn't accept one
-    )
+    // Offload: create locks SQLite, touches the filesystem, and may run
+    // git worktree operations (issue #1380).
+    crate::commands::run_blocking("create_agent_node", move || {
+        services::agent_node::create(
+            mesh_id,
+            &path,
+            &branch,
+            provider.as_deref(),
+            None, // source_issue
+            None, // source_pr — non-PR spawn (issue #450)
+            None, // source_pr_pinned_sha — non-PR spawn (issue #444)
+            use_worktree,
+            None, // name_override — Tauri surface doesn't accept one
+        )
         .map_err(|e| {
             tracing::error!("create_agent_node failed: {}", e);
             e.to_string()
         })
+    })
+    .await
 }
 
 /// List all agent nodes
 #[command]
 pub async fn list_agent_nodes() -> Result<Vec<AgentNode>, String> {
-    db::list_agent_nodes().map_err(|e| e.to_string())
+    crate::commands::run_blocking("list_agent_nodes", || {
+        db::list_agent_nodes().map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Get agent node by ID
 #[command]
 pub async fn get_agent_node(node_id: i64) -> Result<AgentNode, String> {
-    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    crate::commands::run_blocking("get_agent_node", move || {
+        db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Delete an agent node permanently.
@@ -80,8 +91,11 @@ pub async fn delete_agent_node(
     remove_worktree: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    services::agent_node::delete(node_id, remove_worktree.unwrap_or(false))
-        .map_err(|e| e.to_string())?;
+    crate::commands::run_blocking("delete_agent_node", move || {
+        services::agent_node::delete(node_id, remove_worktree.unwrap_or(false))
+            .map_err(|e| e.to_string())
+    })
+    .await?;
 
     drain_pending_removals(app);
     Ok(())
@@ -109,7 +123,10 @@ pub fn drain_pending_removals(app: tauri::AppHandle) {
 /// stays in sync with its optimistic update. Mirrors `update_mesh_positions`.
 #[command]
 pub async fn update_agent_node_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
-    db::update_agent_node_positions_batch(&updates).map_err(|e| e.to_string())
+    crate::commands::run_blocking("update_agent_node_positions", move || {
+        db::update_agent_node_positions_batch(&updates).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Check whether the node's worktree can be removed safely on close.
@@ -160,13 +177,17 @@ pub async fn rename_agent_node(
     // hits our race guard (which re-reads the node's name from the DB).
     crate::session_naming::cleanup(node_id);
 
-    db::update_agent_node_name(node_id, &trimmed).map_err(|e| e.to_string())?;
+    let name_for_emit = trimmed.clone();
+    crate::commands::run_blocking("rename_agent_node", move || {
+        db::update_agent_node_name(node_id, &trimmed).map_err(|e| e.to_string())
+    })
+    .await?;
 
     let _ = app.emit(
         "node-renamed",
         crate::session_naming::NodeRenamedPayload {
             node_id,
-            name: trimmed,
+            name: name_for_emit,
         },
     );
     Ok(())
@@ -186,12 +207,15 @@ pub async fn set_node_pinned(
     node_id: i64,
     pinned: bool,
 ) -> Result<AgentNode, String> {
-    let updated = db::set_agent_node_pinned(node_id, pinned)
-        .map_err(|e| e.to_string())?;
-    if updated == 0 {
-        return Err(format!("set_node_pinned: node {node_id} not found"));
-    }
-    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    crate::commands::run_blocking("set_node_pinned", move || {
+        let updated = db::set_agent_node_pinned(node_id, pinned)
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err(format!("set_node_pinned: node {node_id} not found"));
+        }
+        db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Flip an agent node's `is_pinned` flag and return the new state
@@ -202,10 +226,13 @@ pub async fn set_node_pinned(
 /// an error string (same contract as `set_node_pinned`).
 #[command]
 pub async fn toggle_node_pinned(node_id: i64) -> Result<AgentNode, String> {
-    db::toggle_agent_node_pinned(node_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("toggle_node_pinned: node {node_id} not found"))?;
-    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    crate::commands::run_blocking("toggle_node_pinned", move || {
+        db::toggle_agent_node_pinned(node_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("toggle_node_pinned: node {node_id} not found"))?;
+        db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Swap an agent node's Model Provider (issue #774 / #775). The

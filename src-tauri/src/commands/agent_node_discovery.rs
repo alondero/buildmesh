@@ -33,32 +33,36 @@ pub async fn import_discovered_agent_node(
     worktree_name: Option<String>,
     provider: Option<String>,
 ) -> Result<AgentNode, String> {
-    let session_name = crate::session_naming::on_spawn();
-    let resolved = env::resolve_agent_path(&mesh_path, None);
-    let env_type = resolved.env_type;
-    // Store the harness/profile id verbatim (issue #535); resolution to a
-    // concrete executor happens at the spawn seam. Absent → "anthropic".
-    let provider_id = provider.as_deref().unwrap_or("anthropic");
+    crate::commands::run_blocking("import_discovered_agent_node", move || {
+        let session_name = crate::session_naming::on_spawn();
+        let resolved = env::resolve_agent_path(&mesh_path, None);
+        let env_type = resolved.env_type;
+        // Store the harness/profile id verbatim (issue #535); resolution to a
+        // concrete executor happens at the spawn seam. Absent → "anthropic".
+        let provider_id = provider.as_deref().unwrap_or("anthropic");
 
-    let use_worktree = worktree_name.is_some();
-    let node = db::create_agent_node(
-        mesh_id,
-        &session_name,
-        &mesh_path,
-        &branch,
-        env_type,
-        provider_id,
-        worktree_name.as_deref(),
-        None,
-        None,
-        None, // source_pr_pinned_sha — agent-node-discovery path doesn't pin a PR SHA
-        use_worktree,
-        None,
-        None,
-    ).map_err(|e| e.to_string())?;
-
-    db::update_cli_session_id(node.id, &cli_session_id)
+        let use_worktree = worktree_name.is_some();
+        let node = db::create_agent_node(
+            mesh_id,
+            &session_name,
+            &mesh_path,
+            &branch,
+            env_type,
+            provider_id,
+            worktree_name.as_deref(),
+            None,
+            None,
+            None, // source_pr_pinned_sha — agent-node-discovery path doesn't pin a PR SHA
+            use_worktree,
+            None,
+            None,
+        )
         .map_err(|e| e.to_string())?;
 
-    db::get_agent_node_by_id(node.id).map_err(|e| e.to_string())
+        db::update_cli_session_id(node.id, &cli_session_id)
+            .map_err(|e| e.to_string())?;
+
+        db::get_agent_node_by_id(node.id).map_err(|e| e.to_string())
+    })
+    .await
 }
