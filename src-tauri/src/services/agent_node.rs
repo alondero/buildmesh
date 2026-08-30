@@ -1,7 +1,6 @@
 //! Agent Node service — creation, deletion, and lifecycle orchestration
 
 use crate::agent::provider::parse_spawn_option_id;
-use crate::agent::spawn::{spawn_with_intent, SpawnIntent, SpawnRequest, TerminalSize};
 use crate::db;
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
@@ -538,111 +537,23 @@ pub fn decide_resume(
     }
 }
 
-/// Regenerate an agent node: swap its Model Provider, kill the live
-/// process, and respawn. The worktree, branch, name, position, and
-/// all other state are preserved; only the `provider` column changes.
-///
-/// The same-harness check lives inside [`decide_resume`] — the user
-/// may pick any Spawn Option (cross-harness is allowed), but the
-/// existing `cli_session_id` is only portable across a same-harness
-/// swap, so a cross-harness swap always starts fresh. The "right
-/// handoff" for a cross-harness regenerate is up to the user (e.g.
-/// a context file already in the worktree that the new agent can
-/// read).
-///
-/// On spawn failure the `provider` column has already been updated —
-/// the user can retry. Mirrors the pre-existing spawn flow's behaviour
-/// for a fresh `spawn_agent` (the row is in `Error` state and the
-/// user retries the spawn manually).
-///
-/// # Architecture (issue #1380 review)
-///
-/// The orchestrator below interleaves three sync helpers with two
-/// async steps (`kill_agent`, `spawn_with_intent`). Each helper is a
-/// pure sync function — the service does NOT call `spawn_blocking`
-/// internally. The command boundary
-/// (`commands::agent_node::regenerate_agent_node`) is the single place
-/// that wraps each helper in `crate::commands::run_blocking`. This
-/// keeps the service free of thread-pool orchestration and lets the
-/// helpers be unit-tested without Tauri.
-pub async fn regenerate(
-    node_id: i64,
-    new_provider: &str,
-    app: &tauri::AppHandle,
-) -> Result<AgentNode, AgentNodeError> {
-    let new_provider = new_provider.to_string();
-
-    // 1–2. Load + validate off-thread. Capture the old provider before
-    // the update so `decide_resume` can compare harness ids. Reject
-    // mid-spawn and closed states up front so we never leave a
-    // half-killed process behind. Helper returns owned data — no
-    // pre-clones needed.
-    let (old_provider, skip_kill) = regenerate_load_blocking(node_id)?;
-
-    // 3. Kill the live process ONLY when one is registered.
-    //    `kill_agent` is idempotent — a no-op when no process is
-    //    registered — but its tail (commands/agent.rs:1172) calls
-    //    `session_lifecycle::on_idle`, which unconditionally writes
-    //    `Idle`. For a Suspended node (no live process — the agent
-    //    was killed on app exit, or never started in the
-    //    autopilot-gate case) that write would clobber Suspended→Idle
-    //    BEFORE the new spawn lands. `should_skip_kill_for_regenerate`
-    //    keeps the rule local to this orchestrator — do NOT modify
-    //    `kill_agent` (it's used by `close_node`, the spawn stale-
-    //    process reaper at spawn.rs:1228, and `auto_resume_*`; its
-    //    `on_idle` is correct for actual kills).
-    //
-    //    The explicit kill IS load-bearing for non-Suspended nodes:
-    //    `spawn_agent_inner`'s `is_agent_already_running` short-circuit
-    //    at spawn.rs:743 returns early without killing or respawning
-    //    if a process is still registered, which would leave the OLD
-    //    process alive with the NEW provider in the DB.
-    //    `spawn_agent_inner` re-kills at its own step 2 (spawn.rs:751)
-    //    but only after that short-circuit doesn't fire.
-    //
-    //    Errors are ignored: `kill_agent` returns Err only from the
-    //    trailing `SessionLifecycle::on_kill(.., Idle)` (issue #132) —
-    //    the registry side effects (`kill_session` + `remove`) are
-    //    already in place. The new spawn sets the status correctly
-    //    anyway.
-    if !skip_kill {
-        let _ = crate::agent::process::kill_agent(node_id).await;
-    }
-
-    // 4–6. Update `provider`, reload, decide resume off-thread. The
-    // next `spawn_agent_inner` call reads `node.provider` for backend
-    // env resolution (`preferences::resolve_provider_env(&node.provider)`,
-    // spawn.rs:1399) and preflight, so the new value must land BEFORE
-    // we hand off to the spawn pipeline. The spawner reloads the node
-    // and owns the actual session-id/adapter policy, including
-    // clearing a stale id for a Fresh intent.
-    let resume = regenerate_apply_blocking(node_id, &old_provider, &new_provider)?;
-
-    let intent = if resume {
-        SpawnIntent::Resume {
-            cause: crate::agent::spawn::ResumeCause::Explicit,
-        }
-    } else {
-        SpawnIntent::Fresh
-    };
-
-    spawn_with_intent(
-        app,
-        SpawnRequest::new(node_id, intent, TerminalSize::default()),
-    )
-    .await
-    .map_err(AgentNodeError::Backend)?;
-
-    regenerate_reload_blocking(node_id)
-}
-
-/// Sync helper for step 1 of [`regenerate`]: load the node, validate
-/// its status, and return the old provider + whether the kill step
-/// should be skipped (true only for `Suspended`).
+/// Sync helper for step 1 of the regenerate orchestrator: load the
+/// node, validate its status, and return the old provider + whether
+/// the kill step should be skipped (true only for `Suspended`).
 ///
 /// Pure — no async, no thread-pool orchestration. The command boundary
-/// wraps this in `crate::commands::run_blocking`. See
-/// `regenerate` doc for why this is split out.
+/// (`commands::agent_node::regenerate_agent_node`) is the single place
+/// that wraps this in `crate::commands::run_blocking` (issue #1380
+/// review round-2 feedback 1).
+///
+/// # Architecture
+///
+/// The previous async `regenerate` orchestrator that called the three
+/// sync helpers DIRECTLY on the Tokio runtime was a phantom offload —
+/// the helpers are pure sync, but the orchestrator's `await` never
+/// crossed a thread-pool boundary. Round-2 review caught it. The
+/// orchestrator is now inline in the command, where each helper
+/// call IS wrapped in `run_blocking`.
 pub fn regenerate_load_blocking(
     node_id: i64,
 ) -> Result<(String, bool), AgentNodeError> {
@@ -654,8 +565,8 @@ pub fn regenerate_load_blocking(
     ))
 }
 
-/// Sync helper for steps 4–6 of [`regenerate`]: write the new
-/// `provider` column, reload the row, and return whether the new
+/// Sync helper for steps 4–6 of the regenerate orchestrator: write the
+/// new `provider` column, reload the row, and return whether the new
 /// spawn should resume the existing session (same-harness with a
 /// captured `cli_session_id`) or start fresh.
 ///

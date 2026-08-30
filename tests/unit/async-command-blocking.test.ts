@@ -29,8 +29,17 @@ const FORBIDDEN = [
   // Evidence #1 in issue #1380: create/delete do SQLite + git worktree
   // work without a `db::` token in the command body, so token-level
   // matching against `db::*` alone would miss them. After the
-  // trampoline refactor, regenerate_blocking is the equivalent
-  // helper used by `regenerate_agent_node`.
+  // trampoline refactor, `regenerate` is the async orchestrator whose
+  // body chains three sync helpers — the command boundary must wrap
+  // each in `run_blocking`, so an async command calling
+  // `services::agent_node::regenerate(...)` is the same class of
+  // violation as create/delete.
+  //
+  // PR #1388 round-2 review feedback 1: the matching token was
+  // `regenerate_blocking` (a name that does not exist; the
+  // refactor kept the orchestrator as `regenerate`). The fix below
+  // matches the real orchestrator. Regression fixture at
+  // async-command-blocking.test.ts:481 pins this case.
   {
     kind: 'services::agent_node::create',
     re: /\bservices::agent_node::create\s*\(/g,
@@ -40,8 +49,8 @@ const FORBIDDEN = [
     re: /\bservices::agent_node::delete\s*\(/g,
   },
   {
-    kind: 'services::agent_node::regenerate_blocking',
-    re: /\bservices::agent_node::regenerate_blocking\s*\(/g,
+    kind: 'services::agent_node::regenerate',
+    re: /\bservices::agent_node::regenerate\s*\(/g,
   },
 ] as const;
 
@@ -176,13 +185,28 @@ function matchPair(
       }
     }
 
-    // Detect Rust lifetime: `'` preceded by `&` or by an identifier
-    // char (so `&'a`, `S<'static>`, `<'ctx>` are lifetimes, not char
-    // literals). Lifetimes are one identifier char — skip past the
-    // next char to consume the lifetime entirely.
+    // Detect Rust lifetime: `'` preceded by `&`, `<`, `,`, or an
+    // identifier char (so `&'a`, `Foo<'a>`, `<'a, 'b>`, and turbofish
+    // `bar::<'a>(...)` are all lifetimes, not char literals).
+    // Optional whitespace between the prefix and the `'` is allowed
+    // (`Foo< 'a>` parses). Lifetimes are one identifier char — skip
+    // past the next char to consume the lifetime entirely.
+    //
+    // PR #1388 round-2 review feedback 2: the original fix only
+    // recognised `&` and identifier-char prefixes, which silently
+    // dropped body-internal lifetimes like `Foo<'a>` from the audit.
+    // The regression fixture at async-command-blocking.test.ts:419
+    // pins this case so the bug cannot regress.
     if (c === "'" && i > 0) {
-      const prev = source[i - 1];
-      if (prev === '&' || /[A-Za-z0-9_]/.test(prev)) {
+      let j = i - 1;
+      while (j >= 0 && /\s/.test(source[j])) j--;
+      const prev = j >= 0 ? source[j] : '';
+      if (
+        prev === '&' ||
+        prev === '<' ||
+        prev === ',' ||
+        /[A-Za-z0-9_]/.test(prev)
+      ) {
         if (/[A-Za-z_]/.test(source[i + 1] ?? '')) {
           i += 1; // consume `'a`
           continue;
@@ -393,7 +417,95 @@ pub async fn create_agent_node() -> Result<AgentNode, String> {
 }
 `;
     const found = findBlockingInAsyncCommands('synth.rs', src);
-    expect(found.map((v) => v.kind)).toEqual(['services::agent_node::create']);
+    expect(found.map((v) => v.kind)).toEqual([
+      'services::agent_node::create',
+    ]);
+  });
+
+  // PR #1388 round-2 review feedback 2 — lifetime detection was
+  // passing only by accident. The PREVIOUS fixture
+  //   `pub async fn re<'a>(s: &'a str)`
+  // had the lifetime in the SIGNATURE — matchPair for `{...}`
+  // starts AT `{`, so it never sees the signature. The CORRECT
+  // regression fixture has the lifetime INSIDE the body (a generic
+  // type like `Foo<'a>` or a turbofish `bar::<'a, T>(...)`), which
+  // IS processed by matchPair and trips the `prev === '<'` case
+  // the reviewer flagged.
+  it('flags a db:: call inside an async command with a single <\'a> lifetime in the body (regression #1388 r2)', () => {
+    const src = `
+#[command]
+pub async fn re() -> Result<(), String> {
+    let _ : Foo<'a> = db::record().map_err(|e| e.to_string())?;
+    Ok(())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('re');
+  });
+
+  it('does not break on multiple comma-separated generic lifetimes in the body <\'a, \'b>', () => {
+    const src = `
+#[command]
+pub async fn two() -> Result<(), String> {
+    let _ : Foo<'a, 'b, T> = db::combine().map_err(|e| e.to_string())?;
+    Ok(())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('two');
+  });
+
+  it('does not break on a turbofish call with a lifetime: bar::<\'a>(...)', () => {
+    // turbofish `bar::<'a, T>(x)` is a common Rust idiom. The
+    // `<'a>` after `::` is what the original lexer dropped because
+    // prev = '<' is neither '&' nor an identifier char.
+    const src = `
+#[command]
+pub async fn turbo() -> Result<(), String> {
+    let n = bar::<'a, u32>(7);
+    db::store(n).map_err(|e| e.to_string())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('turbo');
+  });
+
+  it('does not break on a lifetime preceded by whitespace inside <>', () => {
+    // Whitespace between `<` and `'a` is allowed in Rust (rare but legal).
+    // `Foo< 'a>` parses. The lexer must accept it.
+    const src = `
+#[command]
+pub async fn spaced() -> Result<(), String> {
+    let _ : Foo< 'a> = db::count().map_err(|e| e.to_string())?;
+    Ok(())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['db']);
+    expect(found[0].command).toBe('spaced');
+  });
+
+  // PR #1388 round-2 review feedback 1 — the FORBIDDEN regex was
+  // matching `services::agent_node::regenerate_blocking` (a name
+  // that does NOT exist; the refactor extracted three helpers with
+  // `_blocking` suffixes but the ASYNC orchestrator kept the
+  // original name `regenerate`). An async command body that calls
+  // `services::agent_node::regenerate(...)` must be flagged.
+  it('flags an async command body calling services::agent_node::regenerate', () => {
+    const src = `
+#[command]
+pub async fn regenerate_agent_node(node_id: i64) -> Result<(), String> {
+    services::agent_node::regenerate(node_id, &"claude", &app).await
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual([
+      'services::agent_node::regenerate',
+    ]);
+    expect(found[0].command).toBe('regenerate_agent_node');
   });
 
   it('does not flag services::agent_node::create inside run_blocking (negative)', () => {

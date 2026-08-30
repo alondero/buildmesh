@@ -252,15 +252,90 @@ pub async fn toggle_node_pinned(node_id: i64) -> Result<AgentNode, String> {
 /// local store stays on the old provider). The existing
 /// `agent-spawned` event from `spawn_agent_inner` drives PTY /
 /// resize sync on the frontend.
+///
+/// # Architecture (issue #1380 review round-2 feedback 1)
+///
+/// The three sync helpers (`regenerate_load_blocking`,
+/// `regenerate_apply_blocking`, `regenerate_reload_blocking`) and the
+/// two unavoidable async hops (`kill_agent`, `spawn_with_intent`) live
+/// inline in this command — not behind a service-level async
+/// orchestrator — so the offload boundary (each
+/// `crate::commands::run_blocking` call) is explicit at the command
+/// boundary. The previous `services::agent_node::regenerate` async
+/// wrapper called the helpers directly on the Tokio runtime,
+/// defeating the whole point of the refactor; round-2 review caught
+/// the regression.
 #[command]
 pub async fn regenerate_agent_node(
     node_id: i64,
     new_provider_id: String,
     app: tauri::AppHandle,
 ) -> Result<crate::models::AgentNode, String> {
-    services::agent_node::regenerate(node_id, &new_provider_id, &app)
-        .await
-        .map_err(|e| e.to_string())
+    use crate::agent::spawn::{
+        spawn_with_intent, ResumeCause, SpawnIntent, SpawnRequest, TerminalSize,
+    };
+    use crate::services::agent_node::{
+        regenerate_apply_blocking, regenerate_load_blocking, regenerate_reload_blocking,
+    };
+
+    // 1–2. Load + validate off-thread. `regenerate_load_blocking` is
+    // pure sync; the command boundary wraps it. Returns owned data —
+    // no pre-clones needed beyond the `i64` (Copy). The closure maps
+    // the inner `AgentNodeError` to a `String` so `run_blocking`'s
+    // `Result<T, String>` signature matches; `T` is inferred as the
+    // helper's return tuple, so `.await?` unwraps once.
+    let (old_provider, skip_kill) = crate::commands::run_blocking(
+        "regenerate_agent_node_load",
+        move || regenerate_load_blocking(node_id).map_err(|e| e.to_string()),
+    )
+    .await?;
+
+    // 3. Kill the live process ONLY when one is registered. See
+    // `services::agent_node::regenerate` (the removed orchestrator)
+    // for the full rationale — `should_skip_kill_for_regenerate`
+    // keeps the Suspended case safe from `kill_agent_blocking`'s
+    // unconditional `on_idle` tail.
+    if !skip_kill {
+        let _ = crate::agent::process::kill_agent(node_id).await;
+    }
+
+    // 4–6. Update provider, reload, decide resume off-thread. The
+    // spawn pipeline reads `node.provider` for backend env resolution
+    // and preflight (spawn.rs:1399), so the write must land BEFORE
+    // `spawn_with_intent`.
+    let new_provider_for_apply = new_provider_id;
+    let resume = crate::commands::run_blocking(
+        "regenerate_agent_node_apply",
+        move || {
+            regenerate_apply_blocking(node_id, &old_provider, &new_provider_for_apply)
+                .map_err(|e| e.to_string())
+        },
+    )
+    .await?;
+
+    let intent = if resume {
+        SpawnIntent::Resume {
+            cause: ResumeCause::Explicit,
+        }
+    } else {
+        SpawnIntent::Fresh
+    };
+
+    spawn_with_intent(
+        &app,
+        SpawnRequest::new(node_id, intent, TerminalSize::default()),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 7. Final reload off-thread — returns the post-spawn row state
+    // (the spawn pipeline may have updated `cli_session_id` /
+    // `status_changed_at`).
+    Ok(crate::commands::run_blocking(
+        "regenerate_agent_node_reload",
+        move || regenerate_reload_blocking(node_id).map_err(|e| e.to_string()),
+    )
+    .await?)
 }
 
 #[cfg(test)]
