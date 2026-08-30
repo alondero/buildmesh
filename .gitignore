@@ -69,16 +69,60 @@ test-results/
 # worktree-resume, and remote-access plans that lived here.
 docs/superpowers/
 
-# Claude worktrees and local settings (local only)
+# Claude, Codex, AGY, and other Agent Harnesses (runtime, local settings, and ephemeral files)
 .codex/
+CODEX.local.md
+codex.local.md
 .claude/worktrees/
 .claude/settings.local.json
 .claude/tasks/
 .claude/memory/
 .claude/scheduled_tasks.lock
-.antigravitycli/*.json
-.agents/hooks.json
 CLAUDE.local.md
+
+# Antigravity CLI and .agents open standard runtime / local state (.agents/skills is tracked)
+.agents/hooks.json
+.agents/settings.local.json
+.agents/tasks/
+.agents/memory/
+.agents/worktrees/
+.agents/sessions/
+.agents/tmp/
+.agents/*.local.*
+AGENTS.local.md
+.antigravity/
+.antigravitycli/
+.gemini/
+
+# OpenCode, Grok, MiniMax Code, DeepSeek Harness, Kimi
+.opencode/
+.open-code/
+OPENCODE.local.md
+.grok/
+GROK.local.md
+.mcode/
+.dsh/
+.kimi/
+
+# Cursor, Aider, Cline, Roo, Goose, Windsurf
+.cursor/cache/
+.cursor/debug/
+.cursor/index/
+.cursor/tasks/
+.cursor/transcripts/
+.cursor/worktrees/
+.cursor-tutor/
+CURSOR.local.md
+.aider*
+.cline/
+.roo/
+.roomodes.local
+.roomodes.local.json
+.goose/
+.goosehints.local
+.windsurf/
+.codeium/
+
 coverage/
 .worktrees/
 # Git-bash / Cygwin crash dumps (sh.exe.stackdump, bash.exe.stackdump, …)
