@@ -12,8 +12,10 @@
 //! (`inject_test_output`).
 //!
 //! The batcher holds an `Arc<OutputSink>` for the session, so the send
-//! path never takes the global map lock. `kill_session` and the reader
-//! epilogue call `unregister` so a dead process cannot leak Channels.
+//! path never takes the global map lock. The subscription is owned by the
+//! Agent Node's terminal, not by one spawned process: it survives process
+//! exit, retry, resume, and regenerate. Explicit terminal disposal and
+//! Agent Node deletion call `unregister`.
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -32,7 +34,8 @@ enum SinkState {
     Pending(Vec<u8>),
     /// Live Channel. `send` uses this handle in place — no clone.
     Live(Channel<InvokeResponseBody>),
-    /// Process gone / dispose. Further sends are dropped.
+    /// Agent Node deleted or frontend terminal disposed. Further sends
+    /// are dropped. Process exit must not enter this state.
     Closed,
 }
 
@@ -110,8 +113,9 @@ pub fn register(session_id: i64, channel: Channel<InvokeResponseBody>) {
     ensure(session_id).set(channel);
 }
 
-/// Drop the sink for `session_id`. Idempotent. Called from
-/// `kill_session`, the PTY reader epilogue, and `unsubscribe_agent_output`.
+/// Drop the node-scoped sink for `session_id`. Idempotent. Called only when
+/// the Agent Node is deleted or its frontend terminal is explicitly disposed.
+/// Process exit and replacement must preserve the subscription.
 pub fn unregister(session_id: i64) {
     if let Some(sink) = SINKS.write().remove(&session_id) {
         sink.close();
@@ -230,5 +234,115 @@ mod tests {
         unregister(id);
         unregister(id);
         sink.send_owned(b"x".to_vec()); // closed — no panic
+    }
+
+    fn collecting_channel(received: &Arc<Mutex<Vec<u8>>>) -> Channel<InvokeResponseBody> {
+        let rec = received.clone();
+        Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                rec.lock().unwrap().extend_from_slice(&bytes);
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn replacement_reader_reuses_the_live_channel() {
+        // Retry / resume / regenerate start a new PTY reader that calls
+        // `ensure`. That must be the same Live sink the terminal already
+        // subscribed, not a fresh Pending buffer the frontend never sees.
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let id = 9_000_204;
+        register(id, collecting_channel(&received));
+        let first_reader = ensure(id);
+        first_reader.send_owned(b"boot".to_vec());
+
+        let replacement_reader = ensure(id);
+        assert!(
+            Arc::ptr_eq(&first_reader, &replacement_reader),
+            "a new process incarnation must reuse the node-scoped sink"
+        );
+        replacement_reader.send_owned(b"-ok".to_vec());
+        assert_eq!(&*received.lock().unwrap(), b"boot-ok");
+        unregister(id);
+    }
+
+    #[test]
+    fn unregister_starts_a_fresh_pending_sink() {
+        let first = Arc::new(Mutex::new(Vec::new()));
+        let second = Arc::new(Mutex::new(Vec::new()));
+        let id = 9_000_205;
+        register(id, collecting_channel(&first));
+        unregister(id);
+
+        ensure(id).send_owned(b"late".to_vec());
+        assert!(
+            first.lock().unwrap().is_empty(),
+            "bytes after unregister must not reach the disposed Channel"
+        );
+
+        register(id, collecting_channel(&second));
+        assert_eq!(
+            &*second.lock().unwrap(),
+            b"late",
+            "ensure after unregister is a new Pending sink flushed on the next subscribe"
+        );
+        unregister(id);
+    }
+
+    #[test]
+    fn process_lifecycle_does_not_unregister_node_output_subscription() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut unregister_sites = Vec::new();
+        collect_output_unregister_sites(&src_root, &src_root, &mut unregister_sites);
+
+        let allowed = [
+            std::path::Path::new("agent").join("output.rs"),
+            std::path::Path::new("services").join("agent_node.rs"),
+        ];
+        let unexpected: Vec<_> = unregister_sites
+            .iter()
+            .filter(|(rel, _)| !allowed.iter().any(|ok| rel == ok))
+            .cloned()
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "output::unregister is node-scoped; process kill / PTY EOF / retry must not call it. Unexpected sites: {unexpected:?}"
+        );
+        assert!(
+            unregister_sites
+                .iter()
+                .any(|(rel, _)| rel == &allowed[1]),
+            "Agent Node deletion must release the output subscription"
+        );
+    }
+
+    fn collect_output_unregister_sites(
+        dir: &std::path::Path,
+        src_root: &std::path::Path,
+        out: &mut Vec<(std::path::PathBuf, usize)>,
+    ) {
+        let entries = std::fs::read_dir(dir).expect("read src tree");
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                collect_output_unregister_sites(&path, src_root, out);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read rust file");
+            let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
+            for (idx, line) in production.lines().enumerate() {
+                if line.contains("output::unregister(") {
+                    let rel = path
+                        .strip_prefix(src_root)
+                        .unwrap_or(&path)
+                        .to_path_buf();
+                    out.push((rel, idx + 1));
+                }
+            }
+        }
     }
 }

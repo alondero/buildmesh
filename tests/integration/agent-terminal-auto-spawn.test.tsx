@@ -309,5 +309,36 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
     const instance = terminalManager.getInstance(IDLE_NODE.id);
     expect(instance).toBeDefined();
     expect(instance!.term.write).toHaveBeenCalledWith(startupFrame);
+    expect(
+      vi.mocked(invoke).mock.calls.some(([command]) => command === 'unsubscribe_agent_output'),
+      'auto-spawn must keep the node-scoped Channel; unsubscribe is dispose-only',
+    ).toBe(false);
+  });
+
+  it('does not unsubscribe the PTY Channel when AgentTerminal remounts', async () => {
+    const first = render(<AgentTerminal nodeId={IDLE_NODE.id} />);
+    setContainerSize(first.container, IDLE_NODE.id, 1200, 800);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    first.unmount();
+
+    const second = render(<AgentTerminal nodeId={IDLE_NODE.id} />);
+    setContainerSize(second.container, IDLE_NODE.id, 1200, 800);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(
+      vi.mocked(invoke).mock.calls.some(([command]) => command === 'unsubscribe_agent_output'),
+    ).toBe(false);
+    expect(
+      vi.mocked(invoke).mock.calls.filter(([command]) => command === 'subscribe_agent_output'),
+    ).toHaveLength(1);
+    expect(terminalManager.getInstance(IDLE_NODE.id)).toBeDefined();
+    second.unmount();
   });
 });

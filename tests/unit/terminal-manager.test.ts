@@ -75,6 +75,20 @@ describe('TerminalManager', () => {
       });
     });
 
+    it('does not resubscribe or unsubscribe when getOrCreate reuses the instance', async () => {
+      const invokeSpy = vi.spyOn(await import('@tauri-apps/api/core'), 'invoke');
+      await terminalManager.getOrCreate(1);
+      invokeSpy.mockClear();
+
+      await terminalManager.getOrCreate(1);
+
+      const outputIpc = invokeSpy.mock.calls.filter(
+        ([command]) =>
+          command === 'subscribe_agent_output' || command === 'unsubscribe_agent_output',
+      );
+      expect(outputIpc).toEqual([]);
+    });
+
     it('sets up onData handler that calls invoke', async () => {
       const invokeSpy = vi.spyOn(await import('@tauri-apps/api/core'), 'invoke');
       await terminalManager.getOrCreate(1);

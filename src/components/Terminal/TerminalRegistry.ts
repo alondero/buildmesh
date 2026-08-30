@@ -380,8 +380,9 @@ export class TerminalRegistry {
 
       // Binary PTY path (issue #1385). Production bytes arrive here as a
       // `Uint8Array` with no Base64/JSON. The `agent-output` listener
-      // above stays for test injection (`line`) and the pre-subscribe
-      // fallback. `TerminalWriter` still rAF-batches the display write.
+      // above stays for test injection (`line`). Pre-subscribe bytes are
+      // buffered on the backend OutputSink, not this JSON event.
+      // `TerminalWriter` still rAF-batches the display write.
       api.subscribeAgentOutput(nodeId, (bytes) => {
         this.writer.append(nodeId, bytes);
       }).catch(console.error);
