@@ -39,7 +39,16 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
   const hasClaude = status.claude_md_exists || status.skills_dir_exists;
   const needsAgentsMd = status.claude_md_exists && !status.agents_md_exists;
   const needsAgentsSkills = status.skills_dir_exists && !status.agents_skills_exists;
-  const needsWork = needsAgentsMd || needsAgentsSkills;
+  // Issue #1401: a repo can already have AGENTS.md + .agents/skills but
+  // still lack the agent-harness ignore block in its `.gitignore`. That
+  // happens to projects ported before this PR. Treat the missing block
+  // as a standalone reason to open a portability PR — `gitignore_update_for_portability`
+  // is the only path that supports it, so the backend will accept it.
+  const needsGitignoreUpdate =
+    hasClaude && !status.gitignore_has_agent_patterns;
+  const needsSymlinkWork = needsAgentsMd || needsAgentsSkills;
+  const needsWork = needsSymlinkWork || needsGitignoreUpdate;
+  const hasOnlyGitignoreWork = needsGitignoreUpdate && !needsSymlinkWork;
 
   // Nothing Claude-shaped to port — keep the panel quiet.
   if (!hasClaude) return null;
@@ -102,6 +111,15 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
             )}
           </div>
         )}
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-text-primary">.gitignore</span>
+          <span className="text-text-muted">(agent harness runtime rules)</span>
+          {status.gitignore_has_agent_patterns ? (
+            <span className="text-status-success">✓</span>
+          ) : (
+            <span className="text-text-muted">(will update)</span>
+          )}
+        </div>
       </div>
 
       {!needsWork ? (
@@ -109,9 +127,9 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
       ) : (
         <>
           <p className="text-2xs text-text-muted leading-snug">
-            Opens a PR adding the above as git symlinks. Note: a symlink checked out on Windows
-            without Developer Mode becomes a plain text file; macOS/Linux and Windows+Dev Mode
-            resolve it correctly.
+            {hasOnlyGitignoreWork
+              ? 'Opens a PR amending .gitignore so agent-harness runtime files (e.g. .agents/hooks.json) do not pollute git status.'
+              : 'Opens a PR adding the symlinks above (and amending .gitignore so agent-harness runtime files like .agents/hooks.json do not pollute git status). Note: a git symlink checked out on Windows without Developer Mode becomes a plain text file; macOS/Linux and Windows+Dev Mode resolve it correctly.'}
           </p>
           {error && <p className="text-2xs text-status-error">{error}</p>}
           {!isAuthenticated ? (
