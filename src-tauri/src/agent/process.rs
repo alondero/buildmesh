@@ -76,8 +76,8 @@ pub struct AgentProcess {
     pub job: Option<crate::process_util::JobHandle>,
     /// Handle to the reader thread so `kill_session` can `join()` it with a
     /// bounded timeout. Without this, the reader could remain wedged on
-    /// `read()` after a kill, leaving `agent-output` events from a dead
-    /// session interleaving with new ones (issue #300).
+    /// `read()` after a kill, leaving PTY bytes from a dead session
+    /// interleaving with new ones (issue #300).
     pub reader_handle: Mutex<Option<JoinHandle<()>>>,
     /// Original `SpawnTimer.start` clone, set at process-registration time.
     /// Used to log `first_user_input` elapsed against the same reference
@@ -275,6 +275,11 @@ impl AgentProcessRegistry {
     ///    bounded timeout. The bounded join protects the close path from
     ///    any future regression that re-wedges the reader — we never want
     ///    `kill_session` to hang the UI thread.
+    ///
+    /// Must not touch the node-scoped PTY output Channel. Fresh spawn
+    /// calls this before the child exists (step 2 of `spawn_agent_inner`);
+    /// unregistering here drops the terminal's subscription and the new
+    /// reader buffers bytes the viewport never sees.
     pub fn kill_session(&self, session_id: i64) {
         if let Some(agent) = self.inner.get(&session_id) {
             // 0. Flag the teardown as deliberate BEFORE closing anything,
@@ -335,13 +340,6 @@ impl AgentProcessRegistry {
                 join_with_timeout(handle, std::time::Duration::from_secs(2));
             }
         }
-
-        // Drop the binary output Channel so a dead process cannot leak
-        // handles if the frontend never calls unsubscribe (webview
-        // reload, crash, or node left Idle). Idempotent with the reader
-        // epilogue's unregister. Runs even when there was no registry
-        // entry — subscribe can outlive the process.
-        crate::agent::output::unregister(session_id);
 
         // Sandbox cleanup (issue #498/#528): revoke the node's restricted-token
         // worktree ACE grant. No-op for unsandboxed sessions. Runs after the
@@ -566,6 +564,33 @@ mod tests {
     fn is_alive_false_for_missing() {
         let registry = AgentProcessRegistry::new();
         assert!(!registry.is_alive(&999));
+    }
+
+    /// Fresh spawn calls `kill_session` before it starts the process. The
+    /// terminal has already subscribed by then, so the no-process cleanup
+    /// must preserve that node-scoped output subscription for the process
+    /// that is about to start.
+    #[test]
+    fn kill_session_without_process_preserves_output_subscription() {
+        use tauri::ipc::{Channel, InvokeResponseBody};
+
+        let session_id = -915_4010;
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_by_channel = received.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                received_by_channel.lock().unwrap().extend(bytes);
+            }
+            Ok(())
+        });
+        crate::agent::output::register(session_id, channel);
+
+        let registry = AgentProcessRegistry::new();
+        registry.kill_session(session_id);
+        crate::agent::output::ensure(session_id).send_owned(b"visible".to_vec());
+
+        assert_eq!(&*received.lock().unwrap(), b"visible");
+        crate::agent::output::unregister(session_id);
     }
 
     // -----------------------------------------------------------------------

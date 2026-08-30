@@ -316,6 +316,10 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
 
     let removal = removal_path.as_deref().map(|p| (p, node.name.as_str()));
     db::delete_agent_node_enqueueing_removal(session_id, removal)?;
+    // The raw-output subscription is node-scoped, so process exit/restart
+    // deliberately preserves it. Once the row deletion commits, this is the
+    // authoritative backend cleanup seam (idempotent with frontend disposal).
+    crate::agent::output::unregister(session_id);
     Ok(())
 }
 

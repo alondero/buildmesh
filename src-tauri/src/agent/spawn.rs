@@ -963,8 +963,10 @@ pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, 
 ///
 /// Output dispatch (issue #1385): each OS `read()` still feeds capture /
 /// naming / autopilot on this thread, then the bytes go through
-/// `pty::batch::with_batcher` (8 ms / 4 KiB) onto a binary Tauri Channel
-/// (`OutputSink::send`) with the `agent-output` JSON event as fallback.
+/// `pty::batch::with_batcher` (8 ms / 32 KiB) onto a binary Tauri Channel
+/// (`OutputSink::send_owned`). Production PTY bytes never share the JSON
+/// `agent-output` event — that path is test injection only. The Channel
+/// is node-scoped: this reader must not unregister it on exit.
 ///
 /// Two time references are passed in, with distinct semantics — keep
 /// them separate:
@@ -1023,7 +1025,7 @@ fn start_reader(
         // checkpoint in the log.
         // Issue #1385: coalesce OS reads onto a dedicated batcher thread
         // so a build-storm of tiny PTY chunks becomes one IPC dispatch
-        // per 8 ms / 4 KiB. Capture / naming / autopilot still see every
+        // per 8 ms / 32 KiB. Capture / naming / autopilot still see every
         // OS read on this thread (ChunkCapture already stitches split
         // banners). `with_batcher` drops the producer before joining —
         // joining while still holding `SyncSender` deadlocks the reader
@@ -1085,7 +1087,9 @@ fn start_reader(
                 });
             },
         );
-        crate::agent::output::unregister(session_id);
+        // The Channel subscription belongs to the Agent Node's persistent
+        // terminal, not this process incarnation. Keep it live so retry,
+        // resume, and regenerate output reaches the same xterm instance.
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 

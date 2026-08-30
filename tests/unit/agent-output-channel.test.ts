@@ -104,6 +104,42 @@ describe('subscribeAgentOutput / unsubscribeAgentOutput', () => {
   });
 });
 
+describe('unsubscribeAgentOutput call sites', () => {
+  it('is invoked from TerminalRegistry.dispose only', () => {
+    const srcRoot = join(__dirname, '..', '..', 'src');
+    const registrySrc = readFileSync(
+      join(srcRoot, 'components', 'Terminal', 'TerminalRegistry.ts'),
+      'utf8',
+    );
+    expect(registrySrc).toMatch(/unsubscribeAgentOutput\s*\(/);
+
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry)) {
+          const src = readFileSync(full, 'utf8');
+          const cleaned = src
+            .replace(/\/\*[\s\S]*?\*\//g, '')
+            .replace(/\/\/.*$/gm, '');
+          if (!/\bunsubscribeAgentOutput\s*\(/.test(cleaned)) continue;
+          const rel = full.replace(/\\/g, '/');
+          if (rel.endsWith('/src/lib/tauri.ts')) continue;
+          if (rel.endsWith('/src/components/Terminal/TerminalRegistry.ts')) continue;
+          hits.push(rel);
+        }
+      }
+    };
+    walk(srcRoot);
+    expect(
+      hits,
+      'unsubscribeAgentOutput drops the node-scoped PTY Channel; only TerminalRegistry.dispose may call it',
+    ).toEqual([]);
+  });
+});
+
 describe('Channel mock hygiene', () => {
   it('does not copy-paste a Channel class into test files', () => {
     const root = join(__dirname, '..');
