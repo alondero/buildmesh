@@ -18,8 +18,8 @@ use tauri::command;
 /// `BillingBalance` (no usage windows). The no-credential gate in
 /// [`assemble_meters`] drops the row until the user stores a key, matching
 /// the user contract for keyed providers.
-const FETCHABLE: [&str; 11] = [
-    "anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai", "deepseek",
+const FETCHABLE: [&str; 12] = [
+    "anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "commandcode", "openai", "deepseek",
 ];
 
 /// Map a self-authenticating **native** provider account to the harness whose
@@ -38,6 +38,7 @@ fn native_harness_for(account_id: &str) -> Option<&'static str> {
         "agy" => Some("agy"),
         "grok" => Some("grok"),
         "opencode" => Some("opencode"),
+        "commandcode" => Some("commandcode"),
         _ => None,
     }
 }
@@ -267,6 +268,7 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
         ),
         "grok" => usage::grok_usage(),
         "opencode" => usage::opencode_usage(),
+        "commandcode" => usage::commandcode_usage(),
         // OpenAI — keyed, no legacy flat field. Empty string lets
         // `openai_usage` surface its own "No API key configured" message
         // (mirrors Kimi/OpenRouter). The configured-key gate in
@@ -423,7 +425,7 @@ mod tests {
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "openai", "deepseek"] {
+        for id in ["anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "commandcode", "openai", "deepseek"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.
