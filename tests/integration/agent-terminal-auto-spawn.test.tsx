@@ -218,6 +218,7 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
 
   afterEach(() => {
     terminalManager.dispose(IDLE_NODE.id);
+    vi.restoreAllMocks();
   });
 
   it('passes cols > 80 to spawn_agent when the pane is wide (fresh spawn, no prior attach)', async () => {
@@ -275,5 +276,38 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
     // attach effect does, so this still holds either way — we don't rely
     // on it for the regression, just sanity-check that the spy fired.
     expect(attachSpy).toHaveBeenCalled();
+  });
+
+  it('renders a fetch-path PTY frame after a fresh agent spawn', async () => {
+    const { container } = render(<AgentTerminal nodeId={IDLE_NODE.id} />);
+    setContainerSize(container, IDLE_NODE.id, 1200, 800);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'spawn_agent')).toBe(true);
+    const subscribeCall = vi.mocked(invoke).mock.calls.find(
+      ([command]) => command === 'subscribe_agent_output',
+    );
+    expect(subscribeCall).toBeDefined();
+
+    // Tauri 2.11.1 sends raw Channel payloads smaller than 1 KiB directly as
+    // ArrayBuffers, but payloads at this boundary use its fetch path and reach
+    // the Channel callback as a Response. Agent TUI startup frames routinely
+    // cross this boundary.
+    const startupFrame = new Uint8Array(1024).fill('A'.charCodeAt(0));
+    const { onChunk } = subscribeCall![1] as {
+      onChunk: { onmessage: (message: unknown) => void };
+    };
+    onChunk.onmessage(new Response(startupFrame.buffer));
+
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+
+    const instance = terminalManager.getInstance(IDLE_NODE.id);
+    expect(instance).toBeDefined();
+    expect(instance!.term.write).toHaveBeenCalledWith(startupFrame);
   });
 });

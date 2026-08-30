@@ -54,6 +54,50 @@ describe('subscribeAgentOutput / unsubscribeAgentOutput', () => {
     expect(chunks).toEqual([new Uint8Array([0xe2, 0x96, 0x88])]);
   });
 
+  it('reads large raw Channel frames delivered as a Response', async () => {
+    const chunks: Uint8Array[] = [];
+    await subscribeAgentOutput(43, (data) => chunks.push(data));
+
+    const expected = new Uint8Array(2048);
+    expected[0] = 1;
+    expected[expected.length - 1] = 3;
+
+    const { onChunk } = vi.mocked(invoke).mock.calls[0]![1] as {
+      onChunk: { onmessage: (message: unknown) => void };
+    };
+    onChunk.onmessage(new Response(expected.buffer));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(chunks).toEqual([expected]);
+  });
+
+  it('preserves frame order while reading asynchronous Channel responses', async () => {
+    const chunks: Uint8Array[] = [];
+    await subscribeAgentOutput(44, (data) => chunks.push(data));
+
+    let releaseFirst!: (value: ArrayBuffer) => void;
+    const firstBody = new Promise<ArrayBuffer>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstResponse = { arrayBuffer: () => firstBody };
+    const secondResponse = {
+      arrayBuffer: () => Promise.resolve(new Uint8Array([2]).buffer),
+    };
+    const { onChunk } = vi.mocked(invoke).mock.calls[0]![1] as {
+      onChunk: { onmessage: (message: unknown) => void };
+    };
+
+    onChunk.onmessage(firstResponse);
+    onChunk.onmessage(secondResponse);
+    await Promise.resolve();
+    expect(chunks).toEqual([]);
+
+    releaseFirst(new Uint8Array([1]).buffer);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(chunks).toEqual([new Uint8Array([1]), new Uint8Array([2])]);
+  });
+
   it('invokes unsubscribe_agent_output with the session id', async () => {
     await unsubscribeAgentOutput(7);
     expect(invoke).toHaveBeenCalledWith('unsubscribe_agent_output', { sessionId: 7 });
