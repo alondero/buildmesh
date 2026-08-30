@@ -365,6 +365,7 @@ mod tests {
         crate::agent::capabilities::HarnessCapabilities {
             harness_id: id.to_string(),
             supports_resume: false,
+            supports_extra_args: false,
             auto_resume_on_startup: false,
             requires_attention_hook: false,
             produces_readable_transcript: false,

@@ -663,6 +663,10 @@ impl AgentProvider for CodexAdapter {
         true
     }
 
+    fn supports_extra_args(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         true
     }

@@ -156,6 +156,16 @@ pub(crate) struct ExplicitSpawnOverrides {
     /// overriding the mesh row and the application default. `None` or
     /// whitespace-only collapses to absent.
     pub(crate) effort: Option<String>,
+    /// Optional verbatim CLI flag string this one spawn should forward,
+    /// overriding nothing in the cascade (no mesh / application layer
+    /// carries per-spawn flags — this is the only layer of supply for
+    /// circuit-author-supplied flags, issue #1358). Whitespace-only
+    /// collapses to absent; an empty additional-args list is equivalent
+    /// to "no override". Capability-masked downstream — a harness whose
+    /// capability descriptor advertises `supports_extra_args = false`
+    /// silently drops the value at the resolver rather than forwarding
+    /// it as a synthetic flag.
+    pub(crate) extra_args: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

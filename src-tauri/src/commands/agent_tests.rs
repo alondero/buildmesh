@@ -232,6 +232,7 @@ mod tests {
                     application: None,
                 },
             },
+            None,
         );
         build_spawn_command(resolved, provider, &[], mode, session_id, &config, prefill, sandbox)
     }

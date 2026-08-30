@@ -82,6 +82,13 @@ local-ip-address = "0.6"
 # `lto = "thin"` release profile, which a hand-rolled byte XOR loop can be.
 subtle = "2"
 
+# `shell-words` is already in the dep tree (transitively via `clap`
+# and friends) — issue #1362 code review pinned it as a direct dep so
+# `AgentProvider::extra_args_args` quote-aware tokenisation isn't
+# silently upgraded if a future Cargo update removes the transitive
+# path. Same cost-of-declaring lesson as issue #1240 with `subtle`.
+shell-words = "1"
+
 # OS-level interface-change notifications for issue #591.
 # Windows: `NotifyAddrChange` from Iphlpapi.dll. The crate is already in the
 # tree transitively via `rustix`/`signal-hook`; pinning to 0.61 keeps the

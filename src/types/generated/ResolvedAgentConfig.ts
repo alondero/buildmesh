@@ -20,4 +20,11 @@ model: string | null,
  * supplied one, the harness doesn't accept effort, or the value isn't
  * in the harness's allowed vocabulary.
  */
-effort: string | null, };
+effort: string | null, 
+/**
+ * Capability-masked extra CLI args, or `None` if no layer supplied one
+ * or the harness doesn't accept extra args (issue #1358). Verbatim
+ * string — the launch path's `adapter.extra_args_args(...)` (added in
+ * the same slice) splits on whitespace into the final argv tokens.
+ */
+extra_args: string | null, };
