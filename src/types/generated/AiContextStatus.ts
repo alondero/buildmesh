@@ -27,4 +27,11 @@ skill_count: number,
 /**
  * `.agents/skills` already exists.
  */
-agents_skills_exists: boolean, };
+agents_skills_exists: boolean, 
+/**
+ * Project's `.gitignore` (working tree) already ignores the agent harness
+ * runtime files (issue #1401). When `false`, the portability commit
+ * amends `.gitignore` so ephemeral files like `.agents/hooks.json` do not
+ * pollute `git status` on a freshly-ported project.
+ */
+gitignore_has_agent_patterns: boolean, };

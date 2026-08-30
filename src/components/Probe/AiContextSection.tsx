@@ -39,7 +39,12 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
   const hasClaude = status.claude_md_exists || status.skills_dir_exists;
   const needsAgentsMd = status.claude_md_exists && !status.agents_md_exists;
   const needsAgentsSkills = status.skills_dir_exists && !status.agents_skills_exists;
-  const needsWork = needsAgentsMd || needsAgentsSkills;
+  // Issue #1401: only surface the .gitignore row when we have something to
+  // port — otherwise the row would imply we want to amend .gitignore on a
+  // repo with no Claude context at all.
+  const needsGitignoreUpdate =
+    (needsAgentsMd || needsAgentsSkills) && !status.gitignore_has_agent_patterns;
+  const needsWork = needsAgentsMd || needsAgentsSkills || needsGitignoreUpdate;
 
   // Nothing Claude-shaped to port — keep the panel quiet.
   if (!hasClaude) return null;
@@ -99,6 +104,18 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
               <span className="text-status-success">✓</span>
             ) : (
               <span className="text-text-muted">(will create, {status.skill_count} skills)</span>
+            )}
+          </div>
+        )}
+        {(needsAgentsMd || needsAgentsSkills) && (
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-text-primary">.gitignore</span>
+            <span>→</span>
+            <span className="font-mono text-text-primary">Agent harness runtime rules</span>
+            {status.gitignore_has_agent_patterns ? (
+              <span className="text-status-success">✓</span>
+            ) : (
+              <span className="text-text-muted">(will update)</span>
             )}
           </div>
         )}

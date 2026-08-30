@@ -31,6 +31,149 @@ use ts_rs::TS;
 /// so a flaky network doesn't leak a blocking-pool thread (issue #762 review).
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Canonical `.gitignore` block appended (or created) by the portability
+/// commit so ephemeral runtime files written by Claude Code, Codex,
+/// Antigravity (`agy`), OpenCode, Grok, and the rest of the harness zoo do
+/// not pollute `git status` after a project is made portable (issue #1401).
+///
+/// Kept in source rather than `include_str!`'d from the project's own
+/// `.gitignore` — that file holds session-local patterns (`.wayfinder/`,
+/// `docs/superpowers/`, …) which must never leak into a PR on someone
+/// else's repository.
+///
+/// Idempotency key: the comment header line below is unique enough that we
+/// can grep for it to decide whether the block is already present.
+const AGENT_HARNESS_GITIGNORE_HEADER: &str =
+    "# Claude, Codex, AGY, and other Agent Harnesses (runtime, local settings, and ephemeral files)";
+
+/// Helper: the full block written into the target `.gitignore` (with trailing
+/// newline). The header doubles as the idempotency marker — if `.gitignore`
+/// already contains it, the portability commit is a no-op for `.gitignore`.
+const AGENT_HARNESS_GITIGNORE_BLOCK: &str = "\
+# Claude, Codex, AGY, and other Agent Harnesses (runtime, local settings, and ephemeral files)\n\
+.codex/\n\
+CODEX.local.md\n\
+codex.local.md\n\
+.claude/worktrees/\n\
+.claude/settings.local.json\n\
+.claude/tasks/\n\
+.claude/memory/\n\
+.claude/scheduled_tasks.lock\n\
+CLAUDE.local.md\n\
+\n\
+# Antigravity CLI and .agents open standard runtime / local state (.agents/skills is tracked)\n\
+.agents/hooks.json\n\
+.agents/settings.local.json\n\
+.agents/tasks/\n\
+.agents/memory/\n\
+.agents/worktrees/\n\
+.agents/sessions/\n\
+.agents/tmp/\n\
+.agents/*.local.*\n\
+AGENTS.local.md\n\
+.antigravity/\n\
+.antigravitycli/\n\
+.gemini/\n\
+\n\
+# OpenCode, Grok, MiniMax Code, DeepSeek Harness, Kimi\n\
+.opencode/\n\
+.open-code/\n\
+OPENCODE.local.md\n\
+.grok/\n\
+GROK.local.md\n\
+.mcode/\n\
+.dsh/\n\
+.kimi/\n\
+\n\
+# Cursor, Aider, Cline, Roo, Goose, Windsurf\n\
+.cursor/cache/\n\
+.cursor/debug/\n\
+.cursor/index/\n\
+.cursor/tasks/\n\
+.cursor/transcripts/\n\
+.cursor/worktrees/\n\
+.cursor-tutor/\n\
+CURSOR.local.md\n\
+.aider*\n\
+.cline/\n\
+.roo/\n\
+.roomodes.local\n\
+.roomodes.local.json\n\
+.goose/\n\
+.goosehints.local\n\
+.windsurf/\n\
+.codeium/\n";
+
+/// True when `gitignore_content` already contains the canonical agent
+/// harness ignore block. Used to keep the portability commit idempotent.
+fn gitignore_has_agent_block(gitignore_content: &[u8]) -> bool {
+    // Use the header line as the idempotency marker — line-level match
+    // (substring) is enough because the header is unique to this block.
+    let haystack = match std::str::from_utf8(gitignore_content) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    haystack.contains(AGENT_HARNESS_GITIGNORE_HEADER)
+}
+
+/// Read `.gitignore` from the working tree (if present) and report whether
+/// the agent-harness block is already there. The detection mirrors the
+/// filesystem checks used for `agents_md_exists` / `agents_skills_exists`
+/// (what the user sees), not HEAD's blob — uncommitted edits matter here.
+fn working_tree_gitignore_has_agent_block(root: &Path) -> bool {
+    let path = root.join(".gitignore");
+    match std::fs::read(&path) {
+        Ok(bytes) => gitignore_has_agent_block(&bytes),
+        Err(_) => false,
+    }
+}
+
+/// Inspect HEAD's `.gitignore` (via the given tree builder, which is seeded
+/// from HEAD's tree) and return the **new** bytes that should be written for
+/// the portability commit, or `None` when the commit should leave
+/// `.gitignore` alone.
+///
+/// Returns `Some(bytes)` when:
+/// - `.gitignore` is absent in HEAD → bytes are the agent block alone, or
+/// - `.gitignore` exists but does not contain the agent block → bytes are
+///   the existing body + a blank line separator + the agent block.
+///
+/// Returns `None` when `.gitignore` already has the canonical block
+/// (idempotent no-op).
+fn gitignore_update_for_portability(
+    repo: &Repository,
+    root_builder: &git2::TreeBuilder<'_>,
+) -> Result<Option<Vec<u8>>, String> {
+    match root_builder.get(".gitignore").map_err(|e| e.to_string())? {
+        // No `.gitignore` in HEAD — create one containing just the agent
+        // block. Don't seed it with `node_modules` / `dist` boilerplate;
+        // that's the user's call to make on their first commit.
+        None => Ok(Some(AGENT_HARNESS_GITIGNORE_BLOCK.as_bytes().to_vec())),
+        Some(entry) if entry.kind() == Some(git2::ObjectType::Blob) => {
+            let blob = repo.find_blob(entry.id()).map_err(|e| e.to_string())?;
+            if gitignore_has_agent_block(blob.content()) {
+                Ok(None)
+            } else {
+                let mut new_content = blob.content().to_vec();
+                // Ensure a clean separator between the existing body and the
+                // appended block. The block itself starts with a comment
+                // line, so a blank line is enough.
+                if !new_content.ends_with(b"\n") {
+                    new_content.push(b'\n');
+                }
+                if !new_content.ends_with(b"\n\n") {
+                    new_content.push(b'\n');
+                }
+                new_content.extend_from_slice(AGENT_HARNESS_GITIGNORE_BLOCK.as_bytes());
+                Ok(Some(new_content))
+            }
+        }
+        // `.gitignore` is a submodule or symlink — leave it alone rather
+        // than guess at its content.
+        Some(_) => Ok(None),
+    }
+}
+
 /// What AI-context files a project currently has, and what mirrors already exist.
 /// Drives the Mesh Properties panel: enables the button only when there is
 /// something to port that isn't already present.
@@ -50,6 +193,11 @@ pub struct AiContextStatus {
     pub skill_count: usize,
     /// `.agents/skills` already exists.
     pub agents_skills_exists: bool,
+    /// Project's `.gitignore` (working tree) already ignores the agent harness
+    /// runtime files (issue #1401). When `false`, the portability commit
+    /// amends `.gitignore` so ephemeral files like `.agents/hooks.json` do not
+    /// pollute `git status` on a freshly-ported project.
+    pub gitignore_has_agent_patterns: bool,
 }
 
 /// Detect the Claude AI context for a mesh path and report what can be ported.
@@ -92,6 +240,7 @@ pub(crate) fn detect_ai_context_blocking(mesh_path: String) -> Result<AiContextS
         skills_dir_exists: skills_dir.is_dir(),
         skill_count,
         agents_skills_exists: root.join(".agents").join("skills").exists(),
+        gitignore_has_agent_patterns: working_tree_gitignore_has_agent_block(root),
     })
 }
 
@@ -246,6 +395,26 @@ fn build_portability_commit(
         }
     }
 
+    // .gitignore: append the agent harness ignore block when missing
+    // (issue #1401). Read HEAD's blob — that's what the new tree is built
+    // off of — so the result is consistent with the rest of the commit and
+    // idempotent against the user's previous commits. The block lives in
+    // [`AGENT_HARNESS_GITIGNORE_BLOCK`] and the header line doubles as the
+    // idempotency marker.
+    //
+    // The decision (and the blob content to write) is computed up front so
+    // the immutable borrow of `root_builder` from `.get()` drops before we
+    // call the mutable `.insert()`.
+    if let Some(new_gitignore_bytes) =
+        gitignore_update_for_portability(repo, &root_builder).map_err(|e| e.to_string())?
+    {
+        let new_blob = repo.blob(&new_gitignore_bytes).map_err(|e| e.to_string())?;
+        root_builder
+            .insert(".gitignore", new_blob, git2::FileMode::Blob.into())
+            .map_err(|e| e.to_string())?;
+        added.push(".gitignore".to_string());
+    }
+
     if added.is_empty() {
         return Ok(added);
     }
@@ -259,7 +428,7 @@ fn build_portability_commit(
 
     let commit_msg = format!(
         "chore: make AI context portable across providers\n\n\
-         Adds {} as git symlinks so non-Claude agents read the same context.",
+         Adds {} as git symlinks (and updates .gitignore) so non-Claude agents read the same context.",
         added.join(" and ")
     );
     let branch_ref = format!("refs/heads/{}", branch_name);
@@ -286,6 +455,9 @@ fn pr_body(added: &[String]) -> String {
             ".agents/skills" => {
                 "- `.agents/skills` → `.claude/skills` (shared Agent Skills directory; Antigravity reads `.agents/skills` natively)"
             }
+            ".gitignore" => {
+                "- `.gitignore` — append the agent-harness runtime ignore block (`.agents/hooks.json`, `.codex/`, `.claude/worktrees/`, …) so ephemeral files written by Claude Code, Codex, Antigravity and friends don't pollute `git status`. Tracked entries like `.agents/skills` remain untouched."
+            }
             _ => "",
         })
         .filter(|s| !s.is_empty())
@@ -294,12 +466,13 @@ fn pr_body(added: &[String]) -> String {
 
     format!(
         "Makes this project's AI agent context portable across providers.\n\n\
-         Buildmesh added the following as **symlinks** so non-Claude agents \
-         (Codex, OpenCode, Antigravity) read the same context Claude Code uses:\n\n\
+         Buildmesh added the following so non-Claude agents (Codex, OpenCode, Antigravity) \
+         read the same context Claude Code uses:\n\n\
          {bullets}\n\n\
-         ⚠️ These are git symlinks. Checked out on **Windows without Developer Mode**, \
-         git materialises them as plain text files containing the target path rather than \
-         working symlinks. On macOS, Linux, or Windows with Developer Mode they resolve correctly.\n\n\
+         ⚠️ The `AGENTS.md` and `.agents/skills` entries are git symlinks. Checked out on \
+         **Windows without Developer Mode**, git materialises them as plain text files \
+         containing the target path rather than working symlinks. On macOS, Linux, or \
+         Windows with Developer Mode they resolve correctly.\n\n\
          🤖 Generated with [Buildmesh]"
     )
 }
@@ -375,8 +548,18 @@ mod tests {
 
         let head_before = repo.head().unwrap().peel_to_commit().unwrap().id();
 
-        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
-        assert_eq!(added, vec!["AGENTS.md".to_string(), ".agents/skills".to_string()]);
+        let mut added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        // Order of `.gitignore` (new in #1401) is implementation-defined relative
+        // to the symlinks — sort for a stable assertion.
+        added.sort();
+        assert_eq!(
+            added,
+            vec![
+                ".agents/skills".to_string(),
+                ".gitignore".to_string(),
+                "AGENTS.md".to_string(),
+            ]
+        );
 
         let tree = branch_tree(&repo, "test-branch");
 
@@ -413,9 +596,12 @@ mod tests {
         );
 
         let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
-        assert!(added.is_empty(), "should add nothing when mirrors exist");
-        // No branch should have been created.
-        assert!(repo.find_reference("refs/heads/test-branch").is_err());
+        // The mirrors exist, but the repo has no `.gitignore` — the portability
+        // commit still needs to create one (issue #1401). So `.gitignore` IS
+        // expected here; just no symlinks.
+        assert_eq!(added, vec![".gitignore".to_string()]);
+        // A branch should be created — `.gitignore` is the only addition.
+        assert!(repo.find_reference("refs/heads/test-branch").is_ok());
     }
 
     #[test]
@@ -430,8 +616,12 @@ mod tests {
             ],
         );
 
-        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
-        assert_eq!(added, vec![".agents/skills".to_string()]);
+        let mut added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        added.sort();
+        assert_eq!(
+            added,
+            vec![".agents/skills".to_string(), ".gitignore".to_string()]
+        );
     }
 
     #[test]
@@ -452,5 +642,146 @@ mod tests {
         assert!(status.skills_dir_exists);
         assert_eq!(status.skill_count, 2);
         assert!(!status.agents_skills_exists);
+    }
+
+    // ---- .gitignore handling (issue #1401) ----
+
+    fn blob_content(repo: &git2::Repository, tree: &git2::Tree, name: &str) -> Vec<u8> {
+        let entry = tree.get_name(name).expect("entry in tree");
+        repo.find_blob(entry.id())
+            .expect("blob")
+            .content()
+            .to_vec()
+    }
+
+    #[test]
+    fn appends_agent_block_to_existing_gitignore() {
+        let tr = TempRepo::new();
+        let repo = init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "# context"),
+                (".gitignore", "node_modules/\ndist/\n"),
+            ],
+        );
+
+        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        // AGENTS.md is added too, but the assertion that matters is that
+        // .gitignore shows up in the added list and contains both the
+        // user's prior rules and the canonical agent block.
+        assert!(added.iter().any(|p| p == ".gitignore"));
+
+        let tree = branch_tree(&repo, "test-branch");
+        let gi = blob_content(&repo, &tree, ".gitignore");
+        let gi_str = std::str::from_utf8(&gi).unwrap();
+
+        // User's existing rules preserved.
+        assert!(gi_str.contains("node_modules/"));
+        assert!(gi_str.contains("dist/"));
+        // Agent block fully appended.
+        assert!(gi_str.contains(AGENT_HARNESS_GITIGNORE_HEADER));
+        assert!(gi_str.contains(".agents/hooks.json"));
+        assert!(gi_str.contains(".codex/"));
+        assert!(gi_str.contains(".cursor/cache/"));
+    }
+
+    #[test]
+    fn creates_gitignore_when_absent() {
+        let tr = TempRepo::new();
+        let repo = init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "# context"),
+                (".claude/skills/foo/SKILL.md", "x"),
+            ],
+        );
+
+        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        assert!(added.iter().any(|p| p == ".gitignore"));
+
+        let tree = branch_tree(&repo, "test-branch");
+        let gi = blob_content(&repo, &tree, ".gitignore");
+        let gi_str = std::str::from_utf8(&gi).unwrap();
+        assert!(gi_str.contains(AGENT_HARNESS_GITIGNORE_HEADER));
+        assert!(gi_str.contains(".agents/hooks.json"));
+    }
+
+    #[test]
+    fn idempotent_when_gitignore_already_has_block() {
+        let tr = TempRepo::new();
+        let repo = init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "# context"),
+                (".gitignore", AGENT_HARNESS_GITIGNORE_BLOCK),
+            ],
+        );
+
+        let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        // `.gitignore` MUST NOT appear in the added list — the user's HEAD
+        // already has the canonical block, so the commit is a no-op for it.
+        // We still expect AGENTS.md to be added since CLAUDE.md exists and
+        // AGENTS.md doesn't.
+        assert!(
+            !added.iter().any(|p| p == ".gitignore"),
+            "gitignore was re-added: {:?}",
+            added
+        );
+
+        // `.gitignore` IS on the branch tree (inherited from HEAD), but the
+        // blob OID must match HEAD's exactly — i.e. no duplicate blob was
+        // written. TreeBuilder inherits HEAD's entries by default; only an
+        // explicit `insert` would mint a new blob.
+        let head_commit = repo.find_commit(head_oid).unwrap();
+        let head_tree = head_commit.tree().unwrap();
+        let head_gitignore_oid = head_tree
+            .get_name(".gitignore")
+            .expect("HEAD has .gitignore")
+            .id();
+
+        let tree = branch_tree(&repo, "test-branch");
+        let branch_gitignore_oid = tree
+            .get_name(".gitignore")
+            .expect("branch inherits .gitignore from HEAD")
+            .id();
+        assert_eq!(branch_gitignore_oid, head_gitignore_oid);
+    }
+
+    #[test]
+    fn detect_reports_gitignore_has_agent_patterns() {
+        let tr = TempRepo::new();
+        // Repo with CLAUDE.md but a .gitignore that does NOT have the block.
+        init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "# context"),
+                (".gitignore", "node_modules/\n"),
+            ],
+        );
+        let status =
+            detect_ai_context_blocking(tr.path().to_string_lossy().to_string()).unwrap();
+        assert!(!status.gitignore_has_agent_patterns);
+
+        // Repo with the canonical block — flag flips true.
+        let tr2 = TempRepo::new();
+        init_repo(
+            tr2.path(),
+            &[
+                ("CLAUDE.md", "# context"),
+                (".gitignore", AGENT_HARNESS_GITIGNORE_BLOCK),
+            ],
+        );
+        let status2 =
+            detect_ai_context_blocking(tr2.path().to_string_lossy().to_string()).unwrap();
+        assert!(status2.gitignore_has_agent_patterns);
+
+        // Repo with no .gitignore at all — flag is false.
+        let tr3 = TempRepo::new();
+        init_repo(tr3.path(), &[("CLAUDE.md", "# context")]);
+        let status3 =
+            detect_ai_context_blocking(tr3.path().to_string_lossy().to_string()).unwrap();
+        assert!(!status3.gitignore_has_agent_patterns);
     }
 }
