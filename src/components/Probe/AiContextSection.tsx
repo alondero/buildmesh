@@ -39,12 +39,11 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
   const hasClaude = status.claude_md_exists || status.skills_dir_exists;
   const needsAgentsMd = status.claude_md_exists && !status.agents_md_exists;
   const needsAgentsSkills = status.skills_dir_exists && !status.agents_skills_exists;
-  // Issue #1401: only surface the .gitignore row when we have something to
-  // port — otherwise the row would imply we want to amend .gitignore on a
-  // repo with no Claude context at all.
-  const needsGitignoreUpdate =
-    (needsAgentsMd || needsAgentsSkills) && !status.gitignore_has_agent_patterns;
-  const needsWork = needsAgentsMd || needsAgentsSkills || needsGitignoreUpdate;
+  // Issue #1401: surface the .gitignore row whenever there is Claude-shaped
+  // content that might be ported (so the row implies we will amend .gitignore
+  // on the same PR). The .gitignore update piggybacks on the symlink work —
+  // it never stands alone — so it does not get its own `needsWork` disjunct.
+  const needsWork = needsAgentsMd || needsAgentsSkills;
 
   // Nothing Claude-shaped to port — keep the panel quiet.
   if (!hasClaude) return null;
@@ -107,7 +106,7 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
             )}
           </div>
         )}
-        {(needsAgentsMd || needsAgentsSkills) && (
+        {needsWork && (
           <div className="flex items-center gap-2">
             <span className="font-mono text-text-primary">.gitignore</span>
             <span>→</span>

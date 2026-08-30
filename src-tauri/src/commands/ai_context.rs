@@ -32,36 +32,34 @@ use ts_rs::TS;
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Canonical `.gitignore` block appended (or created) by the portability
-/// commit so ephemeral runtime files written by Claude Code, Codex,
-/// Antigravity (`agy`), OpenCode, Grok, and the rest of the harness zoo do
-/// not pollute `git status` after a project is made portable (issue #1401).
+/// commit so ephemeral runtime files written by Codex, Antigravity (`agy`),
+/// OpenCode, Grok, and the rest of the harness zoo do not pollute `git
+/// status` after a project is made portable (issue #1401).
+///
+/// The contents are taken **verbatim** from the issue's Proposed Changes —
+/// not from the project's own `.gitignore`. The project's root .gitignore
+/// also covers Claude Code patterns and uses section-header comments, but
+/// the spec asked for a single flat block keyed by the `# Agent Harnesses…`
+/// header; using that as the idempotency marker means a user who has
+/// already applied the spec's block won't see duplicate entries on a later
+/// portability commit.
 ///
 /// Kept in source rather than `include_str!`'d from the project's own
 /// `.gitignore` — that file holds session-local patterns (`.wayfinder/`,
 /// `docs/superpowers/`, …) which must never leak into a PR on someone
 /// else's repository.
-///
-/// Idempotency key: the comment header line below is unique enough that we
-/// can grep for it to decide whether the block is already present.
 const AGENT_HARNESS_GITIGNORE_HEADER: &str =
-    "# Claude, Codex, AGY, and other Agent Harnesses (runtime, local settings, and ephemeral files)";
+    "# Agent Harnesses (runtime, local settings, and ephemeral files)";
 
-/// Helper: the full block written into the target `.gitignore` (with trailing
-/// newline). The header doubles as the idempotency marker — if `.gitignore`
-/// already contains it, the portability commit is a no-op for `.gitignore`.
+/// Helper: the full block written into the target `.gitignore`. The header
+/// doubles as the idempotency marker — if `.gitignore` already contains it,
+/// the portability commit is a no-op for `.gitignore`. The contents are
+/// the issue #1401 spec block, verbatim.
 const AGENT_HARNESS_GITIGNORE_BLOCK: &str = "\
-# Claude, Codex, AGY, and other Agent Harnesses (runtime, local settings, and ephemeral files)\n\
+# Agent Harnesses (runtime, local settings, and ephemeral files)\n\
 .codex/\n\
 CODEX.local.md\n\
 codex.local.md\n\
-.claude/worktrees/\n\
-.claude/settings.local.json\n\
-.claude/tasks/\n\
-.claude/memory/\n\
-.claude/scheduled_tasks.lock\n\
-CLAUDE.local.md\n\
-\n\
-# Antigravity CLI and .agents open standard runtime / local state (.agents/skills is tracked)\n\
 .agents/hooks.json\n\
 .agents/settings.local.json\n\
 .agents/tasks/\n\
@@ -74,8 +72,6 @@ AGENTS.local.md\n\
 .antigravity/\n\
 .antigravitycli/\n\
 .gemini/\n\
-\n\
-# OpenCode, Grok, MiniMax Code, DeepSeek Harness, Kimi\n\
 .opencode/\n\
 .open-code/\n\
 OPENCODE.local.md\n\
@@ -84,8 +80,6 @@ GROK.local.md\n\
 .mcode/\n\
 .dsh/\n\
 .kimi/\n\
-\n\
-# Cursor, Aider, Cline, Roo, Goose, Windsurf\n\
 .cursor/cache/\n\
 .cursor/debug/\n\
 .cursor/index/\n\
