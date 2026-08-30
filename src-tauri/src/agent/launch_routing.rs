@@ -1,6 +1,7 @@
 //! Prepared provider routing resolved before command construction (issue #1098).
 
 use crate::agent::provider::adapters::codex;
+use crate::agent::provider::LaunchRuntime;
 use crate::env::ResolvedPath;
 use crate::models::Provider;
 use crate::preferences;
@@ -70,6 +71,19 @@ impl PreparedLaunchRouting {
             Self::Native
         } else {
             Self::Environment(values.to_vec())
+        }
+    }
+
+    /// Carry the runtime identity already established during provider
+    /// preflight into later provisioning. This prevents Codex proxy launches
+    /// from independently selecting a second WSL distro or home.
+    pub fn launch_runtime(&self) -> LaunchRuntime {
+        match self {
+            Self::CodexProxy { install, .. } => LaunchRuntime {
+                home: Some(install.codex_home.clone()),
+                wsl_distro: install.wsl_distro.clone(),
+            },
+            Self::Native | Self::Environment(_) => LaunchRuntime::default(),
         }
     }
 }

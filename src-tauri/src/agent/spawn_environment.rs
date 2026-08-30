@@ -169,10 +169,65 @@ pub fn wrap(
     cmd
 }
 
+/// Carry command-defined and adapter-declared environment variables across a
+/// WSL boundary. The adapter owns the inherited-variable declaration; this
+/// module owns the platform-specific `WSLENV` representation.
+pub(crate) fn apply_wsl_env(
+    cmd: &mut CommandBuilder,
+    env_type: EnvType,
+    command_variables: &[&str],
+    inherited_variables: &[&str],
+) {
+    if env_type != EnvType::Wsl {
+        return;
+    }
+    let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+    for key in command_variables {
+        append_to_wslenv(&mut wslenv, key, "/u");
+    }
+    for key in inherited_variables {
+        if std::env::var_os(key).is_some() {
+            append_to_wslenv(&mut wslenv, key, "/u");
+        }
+    }
+    if !wslenv.is_empty() {
+        cmd.env("WSLENV", wslenv);
+    }
+}
+
+/// Append a WSLENV entry by base name, preserving any existing suffix flags.
+pub(crate) fn append_to_wslenv(wslenv: &mut String, key: &str, suffix: &str) {
+    if wslenv
+        .split(':')
+        .any(|part| part.split('/').next() == Some(key))
+    {
+        return;
+    }
+    let entry = format!("{key}{suffix}");
+    if wslenv.is_empty() {
+        wslenv.push_str(&entry);
+    } else {
+        wslenv.push(':');
+        wslenv.push_str(&entry);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{encode_for_powershell, format_powershell_command};
+    use super::{append_to_wslenv, encode_for_powershell, format_powershell_command};
     use base64::Engine;
+
+    #[test]
+    fn append_to_wslenv_deduplicates_by_base_name() {
+        let mut wslenv = "SSH_AUTH_SOCK/up:CODEX_HOME/u".to_string();
+        append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
+        assert_eq!(wslenv, "SSH_AUTH_SOCK/up:CODEX_HOME/u");
+        append_to_wslenv(&mut wslenv, "BUILDMESH_PORT", "/u");
+        assert_eq!(
+            wslenv,
+            "SSH_AUTH_SOCK/up:CODEX_HOME/u:BUILDMESH_PORT/u"
+        );
+    }
 
     fn decode_ps(encoded: &str) -> String {
         let bytes = base64::engine::general_purpose::STANDARD

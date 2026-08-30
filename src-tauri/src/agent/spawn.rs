@@ -583,69 +583,57 @@ pub fn build_spawn_command_prepared(
         cmd.env_remove(k);
     }
 
-    // Inject the per-profile backend env + Codex Proxy credential.
-    // Extracted as helpers because the WSLENV bookkeeping is intricate
-    // and was previously duplicated in two large inline blocks.
-    apply_routing_env(&mut cmd, routing, provider_enum, resolved.env_type);
-    apply_codex_proxy_credential(&mut cmd, routing, provider_enum, resolved.env_type);
+    // Inject the per-profile backend env + Codex Proxy credential. WSLENV is
+    // assembled once after all command-defined variables are known, avoiding
+    // one routing branch overwriting another branch's entries.
+    let mut command_wsl_env = apply_routing_env(&mut cmd, routing);
+    if let Some(key) = apply_codex_proxy_credential(
+        &mut cmd,
+        routing,
+        provider_enum,
+    ) {
+        command_wsl_env.push(key);
+    }
+    spawn_environment::apply_wsl_env(
+        &mut cmd,
+        resolved.env_type,
+        &command_wsl_env,
+        adapter.wsl_passthrough_env(),
+    );
     cmd
 }
 
 /// Apply the per-profile backend env (`PreparedLaunchRouting::Environment`)
-/// to the child command. On WSL, appends the new key names to `WSLENV` with
-/// the `/u` suffix so values cross the WSL boundary (only WSLENV-listed
-/// vars propagate). Codex's custom `CODEX_HOME` is carried across here too,
-/// including for native (non-proxy) Codex spawns. Existing WSLENV entries are
-/// deduped by base name.
-fn apply_routing_env(
+/// to the child command and return the names that need WSL propagation.
+fn apply_routing_env<'a>(
     cmd: &mut CommandBuilder,
-    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
-    provider: Provider,
-    env_type: EnvType,
-) {
+    routing: &'a crate::agent::launch_routing::PreparedLaunchRouting,
+) -> Vec<&'a str> {
     let backend_env: &[(String, String)] = match routing {
         crate::agent::launch_routing::PreparedLaunchRouting::Environment(values) => {
             values.as_slice()
         }
         _ => &[],
     };
-    let carries_codex_home = matches!(provider, Provider::Codex)
-        && env_type == EnvType::Wsl
-        && std::env::var_os("CODEX_HOME").is_some();
-    if backend_env.is_empty() && !carries_codex_home {
-        return;
-    }
     for (k, v) in backend_env {
         cmd.env(k, v);
     }
-    if env_type == EnvType::Wsl {
-        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-        for (k, _) in backend_env {
-            append_to_wslenv(&mut wslenv, k, "/u");
-        }
-        if carries_codex_home {
-            append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-        }
-        if !wslenv.is_empty() {
-            cmd.env("WSLENV", wslenv);
-        }
-    }
+    backend_env.iter().map(|(key, _)| key.as_str()).collect()
 }
 
 /// Apply the Codex Proxy pairing-scoped credential. A verified profile
 /// authenticates exclusively through its pairing-scoped reference
 /// (`PROXY_CREDENTIAL_ENV`); generic `OPENAI_API_KEY` / `OPENAI_BASE_URL`
 /// inherited by Buildmesh are stripped so they cannot become an alternate
-/// credential/endpoint. On WSL the credential key (and `CODEX_HOME` when
-/// set) is appended to WSLENV.
+/// credential/endpoint. The generated credential key is returned for the
+/// shared WSL environment pass.
 fn apply_codex_proxy_credential(
     cmd: &mut CommandBuilder,
     routing: &crate::agent::launch_routing::PreparedLaunchRouting,
     provider_enum: Provider,
-    env_type: EnvType,
-) {
+) -> Option<&'static str> {
     if !matches!(provider_enum, Provider::Codex) {
-        return;
+        return None;
     }
     let key = crate::agent::provider::adapters::codex::PROXY_CREDENTIAL_ENV;
     cmd.env_remove(key);
@@ -655,41 +643,13 @@ fn apply_codex_proxy_credential(
         ..
     } = routing
     else {
-        return;
+        return None;
     };
     debug_assert_eq!(credential_reference, key);
     cmd.env_remove("OPENAI_API_KEY");
     cmd.env_remove("OPENAI_BASE_URL");
     cmd.env(credential_reference, credential);
-    if env_type == EnvType::Wsl {
-        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-        append_to_wslenv(&mut wslenv, key, "/u");
-        if std::env::var_os("CODEX_HOME").is_some() {
-            append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-        }
-        if !wslenv.is_empty() {
-            cmd.env("WSLENV", wslenv);
-        }
-    }
-}
-
-/// Append a key (with its WSLENV suffix flag, usually `/u`) to the
-/// colon-delimited WSLENV list, deduplicated by base name. Pure helper
-/// so the Codex and the per-profile-backend paths agree on the rule.
-fn append_to_wslenv(wslenv: &mut String, key: &str, suffix: &str) {
-    let already_has = wslenv.split(':').any(|part| {
-        part.split('/').next() == Some(key)
-    });
-    if already_has {
-        return;
-    }
-    let entry = format!("{key}{suffix}");
-    if wslenv.is_empty() {
-        wslenv.push_str(&entry);
-    } else {
-        wslenv.push(':');
-        wslenv.push_str(&entry);
-    }
+    Some(key)
 }
 
 /// Spawn the child process.
@@ -2173,28 +2133,42 @@ pub(crate) async fn spawn_agent_inner(
     };
     timer.checkpoint("after_provider_preflight");
 
+    let emit_provider_error = |message: &str| {
+        let _ = app.emit(
+            "provider-error",
+            ProviderErrorPayload {
+                session_id,
+                provider,
+                message: message.to_string(),
+            },
+        );
+    };
+
+    // Trust is a launch prerequisite, independent of attention hooks. The
+    // prepared routing carries the exact runtime identity for Codex proxy
+    // launches so trust and child execution use one WSL distro/home.
+    let launch_runtime = routing.launch_runtime();
+    if let Err(e) = adapter.ensure_workspace_trusted(&resolved, &launch_runtime) {
+        tracing::warn!(
+            "spawn_agent_inner: workspace trust provisioning failed for session {}: {}",
+            session_id,
+            e
+        );
+        emit_provider_error(&format!("workspace trust unavailable: {e}"));
+    }
+    timer.checkpoint("after_workspace_trust");
+
     // Provision attention hooks before building/spawning the child. Codex
     // reads its project hook registry during startup, so a post-launch write
-    // races the CLI and can leave `/hooks` showing zero active hooks. The
-    // adapter receives the full resolved runtime so Codex can trust the exact
-    // linked-worktree path in the native or WSL project map.
-    crate::agent::workspace_trust::ensure_trusted(&resolved);
-    timer.checkpoint("after_workspace_trust");
+    // races the CLI and can leave `/hooks` showing zero active hooks.
     if adapter.requires_attention_hook() {
-        if let Err(e) = adapter.provision_attention_hooks(&resolved) {
+        if let Err(e) = adapter.provision_attention_hooks(&resolved, &launch_runtime) {
             tracing::warn!(
                 "spawn_agent_inner: attention hook provisioning failed for session {}: {}",
                 session_id,
                 e
             );
-            let _ = app.emit(
-                "provider-error",
-                ProviderErrorPayload {
-                    session_id,
-                    provider,
-                    message: format!("attention hooks unavailable: {e}"),
-                },
-            );
+            emit_provider_error(&format!("attention hooks unavailable: {e}"));
         }
     }
     timer.checkpoint("after_inject_hook");
@@ -2258,17 +2232,6 @@ pub(crate) async fn spawn_agent_inner(
         prefill.as_deref(),
         sandbox,
     );
-
-    let emit_provider_error = |e: &String| {
-        let _ = app.emit(
-            "provider-error",
-            ProviderErrorPayload {
-                session_id,
-                provider,
-                message: e.clone(),
-            },
-        );
-    };
 
     let (child, master): (
         Box<dyn portable_pty::Child + Send + Sync>,

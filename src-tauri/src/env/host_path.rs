@@ -116,23 +116,6 @@ pub fn to_host_path(path: &str) -> String {
     }
 }
 
-/// Convert a WSL-native path to a host path using an explicit distribution.
-///
-/// `to_host_path` uses the cached default distribution, which is correct for
-/// ordinary session paths. Codex's `CODEX_HOME` can point at an arbitrary WSL
-/// directory, though, so trust/configuration code needs the same conversion
-/// with the distribution it is provisioning. Drive-mounted paths retain their
-/// existing Windows-drive conversion.
-pub(crate) fn to_host_path_for_distro(path: &str, distro: &str) -> String {
-    if !cfg!(target_os = "windows") || !path.starts_with('/') {
-        return path.to_string();
-    }
-    if path.starts_with("/mnt/") {
-        return to_host_path(path);
-    }
-    format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
-}
-
 /// The host-accessible Codex rollout directory for an agent environment.
 /// CLI-home selection belongs to `environment`; this module owns the WSL path
 /// conversion needed before the host reads that directory.

@@ -12,6 +12,19 @@ use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
 
+/// Runtime facts resolved by provider preflight and shared with the adapter's
+/// provisioning seams. An empty context means the adapter should resolve its
+/// ordinary native/default runtime. The fields stay provider-neutral so the
+/// spawn path does not expose a concrete adapter install type.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchRuntime {
+    /// Guest home or host home selected for the process, when preflight has
+    /// already established one.
+    pub home: Option<String>,
+    /// WSL distribution selected for the process, when applicable.
+    pub wsl_distro: Option<String>,
+}
+
 /// Built-in **Harness Profile** ids that detection populates (`claude`,
 /// `codex`, `cursor`, `agy`, `opencode`, `grok`, `kimi`) plus the code-defined
 /// `terminal` default (issue #536) and the legacy `anthropic` executor id.
@@ -295,6 +308,19 @@ pub trait AgentProvider: Send + Sync {
     /// [`provision_attention_hooks`]: AgentProvider::provision_attention_hooks
     fn requires_attention_hook(&self) -> bool;
 
+    /// Ensure the workspace is trusted for this harness before its process is
+    /// created. Trust is a launch prerequisite, independent of attention-hook
+    /// installation. The default covers Claude/Antigravity's shared settings;
+    /// harnesses with a different trust store override this method.
+    fn ensure_workspace_trusted(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        crate::agent::workspace_trust::ensure_trusted(resolved);
+        Ok(())
+    }
+
     /// Provision this harness's attention hooks in the spawn cwd so the agent
     /// calls back to the local attention endpoint on turn end / permission
     /// prompts. Each adapter owns its harness's config format (issue #886):
@@ -318,8 +344,19 @@ pub trait AgentProvider: Send + Sync {
     /// the legacy injector. Adapters whose configuration also lives in a
     /// runtime-specific home (Codex, including WSL) can override this seam and
     /// use both path forms plus the detected environment.
-    fn provision_attention_hooks(&self, resolved: &ResolvedPath) -> Result<(), String> {
+    fn provision_attention_hooks(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
         self.inject_attention_hook(std::path::Path::new(&resolved.host_path))
+    }
+
+    /// Environment variables this harness needs carried from the Windows host
+    /// into a WSL child. The OS wrapper owns the WSLENV mechanics; adapters
+    /// only declare their runtime-specific variables here.
+    fn wsl_passthrough_env(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// Whether this provider writes a transcript the coordinator read API can

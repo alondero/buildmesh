@@ -33,8 +33,9 @@ const TARGETS: &[(&str, &str)] = &[
 ];
 
 /// Add `resolved.host_path` to the `trustedWorkspaces` array in both Claude
-/// Code and Antigravity settings files under `$USERPROFILE`/`$HOME`. Called
-/// from `spawn_agent_inner` immediately before `inject_attention_hook`.
+/// Code and Antigravity settings files under `$USERPROFILE`/`$HOME`. The
+/// provider seam calls this before attention-hook provisioning, so trust stays
+/// a launch prerequisite rather than an attention-hook side effect.
 ///
 /// Best-effort: a missing `$HOME`, missing settings file, unreadable file,
 /// or malformed JSON are all silent no-ops. The function returns `()`; the
