@@ -289,7 +289,9 @@ pub trait AgentProvider: Send + Sync {
     fn auto_resume_on_startup(&self) -> bool;
 
     /// Whether the spawn path should call [`inject_attention_hook`] before
-    /// launching this provider (issue #886).
+    /// launching this provider (issue #886). For Antigravity (issue #1367), this delivers
+    /// a completion/background signal via Stop hook and `fullyIdle` (approval is unavailable
+    /// under `--dangerously-skip-permissions` launch policy).
     ///
     /// [`inject_attention_hook`]: AgentProvider::inject_attention_hook
     fn requires_attention_hook(&self) -> bool;
@@ -299,11 +301,11 @@ pub trait AgentProvider: Send + Sync {
     /// prompts. Each adapter owns its harness's config format (issue #886):
     /// the Claude-backed `anthropic` adapter writes
     /// `.claude/settings.local.json`; Codex writes `.codex/config.toml` +
-    /// `.codex/hooks.json`. Called from `spawn_agent_inner` (gated on
+    /// `.codex/hooks.json`; Antigravity writes `.agents/hooks.json`. Called
+    /// from `spawn_agent_inner` before child launch (gated on
     /// [`requires_attention_hook`]) with the resolved host-side project path;
     /// implementations must be idempotent — they run on every spawn. A failure
-    /// is logged and the spawn proceeds (the agent still works, only the
-    /// attention callback is lost).
+    /// is logged, surfaced as a provider warning event, and the spawn proceeds.
     ///
     /// [`requires_attention_hook`]: AgentProvider::requires_attention_hook
     fn inject_attention_hook(&self, _project_path: &std::path::Path) -> Result<(), String> {

@@ -6,6 +6,21 @@ use std::path::Path;
 pub struct AgyAdapter;
 pub static AGY: AgyAdapter = AgyAdapter;
 
+/// Minimum supported Antigravity (agy) version for attention hook delivery
+/// and CLI execution (issue #1367). Tested against 1.0.0 through current 1.1.22+.
+pub const MIN_AGY_VERSION: (u32, u32, u32) = (1, 0, 0);
+
+/// Write content to path atomically using a sibling .tmp file and replace/rename.
+fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, content)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// The callback command Antigravity (agy) lifecycle hooks run. AGY pipes
 /// the hook's stdin JSON — `{conversationId, transcriptPath, fullyIdle,
 /// terminationReason, …}` on `Stop` (issue #1285) — into the command;
@@ -33,7 +48,7 @@ fn hook_command(platform: Platform) -> String {
 /// required decision response makes it a blocking gate. Buildmesh launches
 /// AGY with permissions skipped, so Stop is the unambiguous Node Turn
 /// signal here. Idempotent, and preserves any unrelated top-level keys the
-/// user added.
+/// user added. Writes atomically to prevent corruption.
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     let mut settings: serde_json::Value = std::fs::read_to_string(path)
         .ok()
@@ -55,7 +70,7 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     settings["buildmesh-attention"] = expected;
     let content = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    std::fs::write(path, content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
+    atomic_write(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
     tracing::info!("agy inject_attention_hook: wrote {:?}", path);
     Ok(())
 }
@@ -99,19 +114,27 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
+    /// Delivers completion / background turn signals via `Stop` hook (`fullyIdle: true`
+    /// vs `fullyIdle: false`). Tool approvals are unavailable under the current
+    /// `--dangerously-skip-permissions` launch policy (issue #1367).
     fn requires_attention_hook(&self) -> bool {
         true
     }
 
     /// AGY lifecycle hooks live in the project-local `.agents/` dir as
-    /// `hooks.json` (issue #1285). The namespace key is
+    /// `hooks.json` (issue #1285, #1367). The namespace key is
     /// `buildmesh-attention` so user-added sibling namespaces (other
     /// tools, custom automation) round-trip through a re-run untouched.
     fn inject_attention_hook(&self, project_path: &Path) -> Result<(), String> {
         let agents_dir = project_path.join(".agents");
         std::fs::create_dir_all(&agents_dir)
             .map_err(|e| format!("failed to create .agents dir: {e}"))?;
-        ensure_hooks_json(&agents_dir.join("hooks.json"), &hook_command(Platform::current()))
+        let hooks_path = agents_dir.join("hooks.json");
+        ensure_hooks_json(&hooks_path, &hook_command(Platform::current()))?;
+        if !hooks_path.exists() {
+            return Err(format!("hooks.json not found at {:?} after injection", hooks_path));
+        }
+        Ok(())
     }
 
     fn supports_model_override(&self) -> bool {
@@ -461,4 +484,46 @@ mod tests {
         assert!(AGY.produces_readable_transcript());
     }
 
+    /// Issue #1367: Pin the minimum supported Antigravity CLI version.
+    #[test]
+    fn min_agy_version_is_pinned() {
+        assert_eq!(MIN_AGY_VERSION, (1, 0, 0));
+    }
+
+    /// Issue #1367: Verify that atomic write leaves no temporary `.tmp` residue.
+    #[test]
+    fn inject_leaves_no_tmp_residue() {
+        let temp = TempDir::new().unwrap();
+        AGY.inject_attention_hook(temp.path()).unwrap();
+
+        let agents_dir = temp.path().join(".agents");
+        assert!(agents_dir.join("hooks.json").exists());
+        assert!(!agents_dir.join("hooks.json.tmp").exists());
+    }
+
+    /// Issue #1367: Under `--dangerously-skip-permissions`, AGY automatically
+    /// executes tools without prompting for user permission. PreToolUse is
+    /// a blocking execution gate (requiring synchronous decision responses),
+    /// not an async notification hook. Thus, only Stop is injected.
+    #[test]
+    fn skip_permissions_mode_omits_pre_tool_use_gate() {
+        let temp = TempDir::new().unwrap();
+        AGY.inject_attention_hook(temp.path()).unwrap();
+
+        let hooks = read_hooks_json(temp.path());
+        let attention = &hooks["buildmesh-attention"];
+        assert!(
+            attention.get("Stop").is_some(),
+            "Stop hook must be present for turn completion and background detection"
+        );
+        assert!(
+            attention.get("PreToolUse").is_none(),
+            "PreToolUse must NOT be injected under skip-permissions mode"
+        );
+        assert!(
+            attention.get("Notification").is_none(),
+            "Notification is a Claude/Grok concept; AGY uses Stop"
+        );
+    }
 }
+

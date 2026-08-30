@@ -109,7 +109,9 @@ pub struct HarnessCapabilities {
     /// Whether the app auto-resumes suspended sessions for this harness.
     pub auto_resume_on_startup: bool,
     /// Whether the spawn path installs an attention hook for this harness
-    /// (issue #886).
+    /// (issue #886). For Antigravity (issue #1367), this delivers a
+    /// completion/background signal via Stop hook and `fullyIdle`; approval
+    /// is unavailable under skip-permissions mode.
     pub requires_attention_hook: bool,
     /// Whether the harness writes a transcript the coordinator read API
     /// can parse into a Node Digest's rich layer (ADR-0008).
