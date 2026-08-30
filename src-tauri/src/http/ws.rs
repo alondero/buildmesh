@@ -418,7 +418,8 @@ pub fn get_pty_history(node_id: i64) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
+pub fn send_pty_output(node_id: i64, data: impl AsRef<[u8]>) {
+    let data = data.as_ref();
     let nodes = get_known_nodes();
     let sender = {
         let mut locked = nodes.write();
@@ -434,7 +435,7 @@ pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
         }
     };
     if let Some(sender) = sender {
-        let _ = sender.send(data);
+        let _ = sender.send(data.to_vec());
     }
 }
 

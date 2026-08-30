@@ -57,10 +57,6 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn().mockResolvedValue({}),
-}));
-
 vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: vi.fn().mockResolvedValue(undefined),
 }));

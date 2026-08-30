@@ -27,7 +27,6 @@ pub(crate) use intent::{
     ExplicitSpawnOverrides, GitHubWorkContext, ResumeCause, SpawnIntent, SpawnOutcome,
     SpawnRequest, TerminalSize,
 };
-use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,10 +38,15 @@ use ts_rs::TS;
 // Wire types — Tauri event payloads (issue #161)
 // ---------------------------------------------------------------------------
 
-/// Payload of the `agent-output` Tauri event. Streamed from the PTY reader
-/// thread for every node. Exactly one of `data` (base64-encoded bytes) or
-/// `line` (raw UTF-8 string) is populated — the listener branches on which
-/// is `Some`. The empty-both case is meaningless and ignored.
+/// Payload of the `agent-output` Tauri event. Production PTY bytes go
+/// over the binary Channel (`OutputSink`), not this event — mixing the
+/// two IPC paths has no ordering and would split ANSI. `line` remains
+/// the wire shape for test injection (`inject_test_output`). `data`
+/// (base64) is kept so older listeners still typecheck.
+///
+/// Exactly one of `data` (base64-encoded bytes) or `line` (raw UTF-8
+/// string) is populated — the listener branches on which is `Some`. The
+/// empty-both case is meaningless and ignored.
 ///
 /// Generated to `src/types/generated/AgentOutputPayload.ts`; the TS half is
 /// imported by `src/components/Terminal/TerminalRegistry.ts`. The wire key is
@@ -944,12 +948,8 @@ fn register_agent(
     );
 }
 
-fn encode_pty_chunk(data: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-/// Core PTY read loop: read 8 KiB chunks until EOF or error, handing raw bytes
-/// to `on_chunk`. Returns when the PTY closes.
+/// Core PTY read loop: read [`crate::pty::batch::PTY_READ_BUF`] chunks until
+/// EOF or error, handing raw bytes to `on_chunk`. Returns when the PTY closes.
 ///
 /// Extracted so the production reader thread and the real-PTY integration test
 /// exercise the exact same read path (see `src-tauri/tests/pty_spawn.rs`).
@@ -957,7 +957,7 @@ pub fn pump_pty_output(
     mut reader: Box<dyn std::io::Read + Send>,
     mut on_chunk: impl FnMut(&[u8]),
 ) {
-    let mut buf = [0u8; 8192];
+    let mut buf = [0u8; crate::pty::batch::PTY_READ_BUF];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -991,6 +991,11 @@ pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, 
 /// Start the PTY reader thread. Returns the `JoinHandle` so the caller
 /// can store it on `AgentProcess` and let `kill_session` join with a
 /// bounded timeout (issue #300).
+///
+/// Output dispatch (issue #1385): each OS `read()` still feeds capture /
+/// naming / autopilot on this thread, then the bytes go through
+/// `pty::batch::with_batcher` (8 ms / 4 KiB) onto a binary Tauri Channel
+/// (`OutputSink::send`) with the `agent-output` JSON event as fallback.
 ///
 /// Two time references are passed in, with distinct semantics — keep
 /// them separate:
@@ -1047,58 +1052,71 @@ fn start_reader(
         // alongside the other checkpoints. Measured against `spawn_start` (not
         // `spawned_at`) so this elapsed time is comparable to every other
         // checkpoint in the log.
-        let mut first_chunk = true;
-        pump_pty_output(reader, |data| {
-            if first_chunk {
-                first_chunk = false;
-                tracing::info!(
-                    "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (spawn start → first output; agent CLI boot tail)",
-                    session_id,
-                    spawn_start.elapsed().as_millis()
-                );
-            }
-            // Mark THIS MESH as active so the background warm-pool worker
-            // holds off its idle refills for this mesh's pool while an agent
-            // is actively producing output (issue #613 AC2; issue #634 scopes
-            // the activity per-mesh so a chatty agent on mesh A doesn't
-            // starve mesh B's pool). `mesh_id` is captured from the spawn
-            // context at thread start — the closure outlives the agent's
-            // registry entry, so reading it from `PROCESS_REGISTRY` inside
-            // the closure would race with `kill_session`'s `remove`.
-            crate::services::pool_worker::note_activity_for_mesh(mesh_id);
+        // Issue #1385: coalesce OS reads onto a dedicated batcher thread
+        // so a build-storm of tiny PTY chunks becomes one IPC dispatch
+        // per 8 ms / 4 KiB. Capture / naming / autopilot still see every
+        // OS read on this thread (ChunkCapture already stitches split
+        // banners). `with_batcher` drops the producer before joining —
+        // joining while still holding `SyncSender` deadlocks the reader
+        // on every PTY exit.
+        let sink = crate::agent::output::ensure(session_id);
+        let batch_session_id = session_id;
+        crate::pty::batch::with_batcher(
+            move |batch| {
+                // One transport only: Channel (or the sink's pre-subscribe
+                // buffer). Never emit JSON `agent-output` for PTY bytes —
+                // that path and the Channel have no ordering, so a
+                // subscribe landing mid-stream would let later chunks
+                // overtake earlier ones and split ANSI.
+                crate::http_server::send_pty_output(batch_session_id, &batch);
+                sink.send_owned(batch);
+            },
+            |batch_tx| {
+                let mut first_chunk = true;
+                pump_pty_output(reader, |data| {
+                    if first_chunk {
+                        first_chunk = false;
+                        tracing::info!(
+                            "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (spawn start → first output; agent CLI boot tail)",
+                            session_id,
+                            spawn_start.elapsed().as_millis()
+                        );
+                    }
+                    // Mark THIS MESH as active so the background warm-pool worker
+                    // holds off its idle refills for this mesh's pool while an agent
+                    // is actively producing output (issue #613 AC2; issue #634 scopes
+                    // the activity per-mesh so a chatty agent on mesh A doesn't
+                    // starve mesh B's pool). `mesh_id` is captured from the spawn
+                    // context at thread start — the closure outlives the agent's
+                    // registry entry, so reading it from `PROCESS_REGISTRY` inside
+                    // the closure would race with `kill_session`'s `remove`.
+                    crate::services::pool_worker::note_activity_for_mesh(mesh_id);
 
-            let (text, uuid) = chunk_capture.feed(data);
-            maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
-            // Autopilot state evaluator tail (issue #483) — one in-memory
-            // set lookup for non-piloted nodes.
-            crate::autopilot::evaluator::on_output(session_id, &text);
-            // Stale-attention safety net (issue #878) — one map lookup for
-            // unarmed nodes.
-            crate::attention_autoclear::on_output(session_id, data.len());
+                    let (text, uuid) = chunk_capture.feed(data);
+                    maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
+                    // Autopilot state evaluator tail (issue #483) — one in-memory
+                    // set lookup for non-piloted nodes.
+                    crate::autopilot::evaluator::on_output(session_id, &text);
+                    // Stale-attention safety net (issue #878) — one map lookup for
+                    // unarmed nodes.
+                    crate::attention_autoclear::on_output(session_id, data.len());
 
-            if let Some(uuid) = uuid {
-                // The structured hook and Codex rollout fallback can
-                // capture the same self-assigned ID first. Do not let a
-                // delayed PTY banner replace an already-verified value.
-                let captured = db::set_cli_session_id_if_missing(session_id, &uuid)
-                    .unwrap_or(false);
-                if captured {
-                    tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
-                }
-            }
+                    if let Some(uuid) = uuid {
+                        // The structured hook and Codex rollout fallback can
+                        // capture the same self-assigned ID first. Do not let a
+                        // delayed PTY banner replace an already-verified value.
+                        let captured = db::set_cli_session_id_if_missing(session_id, &uuid)
+                            .unwrap_or(false);
+                        if captured {
+                            tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
+                        }
+                    }
 
-            let _ = app_clone.emit(
-                "agent-output",
-                AgentOutputPayload {
-                    session_id,
-                    data: Some(encode_pty_chunk(data)),
-                    line: None,
-                },
-            );
-
-            // Forward to any connected mobile WebSocket clients
-            crate::http_server::send_pty_output(session_id, data.to_vec());
-        });
+                    let _ = batch_tx.send(data.to_vec());
+                });
+            },
+        );
+        crate::agent::output::unregister(session_id);
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 
@@ -2624,6 +2642,30 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    /// The start_reader pattern: `pump_pty_output` inside `with_batcher`.
+    /// If the producer isn't dropped before join, this hangs on EOF.
+    #[test]
+    fn pump_inside_with_batcher_exits_cleanly_on_reader_eof() {
+        let reader: Box<dyn std::io::Read + Send> =
+            Box::new(std::io::Cursor::new(b"hello from pty\n"));
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = got.clone();
+        let started = std::time::Instant::now();
+        crate::pty::batch::with_batcher(
+            move |batch| g.lock().unwrap().extend_from_slice(&batch),
+            |tx| {
+                pump_pty_output(reader, |data| {
+                    let _ = tx.send(data.to_vec());
+                });
+            },
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "reader+batcher hung after PTY EOF — producer was not dropped"
+        );
+        assert_eq!(&*got.lock().unwrap(), b"hello from pty\n");
     }
 
     // -----------------------------------------------------------------------

@@ -82,6 +82,9 @@ silent data-loss path).
 ### Terminal Persistence (CRITICAL)
 `TerminalManager` is a **singleton**. xterm.js instances survive React remounts via a hidden container stack. Never call `dispose()` on a terminal unless the agent node is explicitly deleted — see `src/components/Terminal/Terminal.tsx`. Disposing a terminal causes permanent blanking.
 
+### PTY output streaming (issue #1385)
+The PTY reader thread still sees every OS `read()` (session-id capture, auto-naming, autopilot). A sibling batcher coalesces those slices (8 ms window or 32 KiB = four 8 KiB PTY fills) and pushes **raw bytes** over a per-session Tauri `Channel` (`subscribe_agent_output` / `unsubscribe_agent_output` in `agent::output`). Bytes that arrive before subscribe are buffered on `OutputSink` and flushed in order — never mixed with the JSON `agent-output` event (those two IPC paths have no ordering). `agent-output` `line` is test injection only. `pty::batch::with_batcher` drops the producer before join (otherwise the reader deadlocks on EOF). `kill_session` unregisters the sink so Channels cannot leak. Don't put production PTY bytes back on the JSON event.
+
 ### Layout: Grid-Only
 Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid. The UI auto-scales 1–6 panes via CSS grid.
 

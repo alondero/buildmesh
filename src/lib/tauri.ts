@@ -1,4 +1,4 @@
-import { invoke as _rawInvoke } from '@tauri-apps/api/core';
+import { invoke as _rawInvoke, Channel } from '@tauri-apps/api/core';
 import { logFrontend } from './frontendLog';
 import { shapeArgs } from './ipcShape';
 import type { AgentNode } from '../stores/agentNodeStore';
@@ -813,6 +813,48 @@ export const readClipboard = () =>
 // `TerminalRegistry.syncPtySize`).
 export const resizeAgent = (sessionId: number, rows: number, cols: number) =>
   _invoke('resize_agent', { sessionId, rows, cols });
+
+/**
+ * Coerce a Tauri Channel raw-binary message into a `Uint8Array`.
+ *
+ * Tauri 2's Channel delivers `InvokeResponseBody::Raw` as an
+ * `ArrayBuffer` (eval path for <1 KiB, fetch path for larger). Tests
+ * and older runtimes may hand us a `Uint8Array` or another
+ * `ArrayBufferView` directly. Anything else is ignored — the JSON
+ * `agent-output` event remains the fallback.
+ */
+export function bytesFromChannelMessage(message: unknown): Uint8Array | null {
+  if (message instanceof Uint8Array) return message;
+  if (message instanceof ArrayBuffer) return new Uint8Array(message);
+  if (ArrayBuffer.isView(message)) {
+    const view = message as ArrayBufferView;
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  }
+  return null;
+}
+
+/**
+ * Subscribe this webview to raw PTY bytes for `sessionId` (issue #1385).
+ * Production output skips Base64+JSON and arrives as a `Uint8Array`.
+ * No-ops in tests whose `@tauri-apps/api/core` mock omits `Channel` —
+ * those suites keep using the `agent-output` event fallback.
+ */
+export const subscribeAgentOutput = (
+  sessionId: number,
+  onChunk: (data: Uint8Array) => void,
+): Promise<void> => {
+  if (typeof Channel !== 'function') return Promise.resolve();
+  const onChunkChannel = new Channel<ArrayBuffer | Uint8Array>();
+  onChunkChannel.onmessage = (message) => {
+    const bytes = bytesFromChannelMessage(message);
+    if (bytes) onChunk(bytes);
+  };
+  return _invoke('subscribe_agent_output', { sessionId, onChunk: onChunkChannel });
+};
+
+/** Drop the binary Channel registered by [`subscribeAgentOutput`]. Idempotent. */
+export const unsubscribeAgentOutput = (sessionId: number) =>
+  _invoke('unsubscribe_agent_output', { sessionId });
 
 /** Reply to a remote-pane snapshot request from the HTTP server. The pair
  *  (`request_id`, `data`) is matched against an in-flight promise on the

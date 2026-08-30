@@ -23,9 +23,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn().mockResolvedValue({}),
-}));
+
 
 vi.mock('@xterm/xterm', () => {
   // Mirror the real @xterm/xterm shape: the user-facing `unicode` is a

@@ -511,6 +511,10 @@ pub fn run() {
             agent::process::debug_list_agents,
             agent::process::send_to_agent,
             agent::process::write_to_agent,
+            // Binary PTY output Channel (issue #1385). Complements the
+            // `agent-output` event fallback; see `agent::output`.
+            agent::output::subscribe_agent_output,
+            agent::output::unsubscribe_agent_output,
             commands::agent::auto_resume_agent_nodes,
             agent::process::debug_crash_snapshot,
             agent::provider_menu::list_providers,

@@ -66,6 +66,15 @@ describe('TerminalManager', () => {
       );
     });
 
+    it('subscribes to the binary agent-output Channel on create', async () => {
+      const invokeSpy = vi.spyOn(await import('@tauri-apps/api/core'), 'invoke');
+      await terminalManager.getOrCreate(1);
+      expect(invokeSpy).toHaveBeenCalledWith('subscribe_agent_output', {
+        sessionId: 1,
+        onChunk: expect.any(Object),
+      });
+    });
+
     it('sets up onData handler that calls invoke', async () => {
       const invokeSpy = vi.spyOn(await import('@tauri-apps/api/core'), 'invoke');
       await terminalManager.getOrCreate(1);
@@ -146,6 +155,18 @@ describe('TerminalManager', () => {
       terminalManager.dispose(1);
 
       expect(unlistenSpy).toHaveBeenCalled();
+    });
+
+    it('unsubscribes the binary Channel on dispose', async () => {
+      const invokeSpy = vi.spyOn(await import('@tauri-apps/api/core'), 'invoke');
+      await terminalManager.getOrCreate(1);
+      invokeSpy.mockClear();
+
+      terminalManager.dispose(1);
+
+      expect(invokeSpy).toHaveBeenCalledWith('unsubscribe_agent_output', {
+        sessionId: 1,
+      });
     });
 
     it('calls term.dispose on dispose', async () => {

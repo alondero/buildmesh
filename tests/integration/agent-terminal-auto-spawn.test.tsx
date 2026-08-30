@@ -55,23 +55,27 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({
-  // spawnAgent -> fetchAgentNodes -> invoke('list_agent_nodes') is what keeps the
-  // store's agentNodes in sync post-spawn. If we return a non-array (the
-  // default `{}` from `mockResolvedValue({})`) the store writes that to
-  // state.agentNodes and the next render explodes on `find()`. Return [].
-  // `list_providers` / `get_default_provider` are the new wrapper-memoised
-  // lookups (issue #405); Terminal.tsx's handover-label effect reads them
-  // on every node mount, so the mock must satisfy it with deterministic data.
-  invoke: vi.fn().mockImplementation((cmd: string) => {
-    if (cmd === 'list_agent_nodes') return Promise.resolve([]);
-    if (cmd === 'list_providers') return Promise.resolve([
-      { id: 'anthropic', label: 'Claude' },
-    ]);
-    if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
-    return Promise.resolve({});
-  }),
-}));
+vi.mock('@tauri-apps/api/core', async () => {
+  const { MockChannel } = await import('../setup/tauriChannel');
+  return {
+    // spawnAgent -> fetchAgentNodes -> invoke('list_agent_nodes') is what keeps the
+    // store's agentNodes in sync post-spawn. If we return a non-array (the
+    // default `{}` from `mockResolvedValue({})`) the store writes that to
+    // state.agentNodes and the next render explodes on `find()`. Return [].
+    // `list_providers` / `get_default_provider` are the new wrapper-memoised
+    // lookups (issue #405); Terminal.tsx's handover-label effect reads them
+    // on every node mount, so the mock must satisfy it with deterministic data.
+    invoke: vi.fn().mockImplementation((cmd: string) => {
+      if (cmd === 'list_agent_nodes') return Promise.resolve([]);
+      if (cmd === 'list_providers') return Promise.resolve([
+        { id: 'anthropic', label: 'Claude' },
+      ]);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      return Promise.resolve({});
+    }),
+    Channel: MockChannel,
+  };
+});
 
 vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: vi.fn().mockResolvedValue(undefined),

@@ -336,6 +336,13 @@ impl AgentProcessRegistry {
             }
         }
 
+        // Drop the binary output Channel so a dead process cannot leak
+        // handles if the frontend never calls unsubscribe (webview
+        // reload, crash, or node left Idle). Idempotent with the reader
+        // epilogue's unregister. Runs even when there was no registry
+        // entry — subscribe can outlive the process.
+        crate::agent::output::unregister(session_id);
+
         // Sandbox cleanup (issue #498/#528): revoke the node's restricted-token
         // worktree ACE grant. No-op for unsandboxed sessions. Runs after the
         // process tree is dead so nothing is still using the granted directory.

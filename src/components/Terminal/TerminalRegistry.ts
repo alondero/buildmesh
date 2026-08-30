@@ -272,6 +272,7 @@ export class TerminalRegistry {
         instance.resizeObserver.disconnect();
       }
       instance.unlisten();
+      api.unsubscribeAgentOutput(nodeId).catch(() => {});
       terminalWebglPool.release(`agent:${nodeId}`);
       instance.term.dispose(); // allow-dispose — keyed by deleted-node IPC, the registry's only legit dispose path
       this.instances.delete(nodeId);
@@ -376,6 +377,14 @@ export class TerminalRegistry {
           }
         }
       });
+
+      // Binary PTY path (issue #1385). Production bytes arrive here as a
+      // `Uint8Array` with no Base64/JSON. The `agent-output` listener
+      // above stays for test injection (`line`) and the pre-subscribe
+      // fallback. `TerminalWriter` still rAF-batches the display write.
+      api.subscribeAgentOutput(nodeId, (bytes) => {
+        this.writer.append(nodeId, bytes);
+      }).catch(console.error);
 
       const unlistenSerialize = await listen<SerializeTerminalRequestPayload>('serialize-terminal-request', (event) => {
         if (event.payload.node_id === nodeId) {

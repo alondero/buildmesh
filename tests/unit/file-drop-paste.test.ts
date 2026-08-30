@@ -7,9 +7,13 @@ import {
   nodeIdFromPoint,
 } from '../../src/lib/fileDropPaste';
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(),
-}));
+vi.mock('@tauri-apps/api/core', async () => {
+  const { MockChannel } = await import('../setup/tauriChannel');
+  return {
+    invoke: vi.fn(),
+    Channel: MockChannel,
+  };
+});
 
 const mockedInvoke = vi.mocked(invoke);
 

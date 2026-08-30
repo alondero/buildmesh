@@ -29,10 +29,6 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn().mockResolvedValue({}),
-}));
-
 vi.mock('@xterm/xterm', () => {
   // Mirror the real @xterm/xterm shape: the user-facing `unicode` is a
   // thin proxy whose `register` delegates to the internal UnicodeService
@@ -198,6 +194,26 @@ describe('Event Listener Integration', () => {
     vi.runAllTimers();
 
     expect(writeSpy).toHaveBeenCalledWith('Hello\n');
+  });
+
+  it('binary Channel chunks are written to the terminal without Base64', async () => {
+    const instance = await terminalManager.getOrCreate(1);
+    expect(instance).not.toBeNull();
+
+    const writeSpy = vi.spyOn(instance!.term, 'write');
+    const { invoke } = await import('@tauri-apps/api/core');
+    const subscribeCall = vi.mocked(invoke).mock.calls.find(
+      (call) => call[0] === 'subscribe_agent_output',
+    );
+    expect(subscribeCall).toBeDefined();
+    const { onChunk } = subscribeCall![1] as {
+      onChunk: { onmessage: (message: unknown) => void };
+    };
+
+    onChunk.onmessage(new Uint8Array([0xe2, 0x96, 0x88]));
+    vi.runAllTimers();
+
+    expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
   });
 
   it('agent-output byte payloads are decoded and written to terminal as bytes', async () => {
