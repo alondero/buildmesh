@@ -2,23 +2,51 @@
  * InspectorPanel — the editor's right slide-over (issue #1209).
  *
  * One form per node kind for the fields this slice edits (the
- * blueprint stays canonical in Rust). v2 harness/target fields on
- * Spawn/Inject/SetNodeStatus land in later Circuits v2 slices. Text
- * fields that accept circuit context use `MustacheTextarea` so `{{`
- * opens autocomplete.
+ * blueprint stays canonical in Rust). Text fields that accept circuit
+ * context use `MustacheTextarea` so `{{` opens autocomplete.
+ *
+ * Issue #1359 (Circuits v2 slice 4 — Canvas UX) adds three things:
+ *
+ *   1. `graph` prop so the panel can compute upstream reachability for
+ *      the selected node and pass it into the textarea autocomplete
+ *      (grouped, reachability-aware chips).
+ *   2. A Context Variables reference drawer at the bottom of every
+ *      template-bearing panel — shows every reachable namespace, the
+ *      sample value the runtime will produce, and which ones would
+ *      resolve empty in this branch.
+ *   3. A `target_node_id` dropdown for `inject_pty` and
+ *      `set_node_status` listing every upstream `spawn_agent_node`
+ *      (the stepper dispatches the effect at the chosen agent).
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
 import type { GithubActionKind } from '../../types/generated/GithubActionKind';
 import type { SessionStatusKind } from '../../types/generated/SessionStatusKind';
 import { MustacheTextarea } from './MustacheTextarea';
-import { categoryAccent, categoryOf, configSummary, specFor } from './circuitGraphModel';
+import {
+  MUSTACHE_GROUPS,
+  MUSTACHE_PATHS,
+  categoryAccent,
+  categoryOf,
+  configSummary,
+  getReachableContext,
+  groupForPath,
+  isReachablePath,
+  sampleValueForPath,
+  specFor,
+  type ReachableContext,
+} from './circuitGraphModel';
 
 interface InspectorPanelProps {
   node: CircuitNode | null;
   onChange: (kind: CircuitNodeKind) => void;
+  /** Full blueprint AST — required for reachability. Optional so the
+   *  unit tests can mount the panel without a graph and ad-hoc reuse
+   *  (e.g. embedding inside another form) still works. */
+  graph?: CircuitGraph;
 }
 
 const inputClass =
@@ -74,8 +102,173 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
-  if (node === null) {
+/** Dropdown for `inject_pty` / `set_node_status` to pick an upstream
+ *  `spawn_agent_node` as the effect's target. The empty option lets
+ *  the user fall back to the stepper's "nearest upstream spawn"
+ *  runtime resolution; the explicit pick is what the stepper honours
+ *  when set. */
+function TargetNodeSelect({
+  value,
+  upstreamSpawns,
+  onChange,
+}: {
+  value: string | null;
+  upstreamSpawns: string[];
+  onChange: (targetNodeId: string | null) => void;
+}) {
+  return (
+    <select
+      value={value ?? ''}
+      aria-label="Target agent node"
+      data-testid="inspector-target-node"
+      onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
+      className={inputClass}
+    >
+      <option value="">
+        {upstreamSpawns.length === 0
+          ? '(no upstream spawn — will resolve at runtime)'
+          : '(nearest upstream spawn at runtime)'}
+      </option>
+      {upstreamSpawns.map((id) => (
+        <option key={id} value={id}>
+          {id}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** One row of the context reference drawer. Renders the canonical path
+ *  alongside the sample value the runtime will resolve; rows whose
+ *  namespace isn't reachable in this branch get an "empty" badge so
+ *  the user can see why their template would interpolate blank. */
+function ContextReferenceRow({
+  path,
+  reachable,
+}: {
+  path: string;
+  reachable: ReachableContext | undefined;
+}) {
+  const live = isReachablePath(path, reachable);
+  return (
+    <li
+      data-testid={`context-reference-${path}`}
+      data-reachable={live ? 'true' : 'false'}
+      className="flex items-center gap-2 py-0.5"
+    >
+      <code className={`font-mono text-2xs ${live ? 'text-text-secondary' : 'text-text-muted/60'}`}>
+        {path}
+      </code>
+      <span className={`font-mono text-2xs italic ${live ? 'text-text-muted' : 'text-text-muted/50'}`}>
+        {sampleValueForPath(path)}
+      </span>
+      {!live && (
+        <span
+          aria-label="unreachable in this branch"
+          className="ml-auto text-2xs uppercase tracking-wide text-status-warning/80"
+        >
+          empty
+        </span>
+      )}
+    </li>
+  );
+}
+
+/** Drawer that lists every reachable context variable for the selected
+ *  node. Hidden when the node has no template payload (triggers,
+ *  gates, joins) so it never shows noise the user can't act on. */
+function ContextReferenceDrawer({
+  reachable,
+  hasTemplate,
+}: {
+  reachable: ReachableContext | undefined;
+  hasTemplate: boolean;
+}) {
+  if (!hasTemplate) return null;
+
+  // Build the row list: static MUSTACHE_PATHS plus dynamic spawn-output
+  // chips (`node.<id>.output`) for every reachable spawn upstream.
+  const spawnOutputPaths = useMemo(
+    () => (reachable?.nodeOutputIds ?? []).map((id) => `node.${id}.output`),
+    [reachable]
+  );
+  const allPaths = useMemo(
+    () => [...MUSTACHE_PATHS, ...spawnOutputPaths],
+    [spawnOutputPaths]
+  );
+  const grouped = useMemo(() => {
+    const buckets = new Map<string, string[]>();
+    for (const spec of MUSTACHE_GROUPS) buckets.set(spec.namespace, []);
+    for (const path of allPaths) {
+      // groupForPath routes `node.<id>.output` into the spawn_output
+      // bucket so spawn-output chips end up under the Node Outputs
+      // header, not under "node.id" (issue #1359 round-3 review).
+      const ns = groupForPath(path);
+      const list = buckets.get(ns);
+      if (list !== undefined) list.push(path);
+    }
+    return MUSTACHE_GROUPS.flatMap((spec) => {
+      const paths = buckets.get(spec.namespace) ?? [];
+      if (paths.length === 0) return [];
+      return [{ spec, paths }];
+    });
+  }, [allPaths]);
+
+  return (
+    <section
+      data-testid="inspector-context-reference"
+      className="mt-4 border-t border-border-subtle pt-3"
+    >
+      <header className="flex items-center justify-between mb-1">
+        <span className="text-2xs uppercase tracking-wide text-text-muted">
+          Context variables
+        </span>
+        {reachable === undefined && (
+          <span className="text-2xs text-text-muted/70" data-testid="context-reference-no-graph">
+            no graph
+          </span>
+        )}
+      </header>
+      <p className="text-2xs text-text-muted mb-2">
+        Variables this template can interpolate at runtime.{" "}
+        <span className="text-status-warning/80">empty</span> means a producer upstream is missing.
+      </p>
+      {grouped.map(({ spec, paths }) => (
+        <div key={spec.namespace} className="mb-2" data-testid={`context-group-${spec.namespace}`}>
+          <div className="text-2xs font-semibold text-text-secondary">{spec.label}</div>
+          <ul className="pl-1">
+            {paths.map((path) => (
+              <ContextReferenceRow key={path} path={path} reachable={reachable} />
+            ))}
+          </ul>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+export function InspectorPanel(props: InspectorPanelProps) {
+  // Rules of Hooks: ALL hooks must run on every render, in the same
+  // order. Compute reachability up front so the null-empty-state
+  // branch doesn't change the hook count (which would crash React
+  // with "Rendered more hooks than during the previous render" the
+  // moment the user selects their first node after opening the
+  // editor with nothing selected — issue #1359 review feedback).
+  //
+  // Dep on `props.node?.id` (not `props.node`) so the BFS only re-
+  // walks when the selected node identity changes — not on every
+  // parent re-render where the node object reference shifts but the
+  // id is identical (review feedback round 2: a `props.node` dep
+  // busts the memo on every keystroke because the canvas editor's
+  // working copy mints a fresh React Flow node each render).
+  const reachable = useMemo(
+    () => (props.graph !== undefined && props.node !== null
+      ? getReachableContext(props.node.id, props.graph)
+      : undefined),
+    [props.graph, props.node?.id]
+  );
+
+  if (props.node === null) {
     return (
       <aside
         data-testid="circuit-inspector"
@@ -86,8 +279,21 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
     );
   }
 
+  const { node, onChange } = props;
   const kind = node.type;
   const accent = categoryAccent(categoryOf(kind));
+  // Upstream spawn nodes for the target dropdown — derived from the
+  // same reachability memo, so no second BFS walk.
+  const upstreamSpawns: string[] = reachable?.nodeOutputIds ?? [];
+
+  // Whether the kind surfaces any template field (so the context
+  // drawer is worth rendering). Joins / triggers / pure gates don't
+  // interpolate placeholders; only action kinds do.
+  const hasTemplate =
+    kind.type === 'spawn_agent_node' ||
+    kind.type === 'inject_pty' ||
+    kind.type === 'github_action' ||
+    kind.type === 'notify';
 
   return (
     <aside
@@ -120,21 +326,32 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
               rows={5}
               ariaLabel="Spawn prompt"
               testId="inspector-prompt"
+              reachable={reachable}
             />
           </Field>
         </>
       )}
 
       {kind.type === 'inject_pty' && (
-        <Field label="PTY prompt">
-          <MustacheTextarea
-            value={kind.prompt}
-            onChange={(prompt) => onChange({ ...kind, prompt })}
-            rows={5}
-            ariaLabel="Inject PTY prompt"
-            testId="inspector-prompt"
-          />
-        </Field>
+        <>
+          <Field label="Target agent">
+            <TargetNodeSelect
+              value={kind.target_node_id}
+              upstreamSpawns={upstreamSpawns}
+              onChange={(target_node_id) => onChange({ ...kind, target_node_id })}
+            />
+          </Field>
+          <Field label="PTY prompt">
+            <MustacheTextarea
+              value={kind.prompt}
+              onChange={(prompt) => onChange({ ...kind, prompt })}
+              rows={5}
+              ariaLabel="Inject PTY prompt"
+              testId="inspector-prompt"
+              reachable={reachable}
+            />
+          </Field>
+        </>
       )}
 
       {kind.type === 'notify' && (
@@ -145,6 +362,7 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
             rows={4}
             ariaLabel="Notify message"
             testId="inspector-message"
+            reachable={reachable}
           />
         </Field>
       )}
@@ -185,6 +403,7 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
                 rows={4}
                 ariaLabel="GitHub comment"
                 testId="inspector-comment"
+                reachable={reachable}
               />
             </Field>
           )}
@@ -192,19 +411,28 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
       )}
 
       {kind.type === 'set_node_status' && (
-        <Field label="Status">
-          <select
-            value={kind.status}
-            aria-label="Node status"
-            data-testid="inspector-status-select"
-            onChange={(e) => onChange({ ...kind, status: e.target.value as SessionStatusKind })}
-            className={inputClass}
-          >
-            <option value="running">running</option>
-            <option value="idle">idle</option>
-            <option value="completed">completed</option>
-          </select>
-        </Field>
+        <>
+          <Field label="Target agent">
+            <TargetNodeSelect
+              value={kind.target_node_id}
+              upstreamSpawns={upstreamSpawns}
+              onChange={(target_node_id) => onChange({ ...kind, target_node_id })}
+            />
+          </Field>
+          <Field label="Status">
+            <select
+              value={kind.status}
+              aria-label="Node status"
+              data-testid="inspector-status-select"
+              onChange={(e) => onChange({ ...kind, status: e.target.value as SessionStatusKind })}
+              className={inputClass}
+            >
+              <option value="running">running</option>
+              <option value="idle">idle</option>
+              <option value="completed">completed</option>
+            </select>
+          </Field>
+        </>
       )}
 
       {kind.type === 'interval' && (
@@ -274,6 +502,8 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
       {['manual', 'llm_turn_classifier', 'all_completed', 'any_completed'].includes(kind.type) && (
         <p className="text-xs text-text-secondary">{configSummary(kind)}</p>
       )}
+
+      <ContextReferenceDrawer reachable={reachable} hasTemplate={hasTemplate} />
     </aside>
   );
 }
