@@ -474,6 +474,13 @@ export const diffNodeFileAgainstBase = (
   return _invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
 };
 
+/** Lightweight base-relative file list for an Agent Node. The command
+ * returns paths, statuses, and line counts without building or highlighting
+ * hunks; the centre diff overlay loads a single file only after the user
+ * chooses it. */
+export const nodeChangedFiles = (nodeId: number) =>
+  _invoke<GitStatus[]>('node_changed_files', { nodeId });
+
 // File watcher
 export const watchAgentNode = (nodeId: number) =>
   _invoke('watch_agent_node', { nodeId });

@@ -11,10 +11,9 @@
  * The body width is **horizontally resizable** (issue #724) via a separator
  * handle on the body's left edge. Default 360px, clamped to [240, 720];
  * the chosen width persists across launches via localStorage. The bounds
- * are wider than the sidebar's [192, 480] because the dock's primary job
- * is reviewing diffs (`AgentReviewPanel` uses ~104px of fixed-width gutter
- * per line — see `Diff.tsx` `DiffLineRow`), and narrower than the center
- * workspace needs to stay useful on common laptop resolutions.
+ * are wider than the sidebar's [192, 480] so the dock can accommodate dense
+ * file lists while the center workspace stays useful on common laptop
+ * resolutions.
  *
  * Visual language (post-revamp)
  * -----------------------------
@@ -353,8 +352,8 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
     );
   }
 
-  // "Agent Changes" reviews a specific node's edits — with no focused node
-  // there's nothing to diff, even though a mesh is selected.
+  // "Agent Changes" lists a specific node's edits — with no focused node
+  // there's nothing to inspect, even though a mesh is selected.
   if (tab === 'review' && activeNodeId === null) {
     return (
       <EmptyState

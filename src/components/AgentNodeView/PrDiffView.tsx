@@ -63,7 +63,7 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
   const [files, setFiles] = useState<PrFileEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Monotonic token — identical pattern to CenterDiffOverlay / AgentReviewPanel.
+  // Monotonic token — identical pattern to CenterDiffOverlay.
   // A rapid `setActiveDiffFile` switch (e.g. list → file) must not let an
   // older fetch's resolution overwrite the new state.
   const reqId = useRef(0);
@@ -173,7 +173,7 @@ function PrFileList({
   );
   return (
     <div className="min-h-0">
-      {/* Summary bar — same shape as AgentReviewPanel's. "vs base" would be
+      {/* Summary bar — same shape as the Agent Changes list's. "vs base" would be
        *  a lie here (we're diffing head against the PR's base, but
        *  "vs base" overloads the term with the local merge-base meaning);
        *  "PR #N" is unambiguous and matches the chip users clicked. */}

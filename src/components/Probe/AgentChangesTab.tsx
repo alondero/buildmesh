@@ -1,26 +1,21 @@
 /**
  * AgentChangesTab — issue #376. The Probe Panel's Agent Changes tab body.
  *
- * Wraps the existing `AgentReviewPanel` (ADR 0005 — stacked-diff review
- * surface) with the focused agent node's id and resolved path. By the time
- * this component mounts, `ProbeTabBody` has already guaranteed
- * `activeNodeId` is non-null (otherwise it would have shown the
- * "no active agent node" empty state), so the assertion below never
- * fires at runtime.
+ * Shows the focused Agent Node's lightweight base-relative changed-file list.
+ * By the time this component mounts, `ProbeTabBody` has already guaranteed
+ * `activeNodeId` is non-null (otherwise it would have shown the "no active
+ * agent node" empty state), so the assertion below never fires at runtime.
  *
- * The review surface itself is unchanged from PR #170 — every file the
- * agent changed since branching, sticky summary bar, jump-to-file index
- * built from the per-file sticky headers, and a collapsible FileTree for
- * opening any (even unchanged) file in the editor. This component adds the
- * binding to the Probe context, plus (issue #379) the per-file handoff to
- * the Center Workspace Diff Overlay.
+ * The list uses `node_changed_files`, which returns paths and line counts
+ * without constructing or highlighting every hunk. A click hands one path
+ * to the Center Workspace Diff Overlay, which then loads only that file.
  *
  * The overlay's diff baseline is `'base'` here — Agent Changes reviews
  * everything the node changed since branching (merge-base, ADR 0005), so the
  * overlay shows the same "vs base" view via `diff_node_file_against_base`.
  */
 
-import { AgentReviewPanel } from '../FileTree/AgentReviewPanel';
+import { AgentChangedFilesList } from './AgentChangedFilesList';
 import { PathHeader } from '../shared/PathHeader';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
@@ -28,18 +23,16 @@ import { useUIStore } from '../../stores/uiStore';
 export function AgentChangesTab() {
   const { activeNodeId, activePath, activeMeshId } = useProbeContext();
   const openDiff = useUIStore((s) => s.openDiff);
+  const activeDiffFile = useUIStore((s) => s.activeDiffFile);
 
   // ProbeTabBody gates on `activeNodeId !== null` (and a selected mesh) before
   // mounting this component, so the guard is a type-narrowing convenience
   // rather than a runtime guard.
   if (activeNodeId === null || activePath === null || activeMeshId === null) return null;
 
-  // Clicking a file's "open in center" button pops it into the spacious
-  // overlay. We capture the focused node/mesh as the lens so the overlay
-  // auto-closes if the user later focuses a different node or project.
-  // FileDiffCard collapses itself in response to this callback (issue #758),
-  // so the inline expanded diff and the overlay don't render the same diff
-  // twice.
+  // Clicking a file opens its single-file diff in the spacious overlay. We
+  // capture the focused node/mesh as the lens so the overlay auto-closes if
+  // the user later focuses a different node or project.
   const handleOpenFile = (filePath: string) =>
     openDiff({
       filePath,
@@ -54,9 +47,17 @@ export function AgentChangesTab() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <PathHeader path={activePath} />
-      <AgentReviewPanel
+      <AgentChangedFilesList
         nodeId={activeNodeId}
         rootPath={activePath}
+        selectedFile={
+          activeDiffFile?.nodeId === activeNodeId &&
+          activeDiffFile.meshId === activeMeshId &&
+          activeDiffFile.rootPath === activePath &&
+          activeDiffFile.source === 'base'
+            ? activeDiffFile.filePath
+            : null
+        }
         onOpenFile={handleOpenFile}
       />
     </div>

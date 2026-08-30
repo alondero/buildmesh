@@ -25,7 +25,7 @@
  * issue #345) so React components that only need the invalidation callback
  * (no key, no cache) can share the same bus + `pathMatchesGitEvent` plumbing
  * without hand-rolling their own `listen(GIT_CHANGED, ...)` + cleanup pair.
- * Used by `AgentReviewPanel` and `CenterDiffOverlay`.
+ * Used by `CenterDiffOverlay`; list surfaces use the cache-backed query hook.
  *
  * Architecture
  * ------------
@@ -769,7 +769,7 @@ export function createDualKeyCache<K, V>(
  * Use this from components that need the invalidation callback but don't
  * have a key+cache to manage — i.e. consumers for whom
  * `createPathKeyedCache` / `createDualKeyCache` is overkill. Used directly
- * by `AgentReviewPanel` and `CenterDiffOverlay`; intentionally NOT used by
+ * by `CenterDiffOverlay`; intentionally NOT used by
  * the `usePathInvalidatedQuery` hook (which subscribes via the
  * cache-bearing `client.subscribe(key, cb)` on its own client).
  * Issue #345.
