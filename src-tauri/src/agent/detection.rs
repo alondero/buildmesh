@@ -124,7 +124,7 @@ const DETECTABLE: &[Detectable] = &[
         #[cfg(windows)]
         binaries: &["cmdc"],
         #[cfg(not(windows))]
-        binaries: &["cmd", "cmdc"],
+        binaries: &["cmd"],
         config_dirs: &[".commandcode"],
     },
 ];
@@ -372,6 +372,39 @@ mod tests {
         );
     }
 
+    /// On Windows, `cmdc.cmd` on PATH must detect Command Code.
+    #[test]
+    #[cfg(windows)]
+    fn windows_cmdc_detects_commandcode() {
+        let path_dirs = dirs(&["C:/Users/me/AppData/Roaming/npm"]);
+        let exists = fake_fs(&["C:/Users/me/AppData/Roaming/npm/cmdc.cmd"]);
+        let profiles = detect_profiles(&path_dirs, &["", ".CMD", ".EXE"], None, &exists);
+        assert!(
+            profiles.iter().any(|p| p.id == "commandcode"),
+            "cmdc.cmd must detect Command Code on Windows; got {profiles:?}"
+        );
+    }
+
+    /// On Unix, `cmd` on PATH must detect Command Code, while `cmdc` alone does not.
+    #[test]
+    #[cfg(not(windows))]
+    fn unix_cmd_detects_commandcode() {
+        let path_dirs = dirs(&["/usr/local/bin"]);
+        let exists = fake_fs(&["/usr/local/bin/cmd"]);
+        let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
+        assert!(
+            profiles.iter().any(|p| p.id == "commandcode"),
+            "cmd on Unix must detect Command Code; got {profiles:?}"
+        );
+
+        let exists_cmdc = fake_fs(&["/usr/local/bin/cmdc"]);
+        let profiles_cmdc = detect_profiles(&path_dirs, &[""], None, &exists_cmdc);
+        assert!(
+            !profiles_cmdc.iter().any(|p| p.id == "commandcode"),
+            "cmdc alone on Unix must NOT detect Command Code; got {profiles_cmdc:?}"
+        );
+    }
+
     /// Antigravity (issue #1287) declares Antigravity-only config dirs
     /// (`.gemini/antigravity-cli/`, `.antigravity/`, `.antigravitycli/`).
     /// A bare `.agy` directory is NOT one of them, so a stray `.agy`
@@ -463,6 +496,7 @@ mod tests {
             "/bin/mcode",
             "/bin/dsh",
             "/bin/cmdc",
+            "/bin/cmd",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {

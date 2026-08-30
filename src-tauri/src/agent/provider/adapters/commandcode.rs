@@ -10,14 +10,25 @@
 //! - **macOS / Linux / WSL**: real executable `cmd` on PATH; no wrapper needed,
 //!   so `WindowsShell::Direct` is used.
 //!
-//! **Session lifecycle**:
-//! Command Code auto-assigns session IDs (`self_assigns_session_id() -> true`),
-//! so `session_assign_args()` is empty. Resumption uses `--session <id>`.
+//! **Session lifecycle & CLI resumption**:
+//! Command Code auto-assigns session IDs (`self_assigns_session_id() -> true`).
+//! While the CLI supports `--continue` for resuming the latest conversation in
+//! a directory, Buildmesh deliberately targets exact-ID resumption via
+//! `--session <id>` to guarantee strict node isolation and avoid cross-node
+//! session collisions.
 //!
-//! **Model & prefill**:
-//! Accepts `--model <name>` for model overrides and positional prompt
-//! text for prefill queries.
+//! **Session capture**:
+//! Command Code mints `sess_...` IDs and writes structured JSONL transcripts to
+//! `~/.commandcode/sessions/<session_id>.jsonl`. Because it renders rich TUI
+//! output without printing standard UUID banners on stdout, PTY capture is
+//! disabled (`captures_session_id_from_pty: false`) and session IDs are
+//! captured via post-spawn directory polling (`after_fresh_spawn`).
+//!
+//! **Model, effort & prefill**:
+//! Accepts `--model <name>` for model overrides, `--effort <low|medium|high>`
+//! for reasoning effort, and positional prompt text for prefill queries.
 
+use crate::agent::capabilities::{EffortControlKind, COMMANDCODE_EFFORT_ALLOWED};
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 
@@ -84,6 +95,15 @@ impl AgentProvider for CommandCodeAdapter {
         true
     }
 
+    fn effort_control(&self) -> EffortControlKind {
+        EffortControlKind::Closed {
+            allowed: COMMANDCODE_EFFORT_ALLOWED
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+
     fn supports_extra_args(&self) -> bool {
         true
     }
@@ -98,6 +118,18 @@ impl AgentProvider for CommandCodeAdapter {
 
     fn self_assigns_session_id(&self) -> bool {
         true
+    }
+
+    fn captures_session_id_from_pty(&self) -> bool {
+        false
+    }
+
+    fn after_fresh_spawn(&self, node_id: i64, spawn_path: &str, env_type: EnvType) {
+        crate::services::commandcode_session::start_capture_poller(
+            node_id,
+            spawn_path.to_string(),
+            env_type,
+        );
     }
 
     fn resume_args(&self, id: &str) -> Vec<String> {
@@ -190,8 +222,8 @@ mod tests {
     fn self_assigns_session_id() {
         assert!(COMMANDCODE.self_assigns_session_id());
         assert!(
-            COMMANDCODE.captures_session_id_from_pty(),
-            "Command Code captures session id from PTY output"
+            !COMMANDCODE.captures_session_id_from_pty(),
+            "Command Code captures session id via post-spawn polling, not PTY regex"
         );
     }
 
@@ -214,6 +246,12 @@ mod tests {
     }
 
     #[test]
+    fn effort_args_use_effort_flag() {
+        let args = COMMANDCODE.effort_args("high");
+        assert_eq!(args, vec!["--effort", "high"]);
+    }
+
+    #[test]
     fn prefill_args_positional() {
         let args = COMMANDCODE.prefill_args("implement the feature");
         assert_eq!(args, vec!["implement the feature"]);
@@ -224,6 +262,12 @@ mod tests {
         assert!(COMMANDCODE.supports_resume());
         assert!(COMMANDCODE.auto_resume_on_startup());
         assert!(COMMANDCODE.supports_model_override());
+        assert_eq!(
+            COMMANDCODE.effort_control(),
+            EffortControlKind::Closed {
+                allowed: COMMANDCODE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            }
+        );
         assert!(COMMANDCODE.supports_extra_args());
         assert!(COMMANDCODE.supports_prefill());
         assert!(!COMMANDCODE.requires_attention_hook());
@@ -237,15 +281,17 @@ mod tests {
         assert!(caps.supports_resume);
         assert!(caps.auto_resume_on_startup);
         assert!(caps.supports_model_override);
+        assert!(caps.supports_effort_override);
         assert!(caps.supports_extra_args);
         assert!(caps.supports_prefill);
-        assert!(!caps.supports_effort_override);
         assert!(!caps.requires_attention_hook);
         assert!(!caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(
             caps.effort_control,
-            crate::agent::capabilities::EffortControlKind::None
+            crate::agent::capabilities::EffortControlKind::Closed {
+                allowed: COMMANDCODE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            }
         );
     }
 

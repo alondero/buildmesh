@@ -397,3 +397,38 @@ pub fn grok_dir() -> PathBuf {
             .join(".grok"),
     }
 }
+
+/// The Command Code CLI home directory — `<home>/.commandcode/`. Sessions land
+/// under `<home>/.commandcode/sessions/`.
+pub fn commandcode_dir() -> PathBuf {
+    match current_env() {
+        Environment::Wsl => env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/root"))
+            .join(".commandcode"),
+        Environment::Windows => env::var("USERPROFILE")
+            .or_else(|_| env::var("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}"))
+            })
+            .join(".commandcode"),
+    }
+}
+
+/// The Command Code CLI home for an agent environment.
+pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    match env_type {
+        EnvType::Windows => Some(commandcode_dir()),
+        EnvType::Wsl => {
+            if let Some(user) = spawn_path.strip_prefix("/home/").and_then(|path| path.split('/').next()) {
+                return Some(PathBuf::from(format!("/home/{user}/.commandcode")));
+            }
+            let user = env::var("USERNAME")
+                .ok()
+                .or_else(|| env::var("USER").ok())?;
+            Some(PathBuf::from(format!("/home/{user}/.commandcode")))
+        }
+    }
+}

@@ -244,6 +244,7 @@ pub fn resolve_harness_adapter_id(harness_id: &str) -> Option<&'static str> {
         "kimi" => Some("kimi"),
         "mcode" | "minimax-code" => Some("mcode"),
         "dsh" | "deepseek-harness" | "deepseek" => Some("dsh"),
+        "commandcode" | "command-code" | "cmdc" => Some("commandcode"),
         "terminal" => Some("terminal"),
         _ => None,
     }
@@ -466,6 +467,15 @@ mod tests {
         assert_eq!(resolve_harness_adapter_id("  ANTHROPIC  "), Some("anthropic"));
     }
 
+    #[test]
+    fn resolve_harness_adapter_id_maps_commandcode_and_aliases() {
+        assert_eq!(resolve_harness_adapter_id("commandcode"), Some("commandcode"));
+        assert_eq!(resolve_harness_adapter_id("command-code"), Some("commandcode"));
+        assert_eq!(resolve_harness_adapter_id("cmdc"), Some("commandcode"));
+        assert_eq!(resolve_harness_adapter_id("CommandCode"), Some("commandcode"));
+        assert_eq!(resolve_harness_adapter_id("  CMDC  "), Some("commandcode"));
+    }
+
     /// Unknown harness ids return `None` (no silent fallback to Anthropic,
     /// unlike `Provider::from_db_str` which falls back and logs a warning —
     /// the compatibility layer must surface unknowns explicitly so the UI
@@ -581,6 +591,39 @@ mod tests {
         assert!(
             !kinds.contains(&"prefill"),
             "OpenCode advertises --prompt; prefill must not block Autopilot. got {:?}",
+            result.reasons
+        );
+        assert!(kinds.contains(&"attention"), "got reasons: {:?}", result.reasons);
+    }
+
+    /// Command Code accepts positional queries (prefill) but has no
+    /// attention hook, so Autopilot stays blocked on missing attention only.
+    #[test]
+    fn evaluate_commandcode_emits_attention_reason_only() {
+        let caps = lookup_capabilities("commandcode").expect("commandcode known");
+        assert!(caps.supports_prefill);
+        assert!(!caps.requires_attention_hook);
+        assert!(!caps.is_plain_terminal);
+        let result = evaluate(AutopilotCompatibilityInput {
+            resolved_spawn_option: "commandcode",
+            resolved_harness_id: "commandcode",
+            capabilities: Some(caps),
+            mesh_use_worktree: true,
+            explicit_autopilot_provider: false,
+        });
+        assert!(!result.allowed);
+        let kinds: Vec<&str> = result
+            .reasons
+            .iter()
+            .map(|r| match r {
+                AutopilotCompatibilityReason::MissingPrefill { .. } => "prefill",
+                AutopilotCompatibilityReason::MissingAttentionHook { .. } => "attention",
+                _ => "other",
+            })
+            .collect();
+        assert!(
+            !kinds.contains(&"prefill"),
+            "Command Code advertises prefill; prefill must not block Autopilot. got {:?}",
             result.reasons
         );
         assert!(kinds.contains(&"attention"), "got reasons: {:?}", result.reasons);

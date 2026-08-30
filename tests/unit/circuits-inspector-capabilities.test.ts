@@ -154,16 +154,15 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.effort_control.kind).toBe('none');
   });
 
-  // commandcode — model yes, no effort, prefill yes.
   it('Command Code matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.commandcode;
     expect(c.harness_id).toBe('commandcode');
     expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_effort_override).toBe(true);
     expect(c.supports_extra_args).toBe(true);
     expect(c.supports_prefill).toBe(true);
-    expect(c.effort_control.kind).toBe('none');
-    expect(effortAllowedFor(c)).toEqual([]);
+    expect(c.effort_control.kind).toBe('closed');
+    expect(effortAllowedFor(c)).toEqual(['low', 'medium', 'high']);
   });
 
   // Terminal — plain shell; every override OFF. The issue #1362 review

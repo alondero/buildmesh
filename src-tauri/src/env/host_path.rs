@@ -129,6 +129,17 @@ pub(crate) fn codex_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<
     }
 }
 
+/// The host-accessible Command Code session directory for an agent environment.
+pub(crate) fn commandcode_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    let home = super::environment::commandcode_dir_for_env(env_type, spawn_path)?;
+    match env_type {
+        EnvType::Windows => Some(home.join("sessions")),
+        EnvType::Wsl => Some(
+            PathBuf::from(to_host_path(&home.to_string_lossy())).join("sessions"),
+        ),
+    }
+}
+
 /// Compare CLI-recorded working directories across Windows, WSL, and native
 /// Unix path syntax. APFS/HFS+ is usually case-insensitive too.
 pub fn directories_match(recorded: &str, spawn: &str) -> bool {

@@ -70,6 +70,12 @@ const HARNESS_OPTIONS: { value: InspectorHarnessId; label: string }[] = [
   { value: 'agy', label: HARNESS_LABEL.agy },
   { value: 'opencode', label: HARNESS_LABEL.opencode },
   { value: 'grok', label: HARNESS_LABEL.grok },
+  { value: 'cursor', label: HARNESS_LABEL.cursor },
+  { value: 'kimi', label: HARNESS_LABEL.kimi },
+  { value: 'mcode', label: HARNESS_LABEL.mcode },
+  { value: 'dsh', label: HARNESS_LABEL.dsh },
+  { value: 'commandcode', label: HARNESS_LABEL.commandcode },
+  { value: 'terminal', label: HARNESS_LABEL.terminal },
 ];
 
 interface InspectorPanelProps {
@@ -99,18 +105,35 @@ function harnessIdFromProvider(provider: string | null | undefined): InspectorHa
   // selected" honest in the UI.
   const normalised = provider.trim().toLowerCase();
   if (normalised === '') return null;
-  if (normalised === 'anthropic' || normalised === 'claude_code') {
+  if (normalised === 'anthropic' || normalised === 'claude_code' || normalised === 'claude') {
     // Inspector's selector keys on `anthropic` to match the backend id.
     return 'anthropic';
+  }
+  if (normalised === 'antigravity') {
+    return 'agy';
+  }
+  if (normalised === 'minimax-code' || normalised === 'minimax') {
+    return 'mcode';
+  }
+  if (normalised === 'deepseek' || normalised === 'deepseek-harness') {
+    return 'dsh';
+  }
+  if (normalised === 'command-code' || normalised === 'cmdc') {
+    return 'commandcode';
   }
   if (
     normalised === 'codex' ||
     normalised === 'agy' ||
-    normalised === 'antigravity' ||
     normalised === 'opencode' ||
-    normalised === 'grok'
+    normalised === 'grok' ||
+    normalised === 'cursor' ||
+    normalised === 'kimi' ||
+    normalised === 'mcode' ||
+    normalised === 'dsh' ||
+    normalised === 'commandcode' ||
+    normalised === 'terminal'
   ) {
-    return normalised === 'antigravity' ? 'agy' : (normalised as InspectorHarnessId);
+    return normalised as InspectorHarnessId;
   }
   // Unknown id: emit as a synthetic entry. We don't have a stable
   // capability descriptor for it (matches the backend's

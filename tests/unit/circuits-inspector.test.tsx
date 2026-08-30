@@ -133,6 +133,31 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(screen.queryByTestId('inspector-effort-select')).toBeNull();
   });
 
+  it('renders model + closed-effort + extra-args when Command Code is selected', () => {
+    renderNode(spawnNode({ provider: 'commandcode' }));
+    expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
+    expect(screen.getByTestId('inspector-effort-select')).toBeTruthy();
+    expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
+    const effortSelect = screen.getByTestId(
+      'inspector-effort-select',
+    ) as HTMLSelectElement;
+    const options = Array.from(effortSelect.options).map((o) => o.value);
+    expect(options).toContain('low');
+    expect(options).toContain('medium');
+    expect(options).toContain('high');
+  });
+
+  it('normalizes command-code and cmdc aliases to commandcode in the provider select', () => {
+    const { unmount } = renderNode(spawnNode({ provider: 'command-code' }));
+    const select1 = screen.getByTestId('inspector-provider-select') as HTMLSelectElement;
+    expect(select1.value).toBe('commandcode');
+    unmount();
+
+    renderNode(spawnNode({ provider: 'cmdc' }));
+    const select2 = screen.getByTestId('inspector-provider-select') as HTMLSelectElement;
+    expect(select2.value).toBe('commandcode');
+  });
+
   it('writes back the model through onChange', () => {
     const onChange = vi.fn();
     renderNode(spawnNode({ provider: 'anthropic' }), onChange);

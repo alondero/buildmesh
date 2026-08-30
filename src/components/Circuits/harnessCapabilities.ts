@@ -207,7 +207,6 @@ const DSH_CAPS: HarnessCapabilities = {
   available_on: ['windows', 'macos', 'linux'],
 };
 
-// commandcode (Command Code) — model yes, effort no, prefill yes
 const COMMANDCODE_CAPS: HarnessCapabilities = {
   harness_id: 'commandcode',
   supports_resume: true,
@@ -215,11 +214,11 @@ const COMMANDCODE_CAPS: HarnessCapabilities = {
   requires_attention_hook: false,
   produces_readable_transcript: false,
   supports_model_override: true,
-  supports_effort_override: false,
+  supports_effort_override: true,
   supports_extra_args: true,
   supports_prefill: true,
   is_plain_terminal: false,
-  effort_control: { kind: 'none' },
+  effort_control: { kind: 'closed', allowed: ['low', 'medium', 'high'] },
   available_on: ['windows', 'macos', 'linux'],
 };
 

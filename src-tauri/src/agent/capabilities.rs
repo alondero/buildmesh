@@ -362,6 +362,10 @@ pub const GROK_EFFORT_ALLOWED: &[&str] = &[
     "none", "minimal", "low", "medium", "high", "xhigh", "max",
 ];
 
+/// The allowed values Command Code accepts for `--effort` (CLI reference
+/// `https://commandcode.ai/docs/reference/cli`).
+pub const COMMANDCODE_EFFORT_ALLOWED: &[&str] = &["low", "medium", "high"];
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -581,11 +585,16 @@ mod tests {
         assert!(!commandcode.requires_attention_hook);
         assert!(!commandcode.produces_readable_transcript);
         assert!(commandcode.supports_model_override);
-        assert!(!commandcode.supports_effort_override);
+        assert!(commandcode.supports_effort_override);
         assert!(commandcode.supports_extra_args);
         assert!(commandcode.supports_prefill);
         assert!(!commandcode.is_plain_terminal);
-        assert_eq!(commandcode.effort_control, EffortControlKind::None);
+        assert_eq!(
+            commandcode.effort_control,
+            EffortControlKind::Closed {
+                allowed: COMMANDCODE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            }
+        );
         assert_eq!(
             commandcode.available_on,
             vec!["windows".to_string(), "macos".to_string(), "linux".to_string()]
