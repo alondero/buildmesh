@@ -320,6 +320,7 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     // deliberately preserves it. Once the row deletion commits, this is the
     // authoritative backend cleanup seam (idempotent with frontend disposal).
     crate::agent::output::unregister(session_id);
+    crate::pty::sink::BUILD_RUN.unregister(session_id);
     Ok(())
 }
 

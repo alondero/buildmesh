@@ -541,6 +541,10 @@ pub fn run() {
             commands::build_run::close_build_run,
             commands::build_run::write_to_build_run,
             commands::build_run::resize_build_run,
+            // Binary PTY output Channel (issue #1393). Complements the
+            // `build-run-output-{sessionId}` event fallback.
+            commands::build_run::subscribe_build_run_output,
+            commands::build_run::unsubscribe_build_run_output,
             // Mesh properties
             commands::mesh_properties::get_mesh_properties,
             commands::mesh_properties::update_mesh_name,

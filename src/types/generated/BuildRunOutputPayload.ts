@@ -2,9 +2,10 @@
 
 /**
  * Payload of the per-session `build-run-output-{sessionId}` Tauri event.
- * Emitted by the PTY reader thread on every read with a base64-encoded
- * chunk of stdout bytes (matches the production `agent-output` shape, so
- * the same `decodeBase64Bytes` helper handles both).
+ * Production PTY bytes go over a binary Channel (`subscribe_build_run_output`);
+ * this JSON event is the test-injection fallback (issue #1393, matching
+ * `agent-output` after #1385). `data` is a base64-encoded chunk when tests
+ * emit the object form; a plain string payload is also accepted.
  *
  * Generated to `src/types/generated/BuildRunOutputPayload.ts`; the TS half
  * is imported by `src/components/Terminal/BuildRunTerminalRegistry.ts`.

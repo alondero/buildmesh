@@ -1,5 +1,6 @@
 pub mod batch;
 mod registry;
+pub mod sink;
 pub use registry::PtyRegistry;
 
 use portable_pty::CommandBuilder;

@@ -3,11 +3,11 @@
 use crate::db;
 use crate::env;
 use crate::models::MeshRow;
-use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
@@ -16,14 +16,16 @@ use ts_rs::TS;
 // ---------------------------------------------------------------------------
 
 /// Payload of the per-session `build-run-output-{sessionId}` Tauri event.
-/// Emitted by the PTY reader thread on every read with a base64-encoded
-/// chunk of stdout bytes (matches the production `agent-output` shape, so
-/// the same `decodeBase64Bytes` helper handles both).
+/// Production PTY bytes go over a binary Channel (`subscribe_build_run_output`);
+/// this JSON event is the test-injection fallback (issue #1393, matching
+/// `agent-output` after #1385). `data` is a base64-encoded chunk when tests
+/// emit the object form; a plain string payload is also accepted.
 ///
 /// Generated to `src/types/generated/BuildRunOutputPayload.ts`; the TS half
 /// is imported by `src/components/Terminal/BuildRunTerminalRegistry.ts`.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "BuildRunOutputPayload.ts")]
+#[allow(dead_code)] // ts-rs wire type; production bytes use the Channel
 pub struct BuildRunOutputPayload {
     pub data: String,
 }
@@ -46,9 +48,13 @@ pub struct BuildRunExitedPayload {}
 
 /// Validate that the worktree directory exists on disk.
 /// Returns an error if the node has no worktree_name or the directory hasn't been created yet.
-fn validate_worktree_exists(resolved: &env::ResolvedPath, worktree_name: Option<&str>) -> Result<(), String> {
+fn validate_worktree_exists(
+    resolved: &env::ResolvedPath,
+    worktree_name: Option<&str>,
+) -> Result<(), String> {
     let wt_name = worktree_name.ok_or_else(|| {
-        "No worktree name set for this agent node. Spawn the agent first to create a worktree.".to_string()
+        "No worktree name set for this agent node. Spawn the agent first to create a worktree."
+            .to_string()
     })?;
 
     // Use git2 to verify the worktree is registered in git metadata,
@@ -57,7 +63,8 @@ fn validate_worktree_exists(resolved: &env::ResolvedPath, worktree_name: Option<
         .or_else(|_| git2::Repository::discover(&resolved.host_path))
         .map_err(|e| format!("Failed to open repository: {}", e))?;
 
-    let worktrees = repo.worktrees()
+    let worktrees = repo
+        .worktrees()
         .map_err(|e| format!("Failed to list worktrees: {}", e))?;
 
     // Check if our worktree name is in the list
@@ -70,7 +77,10 @@ fn validate_worktree_exists(resolved: &env::ResolvedPath, worktree_name: Option<
     }
 
     // Also check if the path itself is a valid git worktree (it could be the main worktree)
-    if std::path::Path::new(&resolved.host_path).join(".git").exists() {
+    if std::path::Path::new(&resolved.host_path)
+        .join(".git")
+        .exists()
+    {
         return Ok(());
     }
 
@@ -205,31 +215,22 @@ pub enum BuildRunMode {
     Run,
     /// Interactive shell spawned in the worktree directory. The user types
     /// into it via `write_to_build_run`; output is streamed on the same
-    /// `build-run-output-{node_id}` event channel as build/run.
+    /// binary Channel (`subscribe_build_run_output`) as build/run.
     Terminal,
 }
 
 #[tauri::command]
-pub async fn build_run(
-    node_id: i64,
-    mode: BuildRunMode,
-    app: AppHandle,
-) -> Result<(), String> {
+pub async fn build_run(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Result<(), String> {
     // Offload: the body opens the repo with git2 (worktree-registration
     // check — a stat-heavy walk on large repos / WSL UNC paths) and then
     // opens a ConPTY + spawns a shell. Both are blocking calls that must
     // not park a Tauri async worker (Command Threading convention).
-    crate::commands::run_blocking("build_run", move || build_run_blocking(node_id, mode, app))
-        .await
+    crate::commands::run_blocking("build_run", move || build_run_blocking(node_id, mode, app)).await
 }
 
 /// Sync core for [`build_run`] — see the `*_blocking` + `run_blocking`
 /// convention in `commands/mod.rs`.
-fn build_run_blocking(
-    node_id: i64,
-    mode: BuildRunMode,
-    app: AppHandle,
-) -> Result<(), String> {
+fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Result<(), String> {
     // 1. Get agent node (node.path == mesh.path for all nodes)
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| format!("failed to get agent node {}: {}", node_id, e))?;
@@ -262,7 +263,9 @@ fn build_run_blocking(
         validate_worktree_exists(&resolved, Some(wt_name))?;
 
         // Sanitize .git file to ensure proper worktree isolation across environments
-        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+        if let Err(e) =
+            crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type)
+        {
             tracing::warn!("build_run: failed to sanitize worktree .git file: {}", e);
         }
     }
@@ -289,74 +292,94 @@ fn build_run_blocking(
 
     // 7. Spawn PTY with shell
     let pty_system = native_pty_system();
-    let pair = pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    }).map_err(|e| format!("failed to open PTY: {}", e))?;
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("failed to open PTY: {}", e))?;
 
     let mut cmd = build_shell_command(mode, command, resolved.env_type);
     cmd.cwd(shell_cwd);
     crate::pty::strip_git_env_vars(&mut cmd);
 
-    let child = pair.slave.spawn_command(cmd)
+    let child = pair
+        .slave
+        .spawn_command(cmd)
         .map_err(|e| format!("failed to spawn shell: {}", e))?;
 
-    let reader = pair.master
+    let reader = pair
+        .master
         .try_clone_reader()
         .map_err(|e| format!("failed to clone PTY reader: {}", e))?;
 
     // Take writer up-front so the registry can serve `write_to_build_run`
     // for terminal mode. `take_writer()` is a one-shot — must be called
     // before the master is moved into the registry.
-    let writer = pair.master
+    let writer = pair
+        .master
         .take_writer()
         .map_err(|e| format!("failed to take PTY writer: {}", e))?;
 
     // 8. Store process in registry
     {
         let mut registry = BUILD_RUN_REGISTRY.lock().unwrap();
-        registry.insert(node_id, BuildRunProcess {
-            master: Arc::new(Mutex::new(pair.master)),
-            writer: Arc::new(Mutex::new(writer)),
-        });
+        registry.insert(
+            node_id,
+            BuildRunProcess {
+                master: Arc::new(Mutex::new(pair.master)),
+                writer: Arc::new(Mutex::new(writer)),
+            },
+        );
     }
 
     // 9. Spawn reader thread to stream output to frontend
     let node_id_clone = node_id;
     let app_handle = app.clone();
     std::thread::spawn(move || {
-        let mut r = reader;
-        let mut buf = [0u8; 1024];
-        loop {
-            match r.read(&mut buf) {
-                Ok(0) => {
-                    // EOF — process exited. Notify the frontend so the
-                    // BuildRunTerminalRegistry can flip `ptyAlive=false`
-                    // and surface a visible banner if the terminal is
-                    // currently attached — without this, a shell that
-                    // exits while the user is on another mesh would
-                    // leave a zombie PTY that silently swallows keystrokes.
-                    let _ = app_handle.emit(
-                        &format!("build-run-exited-{}", node_id_clone),
-                        BuildRunExitedPayload {},
-                    );
-                    break;
+        // Issue #1393: coalesce OS reads onto the same batcher the agent
+        // path uses (8 ms / 32 KiB) and push raw bytes over a binary
+        // Channel. Production bytes never share the JSON
+        // `build-run-output-{id}` event — that path is test injection
+        // only. The Channel is session-scoped: this reader must not
+        // unregister it on exit. `with_batcher` drops the producer
+        // before joining — joining while still holding `SyncSender`
+        // deadlocks the reader on every PTY exit.
+        let sink = crate::pty::sink::BUILD_RUN.ensure(node_id_clone);
+        crate::pty::batch::with_batcher(
+            move |batch| {
+                sink.send_owned(batch);
+            },
+            |batch_tx| {
+                let mut r = reader;
+                let mut buf = [0u8; crate::pty::batch::PTY_READ_BUF];
+                loop {
+                    match r.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if batch_tx.send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("build_run PTY read error: {}", e);
+                            break;
+                        }
+                    }
                 }
-                Ok(n) => {
-                    let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-                    let _ = app_handle.emit(
-                        &format!("build-run-output-{}", node_id_clone),
-                        BuildRunOutputPayload { data },
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("build_run PTY read error: {}", e);
-                    break;
-                }
-            }
-        }
+            },
+        );
+        // EOF / read error — process is gone. Notify the frontend so the
+        // BuildRunTerminalRegistry can flip `ptyAlive=false` and surface
+        // a visible banner if the terminal is currently attached —
+        // without this, a shell that exits while the user is on another
+        // mesh would leave a zombie PTY that silently swallows keystrokes.
+        let _ = app_handle.emit(
+            &format!("build-run-exited-{}", node_id_clone),
+            BuildRunExitedPayload {},
+        );
         // Drop the BUILD_RUN_REGISTRY entry on EOF so subsequent
         // `write_to_build_run` calls correctly hit the "Build run not
         // running" path. Without this, the registry still holds the
@@ -383,7 +406,13 @@ pub async fn get_mesh_row(mesh_id: i64) -> Result<MeshRow, String> {
     .await
 }
 
-/// Close a build/run terminal for a node
+/// Close a build/run terminal for a node.
+///
+/// Kills the PTY only. The binary output Channel is session-scoped and
+/// must survive process exit so a replacement spawn (mode switch after
+/// X-close is a new subscribe; natural EOF keeps the xterm showing
+/// `[process exited]`). Frontend `dispose` calls
+/// `unsubscribe_build_run_output` separately.
 #[tauri::command]
 pub async fn close_build_run(node_id: i64) -> Result<(), String> {
     let mut registry = BUILD_RUN_REGISTRY.lock().unwrap();
@@ -392,6 +421,21 @@ pub async fn close_build_run(node_id: i64) -> Result<(), String> {
         drop(master);
     }
     Ok(())
+}
+
+/// Subscribe this webview to raw Build/Run PTY bytes for `session_id`.
+/// Replaces any previous Channel for the same session. Fast in-memory
+/// map insert — plain sync command so it does not occupy a tokio worker
+/// (issue #1380).
+#[tauri::command]
+pub fn subscribe_build_run_output(session_id: i64, on_chunk: Channel<InvokeResponseBody>) {
+    crate::pty::sink::BUILD_RUN.register(session_id, on_chunk);
+}
+
+/// Drop the binary Channel for `session_id`. Idempotent.
+#[tauri::command]
+pub fn unsubscribe_build_run_output(session_id: i64) {
+    crate::pty::sink::BUILD_RUN.unregister(session_id);
 }
 
 /// Forward user keystrokes to the live build/run PTY. Currently meaningful
@@ -443,20 +487,18 @@ fn resolve_build_run_cwd(node: &crate::models::AgentNode) -> env::ResolvedPath {
 /// The fallback (`.or(build_command)`) preserves PR #801's behaviour: a mesh
 /// that never sets the `root_*` columns runs the same command in both
 /// contexts, exactly as before this feature.
-fn resolve_build_run_command(
-    mode: BuildRunMode,
-    is_root: bool,
-    row: &MeshRow,
-) -> Option<&str> {
+fn resolve_build_run_command(mode: BuildRunMode, is_root: bool, row: &MeshRow) -> Option<&str> {
     match (mode, is_root) {
         (BuildRunMode::Build, false) => row.build_command.as_deref(),
-        (BuildRunMode::Build, true) => {
-            row.root_build_command.as_deref().or(row.build_command.as_deref())
-        }
+        (BuildRunMode::Build, true) => row
+            .root_build_command
+            .as_deref()
+            .or(row.build_command.as_deref()),
         (BuildRunMode::Run, false) => row.run_command.as_deref(),
-        (BuildRunMode::Run, true) => {
-            row.root_run_command.as_deref().or(row.run_command.as_deref())
-        }
+        (BuildRunMode::Run, true) => row
+            .root_run_command
+            .as_deref()
+            .or(row.run_command.as_deref()),
         (BuildRunMode::Terminal, _) => Some(""),
     }
 }
@@ -604,7 +646,12 @@ mod tests {
     /// Worktree Node's build.
     #[test]
     fn resolve_command_build_worktree_uses_build_command() {
-        let r = row(Some("npm run build"), None, Some("cargo build --workspace"), None);
+        let r = row(
+            Some("npm run build"),
+            None,
+            Some("cargo build --workspace"),
+            None,
+        );
         assert_eq!(
             resolve_build_run_command(BuildRunMode::Build, false, &r),
             Some("npm run build")
@@ -614,7 +661,12 @@ mod tests {
     /// Root Build context prefers `root_build_command` when set.
     #[test]
     fn resolve_command_build_root_uses_root_build_command() {
-        let r = row(Some("npm run build"), None, Some("cargo build --workspace"), None);
+        let r = row(
+            Some("npm run build"),
+            None,
+            Some("cargo build --workspace"),
+            None,
+        );
         assert_eq!(
             resolve_build_run_command(BuildRunMode::Build, true, &r),
             Some("cargo build --workspace")
@@ -667,17 +719,121 @@ mod tests {
     #[test]
     fn resolve_command_unconfigured_is_none() {
         let r = row(None, None, None, None);
-        assert_eq!(resolve_build_run_command(BuildRunMode::Build, true, &r), None);
-        assert_eq!(resolve_build_run_command(BuildRunMode::Build, false, &r), None);
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Build, true, &r),
+            None
+        );
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Build, false, &r),
+            None
+        );
         assert_eq!(resolve_build_run_command(BuildRunMode::Run, true, &r), None);
-        assert_eq!(resolve_build_run_command(BuildRunMode::Run, false, &r), None);
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Run, false, &r),
+            None
+        );
     }
 
     /// Terminal mode needs no command in either context — always `Some("")`.
     #[test]
     fn resolve_command_terminal_is_empty_in_both_contexts() {
         let r = row(Some("b"), Some("r"), Some("rb"), Some("rr"));
-        assert_eq!(resolve_build_run_command(BuildRunMode::Terminal, true, &r), Some(""));
-        assert_eq!(resolve_build_run_command(BuildRunMode::Terminal, false, &r), Some(""));
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Terminal, true, &r),
+            Some("")
+        );
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Terminal, false, &r),
+            Some("")
+        );
+    }
+
+    /// The start_reader pattern: pump inside `with_batcher`. If the
+    /// producer isn't dropped before join, this hangs on EOF.
+    #[test]
+    fn pump_inside_with_batcher_exits_cleanly_on_reader_eof() {
+        let reader: Box<dyn std::io::Read + Send> =
+            Box::new(std::io::Cursor::new(b"hello from pty\n"));
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = got.clone();
+        let started = std::time::Instant::now();
+        crate::pty::batch::with_batcher(
+            move |batch| g.lock().unwrap().extend_from_slice(&batch),
+            |tx| {
+                let mut r = reader;
+                let mut buf = [0u8; crate::pty::batch::PTY_READ_BUF];
+                loop {
+                    match r.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let _ = tx.send(buf[..n].to_vec());
+                        }
+                        Err(_) => break,
+                    }
+                }
+            },
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "reader+batcher hung after PTY EOF — producer was not dropped"
+        );
+        assert_eq!(&*got.lock().unwrap(), b"hello from pty\n");
+    }
+
+    #[test]
+    fn production_reader_does_not_emit_json_or_base64() {
+        let src = include_str!("build_run.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            production.contains("with_batcher"),
+            "Build/Run reader must go through pty::batch::with_batcher"
+        );
+        assert!(
+            !production.contains("base64::") && !production.contains("use base64"),
+            "production Build/Run PTY bytes must not be Base64-encoded"
+        );
+        assert!(
+            !production.contains("build-run-output-{}"),
+            "production Build/Run PTY bytes must not ride the JSON event; that path is test injection only"
+        );
+        assert!(
+            production.contains("subscribe_build_run_output"),
+            "Build/Run must expose subscribe_build_run_output"
+        );
+    }
+
+    #[test]
+    fn process_lifecycle_does_not_unregister_build_run_output_subscription() {
+        let src = include_str!("build_run.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+
+        let reader = production
+            .split("std::thread::spawn(move || {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    });").next())
+            .expect("reader thread body");
+        assert!(
+            !reader.contains("BUILD_RUN.unregister") && !reader.contains("unregister_output"),
+            "PTY reader / EOF must not drop the session-scoped Channel"
+        );
+
+        let close = production
+            .split("pub async fn close_build_run")
+            .nth(1)
+            .and_then(|rest| rest.split("#[tauri::command]").next())
+            .expect("close_build_run body");
+        assert!(
+            !close.contains("BUILD_RUN.unregister") && !close.contains("unregister_output"),
+            "close_build_run kills the PTY only; Channel unsubscribe is frontend dispose"
+        );
+
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let agent_node = std::fs::read_to_string(src_root.join("services").join("agent_node.rs"))
+            .expect("agent_node.rs");
+        let agent_prod = agent_node.split("#[cfg(test)]").next().unwrap_or(&agent_node);
+        assert!(
+            agent_prod.contains("BUILD_RUN.unregister("),
+            "Agent Node deletion must release the Build/Run output subscription"
+        );
     }
 }
