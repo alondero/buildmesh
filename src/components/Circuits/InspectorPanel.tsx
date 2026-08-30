@@ -390,7 +390,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         id: <span data-testid="inspector-node-id">{node.id}</span>
       </div>
 
-      {kind.type === 'spawn_agent_node' && reachable && (
+      {kind.type === 'spawn_agent_node' && (
         <SpawnAgentNodeFields kind={kind} onChange={onChange} reachable={reachable} />
       )}
 
@@ -586,7 +586,7 @@ function SpawnAgentNodeFields({
 }: {
   kind: Extract<CircuitNodeKind, { type: 'spawn_agent_node' }>;
   onChange: (kind: CircuitNodeKind) => void;
-  reachable: ReachableContext;
+  reachable: ReachableContext | undefined;
 }) {
   const harnessId = harnessIdFromProvider(kind.provider);
   const caps = getCapabilitiesFor(harnessId);
