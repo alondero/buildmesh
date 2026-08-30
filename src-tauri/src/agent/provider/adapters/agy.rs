@@ -3,19 +3,34 @@ use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, Windo
 use crate::models::EnvType;
 use std::path::Path;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 pub struct AgyAdapter;
 pub static AGY: AgyAdapter = AgyAdapter;
 
-/// Minimum supported Antigravity (agy) version for attention hook delivery
-/// and CLI execution (issue #1367). Tested against 1.0.0 through current 1.1.22+.
-pub const MIN_AGY_VERSION: (u32, u32, u32) = (1, 0, 0);
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Write content to path atomically using a sibling .tmp file and replace/rename.
+/// Write content to path atomically using a unique PID+counter .tmp file,
+/// fsync for durability, and atomic rename.
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, content)?;
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("hooks.json");
+    let tmp = path.with_file_name(format!("{}.{}.{}.tmp", file_name, std::process::id(), counter));
+
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    }
+
     if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
+        if let Err(rm_err) = std::fs::remove_file(&tmp) {
+            tracing::warn!("atomic_write: failed to clean up temp file {:?}: {}", tmp, rm_err);
+        }
         return Err(e);
     }
     Ok(())
@@ -130,11 +145,7 @@ impl AgentProvider for AgyAdapter {
         std::fs::create_dir_all(&agents_dir)
             .map_err(|e| format!("failed to create .agents dir: {e}"))?;
         let hooks_path = agents_dir.join("hooks.json");
-        ensure_hooks_json(&hooks_path, &hook_command(Platform::current()))?;
-        if !hooks_path.exists() {
-            return Err(format!("hooks.json not found at {:?} after injection", hooks_path));
-        }
-        Ok(())
+        ensure_hooks_json(&hooks_path, &hook_command(Platform::current()))
     }
 
     fn supports_model_override(&self) -> bool {
@@ -484,12 +495,6 @@ mod tests {
         assert!(AGY.produces_readable_transcript());
     }
 
-    /// Issue #1367: Pin the minimum supported Antigravity CLI version.
-    #[test]
-    fn min_agy_version_is_pinned() {
-        assert_eq!(MIN_AGY_VERSION, (1, 0, 0));
-    }
-
     /// Issue #1367: Verify that atomic write leaves no temporary `.tmp` residue.
     #[test]
     fn inject_leaves_no_tmp_residue() {
@@ -498,7 +503,35 @@ mod tests {
 
         let agents_dir = temp.path().join(".agents");
         assert!(agents_dir.join("hooks.json").exists());
-        assert!(!agents_dir.join("hooks.json.tmp").exists());
+        // Verify no leftover .tmp files matching the pattern
+        let entries = std::fs::read_dir(&agents_dir).unwrap();
+        let tmp_files: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(tmp_files.is_empty(), "found leftover tmp files: {tmp_files:?}");
+    }
+
+    /// Issue #1367: Verify that user-defined sibling namespaces in
+    /// .agents/hooks.json are preserved across an inject.
+    #[test]
+    fn inject_preserves_user_defined_sibling_namespaces() {
+        let temp = TempDir::new().unwrap();
+        let agents = temp.path().join(".agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("hooks.json"),
+            r#"{"user-tool":{"Stop":[{"type":"command","command":"echo"}]}}"#,
+        )
+        .unwrap();
+
+        AGY.inject_attention_hook(temp.path()).unwrap();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(agents.join("hooks.json")).unwrap())
+                .unwrap();
+        assert!(parsed["user-tool"]["Stop"].is_array());
+        assert!(parsed["buildmesh-attention"]["Stop"].is_array());
     }
 
     /// Issue #1367: Under `--dangerously-skip-permissions`, AGY automatically

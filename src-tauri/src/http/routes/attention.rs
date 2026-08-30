@@ -56,14 +56,18 @@ const MAX_HOOK_BODY: usize = 64 * 1024;
 /// `terminationReason`, `workspacePaths`, `artifactDirectoryPath`,
 /// `modelName`, `executionNum`, `error`. All aliases accept both camelCase
 /// and snake_case forms; a payload that mixes casings also parses.
+///
+/// Note: fields like `execution_num`, `workspace_paths`, `artifact_directory_path`,
+/// `model_name`, and `error` are parsed for telemetry, diagnostics, and forward
+/// compatibility with future AGY revisions, but are not decision inputs in `decide()`.
 #[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
-pub struct HookPayload {
+struct HookPayload {
     #[serde(alias = "sessionId", alias = "conversationId")]
-    pub session_id: Option<String>,
+    session_id: Option<String>,
     #[serde(alias = "hookEventName", alias = "hook_event_name")]
-    pub hook_event_name: Option<String>,
+    hook_event_name: Option<String>,
     #[serde(alias = "transcriptPath", alias = "transcript_path")]
-    pub transcript_path: Option<String>,
+    transcript_path: Option<String>,
     /// Grok's structured notification type on `Notification` events
     /// (`permission_prompt`, `idle_prompt`, `task_complete`, …). The
     /// Grok docs note the matcher tests this field — we use it as a
@@ -71,10 +75,10 @@ pub struct HookPayload {
     /// Accepts both the wire camelCase (`notificationType`) and the
     /// grok-agent-sdk snake_case (`notification_type`).
     #[serde(alias = "notificationType", alias = "notification_type")]
-    pub notification_type: Option<String>,
+    notification_type: Option<String>,
     /// Notification hooks carry the human-readable notification text, e.g.
     /// "Claude needs your permission to use Bash".
-    pub message: Option<String>,
+    message: Option<String>,
     /// AGY signals "the turn truly settled" with `fullyIdle: true` and
     /// "the harness is still busy on background work" with `fullyIdle:
     /// false` (issue #1285, #1367). The latter is the false-yield analogue of
@@ -83,26 +87,28 @@ pub struct HookPayload {
     /// the attention marking. Missing / unknown defaults to "idle"
     /// so a future harness that omits the field keeps working.
     #[serde(alias = "fullyIdle", alias = "fully_idle", default)]
-    pub fully_idle: Option<bool>,
+    fully_idle: Option<bool>,
     /// AGY's `terminationReason` (e.g. `"model_stop"`,
     /// `"tool_execution_limit_reached"`, `"error"`, `"max_steps_exceeded"`).
+    /// Opaque to Buildmesh today — recorded for future debugging but not a
+    /// decision input in `decide()`.
     #[serde(alias = "terminationReason", alias = "termination_reason", default)]
-    pub termination_reason: Option<String>,
+    termination_reason: Option<String>,
     /// Present if the hook execution encountered an error.
     #[serde(default)]
-    pub error: Option<String>,
+    error: Option<String>,
     /// AGY execution step index or invocation count.
     #[serde(alias = "executionNum", alias = "execution_num", default)]
-    pub execution_num: Option<i64>,
+    execution_num: Option<i64>,
     /// AGY workspace paths.
     #[serde(alias = "workspacePaths", alias = "workspace_paths", default)]
-    pub workspace_paths: Option<Vec<String>>,
+    workspace_paths: Option<Vec<String>>,
     /// AGY artifact directory path.
     #[serde(alias = "artifactDirectoryPath", alias = "artifact_directory_path", default)]
-    pub artifact_directory_path: Option<String>,
+    artifact_directory_path: Option<String>,
     /// AGY model name.
     #[serde(alias = "modelName", alias = "model_name", default)]
-    pub model_name: Option<String>,
+    model_name: Option<String>,
 }
 
 /// Extract the provider-owned UUID from a structured hook callback. An
@@ -181,9 +187,20 @@ fn decide(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> De
     // AGY `Stop` with `fullyIdle: false` is a direct false-yield signal
     // from the harness — short-circuit before the transcript scan so an
     // AGY node gets correct suppression.
-    if payload.fully_idle == Some(false) {
+    //
+    // AGY-specific: in AGY Stop payloads, `hook_event_name` is either
+    // explicitly "Stop" or omitted from stdin JSON. When `fullyIdle: false`
+    // arrives on a Stop event or an AGY payload (with session_id / conversationId
+    // or terminationReason), suppress attention without scanning transcripts.
+    if (payload.hook_event_name.as_deref() == Some("Stop")
+        || (payload.hook_event_name.is_none()
+            && (payload.termination_reason.is_some() || payload.session_id.is_some())))
+        && payload.fully_idle == Some(false)
+    {
         return Decision::SuppressPendingBackground;
     }
+    // A Stop with fullyIdle: true or absent falls through to the transcript-scan
+    // path so any future transcript reader hooks in normally.
     let Some(transcript_path) = payload.transcript_path.filter(|p| !p.is_empty()) else {
         return Decision::Mark;
     };
@@ -256,26 +273,29 @@ pub async fn handle_post(
     // aborted the turn" — log at debug so it's there when needed without
     // polluting the happy path (issue #1285, #1367).
     let payload_parsed = serde_json::from_slice::<HookPayload>(&body);
-    if let Ok(ref payload) = payload_parsed {
-        if let Some(ref reason) = payload.termination_reason.as_deref().filter(|r| !r.is_empty()) {
-            tracing::debug!(
-                "attention webhook for node {} reported terminationReason={}",
-                session_id,
-                reason
+    match payload_parsed {
+        Ok(ref payload) => {
+            if let Some(ref reason) = payload.termination_reason.as_deref().filter(|r| !r.is_empty()) {
+                tracing::debug!(
+                    "attention webhook for node {} reported terminationReason={}",
+                    session_id,
+                    reason
+                );
+            }
+            if let Some(ref err) = payload.error.as_deref().filter(|e| !e.is_empty()) {
+                tracing::debug!(
+                    "attention webhook for node {} reported error={}",
+                    session_id,
+                    err
+                );
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                "attention webhook for node {} received unparseable or empty body (low-confidence degraded fallback to mark attention)",
+                session_id
             );
         }
-        if let Some(ref err) = payload.error.as_deref().filter(|e| !e.is_empty()) {
-            tracing::debug!(
-                "attention webhook for node {} reported error={}",
-                session_id,
-                err
-            );
-        }
-    } else {
-        tracing::warn!(
-            "attention webhook for node {} received unparseable or empty body (low-confidence degraded fallback to mark attention)",
-            session_id
-        );
     }
 
     match decide(&body, crate::services::transcript_reader::count_pending_background_tasks) {
@@ -688,7 +708,7 @@ mod tests {
         assert_eq!(parsed.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
         assert_eq!(parsed.execution_num, Some(4));
         assert_eq!(parsed.termination_reason.as_deref(), Some("model_stop"));
-        assert_eq!(parsed.error.as_deref(), Some(""));
+        assert!(parsed.error.as_deref().is_some_and(|e| e.is_empty()) || parsed.error.is_none());
         assert_eq!(parsed.fully_idle, Some(true));
         assert_eq!(parsed.workspace_paths.as_deref(), Some(&["/Users/dev/project".to_string()][..]));
         assert_eq!(parsed.model_name.as_deref(), Some("gemini-3.7-flash"));

@@ -304,8 +304,8 @@ pub trait AgentProvider: Send + Sync {
     /// `.codex/hooks.json`; Antigravity writes `.agents/hooks.json`. Called
     /// from `spawn_agent_inner` before child launch (gated on
     /// [`requires_attention_hook`]) with the resolved host-side project path;
-    /// implementations must be idempotent — they run on every spawn. A failure
-    /// is logged, surfaced as a provider warning event, and the spawn proceeds.
+    /// implementations must be idempotent — they run on every spawn. Returns
+    /// an `Err` describing any file system or serialization failure.
     ///
     /// [`requires_attention_hook`]: AgentProvider::requires_attention_hook
     fn inject_attention_hook(&self, _project_path: &std::path::Path) -> Result<(), String> {

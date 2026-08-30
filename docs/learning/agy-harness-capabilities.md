@@ -68,8 +68,8 @@ When `Stop` fires, AGY pipes a JSON payload to the command's stdin:
   "error": "",
   "fullyIdle": true,
   "workspacePaths": ["F:\\src\\repo"],
-  "transcriptPath": "F:\\src\\repo\\.gemini\\antigravity\\transcript.jsonl",
-  "artifactDirectoryPath": "F:\\src\\repo\\.gemini\\antigravity\\artifacts",
+  "transcriptPath": "F:\\src\\repo\\.gemini\\antigravity-cli\\transcript.jsonl",
+  "artifactDirectoryPath": "F:\\src\\repo\\.gemini\\antigravity-cli\\artifacts",
   "modelName": "gemini-3.7-flash"
 }
 ```
@@ -105,6 +105,6 @@ AGY differentiates between background execution and settled turns via the `fully
 ## 4. Provisioning & Workspace Trust Discipline
 
 1. **Pre-Launch Provisioning**: `ensure_trusted` (in `workspace_trust.rs`) and `inject_attention_hook` (in `agy.rs`) run **before** spawning the child process in `spawn_agent_inner`. This eliminates race conditions where AGY booted before `.agents/hooks.json` or `trustedWorkspaces` existed on disk.
-2. **Atomic Writes**: `ensure_hooks_json` writes to `hooks.json.tmp` and performs an atomic rename, preventing file corruption across concurrent spawns.
+2. **Atomic Writes**: `ensure_hooks_json` writes via a unique PID+counter `.tmp` file and performs an atomic fsynced rename, preventing file corruption across concurrent spawns.
 3. **Namespace Isolation**: `buildmesh-attention` lives as a distinct top-level object key in `.agents/hooks.json`. User-defined hooks and sibling tools are preserved intact.
 4. **Failure Observability**: Hook injection failures emit a `provider-error` warning and log detailed diagnostics rather than continuing silently.
