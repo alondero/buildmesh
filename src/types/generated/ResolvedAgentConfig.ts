@@ -14,13 +14,13 @@ export type ResolvedAgentConfig = {
  * Capability-masked model id, or `None` if no layer supplied one or the
  * harness doesn't accept a model override.
  */
-model: string | null,
+model: string | null, 
 /**
  * Capability-masked effort / reasoning value, or `None` if no layer
  * supplied one, the harness doesn't accept effort, or the value isn't
  * in the harness's allowed vocabulary.
  */
-effort: string | null,
+effort: string | null, 
 /**
  * Capability-masked extra CLI args, or `None` if no layer supplied one
  * or the harness doesn't accept extra args (issue #1358). Verbatim
