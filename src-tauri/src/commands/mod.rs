@@ -16,15 +16,7 @@
 /// Issue #1380: an async `#[command]` must not call `db::*`, `std::fs::*`,
 /// or `preferences::load`/`save` on the tokio worker — wrap those through
 /// here (gated by `tests/unit/async-command-blocking.test.ts`).
-pub(crate) async fn run_blocking<T, F>(label: &'static str, f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-    T: Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(f)
-        .await
-        .map_err(|e| format!("{label} task failed: {e}"))?
-}
+pub(crate) use crate::blocking::run_blocking;
 
 pub mod agent;
 pub mod app;
