@@ -197,7 +197,10 @@ pub async fn persist_opencode_tokens(
 /// credential manager call.
 #[command]
 pub async fn revoke_opencode_console(app: AppHandle) -> Result<(), String> {
-    let result = crate::services::opencode_oauth::revoke();
+    let result = crate::commands::run_blocking("revoke_opencode_console", || {
+        crate::services::opencode_oauth::revoke()
+    })
+    .await;
     if result.is_ok() {
         emit_opencode_console_changed(&app);
     }

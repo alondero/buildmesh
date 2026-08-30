@@ -39,10 +39,17 @@ struct Candidate {
     timestamp_ms: i64,
 }
 
+enum CaptureAttempt {
+    AlreadyStored,
+    NotFound,
+    Stored(String),
+}
+
 /// Find the newest valid Codex rollout created for this fresh spawn.
 ///
 /// This is intentionally limited to the fixed `YYYY/MM/DD` rollout layout;
 /// it does not recursively walk an arbitrary user-controlled directory.
+#[cfg(test)]
 pub fn find_id_for_directory_in(
     sessions_dir: &Path,
     spawn_directory: &str,
@@ -191,37 +198,49 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
                 return;
             }
-            if node_has_cli_session_id(node_id) {
-                return;
-            }
             let Some(sessions_dir) = crate::env::codex_sessions_dir(env_type, &spawn_directory) else {
                 tracing::warn!("codex session capture: no sessions directory for env {env_type:?}");
                 return;
             };
             let path = sessions_dir.clone();
             let directory = spawn_directory.clone();
-            let captured = tauri::async_runtime::spawn_blocking(move || {
-                find_fresh_id_for_directory_in(&path, &directory, not_before)
+            // Keep the DB predicate, disk scan, and conditional write in one
+            // blocking task. Splitting these into three dispatches on every
+            // retry needlessly thrashes the blocking pool and widens the race
+            // window between finding a rollout and claiming the row.
+            let captured = crate::blocking::run_blocking("codex_capture", move || {
+                if node_has_cli_session_id(node_id) {
+                    return Ok(CaptureAttempt::AlreadyStored);
+                }
+                let Some(id) = find_fresh_id_for_directory_in(&path, &directory, not_before) else {
+                    return Ok(CaptureAttempt::NotFound);
+                };
+                match crate::db::set_cli_session_id_if_missing(node_id, &id) {
+                    Ok(true) => Ok(CaptureAttempt::Stored(id)),
+                    Ok(false) => Ok(CaptureAttempt::AlreadyStored),
+                    Err(error) => Err(error.to_string()),
+                }
             })
-            .await
-            .ok()
-            .flatten();
-            let Some(id) = captured else {
-                continue;
+            .await;
+            let capture = match captured {
+                Ok(attempt) => attempt,
+                Err(error) => {
+                    tracing::warn!("codex session capture: blocking task failed for node {node_id}: {error}");
+                    return;
+                }
+            };
+            let id = match capture {
+                CaptureAttempt::AlreadyStored => return,
+                CaptureAttempt::NotFound => continue,
+                CaptureAttempt::Stored(id) => id,
             };
             if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
                 return;
             }
-            match crate::db::set_cli_session_id_if_missing(node_id, &id) {
-                Ok(true) => tracing::info!(
-                    "codex session capture: stored {id} for node {node_id} (attempt {})",
-                    attempt + 1
-                ),
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
-                    "codex session capture: db write failed for node {node_id}: {error}"
-                ),
-            }
+            tracing::info!(
+                "codex session capture: stored {id} for node {node_id} (attempt {})",
+                attempt + 1
+            );
             return;
         }
         tracing::warn!("codex session capture: gave up for node {node_id} in {spawn_directory}");
@@ -248,35 +267,43 @@ pub async fn backfill_suspended_node(
         return false;
     };
     let not_before = created_at_ms.saturating_sub(CAPTURE_SKEW_MS);
-    let id = tauri::async_runtime::spawn_blocking(move || {
-        find_unique_id_for_directory_in(&sessions_dir, &node_directory, not_before)
+    let stored = crate::blocking::run_blocking("codex_backfill", move || {
+        let Some(id) = find_unique_id_for_directory_in(&sessions_dir, &node_directory, not_before) else {
+            return Ok(None);
+        };
+        match crate::db::set_cli_session_id_if_missing(node_id, &id) {
+            Ok(true) => Ok(Some(id)),
+            Ok(false) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
     })
     .await
-    .ok()
-    .flatten();
-    let Some(id) = id else {
-        return false;
-    };
-    match crate::db::set_cli_session_id_if_missing(node_id, &id) {
-        Ok(true) => {
-            tracing::info!("codex session capture: backfilled {id} for suspended node {node_id}");
-            true
-        }
-        Ok(false) => false,
-        Err(error) => {
-            tracing::warn!("codex session capture: backfill failed for node {node_id}: {error}");
-            false
-        }
+    .unwrap_or_else(|error| {
+        tracing::warn!("codex session capture: backfill failed for node {node_id}: {error}");
+        None
+    });
+    if let Some(id) = stored {
+        tracing::info!("codex session capture: backfilled {id} for suspended node {node_id}");
+        true
+    } else {
+        false
     }
 }
 
 /// One-time recovery for rows created before Codex rollout capture existed.
 pub async fn backfill_legacy_suspended_nodes_once() -> Result<(), String> {
-    if crate::db::codex_legacy_session_backfill_completed().map_err(|error| error.to_string())? {
+    let nodes = crate::blocking::run_blocking("codex_backfill_list_nodes", || {
+        if crate::db::codex_legacy_session_backfill_completed().map_err(|error| error.to_string())? {
+            return Ok(None);
+        }
+        crate::db::list_suspended_codex_nodes_without_cli_session_id()
+            .map(Some)
+            .map_err(|error| error.to_string())
+    })
+    .await?;
+    let Some(nodes) = nodes else {
         return Ok(());
-    }
-    let nodes = crate::db::list_suspended_codex_nodes_without_cli_session_id()
-        .map_err(|error| error.to_string())?;
+    };
     let mut inspected_all_sources = true;
     for node in nodes {
         let spawn_path = crate::env::node_working_path(&node).spawn_path;

@@ -109,7 +109,9 @@ pub struct HarnessCapabilities {
     /// Whether the app auto-resumes suspended sessions for this harness.
     pub auto_resume_on_startup: bool,
     /// Whether the spawn path installs an attention hook for this harness
-    /// (issue #886).
+    /// (issue #886). For Antigravity (issue #1367), this delivers a
+    /// completion/background signal via Stop hook and `fullyIdle`; approval
+    /// is unavailable under skip-permissions mode.
     pub requires_attention_hook: bool,
     /// Whether the harness writes a transcript the coordinator read API
     /// can parse into a Node Digest's rich layer (ADR-0008).
@@ -120,6 +122,17 @@ pub struct HarnessCapabilities {
     /// Mirrors `effort_control != EffortControlKind::None`; pinned by a unit
     /// test so the two can't drift.
     pub supports_effort_override: bool,
+    /// Whether the harness accepts verbatim CLI flag args from configuration
+    /// (issue #1358). Every interactive harness advertises `true` (it owns
+    /// its argv shape; the orchestrator simply forwards the string and
+    /// lets the adapter's `extra_args_args` helper tokenise it). Terminal
+    /// — the plain-shell harness, with no LLM-driven recipe — advertises
+    /// `false` because splicing synthetic flags into a user's interactive
+    /// shell session would be a footgun. The capability mask drops the
+    /// layer-1 `extra_args` value at the resolver, never at the
+    /// orchestrator, so a future harness can opt in by overriding
+    /// `supports_extra_args` on its adapter.
+    pub supports_extra_args: bool,
     /// Whether `--prefill <text>` (or equivalent positional) is accepted.
     pub supports_prefill: bool,
     /// True for plain shell providers — LLM-specific paths (naming, the
@@ -151,6 +164,11 @@ pub struct ResolvedAgentConfig {
     /// supplied one, the harness doesn't accept effort, or the value isn't
     /// in the harness's allowed vocabulary.
     pub effort: Option<String>,
+    /// Capability-masked extra CLI args, or `None` if no layer supplied one
+    /// or the harness doesn't accept extra args (issue #1358). Verbatim
+    /// string — the launch path's `adapter.extra_args_args(...)` (added in
+    /// the same slice) splits on whitespace into the final argv tokens.
+    pub extra_args: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,21 +230,45 @@ pub struct AgentConfigInputs<'a> {
 // Resolver
 // ---------------------------------------------------------------------------
 
-/// Resolve the model and effort values for one spawn against the selected
-/// harness's capability contract.
+/// Resolve the model, effort, and extra-args values for one spawn against
+/// the selected harness's capability contract.
 ///
 /// Pure (no I/O, no globals) so the resolver is the unit-test seam for both
 /// the cascade and the capability mask. Returns a [`ResolvedAgentConfig`]
-/// every `Some` of which is safe to forward to `build_spawn_command`.
+/// every `Some` of which is safe to forward to `build_spawn_command`. All
+/// three fields are populated atomically — callers must NOT need to
+/// patch up the result post-hoc (issue #1362 code review caught a
+/// previous `resolved.extra_args = resolve_extra_args(...)` mutation
+/// that could be skipped at any other call site).
 ///
 /// Behaviour pinned by `tests::resolver_*` in the `mod tests` block below.
 pub fn resolve_agent_config(
     capabilities: &HarnessCapabilities,
     inputs: AgentConfigInputs<'_>,
+    explicit_extra_args: Option<&str>,
 ) -> ResolvedAgentConfig {
     let model = resolve_field(inputs.model).filter(|_| capabilities.supports_model_override);
     let effort = resolve_effort(inputs.effort, &capabilities.effort_control);
-    ResolvedAgentConfig { model, effort }
+    let extra_args = resolve_extra_args(capabilities, explicit_extra_args);
+    ResolvedAgentConfig { model, effort, extra_args }
+}
+
+/// Capability-masked extra-args resolver (issue #1358).
+///
+/// Kept separate from `resolve_agent_config` so the four-layer cascade
+/// (`explicit > mesh_override > mesh > application`) — which doesn't own
+/// any extras layer — doesn't have to grow. `extra_args` only flows in from
+/// the cascade layer-1 explicit slot (no mesh / application layer carries
+/// per-spawn flags), so the seam collapses to a single value plus the
+/// capability mask: any harness whose descriptor reports
+/// `supports_extra_args = false` (Terminal is the only one) drops the
+/// explicit value rather than splicing a synthetic flag into its argv.
+pub fn resolve_extra_args(
+    capabilities: &HarnessCapabilities,
+    explicit: Option<&str>,
+) -> Option<String> {
+    let explicit = explicit.and_then(normalize_non_empty);
+    explicit.filter(|_| capabilities.supports_extra_args)
 }
 
 /// Whitespace-normalised first-non-empty-layer picker for one field. Every
@@ -384,6 +426,7 @@ mod tests {
         assert!(anthropic.produces_readable_transcript);
         assert!(anthropic.supports_model_override);
         assert!(anthropic.supports_effort_override);
+        assert!(anthropic.supports_extra_args);
         assert!(anthropic.supports_prefill);
         assert!(!anthropic.is_plain_terminal);
         assert_eq!(
@@ -404,6 +447,7 @@ mod tests {
         assert!(codex.produces_readable_transcript);
         assert!(codex.supports_model_override);
         assert!(codex.supports_effort_override);
+        assert!(codex.supports_extra_args);
         assert!(codex.supports_prefill);
         assert_eq!(
             codex.effort_control,
@@ -421,6 +465,7 @@ mod tests {
         assert!(cursor.produces_readable_transcript);
         assert!(cursor.supports_model_override);
         assert!(!cursor.supports_effort_override);
+        assert!(cursor.supports_extra_args);
         assert!(cursor.supports_prefill);
         assert_eq!(cursor.effort_control, EffortControlKind::None);
 
@@ -437,6 +482,7 @@ mod tests {
         // mirrors Anthropic's; only the vocabulary differs from a
         // vocabulary-superset perspective (both use `low|medium|high`).
         assert!(agy.supports_effort_override);
+        assert!(agy.supports_extra_args);
         assert!(agy.supports_prefill);
         assert_eq!(
             agy.effort_control,
@@ -452,6 +498,7 @@ mod tests {
         assert!(!opencode.requires_attention_hook);
         assert!(opencode.supports_model_override);
         assert!(!opencode.supports_effort_override);
+        assert!(opencode.supports_extra_args);
         assert!(opencode.supports_prefill);
         assert_eq!(opencode.effort_control, EffortControlKind::None);
 
@@ -461,6 +508,9 @@ mod tests {
         assert!(!terminal.requires_attention_hook);
         assert!(!terminal.supports_model_override);
         assert!(!terminal.supports_effort_override);
+        // Issue #1358: Terminal is the plain-shell harness — the
+        // resolver drops the layer-1 `extra_args` value at the mask.
+        assert!(!terminal.supports_extra_args);
         assert!(!terminal.supports_prefill);
         assert_eq!(terminal.effort_control, EffortControlKind::None);
 
@@ -470,6 +520,7 @@ mod tests {
         let kimi = kimi_caps();
         assert!(kimi.supports_model_override);
         assert!(!kimi.supports_effort_override);
+        assert!(kimi.supports_extra_args);
         assert!(!kimi.supports_prefill);
         assert_eq!(kimi.effort_control, EffortControlKind::None);
 
@@ -488,6 +539,7 @@ mod tests {
         // `docs/learning/grok-harness-capabilities.md` and the
         // `GROK_EFFORT_ALLOWED` constant above.
         assert!(grok.supports_effort_override);
+        assert!(grok.supports_extra_args);
         assert!(grok.supports_prefill);
         assert_eq!(
             grok.effort_control,
@@ -502,6 +554,9 @@ mod tests {
         // recipe now agree (see `adapters::mcode::tests`).
         assert!(!mcode.supports_model_override);
         assert!(!mcode.supports_effort_override);
+        // Issue #1358: mcode's interactive TUI still accepts arbitrary
+        // CLI flags as positional args; permissive on extras.
+        assert!(mcode.supports_extra_args);
         assert!(mcode.supports_prefill);
         assert_eq!(mcode.effort_control, EffortControlKind::None);
 
@@ -513,6 +568,7 @@ mod tests {
         assert!(!dsh.produces_readable_transcript);
         assert!(dsh.supports_model_override);
         assert!(!dsh.supports_effort_override);
+        assert!(dsh.supports_extra_args);
         assert!(!dsh.supports_prefill);
         assert_eq!(dsh.effort_control, EffortControlKind::None);
     }
@@ -601,7 +657,7 @@ mod tests {
                 application: Some("low"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -627,7 +683,7 @@ mod tests {
                 application: Some("medium"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
@@ -649,7 +705,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(
             resolved.model.is_none(),
             "Terminal doesn't support model overrides; the mask must drop any value"
@@ -676,7 +732,7 @@ mod tests {
                     application: Some("low"),
                 },
             };
-            let resolved = resolve_agent_config(&caps, inputs.clone());
+            let resolved = resolve_agent_config(&caps, inputs.clone(), None);
             assert!(
                 resolved.effort.is_none(),
                 "{} advertises EffortControlKind::None; effort must drop for every layer. \
@@ -701,7 +757,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
             resolved.effort.is_none(),
             "Claude Code rejects values outside the closed vocabulary; got {:?}",
@@ -723,13 +779,13 @@ mod tests {
                 application: None,
             },
         };
-        let codex = resolve_agent_config(&codex_caps(), inputs.clone());
+        let codex = resolve_agent_config(&codex_caps(), inputs.clone(), None);
         assert_eq!(
             codex.effort.as_deref(),
             Some("xhigh"),
             "Codex accepts xhigh via its inline-config vocabulary"
         );
-        let claude = resolve_agent_config(&anthropic_caps(), inputs);
+        let claude = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
             claude.effort.is_none(),
             "Claude's closed vocabulary rejects xhigh"
@@ -759,7 +815,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -783,7 +839,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(resolved.model.is_none());
         assert!(resolved.effort.is_none());
     }
@@ -808,7 +864,7 @@ mod tests {
                 application: Some("\t"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
     }
@@ -831,7 +887,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -859,7 +915,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
     }
@@ -886,7 +942,7 @@ mod tests {
     /// "no overrides" without constructing the struct by hand).
     #[test]
     fn empty_inputs_produce_empty_resolved_config() {
-        let resolved = resolve_agent_config(&anthropic_caps(), AgentConfigInputs::default());
+        let resolved = resolve_agent_config(&anthropic_caps(), AgentConfigInputs::default(), None);
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
     }
@@ -917,7 +973,7 @@ mod tests {
                 application: Some("high"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -951,7 +1007,7 @@ mod tests {
         // but not effort), preserving the original "model passes,
         // effort drops" shape. `opencode` would also work but lacks
         // model override; kimi is the closest match.
-        let resolved = resolve_agent_config(&kimi_caps(), inputs);
+        let resolved = resolve_agent_config(&kimi_caps(), inputs, None);
         assert_eq!(
             resolved.model.as_deref(),
             Some("some-model"),
@@ -976,7 +1032,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
             resolved.model.is_none(),
             "empty cascade must fall through to native behaviour"
@@ -1004,7 +1060,7 @@ mod tests {
                 application: Some("  high  "),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model, None, "whitespace-only model collapses");
         assert_eq!(
             resolved.effort.as_deref(),
@@ -1027,7 +1083,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
     }
 
@@ -1061,7 +1117,7 @@ mod tests {
                 application: Some("high"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -1090,7 +1146,7 @@ mod tests {
                 application: Some("medium"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -1116,7 +1172,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -1135,7 +1191,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("ad-hoc-model"));
     }
 
@@ -1161,7 +1217,7 @@ mod tests {
                 application: Some("high"),
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("override-model"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
@@ -1185,7 +1241,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
         };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs);
+        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(
             resolved.model.is_none(),
             "Terminal doesn't support model overrides; the mask must drop the mesh override layer"
@@ -1218,7 +1274,7 @@ mod tests {
                 application: None,
             },
         };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
     }

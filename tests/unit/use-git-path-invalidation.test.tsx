@@ -114,8 +114,8 @@ describe('useGitPathInvalidation (issue #357)', () => {
   it('does NOT re-subscribe when only `cb` changes (refs read the latest cb)', async () => {
     // Code-review finding: the hook previously listed `cb` in the deps
     // array, which tore down and rebuilt the bus subscription on every
-    // render of consumers that pass inline arrows (`AgentReviewPanel`,
-    // `CenterDiffOverlay`). The fix wraps `cb` in a ref and depends on
+    // render of consumers that pass inline arrows (`CenterDiffOverlay`).
+    // The fix wraps `cb` in a ref and depends on
     // `[path]` only. Pin: changing the `cb` ref alone must NOT trigger
     // a re-subscribe — the subscription count is the observable signal.
     //

@@ -404,6 +404,13 @@ pub struct SpawnOptions {
     /// matters when the harness's capability descriptor declares effort
     /// support (otherwise the resolver mask drops it).
     pub explicit_effort: Option<String>,
+    /// Cascade layer-1 verbatim CLI flag string (issue #1358). No mesh
+    /// / application layer carries per-spawn flags, so this is the only
+    /// layer of supply. Capability-masked downstream — a harness whose
+    /// descriptor reports `supports_extra_args = false` (Terminal is
+    /// the only one) silently drops the value at the resolver rather
+    /// than splicing a synthetic flag into its argv.
+    pub explicit_extra_args: Option<String>,
 }
 
 /// Open a PTY pair using the native PTY system.
@@ -1318,6 +1325,12 @@ pub(crate) async fn spawn_with_intent(
             cols: terminal_size.cols,
             prefill,
             node: Some(node.clone()),
+            // Issue #1358: per-spawn extra_args ride the explicit layer
+            // through to `spawn_agent_inner`, where `resolve_spawn_config`
+            // capability-masks them against `HarnessCapabilities
+            // .supports_extra_args` (Terminal drops; every interactive
+            // harness keeps).
+            explicit_extra_args: explicit.extra_args,
             // Cascade layer-1 overrides flow through verbatim. Empty /
             // whitespace-only values are normalised at `cascade_inputs_for`
             // inside `spawn_agent_inner` so the cascade falls through to
@@ -1441,13 +1454,15 @@ pub(crate) fn resolve_spawn_config(
     provider: Provider,
     explicit_model: Option<&str>,
     explicit_effort: Option<&str>,
-    mesh_model: Option<&str>,
-    mesh_effort: Option<&str>,
+    explicit_extra_args: Option<&str>,
     app_default: Option<&crate::preferences::HarnessConfigValue>,
     mesh_override: Option<&crate::preferences::HarnessConfigValue>,
 ) -> crate::agent::capabilities::ResolvedAgentConfig {
-    let _ = (mesh_model, mesh_effort);
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
+    // Issue #1358: all three cascaded fields (model / effort /
+    // extra-args) flow into one resolver call so `ResolvedAgentConfig`
+    // is constructed atomically (issue #1362 code review). The extra-args
+    // mask lives inside `resolve_agent_config` next to the others.
     crate::agent::capabilities::resolve_agent_config(
         &capabilities,
         cascade_inputs_for(
@@ -1458,6 +1473,7 @@ pub(crate) fn resolve_spawn_config(
             app_default,
             mesh_override,
         ),
+        explicit_extra_args,
     )
 }
 
@@ -1501,6 +1517,7 @@ pub(crate) async fn spawn_agent_inner(
         node: preloaded_node,
         explicit_model,
         explicit_effort,
+        explicit_extra_args,
     } = opts;
 
     tracing::info!(
@@ -2264,14 +2281,19 @@ pub(crate) async fn spawn_agent_inner(
         provider,
         explicit_model.as_deref(),
         explicit_effort.as_deref(),
+        // Cascade layer-1 verbatim CLI flags from the v2 SpawnAgentNode
+        // explicit slot (issue #1358). The resolver capability-masks
+        // this against `HarnessCapabilities.supports_extra_args` —
+        // Terminal drops it; every interactive harness keeps it. The
+        // `non_empty_trim` collapse happens inside `resolve_agent_config`
+        // / `resolve_extra_args` so whitespace-only inputs cascade-fall.
+        explicit_extra_args.as_deref(),
         // Legacy `meshes.model` / `meshes.effort` columns are physically
         // present for positional row compatibility but are no longer
         // read as active spawn configuration — the v33 one-shot
         // migration copied any non-empty legacy values into the
         // `claude` override entry of the new map (issue #1151 acceptance
         // criteria 6). On a healthy v33+ DB this slot is always `None`.
-        None,
-        None,
         app_default.as_ref(),
         mesh_override.as_ref(),
     );
@@ -2320,7 +2342,7 @@ pub(crate) async fn spawn_agent_inner(
     let writer = master.take_writer().map_err(|e| e.to_string())?;
     let reader_alive = Arc::new(AtomicBool::new(true));
 
-    // 12. Register BEFORE starting the reader thread. The pre-#300 order
+    // 11. Register BEFORE starting the reader thread. The pre-#300 order
     //     (register-then-start) is the one that closes the TOCTOU window
     //     in `is_agent_already_running`: a concurrent spawn for the
     //     same session_id sees the entry and bails. The `reader_handle`
@@ -2836,7 +2858,7 @@ mod tests {
             Some(&app_default),
             None,
         );
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(
             resolved.model.as_deref(),
             Some("sonnet-4"),
@@ -2872,7 +2894,7 @@ mod tests {
             Some(&app_default),
             None,
         );
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         // Explicit collapsed → mesh wins over application.
         assert_eq!(resolved.model.as_deref(), Some("haiku-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
@@ -2896,7 +2918,7 @@ mod tests {
             None,
             None,
         );
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
@@ -2924,7 +2946,7 @@ mod tests {
             Some(&app_default),
             Some(&mesh_override),
         );
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs);
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
     }
@@ -2947,11 +2969,12 @@ mod tests {
             Some(&mesh_override),
         );
 
-        let resolved = resolve_agent_config(
+        let resolved = crate::agent::capabilities::resolve_agent_config(
             &crate::agent::capabilities::capabilities_for(
                 &crate::agent::provider::adapters::OPENCODE,
             ),
             inputs,
+            None,
         );
         // OpenCode accepts `--model provider/model` and has no effort
         // control. The mesh override model must pass; effort must drop.
@@ -2975,9 +2998,17 @@ mod tests {
             node: None,
             explicit_model: Some("sonnet-4".into()),
             explicit_effort: Some("low".into()),
+            // Issue #1358: every transport that builds a `SpawnRequest`
+            // and reaches `spawn_agent_inner` via `spawn_with_intent`
+            // forwards `explicit_extra_args` from the v2 SpawnAgentNode
+            // explicit slot. None is fine — the resolver then cascades
+            // through mesh / app defaults and `default_prepare` only
+            // forwards the string when `supports_extra_args = true`.
+            explicit_extra_args: None,
         };
         assert_eq!(opts.explicit_model.as_deref(), Some("sonnet-4"));
         assert_eq!(opts.explicit_effort.as_deref(), Some("low"));
+        assert!(opts.explicit_extra_args.is_none());
     }
 
     /// `SpawnRequest` must carry an `explicit` field (issue #1155 AC #1).
@@ -2993,6 +3024,7 @@ mod tests {
             explicit: ExplicitSpawnOverrides {
                 model: Some("opus-4-1".into()),
                 effort: Some("high".into()),
+                extra_args: None,
             },
         };
         assert_eq!(req.explicit.model.as_deref(), Some("opus-4-1"));
@@ -3075,6 +3107,14 @@ mod tests {
         .with_explicit(ExplicitSpawnOverrides {
             model: Some("opus-4-1".into()),
             effort: Some("high".into()),
+            // Issue #1358: extra_args ride the same cascade layer-1
+            // slot. A non-None value here proves the wiring from
+            // `SpawnRequest.explicit.extra_args` → `SpawnOptions
+            // .explicit_extra_args` → `resolve_spawn_config` — the
+            // gap the spec review flagged (#1358) where this string
+            // was collected by the Inspector but dropped at the
+            // `spawn_with_intent` seam.
+            extra_args: Some("--dangerously-skip-permissions --verbose".into()),
         });
         let app_default = HarnessConfigValue {
             model: Some("sonnet-4".into()),
@@ -3084,8 +3124,7 @@ mod tests {
             Provider::Anthropic,
             req.explicit.model.as_deref(),
             req.explicit.effort.as_deref(),
-            Some("haiku-4"),
-            Some("low"),
+            req.explicit.extra_args.as_deref(),
             Some(&app_default),
             None,
         );
@@ -3093,6 +3132,12 @@ mod tests {
             resolved.model.as_deref(),
             Some("opus-4-1"),
             "SpawnRequest.explicit.model must reach the resolver as FieldInputs::explicit and win over mesh + application"
+        );
+        assert_eq!(
+            resolved.extra_args.as_deref(),
+            Some("--dangerously-skip-permissions --verbose"),
+            "SpawnRequest.explicit.extra_args must reach ResolvedAgentConfig \
+             (issue #1358 AC: extra-args override honoured per harness capability contract)"
         );
         assert_eq!(
             resolved.effort.as_deref(),
@@ -3119,6 +3164,7 @@ mod tests {
         .with_explicit(ExplicitSpawnOverrides {
             model: Some("   ".into()),
             effort: Some("\t\n".into()),
+            extra_args: None,
         });
         let mesh_override = HarnessConfigValue {
             model: Some("haiku-4".into()),
@@ -3132,17 +3178,76 @@ mod tests {
             Provider::Anthropic,
             req.explicit.model.as_deref(),
             req.explicit.effort.as_deref(),
+            req.explicit.extra_args.as_deref(),
             // Legacy mesh columns are no longer read as active config
             // (issue #1151 AC #6) — the v33 migration copied any
             // non-empty legacy values into the mesh override map.
-            None,
-            None,
             Some(&app_default),
             Some(&mesh_override),
         );
         // Explicit collapsed → mesh_override wins over application.
         assert_eq!(resolved.model.as_deref(), Some("haiku-4"));
         assert_eq!(resolved.effort.as_deref(), Some("medium"));
+    }
+
+    /// Issue #1358 end-to-end pin: the `SpawnRequest → SpawnOptions →
+    /// resolve_spawn_config` path **must** deliver `explicit_extra_args`
+    /// end-to-end AND capability-mask it against the harness's
+    /// `supports_extra_args`. Terminal is the standing opt-out (a
+    /// plain-shell harness must not get synthetic flags spliced into
+    /// its argv) — the spec review (#1358) flagged this as the AC
+    /// violation that needed a regression pin. This test is the pin.
+    #[test]
+    fn spawn_request_extra_args_capability_mask_at_resolver() {
+        // Anthropic — interactive harness, `supports_extra_args = true`.
+        let req_interactive = SpawnRequest::new(
+            42,
+            SpawnIntent::Fresh,
+            TerminalSize::default(),
+        )
+        .with_explicit(ExplicitSpawnOverrides {
+            model: None,
+            effort: None,
+            extra_args: Some("--dangerously-skip-permissions".into()),
+        });
+        let resolved_anthropic = resolve_spawn_config(
+            Provider::Anthropic,
+            req_interactive.explicit.model.as_deref(),
+            req_interactive.explicit.effort.as_deref(),
+            req_interactive.explicit.extra_args.as_deref(),
+            None,
+            None,
+        );
+        assert_eq!(
+            resolved_anthropic.extra_args.as_deref(),
+            Some("--dangerously-skip-permissions"),
+            "Anthropic supports extra_args — the explicit slot must reach ResolvedAgentConfig"
+        );
+
+        // Terminal — plain-shell harness, `supports_extra_args = false`.
+        let req_terminal = SpawnRequest::new(
+            42,
+            SpawnIntent::Fresh,
+            TerminalSize::default(),
+        )
+        .with_explicit(ExplicitSpawnOverrides {
+            model: None,
+            effort: None,
+            extra_args: Some("--dangerously-skip-permissions --verbose".into()),
+        });
+        let resolved_terminal = resolve_spawn_config(
+            Provider::Terminal,
+            req_terminal.explicit.model.as_deref(),
+            req_terminal.explicit.effort.as_deref(),
+            req_terminal.explicit.extra_args.as_deref(),
+            None,
+            None,
+        );
+        assert!(
+            resolved_terminal.extra_args.is_none(),
+            "Terminal masks extra_args at the resolver (issue #1358). Got: {:?}",
+            resolved_terminal.extra_args
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4918,6 +5023,7 @@ https://github.com/alondero/buildmesh/issues/247"
             let config = ResolvedAgentConfig {
                 model: Some(model_value.to_string()),
                 effort: Some(effort_value.to_string()),
+                extra_args: None,
             };
             let prefill_text = "fix the auth bug in handler.rs";
             let input = make_input(
@@ -5053,6 +5159,7 @@ https://github.com/alondero/buildmesh/issues/247"
         let config = ResolvedAgentConfig {
             model: Some("minimax/MiniMax-Text-01".to_string()),
             effort: None,
+            extra_args: None,
         };
         let input = make_input(
             Platform::Macos,

@@ -1,7 +1,6 @@
 //! Agent Node service — creation, deletion, and lifecycle orchestration
 
 use crate::agent::provider::parse_spawn_option_id;
-use crate::agent::spawn::{spawn_with_intent, SpawnIntent, SpawnRequest, TerminalSize};
 use crate::db;
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
@@ -538,99 +537,58 @@ pub fn decide_resume(
     }
 }
 
-/// Regenerate an agent node: swap its Model Provider, kill the live
-/// process, and respawn. The worktree, branch, name, position, and
-/// all other state are preserved; only the `provider` column changes.
+/// Sync helper for step 1 of the regenerate orchestrator: load the
+/// node, validate its status, and return the old provider + whether
+/// the kill step should be skipped (true only for `Suspended`).
 ///
-/// The same-harness check lives inside [`decide_resume`] — the user
-/// may pick any Spawn Option (cross-harness is allowed), but the
-/// existing `cli_session_id` is only portable across a same-harness
-/// swap, so a cross-harness swap always starts fresh. The "right
-/// handoff" for a cross-harness regenerate is up to the user (e.g.
-/// a context file already in the worktree that the new agent can
-/// read).
+/// Pure — no async, no thread-pool orchestration. The command boundary
+/// (`commands::agent_node::regenerate_agent_node`) is the single place
+/// that wraps this in `crate::commands::run_blocking` (issue #1380
+/// review round-2 feedback 1).
 ///
-/// On spawn failure the `provider` column has already been updated —
-/// the user can retry. Mirrors the pre-existing spawn flow's behaviour
-/// for a fresh `spawn_agent` (the row is in `Error` state and the
-/// user retries the spawn manually).
-pub async fn regenerate(
+/// # Architecture
+///
+/// The previous async `regenerate` orchestrator that called the three
+/// sync helpers DIRECTLY on the Tokio runtime was a phantom offload —
+/// the helpers are pure sync, but the orchestrator's `await` never
+/// crossed a thread-pool boundary. Round-2 review caught it. The
+/// orchestrator is now inline in the command, where each helper
+/// call IS wrapped in `run_blocking`.
+pub fn regenerate_load_blocking(
     node_id: i64,
+) -> Result<(String, bool), AgentNodeError> {
+    let node = db::get_agent_node_by_id(node_id)?;
+    validate_status_eligible(node.status).map_err(AgentNodeError::Status)?;
+    Ok((
+        node.provider.clone(),
+        should_skip_kill_for_regenerate(node.status),
+    ))
+}
+
+/// Sync helper for steps 4–6 of the regenerate orchestrator: write the
+/// new `provider` column, reload the row, and return whether the new
+/// spawn should resume the existing session (same-harness with a
+/// captured `cli_session_id`) or start fresh.
+///
+/// Takes `&str` references — the caller owns the strings and the
+/// helper does NOT need to capture them into a `'static` closure.
+/// `decide_resume` owns the cross-harness rejection rule.
+pub fn regenerate_apply_blocking(
+    node_id: i64,
+    old_provider: &str,
     new_provider: &str,
-    app: &tauri::AppHandle,
-) -> Result<AgentNode, AgentNodeError> {
-    // 1. Read the current node (capture the old provider before the
-    //    update so `decide_resume` can compare harness ids).
-    let node = db::get_agent_node_by_id(node_id)?;
-    let old_provider = node.provider.clone();
-
-    // 2. Validate status eligibility. Reject mid-spawn and closed
-    //    states up front so we never leave a half-killed process
-    //    behind.
-    if let Err(e) = validate_status_eligible(node.status) {
-        return Err(AgentNodeError::Status(e));
-    }
-
-    // 3. Kill the live process ONLY when one is registered.
-    //    `kill_agent` is idempotent — a no-op when no process is
-    //    registered — but its tail (commands/agent.rs:1172) calls
-    //    `session_lifecycle::on_idle`, which unconditionally writes
-    //    `Idle`. For a Suspended node (no live process — the agent
-    //    was killed on app exit, or never started in the
-    //    autopilot-gate case) that write would clobber Suspended→Idle
-    //    BEFORE the new spawn lands. `should_skip_kill_for_regenerate`
-    //    keeps the rule local to this orchestrator — do NOT modify
-    //    `kill_agent` (it's used by `close_node`, the spawn stale-
-    //    process reaper at spawn.rs:1228, and `auto_resume_*`; its
-    //    `on_idle` is correct for actual kills).
-    //
-    //    The explicit kill IS load-bearing for non-Suspended nodes:
-    //    `spawn_agent_inner`'s `is_agent_already_running` short-circuit
-    //    at spawn.rs:743 returns early without killing or respawning
-    //    if a process is still registered, which would leave the OLD
-    //    process alive with the NEW provider in the DB.
-    //    `spawn_agent_inner` re-kills at its own step 2 (spawn.rs:751)
-    //    but only after that short-circuit doesn't fire.
-    //
-    //    Errors are ignored: `kill_agent` returns Err only from the
-    //    trailing `SessionLifecycle::on_kill(.., Idle)` (issue #132) —
-    //    the registry side effects (`kill_session` + `remove`) are
-    //    already in place. The new spawn sets the status correctly
-    //    anyway.
-    if !should_skip_kill_for_regenerate(node.status) {
-        let _ = crate::agent::process::kill_agent(node_id).await;
-    }
-
-    // 4. Update the `provider` column. The next `spawn_agent_inner`
-    //    call reads `node.provider` for backend env resolution
-    //    (`preferences::resolve_provider_env(&node.provider)`,
-    //    spawn.rs:1399) and preflight, so the new value must land
-    //    BEFORE we hand off to the spawn pipeline.
+) -> Result<bool, AgentNodeError> {
     db::set_agent_node_provider(node_id, new_provider)?;
-
-    // 5. Reload the node so the spawn call sees the new provider.
     let node = db::get_agent_node_by_id(node_id)?;
+    Ok(decide_resume(old_provider, new_provider, node.cli_session_id.as_deref()).is_some())
+}
 
-    // 6. Decide whether the intent is a same-harness resume. The spawner
-    //    reloads the node and owns the actual session-id/adapter policy,
-    //    including clearing a stale id for a Fresh intent.
-    let resume = decide_resume(&old_provider, new_provider, node.cli_session_id.as_deref());
-    let intent = if resume.is_some() {
-        SpawnIntent::Resume {
-            cause: crate::agent::spawn::ResumeCause::Explicit,
-        }
-    } else {
-        SpawnIntent::Fresh
-    };
-
-    spawn_with_intent(
-        app,
-        SpawnRequest::new(node_id, intent, TerminalSize::default()),
-    )
-    .await
-    .map_err(AgentNodeError::Backend)?;
-
-    Ok(db::get_agent_node_by_id(node_id)?)
+/// Sync helper for step 8 of [`regenerate`]: reload the node row
+/// after the spawn lands so the command returns the post-spawn
+/// state. The spawn pipeline may have updated `cli_session_id`,
+/// `status_changed_at`, etc.
+pub fn regenerate_reload_blocking(node_id: i64) -> Result<AgentNode, AgentNodeError> {
+    db::get_agent_node_by_id(node_id).map_err(AgentNodeError::from)
 }
 
 #[cfg(test)]
@@ -1305,5 +1263,179 @@ mod tests {
         // Idempotent — a no-op write should still succeed.
         db::set_agent_node_provider(node.id, "claude:minimax")
             .expect("idempotent write should succeed");
+    }
+
+    // PR #1388 review feedback 2 — the service-layer `regenerate`
+    // used to orchestrate three interleaved `spawn_blocking` hops and
+    // a chain of pre-clones (`new_provider_for_update`,
+    // `old_provider_for_update`) to satisfy the `'static` borrow on
+    // each closure. The refactor splits the work into three single-
+    // purpose sync helpers that the command boundary wraps once each,
+    // threading owned data via return tuples instead of captured clones.
+
+    #[test]
+    fn regenerate_load_blocking_returns_old_provider_and_skip_kill() {
+        // Idle node: provider is captured verbatim, kill is NOT skipped.
+        let mesh_id = fresh_mesh();
+        let idle_node = create(
+            mesh_id,
+            "/tmp/buildmesh_regen_load_idle",
+            "main",
+            Some("anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("seed idle node");
+        let (old_provider, skip_kill) =
+            regenerate_load_blocking(idle_node.id).expect("load should succeed");
+        assert_eq!(old_provider, "anthropic");
+        assert!(
+            !skip_kill,
+            "Idle has no live process to skip, but the skip rule is about Suspended only",
+        );
+
+        // Suspended node: skip_kill must be true (this is the whole
+        // point of the helper — `kill_agent_blocking`'s `on_idle`
+        // tail would clobber Suspended→Idle if we killed).
+        let suspended_node = create(
+            mesh_id,
+            "/tmp/buildmesh_regen_load_suspended",
+            "main",
+            Some("anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("seed suspended node");
+        db::update_agent_node_status(suspended_node.id, SessionStatus::Suspended)
+            .expect("set suspended status");
+        let (suspended_provider, suspended_skip_kill) =
+            regenerate_load_blocking(suspended_node.id).expect("load should succeed");
+        assert_eq!(suspended_provider, "anthropic");
+        assert!(suspended_skip_kill, "Suspended must skip the kill");
+    }
+
+    #[test]
+    fn regenerate_load_blocking_rejects_spawning_status() {
+        // The status guard from `validate_status_eligible` must surface
+        // as an error so the command boundary can map it to the user's
+        // "regenerate unavailable: node is in X state" toast.
+        let mesh_id = fresh_mesh();
+        let node = create(
+            mesh_id,
+            "/tmp/buildmesh_regen_load_spawning",
+            "main",
+            Some("anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("seed node");
+        db::update_agent_node_status(node.id, SessionStatus::Spawning)
+            .expect("set spawning status");
+        let err = regenerate_load_blocking(node.id).unwrap_err();
+        match err {
+            AgentNodeError::Status(msg) => assert!(
+                msg.contains("spawning"),
+                "error must name the rejected status, got: {msg}"
+            ),
+            other => panic!("expected AgentNodeError::Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regenerate_apply_blocking_writes_provider_and_decides_resume() {
+        // Same-harness provider swap with a captured cli_session_id:
+        // apply_blocking must write the new provider AND report
+        // `resume = true` (because `decide_resume` continues the
+        // session for same-harness swaps).
+        let mesh_id = fresh_mesh();
+        let node = create(
+            mesh_id,
+            "/tmp/buildmesh_regen_apply",
+            "main",
+            Some("claude:anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("seed node");
+        db::update_cli_session_id(node.id, "sess-abc")
+            .expect("set cli_session_id");
+
+        let resume = regenerate_apply_blocking(node.id, "claude:anthropic", "claude:minimax")
+            .expect("apply should succeed");
+        assert!(resume, "same-harness swap with a session id must resume");
+
+        let reloaded = db::get_agent_node_by_id(node.id).expect("reload");
+        assert_eq!(
+            reloaded.provider, "claude:minimax",
+            "apply_blocking must persist the new provider before returning"
+        );
+        assert_eq!(
+            reloaded.cli_session_id.as_deref(),
+            Some("sess-abc"),
+            "apply_blocking must NOT clear cli_session_id — the spawner owns that policy",
+        );
+    }
+
+    #[test]
+    fn regenerate_apply_blocking_starts_fresh_on_cross_harness() {
+        // Claude → Codex: the captured Claude session id is not a valid
+        // Codex id, so the apply step must report `resume = false`.
+        let mesh_id = fresh_mesh();
+        let node = create(
+            mesh_id,
+            "/tmp/buildmesh_regen_apply_cross",
+            "main",
+            Some("claude:anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("seed node");
+        db::update_cli_session_id(node.id, "claude-uuid")
+            .expect("set cli_session_id");
+
+        let resume = regenerate_apply_blocking(node.id, "claude:anthropic", "codex")
+            .expect("apply should succeed");
+        assert!(
+            !resume,
+            "cross-harness swap must report resume=false so spawn picks Fresh intent"
+        );
+    }
+
+    #[test]
+    fn regenerate_reload_blocking_returns_fresh_node() {
+        // The reload helper is the final hop in the orchestrator — it
+        // must return the current row so the command can hand it back
+        // to the frontend store.
+        let mesh_id = fresh_mesh();
+        let node = create(
+            mesh_id,
+            "/tmp/buildmesh_regen_reload",
+            "main",
+            Some("anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("seed node");
+        let reloaded = regenerate_reload_blocking(node.id).expect("reload should succeed");
+        assert_eq!(reloaded.id, node.id);
+        assert_eq!(reloaded.provider, "anthropic");
     }
 }

@@ -1,15 +1,18 @@
 //! Mesh property commands — read/write the user-tunable columns on the
 //! `meshes` SQLite row.
 //!
-//! **There is no `mesh.toml` file.** The "properties" / "config" lives on
-//! the `meshes` SQLite row (see `db::get_mesh_by_id`), not in any file at
-//! the mesh root. The `MeshRow` struct in `models::MeshRow` is a thin DTO
-//! over that row.
+//! **There is no `mesh.toml` file.** The "properties" / "config" lives on the
+//! `meshes` SQLite row (see `db::get_mesh_by_id`), not in any file at the mesh
+//! root. The `MeshRow` struct in `models::MeshRow` is a thin DTO over that row.
 //!
 //! `Worktree.baseRef` is additionally written to `.claude/settings.json`
 //! at the mesh root so Claude Code can read it (see
-//! [`update_worktree_base_ref`]); that mirror is an output, not a
-//! source of truth — the DB column is the source.
+//! [`update_worktree_base_ref`]); that mirror is an output, not a source of
+//! truth — the DB column is the source.
+//!
+//! Pure sync — each command is a single SQLite read/write (with optional
+//! `std::fs::*` for the settings.json mirror on `base_ref` updates). Runs on
+//! Tauri's IPC worker, NOT the bounded tokio pool. Issue #1380 review point 4.
 
 use crate::db;
 use crate::models::{HarnessConfigValue, MeshRow};
@@ -73,15 +76,14 @@ fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshRow, String> {
+pub fn get_mesh_properties(mesh_id: i64) -> Result<MeshRow, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-
     Ok(MeshRow::from(&mesh))
 }
 
 #[tauri::command]
-pub async fn update_mesh_name(mesh_id: i64, name: String) -> Result<(), String> {
+pub fn update_mesh_name(mesh_id: i64, name: String) -> Result<(), String> {
     let db = db::lock_db();
     db.execute(
         "UPDATE meshes SET name = ?1 WHERE id = ?2",
@@ -92,7 +94,7 @@ pub async fn update_mesh_name(mesh_id: i64, name: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub async fn update_mesh_column(
+pub fn update_mesh_column(
     mesh_id: i64,
     column: String,
     value: String,
@@ -131,7 +133,7 @@ pub async fn update_mesh_column(
 }
 
 #[tauri::command]
-pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
+pub fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
     let rows = {
         let db = db::lock_db();
         db.execute(
@@ -193,7 +195,7 @@ pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Resul
 /// so the typed integer + the `0..=5` invariant are enforced here —
 /// the catch-all is intentionally unvalidated.
 #[tauri::command]
-pub async fn update_mesh_pool_size(
+pub fn update_mesh_pool_size(
     app: AppHandle,
     mesh_id: i64,
     pool_size: i32,
@@ -204,25 +206,26 @@ pub async fn update_mesh_pool_size(
             pool_size
         ));
     }
-    let db = db::lock_db();
-    let rows = db
-        .execute(
-            "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = ?2",
-            rusqlite::params![pool_size, mesh_id],
-        )
-        .map_err(|e| format!("failed to update pre_spawn_pool_size: {}", e))?;
-    // An UPDATE that matches no rows silently succeeds otherwise —
-    // returning `Ok(())` would let the frontend believe the save
-    // succeeded when the mesh was deleted (or never existed) between
-    // the load and the save. Surfaces the same contract as
-    // `set_mesh_sandbox_inner`'s zero-rows guard.
-    if rows == 0 {
-        return Err(format!(
-            "mesh {} not found (no rows updated)",
-            mesh_id
-        ));
+    {
+        let db = db::lock_db();
+        let rows = db
+            .execute(
+                "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = ?2",
+                rusqlite::params![pool_size, mesh_id],
+            )
+            .map_err(|e| format!("failed to update pre_spawn_pool_size: {}", e))?;
+        // An UPDATE that matches no rows silently succeeds otherwise —
+        // returning `Ok(())` would let the frontend believe the save
+        // succeeded when the mesh was deleted (or never existed) between
+        // the load and the save. Surfaces the same contract as
+        // `set_mesh_sandbox_inner`'s zero-rows guard.
+        if rows == 0 {
+            return Err(format!(
+                "mesh {} not found (no rows updated)",
+                mesh_id
+            ));
+        }
     }
-    drop(db);
 
     // Drain-then-fill runs on a dedicated OS thread so the IPC handler
     // returns immediately. Inner `drain_excess_warm_entries` /
@@ -230,9 +233,8 @@ pub async fn update_mesh_pool_size(
     // they make, so the badge settles naturally as rows drop / fill —
     // no explicit settle emit needed (would double-fire when drain
     // already emitted).
-    let app_for_drain = app.clone();
     std::thread::spawn(move || {
-        warm_pool::drain_and_fill_for_mesh(&app_for_drain, mesh_id);
+        warm_pool::drain_and_fill_for_mesh(&app, mesh_id);
     });
 
     Ok(())
@@ -245,7 +247,7 @@ pub async fn update_mesh_pool_size(
 /// single source of truth for pool state, so the IPC command is just
 /// the typed edge.
 #[tauri::command]
-pub async fn get_mesh_pool_count(mesh_id: i64) -> Result<i64, String> {
+pub fn get_mesh_pool_count(mesh_id: i64) -> Result<i64, String> {
     db::count_available_warm_for_mesh(mesh_id)
         .map_err(|e| format!("pool count for mesh {} failed: {}", mesh_id, e))
 }
@@ -255,7 +257,7 @@ pub async fn get_mesh_pool_count(mesh_id: i64) -> Result<i64, String> {
 /// the generic `update_mesh_column` allowlist) so it takes a typed `bool` and
 /// the zero-rows-is-an-error contract is enforced in `db::set_mesh_sandbox`.
 #[tauri::command]
-pub async fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
+pub fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
     db::set_mesh_sandbox(mesh_id, sandbox)
         .map_err(|e| format!("failed to update sandbox: {}", e))
 }
@@ -278,7 +280,7 @@ pub async fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), Stri
 ///   the defaults (`0`) but no max, and any value the user picks is a
 ///   deliberate config choice.
 #[tauri::command]
-pub async fn update_mesh_loop_config(
+pub fn update_mesh_loop_config(
     mesh_id: i64,
     mode: crate::models::AutopilotMode,
     initial_prompt: Option<String>,
@@ -353,7 +355,7 @@ pub async fn update_mesh_loop_config(
 ///   and the poller applies its defaults (`buildmesh:run`, the normal
 ///   provider chain, `draft_pr`).
 #[tauri::command]
-pub async fn update_mesh_autopilot(
+pub fn update_mesh_autopilot(
     mesh_id: i64,
     enabled: bool,
     trigger_label: Option<String>,
@@ -472,7 +474,7 @@ fn format_reasons(reasons: &[crate::autopilot::compatibility::AutopilotCompatibi
 /// pass. Zero-rows guard surfaces a "mesh deleted between load & save" race as
 /// an error rather than a silent success.
 #[tauri::command]
-pub async fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(), String> {
+pub fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(), String> {
     // Issue #1152 — read-side check before the narrow write. Reject the
     // enable when the resolved Spawn Option is incompatible (same
     // verdict the Probe UI displays). Disabling is always allowed.
@@ -510,7 +512,7 @@ pub async fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(
 /// Idle / Stopped). No GitHub, no scheduler state — the loop is DB-driven, so
 /// status is a projection of the ledger + the enabled flag.
 #[tauri::command]
-pub async fn get_loop_status(
+pub fn get_loop_status(
     mesh_id: i64,
 ) -> Result<crate::services::autopilot::LoopStatusDto, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
@@ -540,7 +542,7 @@ pub async fn get_loop_status(
 /// existing fall-through (`"claude"` hardcoded fallback if every layer
 /// was empty).
 #[tauri::command]
-pub async fn get_autopilot_compatibility(
+pub fn get_autopilot_compatibility(
     mesh_id: i64,
 ) -> Result<crate::autopilot::compatibility::AutopilotCompatibility, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
@@ -555,7 +557,7 @@ pub async fn get_autopilot_compatibility(
 }
 
 #[tauri::command]
-pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
+pub fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
@@ -580,7 +582,7 @@ pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<
 }
 
 #[tauri::command]
-pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
+pub fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
@@ -627,7 +629,7 @@ pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
 /// not-found mesh — it returns 0 rows, which the IPC surface maps to
 /// an error).
 #[tauri::command]
-pub async fn upsert_mesh_harness_override(
+pub fn upsert_mesh_harness_override(
     mesh_id: i64,
     harness_id: String,
     value: HarnessConfigValue,
@@ -636,10 +638,6 @@ pub async fn upsert_mesh_harness_override(
     // blanks via `preferences::normalize_harness_default` so a save
     // carrying only whitespace is rejected as an empty map entry (the
     // helper then drops the entry to maintain the sparse invariant).
-    // The harness-id lookup is case-insensitive for built-ins (matches
-    // `preferences::is_known_harness_id`) and case-sensitive for stored
-    // custom profiles — matching the same keying the application-default
-    // map uses.
     let validated = preferences::validate_harness_default(&harness_id, value)?;
     let rows = db::upsert_mesh_harness_override(mesh_id, &harness_id, validated)
         .map_err(|e| format!("failed to upsert mesh harness override: {}", e))?;
@@ -660,7 +658,7 @@ pub async fn upsert_mesh_harness_override(
 /// no-op row "touch" — the row count is the source of truth for the
 /// "mesh not found" error.
 #[tauri::command]
-pub async fn remove_mesh_harness_override(
+pub fn remove_mesh_harness_override(
     mesh_id: i64,
     harness_id: String,
 ) -> Result<(), String> {
@@ -680,7 +678,7 @@ pub async fn remove_mesh_harness_override(
 /// the user can still configure application defaults per harness and
 /// the Mesh will inherit them cleanly after the reset.
 #[tauri::command]
-pub async fn clear_mesh_harness_overrides(mesh_id: i64) -> Result<(), String> {
+pub fn clear_mesh_harness_overrides(mesh_id: i64) -> Result<(), String> {
     let rows = db::clear_mesh_harness_overrides(mesh_id)
         .map_err(|e| format!("failed to clear mesh harness overrides: {}", e))?;
     if rows == 0 {

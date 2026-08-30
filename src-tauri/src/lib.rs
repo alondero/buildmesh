@@ -4,6 +4,7 @@
 pub mod agent;
 mod attention_autoclear;
 pub mod autopilot;
+mod blocking;
 mod commands;
 mod coordinator;
 mod db;

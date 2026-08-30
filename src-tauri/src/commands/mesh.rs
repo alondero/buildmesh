@@ -37,16 +37,19 @@ fn folder_display_name(folder_path: &tauri_plugin_dialog::FilePath, path: &str) 
 /// committing via `create_mesh`. Returns `None` when the user cancels.
 #[command]
 pub async fn pick_mesh_folder(app: tauri::AppHandle) -> Result<Option<PickedFolder>, String> {
-    tracing::debug!("pick_mesh_folder called");
-    let folder_path = app.dialog().file().blocking_pick_folder();
-    tracing::debug!("folder picker returned: {:?}", folder_path);
-    let Some(folder_path) = folder_path else {
-        return Ok(None);
-    };
-    let path = folder_path.to_string();
-    let name = folder_display_name(&folder_path, &path);
-    tracing::debug!("picked folder: {} ({})", path, name);
-    Ok(Some(PickedFolder { path, name }))
+    crate::commands::run_blocking("pick_mesh_folder", move || {
+        tracing::debug!("pick_mesh_folder called");
+        let folder_path = app.dialog().file().blocking_pick_folder();
+        tracing::debug!("folder picker returned: {:?}", folder_path);
+        let Some(folder_path) = folder_path else {
+            return Ok(None);
+        };
+        let path = folder_path.to_string();
+        let name = folder_display_name(&folder_path, &path);
+        tracing::debug!("picked folder: {} ({})", path, name);
+        Ok(Some(PickedFolder { path, name }))
+    })
+    .await
 }
 
 /// Add a mesh by opening a folder picker dialog. Retained for callers that
@@ -55,26 +58,29 @@ pub async fn pick_mesh_folder(app: tauri::AppHandle) -> Result<Option<PickedFold
 /// chosen in between.
 #[command]
 pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
-    tracing::debug!("add_mesh called");
-    let folder_path = app.dialog()
-        .file()
-        .blocking_pick_folder();
-    tracing::debug!("folder picker returned: {:?}", folder_path);
-    let folder_path = folder_path.ok_or("No folder selected")?;
+    crate::commands::run_blocking("add_mesh", move || {
+        tracing::debug!("add_mesh called");
+        let folder_path = app.dialog()
+            .file()
+            .blocking_pick_folder();
+        tracing::debug!("folder picker returned: {:?}", folder_path);
+        let folder_path = folder_path.ok_or("No folder selected")?;
 
-    let path = folder_path.to_string();
-    tracing::debug!("selected path: {}", path);
-    let name = folder_display_name(&folder_path, &path);
-    tracing::debug!("mesh name: {}", name);
+        let path = folder_path.to_string();
+        tracing::debug!("selected path: {}", path);
+        let name = folder_display_name(&folder_path, &path);
+        tracing::debug!("mesh name: {}", name);
 
-    let mesh = db::create_mesh(&name, &path).map_err(|e| {
-        tracing::error!("create_mesh failed: {}", e);
-        e.to_string()
-    })?;
-    if let Err(e) = inject_attention_hook(std::path::Path::new(&path)) {
-        tracing::warn!("add_mesh: attention hook injection failed: {e}");
-    }
-    Ok(mesh)
+        let mesh = db::create_mesh(&name, &path).map_err(|e| {
+            tracing::error!("create_mesh failed: {}", e);
+            e.to_string()
+        })?;
+        if let Err(e) = inject_attention_hook(std::path::Path::new(&path)) {
+            tracing::warn!("add_mesh: attention hook injection failed: {e}");
+        }
+        Ok(mesh)
+    })
+    .await
 }
 
 /// Create a new mesh, optionally with a user-picked accent `color` (a
@@ -86,15 +92,18 @@ pub async fn create_mesh(
     path: String,
     color: Option<String>,
 ) -> Result<Mesh, String> {
-    let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
-    if let Some(color) = color.as_deref().filter(|c| !c.is_empty()) {
-        db::set_mesh_color(mesh.id, Some(color)).map_err(|e| e.to_string())?;
-    }
-    if let Err(e) = inject_attention_hook(std::path::Path::new(&path)) {
-        tracing::warn!("create_mesh: attention hook injection failed: {e}");
-    }
-    // Re-read so the returned mesh carries the colour we just wrote.
-    db::get_mesh_by_id(mesh.id).map_err(|e| e.to_string())
+    crate::commands::run_blocking("create_mesh", move || {
+        let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
+        if let Some(color) = color.as_deref().filter(|c| !c.is_empty()) {
+            db::set_mesh_color(mesh.id, Some(color)).map_err(|e| e.to_string())?;
+        }
+        if let Err(e) = inject_attention_hook(std::path::Path::new(&path)) {
+            tracing::warn!("create_mesh: attention hook injection failed: {e}");
+        }
+        // Re-read so the returned mesh carries the colour we just wrote.
+        db::get_mesh_by_id(mesh.id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Set (or clear) a mesh's accent colour — used by the sidebar swatch's
@@ -102,24 +111,33 @@ pub async fn create_mesh(
 /// fallback. Errors if the mesh no longer exists (zero rows updated).
 #[command]
 pub async fn update_mesh_color(mesh_id: i64, color: Option<String>) -> Result<(), String> {
-    let normalized = color.as_deref().filter(|c| !c.is_empty());
-    let rows = db::set_mesh_color(mesh_id, normalized).map_err(|e| e.to_string())?;
-    if rows == 0 {
-        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
-    }
-    Ok(())
+    crate::commands::run_blocking("update_mesh_color", move || {
+        let normalized = color.as_deref().filter(|c| !c.is_empty());
+        let rows = db::set_mesh_color(mesh_id, normalized).map_err(|e| e.to_string())?;
+        if rows == 0 {
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Create a mesh for testing without dialog (uses temp directory)
 #[command]
 pub async fn create_test_mesh(name: String) -> Result<Mesh, String> {
-    services::mesh::create_test(&name).map_err(|e| e.to_string())
+    crate::commands::run_blocking("create_test_mesh", move || {
+        services::mesh::create_test(&name).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// List all meshes
 #[command]
 pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
-    db::list_meshes().map_err(|e| e.to_string())
+    crate::commands::run_blocking("list_meshes", || {
+        db::list_meshes().map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Delete a mesh and its nodes, including the on-disk pool directories
@@ -180,31 +198,35 @@ pub async fn delete_mesh(mesh_id: i64) -> Result<(), String> {
     // libgit2 `git worktree remove --force` calls (each one reopens the
     // dir as a Repository and walks the admin gitdir). Calling it inline
     // on the async runtime pins a Tokio worker thread for the full
-    // duration (#642.4); `spawn.rs` already wraps its libgit2 work in
-    // `tokio::task::spawn_blocking` (see `spawn_blocking(move ||
-    // provision_for_spawn(...))`), so the mesh-delete path should match
-    // that convention.
-    tokio::task::spawn_blocking(move || delete_mesh_inner(mesh_id))
-        .await
-        .map_err(|e| format!("delete_mesh task panicked: {}", e))?
+    // duration (#642.4 / #1380).
+    crate::commands::run_blocking("delete_mesh", move || delete_mesh_inner(mesh_id)).await
 }
 
 /// Update a mesh's layout preference
 #[command]
 pub async fn update_mesh_layout(mesh_id: i64, layout: String) -> Result<(), String> {
-    services::mesh::update_layout(mesh_id, &layout).map_err(|e| e.to_string())
+    crate::commands::run_blocking("update_mesh_layout", move || {
+        services::mesh::update_layout(mesh_id, &layout).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Update multiple meshes' sort positions in the sidebar
 #[command]
 pub async fn update_mesh_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
-    db::update_mesh_positions_batch(&updates).map_err(|e| e.to_string())
+    crate::commands::run_blocking("update_mesh_positions", move || {
+        db::update_mesh_positions_batch(&updates).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Get or create the root remote access token for the whole buildmesh instance
 #[command]
 pub async fn get_root_token() -> Result<String, String> {
-    db::get_or_create_root_token().map_err(|e| e.to_string())
+    crate::commands::run_blocking("get_root_token", || {
+        db::get_or_create_root_token().map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Get the local machine's LAN IP address.
@@ -263,11 +285,13 @@ pub async fn get_local_ip() -> Result<String, String> {
 ///   3. hardcoded `claude` fallback (post-#538 unified harness id)
 #[command]
 pub async fn get_default_provider(mesh_id: i64) -> Result<String, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("{}", e))?;
-    Ok(crate::preferences::resolve_default_provider(
-        None,
-        mesh.default_provider,
-        crate::preferences::default_provider(),
-    ))
+    crate::commands::run_blocking("get_default_provider", move || {
+        let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("{}", e))?;
+        Ok(crate::preferences::resolve_default_provider(
+            None,
+            mesh.default_provider,
+            crate::preferences::default_provider(),
+        ))
+    })
+    .await
 }

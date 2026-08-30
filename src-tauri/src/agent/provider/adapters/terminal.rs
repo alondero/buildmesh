@@ -66,6 +66,14 @@ impl AgentProvider for TerminalAdapter {
         false
     }
 
+    fn supports_extra_args(&self) -> bool {
+        // Issue #1358: Terminal opens the user's interactive shell with
+        // no LLM-driven recipe — splicing synthetic flags into a
+        // user's interactive command line would be a footgun. The
+        // resolver drops the layer-1 `extra_args` value at the mask.
+        false
+    }
+
     fn supports_prefill(&self) -> bool {
         false
     }

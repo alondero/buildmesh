@@ -330,6 +330,7 @@ pub trait AgentProvider: Send + Sync {
     /// `.codex/hooks.json`. Implementations must be idempotent and are called
     /// before every spawn. A failure is logged and the spawn proceeds (the
     /// agent still works, only the attention callback is lost).
+    /// Antigravity writes `.agents/hooks.json`.
     ///
     /// Provision attention hooks for one resolved runtime before its process
     /// starts. The resolved path and runtime context let adapters choose the
@@ -367,6 +368,18 @@ pub trait AgentProvider: Send + Sync {
 
     /// Whether `--model <name>` / `--effort <level>` args from mesh config apply.
     fn supports_model_override(&self) -> bool;
+
+    /// Whether the harness accepts verbatim CLI flag args from
+    /// configuration (issue #1358). The orchestrator's
+    /// `default_prepare` only forwards `ResolvedAgentConfig.extra_args`
+    /// through `adapter.extra_args_args(...)` when this returns `true`;
+    /// every interactive harness declares `true` (it owns its argv
+    /// shape and the launch helper just tokenises the user's string),
+    /// while the plain-shell Terminal adapter declares `false` (splicing
+    /// synthetic flags into a user's interactive shell session would be
+    /// a footgun). Mirrors the per-adapter opt-in pattern
+    /// `supports_model_override` already uses.
+    fn supports_extra_args(&self) -> bool;
 
     /// Whether `--prefill <text>` is accepted. Used by both spawn flows:
     /// `spawn_issue_agent` (URL + title hint, ~150 bytes; never the full body —
@@ -428,6 +441,34 @@ pub trait AgentProvider: Send + Sync {
     /// Args for prefill/prompt text.
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec!["--prefill".into(), text.into()]
+    }
+
+    /// Args appended verbatim from a circuit author's
+    /// `SpawnAgentNode.extra_args` (issue #1358). The orchestrator's
+    /// `default_prepare` only forwards `ResolvedAgentConfig.extra_args`
+    /// through this helper when the adapter's
+    /// `capabilities().supports_extra_args == true` — Terminal is the
+    /// standing example of a harness that opts out, so its invocation
+    /// never gets a synthetic flag splice.
+    ///
+    /// Default impl: tokenise with shell-style quoting so that
+    /// `--append "fix the bug"` keeps the quoted phrase as a single
+    /// argv element instead of splitting inside the quotes (a real
+    /// footgun with naive `split_whitespace` — flagged in PR #1362
+    /// code review). Backslashes and the canonical POSIX quotes are
+    /// honoured.
+    ///
+    /// Returns `Err(shell_words::Error)` on malformed input
+    /// (unclosed quote, dangling escape) **rather than panicking**:
+    /// the spawn worker thread must not abort on a user typo.
+    /// `default_prepare` logs the parse error and falls back to
+    /// whitespace tokenisation, which gracefully drops the malformed
+    /// token list rather than crashing the worker.
+    /// Per-adapter overrides can special-case (e.g. Codex may want a
+    /// `--` separator before raw tokens in a future slice) — the
+    /// seam is wide-open without breaking call sites.
+    fn extra_args_args(&self, raw: &str) -> Result<Vec<String>, shell_words::ParseError> {
+        shell_words::split(raw)
     }
 
     /// Args appended when the parent mesh has its `sandbox` toggle on.
@@ -520,6 +561,7 @@ pub trait AgentProvider: Send + Sync {
             produces_readable_transcript: self.produces_readable_transcript(),
             supports_model_override: self.supports_model_override(),
             supports_effort_override: !matches!(effort_control, EffortControlKind::None),
+            supports_extra_args: self.supports_extra_args(),
             supports_prefill: self.supports_prefill(),
             is_plain_terminal: self.is_plain_terminal(),
             effort_control,

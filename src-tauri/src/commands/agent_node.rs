@@ -39,33 +39,44 @@ pub async fn create_agent_node(
     // Tauri command surface has no PR-spawn plumbing; PR flows go via
     // `commands::pr::create_pr_node`. If we ever expose PR spawn here,
     // this is the call site to grow.
-    services::agent_node::create(
-        mesh_id,
-        &path,
-        &branch,
-        provider.as_deref(),
-        None, // source_issue
-        None, // source_pr — non-PR spawn (issue #450)
-        None, // source_pr_pinned_sha — non-PR spawn (issue #444)
-        use_worktree,
-        None, // name_override — Tauri surface doesn't accept one
-    )
+    // Offload: create locks SQLite, touches the filesystem, and may run
+    // git worktree operations (issue #1380).
+    crate::commands::run_blocking("create_agent_node", move || {
+        services::agent_node::create(
+            mesh_id,
+            &path,
+            &branch,
+            provider.as_deref(),
+            None, // source_issue
+            None, // source_pr — non-PR spawn (issue #450)
+            None, // source_pr_pinned_sha — non-PR spawn (issue #444)
+            use_worktree,
+            None, // name_override — Tauri surface doesn't accept one
+        )
         .map_err(|e| {
             tracing::error!("create_agent_node failed: {}", e);
             e.to_string()
         })
+    })
+    .await
 }
 
 /// List all agent nodes
 #[command]
 pub async fn list_agent_nodes() -> Result<Vec<AgentNode>, String> {
-    db::list_agent_nodes().map_err(|e| e.to_string())
+    crate::commands::run_blocking("list_agent_nodes", || {
+        db::list_agent_nodes().map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Get agent node by ID
 #[command]
 pub async fn get_agent_node(node_id: i64) -> Result<AgentNode, String> {
-    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    crate::commands::run_blocking("get_agent_node", move || {
+        db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Delete an agent node permanently.
@@ -80,8 +91,11 @@ pub async fn delete_agent_node(
     remove_worktree: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    services::agent_node::delete(node_id, remove_worktree.unwrap_or(false))
-        .map_err(|e| e.to_string())?;
+    crate::commands::run_blocking("delete_agent_node", move || {
+        services::agent_node::delete(node_id, remove_worktree.unwrap_or(false))
+            .map_err(|e| e.to_string())
+    })
+    .await?;
 
     drain_pending_removals(app);
     Ok(())
@@ -109,7 +123,10 @@ pub fn drain_pending_removals(app: tauri::AppHandle) {
 /// stays in sync with its optimistic update. Mirrors `update_mesh_positions`.
 #[command]
 pub async fn update_agent_node_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
-    db::update_agent_node_positions_batch(&updates).map_err(|e| e.to_string())
+    crate::commands::run_blocking("update_agent_node_positions", move || {
+        db::update_agent_node_positions_batch(&updates).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Check whether the node's worktree can be removed safely on close.
@@ -160,13 +177,17 @@ pub async fn rename_agent_node(
     // hits our race guard (which re-reads the node's name from the DB).
     crate::session_naming::cleanup(node_id);
 
-    db::update_agent_node_name(node_id, &trimmed).map_err(|e| e.to_string())?;
+    let name_for_emit = trimmed.clone();
+    crate::commands::run_blocking("rename_agent_node", move || {
+        db::update_agent_node_name(node_id, &trimmed).map_err(|e| e.to_string())
+    })
+    .await?;
 
     let _ = app.emit(
         "node-renamed",
         crate::session_naming::NodeRenamedPayload {
             node_id,
-            name: trimmed,
+            name: name_for_emit,
         },
     );
     Ok(())
@@ -186,12 +207,15 @@ pub async fn set_node_pinned(
     node_id: i64,
     pinned: bool,
 ) -> Result<AgentNode, String> {
-    let updated = db::set_agent_node_pinned(node_id, pinned)
-        .map_err(|e| e.to_string())?;
-    if updated == 0 {
-        return Err(format!("set_node_pinned: node {node_id} not found"));
-    }
-    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    crate::commands::run_blocking("set_node_pinned", move || {
+        let updated = db::set_agent_node_pinned(node_id, pinned)
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err(format!("set_node_pinned: node {node_id} not found"));
+        }
+        db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Flip an agent node's `is_pinned` flag and return the new state
@@ -202,10 +226,13 @@ pub async fn set_node_pinned(
 /// an error string (same contract as `set_node_pinned`).
 #[command]
 pub async fn toggle_node_pinned(node_id: i64) -> Result<AgentNode, String> {
-    db::toggle_agent_node_pinned(node_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("toggle_node_pinned: node {node_id} not found"))?;
-    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    crate::commands::run_blocking("toggle_node_pinned", move || {
+        db::toggle_agent_node_pinned(node_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("toggle_node_pinned: node {node_id} not found"))?;
+        db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Swap an agent node's Model Provider (issue #774 / #775). The
@@ -225,15 +252,90 @@ pub async fn toggle_node_pinned(node_id: i64) -> Result<AgentNode, String> {
 /// local store stays on the old provider). The existing
 /// `agent-spawned` event from `spawn_agent_inner` drives PTY /
 /// resize sync on the frontend.
+///
+/// # Architecture (issue #1380 review round-2 feedback 1)
+///
+/// The three sync helpers (`regenerate_load_blocking`,
+/// `regenerate_apply_blocking`, `regenerate_reload_blocking`) and the
+/// two unavoidable async hops (`kill_agent`, `spawn_with_intent`) live
+/// inline in this command — not behind a service-level async
+/// orchestrator — so the offload boundary (each
+/// `crate::commands::run_blocking` call) is explicit at the command
+/// boundary. The previous `services::agent_node::regenerate` async
+/// wrapper called the helpers directly on the Tokio runtime,
+/// defeating the whole point of the refactor; round-2 review caught
+/// the regression.
 #[command]
 pub async fn regenerate_agent_node(
     node_id: i64,
     new_provider_id: String,
     app: tauri::AppHandle,
 ) -> Result<crate::models::AgentNode, String> {
-    services::agent_node::regenerate(node_id, &new_provider_id, &app)
-        .await
-        .map_err(|e| e.to_string())
+    use crate::agent::spawn::{
+        spawn_with_intent, ResumeCause, SpawnIntent, SpawnRequest, TerminalSize,
+    };
+    use crate::services::agent_node::{
+        regenerate_apply_blocking, regenerate_load_blocking, regenerate_reload_blocking,
+    };
+
+    // 1–2. Load + validate off-thread. `regenerate_load_blocking` is
+    // pure sync; the command boundary wraps it. Returns owned data —
+    // no pre-clones needed beyond the `i64` (Copy). The closure maps
+    // the inner `AgentNodeError` to a `String` so `run_blocking`'s
+    // `Result<T, String>` signature matches; `T` is inferred as the
+    // helper's return tuple, so `.await?` unwraps once.
+    let (old_provider, skip_kill) = crate::commands::run_blocking(
+        "regenerate_agent_node_load",
+        move || regenerate_load_blocking(node_id).map_err(|e| e.to_string()),
+    )
+    .await?;
+
+    // 3. Kill the live process ONLY when one is registered. See
+    // `services::agent_node::regenerate` (the removed orchestrator)
+    // for the full rationale — `should_skip_kill_for_regenerate`
+    // keeps the Suspended case safe from `kill_agent_blocking`'s
+    // unconditional `on_idle` tail.
+    if !skip_kill {
+        let _ = crate::agent::process::kill_agent(node_id).await;
+    }
+
+    // 4–6. Update provider, reload, decide resume off-thread. The
+    // spawn pipeline reads `node.provider` for backend env resolution
+    // and preflight (spawn.rs:1399), so the write must land BEFORE
+    // `spawn_with_intent`.
+    let new_provider_for_apply = new_provider_id;
+    let resume = crate::commands::run_blocking(
+        "regenerate_agent_node_apply",
+        move || {
+            regenerate_apply_blocking(node_id, &old_provider, &new_provider_for_apply)
+                .map_err(|e| e.to_string())
+        },
+    )
+    .await?;
+
+    let intent = if resume {
+        SpawnIntent::Resume {
+            cause: ResumeCause::Explicit,
+        }
+    } else {
+        SpawnIntent::Fresh
+    };
+
+    spawn_with_intent(
+        &app,
+        SpawnRequest::new(node_id, intent, TerminalSize::default()),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 7. Final reload off-thread — returns the post-spawn row state
+    // (the spawn pipeline may have updated `cli_session_id` /
+    // `status_changed_at`).
+    Ok(crate::commands::run_blocking(
+        "regenerate_agent_node_reload",
+        move || regenerate_reload_blocking(node_id).map_err(|e| e.to_string()),
+    )
+    .await?)
 }
 
 #[cfg(test)]

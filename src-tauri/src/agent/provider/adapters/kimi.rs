@@ -82,6 +82,10 @@ impl AgentProvider for KimiAdapter {
         true
     }
 
+    fn supports_extra_args(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         false
     }
@@ -222,6 +226,7 @@ mod tests {
         let config = ResolvedAgentConfig {
             model: Some("kimi-k2".to_string()),
             effort: None,
+            extra_args: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,

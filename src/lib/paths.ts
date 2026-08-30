@@ -46,8 +46,9 @@ function normalizePath(p: string): string {
  *   - Mesh-level consumers (`useMeshHealth`, `useMeshGitStatus`,
  *     `useGitBranchStatus` in `MeshItem`) that subscribe with the mesh root
  *     and want to refresh on any worktree edit.
- *   - Node-level consumers (`useGitSummary`, `useOpenPr`, `AgentReviewPanel`,
- *     `CenterDiffOverlay`) that subscribe with the worktree path itself.
+ *   - Node-level consumers (`useGitSummary`, `useOpenPr`,
+ *     `AgentChangedFilesList`, `CenterDiffOverlay`) that subscribe with the
+ *     worktree path itself.
  *
  * The helper also normalizes for cross-platform match: forward/back-slashes
  * are collapsed, trailing separators stripped, and (on Windows) the

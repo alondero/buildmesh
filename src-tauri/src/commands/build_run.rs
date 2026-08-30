@@ -375,9 +375,12 @@ fn build_run_blocking(
 
 #[tauri::command]
 pub async fn get_mesh_row(mesh_id: i64) -> Result<MeshRow, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("failed to get mesh {}: {}", mesh_id, e))?;
-    Ok(MeshRow::from(&mesh))
+    crate::commands::run_blocking("get_mesh_row", move || {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("failed to get mesh {}: {}", mesh_id, e))?;
+        Ok(MeshRow::from(&mesh))
+    })
+    .await
 }
 
 /// Close a build/run terminal for a node

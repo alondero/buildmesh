@@ -90,6 +90,16 @@ impl AgentProvider for McodeAdapter {
         false
     }
 
+    fn supports_extra_args(&self) -> bool {
+        // Issue #1358: mcode's interactive TUI still accepts arbitrary
+        // CLI flags as positional args (it's a runtime, not a
+        // vocab-restricted CLI like Codex). The masking defaults are
+        // conservative on `supports_model_override` and
+        // `supports_effort_override` (mcode's TUI rejects them) but
+        // permissive on extras.
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         // mcode accepts `[prompt]` as a trailing positional on the
         // interactive TUI (and on `exec`). Override below emits the
@@ -267,6 +277,7 @@ mod tests {
         let config = ResolvedAgentConfig {
             model: Some("minimax/MiniMax-Text-01".to_string()),
             effort: None,
+            extra_args: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Macos,
@@ -292,6 +303,7 @@ mod tests {
         let config = ResolvedAgentConfig {
             model: Some("minimax/MiniMax-Text-01".to_string()),
             effort: None,
+            extra_args: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Windows,

@@ -56,6 +56,10 @@ impl AgentProvider for AnthropicAdapter {
         true
     }
 
+    fn supports_extra_args(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         true
     }

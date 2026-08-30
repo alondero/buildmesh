@@ -158,8 +158,8 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   // burst of GIT_CHANGED events) can't overwrite the newest result.
   const reqId = useRef(0);
 
-  // Issue #1181 — see AgentReviewPanel for the full rationale. Per-file
-  // diffs also go through `run_blocking`, and rapid file switching in
+  // Issue #1181 — per-file diffs also go through `run_blocking`, and rapid
+  // file switching in
   // the overlay + `git-changed` bursts can pile up the same way the
   // review panel does. Owning an AbortController + matching the
   // existing reqId pattern keeps the two consumers symmetric.
@@ -216,15 +216,15 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
 
   useEffect(() => {
     fetchDiff();
-    // Same cleanup as AgentReviewPanel — abort pending fetches on
-    // unmount or dep change so a stale `.then` can't setState.
+    // Abort pending fetches on unmount or dep change so a stale `.then` can't
+    // setState.
     return () => {
       abortRef.current?.abort();
     };
   }, [fetchDiff]);
 
   // Live refresh: the agent keeps editing while the overlay is open, so re-pull
-  // when the watcher reports a change in this worktree. Mirrors AgentReviewPanel.
+  // when the watcher reports a change in this worktree.
   // Issue #1165: same 2 s freshness window — a burst of `GIT_CHANGED` events
   // during a heavy edit session collapses to one trailing refetch instead of
   // one per emit (each refetch hits the libgit2 walk + 3× syntect pass).

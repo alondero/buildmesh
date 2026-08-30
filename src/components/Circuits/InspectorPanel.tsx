@@ -2,23 +2,133 @@
  * InspectorPanel — the editor's right slide-over (issue #1209).
  *
  * One form per node kind for the fields this slice edits (the
- * blueprint stays canonical in Rust). v2 harness/target fields on
- * Spawn/Inject/SetNodeStatus land in later Circuits v2 slices. Text
- * fields that accept circuit context use `MustacheTextarea` so `{{`
- * opens autocomplete.
+ * blueprint stays canonical in Rust). Text fields that accept circuit
+ * context use `MustacheTextarea` so `{{` opens autocomplete.
+ *
+ * Issue #1358 (Circuits v2 slice 3 — Harness Integration) extends
+ * `SpawnAgentNode` with a Provider selector + capability-gated
+ * Model / Effort / Extra-Args overrides. The Inspector reads the
+ * capability contract from a hardcoded `harnessCapabilities.ts`
+ * table; the orchestrator applies the same contract via
+ * `resolve_agent_config` so a user-authored override that the new
+ * harness can't honour is dropped at spawn time. Issue #1359
+ * (Circuits v2 slice 4 — Canvas UX) layers a Context Variables
+ * reference drawer + `target_node_id` dropdowns on top.
+ *
+ *   1. `graph` prop so the panel can compute upstream reachability for
+ *      the selected node and pass it into the textarea autocomplete
+ *      (grouped, reachability-aware chips).
+ *   2. A Context Variables reference drawer at the bottom of every
+ *      template-bearing panel — shows every reachable namespace, the
+ *      sample value the runtime will produce, and which ones would
+ *      resolve empty in this branch.
+ *   3. A `target_node_id` dropdown for `inject_pty` and
+ *      `set_node_status` listing every upstream `spawn_agent_node`
+ *      (the stepper dispatches the effect at the chosen agent).
+ *   4. Provider / Model / Effort / Extra-Args controls for
+ *      `SpawnAgentNode` (issue #1358). Switching the provider
+ *      sanitises the other three fields so a stale value never
+ *      serialises into a circuit the new harness can't honour.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
 import type { GithubActionKind } from '../../types/generated/GithubActionKind';
 import type { SessionStatusKind } from '../../types/generated/SessionStatusKind';
 import { MustacheTextarea } from './MustacheTextarea';
-import { categoryAccent, categoryOf, configSummary, specFor } from './circuitGraphModel';
+import {
+  MUSTACHE_GROUPS,
+  MUSTACHE_PATHS,
+  categoryAccent,
+  categoryOf,
+  configSummary,
+  getReachableContext,
+  groupForPath,
+  isReachablePath,
+  sampleValueForPath,
+  specFor,
+  type ReachableContext,
+} from './circuitGraphModel';
+import {
+  effortAllowedFor,
+  getCapabilitiesFor,
+  HARNESS_LABEL,
+  type InspectorHarnessId,
+} from './harnessCapabilities';
+
+/**
+ * The five harness ids offered in the Inspector's provider dropdown.
+ * Mirrors the same surface that the Rust `BUILTIN_HARNESS_IDS`
+ * list provides; the dropdown order is stable so the user's
+ * selection persists across re-renders.
+ */
+const HARNESS_OPTIONS: { value: InspectorHarnessId; label: string }[] = [
+  { value: 'anthropic', label: HARNESS_LABEL.anthropic },
+  { value: 'codex', label: HARNESS_LABEL.codex },
+  { value: 'agy', label: HARNESS_LABEL.agy },
+  { value: 'opencode', label: HARNESS_LABEL.opencode },
+  { value: 'grok', label: HARNESS_LABEL.grok },
+];
 
 interface InspectorPanelProps {
   node: CircuitNode | null;
   onChange: (kind: CircuitNodeKind) => void;
+  /** Full blueprint AST — required for reachability. Optional so the
+   *  unit tests can mount the panel without a graph and ad-hoc reuse
+   *  (e.g. embedding inside another form) still works. */
+  graph?: CircuitGraph;
+}
+
+/**
+ * Compute the harness id string the Inspector uses to key into
+ * `harnessCapabilities.ts`. Mirrors `Provider::from_db_str`'s default
+ * fallback (`""` and unknown ids → `"anthropic"`) so a user-authored
+ * `provider` that hasn't been normalised by the backend still resolves
+ * to Anthropic's descriptor. `null` ⇒ no harness selected (use the
+ * mesh's default at spawn).
+ */
+function harnessIdFromProvider(provider: string | null | undefined): InspectorHarnessId | null {
+  if (provider == null) return null;
+  // Issue #1362 review: the backend's `non_empty_trim` collapses
+  // whitespace-only and empty `provider` strings to `None` (cascade
+  // falls through to the mesh's default autopilot). Mirror that
+  // semantic here so an empty / whitespace / unknown id never gets
+  // rendered as if the user had picked a harness — keep "no provider
+  // selected" honest in the UI.
+  const normalised = provider.trim().toLowerCase();
+  if (normalised === '') return null;
+  if (normalised === 'anthropic' || normalised === 'claude_code') {
+    // Inspector's selector keys on `anthropic` to match the backend id.
+    return 'anthropic';
+  }
+  if (
+    normalised === 'codex' ||
+    normalised === 'agy' ||
+    normalised === 'antigravity' ||
+    normalised === 'opencode' ||
+    normalised === 'grok'
+  ) {
+    return normalised === 'antigravity' ? 'agy' : (normalised as InspectorHarnessId);
+  }
+  // Unknown id: emit as a synthetic entry. We don't have a stable
+  // capability descriptor for it (matches the backend's
+  // `Provider::from_db_str` fallback to Anthropic, but the inspector
+  // renders the resolved id so the user sees what they authored).
+  // Return null to fall back to "no overrides".
+  return null;
+}
+
+/**
+ * Inverse of `harnessIdFromProvider` for the wire payload — keep the
+ * user's id canonical. The backend's `Provider::from_db_str` accepts
+ * both `codex` and `agy` (so does the inspector dropdown), so this
+ * just maps back to the wire shape the AST serialises.
+ */
+function providerStringFromHarnessId(id: InspectorHarnessId): string {
+  if (id === 'agy') return 'agy';
+  return id;
 }
 
 const inputClass =
@@ -74,8 +184,173 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
-  if (node === null) {
+/** Dropdown for `inject_pty` / `set_node_status` to pick an upstream
+ *  `spawn_agent_node` as the effect's target. The empty option lets
+ *  the user fall back to the stepper's "nearest upstream spawn"
+ *  runtime resolution; the explicit pick is what the stepper honours
+ *  when set. */
+function TargetNodeSelect({
+  value,
+  upstreamSpawns,
+  onChange,
+}: {
+  value: string | null;
+  upstreamSpawns: string[];
+  onChange: (targetNodeId: string | null) => void;
+}) {
+  return (
+    <select
+      value={value ?? ''}
+      aria-label="Target agent node"
+      data-testid="inspector-target-node"
+      onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
+      className={inputClass}
+    >
+      <option value="">
+        {upstreamSpawns.length === 0
+          ? '(no upstream spawn — will resolve at runtime)'
+          : '(nearest upstream spawn at runtime)'}
+      </option>
+      {upstreamSpawns.map((id) => (
+        <option key={id} value={id}>
+          {id}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** One row of the context reference drawer. Renders the canonical path
+ *  alongside the sample value the runtime will resolve; rows whose
+ *  namespace isn't reachable in this branch get an "empty" badge so
+ *  the user can see why their template would interpolate blank. */
+function ContextReferenceRow({
+  path,
+  reachable,
+}: {
+  path: string;
+  reachable: ReachableContext | undefined;
+}) {
+  const live = isReachablePath(path, reachable);
+  return (
+    <li
+      data-testid={`context-reference-${path}`}
+      data-reachable={live ? 'true' : 'false'}
+      className="flex items-center gap-2 py-0.5"
+    >
+      <code className={`font-mono text-2xs ${live ? 'text-text-secondary' : 'text-text-muted/60'}`}>
+        {path}
+      </code>
+      <span className={`font-mono text-2xs italic ${live ? 'text-text-muted' : 'text-text-muted/50'}`}>
+        {sampleValueForPath(path)}
+      </span>
+      {!live && (
+        <span
+          aria-label="unreachable in this branch"
+          className="ml-auto text-2xs uppercase tracking-wide text-status-warning/80"
+        >
+          empty
+        </span>
+      )}
+    </li>
+  );
+}
+
+/** Drawer that lists every reachable context variable for the selected
+ *  node. Hidden when the node has no template payload (triggers,
+ *  gates, joins) so it never shows noise the user can't act on. */
+function ContextReferenceDrawer({
+  reachable,
+  hasTemplate,
+}: {
+  reachable: ReachableContext | undefined;
+  hasTemplate: boolean;
+}) {
+  if (!hasTemplate) return null;
+
+  // Build the row list: static MUSTACHE_PATHS plus dynamic spawn-output
+  // chips (`node.<id>.output`) for every reachable spawn upstream.
+  const spawnOutputPaths = useMemo(
+    () => (reachable?.nodeOutputIds ?? []).map((id) => `node.${id}.output`),
+    [reachable]
+  );
+  const allPaths = useMemo(
+    () => [...MUSTACHE_PATHS, ...spawnOutputPaths],
+    [spawnOutputPaths]
+  );
+  const grouped = useMemo(() => {
+    const buckets = new Map<string, string[]>();
+    for (const spec of MUSTACHE_GROUPS) buckets.set(spec.namespace, []);
+    for (const path of allPaths) {
+      // groupForPath routes `node.<id>.output` into the spawn_output
+      // bucket so spawn-output chips end up under the Node Outputs
+      // header, not under "node.id" (issue #1359 round-3 review).
+      const ns = groupForPath(path);
+      const list = buckets.get(ns);
+      if (list !== undefined) list.push(path);
+    }
+    return MUSTACHE_GROUPS.flatMap((spec) => {
+      const paths = buckets.get(spec.namespace) ?? [];
+      if (paths.length === 0) return [];
+      return [{ spec, paths }];
+    });
+  }, [allPaths]);
+
+  return (
+    <section
+      data-testid="inspector-context-reference"
+      className="mt-4 border-t border-border-subtle pt-3"
+    >
+      <header className="flex items-center justify-between mb-1">
+        <span className="text-2xs uppercase tracking-wide text-text-muted">
+          Context variables
+        </span>
+        {reachable === undefined && (
+          <span className="text-2xs text-text-muted/70" data-testid="context-reference-no-graph">
+            no graph
+          </span>
+        )}
+      </header>
+      <p className="text-2xs text-text-muted mb-2">
+        Variables this template can interpolate at runtime.{" "}
+        <span className="text-status-warning/80">empty</span> means a producer upstream is missing.
+      </p>
+      {grouped.map(({ spec, paths }) => (
+        <div key={spec.namespace} className="mb-2" data-testid={`context-group-${spec.namespace}`}>
+          <div className="text-2xs font-semibold text-text-secondary">{spec.label}</div>
+          <ul className="pl-1">
+            {paths.map((path) => (
+              <ContextReferenceRow key={path} path={path} reachable={reachable} />
+            ))}
+          </ul>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+export function InspectorPanel(props: InspectorPanelProps) {
+  // Rules of Hooks: ALL hooks must run on every render, in the same
+  // order. Compute reachability up front so the null-empty-state
+  // branch doesn't change the hook count (which would crash React
+  // with "Rendered more hooks than during the previous render" the
+  // moment the user selects their first node after opening the
+  // editor with nothing selected — issue #1359 review feedback).
+  //
+  // Dep on `props.node?.id` (not `props.node`) so the BFS only re-
+  // walks when the selected node identity changes — not on every
+  // parent re-render where the node object reference shifts but the
+  // id is identical (review feedback round 2: a `props.node` dep
+  // busts the memo on every keystroke because the canvas editor's
+  // working copy mints a fresh React Flow node each render).
+  const reachable = useMemo(
+    () => (props.graph !== undefined && props.node !== null
+      ? getReachableContext(props.node.id, props.graph)
+      : undefined),
+    [props.graph, props.node?.id]
+  );
+
+  if (props.node === null) {
     return (
       <aside
         data-testid="circuit-inspector"
@@ -86,8 +361,21 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
     );
   }
 
+  const { node, onChange } = props;
   const kind = node.type;
   const accent = categoryAccent(categoryOf(kind));
+  // Upstream spawn nodes for the target dropdown — derived from the
+  // same reachability memo, so no second BFS walk.
+  const upstreamSpawns: string[] = reachable?.nodeOutputIds ?? [];
+
+  // Whether the kind surfaces any template field (so the context
+  // drawer is worth rendering). Joins / triggers / pure gates don't
+  // interpolate placeholders; only action kinds do.
+  const hasTemplate =
+    kind.type === 'spawn_agent_node' ||
+    kind.type === 'inject_pty' ||
+    kind.type === 'github_action' ||
+    kind.type === 'notify';
 
   return (
     <aside
@@ -103,38 +391,29 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
       </div>
 
       {kind.type === 'spawn_agent_node' && (
+        <SpawnAgentNodeFields kind={kind} onChange={onChange} reachable={reachable} />
+      )}
+
+      {kind.type === 'inject_pty' && (
         <>
-          <Field label="Agent name">
-            <input
-              value={kind.name ?? ''}
-              aria-label="Agent name"
-              data-testid="inspector-agent-name"
-              onChange={(e) => onChange({ ...kind, name: e.target.value || null })}
-              className={inputClass}
+          <Field label="Target agent">
+            <TargetNodeSelect
+              value={kind.target_node_id}
+              upstreamSpawns={upstreamSpawns}
+              onChange={(target_node_id) => onChange({ ...kind, target_node_id })}
             />
           </Field>
-          <Field label="Initial prompt (via Inject PTY)">
+          <Field label="PTY prompt">
             <MustacheTextarea
               value={kind.prompt}
               onChange={(prompt) => onChange({ ...kind, prompt })}
               rows={5}
-              ariaLabel="Spawn prompt"
+              ariaLabel="Inject PTY prompt"
               testId="inspector-prompt"
+              reachable={reachable}
             />
           </Field>
         </>
-      )}
-
-      {kind.type === 'inject_pty' && (
-        <Field label="PTY prompt">
-          <MustacheTextarea
-            value={kind.prompt}
-            onChange={(prompt) => onChange({ ...kind, prompt })}
-            rows={5}
-            ariaLabel="Inject PTY prompt"
-            testId="inspector-prompt"
-          />
-        </Field>
       )}
 
       {kind.type === 'notify' && (
@@ -145,6 +424,7 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
             rows={4}
             ariaLabel="Notify message"
             testId="inspector-message"
+            reachable={reachable}
           />
         </Field>
       )}
@@ -185,6 +465,7 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
                 rows={4}
                 ariaLabel="GitHub comment"
                 testId="inspector-comment"
+                reachable={reachable}
               />
             </Field>
           )}
@@ -192,19 +473,28 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
       )}
 
       {kind.type === 'set_node_status' && (
-        <Field label="Status">
-          <select
-            value={kind.status}
-            aria-label="Node status"
-            data-testid="inspector-status-select"
-            onChange={(e) => onChange({ ...kind, status: e.target.value as SessionStatusKind })}
-            className={inputClass}
-          >
-            <option value="running">running</option>
-            <option value="idle">idle</option>
-            <option value="completed">completed</option>
-          </select>
-        </Field>
+        <>
+          <Field label="Target agent">
+            <TargetNodeSelect
+              value={kind.target_node_id}
+              upstreamSpawns={upstreamSpawns}
+              onChange={(target_node_id) => onChange({ ...kind, target_node_id })}
+            />
+          </Field>
+          <Field label="Status">
+            <select
+              value={kind.status}
+              aria-label="Node status"
+              data-testid="inspector-status-select"
+              onChange={(e) => onChange({ ...kind, status: e.target.value as SessionStatusKind })}
+              className={inputClass}
+            >
+              <option value="running">running</option>
+              <option value="idle">idle</option>
+              <option value="completed">completed</option>
+            </select>
+          </Field>
+        </>
       )}
 
       {kind.type === 'interval' && (
@@ -274,6 +564,148 @@ export function InspectorPanel({ node, onChange }: InspectorPanelProps) {
       {['manual', 'llm_turn_classifier', 'all_completed', 'any_completed'].includes(kind.type) && (
         <p className="text-xs text-text-secondary">{configSummary(kind)}</p>
       )}
+
+      <ContextReferenceDrawer reachable={reachable} hasTemplate={hasTemplate} />
     </aside>
+  );
+}
+/**
+ * The SpawnAgentNode inspector (issue #1358). Renders the existing
+ * agent-name / prompt fields plus the four capability-gated v2
+ * overrides: provider, model, effort, extra-args. When the user
+ * hasn't selected a provider (`kind.provider == null`) we hide the
+ * model / effort / extra-args inputs entirely — the resolver falls
+ * through to the mesh / application defaults in that mode, and
+ * showing the inputs would suggest an actionable control the spec
+ * doesn't honour.
+ */
+function SpawnAgentNodeFields({
+  kind,
+  onChange,
+  reachable,
+}: {
+  kind: Extract<CircuitNodeKind, { type: 'spawn_agent_node' }>;
+  onChange: (kind: CircuitNodeKind) => void;
+  reachable: ReachableContext | undefined;
+}) {
+  const harnessId = harnessIdFromProvider(kind.provider);
+  const caps = getCapabilitiesFor(harnessId);
+
+  return (
+    <>
+      <Field label="Agent name">
+        <input
+          value={kind.name ?? ''}
+          aria-label="Agent name"
+          data-testid="inspector-agent-name"
+          onChange={(e) => onChange({ ...kind, name: e.target.value || null })}
+          className={inputClass}
+        />
+      </Field>
+      <Field label="Initial prompt (via Inject PTY)">
+        <MustacheTextarea
+          value={kind.prompt}
+          onChange={(prompt) => onChange({ ...kind, prompt })}
+          rows={5}
+          ariaLabel="Spawn prompt"
+          testId="inspector-prompt"
+          reachable={reachable}
+        />
+      </Field>
+
+      <Field label="Provider (default = mesh autopilot)">
+        <select
+          value={harnessId ?? ''}
+          aria-label="Provider"
+          data-testid="inspector-provider-select"
+          onChange={(e) => {
+            const v = e.target.value;
+            // Issue #1362 review (PR #1362): when the user switches
+            // provider, the previously-authored `model` / `effort` /
+            // `extra_args` may no longer be honoured by the new
+            // harness's capability contract. Clear them so the AST
+            // doesn't serialise dangling configuration that the
+            // resolver would silently drop at spawn time — the next
+            // edit re-populates them. The `provider` itself is the
+            // one field that legitimately persists across switches.
+            const next: Partial<typeof kind> =
+              v === ''
+                ? { provider: null }
+                : { provider: providerStringFromHarnessId(v as InspectorHarnessId) };
+            onChange({
+              ...kind,
+              ...next,
+              model: null,
+              effort: null,
+              extra_args: null,
+            });
+          }}
+          className={inputClass}
+        >
+          <option value="">Default (mesh autopilot)</option>
+          {HARNESS_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      {/* Capability-gated overrides — rendered only when a harness is
+          selected AND the descriptor advertises the control. Capability
+          contract is the authoritative source — see
+          `src-tauri/src/agent/capabilities.rs::inventory_matches_research_matrix`. */}
+      {caps?.supports_model_override && (
+        <Field label="Model override">
+          <input
+            value={kind.model ?? ''}
+            aria-label="Model override"
+            data-testid="inspector-model-input"
+            placeholder="e.g. opus-4-1"
+            onChange={(e) => onChange({ ...kind, model: e.target.value || null })}
+            className={inputClass}
+          />
+        </Field>
+      )}
+
+      {caps && caps.effort_control.kind !== 'none' && (
+        <Field label="Reasoning effort">
+          <select
+            value={kind.effort ?? ''}
+            aria-label="Effort override"
+            data-testid="inspector-effort-select"
+            onChange={(e) => onChange({ ...kind, effort: e.target.value || null })}
+            className={inputClass}
+          >
+            <option value="">— inherit default —</option>
+            {effortAllowedFor(caps).map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+
+      {caps?.supports_extra_args && (
+        <Field label="Extra CLI args (whitespace-separated)">
+          <input
+            value={kind.extra_args ?? ''}
+            aria-label="Extra CLI args"
+            data-testid="inspector-extra-args-input"
+            placeholder="e.g. --dangerously-skip-permissions"
+            onChange={(e) => onChange({ ...kind, extra_args: e.target.value || null })}
+            className={`${inputClass} font-mono`}
+          />
+        </Field>
+      )}
+
+      {!caps && harnessId == null && (
+        <p className="text-2xs text-text-muted">
+          No provider override selected — model, effort, and extra args
+          fall through to the mesh / application defaults at spawn.
+        </p>
+      )}
+    </>
   );
 }

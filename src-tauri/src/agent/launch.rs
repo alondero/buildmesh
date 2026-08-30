@@ -193,6 +193,37 @@ pub fn default_prepare(
             recipe.base_args.extend(adapter.effort_args(effort));
         }
     }
+    // Issue #1358: forward the per-step `extra_args` verbatim through
+    // the adapter's tokenise helper. Mirrors the model / effort
+    // branches above — capability-masked at the resolver (no
+    // harness-side check needed here) and only forwarded when the
+    // capability descriptor advertises support. Placed between
+    // `effort_args` and `sandbox_args` so the semantic-then-positional
+    // layer order survives: model / effort / extras are user-supplied,
+    // sandbox is mesh-driven, prefill is the trailing positional.
+    if capabilities.supports_extra_args {
+        if let Some(extra) = input.config.extra_args.as_deref().filter(|s| !s.is_empty()) {
+            // Gracefully degrade rather than crashing the spawn worker
+            // thread on a user typo (unclosed quote, dangling escape).
+            // PR #1362 round 2 review: a `panic!` here is a fatal runtime
+            // failure for a circuit-author-authored value. We log and
+            // fall back to whitespace splitting so the spawn still
+            // proceeds (the user's other args land correctly; only the
+            // malformed token group is dropped).
+            match adapter.extra_args_args(extra) {
+                Ok(args) => recipe.base_args.extend(args),
+                Err(e) => {
+                    tracing::warn!(
+                        "extra_args tokenisation failed ({}); falling back to whitespace split for {:?}",
+                        e, extra
+                    );
+                    recipe
+                        .base_args
+                        .extend(extra.split_whitespace().map(String::from));
+                }
+            }
+        }
+    }
 
     // Issue #1287 — adapter-level sandbox flag. When the parent mesh
     // has its `sandbox` toggle on, append the adapter's declared
@@ -398,6 +429,169 @@ mod tests {
             .position(|a| a == "--model")
             .expect("forwarded model must be present in base_args");
         assert_eq!(prepared.recipe.base_args[i + 1], "claude-sonnet-4-5");
+    }
+
+    /// `extra_args` (issue #1358) must be forwarded verbatim through
+    /// the adapter's `extra_args_args`. The capability mask has already
+    /// run — the descriptor reports `supports_extra_args = true` for
+    /// Anthropic — so a `Some(raw)` value here is safe to forward
+    /// without a re-mask. Whitespace tokenisation is the default impl,
+    /// so a multi-flag string becomes multiple argv entries.
+    #[test]
+    fn default_prepare_forwards_extra_args() {
+        let adapter = &crate::agent::provider::adapters::ANTHROPIC as &dyn AgentProvider;
+        let sentinel_a = "--bm-test-extra-a";
+        let sentinel_b = "--bm-test-extra-b";
+        let config = ResolvedAgentConfig {
+            extra_args: Some(format!("{sentinel_a} {sentinel_b}")),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        let base = &prepared.recipe.base_args;
+        // Find first sentinel and assert the second follows it (so the
+        // whitespace tokenisation emitted both as separate argv entries).
+        let i = base
+            .iter()
+            .position(|a| a == sentinel_a)
+            .expect("forwarded extra_args must include the literal flag");
+        assert_eq!(
+            base[i + 1],
+            sentinel_b,
+            "whitespace tokenisation emits each token as its own argv element"
+        );
+    }
+
+    /// Quote-aware tokenisation (issue #1362 code review): a quoted
+    /// argv element must NOT be split on the embedded whitespace. A
+    /// user-supplied `--append "fix the bug"` keeps the quoted phrase
+    /// as a single argv entry, exactly as the shell would. Without
+    /// the seam, naive `split_whitespace` would chop the value
+    /// silently and the harness would see `--append fix the bug`
+    /// (three argv elements) which has very different semantics on
+    /// most CLIs.
+    #[test]
+    fn extra_args_tokenisation_preserves_quoted_phrases() {
+        let adapter = &crate::agent::provider::adapters::ANTHROPIC as &dyn AgentProvider;
+        let config = ResolvedAgentConfig {
+            extra_args: Some(r#"--append "fix the bug" --verbose"#.to_string()),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        let i = prepared
+            .recipe
+            .base_args
+            .iter()
+            .position(|a| a == "--append")
+            .expect("--append must be tokenised as a separate argv element");
+        assert_eq!(
+            &prepared.recipe.base_args[i + 1],
+            "fix the bug",
+            "quoted phrase must remain a single argv element after shell-style tokenisation"
+        );
+        assert_eq!(
+            &prepared.recipe.base_args[i + 2],
+            "--verbose",
+            "trailing unquoted token must not be glued to the prior quoted phrase"
+        );
+    }
+
+    /// Terminal's `supports_extra_args = false` must drop the
+    /// `extra_args` value at the capability gate (issue #1358). Without
+    /// this pin a future regression that forgot the gate would splice
+    /// the user's flags into `powershell.exe` — a footgun.
+    #[test]
+    fn default_prepare_drops_extra_args_for_terminal() {
+        let adapter = &crate::agent::provider::adapters::TERMINAL as &dyn AgentProvider;
+        let config = ResolvedAgentConfig {
+            extra_args: Some("--anything --the-user-typed".to_string()),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        assert!(
+            !prepared.recipe.base_args.contains(&"--anything".to_string())
+                && !prepared
+                    .recipe
+                    .base_args
+                    .contains(&"--the-user-typed".to_string()),
+            "Terminal drops extra_args at the capability mask; got {:?}",
+            prepared.recipe.base_args
+        );
+    }
+
+    /// **PR #1362 round 2 review (panic-on-typo fix):** A malformed
+    /// shell-syntax input (unclosed quote, dangling escape) MUST NOT
+    /// crash the spawn worker thread. The fallback path:
+    /// 1. Returns `Err` from `extra_args_args(raw)` (not `panic!`)
+    /// 2. `default_prepare` logs a warning at `tracing::warn!`
+    /// 3. Falls back to whitespace splitting so the user's other
+    ///    args still reach the harness — only the malformed token
+    ///    group is dropped, NOT the entire spawn.
+    ///
+    /// CRITICAL: this test catches a regression where a `panic!`
+    /// would turn every user typo into a fatal worker crash.
+    #[test]
+    fn extra_args_malformed_shell_syntax_does_not_panic() {
+        let adapter = &crate::agent::provider::adapters::ANTHROPIC as &dyn AgentProvider;
+        // Unclosed quote — shell_words::split returns Err(MismatchedQuotes).
+        let config = ResolvedAgentConfig {
+            extra_args: Some(r#"--message "Let's test this or foo\"#.to_string()),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        // The test exists to PROVE no panic. If a future refactor
+        // reintroduces `panic!` or `.unwrap()` on the parse error,
+        // this test traps the panic (catch_unwind) and reports it
+        // instead of taking down the test runner.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            default_prepare(adapter, input)
+        }));
+        let prepared = outcome.expect(
+            "extra_args tokenisation MUST NOT panic on malformed input — \
+             PR #1362 round 2 review fix: log + fall back to whitespace, never panic.",
+        );
+        // Whitespace-split fallback keeps the well-formed tokens.
+        // `--message` tokenises as a separate argv element (it's
+        // unquoted in the fallback path).
+        assert!(
+            prepared.recipe.base_args.contains(&"--message".to_string()),
+            "fallback must still forward the well-formed `--message` token; got {:?}",
+            prepared.recipe.base_args
+        );
+        // The malformed quote's contents drop with the quote — that's
+        // the expected graceful degradation. The critical property is
+        // that the spawn *proceeds* (no panic) and other valid args
+        // survive.
     }
 
     /// Effort config must be forwarded through the adapter's

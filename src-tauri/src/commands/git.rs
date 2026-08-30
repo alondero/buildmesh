@@ -625,10 +625,9 @@ pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, Strin
 /// sidebar `!` badge clears and the file explorer refreshes.
 ///
 /// Thin async wrapper; see [`get_git_branch_status`] for the offload
-/// rationale. The mesh row is resolved ONCE up front and the derived
-/// `host_path` + `local_base` are passed into the blocking core, so the
-/// core doesn't pay for a second `db::get_mesh_by_id` (or `to_host_path`
-/// call). The emit payload after `run_blocking` reuses the same values.
+/// rationale. The mesh row is resolved once inside the blocking closure
+/// and the derived `host_path` is returned for the post-await emit, so
+/// we don't pay a second `db::get_mesh_by_id` (or `to_host_path`) call.
 ///
 /// Issue #1232 hardening: an adversarial `base_ref` (e.g. `-b`,
 /// `--upload-pack=evil`) is rejected by [`health::parse_local_branch`]
@@ -639,24 +638,23 @@ pub async fn restore_mesh_to_base(
     mesh_id: i64,
     app: tauri::AppHandle,
 ) -> Result<RestoreResult, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    let host_path = to_host_path(&mesh.path);
-    let local_base = health::parse_local_branch(&mesh.base_ref).ok_or_else(|| {
-        if mesh.base_ref.starts_with('-') {
-            format!(
-                "invalid base ref '{}': must not start with '-'",
-                mesh.base_ref
-            )
-        } else {
-            format!("invalid base ref '{}'", mesh.base_ref)
-        }
-    })?;
-
-    let host_path_for_emit = host_path.clone();
-    let result =
+    let (result, host_path_for_emit) =
         crate::commands::run_blocking("restore_mesh_to_base", move || {
-            restore_mesh_to_base_blocking(host_path, local_base)
+            let mesh = db::get_mesh_by_id(mesh_id)
+                .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+            let host_path = to_host_path(&mesh.path);
+            let local_base = health::parse_local_branch(&mesh.base_ref).ok_or_else(|| {
+                if mesh.base_ref.starts_with('-') {
+                    format!(
+                        "invalid base ref '{}': must not start with '-'",
+                        mesh.base_ref
+                    )
+                } else {
+                    format!("invalid base ref '{}'", mesh.base_ref)
+                }
+            })?;
+            let result = restore_mesh_to_base_blocking(host_path.clone(), local_base)?;
+            Ok((result, host_path))
         })
         .await?;
     // Emit only on success — a failing restore never refreshes the panel.
@@ -700,26 +698,26 @@ pub(crate) fn restore_mesh_to_base_blocking(
 /// so any open panel re-fetches.
 ///
 /// Thin async wrapper; see [`get_git_branch_status`] for the offload
-/// rationale. The mesh row is resolved ONCE up front and the derived
-/// `mesh_host_path` + `local_base` are passed into the blocking core so
-/// the core doesn't pay for a second `db::get_mesh_by_id`. The freed
-/// worktree's `host_path` is the command's `worktree_path` arg (host-
-/// mapped) — the core doesn't need to compute it.
+/// rationale. The mesh row is resolved once inside the blocking closure
+/// and the derived `mesh_host_path` is returned for the post-await emit,
+/// so we don't pay a second `db::get_mesh_by_id`. The freed worktree's
+/// `host_path` is the command's `worktree_path` arg (host-mapped).
 #[command]
 pub async fn free_base_branch(
     mesh_id: i64,
     worktree_path: String,
     app: tauri::AppHandle,
 ) -> Result<FreeResult, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    let mesh_host_path = to_host_path(&mesh.path);
-    let local_base = health::parse_local_branch(&mesh.base_ref)
-        .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
-    let host_wt_path = to_host_path(&worktree_path);
-
-    let result = crate::commands::run_blocking("free_base_branch", move || {
-        free_base_branch_blocking(host_wt_path, local_base)
+    let worktree_path_for_emit = worktree_path.clone();
+    let (result, mesh_host_path) = crate::commands::run_blocking("free_base_branch", move || {
+        let mesh = db::get_mesh_by_id(mesh_id)
+            .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+        let mesh_host_path = to_host_path(&mesh.path);
+        let local_base = health::parse_local_branch(&mesh.base_ref)
+            .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
+        let host_wt_path = to_host_path(&worktree_path);
+        let result = free_base_branch_blocking(host_wt_path, local_base)?;
+        Ok((result, mesh_host_path))
     })
     .await?;
 
@@ -730,7 +728,7 @@ pub async fn free_base_branch(
         "git-changed",
         serde_json::json!({
             "path": mesh_host_path,
-            "internal_path": to_host_path(&worktree_path),
+            "internal_path": to_host_path(&worktree_path_for_emit),
         }),
     );
 

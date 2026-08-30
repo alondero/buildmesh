@@ -313,6 +313,380 @@ describe('CircuitFlowEditor', () => {
     );
   });
 
+  it('keyboard-navigates the mustache menu: ArrowDown + Enter picks the first chip', async () => {
+    // One userEvent instance per test — calling `userEvent.setup()` per
+    // statement creates separate keyboards that don't share the same
+    // focused element, dropping keystrokes mid-typing.
+    const user = userEvent.setup();
+    renderEditor();
+
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt = await screen.findByTestId('inspector-prompt') as HTMLTextAreaElement;
+    // Open the menu by typing `{{` (matches the v1 fixture's open
+    // state — typing extra braces is flaky with userEvent).
+    fireEvent.change(prompt, {
+      target: { value: 'review the diffFix {{ ', selectionStart: 22 },
+    });
+    prompt.focus();
+    const menu = await screen.findByTestId('mustache-menu');
+    // No chip is highlighted on first open.
+    expect(menu.querySelector('[data-highlighted="true"]')).toBeNull();
+
+    // ArrowDown highlights the first chip.
+    await user.keyboard('{ArrowDown}');
+    const first = menu.querySelector('[data-highlighted="true"]');
+    expect(first).not.toBeNull();
+    expect(first?.getAttribute('data-testid')).toBe('mustache-chip-circuit.id');
+
+    // Enter picks it.
+    await user.keyboard('{Enter}');
+    expect((screen.getByTestId('inspector-prompt') as HTMLTextAreaElement).value).toBe(
+      'review the diffFix {{ circuit.id }}'
+    );
+  });
+
+  it('ArrowUp from the first chip wraps to the last chip in the menu', async () => {
+    const user = userEvent.setup();
+    renderEditor();
+
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt = await screen.findByTestId('inspector-prompt') as HTMLTextAreaElement;
+    fireEvent.change(prompt, {
+      target: { value: 'review the diffFix {{ ', selectionStart: 22 },
+    });
+    prompt.focus();
+    const menu = await screen.findByTestId('mustache-menu');
+
+    await user.keyboard('{ArrowUp}');
+    const wrapped = menu.querySelector('[data-highlighted="true"]');
+    expect(wrapped).not.toBeNull();
+    // The last chip in the spawn's menu should be highlighted
+    // (no spawn-output chip is reachable from the spawn itself).
+    const allChips = Array.from(menu.querySelectorAll('[data-testid^="mustache-chip-"]'))
+      .filter((el) => !el.getAttribute('data-testid')?.endsWith('-unreachable'));
+    const last = allChips[allChips.length - 1];
+    expect(wrapped?.getAttribute('data-testid')).toBe(last?.getAttribute('data-testid'));
+  });
+
+  it('Enter picks the highlighted chip, NOT the raw fuzzy top (round-2 review regression)', async () => {
+    // The bug: when the menu was grouped by namespace but pick()
+    // indexed into the fuzzy-sorted `suggestions` array, ArrowDown
+    // highlighted a grouped-first chip (e.g. circuit.id at DOM index
+    // 0) but Enter inserted the fuzzy-top chip (issue.author for an
+    // `{{ issue` query). The previous test passed because with an
+    // empty query both orderings happened to start with circuit.id.
+    // Type a non-empty prefix so the orderings diverge.
+    const user = userEvent.setup();
+    renderEditor();
+
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt = await screen.findByTestId('inspector-prompt') as HTMLTextAreaElement;
+    fireEvent.change(prompt, {
+      target: { value: 'review the diffFix {{ issue ', selectionStart: 28 },
+    });
+    prompt.focus();
+    const menu = await screen.findByTestId('mustache-menu');
+
+    // Without any arrow press, Enter should pick the DOM first chip
+    // (whatever the render order is — in grouped mode, that's the
+    // first chip of the first non-empty group, which for `{{ issue`
+    // is in the issue.* group).
+    await user.keyboard('{Enter}');
+    const highlighted = (menu.querySelector('[data-highlighted="true"]') ??
+      menu.querySelector('[data-testid^="mustache-chip-"]')) as HTMLElement;
+    const expectedId = highlighted.getAttribute('data-testid')?.replace('mustache-chip-', '');
+    const expectedPath = expectedId ?? '';
+    expect((screen.getByTestId('inspector-prompt') as HTMLTextAreaElement).value).toBe(
+      `review the diffFix {{ ${expectedPath} }}`
+    );
+
+    // Now ArrowDown to a chip whose position is NOT 0, then Enter —
+    // the inserted chip must match the highlighted one, not the
+    // fuzzy-top chip. For `{{ issue`, every issue.* chip is in the
+    // same group, so the render order matches the fuzzy order for
+    // the issue.* group. Pick a prefix that mixes two groups
+    // instead: `{{ issue` will still group everything together.
+    // Use `{{ c` — sorted by fuzzy, `circuit.*` ranks above
+    // `issue.*`/`pr.*` etc. because every chip matches.
+    fireEvent.change(prompt, {
+      target: { value: 'review the diffFix {{ c', selectionStart: 24 },
+    });
+    prompt.focus();
+    const menu2 = await screen.findByTestId('mustache-menu');
+    // ArrowDown to the SECOND chip in the menu (grouped order:
+    // circuit.id, circuit.name, …). Then Enter.
+    await user.keyboard('{ArrowDown}'); // -> first chip
+    await user.keyboard('{ArrowDown}'); // -> second chip
+    const second = menu2.querySelector('[data-highlighted="true"]') as HTMLElement;
+    expect(second).not.toBeNull();
+    const secondId = second.getAttribute('data-testid')?.replace('mustache-chip-', '');
+    await user.keyboard('{Enter}');
+    expect((screen.getByTestId('inspector-prompt') as HTMLTextAreaElement).value).toBe(
+      `review the diffFix {{ ${secondId} }}`
+    );
+  });
+
+  it('Escape closes the mustache menu without picking a chip', async () => {
+    const user = userEvent.setup();
+    renderEditor();
+
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt = await screen.findByTestId('inspector-prompt') as HTMLTextAreaElement;
+    fireEvent.change(prompt, {
+      target: { value: 'review the diffFix {{ ', selectionStart: 22 },
+    });
+    prompt.focus();
+    const menu = await screen.findByTestId('mustache-menu');
+    expect(menu).toBeTruthy();
+
+    await user.keyboard('{ArrowDown}');
+    await user.keyboard('{Escape}');
+    // Menu dismissed, prompt text unchanged.
+    expect(screen.queryByTestId('mustache-menu')).toBeNull();
+    expect((screen.getByTestId('inspector-prompt') as HTMLTextAreaElement).value).toBe(
+      'review the diffFix {{ '
+    );
+  });
+
+  it('selecting then deselecting a node does not crash the InspectorPanel (Rules of Hooks)', () => {
+    // Regression test for issue #1359 review: the inspector used to
+    // early-return on `node === null` before any `useMemo`, then run
+    // hooks when a node was selected — React would throw "Rendered
+    // more hooks than during the previous render". The fix moves all
+    // hooks above the null branch.
+    const onClose = vi.fn();
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { rerender } = render(
+        <CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />
+      );
+      // Empty-state — body still renders but no per-node form.
+      expect(screen.getByTestId('circuit-inspector')).toBeTruthy();
+      expect(screen.queryByTestId('inspector-prompt')).toBeNull();
+
+      // Click a node → useMemo for reachable fires for the first time.
+      fireEvent.click(screen.getByTestId('circuit-node-spawn'));
+      expect(screen.getByTestId('inspector-prompt')).toBeTruthy();
+
+      // Click the React Flow pane (NOT the canvas-wrapper, which
+      // doesn't have onPaneClick attached — only `.react-flow__pane`
+      // does). That handler calls setSelectedNodeId(null), taking
+      // the inspector back to its empty state.
+      const pane = screen.getByTestId('rf__wrapper').querySelector('.react-flow__pane');
+      expect(pane).not.toBeNull();
+      fireEvent.click(pane!);
+      // After deselect, the inspector renders the empty state.
+      expect(screen.queryByTestId('inspector-prompt')).toBeNull();
+      expect(screen.getByTestId('circuit-inspector')).toBeTruthy();
+
+      // No "Rendered more hooks than during the previous render"
+      // invariant should have been raised — React prints that to
+      // console.error. (Other warnings may be benign; we only fail
+      // the test if React's hook-count invariant shows up.)
+      const invariantCalls = consoleSpy.mock.calls.filter((args) => {
+        const msg = String(args[0] ?? '');
+        return msg.includes('Rendered more hooks') || msg.includes('rendered fewer hooks');
+      });
+      expect(invariantCalls).toEqual([]);
+
+      // Smoke re-render with the same props — stable hook count.
+      rerender(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
+      expect(screen.getByTestId('circuit-inspector')).toBeTruthy();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('groups mustache suggestions by namespace when reachability is available', async () => {
+    renderEditor();
+
+    // Select the gate node — its upstream is the spawn, so spawn
+    // output IS reachable for this node. (Selecting the spawn itself
+    // would test the "no own output" rule, which we cover in the
+    // model tests.)
+    fireEvent.click(await screen.findByTestId('circuit-node-gate'));
+    const prompt = await screen.findByTestId('inspector-command');
+    // The gate has no template field; switch back to the spawn's
+    // neighbour and inspect via the spawn's prompt — but use the
+    // upstream gate's perspective via a custom graph instead.
+    // Easier: select spawn and inspect the menu, which still proves
+    // grouping even though spawn-output is unreachable for spawn.
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const spawnPrompt = await screen.findByTestId('inspector-prompt');
+    await userEvent.setup().type(spawnPrompt, 'Fix {{{{ ');
+
+    const menu = await screen.findByTestId('mustache-menu');
+    // Group headers render for every namespace that has chips.
+    for (const group of ['circuit', 'node', 'issue', 'pr', 'verification', 'retry']) {
+      expect(menu.querySelector(`[data-testid="mustache-group-${group}"]`)).not.toBeNull();
+    }
+    // The spawn cannot reach its OWN output (temporal paradox guard).
+    expect(menu.querySelector('[data-testid="mustache-chip-node.spawn.output"]')).toBeNull();
+    // Silence the unused-variable lint.
+    expect(prompt).toBeTruthy();
+  });
+
+  it('marks unreachable mustache chips with an "empty" badge', async () => {
+    renderEditor();
+
+    // The spawn node in the fixture has no issue-label trigger upstream
+    // (the trigger is `manual`), so `issue.*` chips must dim.
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt = await screen.findByTestId('inspector-prompt');
+    await userEvent.setup().type(prompt, 'Fix {{{{ ');
+
+    const menu = await screen.findByTestId('mustache-menu');
+    // circuit.* and node.id are always live (trigger wrapper / with_node).
+    expect(menu.querySelector('[data-testid="mustache-chip-issue.number"][data-reachable="true"]')).toBeNull();
+    expect(menu.querySelector('[data-testid="mustache-chip-issue.number"][data-reachable="false"]')).not.toBeNull();
+    expect(menu.querySelector('[data-testid="mustache-chip-issue.number-unreachable"]')).not.toBeNull();
+    // `circuit.name` is always reachable.
+    expect(menu.querySelector('[data-testid="mustache-chip-circuit.name"][data-reachable="true"]')).not.toBeNull();
+    // The spawn's own output is NOT reachable — a node cannot read
+    // its own terminal output before it has produced any.
+    expect(menu.querySelector('[data-testid="mustache-chip-node.spawn.output"]')).toBeNull();
+  });
+
+  it('renders the inspector context reference drawer with reachable/empty markers', async () => {
+    renderEditor();
+
+    // Select the gate — its upstream IS the spawn, so spawn output
+    // IS reachable from the gate's perspective.
+    fireEvent.click(await screen.findByTestId('circuit-node-gate'));
+    // The gate has no template field; the drawer is hidden. Switch
+    // back to the spawn node and verify the temporal-paradox guard.
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const drawer = await screen.findByTestId('inspector-context-reference');
+    // For the spawn itself, `circuit.name` is always reachable,
+    // `issue.*` is empty (manual trigger, not an issue-label trigger),
+    // and `node.spawn.output` is NOT reachable (the spawn cannot
+    // consume its own output — the BFS seeds from predecessors).
+    expect(drawer.querySelector('[data-testid="context-reference-issue.number"]')!.getAttribute('data-reachable')).toBe('false');
+    expect(drawer.querySelector('[data-testid="context-reference-circuit.name"]')!.getAttribute('data-reachable')).toBe('true');
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn.output"]')).toBeNull();
+    // Group headers render under the spec ordering.
+    expect(drawer.querySelector('[data-testid="context-group-issue"]')).not.toBeNull();
+    expect(drawer.querySelector('[data-testid="context-group-circuit"]')).not.toBeNull();
+  });
+
+  it('downstream drawer renders spawn_output group + node.<id>.output reference rows', async () => {
+    // Fixture: trigger → spawn_1 → spawn_2 → notify. Selecting
+    // `notify` must show BOTH spawns' outputs as reachable context,
+    // routed into the dedicated `spawn_output` group (issue #1359
+    // round-3 review: previously the drawer bucketed `node.<id>.output`
+    // under the top-level `node` namespace and they ended up in the
+    // wrong bucket / were missing from the reference list).
+    const GRAPH_WITH_DOWNSTREAM = JSON.stringify({
+      version: 1,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        {
+          id: 'spawn_1',
+          type: {
+            type: 'spawn_agent_node',
+            prompt: 'first',
+            name: null,
+          },
+        },
+        {
+          id: 'spawn_2',
+          type: {
+            type: 'spawn_agent_node',
+            prompt: 'second',
+            name: null,
+          },
+        },
+        { id: 'notify', type: { type: 'notify', message: '' } },
+      ],
+      edges: [
+        { from: 'trigger', to: 'spawn_1', condition: 'always' },
+        { from: 'spawn_1', to: 'spawn_2', condition: 'always' },
+        { from: 'spawn_2', to: 'notify', condition: 'always' },
+      ],
+    });
+    render(
+      <CircuitFlowEditor
+        circuit={{ ...CIRCUIT, graph_json: GRAPH_WITH_DOWNSTREAM }}
+        runs={[]}
+        onClose={() => {}}
+      />
+    );
+
+    fireEvent.click(await screen.findByTestId('circuit-node-notify'));
+    const drawer = await screen.findByTestId('inspector-context-reference');
+    // spawn_output group exists and contains BOTH spawn ids (sorted).
+    expect(drawer.querySelector('[data-testid="context-group-spawn_output"]')).not.toBeNull();
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn_1.output"]')).not.toBeNull();
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn_2.output"]')).not.toBeNull();
+    // Both are reachable (the drawer knows they're upstream producers).
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn_1.output"]')!.getAttribute('data-reachable')).toBe('true');
+    expect(drawer.querySelector('[data-testid="context-reference-node.spawn_2.output"]')!.getAttribute('data-reachable')).toBe('true');
+  });
+
+  it('offers an upstream spawn target picker on InjectPty and SetNodeStatus', async () => {
+    const GRAPH_WITH_TARGETS = JSON.stringify({
+      version: 1,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        {
+          id: 'spawn_1',
+          type: {
+            type: 'spawn_agent_node',
+            prompt: 'first',
+            name: null,
+          },
+        },
+        {
+          id: 'spawn_2',
+          type: {
+            type: 'spawn_agent_node',
+            prompt: 'second',
+            name: null,
+          },
+        },
+        { id: 'inject', type: { type: 'inject_pty', prompt: 'go' } },
+        { id: 'status', type: { type: 'set_node_status', status: 'running' } },
+      ],
+      edges: [
+        { from: 'trigger', to: 'spawn_1', condition: 'always' },
+        { from: 'spawn_1', to: 'spawn_2', condition: 'always' },
+        { from: 'spawn_2', to: 'inject', condition: 'always' },
+        { from: 'inject', to: 'status', condition: 'always' },
+      ],
+    });
+    render(
+      <CircuitFlowEditor
+        circuit={{ ...CIRCUIT, graph_json: GRAPH_WITH_TARGETS }}
+        runs={[]}
+        onClose={() => {}}
+      />
+    );
+
+    fireEvent.click(await screen.findByTestId('circuit-node-inject'));
+    const injectSelect = await screen.findByTestId('inspector-target-node') as HTMLSelectElement;
+    const injectOptions = Array.from(injectSelect.options).map((o) => o.value);
+    // Both spawns are upstream of `inject` — sorted by id.
+    expect(injectOptions).toEqual(expect.arrayContaining(['', 'spawn_1', 'spawn_2']));
+    // Picking spawn_2 commits the target.
+    fireEvent.change(injectSelect, { target: { value: 'spawn_2' } });
+    fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => {
+      const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === 'update_circuit_graph');
+      const graph = JSON.parse((call?.[1] as Record<string, unknown>).graphJson as string);
+      const inject = graph.nodes.find((n: { id: string }) => n.id === 'inject');
+      expect(inject.type.target_node_id).toBe('spawn_2');
+    });
+
+    // Now the status node — its upstream is inject + spawn_2; the
+    // picker must NOT include `inject` (it's not a spawn) but DOES
+    // include both spawns.
+    fireEvent.click(await screen.findByTestId('circuit-node-status'));
+    const statusSelect = (await screen.findByTestId('inspector-target-node')) as HTMLSelectElement;
+    const statusOptions = Array.from(statusSelect.options).map((o) => o.value);
+    expect(statusOptions).toEqual(expect.arrayContaining(['', 'spawn_1', 'spawn_2']));
+    expect(statusOptions).not.toContain('inject');
+  });
+
   it('lists runs in the history drawer with per-step logs and path highlighting', async () => {
     renderEditor();
 

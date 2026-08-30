@@ -1,0 +1,20 @@
+[package]
+name = "buildmesh_macros"
+version = "1.3.0-0"
+edition = "2021"
+description = "Buildmesh proc-macros — #[blocking_command] attribute for Tauri command offload boilerplate (issue #1380 review point 3)."
+license = "Apache-2.0"
+repository = "https://github.com/alondero/buildmesh"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+trybuild = "1"
+tokio = { version = "1", features = ["macros", "rt"] }

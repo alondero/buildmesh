@@ -594,6 +594,7 @@ mod tests {
     fn evaluate_emits_individual_missing_prefill_reason() {
         let caps = HarnessCapabilities {
             harness_id: "futuristic".into(),
+            supports_extra_args: true,
             supports_resume: true,
             auto_resume_on_startup: true,
             requires_attention_hook: true,

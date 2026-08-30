@@ -12,7 +12,7 @@
  * (`usePathInvalidatedQuery`) already fixes this with the AbortSignal
  * passed by `useAsyncEffect` (issue #349) that the bus callback
  * short-circuits on. The components that used `subscribeGitPathInvalidation`
- * directly (`AgentReviewPanel`, `CenterDiffOverlay`) had the same
+ * directly (`CenterDiffOverlay`) had the same
  * pre-existing footgun.
  *
  * Centralising the fix here means a future callback-only consumer can't

@@ -13,6 +13,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# `#[blocking_command]` proc-macro attribute — wraps async Tauri command
+# bodies in `crate::commands::run_blocking(label, move || { ... }).await`
+# so we don't hand-write the offload boilerplate across 30+ commands
+# (issue #1380 review point 3). Path dep — the crate lives in this
+# workspace alongside `buildmesh_lib`.
+buildmesh_macros = { path = "proc-macros" }
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
@@ -82,6 +88,13 @@ local-ip-address = "0.6"
 # inner loop cannot be optimised into a short-circuit under our
 # `lto = "thin"` release profile, which a hand-rolled byte XOR loop can be.
 subtle = "2"
+
+# `shell-words` is already in the dep tree (transitively via `clap`
+# and friends) — issue #1362 code review pinned it as a direct dep so
+# `AgentProvider::extra_args_args` quote-aware tokenisation isn't
+# silently upgraded if a future Cargo update removes the transitive
+# path. Same cost-of-declaring lesson as issue #1240 with `subtle`.
+shell-words = "1"
 
 # OS-level interface-change notifications for issue #591.
 # Windows: `NotifyAddrChange` from Iphlpapi.dll. The crate is already in the
