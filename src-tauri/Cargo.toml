@@ -68,6 +68,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # read out, the tempdir drops on scope exit). Auto-removed on drop; the
 # operation runs once per modal open so the I/O cost is negligible.
 tempfile = "3"
+toml_edit = "0.25.12"
 parking_lot = "0.12"
 # PATH + PATHEXT-aware lookup for `session_naming::resolve_claude_binary`.
 # See session_naming.rs for the rationale (PATH-stale buildmesh process

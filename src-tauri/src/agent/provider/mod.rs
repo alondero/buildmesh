@@ -9,7 +9,22 @@ pub mod compatibility;
 pub mod provider_conf;
 
 use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
+use crate::env::ResolvedPath;
 use crate::models::EnvType;
+
+/// Runtime facts resolved by provider preflight and shared with the adapter's
+/// provisioning seams. An empty context means the adapter should resolve its
+/// ordinary native/default runtime. `harness_home` is a harness-specific
+/// configuration root (for example Codex's `CODEX_HOME`), not the operating
+/// system user's home directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchRuntime {
+    /// Harness configuration root selected for the process, when preflight
+    /// has already established one.
+    pub harness_home: Option<String>,
+    /// WSL distribution selected for the process, when applicable.
+    pub wsl_distro: Option<String>,
+}
 
 /// Built-in **Harness Profile** ids that detection populates (`claude`,
 /// `codex`, `cursor`, `agy`, `opencode`, `grok`, `kimi`) plus the code-defined
@@ -288,28 +303,52 @@ pub trait AgentProvider: Send + Sync {
     /// using the stored `cli_session_id`.
     fn auto_resume_on_startup(&self) -> bool;
 
-    /// Whether the spawn path should call [`inject_attention_hook`] before
-    /// launching this provider (issue #886). For Antigravity (issue #1367), this delivers
-    /// a completion/background signal via Stop hook and `fullyIdle` (approval is unavailable
-    /// under `--dangerously-skip-permissions` launch policy).
+    /// Whether the spawn path should call [`provision_attention_hooks`] before
+    /// launching this provider (issue #886).
     ///
-    /// [`inject_attention_hook`]: AgentProvider::inject_attention_hook
+    /// [`provision_attention_hooks`]: AgentProvider::provision_attention_hooks
     fn requires_attention_hook(&self) -> bool;
+
+    /// Ensure the workspace is trusted for this harness before its process is
+    /// created. Trust is a launch prerequisite, independent of attention-hook
+    /// installation. Providers with vendor-specific trust stores opt in by
+    /// overriding this method; unrelated providers must remain side-effect
+    /// free.
+    fn ensure_workspace_trusted(
+        &self,
+        _resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Provision this harness's attention hooks in the spawn cwd so the agent
     /// calls back to the local attention endpoint on turn end / permission
     /// prompts. Each adapter owns its harness's config format (issue #886):
     /// the Claude-backed `anthropic` adapter writes
     /// `.claude/settings.local.json`; Codex writes `.codex/config.toml` +
-    /// `.codex/hooks.json`; Antigravity writes `.agents/hooks.json`. Called
-    /// from `spawn_agent_inner` before child launch (gated on
-    /// [`requires_attention_hook`]) with the resolved host-side project path;
-    /// implementations must be idempotent — they run on every spawn. Returns
-    /// an `Err` describing any file system or serialization failure.
+    /// `.codex/hooks.json`. Implementations must be idempotent and are called
+    /// before every spawn. A failure is logged and the spawn proceeds (the
+    /// agent still works, only the attention callback is lost).
+    /// Antigravity writes `.agents/hooks.json`.
     ///
-    /// [`requires_attention_hook`]: AgentProvider::requires_attention_hook
-    fn inject_attention_hook(&self, _project_path: &std::path::Path) -> Result<(), String> {
+    /// Provision attention hooks for one resolved runtime before its process
+    /// starts. The resolved path and runtime context let adapters choose the
+    /// correct host or guest configuration location.
+    fn provision_attention_hooks(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        let _ = resolved;
         Ok(())
+    }
+
+    /// Environment variables this harness needs carried from the Windows host
+    /// into a WSL child. The OS wrapper owns the WSLENV mechanics; adapters
+    /// only declare their runtime-specific variables here.
+    fn wsl_passthrough_env(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// Whether this provider writes a transcript the coordinator read API can

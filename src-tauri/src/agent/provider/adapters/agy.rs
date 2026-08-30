@@ -1,5 +1,8 @@
 use crate::agent::capabilities::EffortControlKind;
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
+use crate::env::ResolvedPath;
 use crate::models::EnvType;
 use std::path::Path;
 
@@ -86,7 +89,7 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     let content = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
     atomic_write(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
-    tracing::info!("agy inject_attention_hook: wrote {:?}", path);
+    tracing::info!("agy provision_attention_hooks: wrote {:?}", path);
     Ok(())
 }
 
@@ -136,12 +139,25 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
+    fn ensure_workspace_trusted(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        crate::agent::workspace_trust::ensure_trusted(resolved);
+        Ok(())
+    }
+
     /// AGY lifecycle hooks live in the project-local `.agents/` dir as
     /// `hooks.json` (issue #1285, #1367). The namespace key is
     /// `buildmesh-attention` so user-added sibling namespaces (other
     /// tools, custom automation) round-trip through a re-run untouched.
-    fn inject_attention_hook(&self, project_path: &Path) -> Result<(), String> {
-        let agents_dir = project_path.join(".agents");
+    fn provision_attention_hooks(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        let agents_dir = Path::new(&resolved.host_path).join(".agents");
         std::fs::create_dir_all(&agents_dir)
             .map_err(|e| format!("failed to create .agents dir: {e}"))?;
         let hooks_path = agents_dir.join("hooks.json");
@@ -221,6 +237,19 @@ mod tests {
         let content = std::fs::read_to_string(project.join(".agents").join("hooks.json"))
             .expect("hooks.json not written");
         serde_json::from_str(&content).expect("hooks.json is not valid JSON")
+    }
+
+    fn provision_agy(project: &Path) {
+        let path = project.to_string_lossy().into_owned();
+        let resolved = ResolvedPath {
+            host_path: path.clone(),
+            spawn_path: path.clone(),
+            raw_path: path,
+            env_type: EnvType::Windows,
+        };
+        AGY
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default())
+            .unwrap();
     }
 
     // -------------------------------------------------------------------
@@ -358,7 +387,7 @@ mod tests {
     #[test]
     fn inject_writes_stop_webhook() {
         let temp = TempDir::new().unwrap();
-        AGY.inject_attention_hook(temp.path()).unwrap();
+        provision_agy(temp.path());
 
         let hooks = read_hooks_json(temp.path());
         let attention = hooks
@@ -389,10 +418,10 @@ mod tests {
     #[test]
     fn inject_is_idempotent() {
         let temp = TempDir::new().unwrap();
-        AGY.inject_attention_hook(temp.path()).unwrap();
+        provision_agy(temp.path());
         let hooks_first = read_hooks_json(temp.path());
 
-        AGY.inject_attention_hook(temp.path()).unwrap();
+        provision_agy(temp.path());
         let hooks_second = read_hooks_json(temp.path());
         assert_eq!(hooks_first, hooks_second);
     }
@@ -411,7 +440,7 @@ mod tests {
         )
         .unwrap();
 
-        AGY.inject_attention_hook(temp.path()).unwrap();
+        provision_agy(temp.path());
 
         let hooks = read_hooks_json(temp.path());
         assert_eq!(hooks["custom_namespace"]["user"], "kept");
@@ -435,7 +464,7 @@ mod tests {
         )
         .unwrap();
 
-        AGY.inject_attention_hook(temp.path()).unwrap();
+        provision_agy(temp.path());
 
         let hooks = read_hooks_json(temp.path());
         assert!(hooks["buildmesh-attention"]["Stop"].is_array());
@@ -499,7 +528,7 @@ mod tests {
     #[test]
     fn inject_leaves_no_tmp_residue() {
         let temp = TempDir::new().unwrap();
-        AGY.inject_attention_hook(temp.path()).unwrap();
+        provision_agy(temp.path());
 
         let agents_dir = temp.path().join(".agents");
         assert!(agents_dir.join("hooks.json").exists());
@@ -525,7 +554,7 @@ mod tests {
         )
         .unwrap();
 
-        AGY.inject_attention_hook(temp.path()).unwrap();
+        provision_agy(temp.path());
 
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(agents.join("hooks.json")).unwrap())
@@ -541,7 +570,7 @@ mod tests {
     #[test]
     fn skip_permissions_mode_omits_pre_tool_use_gate() {
         let temp = TempDir::new().unwrap();
-        AGY.inject_attention_hook(temp.path()).unwrap();
+        provision_agy(temp.path());
 
         let hooks = read_hooks_json(temp.path());
         let attention = &hooks["buildmesh-attention"];
@@ -559,4 +588,3 @@ mod tests {
         );
     }
 }
-

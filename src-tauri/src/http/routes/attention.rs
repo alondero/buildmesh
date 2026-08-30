@@ -782,4 +782,3 @@ mod tests {
         assert_eq!(decide(empty_obj, |_| Some(0)), Decision::Mark);
     }
 }
-

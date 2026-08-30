@@ -53,7 +53,10 @@
 //! the AGY adapter pattern.
 
 use crate::agent::capabilities::{EffortControlKind, GROK_EFFORT_ALLOWED};
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
+use crate::env::ResolvedPath;
 use crate::models::EnvType;
 use std::path::Path;
 
@@ -131,7 +134,7 @@ fn ensure_hooks_json(path: &Path) -> Result<(), String> {
     let content = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
     std::fs::write(path, content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
-    tracing::info!("grok inject_attention_hook: wrote {:?}", path);
+    tracing::info!("grok provision_attention_hooks: wrote {:?}", path);
     Ok(())
 }
 
@@ -182,7 +185,7 @@ impl AgentProvider for GrokAdapter {
         true
     }
 
-    /// Inject Buildmesh attention hooks into Grok's always-trusted
+    /// Provision Buildmesh attention hooks into Grok's always-trusted
     /// global hooks directory (issue #1282). The file lives in the
     /// user's `~/.grok/hooks/`, NOT under the project cwd: project-local
     /// `.grok/hooks/` requires folder trust via `/hooks-trust` /
@@ -192,10 +195,13 @@ impl AgentProvider for GrokAdapter {
     /// The HTTP handler POSTs the event envelope to the attention
     /// endpoint with `$BUILDMESH_PORT` and `$BUILDMESH_SESSION_ID`
     /// expanded at runner time (set per-agent by `spawn_environment`).
-    /// `project_path` is unused — present to satisfy the trait so a
-    /// future migration to a project-local path doesn't change the
-    /// call site.
-    fn inject_attention_hook(&self, _project_path: &Path) -> Result<(), String> {
+    /// The resolved project path is intentionally unused because the global
+    /// hook directory is the only trustable Grok location available here.
+    fn provision_attention_hooks(
+        &self,
+        _resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
         let dir = grok_home()?;
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("failed to create .grok/hooks dir: {e}"))?;
@@ -253,6 +259,19 @@ impl AgentProvider for GrokAdapter {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn provision_grok(project: &Path) {
+        let path = project.to_string_lossy().into_owned();
+        let resolved = ResolvedPath {
+            host_path: path.clone(),
+            spawn_path: path.clone(),
+            raw_path: path,
+            env_type: EnvType::Windows,
+        };
+        GROK
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default())
+            .unwrap();
+    }
 
     #[test]
     fn id_and_ui_metadata() {
@@ -687,8 +706,7 @@ mod tests {
     #[test]
     fn inject_writes_notification_and_stop_hooks() {
         let temp = with_user_home_redirect();
-        GROK.inject_attention_hook(std::path::Path::new("/any"))
-            .expect("inject should succeed");
+        provision_grok(Path::new("/any"));
 
         let path = temp.path().join(".grok").join("hooks").join("buildmesh-attention.json");
         let content = std::fs::read_to_string(&path).expect("hook file not written");
@@ -725,13 +743,13 @@ mod tests {
     #[test]
     fn inject_is_idempotent() {
         let temp = with_user_home_redirect();
-        GROK.inject_attention_hook(std::path::Path::new("/any")).unwrap();
+        provision_grok(Path::new("/any"));
         let first = std::fs::read_to_string(
             temp.path().join(".grok").join("hooks").join("buildmesh-attention.json"),
         )
         .unwrap();
 
-        GROK.inject_attention_hook(std::path::Path::new("/any")).unwrap();
+        provision_grok(Path::new("/any"));
         let second = std::fs::read_to_string(
             temp.path().join(".grok").join("hooks").join("buildmesh-attention.json"),
         )
@@ -754,7 +772,7 @@ mod tests {
         )
         .unwrap();
 
-        GROK.inject_attention_hook(std::path::Path::new("/any")).unwrap();
+        provision_grok(Path::new("/any"));
 
         let value: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join("buildmesh-attention.json")).unwrap(),
@@ -787,7 +805,7 @@ mod tests {
     fn inject_targets_global_grok_hooks_dir_not_project() {
         let temp = with_user_home_redirect();
         let project = TempDir::new().unwrap();
-        GROK.inject_attention_hook(project.path()).unwrap();
+        provision_grok(project.path());
 
         // No hook file landed under the project cwd.
         assert!(

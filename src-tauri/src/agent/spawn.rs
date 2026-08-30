@@ -594,60 +594,57 @@ pub fn build_spawn_command_prepared(
         cmd.env_remove(k);
     }
 
-    // Inject the per-profile backend env + Codex Proxy credential.
-    // Extracted as helpers because the WSLENV bookkeeping is intricate
-    // and was previously duplicated in two large inline blocks.
-    apply_routing_env(&mut cmd, routing, resolved.env_type);
-    apply_codex_proxy_credential(&mut cmd, routing, provider_enum, resolved.env_type);
+    // Inject the per-profile backend env + Codex Proxy credential. WSLENV is
+    // assembled once after all command-defined variables are known, avoiding
+    // one routing branch overwriting another branch's entries.
+    let mut command_wsl_env = apply_routing_env(&mut cmd, routing);
+    if let Some(key) = apply_codex_proxy_credential(
+        &mut cmd,
+        routing,
+        provider_enum,
+    ) {
+        command_wsl_env.push(key);
+    }
+    spawn_environment::apply_wsl_env(
+        &mut cmd,
+        resolved.env_type,
+        &command_wsl_env,
+        adapter.wsl_passthrough_env(),
+    );
     cmd
 }
 
 /// Apply the per-profile backend env (`PreparedLaunchRouting::Environment`)
-/// to the child command. On WSL, appends the new key names to `WSLENV` with
-/// the `/u` suffix so values cross the WSL boundary (only WSLENV-listed
-/// vars propagate). Existing WSLENV entries are deduped by base name.
-fn apply_routing_env(
+/// to the child command and return the names that need WSL propagation.
+fn apply_routing_env<'a>(
     cmd: &mut CommandBuilder,
-    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
-    env_type: EnvType,
-) {
+    routing: &'a crate::agent::launch_routing::PreparedLaunchRouting,
+) -> Vec<&'a str> {
     let backend_env: &[(String, String)] = match routing {
         crate::agent::launch_routing::PreparedLaunchRouting::Environment(values) => {
             values.as_slice()
         }
         _ => &[],
     };
-    if backend_env.is_empty() {
-        return;
-    }
     for (k, v) in backend_env {
         cmd.env(k, v);
     }
-    if env_type == EnvType::Wsl {
-        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-        for (k, _) in backend_env {
-            append_to_wslenv(&mut wslenv, k, "/u");
-        }
-        if !wslenv.is_empty() {
-            cmd.env("WSLENV", wslenv);
-        }
-    }
+    backend_env.iter().map(|(key, _)| key.as_str()).collect()
 }
 
 /// Apply the Codex Proxy pairing-scoped credential. A verified profile
 /// authenticates exclusively through its pairing-scoped reference
 /// (`PROXY_CREDENTIAL_ENV`); generic `OPENAI_API_KEY` / `OPENAI_BASE_URL`
 /// inherited by Buildmesh are stripped so they cannot become an alternate
-/// credential/endpoint. On WSL the credential key (and `CODEX_HOME` when
-/// set) is appended to WSLENV.
+/// credential/endpoint. The generated credential key is returned for the
+/// shared WSL environment pass.
 fn apply_codex_proxy_credential(
     cmd: &mut CommandBuilder,
     routing: &crate::agent::launch_routing::PreparedLaunchRouting,
     provider_enum: Provider,
-    env_type: EnvType,
-) {
+) -> Option<&'static str> {
     if !matches!(provider_enum, Provider::Codex) {
-        return;
+        return None;
     }
     let key = crate::agent::provider::adapters::codex::PROXY_CREDENTIAL_ENV;
     cmd.env_remove(key);
@@ -657,41 +654,13 @@ fn apply_codex_proxy_credential(
         ..
     } = routing
     else {
-        return;
+        return None;
     };
     debug_assert_eq!(credential_reference, key);
     cmd.env_remove("OPENAI_API_KEY");
     cmd.env_remove("OPENAI_BASE_URL");
     cmd.env(credential_reference, credential);
-    if env_type == EnvType::Wsl {
-        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-        append_to_wslenv(&mut wslenv, key, "/u");
-        if std::env::var_os("CODEX_HOME").is_some() {
-            append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-        }
-        if !wslenv.is_empty() {
-            cmd.env("WSLENV", wslenv);
-        }
-    }
-}
-
-/// Append a key (with its WSLENV suffix flag, usually `/u`) to the
-/// colon-delimited WSLENV list, deduplicated by base name. Pure helper
-/// so the Codex and the per-profile-backend paths agree on the rule.
-fn append_to_wslenv(wslenv: &mut String, key: &str, suffix: &str) {
-    let already_has = wslenv.split(':').any(|part| {
-        part.split('/').next() == Some(key)
-    });
-    if already_has {
-        return;
-    }
-    let entry = format!("{key}{suffix}");
-    if wslenv.is_empty() {
-        wslenv.push_str(&entry);
-    } else {
-        wslenv.push(':');
-        wslenv.push_str(&entry);
-    }
+    Some(key)
 }
 
 /// Spawn the child process.
@@ -752,7 +721,7 @@ fn sandbox_spawn(
 /// migrate an older `idle_prompt`-only config on the next spawn.
 ///
 /// This is the Claude-harness implementation behind
-/// `AnthropicAdapter::inject_attention_hook` (issue #886); the mesh commands
+/// `AnthropicAdapter::provision_attention_hooks` (issue #886); the mesh commands
 /// also call it directly to pre-provision the default harness's hook at mesh
 /// creation, before any node/provider exists.
 pub fn inject_attention_hook(project_path: &std::path::Path) -> Result<(), String> {
@@ -1526,6 +1495,29 @@ pub(crate) fn resolve_spawn_config(
     )
 }
 
+/// Run the two provider-owned launch prerequisites in order while preserving
+/// independent failures. Hook provisioning must still run when trust setup
+/// reports an error, and a provider without attention hooks should not invoke
+/// its hook seam. The caller supplies this synchronous body to the blocking
+/// pool because adapters may inspect or mutate files and invoke WSL.
+fn run_provider_provisioning<Trust, Hooks>(
+    ensure_trusted: Trust,
+    provision_hooks: Hooks,
+    needs_attention_hook: bool,
+) -> (Result<(), String>, Result<(), String>)
+where
+    Trust: FnOnce() -> Result<(), String>,
+    Hooks: FnOnce() -> Result<(), String>,
+{
+    let trust = ensure_trusted();
+    let hooks = if needs_attention_hook {
+        provision_hooks()
+    } else {
+        Ok(())
+    };
+    (trust, hooks)
+}
+
 /// Transitional implementation retained while transport callers migrate to
 /// [`spawn_with_intent`]. It is private to the agent module once migration is
 /// complete.
@@ -2198,6 +2190,75 @@ pub(crate) async fn spawn_agent_inner(
         }
     };
     timer.checkpoint("after_provider_preflight");
+
+    let emit_provider_error = |message: &str| {
+        let _ = app.emit(
+            "provider-error",
+            ProviderErrorPayload {
+                session_id,
+                provider,
+                message: message.to_string(),
+            },
+        );
+    };
+
+    // Trust is a launch prerequisite, independent of attention hooks. The
+    // prepared routing carries the exact runtime identity for Codex proxy
+    // launches so trust and child execution use one WSL distro/home. Both
+    // trust and hook provisioning are blocking filesystem/process work, so
+    // keep their ordering while moving them off the Tokio worker thread.
+    let launch_runtime = routing.launch_runtime();
+    let provisioning_resolved = resolved.clone();
+    let provisioning_runtime = launch_runtime.clone();
+    let needs_attention_hook = adapter.requires_attention_hook();
+    let provisioning = crate::commands::run_blocking("provider_provisioning", move || {
+        Ok(run_provider_provisioning(
+            || {
+                adapter.ensure_workspace_trusted(
+                    &provisioning_resolved,
+                    &provisioning_runtime,
+                )
+            },
+            || {
+                adapter.provision_attention_hooks(
+                    &provisioning_resolved,
+                    &provisioning_runtime,
+                )
+            },
+            needs_attention_hook,
+        ))
+    })
+    .await;
+    match provisioning {
+        Ok((trust, hooks)) => {
+            if let Err(e) = trust {
+                tracing::warn!(
+                    "spawn_agent_inner: workspace trust provisioning failed for session {}: {}",
+                    session_id,
+                    e
+                );
+                emit_provider_error(&format!("workspace trust unavailable: {e}"));
+            }
+            if let Err(e) = hooks {
+                tracing::warn!(
+                    "spawn_agent_inner: attention hook provisioning failed for session {}: {}",
+                    session_id,
+                    e
+                );
+                emit_provider_error(&format!("attention hooks unavailable: {e}"));
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                "spawn_agent_inner: provider provisioning task failed for session {}: {}",
+                session_id,
+                error
+            );
+            emit_provider_error(&format!("provider provisioning unavailable: {error}"));
+        }
+    }
+    timer.checkpoint("after_workspace_trust");
+
     // Resolve configuration values through the per-field cascade (issue
     // #1149 prefactor; #1150 fills the application slot; #1151 fills the
     // per-Mesh override slot). The resolver applies the capability mask,
@@ -2263,37 +2324,6 @@ pub(crate) async fn spawn_agent_inner(
         sandbox,
     );
 
-    let emit_provider_error = |e: &str| {
-        let _ = app.emit(
-            "provider-error",
-            ProviderErrorPayload {
-                session_id,
-                provider,
-                message: e.to_string(),
-            },
-        );
-    };
-
-    // 8. Provision workspace trust and attention hooks before child process launches
-    // so CLI harnesses discover hooks and trusted workspaces at boot time (issue #1367).
-    crate::agent::workspace_trust::ensure_trusted(&resolved);
-    timer.checkpoint("after_workspace_trust");
-    if adapter.requires_attention_hook() {
-        // The adapter owns its harness's hook format (issue #886). A failure
-        // must not abort the spawn — the agent still works, but telemetry
-        // is missing so we surface a provider-warning event.
-        if let Err(e) = adapter.inject_attention_hook(std::path::Path::new(&resolved.host_path)) {
-            tracing::warn!(
-                "spawn_agent_inner: attention hook injection failed for session {}: {}",
-                session_id,
-                e
-            );
-            emit_provider_error(&format!("Attention hook injection warning: {e}"));
-        }
-    }
-    timer.checkpoint("after_inject_hook");
-
-    // 9. Spawn child process (either sandboxed or direct PTY)
     let (child, master): (
         Box<dyn portable_pty::Child + Send + Sync>,
         Box<dyn portable_pty::MasterPty + Send>,
@@ -2685,6 +2715,40 @@ mod tests {
         FieldInputs, HarnessCapabilities, resolve_agent_config,
     };
     use crate::preferences::HarnessConfigValue;
+
+    #[test]
+    fn provider_provisioning_runs_hooks_after_trust_failure() {
+        let trust_finished = std::cell::Cell::new(false);
+        let hook_saw_trust_finish = std::cell::Cell::new(false);
+        let (trust, hooks) = run_provider_provisioning(
+            || {
+                trust_finished.set(true);
+                Err("trust failed".to_string())
+            },
+            || {
+                hook_saw_trust_finish.set(trust_finished.get());
+                Err("hooks failed".to_string())
+            },
+            true,
+        );
+
+        assert_eq!(trust.unwrap_err(), "trust failed");
+        assert_eq!(hooks.unwrap_err(), "hooks failed");
+        assert!(hook_saw_trust_finish.get());
+
+        let hook_called = std::cell::Cell::new(false);
+        let (trust, hooks) = run_provider_provisioning(
+            || Ok(()),
+            || {
+                hook_called.set(true);
+                Ok(())
+            },
+            false,
+        );
+        assert!(trust.is_ok());
+        assert!(hooks.is_ok());
+        assert!(!hook_called.get());
+    }
 
     /// Helper that returns the Anthropic capabilities descriptor for the
     /// integration tests below. Pulled out so each test reads as the
