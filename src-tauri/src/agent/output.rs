@@ -1,16 +1,19 @@
 //! Binary PTY-output sink (issue #1385).
 //!
-//! Production agent output is pushed over a per-session Tauri `Channel` as
-//! raw bytes (`InvokeResponseBody::Raw`), so the webview receives a
-//! `Uint8Array` without Base64 or JSON. The `agent-output` event (base64
-//! `data` / UTF-8 `line`) remains as the fallback for:
+//! Production PTY bytes go **only** over a per-session Tauri `Channel`
+//! (`InvokeResponseBody::Raw`). They are never mixed with the JSON
+//! `agent-output` event: those two IPC paths have no ordering, and a
+//! subscribe that lands mid-stream would let chunk 2 on the Channel
+//! overtake chunk 1 on the event bus (split ANSI). Bytes that arrive
+//! before `subscribe_agent_output` are held on the sink and flushed
+//! in order when the Channel is registered.
 //!
-//! - the window before the frontend has subscribed
-//! - test injection (`inject_test_output` emits `line` payloads)
+//! `agent-output` with `line` remains for test injection only
+//! (`inject_test_output`).
 //!
-//! The batcher thread holds an `Arc<OutputSink>` for its session, so the
-//! send hot path never takes the global map lock. Subscribe/unsubscribe
-//! only touch the map.
+//! The batcher holds an `Arc<OutputSink>` for the session, so the send
+//! path never takes the global map lock. `kill_session` and the reader
+//! epilogue call `unregister` so a dead process cannot leak Channels.
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -19,42 +22,75 @@ use std::sync::Arc;
 use tauri::command;
 use tauri::ipc::{Channel, InvokeResponseBody};
 
-/// Per-session slot the batcher clones at spawn time. `send` takes a
-/// read lock on this slot only — not the global map — so N agents do
-/// not serialise on one `Mutex<HashMap>`.
+/// Cap on bytes buffered before the frontend has subscribed. Matches
+/// `TerminalWriter.MAX_PENDING_BYTES` — past this, older bytes are dropped
+/// because xterm's scrollback cannot retain more anyway.
+const PENDING_CAP: usize = 4 * 1024 * 1024;
+
+enum SinkState {
+    /// Frontend has not subscribed yet. Append-only; flushed on `set`.
+    Pending(Vec<u8>),
+    /// Live Channel. `send` uses this handle in place — no clone.
+    Live(Channel<InvokeResponseBody>),
+    /// Process gone / dispose. Further sends are dropped.
+    Closed,
+}
+
+/// Per-session slot the batcher clones at spawn time.
 pub struct OutputSink {
-    channel: RwLock<Option<Channel<InvokeResponseBody>>>,
+    inner: RwLock<SinkState>,
 }
 
 impl OutputSink {
     fn new() -> Self {
         Self {
-            channel: RwLock::new(None),
+            inner: RwLock::new(SinkState::Pending(Vec::new())),
         }
     }
 
-    /// Push `data` on the session's binary Channel.
-    ///
-    /// Returns `true` when a Channel is registered, **even if this send
-    /// failed**. The JSON-event fallback must not fire in that case:
-    /// `Channel::send` may have already delivered the bytes to JS before
-    /// returning `Err`, and emitting the event would duplicate (and
-    /// corrupt) the terminal stream.
-    pub fn send(&self, data: &[u8]) -> bool {
-        let channel = self.channel.read().clone();
-        let Some(channel) = channel else {
-            return false;
-        };
-        let _ = channel.send(InvokeResponseBody::Raw(data.to_vec()));
-        true
+    /// Deliver `data` without cloning the Channel. Always the Channel
+    /// path (or a pending buffer): the caller must not also emit JSON.
+    pub fn send_owned(&self, data: Vec<u8>) {
+        {
+            let inner = self.inner.read();
+            if let SinkState::Live(channel) = &*inner {
+                let _ = channel.send(InvokeResponseBody::Raw(data));
+                return;
+            }
+            if matches!(&*inner, SinkState::Closed) {
+                return;
+            }
+        }
+        let mut inner = self.inner.write();
+        match &mut *inner {
+            SinkState::Live(channel) => {
+                let _ = channel.send(InvokeResponseBody::Raw(data));
+            }
+            SinkState::Pending(buf) => {
+                buf.extend_from_slice(&data);
+                let excess = buf.len().saturating_sub(PENDING_CAP);
+                if excess > 0 {
+                    buf.drain(..excess);
+                }
+            }
+            SinkState::Closed => {}
+        }
     }
 
     fn set(&self, channel: Channel<InvokeResponseBody>) {
-        *self.channel.write() = Some(channel);
+        let mut inner = self.inner.write();
+        let pending = match &mut *inner {
+            SinkState::Pending(buf) => std::mem::take(buf),
+            SinkState::Live(_) | SinkState::Closed => Vec::new(),
+        };
+        if !pending.is_empty() {
+            let _ = channel.send(InvokeResponseBody::Raw(pending));
+        }
+        *inner = SinkState::Live(channel);
     }
 
-    fn clear(&self) {
-        *self.channel.write() = None;
+    fn close(&self) {
+        *self.inner.write() = SinkState::Closed;
     }
 }
 
@@ -74,9 +110,11 @@ pub fn register(session_id: i64, channel: Channel<InvokeResponseBody>) {
     ensure(session_id).set(channel);
 }
 
+/// Drop the sink for `session_id`. Idempotent. Called from
+/// `kill_session`, the PTY reader epilogue, and `unsubscribe_agent_output`.
 pub fn unregister(session_id: i64) {
     if let Some(sink) = SINKS.write().remove(&session_id) {
-        sink.clear();
+        sink.close();
     }
 }
 
@@ -89,9 +127,7 @@ pub fn subscribe_agent_output(session_id: i64, on_chunk: Channel<InvokeResponseB
     register(session_id, on_chunk);
 }
 
-/// Drop the binary Channel for `session_id`. Idempotent: a second call
-/// (or a call with no prior subscribe) is a no-op. Called from
-/// `TerminalRegistry.dispose` when the node is deleted.
+/// Drop the binary Channel for `session_id`. Idempotent.
 #[command]
 pub fn unsubscribe_agent_output(session_id: i64) {
     unregister(session_id);
@@ -104,13 +140,24 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn send_false_when_unregistered() {
+    fn send_before_subscribe_flushes_in_order_on_register() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let rec = received.clone();
+        let ch = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                rec.lock().unwrap().extend_from_slice(&bytes);
+            }
+            Ok(())
+        });
         let sink = OutputSink::new();
-        assert!(!sink.send(b"x"));
+        sink.send_owned(b"hel".to_vec());
+        sink.send_owned(b"lo".to_vec());
+        sink.set(ch);
+        assert_eq!(&*received.lock().unwrap(), b"hello");
     }
 
     #[test]
-    fn send_delivers_to_registered_channel() {
+    fn send_after_subscribe_goes_to_channel_without_cloning_per_chunk() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let rec = received.clone();
         let ch = Channel::new(move |body| {
@@ -121,27 +168,32 @@ mod tests {
         });
         let sink = OutputSink::new();
         sink.set(ch);
-        assert!(sink.send(b"hello"));
-        assert_eq!(&*received.lock().unwrap(), b"hello");
+        sink.send_owned(b"ab".to_vec());
+        sink.send_owned(b"cd".to_vec());
+        assert_eq!(&*received.lock().unwrap(), b"abcd");
     }
 
     #[test]
-    fn send_true_when_channel_registered_even_if_send_fails() {
-        // Dual-write guard: a registered Channel that errors on send
-        // must still suppress the JSON fallback. Otherwise the same
-        // bytes can land on both the Channel callback and `agent-output`.
-        let ch = Channel::new(|_| Err(tauri::Error::WebviewNotFound));
+    fn closed_sink_drops_further_sends() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let rec = received.clone();
+        let ch = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                rec.lock().unwrap().extend_from_slice(&bytes);
+            }
+            Ok(())
+        });
         let sink = OutputSink::new();
         sink.set(ch);
-        assert!(
-            sink.send(b"x"),
-            "registered Channel must suppress JSON fallback even on send Err"
-        );
+        sink.send_owned(b"keep".to_vec());
+        sink.close();
+        sink.send_owned(b"drop".to_vec());
+        assert_eq!(&*received.lock().unwrap(), b"keep");
     }
 
     #[test]
     fn ensure_returns_the_same_arc_for_a_session() {
-        let id = 9_000_101;
+        let id = 9_000_201;
         let a = ensure(id);
         let b = ensure(id);
         assert!(Arc::ptr_eq(&a, &b));
@@ -162,23 +214,21 @@ mod tests {
             s.fetch_add(1, Ordering::SeqCst);
             Ok(())
         });
-        let id = 9_000_102;
+        let id = 9_000_202;
         register(id, ch1);
         register(id, ch2);
-        assert!(ensure(id).send(b"x"));
+        ensure(id).send_owned(b"x".to_vec());
         assert_eq!(first_hits.load(Ordering::SeqCst), 0);
         assert_eq!(second_hits.load(Ordering::SeqCst), 1);
         unregister(id);
     }
 
     #[test]
-    fn unregister_is_idempotent_and_clears_the_slot() {
-        let id = 9_000_103;
+    fn unregister_is_idempotent() {
+        let id = 9_000_203;
         let sink = ensure(id);
-        let ch = Channel::new(|_| Ok(()));
-        sink.set(ch);
         unregister(id);
         unregister(id);
-        assert!(!sink.send(b"x"), "cleared sink must fall back to JSON");
+        sink.send_owned(b"x".to_vec()); // closed — no panic
     }
 }

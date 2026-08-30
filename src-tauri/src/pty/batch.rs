@@ -5,8 +5,7 @@
 //! Base64+JSON overhead. This batcher sits on a dedicated thread, drains a
 //! channel of raw chunks, and flushes when either:
 //!
-//! - [`FLUSH_BYTES`] have accumulated (large enough to hit Tauri Channel's
-//!   binary-fetch path, which kicks in at 1 KiB), or
+//! - [`FLUSH_BYTES`] have accumulated (four PTY fills — see [`PTY_READ_BUF`]), or
 //! - [`FLUSH_WINDOW`] has elapsed since the first byte of the batch (keeps
 //!   keystroke echo inside the issue's <16 ms interactive budget).
 //!
@@ -16,11 +15,15 @@
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
-/// Cap on unflushed bytes before a batch is forced out. 4 KiB is half the
-/// PTY reader's 8 KiB `read()` buffer, so a full OS read still flushes in
-/// at most two IPC messages, and a storm of tiny reads coalesces into
-/// chunks large enough for Tauri's binary Channel fetch path (≥ 1 KiB).
-pub const FLUSH_BYTES: usize = 4 * 1024;
+/// Size of the `read()` buffer in `pump_pty_output`. A build-storm fill
+/// returns up to this many bytes in one OS read.
+pub const PTY_READ_BUF: usize = 8192;
+
+/// Cap on unflushed bytes before a batch is forced out. Four PTY fills
+/// (32 KiB) so a storm of *full* 8 KiB `read()`s actually coalesces
+/// instead of flushing on the first fill. Tiny interactive reads still
+/// flush on [`FLUSH_WINDOW`].
+pub const FLUSH_BYTES: usize = PTY_READ_BUF * 4;
 
 /// Maximum time a byte sits in the batcher before being dispatched.
 /// 8 ms is half a 60 Hz frame and well inside the <16 ms keystroke budget
@@ -36,7 +39,7 @@ pub const QUEUE_CAP: usize = 256;
 
 /// Drain `rx` and call `on_batch` with coalesced chunks using the
 /// production window and size thresholds.
-pub fn drain_batched(rx: mpsc::Receiver<Vec<u8>>, on_batch: impl FnMut(&[u8])) {
+pub fn drain_batched(rx: mpsc::Receiver<Vec<u8>>, on_batch: impl FnMut(Vec<u8>)) {
     drain_batched_with(rx, FLUSH_WINDOW, FLUSH_BYTES, on_batch);
 }
 
@@ -49,7 +52,7 @@ pub fn drain_batched(rx: mpsc::Receiver<Vec<u8>>, on_batch: impl FnMut(&[u8])) {
 /// batcher waits for `Disconnected`). This helper is the only legal
 /// pairing of "pump then join".
 pub fn with_batcher(
-    on_batch: impl FnMut(&[u8]) + Send + 'static,
+    on_batch: impl FnMut(Vec<u8>) + Send + 'static,
     body: impl FnOnce(&mpsc::SyncSender<Vec<u8>>),
 ) {
     let (tx, rx) = mpsc::sync_channel(QUEUE_CAP);
@@ -65,14 +68,18 @@ pub fn drain_batched_with(
     rx: mpsc::Receiver<Vec<u8>>,
     window: Duration,
     max_bytes: usize,
-    mut on_batch: impl FnMut(&[u8]),
+    mut on_batch: impl FnMut(Vec<u8>),
 ) {
     loop {
         let first = match rx.recv() {
             Ok(chunk) => chunk,
             Err(_) => return,
         };
+        // Take ownership of the first Vec — no extra alloc for a single
+        // fill. Reserve up to `max_bytes` so coalesced extends don't
+        // reallocate on the storm path.
         let mut buf = first;
+        buf.reserve(max_bytes.saturating_sub(buf.len()));
         let deadline = Instant::now() + window;
 
         loop {
@@ -85,7 +92,7 @@ pub fn drain_batched_with(
                     continue;
                 }
                 Err(TryRecvError::Disconnected) => {
-                    on_batch(&buf);
+                    on_batch(buf);
                     return;
                 }
                 Err(TryRecvError::Empty) => {}
@@ -98,12 +105,12 @@ pub fn drain_batched_with(
                 Ok(chunk) => buf.extend_from_slice(&chunk),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => {
-                    on_batch(&buf);
+                    on_batch(buf);
                     return;
                 }
             }
         }
-        on_batch(&buf);
+        on_batch(buf);
     }
 }
 
@@ -115,7 +122,7 @@ mod tests {
 
     fn collect(rx: mpsc::Receiver<Vec<u8>>, window: Duration, max_bytes: usize) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        drain_batched_with(rx, window, max_bytes, |batch| out.push(batch.to_vec()));
+        drain_batched_with(rx, window, max_bytes, |batch| out.push(batch));
         out
     }
 
@@ -186,7 +193,7 @@ mod tests {
         let rec = received.clone();
         let started = Instant::now();
         with_batcher(
-            move |batch| rec.lock().unwrap().extend_from_slice(batch),
+            move |batch| rec.lock().unwrap().extend_from_slice(&batch),
             |tx| {
                 tx.send(b"xyz".to_vec()).unwrap();
             },
@@ -196,6 +203,29 @@ mod tests {
             "batcher join hung — producer SyncSender was not dropped"
         );
         assert_eq!(&*received.lock().unwrap(), b"xyz");
+    }
+
+    #[test]
+    fn two_full_pty_fills_coalesce_under_production_flush_bytes() {
+        // The PTY reader fills 8 KiB. FLUSH_BYTES is 4 fills, so two
+        // back-to-back full reads must become one IPC dispatch — the
+        // whole point of the batcher on a build storm.
+        let (tx, rx) = mpsc::sync_channel(8);
+        tx.send(vec![1u8; PTY_READ_BUF]).unwrap();
+        tx.send(vec![2u8; PTY_READ_BUF]).unwrap();
+        drop(tx);
+
+        let batches = collect(rx, Duration::from_secs(5), FLUSH_BYTES);
+        assert_eq!(batches.len(), 1, "two full fills must coalesce");
+        assert_eq!(batches[0].len(), PTY_READ_BUF * 2);
+    }
+
+    #[test]
+    fn production_flush_bytes_is_several_pty_fills() {
+        assert!(
+            FLUSH_BYTES > PTY_READ_BUF,
+            "FLUSH_BYTES ({FLUSH_BYTES}) must exceed one PTY fill ({PTY_READ_BUF}) or a build storm never batches"
+        );
     }
 
     #[test]

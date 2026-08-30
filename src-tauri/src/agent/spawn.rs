@@ -27,7 +27,6 @@ pub(crate) use intent::{
     ExplicitSpawnOverrides, GitHubWorkContext, ResumeCause, SpawnIntent, SpawnOutcome,
     SpawnRequest, TerminalSize,
 };
-use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,10 +38,11 @@ use ts_rs::TS;
 // Wire types — Tauri event payloads (issue #161)
 // ---------------------------------------------------------------------------
 
-/// Payload of the `agent-output` Tauri event. Fallback path for PTY bytes
-/// when the frontend has not yet subscribed a binary Channel (issue #1385),
-/// and the wire shape for test injection (`line`). Production PTY output
-/// prefers `OutputSink::send` (raw `Uint8Array`, no Base64).
+/// Payload of the `agent-output` Tauri event. Production PTY bytes go
+/// over the binary Channel (`OutputSink`), not this event — mixing the
+/// two IPC paths has no ordering and would split ANSI. `line` remains
+/// the wire shape for test injection (`inject_test_output`). `data`
+/// (base64) is kept so older listeners still typecheck.
 ///
 /// Exactly one of `data` (base64-encoded bytes) or `line` (raw UTF-8
 /// string) is populated — the listener branches on which is `Some`. The
@@ -948,12 +948,8 @@ fn register_agent(
     );
 }
 
-fn encode_pty_chunk(data: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-/// Core PTY read loop: read 8 KiB chunks until EOF or error, handing raw bytes
-/// to `on_chunk`. Returns when the PTY closes.
+/// Core PTY read loop: read [`crate::pty::batch::PTY_READ_BUF`] chunks until
+/// EOF or error, handing raw bytes to `on_chunk`. Returns when the PTY closes.
 ///
 /// Extracted so the production reader thread and the real-PTY integration test
 /// exercise the exact same read path (see `src-tauri/tests/pty_spawn.rs`).
@@ -961,7 +957,7 @@ pub fn pump_pty_output(
     mut reader: Box<dyn std::io::Read + Send>,
     mut on_chunk: impl FnMut(&[u8]),
 ) {
-    let mut buf = [0u8; 8192];
+    let mut buf = [0u8; crate::pty::batch::PTY_READ_BUF];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -1064,21 +1060,16 @@ fn start_reader(
         // joining while still holding `SyncSender` deadlocks the reader
         // on every PTY exit.
         let sink = crate::agent::output::ensure(session_id);
-        let app_for_batch = app_clone.clone();
         let batch_session_id = session_id;
         crate::pty::batch::with_batcher(
             move |batch| {
-                if !sink.send(batch) {
-                    let _ = app_for_batch.emit(
-                        "agent-output",
-                        AgentOutputPayload {
-                            session_id: batch_session_id,
-                            data: Some(encode_pty_chunk(batch)),
-                            line: None,
-                        },
-                    );
-                }
-                crate::http_server::send_pty_output(batch_session_id, batch.to_vec());
+                // One transport only: Channel (or the sink's pre-subscribe
+                // buffer). Never emit JSON `agent-output` for PTY bytes —
+                // that path and the Channel have no ordering, so a
+                // subscribe landing mid-stream would let later chunks
+                // overtake earlier ones and split ANSI.
+                crate::http_server::send_pty_output(batch_session_id, &batch);
+                sink.send_owned(batch);
             },
             |batch_tx| {
                 let mut first_chunk = true;
@@ -1125,6 +1116,7 @@ fn start_reader(
                 });
             },
         );
+        crate::agent::output::unregister(session_id);
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 
@@ -2647,6 +2639,30 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    /// The start_reader pattern: `pump_pty_output` inside `with_batcher`.
+    /// If the producer isn't dropped before join, this hangs on EOF.
+    #[test]
+    fn pump_inside_with_batcher_exits_cleanly_on_reader_eof() {
+        let reader: Box<dyn std::io::Read + Send> =
+            Box::new(std::io::Cursor::new(b"hello from pty\n"));
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = got.clone();
+        let started = std::time::Instant::now();
+        crate::pty::batch::with_batcher(
+            move |batch| g.lock().unwrap().extend_from_slice(&batch),
+            |tx| {
+                pump_pty_output(reader, |data| {
+                    let _ = tx.send(data.to_vec());
+                });
+            },
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "reader+batcher hung after PTY EOF — producer was not dropped"
+        );
+        assert_eq!(&*got.lock().unwrap(), b"hello from pty\n");
     }
 
     // -----------------------------------------------------------------------

@@ -29,14 +29,6 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
-vi.mock('@tauri-apps/api/core', async () => {
-  const { MockChannel } = await import('../setup/tauriChannel');
-  return {
-    invoke: vi.fn().mockResolvedValue({}),
-    Channel: MockChannel,
-  };
-});
-
 vi.mock('@xterm/xterm', () => {
   // Mirror the real @xterm/xterm shape: the user-facing `unicode` is a
   // thin proxy whose `register` delegates to the internal UnicodeService
