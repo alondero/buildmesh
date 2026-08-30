@@ -60,6 +60,12 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
     return Promise.resolve({});
   }),
+  Channel: class Channel {
+    onmessage = (_message: unknown) => {};
+    constructor(handler?: (message: unknown) => void) {
+      if (handler) this.onmessage = handler;
+    }
+  },
 }));
 
 vi.mock('@tauri-apps/plugin-opener', () => ({

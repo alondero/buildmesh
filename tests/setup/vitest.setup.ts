@@ -7,6 +7,12 @@ import { vi } from 'vitest';
 // Mock invoke - used for write_to_agent, list_agent_nodes, etc.
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockResolvedValue({}),
+  Channel: class Channel {
+    onmessage = (_message: unknown) => {};
+    constructor(handler?: (message: unknown) => void) {
+      if (handler) this.onmessage = handler;
+    }
+  },
 }));
 
 // Mock window API - used for focus tracking (onFocusChanged)

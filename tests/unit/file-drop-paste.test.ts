@@ -9,6 +9,12 @@ import {
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
+  Channel: class Channel {
+    onmessage = (_message: unknown) => {};
+    constructor(handler?: (message: unknown) => void) {
+      if (handler) this.onmessage = handler;
+    }
+  },
 }));
 
 const mockedInvoke = vi.mocked(invoke);

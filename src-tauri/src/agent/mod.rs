@@ -21,6 +21,7 @@ pub mod capabilities;
 pub mod detection;
 pub mod launch;
 pub mod launch_routing;
+pub mod output;
 pub mod process;
 pub mod provider;
 pub mod provider_menu;

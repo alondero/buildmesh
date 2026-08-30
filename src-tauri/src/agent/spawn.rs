@@ -39,10 +39,14 @@ use ts_rs::TS;
 // Wire types — Tauri event payloads (issue #161)
 // ---------------------------------------------------------------------------
 
-/// Payload of the `agent-output` Tauri event. Streamed from the PTY reader
-/// thread for every node. Exactly one of `data` (base64-encoded bytes) or
-/// `line` (raw UTF-8 string) is populated — the listener branches on which
-/// is `Some`. The empty-both case is meaningless and ignored.
+/// Payload of the `agent-output` Tauri event. Fallback path for PTY bytes
+/// when the frontend has not yet subscribed a binary Channel (issue #1385),
+/// and the wire shape for test injection (`line`). Production PTY output
+/// prefers `agent::output::send_raw` (raw `Uint8Array`, no Base64).
+///
+/// Exactly one of `data` (base64-encoded bytes) or `line` (raw UTF-8
+/// string) is populated — the listener branches on which is `Some`. The
+/// empty-both case is meaningless and ignored.
 ///
 /// Generated to `src/types/generated/AgentOutputPayload.ts`; the TS half is
 /// imported by `src/components/Terminal/TerminalRegistry.ts`. The wire key is
@@ -992,6 +996,12 @@ pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, 
 /// can store it on `AgentProcess` and let `kill_session` join with a
 /// bounded timeout (issue #300).
 ///
+/// Output dispatch (issue #1385): each OS `read()` still feeds capture /
+/// naming / autopilot on this thread, then the bytes go through
+/// `pty::batch::drain_batched` (8 ms / 4 KiB) onto a binary Tauri Channel
+/// (`agent::output::send_raw`) with the `agent-output` JSON event as
+/// fallback.
+///
 /// Two time references are passed in, with distinct semantics — keep
 /// them separate:
 ///
@@ -1047,6 +1057,34 @@ fn start_reader(
         // alongside the other checkpoints. Measured against `spawn_start` (not
         // `spawned_at`) so this elapsed time is comparable to every other
         // checkpoint in the log.
+        // Issue #1385: coalesce OS reads onto a dedicated batcher thread
+        // so a build-storm of tiny PTY chunks becomes one IPC dispatch
+        // per 8 ms / 4 KiB. Capture / naming / autopilot still see every
+        // OS read on this thread (ChunkCapture already stitches split
+        // banners). `pump_pty_output` returning drops `batch_tx` (the
+        // EOF that flushes the last bytes) before we join the batcher
+        // and run the post-exit epilogue.
+        let (batch_tx, batch_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+            crate::pty::batch::QUEUE_CAP,
+        );
+        let app_for_batch = app_clone.clone();
+        let batch_session_id = session_id;
+        let batcher = std::thread::spawn(move || {
+            crate::pty::batch::drain_batched(batch_rx, |batch| {
+                if !crate::agent::output::send_raw(batch_session_id, batch) {
+                    let _ = app_for_batch.emit(
+                        "agent-output",
+                        AgentOutputPayload {
+                            session_id: batch_session_id,
+                            data: Some(encode_pty_chunk(batch)),
+                            line: None,
+                        },
+                    );
+                }
+                crate::http_server::send_pty_output(batch_session_id, batch.to_vec());
+            });
+        });
+
         let mut first_chunk = true;
         pump_pty_output(reader, |data| {
             if first_chunk {
@@ -1087,18 +1125,12 @@ fn start_reader(
                 }
             }
 
-            let _ = app_clone.emit(
-                "agent-output",
-                AgentOutputPayload {
-                    session_id,
-                    data: Some(encode_pty_chunk(data)),
-                    line: None,
-                },
-            );
-
-            // Forward to any connected mobile WebSocket clients
-            crate::http_server::send_pty_output(session_id, data.to_vec());
+            let _ = batch_tx.send(data.to_vec());
         });
+        // `pump_pty_output` returning drops the closure (and `batch_tx`),
+        // which is the EOF that lets the batcher flush remaining bytes
+        // before we run the post-exit epilogue.
+        let _ = batcher.join();
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 
