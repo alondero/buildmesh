@@ -311,14 +311,14 @@ pub trait AgentProvider: Send + Sync {
 
     /// Ensure the workspace is trusted for this harness before its process is
     /// created. Trust is a launch prerequisite, independent of attention-hook
-    /// installation. The default covers Claude/Antigravity's shared settings;
-    /// harnesses with a different trust store override this method.
+    /// installation. Providers with vendor-specific trust stores opt in by
+    /// overriding this method; unrelated providers must remain side-effect
+    /// free.
     fn ensure_workspace_trusted(
         &self,
-        resolved: &ResolvedPath,
+        _resolved: &ResolvedPath,
         _runtime: &LaunchRuntime,
     ) -> Result<(), String> {
-        crate::agent::workspace_trust::ensure_trusted(resolved);
         Ok(())
     }
 

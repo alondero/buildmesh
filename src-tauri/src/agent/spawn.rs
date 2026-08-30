@@ -2241,8 +2241,6 @@ pub(crate) async fn spawn_agent_inner(
     }
     timer.checkpoint("after_workspace_trust");
 
-    timer.checkpoint("after_inject_hook");
-
     // Resolve configuration values through the per-field cascade (issue
     // #1149 prefactor; #1150 fills the application slot; #1151 fills the
     // per-Mesh override slot). The resolver applies the capability mask,

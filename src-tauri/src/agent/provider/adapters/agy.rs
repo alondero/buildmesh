@@ -139,6 +139,15 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
+    fn ensure_workspace_trusted(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        crate::agent::workspace_trust::ensure_trusted(resolved);
+        Ok(())
+    }
+
     /// AGY lifecycle hooks live in the project-local `.agents/` dir as
     /// `hooks.json` (issue #1285, #1367). The namespace key is
     /// `buildmesh-attention` so user-added sibling namespaces (other

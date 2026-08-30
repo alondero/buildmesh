@@ -304,7 +304,7 @@ done
 const WSL_ATOMIC_WRITE_FILES_SCRIPT: &str = r#"set -eu
 i=0
 while [ "$#" -gt 0 ]; do
-  p="$1"; var="$2"; shift 2
+  p="$1"; shift
   case "$p" in
     */*) d="${p%/*}" ;;
     *) d="." ;;
@@ -315,7 +315,7 @@ while [ "$#" -gt 0 ]; do
     chmod 700 "$d" 2>/dev/null || true
   fi
   tmp="$d/.buildmesh-codex.$$.${i}.tmp"
-  encoded=$(printenv "$var")
+  IFS= read -r encoded || exit 1
   printf %s "$encoded" | base64 -d > "$tmp"
   chmod 600 "$tmp"
   if [ -f "$p" ] && cmp -s "$tmp" "$p"; then rm -f "$tmp"; else mv -f "$tmp" "$p"; fi
@@ -393,29 +393,36 @@ fn wsl_write_files(distro: &str, files: &[(&Path, &str)]) -> Result<(), String> 
     if files.is_empty() {
         return Ok(());
     }
-    let mut values = Vec::with_capacity(files.len());
-    let mut args = Vec::with_capacity(files.len() * 2);
-    for (index, (path, content)) in files.iter().enumerate() {
-        let variable = format!("BUILDMESH_CODEX_CONTENT_{index}");
+    let mut args = Vec::with_capacity(files.len());
+    let mut payload = String::new();
+    for (path, content) in files {
         let encoded = base64::engine::general_purpose::STANDARD.encode(content);
         args.push(path.to_string_lossy().into_owned());
-        args.push(variable.clone());
-        values.push((variable, encoded));
+        payload.push_str(&encoded);
+        payload.push('\n');
     }
-    let value_refs: Vec<(&str, &str)> = values
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut command = wsl_command_with_values(
         distro,
         WSL_ATOMIC_WRITE_FILES_SCRIPT,
-        &value_refs,
+        &[],
         &arg_refs,
     );
-    let status = command
-        .status()
+    command.stdin(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
         .map_err(|e| format!("failed to write WSL Codex files: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        if let Err(error) = stdin.write_all(payload.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to send WSL Codex file payload: {error}"));
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to wait for WSL Codex file write: {e}"))?;
     if status.success() {
         Ok(())
     } else {
@@ -623,9 +630,14 @@ fn ensure_project_trust_content(
 
 fn project_keys_match(existing: &str, candidate: &str, env_type: EnvType) -> bool {
     if env_type == EnvType::Windows {
-        existing.eq_ignore_ascii_case(candidate)
+        let normalize = |path: &str| path.replace('/', "\\");
+        let existing = normalize(existing);
+        let candidate = normalize(candidate);
+        existing
+            .trim_end_matches('\\')
+            .eq_ignore_ascii_case(candidate.trim_end_matches('\\'))
     } else {
-        existing == candidate
+        existing.trim_end_matches('/') == candidate.trim_end_matches('/')
     }
 }
 
@@ -1836,6 +1848,30 @@ trust_level = "untrusted" # preserve this explanation
     }
 
     #[test]
+    fn project_trust_merge_normalizes_windows_separators_and_trailing_slashes() {
+        let existing = r#"[projects."F:/src/buildmesh/"]
+trust_level = "untrusted"
+"#;
+        let updated =
+            ensure_project_trust_content(existing, r#"F:\src\buildmesh"#, EnvType::Windows)
+                .unwrap();
+        let document = updated.parse::<DocumentMut>().unwrap();
+        let projects = document["projects"].as_table_like().unwrap();
+        assert_eq!(projects.iter().count(), 1);
+        assert_eq!(
+            projects
+                .get("F:/src/buildmesh/")
+                .unwrap()
+                .as_table_like()
+                .unwrap()
+                .get("trust_level")
+                .and_then(Item::as_value)
+                .and_then(|item| item.as_str()),
+            Some("trusted")
+        );
+    }
+
+    #[test]
     fn project_trust_merge_keeps_case_distinct_wsl_paths() {
         let existing = r#"[projects."/home/alice/Code"]
 trust_level = "trusted"
@@ -1847,6 +1883,13 @@ trust_level = "trusted"
         assert_eq!(projects.iter().count(), 2);
         assert!(updated.contains("[projects.\"/home/alice/Code\"]"));
         assert!(updated.contains("[projects.\"/home/alice/code\"]"));
+    }
+
+    #[test]
+    fn wsl_write_script_reads_payloads_from_stdin() {
+        assert!(WSL_ATOMIC_WRITE_FILES_SCRIPT.contains("IFS= read -r encoded"));
+        assert!(!WSL_ATOMIC_WRITE_FILES_SCRIPT.contains("printenv"));
+        assert!(!WSL_ATOMIC_WRITE_FILES_SCRIPT.contains("BUILDMESH_CODEX_CONTENT"));
     }
 
     #[test]

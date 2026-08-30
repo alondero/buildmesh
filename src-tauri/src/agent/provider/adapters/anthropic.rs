@@ -37,6 +37,15 @@ impl AgentProvider for AnthropicAdapter {
         true
     }
 
+    fn ensure_workspace_trusted(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        crate::agent::workspace_trust::ensure_trusted(resolved);
+        Ok(())
+    }
+
     /// Claude Code reads its hooks from `.claude/settings.local.json`; the
     /// shared helper in `agent::spawn` owns that format (the mesh commands
     /// also call it directly to pre-provision at mesh creation).
