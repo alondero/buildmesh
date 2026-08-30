@@ -6,8 +6,12 @@ use crate::http::MaybeTls;
 use crate::db;
 use crate::http::request;
 
-pub fn list_json() -> String {
-    match db::list_agent_nodes() {
+pub async fn list_json() -> String {
+    match crate::commands::run_blocking("http_list_nodes", || {
+        db::list_agent_nodes().map_err(|e| e.to_string())
+    })
+    .await
+    {
         Ok(nodes) => serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()),
         Err(_) => "[]".to_string(),
     }
@@ -48,7 +52,13 @@ pub async fn create(
         }
     };
 
-    let mesh = match db::get_mesh_by_id(req.mesh_id) {
+    let mesh_id = req.mesh_id;
+    let provider = req.provider;
+    let mesh = match crate::commands::run_blocking("http_create_node_mesh", move || {
+        db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())
+    })
+    .await
+    {
         Ok(m) => m,
         Err(_) => {
             request::send_json_error(lines, "400 Bad Request", "Mesh not found").await;
@@ -56,17 +66,23 @@ pub async fn create(
         }
     };
 
-    let node = match crate::services::agent_node::create(
-        req.mesh_id,
-        &mesh.path,
-        "main",
-        Some(req.provider.as_str()),
-        None, // source_issue
-        None, // source_pr — generic mobile spawn, not PR-spawn (issue #450)
-        None, // source_pr_pinned_sha — generic mobile spawn, no pin (issue #444)
-        None, // use_worktree_override — None falls back to mesh default
-        None, // name_override — none supplied on this route
-    ) {
+    let mesh_path = mesh.path.clone();
+    let node = match crate::commands::run_blocking("http_create_node", move || {
+        crate::services::agent_node::create(
+            mesh_id,
+            &mesh_path,
+            "main",
+            Some(provider.as_str()),
+            None, // source_issue
+            None, // source_pr — generic mobile spawn, not PR-spawn (issue #450)
+            None, // source_pr_pinned_sha — generic mobile spawn, no pin (issue #444)
+            None, // use_worktree_override — None falls back to mesh default
+            None, // name_override — none supplied on this route
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             let msg = format!("Failed to create node: {}", e);
@@ -100,7 +116,11 @@ pub async fn create(
         return;
     }
 
-    let node = match db::get_agent_node_by_id(node_id) {
+    let node = match crate::commands::run_blocking("http_reload_node", move || {
+        db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+    })
+    .await
+    {
         Ok(node) => node,
         Err(e) => {
             request::send_json_error(

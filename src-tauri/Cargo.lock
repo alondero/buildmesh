@@ -392,6 +392,7 @@ dependencies = [
  "anyhow",
  "backtrace",
  "base64 0.22.1",
+ "buildmesh_macros",
  "chrono",
  "difference-rs",
  "futures-util",
@@ -436,6 +437,15 @@ dependencies = [
  "uuid",
  "which",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "buildmesh_macros"
+version = "1.3.0-0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

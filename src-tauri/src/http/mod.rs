@@ -1782,9 +1782,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
             return;
         }
         let body = match path_without_query.as_str() {
-            "/api/nodes" => routes::nodes::list_json(),
+            "/api/nodes" => routes::nodes::list_json().await,
             "/api/providers" => routes::providers::list_json().await,
-            "/api/meshes" => routes::meshes::list_json(),
+            "/api/meshes" => routes::meshes::list_json().await,
             _ => r#"{"error":"not found"}"#.to_string(),
         };
         let _ = request::write_json(&mut lines, "200 OK", &body).await;

@@ -196,9 +196,13 @@ pub async fn spawn_issue_agent(
     issue_title: String,
     provider: Option<String>,
 ) -> Result<crate::models::AgentNode, String> {
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
-        .map_err(|e| format!("{} — cannot derive issue URL", e))?;
+    let (mesh, owner, repo) = crate::commands::run_blocking("spawn_issue_agent_mesh", move || {
+        let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+        let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
+            .map_err(|e| format!("{} — cannot derive issue URL", e))?;
+        Ok((mesh, owner, repo))
+    })
+    .await?;
 
     let intent = SpawnIntent::Issue(GitHubWorkContext {
         owner,
@@ -658,7 +662,10 @@ pub async fn spawn_handover_agent(
     prefill: String,
     provider: Option<String>,
 ) -> Result<crate::models::AgentNode, String> {
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let mesh = crate::commands::run_blocking("spawn_handover_agent_mesh", move || {
+        db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())
+    })
+    .await?;
     let node = spawn_new_agent_impl(
         &app,
         &mesh,
@@ -688,7 +695,10 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
         tracing::warn!("auto_resume_agent_nodes: legacy Codex session migration failed: {error}");
     }
 
-    let nodes = db::list_suspended_nodes().map_err(|e| e.to_string())?;
+    let nodes = crate::commands::run_blocking("auto_resume_agent_nodes", || {
+        db::list_suspended_nodes().map_err(|e| e.to_string())
+    })
+    .await?;
 
     if nodes.is_empty() {
         tracing::info!("auto_resume_agent_nodes: no suspended nodes to resume");
