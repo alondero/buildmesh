@@ -2245,17 +2245,37 @@ pub(crate) async fn spawn_agent_inner(
         sandbox,
     );
 
-    let emit_provider_error = |e: &String| {
+    let emit_provider_error = |e: &str| {
         let _ = app.emit(
             "provider-error",
             ProviderErrorPayload {
                 session_id,
                 provider,
-                message: e.clone(),
+                message: e.to_string(),
             },
         );
     };
 
+    // 8. Provision workspace trust and attention hooks before child process launches
+    // so CLI harnesses discover hooks and trusted workspaces at boot time (issue #1367).
+    crate::agent::workspace_trust::ensure_trusted(&resolved);
+    timer.checkpoint("after_workspace_trust");
+    if adapter.requires_attention_hook() {
+        // The adapter owns its harness's hook format (issue #886). A failure
+        // must not abort the spawn — the agent still works, but telemetry
+        // is missing so we surface a provider-warning event.
+        if let Err(e) = adapter.inject_attention_hook(std::path::Path::new(&resolved.host_path)) {
+            tracing::warn!(
+                "spawn_agent_inner: attention hook injection failed for session {}: {}",
+                session_id,
+                e
+            );
+            emit_provider_error(&format!("Attention hook injection warning: {e}"));
+        }
+    }
+    timer.checkpoint("after_inject_hook");
+
+    // 9. Spawn child process (either sandboxed or direct PTY)
     let (child, master): (
         Box<dyn portable_pty::Child + Send + Sync>,
         Box<dyn portable_pty::MasterPty + Send>,
@@ -2290,24 +2310,7 @@ pub(crate) async fn spawn_agent_inner(
     let writer = master.take_writer().map_err(|e| e.to_string())?;
     let reader_alive = Arc::new(AtomicBool::new(true));
 
-    // 11. Inject attention hook
-    crate::agent::workspace_trust::ensure_trusted(&resolved);
-    timer.checkpoint("after_workspace_trust");
-    if adapter.requires_attention_hook() {
-        // The adapter owns its harness's hook format (issue #886). A failure
-        // must not abort the spawn — the agent still works, only the
-        // attention callback is lost.
-        if let Err(e) = adapter.inject_attention_hook(std::path::Path::new(&resolved.host_path)) {
-            tracing::warn!(
-                "spawn_agent_inner: attention hook injection failed for session {}: {}",
-                session_id,
-                e
-            );
-        }
-    }
-    timer.checkpoint("after_inject_hook");
-
-    // 12. Register BEFORE starting the reader thread. The pre-#300 order
+    // 11. Register BEFORE starting the reader thread. The pre-#300 order
     //     (register-then-start) is the one that closes the TOCTOU window
     //     in `is_agent_already_running`: a concurrent spawn for the
     //     same session_id sees the entry and bails. The `reader_handle`

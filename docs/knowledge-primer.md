@@ -13,6 +13,7 @@
 - `tests/e2e/` — Playwright e2e (requires app running on port 1991; boots `tauri dev` on the **base** identity — collides with a running stable hub, so not for autonomous agents)
 - `scripts/ui-shot.mjs` — ad-hoc UI verification + screenshots: Playwright attaches over CDP to the real dev-profile window (`scripts\run-dev.ps1 -CdpPort 9223`); see `.claude/skills/verify-ui/skill.md`
 - `docs/adr/` — Architecture Decision Records
+- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `agy-harness-capabilities.md`, `grok-harness-capabilities.md`, `opencode-harness-capabilities.md`)
 
 ## Key Conventions
 

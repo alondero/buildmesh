@@ -158,29 +158,33 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             }
             let path = db_path.clone();
             let dir = spawn_directory.clone();
-            let captured = tauri::async_runtime::spawn_blocking(move || {
-                try_capture_from_db_path(&path, &dir, not_before)
+            // Read the provider DB and conditionally persist the captured ID
+            // in one blocking task. A separate DB hop after every scan adds
+            // needless pool churn and leaves a race between the two steps.
+            let captured = crate::blocking::run_blocking("opencode_capture", move || {
+                let Some(id) = try_capture_from_db_path(&path, &dir, not_before) else {
+                    return Ok(None);
+                };
+                crate::db::update_cli_session_id(node_id, &id)
+                    .map(|()| Some(id))
+                    .map_err(|error| error.to_string())
             })
-            .await
-            .ok()
-            .flatten();
+            .await;
+            let captured = match captured {
+                Ok(captured) => captured,
+                Err(error) => {
+                    tracing::warn!("opencode session capture: blocking task failed for node {node_id}: {error}");
+                    return;
+                }
+            };
             if let Some(id) = captured {
                 if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
                     return;
                 }
-                match crate::db::update_cli_session_id(node_id, &id) {
-                    Ok(()) => {
-                        tracing::info!(
-                            "opencode session capture: stored {id} for node {node_id} (attempt {})",
-                            i + 1
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "opencode session capture: db write failed for node {node_id}: {e}"
-                        );
-                    }
-                }
+                tracing::info!(
+                    "opencode session capture: stored {id} for node {node_id} (attempt {})",
+                    i + 1
+                );
                 return;
             }
         }
