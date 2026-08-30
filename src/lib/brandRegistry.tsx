@@ -102,6 +102,16 @@ function DeepSeekIcon({ className, title }: InlineIconProps) {
   );
 }
 
+function CommandCodeIcon({ className, title }: InlineIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <title>{title}</title>
+      <polyline points="4 17 10 11 4 5" />
+      <line x1="12" y1="19" x2="20" y2="19" />
+    </svg>
+  );
+}
+
 type BrandRegistration = Brand & { readonly aliases?: readonly string[] };
 
 // Colour-baked assets stay as images; monochrome marks remain inline so
@@ -122,6 +132,7 @@ const BRANDS: readonly BrandRegistration[] = [
   // resolvable as aliases for the harness-side lookups (`brandFor('dsh')`)
   // so the DeepSeek Harness adapter's brand chip keeps working.
   { id: 'deepseek', aliases: ['dsh', 'deepseek-harness'], icon: { kind: 'inline', component: DeepSeekIcon }, chipHex: '#1E88E5', chipClass: 'bg-blue-600' },
+  { id: 'commandcode', aliases: ['cmdc', 'command-code'], icon: { kind: 'inline', component: CommandCodeIcon }, chipHex: '#8C4EDD', chipClass: 'bg-purple-600' },
   { id: 'terminal', icon: { kind: 'inline', component: TerminalIcon }, chipHex: '#9ca3af', chipClass: 'bg-gray-500' },
   { id: 'codex', icon: { kind: 'inline', component: OpenAIIcon }, chipHex: '#10a37f', chipClass: 'bg-gray-500' },
   { id: 'openrouter', icon: { kind: 'inline', component: OpenRouterIcon }, chipHex: '#615EFF', chipClass: 'bg-gray-500' },

@@ -410,6 +410,10 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::DSH)
     }
 
+    fn commandcode_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::COMMANDCODE)
+    }
+
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
     /// descriptor must match the matrix documented in `docs/knowledge-primer.md`
     /// and the #1143 research summary. Drift here means a future adapter
@@ -569,6 +573,23 @@ mod tests {
         assert!(dsh.supports_extra_args);
         assert!(!dsh.supports_prefill);
         assert_eq!(dsh.effort_control, EffortControlKind::None);
+
+        let commandcode = commandcode_caps();
+        assert_eq!(commandcode.harness_id, "commandcode");
+        assert!(commandcode.supports_resume);
+        assert!(commandcode.auto_resume_on_startup);
+        assert!(!commandcode.requires_attention_hook);
+        assert!(!commandcode.produces_readable_transcript);
+        assert!(commandcode.supports_model_override);
+        assert!(!commandcode.supports_effort_override);
+        assert!(commandcode.supports_extra_args);
+        assert!(commandcode.supports_prefill);
+        assert!(!commandcode.is_plain_terminal);
+        assert_eq!(commandcode.effort_control, EffortControlKind::None);
+        assert_eq!(
+            commandcode.available_on,
+            vec!["windows".to_string(), "macos".to_string(), "linux".to_string()]
+        );
     }
 
     /// `supports_effort_override` must mirror `effort_control != None`. The
@@ -588,6 +609,7 @@ mod tests {
             grok_caps(),
             mcode_caps(),
             dsh_caps(),
+            commandcode_caps(),
         ] {
             let has_effort_control = !matches!(caps.effort_control, EffortControlKind::None);
             assert_eq!(
@@ -621,6 +643,8 @@ mod tests {
             &crate::agent::provider::adapters::KIMI,
             &crate::agent::provider::adapters::GROK,
             &crate::agent::provider::adapters::MCODE,
+            &crate::agent::provider::adapters::DSH,
+            &crate::agent::provider::adapters::COMMANDCODE,
         ] {
             let from_trait = adapter.effort_control();
             let from_descriptor = capabilities_for(adapter).effort_control;

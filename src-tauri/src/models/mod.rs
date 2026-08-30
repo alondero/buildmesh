@@ -86,6 +86,9 @@ pub enum Provider {
     /// DeepSeek Harness CLI (`dsh`) — interactive agent harness.
     /// See `agent::provider::adapters::dsh`.
     Dsh,
+    /// Command Code CLI (`commandcode`) — interactive agent harness.
+    /// See `agent::provider::adapters::commandcode` (wayfinder #1394).
+    CommandCode,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -105,6 +108,7 @@ impl Provider {
             Provider::Kimi,
             Provider::Mcode,
             Provider::Dsh,
+            Provider::CommandCode,
             Provider::Terminal,
         ]
     }
@@ -130,6 +134,7 @@ impl Provider {
             "kimi" => Provider::Kimi,
             "mcode" | "minimax-code" => Provider::Mcode,
             "dsh" | "deepseek-harness" | "deepseek" => Provider::Dsh,
+            "commandcode" | "command-code" | "cmdc" | "cmd" => Provider::CommandCode,
             "terminal" => Provider::Terminal,
             // "minimax" is no longer a first-class executor: it is Claude Code
             // with a swapped backend, configured as a harness profile whose
@@ -163,6 +168,7 @@ impl Provider {
             Provider::Kimi => &adapters::KIMI,
             Provider::Mcode => &adapters::MCODE,
             Provider::Dsh => &adapters::DSH,
+            Provider::CommandCode => &adapters::COMMANDCODE,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -180,6 +186,7 @@ impl std::fmt::Display for Provider {
             Provider::Kimi => write!(f, "kimi"),
             Provider::Mcode => write!(f, "mcode"),
             Provider::Dsh => write!(f, "dsh"),
+            Provider::CommandCode => write!(f, "commandcode"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }

@@ -52,6 +52,7 @@ export type InspectorHarnessId =
   | 'kimi'
   | 'mcode'
   | 'dsh'
+  | 'commandcode'
   | 'terminal';
 
 const ANTHROPIC_CAPS: HarnessCapabilities = {
@@ -206,6 +207,22 @@ const DSH_CAPS: HarnessCapabilities = {
   available_on: ['windows', 'macos', 'linux'],
 };
 
+// commandcode (Command Code) — model yes, effort no, prefill yes
+const COMMANDCODE_CAPS: HarnessCapabilities = {
+  harness_id: 'commandcode',
+  supports_resume: true,
+  auto_resume_on_startup: true,
+  requires_attention_hook: false,
+  produces_readable_transcript: false,
+  supports_model_override: true,
+  supports_effort_override: false,
+  supports_extra_args: true,
+  supports_prefill: true,
+  is_plain_terminal: false,
+  effort_control: { kind: 'none' },
+  available_on: ['windows', 'macos', 'linux'],
+};
+
 // Terminal — the plain-shell harness; every override OFF (issue #1358
 // declared `supports_extra_args: false` so the resolver drops it)
 const TERMINAL_CAPS: HarnessCapabilities = {
@@ -238,6 +255,7 @@ export const HARNESS_CAPABILITIES: Record<InspectorHarnessId, HarnessCapabilitie
   kimi: KIMI_CAPS,
   mcode: MCODE_CAPS,
   dsh: DSH_CAPS,
+  commandcode: COMMANDCODE_CAPS,
   terminal: TERMINAL_CAPS,
 };
 
@@ -258,6 +276,7 @@ export const HARNESS_LABEL: Record<InspectorHarnessId, string> = {
   kimi: 'Kimi Code',
   mcode: 'MiniMax Code',
   dsh: 'DeepSeek Harness',
+  commandcode: 'Command Code',
   terminal: 'Terminal',
 };
 
