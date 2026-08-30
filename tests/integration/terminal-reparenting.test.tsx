@@ -32,15 +32,13 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn().mockResolvedValue({}),
-  Channel: class Channel {
-    onmessage = (_message: unknown) => {};
-    constructor(handler?: (message: unknown) => void) {
-      if (handler) this.onmessage = handler;
-    }
-  },
-}));
+vi.mock('@tauri-apps/api/core', async () => {
+  const { MockChannel } = await import('../setup/tauriChannel');
+  return {
+    invoke: vi.fn().mockResolvedValue({}),
+    Channel: MockChannel,
+  };
+});
 
 vi.mock('@xterm/xterm', () => {
   // Mirror the real @xterm/xterm shape: the user-facing `unicode` is a

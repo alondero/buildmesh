@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { invoke } from '@tauri-apps/api/core';
 import {
   bytesFromChannelMessage,
@@ -55,5 +57,25 @@ describe('subscribeAgentOutput / unsubscribeAgentOutput', () => {
   it('invokes unsubscribe_agent_output with the session id', async () => {
     await unsubscribeAgentOutput(7);
     expect(invoke).toHaveBeenCalledWith('unsubscribe_agent_output', { sessionId: 7 });
+  });
+});
+
+describe('Channel mock hygiene', () => {
+  it('does not copy-paste a Channel class into test files', () => {
+    const root = join(__dirname, '..');
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry) && !full.endsWith('tauriChannel.ts')) {
+          const src = readFileSync(full, 'utf8');
+          if (/class Channel\s*\{/.test(src)) hits.push(full);
+        }
+      }
+    };
+    walk(root);
+    expect(hits, 'import MockChannel from tests/setup/tauriChannel.ts instead').toEqual([]);
   });
 });

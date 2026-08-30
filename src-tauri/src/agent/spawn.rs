@@ -42,7 +42,7 @@ use ts_rs::TS;
 /// Payload of the `agent-output` Tauri event. Fallback path for PTY bytes
 /// when the frontend has not yet subscribed a binary Channel (issue #1385),
 /// and the wire shape for test injection (`line`). Production PTY output
-/// prefers `agent::output::send_raw` (raw `Uint8Array`, no Base64).
+/// prefers `OutputSink::send` (raw `Uint8Array`, no Base64).
 ///
 /// Exactly one of `data` (base64-encoded bytes) or `line` (raw UTF-8
 /// string) is populated — the listener branches on which is `Some`. The
@@ -998,9 +998,8 @@ pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, 
 ///
 /// Output dispatch (issue #1385): each OS `read()` still feeds capture /
 /// naming / autopilot on this thread, then the bytes go through
-/// `pty::batch::drain_batched` (8 ms / 4 KiB) onto a binary Tauri Channel
-/// (`agent::output::send_raw`) with the `agent-output` JSON event as
-/// fallback.
+/// `pty::batch::with_batcher` (8 ms / 4 KiB) onto a binary Tauri Channel
+/// (`OutputSink::send`) with the `agent-output` JSON event as fallback.
 ///
 /// Two time references are passed in, with distinct semantics — keep
 /// them separate:
@@ -1061,17 +1060,15 @@ fn start_reader(
         // so a build-storm of tiny PTY chunks becomes one IPC dispatch
         // per 8 ms / 4 KiB. Capture / naming / autopilot still see every
         // OS read on this thread (ChunkCapture already stitches split
-        // banners). `pump_pty_output` returning drops `batch_tx` (the
-        // EOF that flushes the last bytes) before we join the batcher
-        // and run the post-exit epilogue.
-        let (batch_tx, batch_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
-            crate::pty::batch::QUEUE_CAP,
-        );
+        // banners). `with_batcher` drops the producer before joining —
+        // joining while still holding `SyncSender` deadlocks the reader
+        // on every PTY exit.
+        let sink = crate::agent::output::ensure(session_id);
         let app_for_batch = app_clone.clone();
         let batch_session_id = session_id;
-        let batcher = std::thread::spawn(move || {
-            crate::pty::batch::drain_batched(batch_rx, |batch| {
-                if !crate::agent::output::send_raw(batch_session_id, batch) {
+        crate::pty::batch::with_batcher(
+            move |batch| {
+                if !sink.send(batch) {
                     let _ = app_for_batch.emit(
                         "agent-output",
                         AgentOutputPayload {
@@ -1082,55 +1079,52 @@ fn start_reader(
                     );
                 }
                 crate::http_server::send_pty_output(batch_session_id, batch.to_vec());
-            });
-        });
+            },
+            |batch_tx| {
+                let mut first_chunk = true;
+                pump_pty_output(reader, |data| {
+                    if first_chunk {
+                        first_chunk = false;
+                        tracing::info!(
+                            "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (spawn start → first output; agent CLI boot tail)",
+                            session_id,
+                            spawn_start.elapsed().as_millis()
+                        );
+                    }
+                    // Mark THIS MESH as active so the background warm-pool worker
+                    // holds off its idle refills for this mesh's pool while an agent
+                    // is actively producing output (issue #613 AC2; issue #634 scopes
+                    // the activity per-mesh so a chatty agent on mesh A doesn't
+                    // starve mesh B's pool). `mesh_id` is captured from the spawn
+                    // context at thread start — the closure outlives the agent's
+                    // registry entry, so reading it from `PROCESS_REGISTRY` inside
+                    // the closure would race with `kill_session`'s `remove`.
+                    crate::services::pool_worker::note_activity_for_mesh(mesh_id);
 
-        let mut first_chunk = true;
-        pump_pty_output(reader, |data| {
-            if first_chunk {
-                first_chunk = false;
-                tracing::info!(
-                    "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (spawn start → first output; agent CLI boot tail)",
-                    session_id,
-                    spawn_start.elapsed().as_millis()
-                );
-            }
-            // Mark THIS MESH as active so the background warm-pool worker
-            // holds off its idle refills for this mesh's pool while an agent
-            // is actively producing output (issue #613 AC2; issue #634 scopes
-            // the activity per-mesh so a chatty agent on mesh A doesn't
-            // starve mesh B's pool). `mesh_id` is captured from the spawn
-            // context at thread start — the closure outlives the agent's
-            // registry entry, so reading it from `PROCESS_REGISTRY` inside
-            // the closure would race with `kill_session`'s `remove`.
-            crate::services::pool_worker::note_activity_for_mesh(mesh_id);
+                    let (text, uuid) = chunk_capture.feed(data);
+                    maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
+                    // Autopilot state evaluator tail (issue #483) — one in-memory
+                    // set lookup for non-piloted nodes.
+                    crate::autopilot::evaluator::on_output(session_id, &text);
+                    // Stale-attention safety net (issue #878) — one map lookup for
+                    // unarmed nodes.
+                    crate::attention_autoclear::on_output(session_id, data.len());
 
-            let (text, uuid) = chunk_capture.feed(data);
-            maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
-            // Autopilot state evaluator tail (issue #483) — one in-memory
-            // set lookup for non-piloted nodes.
-            crate::autopilot::evaluator::on_output(session_id, &text);
-            // Stale-attention safety net (issue #878) — one map lookup for
-            // unarmed nodes.
-            crate::attention_autoclear::on_output(session_id, data.len());
+                    if let Some(uuid) = uuid {
+                        // The structured hook and Codex rollout fallback can
+                        // capture the same self-assigned ID first. Do not let a
+                        // delayed PTY banner replace an already-verified value.
+                        let captured = db::set_cli_session_id_if_missing(session_id, &uuid)
+                            .unwrap_or(false);
+                        if captured {
+                            tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
+                        }
+                    }
 
-            if let Some(uuid) = uuid {
-                // The structured hook and Codex rollout fallback can
-                // capture the same self-assigned ID first. Do not let a
-                // delayed PTY banner replace an already-verified value.
-                let captured = db::set_cli_session_id_if_missing(session_id, &uuid)
-                    .unwrap_or(false);
-                if captured {
-                    tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
-                }
-            }
-
-            let _ = batch_tx.send(data.to_vec());
-        });
-        // `pump_pty_output` returning drops the closure (and `batch_tx`),
-        // which is the EOF that lets the batcher flush remaining bytes
-        // before we run the post-exit epilogue.
-        let _ = batcher.join();
+                    let _ = batch_tx.send(data.to_vec());
+                });
+            },
+        );
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 

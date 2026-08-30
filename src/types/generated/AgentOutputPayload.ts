@@ -4,7 +4,7 @@
  * Payload of the `agent-output` Tauri event. Fallback path for PTY bytes
  * when the frontend has not yet subscribed a binary Channel (issue #1385),
  * and the wire shape for test injection (`line`). Production PTY output
- * prefers `agent::output::send_raw` (raw `Uint8Array`, no Base64).
+ * prefers `OutputSink::send` (raw `Uint8Array`, no Base64).
  *
  * Exactly one of `data` (base64-encoded bytes) or `line` (raw UTF-8
  * string) is populated — the listener branches on which is `Some`. The

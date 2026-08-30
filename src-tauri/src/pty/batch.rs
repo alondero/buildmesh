@@ -40,6 +40,25 @@ pub fn drain_batched(rx: mpsc::Receiver<Vec<u8>>, on_batch: impl FnMut(&[u8])) {
     drain_batched_with(rx, FLUSH_WINDOW, FLUSH_BYTES, on_batch);
 }
 
+/// Run `body` as the PTY-reader producer, then drop the sender and join
+/// the batcher.
+///
+/// `drain_batched` blocks on `recv()` until **every** `SyncSender` is
+/// dropped. Joining the batcher while the reader still holds `tx` is a
+/// deadlock on every PTY exit (the reader waits for the batcher, the
+/// batcher waits for `Disconnected`). This helper is the only legal
+/// pairing of "pump then join".
+pub fn with_batcher(
+    on_batch: impl FnMut(&[u8]) + Send + 'static,
+    body: impl FnOnce(&mpsc::SyncSender<Vec<u8>>),
+) {
+    let (tx, rx) = mpsc::sync_channel(QUEUE_CAP);
+    let batcher = std::thread::spawn(move || drain_batched(rx, on_batch));
+    body(&tx);
+    drop(tx);
+    let _ = batcher.join();
+}
+
 /// Test-visible variant with injectable thresholds so the time-window
 /// test does not depend on the production 8 ms constant.
 pub fn drain_batched_with(
@@ -156,6 +175,27 @@ mod tests {
         drop(tx);
         let batches = collect(rx, Duration::from_millis(50), 64);
         assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn with_batcher_drops_the_producer_so_join_cannot_deadlock() {
+        // Regression pin for the spawn.rs join-while-holding-tx deadlock:
+        // if `with_batcher` forgot `drop(tx)` this test hangs until the
+        // runner timeout instead of returning.
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = received.clone();
+        let started = Instant::now();
+        with_batcher(
+            move |batch| rec.lock().unwrap().extend_from_slice(batch),
+            |tx| {
+                tx.send(b"xyz".to_vec()).unwrap();
+            },
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "batcher join hung — producer SyncSender was not dropped"
+        );
+        assert_eq!(&*received.lock().unwrap(), b"xyz");
     }
 
     #[test]
