@@ -29,6 +29,7 @@ const FULL_CLAUDE: AiContextStatus = {
   skills_dir_exists: true,
   skill_count: 3,
   agents_skills_exists: false,
+  gitignore_has_agent_patterns: false,
 };
 
 describe('AiContextSection', () => {
@@ -44,6 +45,7 @@ describe('AiContextSection', () => {
         skills_dir_exists: false,
         skill_count: 0,
         agents_skills_exists: false,
+        gitignore_has_agent_patterns: false,
       },
     });
     const { container } = render(
@@ -63,7 +65,12 @@ describe('AiContextSection', () => {
 
   it('shows already-portable and no button when both mirrors exist', async () => {
     mockBackend({
-      status: { ...FULL_CLAUDE, agents_md_exists: true, agents_skills_exists: true },
+      status: {
+        ...FULL_CLAUDE,
+        agents_md_exists: true,
+        agents_skills_exists: true,
+        gitignore_has_agent_patterns: true,
+      },
     });
     render(<AiContextSection meshId={1} meshPath="/repo" isAuthenticated={true} />);
     expect(await screen.findByText(/already portable/i)).toBeTruthy();
@@ -85,5 +92,39 @@ describe('AiContextSection', () => {
     const link = await screen.findByText('https://github.com/o/r/pull/42');
     expect(link).toBeTruthy();
     expect(invoke).toHaveBeenCalledWith('create_ai_context_portability_pr', { meshId: 7 });
+  });
+
+  it('offers the button for .gitignore-only update when mirrors already exist (#1401)', async () => {
+    // Repo ported previously: AGENTS.md + .agents/skills present, but the
+    // .gitignore hasn't been amended with the agent-harness block. The
+    // portability PR still has work to do.
+    mockBackend({
+      status: {
+        ...FULL_CLAUDE,
+        agents_md_exists: true,
+        agents_skills_exists: true,
+        gitignore_has_agent_patterns: false,
+      },
+    });
+    render(<AiContextSection meshId={1} meshPath="/repo" isAuthenticated={true} />);
+    expect(await screen.findByRole('button', { name: /make ai context portable/i })).toBeTruthy();
+    // The .gitignore row should show "(will update)".
+    expect(screen.getByText(/\(will update\)/i)).toBeTruthy();
+    // The explainer must mention .gitignore (not just symlinks).
+    expect(screen.getByText(/amending \.gitignore/i)).toBeTruthy();
+  });
+
+  it('hides the .gitignore row text "(will update)" when the block already exists', async () => {
+    mockBackend({
+      status: {
+        ...FULL_CLAUDE,
+        agents_md_exists: false,
+        agents_skills_exists: false,
+        gitignore_has_agent_patterns: true,
+      },
+    });
+    render(<AiContextSection meshId={1} meshPath="/repo" isAuthenticated={true} />);
+    expect(await screen.findByRole('button', { name: /make ai context portable/i })).toBeTruthy();
+    expect(screen.queryByText(/\(will update\)/i)).toBeNull();
   });
 });

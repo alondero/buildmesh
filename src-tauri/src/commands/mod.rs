@@ -26,6 +26,7 @@ pub mod agent_tests;
 pub mod agent_node;
 pub mod agent_node_discovery;
 pub mod ai_context;
+pub mod ai_context_gitignore;
 pub mod attention;
 pub mod build_run;
 pub mod circuit;

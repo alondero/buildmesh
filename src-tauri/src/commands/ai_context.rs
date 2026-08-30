@@ -25,102 +25,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::command;
 use ts_rs::TS;
 
+use super::ai_context_gitignore;
+
 /// Wall-clock timeout for the `git push` shell-out in
 /// [`create_ai_context_portability_pr_blocking`]. Push is network-bound
 /// (remote `receive-pack`); 5 minutes mirrors [`crate::git::sync::MANUAL_FETCH_TIMEOUT`]
 /// so a flaky network doesn't leak a blocking-pool thread (issue #762 review).
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Canonical `.gitignore` block appended (or created) by the portability
-/// commit so ephemeral runtime files written by Codex, Antigravity (`agy`),
-/// OpenCode, Grok, and the rest of the harness zoo do not pollute `git
-/// status` after a project is made portable (issue #1401).
-///
-/// The contents are taken **verbatim** from the issue's Proposed Changes —
-/// not from the project's own `.gitignore`. The project's root .gitignore
-/// also covers Claude Code patterns and uses section-header comments, but
-/// the spec asked for a single flat block keyed by the `# Agent Harnesses…`
-/// header; using that as the idempotency marker means a user who has
-/// already applied the spec's block won't see duplicate entries on a later
-/// portability commit.
-///
-/// Kept in source rather than `include_str!`'d from the project's own
-/// `.gitignore` — that file holds session-local patterns (`.wayfinder/`,
-/// `docs/superpowers/`, …) which must never leak into a PR on someone
-/// else's repository.
-const AGENT_HARNESS_GITIGNORE_HEADER: &str =
-    "# Agent Harnesses (runtime, local settings, and ephemeral files)";
-
-/// Helper: the full block written into the target `.gitignore`. The header
-/// doubles as the idempotency marker — if `.gitignore` already contains it,
-/// the portability commit is a no-op for `.gitignore`. The contents are
-/// the issue #1401 spec block, verbatim.
-const AGENT_HARNESS_GITIGNORE_BLOCK: &str = "\
-# Agent Harnesses (runtime, local settings, and ephemeral files)\n\
-.codex/\n\
-CODEX.local.md\n\
-codex.local.md\n\
-.agents/hooks.json\n\
-.agents/settings.local.json\n\
-.agents/tasks/\n\
-.agents/memory/\n\
-.agents/worktrees/\n\
-.agents/sessions/\n\
-.agents/tmp/\n\
-.agents/*.local.*\n\
-AGENTS.local.md\n\
-.antigravity/\n\
-.antigravitycli/\n\
-.gemini/\n\
-.opencode/\n\
-.open-code/\n\
-OPENCODE.local.md\n\
-.grok/\n\
-GROK.local.md\n\
-.mcode/\n\
-.dsh/\n\
-.kimi/\n\
-.cursor/cache/\n\
-.cursor/debug/\n\
-.cursor/index/\n\
-.cursor/tasks/\n\
-.cursor/transcripts/\n\
-.cursor/worktrees/\n\
-.cursor-tutor/\n\
-CURSOR.local.md\n\
-.aider*\n\
-.cline/\n\
-.roo/\n\
-.roomodes.local\n\
-.roomodes.local.json\n\
-.goose/\n\
-.goosehints.local\n\
-.windsurf/\n\
-.codeium/\n";
-
-/// True when `gitignore_content` already contains the canonical agent
-/// harness ignore block. Used to keep the portability commit idempotent.
-fn gitignore_has_agent_block(gitignore_content: &[u8]) -> bool {
-    // Use the header line as the idempotency marker — line-level match
-    // (substring) is enough because the header is unique to this block.
-    let haystack = match std::str::from_utf8(gitignore_content) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    haystack.contains(AGENT_HARNESS_GITIGNORE_HEADER)
-}
-
-/// Read `.gitignore` from the working tree (if present) and report whether
-/// the agent-harness block is already there. The detection mirrors the
-/// filesystem checks used for `agents_md_exists` / `agents_skills_exists`
-/// (what the user sees), not HEAD's blob — uncommitted edits matter here.
-fn working_tree_gitignore_has_agent_block(root: &Path) -> bool {
-    let path = root.join(".gitignore");
-    match std::fs::read(&path) {
-        Ok(bytes) => gitignore_has_agent_block(&bytes),
-        Err(_) => false,
-    }
-}
 
 /// Inspect HEAD's `.gitignore` (via the given tree builder, which is seeded
 /// from HEAD's tree) and return the **new** bytes that should be written for
@@ -134,6 +45,8 @@ fn working_tree_gitignore_has_agent_block(root: &Path) -> bool {
 ///
 /// Returns `None` when `.gitignore` already has the canonical block
 /// (idempotent no-op).
+///
+/// The block itself lives in [`crate::commands::ai_context_gitignore`].
 fn gitignore_update_for_portability(
     repo: &Repository,
     root_builder: &git2::TreeBuilder<'_>,
@@ -142,29 +55,57 @@ fn gitignore_update_for_portability(
         // No `.gitignore` in HEAD — create one containing just the agent
         // block. Don't seed it with `node_modules` / `dist` boilerplate;
         // that's the user's call to make on their first commit.
-        None => Ok(Some(AGENT_HARNESS_GITIGNORE_BLOCK.as_bytes().to_vec())),
+        None => Ok(Some(ai_context_gitignore::BLOCK.as_bytes().to_vec())),
         Some(entry) if entry.kind() == Some(git2::ObjectType::Blob) => {
             let blob = repo.find_blob(entry.id()).map_err(|e| e.to_string())?;
-            if gitignore_has_agent_block(blob.content()) {
+            if ai_context_gitignore::has_block(blob.content()) {
                 Ok(None)
             } else {
-                let mut new_content = blob.content().to_vec();
-                // Ensure a clean separator between the existing body and the
-                // appended block. The block itself starts with a comment
-                // line, so a blank line is enough.
-                if !new_content.ends_with(b"\n") {
-                    new_content.push(b'\n');
-                }
-                if !new_content.ends_with(b"\n\n") {
-                    new_content.push(b'\n');
-                }
-                new_content.extend_from_slice(AGENT_HARNESS_GITIGNORE_BLOCK.as_bytes());
+                let existing = blob.content();
+                let mut new_content = Vec::with_capacity(existing.len() + ai_context_gitignore::BLOCK.len());
+                new_content.extend_from_slice(existing);
+                append_separator(&mut new_content);
+                new_content.extend_from_slice(ai_context_gitignore::BLOCK.as_bytes());
                 Ok(Some(new_content))
             }
         }
         // `.gitignore` is a submodule or symlink — leave it alone rather
         // than guess at its content.
         Some(_) => Ok(None),
+    }
+}
+
+/// Insert a clean separator (a single blank line) between the existing
+/// `.gitignore` body and the appended block, respecting the file's existing
+/// newline convention so we don't mangle CRLF files.
+///
+/// Behaviour:
+/// - Empty body: no separator — appending the block directly gives a valid
+///   file (a single blank-line-then-comment would be wasteful).
+/// - LF-only file ending in `\n`: leave a single blank line; `\n\n` total.
+/// - CRLF file ending in `\r\n`: leave a single blank line; `\r\n\r\n` total.
+/// - File with no trailing newline: add one first, then the blank line.
+fn append_separator(buf: &mut Vec<u8>) {
+    if buf.is_empty() {
+        return;
+    }
+    let last_two: &[u8] = if buf.len() >= 2 {
+        &buf[buf.len() - 2..]
+    } else {
+        &buf[..]
+    };
+    let line_ending: &[u8] = if last_two == b"\r\n" || (buf.len() == 1 && buf[0] == b'\r') {
+        b"\r\n"
+    } else if last_two.last() == Some(&b'\n') {
+        b"\n"
+    } else {
+        b"\n"
+    };
+    if !buf.ends_with(line_ending) {
+        buf.extend_from_slice(line_ending);
+    }
+    if !buf.ends_with(&[line_ending, line_ending].concat()) {
+        buf.extend_from_slice(line_ending);
     }
 }
 
@@ -187,10 +128,16 @@ pub struct AiContextStatus {
     pub skill_count: usize,
     /// `.agents/skills` already exists.
     pub agents_skills_exists: bool,
-    /// Project's `.gitignore` (working tree) already ignores the agent harness
+    /// Project's HEAD `.gitignore` already ignores the agent harness
     /// runtime files (issue #1401). When `false`, the portability commit
     /// amends `.gitignore` so ephemeral files like `.agents/hooks.json` do not
     /// pollute `git status` on a freshly-ported project.
+    ///
+    /// Reads HEAD's blob (via the same `git2::TreeBuilder` the commit uses)
+    /// rather than the working-tree file, so the probe and the commit
+    /// operate on the same state — uncommitted local edits don't create a
+    /// false ✓ in the UI followed by a merge-conflicting `.gitignore` on
+    /// the PR.
     pub gitignore_has_agent_patterns: bool,
 }
 
@@ -228,14 +175,49 @@ pub(crate) fn detect_ai_context_blocking(mesh_path: String) -> Result<AiContextS
         0
     };
 
+    // Read the `.gitignore` blob from HEAD's tree so the probe matches
+    // what the commit will operate on (issue #1401 review). Reading from
+    // the working tree would diverge from the commit whenever the user
+    // has uncommitted local `.gitignore` edits, leading to false ✓ in
+    // the UI followed by a merge-conflicting `.gitignore` change on the PR.
+    let gitignore_has_agent_patterns = head_gitignore_has_agent_block(root);
+
     Ok(AiContextStatus {
         claude_md_exists: root.join("CLAUDE.md").is_file(),
         agents_md_exists: root.join("AGENTS.md").exists(),
         skills_dir_exists: skills_dir.is_dir(),
         skill_count,
         agents_skills_exists: root.join(".agents").join("skills").exists(),
-        gitignore_has_agent_patterns: working_tree_gitignore_has_agent_block(root),
+        gitignore_has_agent_patterns,
     })
+}
+
+/// Open the repo at `root` (best-effort — returns `false` when the dir is
+/// not a git repo, HEAD cannot be resolved, or `.gitignore` is missing)
+/// and report whether HEAD's committed `.gitignore` blob already contains
+/// the canonical agent-harness block.
+fn head_gitignore_has_agent_block(root: &Path) -> bool {
+    let repo = match Repository::open(root) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let head_commit = match repo.head().and_then(|h| h.peel_to_commit()) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let head_tree = match head_commit.tree() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let entry = match head_tree.get_name(".gitignore") {
+        Some(e) if e.kind() == Some(git2::ObjectType::Blob) => e,
+        _ => return false,
+    };
+    let blob = match repo.find_blob(entry.id()) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    ai_context_gitignore::has_block(blob.content())
 }
 
 /// Build the portability commit and open a PR for review.
@@ -347,7 +329,8 @@ fn build_portability_commit(
     let link_mode: i32 = git2::FileMode::Link.into();
     let tree_mode: i32 = git2::FileMode::Tree.into();
 
-    let mut added: Vec<String> = Vec::new();
+    let mut symlinks_added: Vec<String> = Vec::new();
+    let mut files_added: Vec<String> = Vec::new();
 
     // AGENTS.md -> CLAUDE.md (same directory, so the target is just "CLAUDE.md").
     let agents_md_present = root_builder.get("AGENTS.md").map_err(|e| e.to_string())?.is_some();
@@ -356,7 +339,7 @@ fn build_portability_commit(
         root_builder
             .insert("AGENTS.md", blob, link_mode)
             .map_err(|e| e.to_string())?;
-        added.push("AGENTS.md".to_string());
+        symlinks_added.push("AGENTS.md".to_string());
     }
 
     // .agents/skills -> .claude/skills. The symlink lives in `.agents/`, so its
@@ -385,16 +368,14 @@ fn build_portability_commit(
             root_builder
                 .insert(".agents", agents_tree_oid, tree_mode)
                 .map_err(|e| e.to_string())?;
-            added.push(".agents/skills".to_string());
+            symlinks_added.push(".agents/skills".to_string());
         }
     }
 
     // .gitignore: append the agent harness ignore block when missing
     // (issue #1401). Read HEAD's blob — that's what the new tree is built
     // off of — so the result is consistent with the rest of the commit and
-    // idempotent against the user's previous commits. The block lives in
-    // [`AGENT_HARNESS_GITIGNORE_BLOCK`] and the header line doubles as the
-    // idempotency marker.
+    // idempotent against the user's previous commits.
     //
     // The decision (and the blob content to write) is computed up front so
     // the immutable borrow of `root_builder` from `.get()` drops before we
@@ -406,11 +387,11 @@ fn build_portability_commit(
         root_builder
             .insert(".gitignore", new_blob, git2::FileMode::Blob.into())
             .map_err(|e| e.to_string())?;
-        added.push(".gitignore".to_string());
+        files_added.push(".gitignore".to_string());
     }
 
-    if added.is_empty() {
-        return Ok(added);
+    if symlinks_added.is_empty() && files_added.is_empty() {
+        return Ok(Vec::new());
     }
 
     let new_tree_oid = root_builder.write().map_err(|e| e.to_string())?;
@@ -420,11 +401,7 @@ fn build_portability_commit(
         .or_else(|_| git2::Signature::now("buildmesh", "buildmesh@local"))
         .map_err(|e| e.to_string())?;
 
-    let commit_msg = format!(
-        "chore: make AI context portable across providers\n\n\
-         Adds {} as git symlinks (and updates .gitignore) so non-Claude agents read the same context.",
-        added.join(" and ")
-    );
+    let commit_msg = format_commit_message(&symlinks_added, &files_added);
     let branch_ref = format!("refs/heads/{}", branch_name);
     repo.commit(
         Some(&branch_ref),
@@ -436,7 +413,36 @@ fn build_portability_commit(
     )
     .map_err(|e| format!("failed to create commit: {}", e))?;
 
+    // Combine symlinks + files for the caller — the PR body uses the same
+    // list to decide which bullets to render.
+    let mut added: Vec<String> = Vec::with_capacity(symlinks_added.len() + files_added.len());
+    added.extend(symlinks_added);
+    added.extend(files_added);
     Ok(added)
+}
+
+/// Compose a commit message that doesn't claim `.gitignore` is a git
+/// symlink (issue #1401 review). Symlinks (`AGENTS.md`, `.agents/skills`)
+/// are listed in their own phrase; regular-file updates (`.gitignore`)
+/// get their own. When only one category is present, only that category's
+/// phrase is rendered.
+fn format_commit_message(symlinks: &[String], files: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !symlinks.is_empty() {
+        parts.push(format!("Adds {} as git symlinks", symlinks.join(" and ")));
+    }
+    if !files.is_empty() {
+        parts.push(format!("updates {}", files.join(" and ")));
+    }
+    let summary = if parts.len() == 1 {
+        parts.remove(0)
+    } else {
+        parts.join(" and ")
+    };
+    format!(
+        "chore: make AI context portable across providers\n\n\
+         {summary} so non-Claude agents read the same context."
+    )
 }
 
 fn pr_body(added: &[String]) -> String {
@@ -450,7 +456,7 @@ fn pr_body(added: &[String]) -> String {
                 "- `.agents/skills` → `.claude/skills` (shared Agent Skills directory; Antigravity reads `.agents/skills` natively)"
             }
             ".gitignore" => {
-                "- `.gitignore` — append the agent-harness runtime ignore block (`.agents/hooks.json`, `.codex/`, `.claude/worktrees/`, …) so ephemeral files written by Claude Code, Codex, Antigravity and friends don't pollute `git status`. Tracked entries like `.agents/skills` remain untouched."
+                "- `.gitignore` — append the agent-harness runtime ignore block (`.agents/hooks.json`, `.codex/`, `.cursor/cache/`, …) so ephemeral files written by Codex, Antigravity, OpenCode, Cursor and friends don't pollute `git status`. Tracked entries like `.agents/skills` remain untouched."
             }
             _ => "",
         })
@@ -463,8 +469,8 @@ fn pr_body(added: &[String]) -> String {
          Buildmesh added the following so non-Claude agents (Codex, OpenCode, Antigravity) \
          read the same context Claude Code uses:\n\n\
          {bullets}\n\n\
-         ⚠️ The `AGENTS.md` and `.agents/skills` entries are git symlinks. Checked out on \
-         **Windows without Developer Mode**, git materialises them as plain text files \
+         ⚠️ `AGENTS.md` and `.agents/skills` are git **symlinks** (filemode `120000`). \
+         On **Windows without Developer Mode**, git materialises them as plain text files \
          containing the target path rather than working symlinks. On macOS, Linux, or \
          Windows with Developer Mode they resolve correctly.\n\n\
          🤖 Generated with [Buildmesh]"
@@ -673,10 +679,66 @@ mod tests {
         assert!(gi_str.contains("node_modules/"));
         assert!(gi_str.contains("dist/"));
         // Agent block fully appended.
-        assert!(gi_str.contains(AGENT_HARNESS_GITIGNORE_HEADER));
+        assert!(gi_str.contains(ai_context_gitignore::HEADER));
         assert!(gi_str.contains(".agents/hooks.json"));
         assert!(gi_str.contains(".codex/"));
         assert!(gi_str.contains(".cursor/cache/"));
+    }
+
+    #[test]
+    fn appends_agent_block_to_empty_gitignore_without_prepending_blank_lines() {
+        let tr = TempRepo::new();
+        let repo = init_repo(
+            tr.path(),
+            &[("CLAUDE.md", "# context"), (".gitignore", "")],
+        );
+
+        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        assert!(added.iter().any(|p| p == ".gitignore"));
+
+        let tree = branch_tree(&repo, "test-branch");
+        let gi = blob_content(&repo, &tree, ".gitignore");
+        // The block must start at offset 0 — no `\n\n` prepended.
+        assert!(
+            gi.starts_with(ai_context_gitignore::BLOCK.as_bytes()),
+            "empty .gitignore got prepended bytes: {:?}",
+            String::from_utf8_lossy(&gi)
+        );
+    }
+
+    #[test]
+    fn appends_agent_block_preserving_crlf_line_endings() {
+        let tr = TempRepo::new();
+        // CRLF line endings throughout, no trailing newline (the most
+        // common Windows-on-Windows gitignore layout).
+        let repo = init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "# context"),
+                (".gitignore", "node_modules/\r\ndist/\r\n"),
+            ],
+        );
+
+        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        assert!(added.iter().any(|p| p == ".gitignore"));
+
+        let tree = branch_tree(&repo, "test-branch");
+        let gi = blob_content(&repo, &tree, ".gitignore");
+        let gi_str = std::str::from_utf8(&gi).unwrap();
+
+        // Original CRLF preserved.
+        assert!(gi_str.contains("node_modules/\r\n"));
+        assert!(gi_str.contains("dist/\r\n"));
+        // Separator is a single blank line, in CRLF — no Frankenstein
+        // `\r\n\n` between the user's body and the block.
+        assert!(
+            !gi_str.contains("\r\n\n"),
+            "CRLF got mangled: {:?}",
+            gi_str
+        );
+        // Block content landed.
+        assert!(gi_str.contains(ai_context_gitignore::HEADER));
+        assert!(gi_str.contains(".agents/hooks.json"));
     }
 
     #[test]
@@ -696,7 +758,7 @@ mod tests {
         let tree = branch_tree(&repo, "test-branch");
         let gi = blob_content(&repo, &tree, ".gitignore");
         let gi_str = std::str::from_utf8(&gi).unwrap();
-        assert!(gi_str.contains(AGENT_HARNESS_GITIGNORE_HEADER));
+        assert!(gi_str.contains(ai_context_gitignore::HEADER));
         assert!(gi_str.contains(".agents/hooks.json"));
     }
 
@@ -707,7 +769,7 @@ mod tests {
             tr.path(),
             &[
                 ("CLAUDE.md", "# context"),
-                (".gitignore", AGENT_HARNESS_GITIGNORE_BLOCK),
+                (".gitignore", ai_context_gitignore::BLOCK),
             ],
         );
 
@@ -764,7 +826,7 @@ mod tests {
             tr2.path(),
             &[
                 ("CLAUDE.md", "# context"),
-                (".gitignore", AGENT_HARNESS_GITIGNORE_BLOCK),
+                (".gitignore", super::ai_context_gitignore::BLOCK),
             ],
         );
         let status2 =
