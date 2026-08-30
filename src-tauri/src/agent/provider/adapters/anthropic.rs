@@ -1,7 +1,8 @@
 use crate::agent::capabilities::{EffortControlKind, CLAUDE_EFFORT_ALLOWED};
 use crate::agent::provider::{
-    claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta,
+    claude_direct_recipe, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
 };
+use crate::env::ResolvedPath;
 use crate::models::EnvType;
 
 pub struct AnthropicAdapter;
@@ -39,8 +40,12 @@ impl AgentProvider for AnthropicAdapter {
     /// Claude Code reads its hooks from `.claude/settings.local.json`; the
     /// shared helper in `agent::spawn` owns that format (the mesh commands
     /// also call it directly to pre-provision at mesh creation).
-    fn inject_attention_hook(&self, project_path: &std::path::Path) -> Result<(), String> {
-        crate::agent::spawn::inject_attention_hook(project_path)
+    fn provision_attention_hooks(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        crate::agent::spawn::inject_attention_hook(std::path::Path::new(&resolved.host_path))
     }
 
     fn produces_readable_transcript(&self) -> bool {

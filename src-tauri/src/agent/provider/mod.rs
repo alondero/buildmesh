@@ -14,13 +14,14 @@ use crate::models::EnvType;
 
 /// Runtime facts resolved by provider preflight and shared with the adapter's
 /// provisioning seams. An empty context means the adapter should resolve its
-/// ordinary native/default runtime. The fields stay provider-neutral so the
-/// spawn path does not expose a concrete adapter install type.
+/// ordinary native/default runtime. `harness_home` is a harness-specific
+/// configuration root (for example Codex's `CODEX_HOME`), not the operating
+/// system user's home directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchRuntime {
-    /// Guest home or host home selected for the process, when preflight has
-    /// already established one.
-    pub home: Option<String>,
+    /// Harness configuration root selected for the process, when preflight
+    /// has already established one.
+    pub harness_home: Option<String>,
     /// WSL distribution selected for the process, when applicable.
     pub wsl_distro: Option<String>,
 }
@@ -326,30 +327,20 @@ pub trait AgentProvider: Send + Sync {
     /// prompts. Each adapter owns its harness's config format (issue #886):
     /// the Claude-backed `anthropic` adapter writes
     /// `.claude/settings.local.json`; Codex writes `.codex/config.toml` +
-    /// `.codex/hooks.json`. The default implementation is called through
-    /// [`provision_attention_hooks`] with the resolved host-side project path;
-    /// implementations must be idempotent — they run on every spawn. A failure
-    /// is logged and the spawn proceeds (the agent still works, only the
-    /// attention callback is lost). The default implementation delegates to
-    /// this legacy host-path-only hook; adapters with runtime-specific homes
-    /// can override [`provision_attention_hooks`].
+    /// `.codex/hooks.json`. Implementations must be idempotent and are called
+    /// before every spawn. A failure is logged and the spawn proceeds (the
+    /// agent still works, only the attention callback is lost).
     ///
-    /// [`provision_attention_hooks`]: AgentProvider::provision_attention_hooks
-    fn inject_attention_hook(&self, _project_path: &std::path::Path) -> Result<(), String> {
-        Ok(())
-    }
-
     /// Provision attention hooks for one resolved runtime before its process
-    /// starts. Most adapters only need the host-side project path and inherit
-    /// the legacy injector. Adapters whose configuration also lives in a
-    /// runtime-specific home (Codex, including WSL) can override this seam and
-    /// use both path forms plus the detected environment.
+    /// starts. The resolved path and runtime context let adapters choose the
+    /// correct host or guest configuration location.
     fn provision_attention_hooks(
         &self,
         resolved: &ResolvedPath,
         _runtime: &LaunchRuntime,
     ) -> Result<(), String> {
-        self.inject_attention_hook(std::path::Path::new(&resolved.host_path))
+        let _ = resolved;
+        Ok(())
     }
 
     /// Environment variables this harness needs carried from the Windows host

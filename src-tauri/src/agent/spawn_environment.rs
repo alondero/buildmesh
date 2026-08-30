@@ -182,6 +182,12 @@ pub(crate) fn apply_wsl_env(
         return;
     }
     let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+    // `wrap` installs these callback values on the outer `wsl.exe` command.
+    // They must also be listed in WSLENV or the guest hook process cannot see
+    // the port/session that identifies its attention callback.
+    for key in ["BUILDMESH_PORT", "BUILDMESH_SESSION_ID"] {
+        append_to_wslenv(&mut wslenv, key, "/u");
+    }
     for key in command_variables {
         append_to_wslenv(&mut wslenv, key, "/u");
     }
@@ -214,8 +220,27 @@ pub(crate) fn append_to_wslenv(wslenv: &mut String, key: &str, suffix: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_to_wslenv, encode_for_powershell, format_powershell_command};
+    use super::{
+        append_to_wslenv, apply_wsl_env, encode_for_powershell, format_powershell_command,
+    };
     use base64::Engine;
+
+    #[test]
+    fn apply_wsl_env_carries_attention_callback_variables() {
+        let mut command = portable_pty::CommandBuilder::new("wsl.exe");
+        apply_wsl_env(&mut command, crate::models::EnvType::Wsl, &[], &[]);
+
+        let wslenv = command
+            .get_env("WSLENV")
+            .expect("WSLENV should be configured for WSL")
+            .to_string_lossy();
+        assert!(wslenv
+            .split(':')
+            .any(|entry| entry.split('/').next() == Some("BUILDMESH_PORT")));
+        assert!(wslenv
+            .split(':')
+            .any(|entry| entry.split('/').next() == Some("BUILDMESH_SESSION_ID")));
+    }
 
     #[test]
     fn append_to_wslenv_deduplicates_by_base_name() {

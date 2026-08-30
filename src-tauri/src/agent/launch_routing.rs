@@ -80,7 +80,7 @@ impl PreparedLaunchRouting {
     pub fn launch_runtime(&self) -> LaunchRuntime {
         match self {
             Self::CodexProxy { install, .. } => LaunchRuntime {
-                home: Some(install.codex_home.clone()),
+                harness_home: Some(install.codex_home.clone()),
                 wsl_distro: install.wsl_distro.clone(),
             },
             Self::Native | Self::Environment(_) => LaunchRuntime::default(),

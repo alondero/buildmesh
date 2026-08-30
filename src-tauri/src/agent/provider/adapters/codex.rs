@@ -292,31 +292,46 @@ fn materialize_wsl_profile(
     }
 }
 
-const WSL_READ_FILE_SCRIPT: &str = r#"set -eu
-p="${BUILDMESH_CODEX_PATH:?}"
-if [ -f "$p" ]; then cat "$p"; fi
+const WSL_FILE_END_MARKER: &str = "__BUILDMESH_CODEX_FILE_END__";
+
+const WSL_READ_FILES_SCRIPT: &str = r#"set -eu
+for p in "$@"; do
+  if [ -f "$p" ]; then base64 "$p"; fi
+  printf '%s\n' '__BUILDMESH_CODEX_FILE_END__'
+done
 "#;
 
-const WSL_ATOMIC_WRITE_SCRIPT: &str = r#"set -eu
-p="${BUILDMESH_CODEX_PATH:?}"
-d="${p%/*}"
-if [ ! -d "$d" ]; then
-  mkdir -p "$d"
-  chmod 700 "$d" 2>/dev/null || true
-fi
-tmp="$d/.buildmesh-codex.$$.tmp"
-printf %s "${BUILDMESH_CODEX_CONTENT:?}" | base64 -d > "$tmp"
-chmod 600 "$tmp"
-if [ -f "$p" ] && cmp -s "$tmp" "$p"; then rm -f "$tmp"; else mv -f "$tmp" "$p"; fi
+const WSL_ATOMIC_WRITE_FILES_SCRIPT: &str = r#"set -eu
+i=0
+while [ "$#" -gt 0 ]; do
+  p="$1"; var="$2"; shift 2
+  case "$p" in
+    */*) d="${p%/*}" ;;
+    *) d="." ;;
+  esac
+  [ -n "$d" ] || d="."
+  if [ ! -d "$d" ]; then
+    mkdir -p "$d"
+    chmod 700 "$d" 2>/dev/null || true
+  fi
+  tmp="$d/.buildmesh-codex.$$.${i}.tmp"
+  encoded=$(printenv "$var")
+  printf %s "$encoded" | base64 -d > "$tmp"
+  chmod 600 "$tmp"
+  if [ -f "$p" ] && cmp -s "$tmp" "$p"; then rm -f "$tmp"; else mv -f "$tmp" "$p"; fi
+  i=$((i + 1))
+done
 "#;
 
 fn wsl_command_with_values(
     distro: &str,
     script: &str,
     values: &[(&str, &str)],
+    args: &[&str],
 ) -> std::process::Command {
     let mut command = crate::process_util::command_no_window("wsl.exe");
-    command.args(["-d", distro, "--exec", "sh", "-c", script]);
+    command.args(["-d", distro, "--exec", "sh", "-c", script, "--"]);
+    command.args(args);
     let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
     for (name, value) in values {
         command.env(name, value);
@@ -326,65 +341,111 @@ fn wsl_command_with_values(
     command
 }
 
-fn wsl_read_file(distro: &str, path: &Path) -> Result<String, String> {
-    let path_string = path.to_string_lossy().into_owned();
-    let mut command = wsl_command_with_values(
-        distro,
-        WSL_READ_FILE_SCRIPT,
-        &[("BUILDMESH_CODEX_PATH", &path_string)],
-    );
+fn wsl_read_files(distro: &str, paths: &[&Path]) -> Result<Vec<String>, String> {
+    let path_strings: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let path_args: Vec<&str> = path_strings.iter().map(String::as_str).collect();
+    let mut command = wsl_command_with_values(distro, WSL_READ_FILES_SCRIPT, &[], &path_args);
     let output = command
         .output()
-        .map_err(|e| format!("failed to read WSL Codex file {path_string}: {e}"))?;
+        .map_err(|e| format!("failed to read WSL Codex files: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "WSL Codex file read exited with {} for {path_string}",
+            "WSL Codex file read exited with {}",
             output.status
         ));
     }
-    String::from_utf8(output.stdout)
-        .map_err(|e| format!("WSL Codex file {path_string} is not UTF-8: {e}"))
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| format!("WSL Codex file read was not UTF-8: {e}"))?;
+    let mut encoded_files = Vec::with_capacity(paths.len());
+    let mut current = String::new();
+    for line in stdout.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line == WSL_FILE_END_MARKER {
+            encoded_files.push(std::mem::take(&mut current));
+        } else {
+            current.push_str(line);
+        }
+    }
+    if !current.is_empty() || encoded_files.len() != paths.len() {
+        return Err(format!(
+            "WSL Codex file read returned {} files for {} requested",
+            encoded_files.len(),
+            paths.len()
+        ));
+    }
+    encoded_files
+        .into_iter()
+        .enumerate()
+        .map(|(index, encoded)| {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|e| format!("WSL Codex file {index} was not valid base64: {e}"))?;
+            String::from_utf8(bytes)
+                .map_err(|e| format!("WSL Codex file {index} is not UTF-8: {e}"))
+        })
+        .collect()
 }
 
-fn wsl_write_atomic(distro: &str, path: &Path, content: &str) -> Result<(), String> {
-    let path_string = path.to_string_lossy().into_owned();
-    let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+fn wsl_write_files(distro: &str, files: &[(&Path, &str)]) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut values = Vec::with_capacity(files.len());
+    let mut args = Vec::with_capacity(files.len() * 2);
+    for (index, (path, content)) in files.iter().enumerate() {
+        let variable = format!("BUILDMESH_CODEX_CONTENT_{index}");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+        args.push(path.to_string_lossy().into_owned());
+        args.push(variable.clone());
+        values.push((variable, encoded));
+    }
+    let value_refs: Vec<(&str, &str)> = values
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut command = wsl_command_with_values(
         distro,
-        WSL_ATOMIC_WRITE_SCRIPT,
-        &[
-            ("BUILDMESH_CODEX_PATH", &path_string),
-            ("BUILDMESH_CODEX_CONTENT", &encoded),
-        ],
+        WSL_ATOMIC_WRITE_FILES_SCRIPT,
+        &value_refs,
+        &arg_refs,
     );
     let status = command
         .status()
-        .map_err(|e| format!("failed to write WSL Codex file {path_string}: {e}"))?;
+        .map_err(|e| format!("failed to write WSL Codex files: {e}"))?;
     if status.success() {
         Ok(())
     } else {
         Err(format!(
-            "WSL Codex file write exited with {status} for {path_string}"
+            "WSL Codex file write exited with {status}"
         ))
     }
 }
 
-fn read_runtime_file(path: &Path, distro: Option<&str>) -> Result<String, String> {
+fn read_runtime_files(paths: &[&Path], distro: Option<&str>) -> Result<Vec<String>, String> {
     match distro {
-        Some(distro) => wsl_read_file(distro, path),
-        None => match std::fs::read_to_string(path) {
-            Ok(content) => Ok(content),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(error) => Err(format!("failed to read Codex file {}: {error}", path.display())),
-        },
+        Some(distro) => wsl_read_files(distro, paths),
+        None => paths
+            .iter()
+            .map(|path| match std::fs::read_to_string(path) {
+                Ok(content) => Ok(content),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                Err(error) => Err(format!("failed to read Codex file {}: {error}", path.display())),
+            })
+            .collect(),
     }
 }
 
-fn write_runtime_file(path: &Path, content: &str, distro: Option<&str>) -> Result<(), String> {
+fn write_runtime_files(files: &[(&Path, &str)], distro: Option<&str>) -> Result<(), String> {
     match distro {
-        Some(distro) => wsl_write_atomic(distro, path, content),
-        None => write_atomic(path, content)
-            .map_err(|e| format!("failed to write Codex file {}: {e}", path.display())),
+        Some(distro) => wsl_write_files(distro, files),
+        None => files.iter().try_for_each(|(path, content)| {
+            write_atomic(path, content)
+                .map_err(|e| format!("failed to write Codex file {}: {e}", path.display()))
+        }),
     }
 }
 
@@ -400,7 +461,7 @@ fn runtime_codex_home(
     if env_type == EnvType::Windows {
         return Ok((
             runtime
-                .home
+                .harness_home
                 .as_deref()
                 .map(PathBuf::from)
                 .unwrap_or(native_codex_home()?),
@@ -413,7 +474,11 @@ fn runtime_codex_home(
         .clone()
         .or_else(crate::env::get_default_wsl_distro)
         .ok_or_else(|| "could not resolve the WSL distribution for Codex trust".to_string())?;
-    if let Some(home) = runtime.home.as_deref().filter(|home| !home.is_empty()) {
+    if let Some(home) = runtime
+        .harness_home
+        .as_deref()
+        .filter(|home| !home.is_empty())
+    {
         return Ok((PathBuf::from(home), Some(distro)));
     }
 
@@ -494,20 +559,27 @@ fn ensure_codex_project_trusted(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (config_path, distro) = codex_trust_config_path(resolved.env_type, runtime)?;
     let project_path = trust_project_path(resolved);
-    let existing = read_runtime_file(&config_path, distro.as_deref())
-        .map_err(|error| format!("failed to read Codex trust config {}: {error}", config_path.display()))?;
-    let updated = ensure_project_trust_content(&existing, &project_path)?;
+    let existing = read_runtime_files(&[&config_path], distro.as_deref())
+        .map_err(|error| format!("failed to read Codex trust config {}: {error}", config_path.display()))?
+        .into_iter()
+        .next()
+        .expect("one Codex trust file was requested");
+    let updated = ensure_project_trust_content(&existing, &project_path, resolved.env_type)?;
     if updated == existing {
         return Ok(());
     }
-    write_runtime_file(&config_path, &updated, distro.as_deref())
+    write_runtime_files(&[(&config_path, &updated)], distro.as_deref())
         .map_err(|e| format!("failed to write Codex trust config {}: {e}", config_path.display()))
 }
 
 /// Parse and edit Codex's TOML document with `toml_edit`. This keeps comments,
 /// quote style, and unrelated tables intact while treating equivalent TOML
 /// key spellings as the same project on Windows.
-fn ensure_project_trust_content(existing: &str, project_path: &str) -> Result<String, String> {
+fn ensure_project_trust_content(
+    existing: &str,
+    project_path: &str,
+    env_type: EnvType,
+) -> Result<String, String> {
     let mut document = existing
         .parse::<DocumentMut>()
         .map_err(|error| format!("failed to parse Codex trust config: {error}"))?;
@@ -519,7 +591,7 @@ fn ensure_project_trust_content(existing: &str, project_path: &str) -> Result<St
         .ok_or_else(|| "Codex trust config 'projects' value must be a table".to_string())?;
     let existing_key = projects
         .iter()
-        .find(|(key, _)| project_keys_match(key, project_path))
+        .find(|(key, _)| project_keys_match(key, project_path, env_type))
         .map(|(key, _)| key.to_string());
     let project = if let Some(key) = existing_key {
         projects
@@ -549,8 +621,8 @@ fn ensure_project_trust_content(existing: &str, project_path: &str) -> Result<St
     Ok(document.to_string())
 }
 
-fn project_keys_match(existing: &str, candidate: &str) -> bool {
-    if cfg!(target_os = "windows") {
+fn project_keys_match(existing: &str, candidate: &str, env_type: EnvType) -> bool {
+    if env_type == EnvType::Windows {
         existing.eq_ignore_ascii_case(candidate)
     } else {
         existing == candidate
@@ -792,19 +864,6 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
 /// #884). `toml_edit` preserves comments and formatting while the parsed
 /// document prevents duplicate keys or bracket-like comments from confusing
 /// the merge.
-fn ensure_hooks_feature(path: &Path) -> Result<(), String> {
-    let existing = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(format!("failed to read config.toml: {error}")),
-    };
-    let updated = ensure_hooks_feature_content(&existing)?;
-    if updated == existing {
-        return Ok(());
-    }
-    write_atomic(path, &updated).map_err(|e| format!("failed to write config.toml: {e}"))
-}
-
 fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
     let mut document = existing
         .parse::<DocumentMut>()
@@ -815,23 +874,23 @@ fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
         .or_insert(Item::Table(Table::new()))
         .as_table_like_mut()
         .ok_or_else(|| "Codex project config 'features' value must be a table".to_string())?;
-    let key = if features
+    if features
         .get("hooks")
         .and_then(Item::as_value)
         .and_then(|item| item.as_bool())
         == Some(true)
+        || features
+            .get("codex_hooks")
+            .and_then(Item::as_value)
+            .and_then(|item| item.as_bool())
+            == Some(true)
     {
-        "hooks"
-    } else if features
-        .get("codex_hooks")
-        .and_then(Item::as_value)
-        .and_then(|item| item.as_bool())
-        == Some(true)
-    {
-        // `codex_hooks = true` is the supported legacy alias and already
-        // enables the feature. Keep the user's spelling untouched.
+        // Either spelling already enables the feature. Keep the user's
+        // spelling, formatting, and comments untouched.
         return Ok(document.to_string());
-    } else if features.get("hooks").is_some() {
+    }
+
+    let key = if features.get("hooks").is_some() {
         "hooks"
     } else if features.get("codex_hooks").is_some() {
         "codex_hooks"
@@ -856,20 +915,9 @@ fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
 /// level deeper than Claude Code's (each event maps to matcher groups, each
 /// carrying a `hooks` array — issue #884). Idempotent, and preserves any
 /// unrelated top-level keys the user added.
-fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let original = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(format!("failed to read hooks.json: {error}")),
-    };
-    let Some(content) = ensure_hooks_json_content(&original, command)? else {
-        return Ok(());
-    };
-    write_atomic(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
-    tracing::info!("codex inject_attention_hook: wrote {:?}", path);
-    Ok(())
-}
-
+/// Return updated hooks JSON, or `None` when the existing document already
+/// contains the current Buildmesh handlers. The caller owns the runtime-aware
+/// read/write so WSL can batch guest file operations.
 fn ensure_hooks_json_content(
     existing: &str,
     command: &str,
@@ -957,6 +1005,9 @@ fn ensure_codex_project_files(
     resolved: &ResolvedPath,
     runtime: &LaunchRuntime,
 ) -> Result<(), String> {
+    let _guard = ATTENTION_CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let distro = runtime_wsl_distro(resolved.env_type, runtime)?;
     let project_dir = if distro.is_some() {
         PathBuf::from(&resolved.spawn_path).join(".codex")
@@ -971,10 +1022,11 @@ fn ensure_codex_project_files(
     // Read and validate both files before writing either one. A malformed
     // hooks.json must not leave a half-applied project configuration behind.
     let config_path = project_dir.join("config.toml");
-    let config_existing = read_runtime_file(&config_path, distro.as_deref())?;
-    let config_updated = ensure_hooks_feature_content(&config_existing)?;
     let hooks_path = project_dir.join("hooks.json");
-    let hooks_existing = read_runtime_file(&hooks_path, distro.as_deref())?;
+    let existing = read_runtime_files(&[&config_path, &hooks_path], distro.as_deref())?;
+    let config_existing = &existing[0];
+    let config_updated = ensure_hooks_feature_content(config_existing)?;
+    let hooks_existing = &existing[1];
     let platform = if resolved.env_type == EnvType::Wsl {
         Platform::Linux
     } else {
@@ -982,13 +1034,14 @@ fn ensure_codex_project_files(
     };
     let hooks_updated = ensure_hooks_json_content(&hooks_existing, &hook_command(platform))?;
 
-    if config_updated != config_existing {
-        write_runtime_file(&config_path, &config_updated, distro.as_deref())?;
+    let mut writes: Vec<(&Path, &str)> = Vec::new();
+    if config_updated != *config_existing {
+        writes.push((&config_path, &config_updated));
     }
-    if let Some(hooks_updated) = hooks_updated {
-        write_runtime_file(&hooks_path, &hooks_updated, distro.as_deref())?;
+    if let Some(hooks_updated) = hooks_updated.as_ref() {
+        writes.push((&hooks_path, hooks_updated));
     }
-    Ok(())
+    write_runtime_files(&writes, distro.as_deref())
 }
 
 impl AgentProvider for CodexAdapter {
@@ -1047,19 +1100,6 @@ impl AgentProvider for CodexAdapter {
         runtime: &LaunchRuntime,
     ) -> Result<(), String> {
         ensure_codex_project_trusted(resolved, runtime)
-    }
-
-    /// Codex hooks live in the project-local `.codex/` dir: `config.toml`
-    /// enables the hooks feature, `hooks.json` declares the webhooks
-    /// (issue #886). The spawn flags carry the trust bypass that lets them
-    /// run headlessly. WSL files are read/written by the guest shell so
-    /// permissions and atomic replacement use the same runtime as Codex.
-    fn inject_attention_hook(&self, project_path: &Path) -> Result<(), String> {
-        let codex_dir = project_path.join(".codex");
-        std::fs::create_dir_all(&codex_dir)
-            .map_err(|e| format!("failed to create .codex dir: {e}"))?;
-        ensure_hooks_feature(&codex_dir.join("config.toml"))?;
-        ensure_hooks_json(&codex_dir.join("hooks.json"), &hook_command(Platform::current()))
     }
 
     fn provision_attention_hooks(
@@ -1549,13 +1589,26 @@ mod tests {
         serde_json::from_str(&content).expect("hooks.json is not valid JSON")
     }
 
+    fn provision_codex(project: &Path) {
+        let path = project.to_string_lossy().into_owned();
+        let resolved = ResolvedPath {
+            host_path: path.clone(),
+            spawn_path: path.clone(),
+            raw_path: path,
+            env_type: EnvType::Windows,
+        };
+        CODEX
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default())
+            .unwrap();
+    }
+
     /// Injection writes both files: the feature flag and the two webhooks in
     /// Codex's nested matcher/event schema, POSTing the hook's stdin to the
     /// attention endpoint.
     #[test]
     fn inject_writes_config_and_hooks() {
         let temp = TempDir::new().unwrap();
-        CODEX.inject_attention_hook(temp.path()).unwrap();
+        provision_codex(temp.path());
 
         let config = std::fs::read_to_string(temp.path().join(".codex").join("config.toml"))
             .expect("config.toml not written");
@@ -1582,12 +1635,12 @@ mod tests {
     #[test]
     fn inject_is_idempotent() {
         let temp = TempDir::new().unwrap();
-        CODEX.inject_attention_hook(temp.path()).unwrap();
+        provision_codex(temp.path());
         let config_first =
             std::fs::read_to_string(temp.path().join(".codex").join("config.toml")).unwrap();
         let hooks_first = read_hooks_json(temp.path());
 
-        CODEX.inject_attention_hook(temp.path()).unwrap();
+        provision_codex(temp.path());
         let config_second =
             std::fs::read_to_string(temp.path().join(".codex").join("config.toml")).unwrap();
         assert_eq!(config_first, config_second);
@@ -1608,7 +1661,7 @@ mod tests {
         )
         .unwrap();
 
-        CODEX.inject_attention_hook(temp.path()).unwrap();
+        provision_codex(temp.path());
 
         let config = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
         assert!(config.contains("model = \"gpt-5.2-codex\""), "config: {config}");
@@ -1630,7 +1683,7 @@ mod tests {
         std::fs::create_dir_all(&codex_dir).unwrap();
         std::fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.2-codex\"\n").unwrap();
 
-        CODEX.inject_attention_hook(temp.path()).unwrap();
+        provision_codex(temp.path());
 
         let config = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
         assert!(config.contains("model = \"gpt-5.2-codex\""));
@@ -1646,7 +1699,7 @@ mod tests {
         std::fs::create_dir_all(&codex_dir).unwrap();
         std::fs::write(codex_dir.join("hooks.json"), r#"{"custom":"kept"}"#).unwrap();
 
-        CODEX.inject_attention_hook(temp.path()).unwrap();
+        provision_codex(temp.path());
 
         let hooks = read_hooks_json(temp.path());
         assert_eq!(hooks["custom"], "kept");
@@ -1670,8 +1723,7 @@ mod tests {
         )
         .unwrap();
 
-        ensure_hooks_json(&codex_dir.join("hooks.json"), &hook_command(Platform::Windows))
-            .unwrap();
+        provision_codex(temp.path());
 
         let hooks = read_hooks_json(temp.path());
         assert_eq!(hooks["description"], "user config");
@@ -1699,7 +1751,11 @@ mod tests {
         let path = codex_dir.join("hooks.json");
         std::fs::write(&path, "{not json").unwrap();
 
-        let error = ensure_hooks_json(&path, &hook_command(Platform::Windows)).unwrap_err();
+        let error = ensure_hooks_json_content(
+            &std::fs::read_to_string(&path).unwrap(),
+            &hook_command(Platform::Windows),
+        )
+        .unwrap_err();
         assert!(error.contains("parse hooks.json"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "{not json");
     }
@@ -1715,10 +1771,21 @@ mod tests {
     }
 
     #[test]
+    fn config_feature_merge_leaves_existing_true_aliases_untouched() {
+        for existing in [
+            "[features]\nhooks = true # user enabled\n",
+            "[features]\ncodex_hooks = true # legacy user setting\n",
+        ] {
+            let updated = ensure_hooks_feature_content(existing).unwrap();
+            assert_eq!(updated, existing);
+        }
+    }
+
+    #[test]
     fn project_trust_merge_adds_exact_path_and_preserves_other_projects() {
         let project = r#"F:\src\buildmesh\.claude\worktrees\linked"#;
         let existing = "model = \"gpt-5.2-codex\"\n\n[projects.\"F:\\\\src\\\\buildmesh\"]\ntrust_level = \"trusted\"\n\n[features]\nweb_search = true\n";
-        let updated = ensure_project_trust_content(existing, project).unwrap();
+        let updated = ensure_project_trust_content(existing, project, EnvType::Windows).unwrap();
 
         assert!(updated.contains("model = \"gpt-5.2-codex\""));
         assert!(updated.contains("[projects.\"F:\\\\src\\\\buildmesh\"]"));
@@ -1735,7 +1802,7 @@ mod tests {
         let project = r#"F:\src\buildmesh\.claude\worktrees\linked"#;
         let header = format!("[projects.{}]", toml_string(project));
         let existing = format!("{header}\ntrust_level = \"untrusted\"\nother = true\n");
-        let updated = ensure_project_trust_content(&existing, project).unwrap();
+        let updated = ensure_project_trust_content(&existing, project, EnvType::Windows).unwrap();
 
         assert_eq!(updated.matches(&header).count(), 1);
         assert_eq!(updated.matches("trust_level =").count(), 1);
@@ -1750,7 +1817,7 @@ mod tests {
 [projects.'f:\src\buildmesh'] # worktree root
 trust_level = "untrusted" # preserve this explanation
 "#;
-        let updated = ensure_project_trust_content(existing, project).unwrap();
+        let updated = ensure_project_trust_content(existing, project, EnvType::Windows).unwrap();
         let document = updated.parse::<DocumentMut>().unwrap();
         let projects = document["projects"].as_table_like().unwrap();
         assert_eq!(projects.iter().count(), 1, "must not create a duplicate table");
@@ -1762,6 +1829,20 @@ trust_level = "untrusted" # preserve this explanation
         );
         assert!(updated.contains("# worktree root"));
         assert!(updated.contains("# preserve this explanation"));
+    }
+
+    #[test]
+    fn project_trust_merge_keeps_case_distinct_wsl_paths() {
+        let existing = r#"[projects."/home/alice/Code"]
+trust_level = "trusted"
+"#;
+        let updated =
+            ensure_project_trust_content(existing, "/home/alice/code", EnvType::Wsl).unwrap();
+        let document = updated.parse::<DocumentMut>().unwrap();
+        let projects = document["projects"].as_table_like().unwrap();
+        assert_eq!(projects.iter().count(), 2);
+        assert!(updated.contains("[projects.\"/home/alice/Code\"]"));
+        assert!(updated.contains("[projects.\"/home/alice/code\"]"));
     }
 
     #[test]
@@ -1781,7 +1862,7 @@ web_search = true
     #[test]
     fn malformed_project_trust_toml_is_rejected_without_a_rewrite() {
         let existing = "[projects.\"broken\"\ntrust_level = \"untrusted\"\n";
-        let error = ensure_project_trust_content(existing, "broken").unwrap_err();
+        let error = ensure_project_trust_content(existing, "broken", EnvType::Windows).unwrap_err();
         assert!(error.contains("parse Codex trust config"));
     }
 

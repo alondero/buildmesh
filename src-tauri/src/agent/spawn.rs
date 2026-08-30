@@ -710,7 +710,7 @@ fn sandbox_spawn(
 /// migrate an older `idle_prompt`-only config on the next spawn.
 ///
 /// This is the Claude-harness implementation behind
-/// `AnthropicAdapter::inject_attention_hook` (issue #886); the mesh commands
+/// `AnthropicAdapter::provision_attention_hooks` (issue #886); the mesh commands
 /// also call it directly to pre-provision the default harness's hook at mesh
 /// creation, before any node/provider exists.
 pub fn inject_attention_hook(project_path: &std::path::Path) -> Result<(), String> {
@@ -1461,6 +1461,29 @@ pub(crate) fn resolve_spawn_config(
     )
 }
 
+/// Run the two provider-owned launch prerequisites in order while preserving
+/// independent failures. Hook provisioning must still run when trust setup
+/// reports an error, and a provider without attention hooks should not invoke
+/// its hook seam. The caller supplies this synchronous body to the blocking
+/// pool because adapters may inspect or mutate files and invoke WSL.
+fn run_provider_provisioning<Trust, Hooks>(
+    ensure_trusted: Trust,
+    provision_hooks: Hooks,
+    needs_attention_hook: bool,
+) -> (Result<(), String>, Result<(), String>)
+where
+    Trust: FnOnce() -> Result<(), String>,
+    Hooks: FnOnce() -> Result<(), String>,
+{
+    let trust = ensure_trusted();
+    let hooks = if needs_attention_hook {
+        provision_hooks()
+    } else {
+        Ok(())
+    };
+    (trust, hooks)
+}
+
 /// Transitional implementation retained while transport callers migrate to
 /// [`spawn_with_intent`]. It is private to the agent module once migration is
 /// complete.
@@ -2146,31 +2169,61 @@ pub(crate) async fn spawn_agent_inner(
 
     // Trust is a launch prerequisite, independent of attention hooks. The
     // prepared routing carries the exact runtime identity for Codex proxy
-    // launches so trust and child execution use one WSL distro/home.
+    // launches so trust and child execution use one WSL distro/home. Both
+    // trust and hook provisioning are blocking filesystem/process work, so
+    // keep their ordering while moving them off the Tokio worker thread.
     let launch_runtime = routing.launch_runtime();
-    if let Err(e) = adapter.ensure_workspace_trusted(&resolved, &launch_runtime) {
-        tracing::warn!(
-            "spawn_agent_inner: workspace trust provisioning failed for session {}: {}",
-            session_id,
-            e
-        );
-        emit_provider_error(&format!("workspace trust unavailable: {e}"));
+    let provisioning_resolved = resolved.clone();
+    let provisioning_runtime = launch_runtime.clone();
+    let needs_attention_hook = adapter.requires_attention_hook();
+    let provisioning = crate::commands::run_blocking("provider_provisioning", move || {
+        Ok(run_provider_provisioning(
+            || {
+                adapter.ensure_workspace_trusted(
+                    &provisioning_resolved,
+                    &provisioning_runtime,
+                )
+            },
+            || {
+                adapter.provision_attention_hooks(
+                    &provisioning_resolved,
+                    &provisioning_runtime,
+                )
+            },
+            needs_attention_hook,
+        ))
+    })
+    .await;
+    match provisioning {
+        Ok((trust, hooks)) => {
+            if let Err(e) = trust {
+                tracing::warn!(
+                    "spawn_agent_inner: workspace trust provisioning failed for session {}: {}",
+                    session_id,
+                    e
+                );
+                emit_provider_error(&format!("workspace trust unavailable: {e}"));
+            }
+            if let Err(e) = hooks {
+                tracing::warn!(
+                    "spawn_agent_inner: attention hook provisioning failed for session {}: {}",
+                    session_id,
+                    e
+                );
+                emit_provider_error(&format!("attention hooks unavailable: {e}"));
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                "spawn_agent_inner: provider provisioning task failed for session {}: {}",
+                session_id,
+                error
+            );
+            emit_provider_error(&format!("provider provisioning unavailable: {error}"));
+        }
     }
     timer.checkpoint("after_workspace_trust");
 
-    // Provision attention hooks before building/spawning the child. Codex
-    // reads its project hook registry during startup, so a post-launch write
-    // races the CLI and can leave `/hooks` showing zero active hooks.
-    if adapter.requires_attention_hook() {
-        if let Err(e) = adapter.provision_attention_hooks(&resolved, &launch_runtime) {
-            tracing::warn!(
-                "spawn_agent_inner: attention hook provisioning failed for session {}: {}",
-                session_id,
-                e
-            );
-            emit_provider_error(&format!("attention hooks unavailable: {e}"));
-        }
-    }
     timer.checkpoint("after_inject_hook");
 
     // Resolve configuration values through the per-field cascade (issue
@@ -2600,6 +2653,40 @@ mod tests {
         FieldInputs, HarnessCapabilities, resolve_agent_config,
     };
     use crate::preferences::HarnessConfigValue;
+
+    #[test]
+    fn provider_provisioning_runs_hooks_after_trust_failure() {
+        let trust_finished = std::cell::Cell::new(false);
+        let hook_saw_trust_finish = std::cell::Cell::new(false);
+        let (trust, hooks) = run_provider_provisioning(
+            || {
+                trust_finished.set(true);
+                Err("trust failed".to_string())
+            },
+            || {
+                hook_saw_trust_finish.set(trust_finished.get());
+                Err("hooks failed".to_string())
+            },
+            true,
+        );
+
+        assert_eq!(trust.unwrap_err(), "trust failed");
+        assert_eq!(hooks.unwrap_err(), "hooks failed");
+        assert!(hook_saw_trust_finish.get());
+
+        let hook_called = std::cell::Cell::new(false);
+        let (trust, hooks) = run_provider_provisioning(
+            || Ok(()),
+            || {
+                hook_called.set(true);
+                Ok(())
+            },
+            false,
+        );
+        assert!(trust.is_ok());
+        assert!(hooks.is_ok());
+        assert!(!hook_called.get());
+    }
 
     /// Helper that returns the Anthropic capabilities descriptor for the
     /// integration tests below. Pulled out so each test reads as the
