@@ -50,6 +50,7 @@ import type { ProviderMeters } from '../types/generated/ProviderMeters';
 import type { ProviderUsage } from '../types/generated/ProviderUsage';
 import type { RealizedBind } from '../types/generated/RealizedBind';
 import type { RestoreResult } from '../types/generated/RestoreResult';
+import type { SpawnAgentRequest } from '../types/generated/SpawnAgentRequest';
 import type { UsageWindow } from '../types/generated/UsageWindow';
 import type { WorktreeInfo } from '../types/generated/WorktreeInfo';
 import type { WorktreeCloseSafety } from './worktreeClose';
@@ -398,14 +399,8 @@ export const detectMeshProject = (meshPath: string) =>
   _invoke<DetectedProject>('detect_mesh_project', { meshPath });
 
 // Agent
-export const spawnAgent = (
-  sessionId: number,
-  provider: string,
-  resume?: string | null,
-  rows?: number,
-  cols?: number,
-  prefill?: string,
-) => _invoke('spawn_agent', { sessionId, provider, resume, rows, cols, prefill });
+export const spawnAgent = (request: SpawnAgentRequest) =>
+  _invoke('spawn_agent', { request });
 
 // Issue #774 / #775 — swap a node's Model Provider. The worktree,
 // branch, name, and position are preserved; only `provider` changes. The

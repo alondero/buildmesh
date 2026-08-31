@@ -117,10 +117,13 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     [agentNodes, meshes, spawnOptions],
   );
 
-  const results = useMemo(
-    () => searchOmnibar(index, query, { limit: RESULT_LIMIT }),
-    [index, query],
-  );
+  // Prompt mode holds a free-form first-turn draft in `query`. Scoring
+  // that text against the entity index is wasted work — the listbox is
+  // hidden for the duration — so skip search until we leave this mode.
+  const results = useMemo(() => {
+    if (!index || promptTarget) return [];
+    return searchOmnibar(index, query, { limit: RESULT_LIMIT });
+  }, [index, query, promptTarget]);
 
   // Focus: capture the element the user came from, move into the search box,
   // restore on unmount (the palette's version of the <Modal> contract). This

@@ -264,13 +264,13 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
       (c) => c[0] === 'spawn_agent',
     );
     expect(spawnCalls.length).toBeGreaterThanOrEqual(1);
-    const args = spawnCalls[0]![1] as { rows?: number; cols?: number };
+    const args = spawnCalls[0]![1] as { request?: { rows?: number | null; cols?: number | null } };
     // The bug: cols=80 (FitAddon fallback) because the term wasn't open
     // when proposeDimensions() was called.
-    expect(args.cols).toBe(EXPECTED_COLS);
-    expect(args.cols).toBeGreaterThan(80);
-    expect(args.rows).toBe(EXPECTED_ROWS);
-    expect(args.rows).toBeGreaterThan(24);
+    expect(args.request?.cols).toBe(EXPECTED_COLS);
+    expect(args.request?.cols).toBeGreaterThan(80);
+    expect(args.request?.rows).toBe(EXPECTED_ROWS);
+    expect(args.request?.rows).toBeGreaterThan(24);
     // attach should have been called at least once with the container.
     // With the fix the auto-spawn effect calls it; with the bug only the
     // attach effect does, so this still holds either way — we don't rely

@@ -951,8 +951,7 @@ describe('performance budget (issue #1410 §3)', () => {
       return total / queries.length;
     };
 
-    let avg = measure();
-    if (avg >= 5) avg = measure();
+    const avg = measure();
     expect(avg).toBeLessThan(5);
   });
 

@@ -28,6 +28,7 @@ import { attachAgentNodeListeners } from './agentNodeListeners';
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
 import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
+import type { SpawnAgentIntent } from '../types/generated/SpawnAgentIntent';
 export type { AgentNode };
 
 // Issue #1054 — cross-store reach, kept narrow on purpose
@@ -104,6 +105,26 @@ export interface SpawnAgentOptions {
   rows?: number;
   cols?: number;
   fresh?: boolean;
+  /// First-turn prompt (issue #1413). Non-empty wins over `fresh` /
+  /// resume and becomes `SpawnAgentIntent.loop`.
+  prefill?: string;
+}
+
+function resolveSpawnAgentIntent(
+  options: SpawnAgentOptions,
+  node: AgentNode | undefined,
+): SpawnAgentIntent {
+  const trimmed = options.prefill?.trim() ?? '';
+  if (trimmed !== '') {
+    return { type: 'loop', initial_prompt: trimmed };
+  }
+  if (options.fresh) {
+    return { type: 'fresh' };
+  }
+  if (node?.cli_session_id) {
+    return { type: 'resume' };
+  }
+  return { type: 'fresh' };
 }
 
 interface AgentNodeState {
@@ -130,11 +151,6 @@ interface AgentNodeState {
   // the autopilot-node-closed path would let a stale timer fire against an
   // archived node, surfacing a spurious "System" error toast minutes later.
   schedules: Record<number, ScheduledTask>;
-  // First-turn prompt staged for a node that hasn't been auto-spawned yet
-  // (issue #1413). `selectProviderForMesh` writes it; `spawnAgent` consumes
-  // it on the way to `spawn_agent` so the Terminal auto-spawn path (which
-  // doesn't know about the Omnibar) still forwards `--prefill`.
-  pendingPrefills: Record<number, string>;
 
   // Derived getters
   getActiveNode: () => AgentNode | null;
@@ -147,8 +163,11 @@ interface AgentNodeState {
   /// one action (issue #283) so the invariant — "only switch active mesh/node
   /// if creation succeeded" — is enforced in one place, not re-derivable per
   /// click handler. On `createAgentNode` rejection the active mesh stays put.
-  /// `initialPrompt` (issue #1413) is an optional first-turn prefill staged
-  /// for the subsequent auto-spawn; omitted / whitespace means Fresh.
+  /// `initialPrompt` (issue #1413) is an optional first-turn prompt.
+  /// When non-empty, this action creates the node and then calls
+  /// `spawnAgent` with `{ prefill }` in the same turn — Terminal
+  /// auto-spawn is skipped because the node is already `spawning`.
+  /// Omitted / whitespace means Fresh (Terminal auto-spawns as before).
   selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
   renameAgentNode: (id: number, name: string) => Promise<void>;
@@ -232,7 +251,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   error: null,
   closingNodeIds: new Set(),
   schedules: {},
-  pendingPrefills: {},
 
   getActiveNode: () => {
     const { agentNodes, activeNodeId } = get();
@@ -357,17 +375,18 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // "mesh selected but no node" state. Holding the order here makes the
     // invariant unit-testable and impossible to violate from a click handler.
     const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree);
-    // Stage the Omnibar's initial prompt (issue #1413) BEFORE setActiveNode
-    // so the Terminal auto-spawn that reacts to the new idle row can pick
-    // it up in the same turn. Whitespace-only is treated as "no prompt".
-    const trimmed = initialPrompt?.trim() ?? '';
-    if (trimmed !== '') {
-      set((state) => ({
-        pendingPrefills: { ...state.pendingPrefills, [node.id]: trimmed },
-      }));
-    }
     get().setActiveNode(node.id);
     useMeshStore.getState().selectMesh(meshId);
+    // Explicit create-then-spawn (issue #1413 review): the prompt rides
+    // on this call, not a store-side dictionary the Terminal mount
+    // later peeks at. `spawnAgent` flips the row to `spawning`
+    // synchronously so the idle auto-spawn effect cannot start a
+    // parallel Fresh spawn. Whitespace-only is treated as "no prompt"
+    // and Terminal auto-spawns as before.
+    const trimmed = initialPrompt?.trim() ?? '';
+    if (trimmed !== '') {
+      await get().spawnAgent(node.id, providerId, { prefill: trimmed });
+    }
     return node;
   },
 
@@ -380,11 +399,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // A scheduled send outlives the node it targets otherwise — cancel it
     // up front so a stray timeout can't fire `sendToAgent` for a deleted node.
     get().cancelSchedule(id);
-    if (get().pendingPrefills[id] !== undefined) {
-      const next = { ...get().pendingPrefills };
-      delete next[id];
-      set({ pendingPrefills: next });
-    }
 
     // Flag the node closing *synchronously* so the click registers instantly.
     // We can't drop the row yet — the safety check below decides whether to
@@ -618,26 +632,34 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   spawnAgent: async (nodeId, provider, rowsOrOptions, maybeCols) => {
+    const options: SpawnAgentOptions =
+      typeof rowsOrOptions === 'object' && rowsOrOptions !== null
+        ? rowsOrOptions
+        : {
+            rows: typeof rowsOrOptions === 'number' ? rowsOrOptions : undefined,
+            cols: maybeCols,
+          };
+    const node = get().agentNodes.find(s => s.id === nodeId);
+    const previousStatus = node?.status;
+    const intent = resolveSpawnAgentIntent(options, node);
+    // Flip idle → spawning *before* the first await so Terminal's
+    // auto-spawn effect (keyed on `status === 'idle'`) cannot start a
+    // second spawn_agent while this one is in flight.
+    if (node?.status === 'idle') {
+      set((state) => ({
+        agentNodes: state.agentNodes.map((n) =>
+          n.id === nodeId ? { ...n, status: 'spawning' } : n,
+        ),
+      }));
+    }
     try {
-      const options: SpawnAgentOptions =
-        typeof rowsOrOptions === 'object' && rowsOrOptions !== null
-          ? rowsOrOptions
-          : {
-              rows: typeof rowsOrOptions === 'number' ? rowsOrOptions : undefined,
-              cols: maybeCols,
-            };
-      const node = get().agentNodes.find(s => s.id === nodeId);
-      const resume = options.fresh ? null : (node?.cli_session_id ?? null);
-      // Consume a staged first-turn prompt (issue #1413) so a retried
-      // spawnAgent doesn't double-prefill. Missing key → undefined →
-      // spawn_agent stays on SpawnIntent::Fresh.
-      const pendingPrefill = get().pendingPrefills[nodeId];
-      if (pendingPrefill !== undefined) {
-        const next = { ...get().pendingPrefills };
-        delete next[nodeId];
-        set({ pendingPrefills: next });
-      }
-      await api.spawnAgent(nodeId, provider, resume, options.rows, options.cols, pendingPrefill);
+      await api.spawnAgent({
+        sessionId: nodeId,
+        provider,
+        intent,
+        rows: options.rows ?? null,
+        cols: options.cols ?? null,
+      });
       await get().fetchAgentNodes();
     } catch (e) {
       // The central IPC wrapper (src/lib/tauri.ts → _invoke) already logs
@@ -646,7 +668,16 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // store-side catch keeps doing two things the wrapper does not: it
       // surfaces the error on `state.error` for the UI to render, and it
       // re-throws so the caller's catch can react.
-      set({ error: formatError(e) });
+      if (previousStatus !== undefined) {
+        set((state) => ({
+          agentNodes: state.agentNodes.map((n) =>
+            n.id === nodeId ? { ...n, status: previousStatus } : n,
+          ),
+          error: formatError(e),
+        }));
+      } else {
+        set({ error: formatError(e) });
+      }
       throw e;
     }
   },

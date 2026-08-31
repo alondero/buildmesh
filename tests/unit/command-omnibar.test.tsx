@@ -638,6 +638,16 @@ describe('CommandOmnibar — quick spawn prompt mode (issue #1413)', () => {
     expect(options()).toHaveLength(0);
   });
 
+  it('does not fuzzy-search the draft prompt while prompt mode is active', async () => {
+    const input = await openSpawnResults();
+    fireEvent.keyDown(input, { key: 'Tab' });
+    fireEvent.change(input, {
+      target: { value: 'Refactor the auth middleware to support bearer tokens' },
+    });
+    expect(options()).toHaveLength(0);
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
   it('Enter in prompt mode dispatches selectProviderForMesh with the typed prompt and closes', async () => {
     const spy = vi
       .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
