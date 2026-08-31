@@ -24,6 +24,13 @@
 //! disabled (`captures_session_id_from_pty: false`) and session IDs are
 //! captured via post-spawn directory polling (`after_fresh_spawn`).
 //!
+//! **Permissions (`--yolo`, issue #1419)**:
+//! The recipe carries `--yolo` so spawned agents run with permission prompts
+//! pre-approved. Without it the CLI stops on every tool call waiting for
+//! interactive confirmation, which blocks unattended agent loops — the same
+//! role `--dangerously-skip-permissions` plays for the AGY/Claude-backed
+//! adapters.
+//!
 //! **Model, effort & prefill**:
 //! Accepts `--model <name>` for model overrides, `--effort <low|medium|high>`
 //! for reasoning effort, and positional prompt text for prefill queries.
@@ -70,7 +77,7 @@ impl AgentProvider for CommandCodeAdapter {
     fn spawn_recipe(&self, platform: Platform, env_type: EnvType) -> SpawnRecipe {
         SpawnRecipe {
             binary: binary_for(platform, env_type),
-            base_args: vec![],
+            base_args: vec!["--yolo".into()],
             windows_shell: shell_for(platform),
         }
     }
@@ -170,7 +177,13 @@ mod tests {
     fn spawn_recipe_cmd_on_windows_native() {
         let recipe = COMMANDCODE.spawn_recipe(Platform::Windows, EnvType::Windows);
         assert_eq!(recipe.binary, "cmdc");
-        assert!(recipe.base_args.is_empty());
+        assert_eq!(
+            recipe.base_args,
+            vec!["--yolo".to_string()],
+            "Windows native recipe must carry --yolo so unattended agents \
+             don't block on permission prompts; got {:?}",
+            recipe.base_args
+        );
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Cmd),
             "Windows native must use WindowsShell::Cmd for the .cmd shim — got {:?}",
@@ -182,7 +195,12 @@ mod tests {
     fn spawn_recipe_direct_on_macos() {
         let recipe = COMMANDCODE.spawn_recipe(Platform::Macos, EnvType::Windows);
         assert_eq!(recipe.binary, "cmd");
-        assert!(recipe.base_args.is_empty());
+        assert_eq!(
+            recipe.base_args,
+            vec!["--yolo".to_string()],
+            "macOS recipe must carry --yolo; got {:?}",
+            recipe.base_args
+        );
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Direct),
             "macOS must use WindowsShell::Direct — got {:?}",
@@ -194,7 +212,12 @@ mod tests {
     fn spawn_recipe_direct_on_linux() {
         let recipe = COMMANDCODE.spawn_recipe(Platform::Linux, EnvType::Windows);
         assert_eq!(recipe.binary, "cmd");
-        assert!(recipe.base_args.is_empty());
+        assert_eq!(
+            recipe.base_args,
+            vec!["--yolo".to_string()],
+            "Linux recipe must carry --yolo; got {:?}",
+            recipe.base_args
+        );
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Direct),
             "Linux must use WindowsShell::Direct — got {:?}",
@@ -206,7 +229,12 @@ mod tests {
     fn spawn_recipe_wsl_uses_cmd_binary() {
         let recipe = COMMANDCODE.spawn_recipe(Platform::Windows, EnvType::Wsl);
         assert_eq!(recipe.binary, "cmd");
-        assert!(recipe.base_args.is_empty());
+        assert_eq!(
+            recipe.base_args,
+            vec!["--yolo".to_string()],
+            "WSL recipe must carry --yolo; got {:?}",
+            recipe.base_args
+        );
     }
 
     #[test]
@@ -307,9 +335,15 @@ mod tests {
             sandbox: false,
         };
         let prepared = default_prepare(&COMMANDCODE, input);
+        // `--yolo` is the always-on base flag (issue #1419); `--session <id>`
+        // is appended by `default_prepare` after the base recipe.
         assert_eq!(
             prepared.recipe.base_args,
-            vec!["--session".to_string(), "ses_12345".to_string()]
+            vec![
+                "--yolo".to_string(),
+                "--session".to_string(),
+                "ses_12345".to_string()
+            ]
         );
     }
 
@@ -330,6 +364,12 @@ mod tests {
         };
         let prepared = default_prepare(&COMMANDCODE, input);
         let args = &prepared.recipe.base_args;
+        // Issue #1419: `--yolo` must be present on every fresh-spawn
+        // recipe alongside `--model` and the positional prefill.
+        assert!(
+            args.contains(&"--yolo".to_string()),
+            "--yolo missing from fresh recipe; got {args:?}"
+        );
         assert_flag_followed_by_value(args, "--model", "taste-1");
         assert!(args.contains(&"refactor auth flow".to_string()));
         assert!(!args.iter().any(|a| a == "--session" || a == "--session-id"));
