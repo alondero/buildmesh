@@ -370,7 +370,7 @@ describe('useAgentNodeStore', () => {
     it('forwards a prefill option as a Loop intent', async () => {
       const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
       useAgentNodeStore.setState({
-        agentNodes: [existing],
+        nodesById: { [existing.id]: existing }, nodeIds: [existing.id],
       });
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'spawn_agent') return Promise.resolve(undefined);
@@ -398,7 +398,7 @@ describe('useAgentNodeStore', () => {
 
     it('marks an idle node spawning before the IPC resolves so auto-spawn cannot race', async () => {
       const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
-      useAgentNodeStore.setState({ agentNodes: [existing] });
+      useAgentNodeStore.setState({ nodesById: { [existing.id]: existing }, nodeIds: [existing.id] });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -413,21 +413,21 @@ describe('useAgentNodeStore', () => {
       const pending = useAgentNodeStore.getState().spawnAgent(42, 'anthropic', {
         prefill: 'fix the flaky test',
       });
-      expect(useAgentNodeStore.getState().agentNodes[0]?.status).toBe('spawning');
+      expect(useAgentNodeStore.getState().nodesById[42]?.status).toBe('spawning');
       release();
       await pending;
     });
 
     it('reverts idle status when spawn_agent rejects', async () => {
       const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
-      useAgentNodeStore.setState({ agentNodes: [existing] });
+      useAgentNodeStore.setState({ nodesById: { [existing.id]: existing }, nodeIds: [existing.id] });
       mockInvoke.mockRejectedValueOnce(new Error('pty failed'));
 
       await expect(
         useAgentNodeStore.getState().spawnAgent(42, 'anthropic', { prefill: 'go' }),
       ).rejects.toThrow('pty failed');
 
-      expect(useAgentNodeStore.getState().agentNodes[0]?.status).toBe('idle');
+      expect(useAgentNodeStore.getState().nodesById[42]?.status).toBe('idle');
       expect(useAgentNodeStore.getState().error).toContain('pty failed');
     });
   });
