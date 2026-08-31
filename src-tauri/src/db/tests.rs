@@ -920,7 +920,7 @@ fn reader_pool_reads_while_writer_transaction_is_active() {
     let temp = tempfile::tempdir().unwrap();
     let db_path = temp.path().join("reader-writer-concurrency.db");
     let writer = rusqlite::Connection::open(&db_path).unwrap();
-    super::apply_connection_pragmas(&writer).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
     writer
         .execute_batch(
             "CREATE TABLE probe (value INTEGER NOT NULL);
@@ -938,7 +938,7 @@ fn reader_pool_reads_while_writer_transaction_is_active() {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let readers = &readers;
         scope.spawn(move || {
-            let reader = readers.checkout();
+            let reader = readers.checkout().unwrap();
             let count: i64 = reader
                 .query_row("SELECT COUNT(*) FROM probe", [], |row| row.get(0))
                 .unwrap();
@@ -962,13 +962,13 @@ fn reader_pool_serves_a_second_reader_while_the_first_is_checked_out() {
     let temp = tempfile::tempdir().unwrap();
     let db_path = temp.path().join("reader-reader-concurrency.db");
     let writer = rusqlite::Connection::open(&db_path).unwrap();
-    super::apply_connection_pragmas(&writer).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
     writer
         .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
         .unwrap();
     let readers = super::ReaderPool::open(&db_path).unwrap();
 
-    let first_reader = readers.checkout();
+    let first_reader = readers.checkout().unwrap();
     let mut first_statement = first_reader.prepare("SELECT value FROM probe").unwrap();
     let mut first_rows = first_statement.query([]).unwrap();
 
@@ -976,7 +976,7 @@ fn reader_pool_serves_a_second_reader_while_the_first_is_checked_out() {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let readers = &readers;
         scope.spawn(move || {
-            let second_reader = readers.checkout();
+            let second_reader = readers.checkout().unwrap();
             let count: i64 = second_reader
                 .query_row("SELECT COUNT(*) FROM probe", [], |row| row.get(0))
                 .unwrap();
@@ -998,17 +998,118 @@ fn reader_pool_connections_reject_writes() {
     let temp = tempfile::tempdir().unwrap();
     let db_path = temp.path().join("read-only-pool.db");
     let writer = rusqlite::Connection::open(&db_path).unwrap();
-    super::apply_connection_pragmas(&writer).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
     writer
         .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
         .unwrap();
 
     let readers = super::ReaderPool::open(&db_path).unwrap();
-    let reader = readers.checkout();
+    let reader = readers.checkout().unwrap();
     assert!(
         reader
             .execute("INSERT INTO probe (value) VALUES (1)", [])
             .is_err(),
         "reader-pool handles must be enforced read-only by SQLite"
     );
+}
+
+#[test]
+fn reader_pool_times_out_when_exhausted() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-timeout.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+    let checked_out: Vec<_> = (0..super::READER_POOL_SIZE)
+        .map(|_| readers.checkout().unwrap())
+        .collect();
+    let started = std::time::Instant::now();
+    assert!(readers.checkout().is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    drop(checked_out);
+}
+
+#[test]
+fn reader_pool_recycles_after_panic_unwind() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-panic.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reader = readers.checkout().unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        panic!("intentional reader panic");
+    }));
+    assert!(result.is_err());
+    let reader = readers.checkout().unwrap();
+    assert_eq!(reader.query_row("SELECT COUNT(*) FROM probe", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn reader_pool_queues_ninth_reader_until_a_slot_is_returned() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-contention.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+    let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let mut done = Vec::with_capacity(super::READER_POOL_SIZE + 1);
+        let readers = &readers;
+        for _ in 0..=super::READER_POOL_SIZE {
+            let release = std::sync::Arc::clone(&release);
+            let ready_tx = ready_tx.clone();
+            done.push(scope.spawn(move || {
+                let reader = readers.checkout().unwrap();
+                ready_tx.send(()).unwrap();
+                while !release.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                drop(reader);
+            }));
+        }
+        for _ in 0..super::READER_POOL_SIZE {
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("all initial reader holders must check out promptly");
+        }
+        release.store(true, std::sync::atomic::Ordering::Release);
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the queued ninth reader must check out after a slot is returned");
+        for handle in done {
+            handle.join().unwrap();
+        }
+    });
+}
+
+#[test]
+fn reader_pool_shares_named_memory_uri() {
+    let uri = std::path::PathBuf::from("file:reader-shared-memory?mode=memory&cache=shared");
+    let writer = rusqlite::Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let readers = super::ReaderPool::open(&uri).unwrap();
+    let reader = readers.checkout().unwrap();
+    assert_eq!(reader.query_row("SELECT COUNT(*) FROM probe", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
 }

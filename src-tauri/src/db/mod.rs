@@ -66,15 +66,26 @@ pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
 use std::collections::HashSet;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::models::*;
 use crate::preferences::HarnessConfigValue;
 
+// Eight handles cover the UI, HTTP, and worker polling fan-out while keeping
+// SQLite's file-descriptor and cache footprint bounded.
 const READER_POOL_SIZE: usize = 8;
+// Synchronous callers retain the historical accessor, but no checkout may
+// park a thread forever. Async callers use `try_read_conn()` to surface this
+// timeout as an error instead of blocking a runtime worker indefinitely.
+const READER_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
+static INIT_LOCK: Mutex<()> = Mutex::new(());
 
 struct Database {
+    // `std::sync::Mutex` is intentional: issue #1224 requires poison recovery
+    // after a panic in a writer, while reader-pool bookkeeping uses
+    // `parking_lot` because its guards are never exposed across panics.
     writer: Mutex<Connection>,
     readers: ReaderPool,
 }
@@ -84,33 +95,48 @@ struct Database {
 struct ReaderPool {
     available: parking_lot::Mutex<Vec<Connection>>,
     ready: parking_lot::Condvar,
+    db_path: PathBuf,
+    flags: OpenFlags,
 }
 
 impl ReaderPool {
-    fn open(db_path: &PathBuf) -> SqlResult<Self> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    fn open(db_path: &Path) -> SqlResult<Self> {
+        let mut flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        if db_path.to_string_lossy().starts_with("file:") {
+            flags |= OpenFlags::SQLITE_OPEN_URI;
+        }
         let mut connections = Vec::with_capacity(READER_POOL_SIZE);
         for _ in 0..READER_POOL_SIZE {
             let conn = Connection::open_with_flags(db_path, flags)?;
-            apply_reader_pragmas(&conn)?;
+            apply_connection_pragmas(&conn, true)?;
             connections.push(conn);
         }
         Ok(Self {
             available: parking_lot::Mutex::new(connections),
             ready: parking_lot::Condvar::new(),
+            db_path: db_path.to_path_buf(),
+            flags,
         })
     }
 
-    fn checkout(&self) -> ReadConnection<'_> {
+    fn checkout(&self) -> SqlResult<ReadConnection<'_>> {
         let mut available = self.available.lock();
+        let started = std::time::Instant::now();
         loop {
             if let Some(conn) = available.pop() {
-                return ReadConnection {
+                if started.elapsed() >= Duration::from_millis(10) {
+                    tracing::debug!(elapsed_ms = started.elapsed().as_millis(), "database reader pool contention ended");
+                }
+                return Ok(ReadConnection {
                     pool: self,
                     conn: Some(conn),
-                };
+                });
             }
-            self.ready.wait(&mut available);
+            let wait = self.ready.wait_for(&mut available, READER_CHECKOUT_TIMEOUT);
+            if wait.timed_out() {
+                tracing::warn!(elapsed_ms = started.elapsed().as_millis(), "database reader pool checkout timed out");
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
     }
 }
@@ -133,6 +159,26 @@ impl Deref for ReadConnection<'_> {
 impl Drop for ReadConnection<'_> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            let conn = if conn.is_autocommit() {
+                conn
+            } else {
+                let conn = conn;
+                if conn.execute_batch("ROLLBACK").is_ok() && conn.is_autocommit() {
+                    conn
+                } else {
+                    match Connection::open_with_flags(&self.pool.db_path, self.pool.flags)
+                        .and_then(|replacement| {
+                            apply_connection_pragmas(&replacement, true)?;
+                            Ok(replacement)
+                        }) {
+                        Ok(replacement) => replacement,
+                        Err(error) => {
+                            tracing::error!(%error, "failed to recycle database reader connection");
+                            return;
+                        }
+                    }
+                }
+            };
             self.pool.available.lock().push(conn);
             self.pool.ready.notify_one();
         }
@@ -309,26 +355,51 @@ static DB: OnceCell<Database> = OnceCell::new();
 /// - `busy_timeout=5000`: if any second connection ever touches the file
 ///   (e.g. a dev-profile instance pointed at the same dir by mistake), fail
 ///   after 5s of retrying instead of an instant `SQLITE_BUSY`.
-fn apply_connection_pragmas(conn: &Connection) -> SqlResult<()> {
-    // `journal_mode` returns the resulting mode as a row, so it needs
-    // `query_row`, not `execute` (rusqlite errors on rows from execute).
-    let _mode: String =
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+fn apply_connection_pragmas(conn: &Connection, reader: bool) -> SqlResult<()> {
+    if !reader {
+        // `journal_mode` returns the resulting mode as a row, so it needs
+        // `query_row`, not `execute` (rusqlite errors on rows from execute).
+        let _mode: String =
+            conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+    }
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    if reader {
+        conn.pragma_update(None, "query_only", "ON")?;
+    }
     Ok(())
 }
 
-fn apply_reader_pragmas(conn: &Connection) -> SqlResult<()> {
-    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-    conn.pragma_update(None, "query_only", "ON")?;
-    Ok(())
+fn open_writer(db_path: &Path) -> SqlResult<Connection> {
+    if db_path.to_string_lossy().starts_with("file:") {
+        Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_URI,
+        )
+    } else {
+        Connection::open(db_path)
+    }
 }
 
 /// Initialize the database
-pub fn init(db_path: &PathBuf) -> SqlResult<()> {
-    let conn = Connection::open(db_path)?;
-    apply_connection_pragmas(&conn)?;
+pub fn init(db_path: &Path) -> SqlResult<()> {
+    let _init_guard = INIT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if DB.get().is_some() {
+        return Ok(());
+    }
+    // SQLite's plain `:memory:` name creates one private database per
+    // connection. Use a named shared-cache URI so the writer and readers see
+    // the same in-memory schema, while also enabling URI paths generally.
+    let db_path = if db_path.as_os_str() == ":memory:" {
+        PathBuf::from("file:buildmesh-shared-memory?mode=memory&cache=shared")
+    } else {
+        db_path.to_path_buf()
+    };
+    let conn = open_writer(&db_path)?;
+    apply_connection_pragmas(&conn, false)?;
 
     // Ensure app_settings exists first (needed by evolve_to to probe
     // schema_version).
@@ -570,7 +641,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     // share the global `DB` once it's set. See
     // `commands::agent::tests::ensure_pr_db` and `db::mesh_tests` for
     // the two consumer call sites that this unblocks.
-    let readers = ReaderPool::open(db_path)?;
+    let readers = ReaderPool::open(&db_path)?;
     let _ = DB.set(Database {
         writer: Mutex::new(conn),
         readers,
@@ -1578,6 +1649,13 @@ fn get() -> &'static Database {
 /// Check out a read-only connection. Queries run without the pool's
 /// bookkeeping mutex and without the dedicated writer mutex.
 pub fn read_conn() -> ReadConnection<'static> {
+    try_read_conn().expect("database reader pool checkout failed")
+}
+
+/// Check out a read-only connection with bounded waiting. This is the safe
+/// entry point for async request paths, which must surface pool exhaustion
+/// instead of blocking a runtime worker indefinitely.
+pub fn try_read_conn() -> SqlResult<ReadConnection<'static>> {
     get().readers.checkout()
 }
 
