@@ -7,13 +7,15 @@
 
 use crate::db;
 use crate::env;
+use crate::models::EnvType;
+use crate::services::commandcode_session;
 use crate::services::transcript_reader::{
     cursor_workspace_slug, encode_path, first_text_block, is_synthetic_message, truncate,
 };
 use serde::Serialize;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use ts_rs::TS;
 
 /// A resumable Claude-Code session found on disk. The desktop Tauri
@@ -196,6 +198,16 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
         &tracked_ids,
     ));
 
+    // Command Code stores flat session files under a home directory rather
+    // than a mesh-scoped project tree. The session header carries the cwd, so
+    // use it to associate mesh-root and worktree sessions with this mesh.
+    let env_type = EnvType::from(env::env_for_path(Path::new(mesh_path)));
+    sessions.extend(discover_commandcode_sessions_in(
+        env::commandcode_sessions_dir(env_type, mesh_path).as_deref(),
+        mesh_path,
+        &tracked_ids,
+    ));
+
     // Antigravity (`agy`) stores every conversation globally under
     // `~/.gemini/antigravity-cli/brain/<conversation_id>/` (issue #1284).
     // The scanner walks every conversation directory, reads the
@@ -309,6 +321,105 @@ fn discover_cursor_sessions_in(
     sessions
 }
 
+/// Discover Command Code's flat session files below an explicit sessions
+/// directory. The session header supplies the working directory and timestamp;
+/// the transcript supplies the first user message for the archive label.
+fn discover_commandcode_sessions_in(
+    sessions_dir: Option<&Path>,
+    mesh_path: &str,
+    tracked_ids: &std::collections::HashSet<String>,
+) -> Vec<ArchivedAgentNode> {
+    let Some(sessions_dir) = sessions_dir.filter(|path| path.is_dir()) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+
+    let mut sessions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+
+        let Some(candidate) = commandcode_session::read_session_file(&path) else {
+            continue;
+        };
+        if tracked_ids.contains(&candidate.id) {
+            continue;
+        }
+
+        let is_mesh_root = env::directories_match(&candidate.directory, mesh_path);
+        let worktree_name = if is_mesh_root {
+            None
+        } else {
+            extract_worktree_name_from_path(&candidate.directory, mesh_path)
+        };
+        if !is_mesh_root && worktree_name.is_none() {
+            continue;
+        }
+
+        let Some(first_message) = parse_commandcode_first_user_message(&path) else {
+            continue;
+        };
+        let timestamp = (candidate.timestamp_ms > 0)
+            .then(|| chrono::DateTime::from_timestamp_millis(candidate.timestamp_ms))
+            .flatten()
+            .map(|timestamp| timestamp.to_rfc3339())
+            .or_else(|| {
+                path.metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .map(|modified| {
+                        let timestamp: chrono::DateTime<chrono::Utc> = modified.into();
+                        timestamp.to_rfc3339()
+                    })
+            });
+
+        sessions.push(ArchivedAgentNode {
+            session_id: candidate.id,
+            first_message,
+            branch: None,
+            cwd: (!candidate.directory.is_empty()).then_some(candidate.directory),
+            timestamp,
+            worktree_name,
+        });
+    }
+    sessions
+}
+
+/// Read the first genuine user prompt from a Command Code transcript for the
+/// archive label. Internal blocks and tool-result envelopes have no title text.
+fn parse_commandcode_first_user_message(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|kind| kind.as_str()) != Some("message") {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(|role| role.as_str()) != Some("user") {
+            continue;
+        }
+        let text = first_text_block(message.get("content"));
+        if is_synthetic_message(&text) {
+            continue;
+        }
+        let display = truncate(&strip_tags(&text), 80);
+        if !display.is_empty() {
+            return Some(display);
+        }
+    }
+    None
+}
+
 /// Discover Antigravity (`agy`) conversations stored under `<brain_dir>/`.
 /// AGY writes every conversation globally — not project-scoped like Claude
 /// Code — so the scanner walks each `<conversation_id>/` directory and pulls
@@ -377,7 +488,7 @@ fn discover_agy_sessions_in(
         // sees a global session without a misleading association.
         let worktree_name = workspace_path
             .as_deref()
-            .and_then(|p| extract_agy_worktree_name(p, mesh_path));
+            .and_then(|p| extract_worktree_name_from_path(p, mesh_path));
 
         sessions.push(ArchivedAgentNode {
             session_id,
@@ -398,7 +509,7 @@ fn discover_agy_sessions_in(
 /// convention. Returns `None` for the mesh root (no worktree) and for paths
 /// that don't resolve to a worktree inside the calling mesh (so a foreign
 /// conversation doesn't masquerade as ours).
-fn extract_agy_worktree_name(workspace_path: &str, mesh_path: &str) -> Option<String> {
+fn extract_worktree_name_from_path(workspace_path: &str, mesh_path: &str) -> Option<String> {
     let mesh = mesh_path.replace('\\', "/");
     let wp = workspace_path.replace('\\', "/");
 
@@ -792,6 +903,77 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).ok();
         assert!(discovered.is_empty());
+    }
+
+    #[test]
+    fn commandcode_discovery_finds_mesh_sessions_and_filters_foreign_or_tracked() {
+        let root = std::env::temp_dir().join(format!(
+            "buildmesh_commandcode_discovery_{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let write_session = |id: &str, cwd: &str, prompt: &str, timestamp: &str| {
+            std::fs::write(
+                root.join(format!("{id}.jsonl")),
+                format!(
+                    r#"{{"type":"session","id":"{id}","cwd":"{cwd}","timestamp":"{timestamp}"}}
+{{"type":"model_change","model":"commandcode-default"}}
+{{"type":"message","id":"user-1","message":{{"role":"user","content":"{prompt}"}}}}
+"#
+                ),
+            )
+            .unwrap();
+        };
+        write_session(
+            "sess_base",
+            "/Users/adam/src/buildmesh",
+            "Inspect the base workspace",
+            "2026-08-31T10:00:00Z",
+        );
+        write_session(
+            "sess_worktree",
+            "/Users/adam/src/buildmesh/.claude/worktrees/fancy-name",
+            "Inspect the worktree",
+            "2026-08-31T11:00:00Z",
+        );
+        write_session(
+            "sess_foreign",
+            "/Users/other/project",
+            "Do not include this",
+            "2026-08-31T12:00:00Z",
+        );
+        write_session(
+            "sess_tracked",
+            "/Users/adam/src/buildmesh",
+            "Already tracked",
+            "2026-08-31T13:00:00Z",
+        );
+
+        let tracked = ["sess_tracked".to_string()].into_iter().collect();
+        let discovered = discover_commandcode_sessions_in(
+            Some(root.as_path()),
+            "/Users/adam/src/buildmesh",
+            &tracked,
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(discovered.len(), 2);
+        let base = discovered
+            .iter()
+            .find(|session| session.session_id == "sess_base")
+            .expect("mesh-root Command Code session should be discovered");
+        assert_eq!(base.first_message, "Inspect the base workspace");
+        assert_eq!(base.cwd.as_deref(), Some("/Users/adam/src/buildmesh"));
+        assert!(base.worktree_name.is_none());
+
+        let worktree = discovered
+            .iter()
+            .find(|session| session.session_id == "sess_worktree")
+            .expect("worktree Command Code session should be discovered");
+        assert_eq!(worktree.first_message, "Inspect the worktree");
+        assert_eq!(worktree.worktree_name.as_deref(), Some("fancy-name"));
     }
 
     // --- AGY discovery (issue #1284) -----------------------------------
