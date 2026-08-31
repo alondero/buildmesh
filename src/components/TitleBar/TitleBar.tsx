@@ -3,7 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import Wordmark from '../../assets/wordmark.png';
 import { isMac } from '../../lib/platform';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
-import { GridControls } from '../AgentNodeView/GridControls';
+import { GridControls } from './GridControls';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';

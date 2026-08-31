@@ -1,5 +1,5 @@
 ﻿import { describe, it, expect, beforeEach } from 'vitest';
-import { toggleGridMaximize, cycleGridMode } from '../../src/lib/gridShortcuts';
+import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding } from '../../src/lib/gridShortcuts';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
@@ -143,5 +143,66 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
       cycleGridMode();
       expect(useUIStore.getState().viewMode).not.toBe('single');
     }
+  });
+});
+
+describe('buildFocusGridSearchBinding (issue #998 Ctrl+F / ⌘+⌥+F)', () => {
+  // The binding is the one piece of cross-platform state in this PR that
+  // is *not* a pure store mutator: it's a literal Tauri global-shortcut
+  // shape that App.tsx hands to `useGlobalShortcuts`. We test it as a
+  // runtime contract (input isMac → output binding) rather than regexing
+  // App.tsx source, so a refactor that inlines the ternary, extracts a
+  // config map, or rewrites the binding shape in any other way that
+  // preserves behaviour will keep the tests green.
+  //
+  // The macOS branch is the only one with a non-trivial safety contract
+  // (the `Alt+` carve-out avoids re-colliding with `term-find`'s bare
+  // `⌘+F`), so that's the assertion the regression guard exists to make.
+  // The Win/Linux branch is asserted too, so a future refactor that
+  // accidentally drops the chord entirely (or inverts the platform
+  // branches) is caught.
+
+  it('binds bare Ctrl+F on Windows / Linux (no readline collision)', () => {
+    const binding = buildFocusGridSearchBinding(false);
+    expect(binding.action).toBe('focus-grid-search');
+    expect(binding.key).toBe('CommandOrControl+F');
+  });
+
+  it('binds Cmd+Alt+F on macOS — the term-find collision carve-out', () => {
+    // The carve-out: bare ⌘+F is claimed by xterm's terminal find action
+    // (matched by Terminal.tsx's `attachCustomKeyEventHandler` to the
+    // `'find'` KeyAction). A Tauri global-shortcut registration at the
+    // OS level would beat the focus-level handler, so every ⌘+F in an
+    // agent terminal would jump to the grid search instead of opening
+    // the terminal's find bar. The two-modifier ⌘+⌥+F follows the
+    // readline-free two-modifier principle shared by the
+    // `Ctrl/Cmd+Alt+Arrow*` grid-traversal bindings — no readline,
+    // terminal, or other app shortcut uses two meta+alt modifiers
+    // together, so the chord stays free.
+    const binding = buildFocusGridSearchBinding(true);
+    expect(binding.action).toBe('focus-grid-search');
+    expect(binding.key).toBe('CommandOrControl+Alt+F');
+    // Pin the *exact* form of the carve-out so a future edit that
+    // changes `Alt+` to `Shift+` (which IS a readline gesture — it
+    // captures Ctrl+Shift+F in many shells) or to `Meta+` (which would
+    // require a different `CommandOrControl+Meta+...` form Tauri may
+    // not accept) is caught here rather than at runtime in a focused
+    // agent terminal.
+    expect(binding.key).not.toMatch(/\+Shift\+/);
+  });
+
+  it('tags the action as a string literal type so App.tsx dispatch narrows correctly', () => {
+    // App.tsx's `if (action === 'focus-grid-search')` relies on the
+    // action being a string-literal type, not a generic `string`. If
+    // the helper widened the action to `string`, TypeScript would
+    // raise `This comparison appears unintentional` (ts(2820)) in the
+    // dispatch handler. A regression that widens the type would break
+    // the compile, not the runtime — but it's still worth pinning
+    // here so the next maintainer doesn't "fix" the `as const` away.
+    const binding = buildFocusGridSearchBinding(false);
+    // The exact literal is what we care about; assignability to a
+    // narrower literal type proves the type-tag survived.
+    const narrowed: 'focus-grid-search' = binding.action;
+    expect(narrowed).toBe('focus-grid-search');
   });
 });

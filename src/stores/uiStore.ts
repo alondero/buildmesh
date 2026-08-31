@@ -384,6 +384,25 @@ interface UIState extends GridControls {
   // the "clear all" behind #988's active-filter badges. Persists the cleared
   // set, so the reset survives a restart.
   resetGridControls: () => void;
+
+  // ---- Grid search focus request (issue #998) ----
+  // Monotonically increasing counter bumped by `requestFocusGridSearch()`. The
+  // App.tsx `focus-grid-search` Tauri global-shortcut handler calls this
+  // action; the `GridControls` component subscribes to the counter in a
+  // layout effect and, on every increment, calls `.focus()` + `.select()` on
+  // the rendered search input. This replaces the previous module-level ref
+  // singleton (see PR review on the singleton anti-pattern) — a request
+  // counter is the React-idiomatic "imperative command from outside the
+  // component tree" channel: the producer (App.tsx) writes a number, the
+  // consumer (GridControls) reacts via its existing store subscription, and
+  // there is no module-level mutable state to leak across tests or races.
+  //
+  // The counter pattern (vs. a boolean `focusGridSearchRequested: boolean`)
+  // handles re-presses: two ⌘+F presses bump the counter twice, and the
+  // consumer effect fires twice (each bump is a distinct change), so focus
+  // is set on every press — not just the first one.
+  focusGridSearchRequest: number;
+  requestFocusGridSearch: () => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => {
@@ -555,6 +574,17 @@ export const useUIStore = create<UIState>((set, get) => {
     resetGridControls: () => {
       set({ ...DEFAULT_GRID_CONTROLS });
       persistGridControls(DEFAULT_GRID_CONTROLS);
+    },
+
+    focusGridSearchRequest: 0,
+    // No idempotency guard here — unlike the setters above, this action
+    // *must* notify subscribers on every press so the consumer's
+    // `useLayoutEffect` runs each time. The counter is the only piece of
+    // state the effect observes, so a same-value call would skip the
+    // re-focus on the second ⌘+F of a re-press sequence. Two presses =
+    // counter goes 0 → 1 → 2 = two effect runs = two .focus() calls.
+    requestFocusGridSearch: () => {
+      set({ focusGridSearchRequest: get().focusGridSearchRequest + 1 });
     },
   };
 });

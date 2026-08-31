@@ -27,8 +27,7 @@ import { createShortcutGuard } from './lib/shortcutGuard';
 import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { traversalTargetId } from './lib/gridTraversal';
-import { toggleGridMaximize, cycleGridMode } from './lib/gridShortcuts';
-import { focusGridSearch } from './lib/gridSearchFocus';
+import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding } from './lib/gridShortcuts';
 import { scopeNodesForMode } from './lib/viewModes';
 import type { NonSingleViewMode } from './stores/uiStore';
 import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
@@ -148,26 +147,12 @@ function App() {
         { key: 'CommandOrControl+Shift+P', action: 'open-omnibar-commands' as const },
       ];
 
-  // Issue #998 — focus the grid search input. `Cmd/Ctrl+F` is the
-  // editors' universal "find" chord, so the issue text asks for it
-  // verbatim. The Tauri global-shortcut plugin only exposes
-  // `CommandOrControl` (a single canonical key per action) and not
-  // per-platform `Alt+F` / `Cmd+F` like `Alt+G` does — so we branch
-  // the whole binding on `isMac`, same shape as `gridToggleShortcut`
-  // and `omnibarShortcuts` above. On Win/Linux, bare `Ctrl+F` is free
-  // (no readline gesture uses it). On macOS, bare `⌘+F` is already
-  // taken by the terminal's find action (xterm's
-  // `attachCustomKeyEventHandler` matches `Cmd+F` to `'find'`) — a
-  // global-shortcut registration would beat that focus-level handler
-  // and every `⌘+F` in an agent terminal would jump to the grid
-  // search. The two-modifier `⌘+⌥+F` carve-out follows the same
-  // readline-free two-modifier principle as the `Ctrl/Cmd+Alt+Arrow*`
-  // grid-traversal bindings (see the comment above): no readline,
-  // terminal, or other app shortcut uses two meta+alt modifiers
-  // together, so the chord stays free.
-  const focusGridSearchShortcut = isMac
-    ? { key: 'CommandOrControl+Alt+F', action: 'focus-grid-search' as const }
-    : { key: 'CommandOrControl+F', action: 'focus-grid-search' as const };
+  // Issue #998 — focus the grid search input. The platform-branch logic
+  // and the macOS `⌘+⌥+F` collision carve-out (vs. `term-find` on bare
+  // `⌘+F`) live in `buildFocusGridSearchBinding` so the branch can be
+  // unit-tested directly without regexing this file. See
+  // `src/lib/gridShortcuts.ts` for the full rationale.
+  const focusGridSearchShortcut = buildFocusGridSearchBinding(isMac);
 
   const shortcuts = [
     { key: 'CommandOrControl+T', action: 'new-agent' },
@@ -280,24 +265,21 @@ function App() {
 
       if (action === 'focus-grid-search') {
         // Issue #998 — Ctrl+F (Win/Linux) / ⌘+⌥+F (macOS) focuses the grid
-        // search input. The actual `.focus()` call lives in
-        // `src/lib/gridSearchFocus.ts` (a module-level ref registered by
-        // the `GridControls` component in a layout effect) so the binding
-        // doesn't need a ref forwarded through the View Header wrapper.
+        // search input. The actual `.focus()` + `.select()` calls live
+        // in the `GridControls` component's `useLayoutEffect` (which
+        // subscribes to `useUIStore.focusGridSearchRequest`); we just
+        // bump the request counter here. A request counter is the
+        // React-idiomatic channel for "imperative command from outside
+        // the component tree" — no ref forwarding, no module-level
+        // singleton, no leaky DOM registration. The component handles
+        // the "no input mounted" case as a no-op (the effect's
+        // `inputRef.current?.focus()` short-circuits).
         //
         // No cooldown: a held key must not burn a window — the user
-        // re-pressing while already focused is a harmless re-focus.
-        // No `isTextInputFocused()` guard: `isTextInputFocused()` already
-        // excludes the xterm-helper-textarea (so a focused agent terminal
-        // still allows the chord to fire — the common "I just typed
-        // something for the agent and want to filter the grid" case), but
-        // a real text input (inline node rename, settings form) would
-        // block the chord. The user is asking to focus the search input;
-        // the only thing that should preempt that is if there's no
-        // search input to focus, which the singleton's
-        // `registerGridSearchInput` tracks. A no-op `.focus()` (no
-        // registered input) is cheap.
-        focusGridSearch();
+        // re-pressing while already focused is a harmless re-focus, and
+        // the counter pattern (0 → 1 → 2) naturally fires the effect
+        // on every distinct press.
+        useUIStore.getState().requestFocusGridSearch();
         return;
       }
 
