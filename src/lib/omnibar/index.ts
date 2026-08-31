@@ -36,6 +36,7 @@ export {
   indexGitHub,
   indexSpawnOptions,
   filterByPrefix,
+  field,
   APP_COMMANDS,
   PROBE_TAB_COMMANDS,
   CATEGORY,
@@ -48,7 +49,7 @@ export type {
   Category,
 } from './indexers';
 
-import { searchItems } from './fuzzySearch';
+import { searchItems, type EmptyQueryMode } from './fuzzySearch';
 import { filterByPrefix } from './indexers';
 import type { FuzzyResult, IndexedItem } from './fuzzySearch';
 
@@ -56,13 +57,25 @@ import type { FuzzyResult, IndexedItem } from './fuzzySearch';
  * Search the full palette with prefix filtering (issue #1410 §2 and §3):
  * applies the leading `>` / `@` / `/` / `+` / `#` domain filter, then runs
  * the remaining query through the fuzzy engine. `limit` caps the returned
- * result count; an empty query returns `[]` unless `emptyMode` is set.
+ * result count.
+ *
+ * Bare-prefix behaviour (review #1425): typing just a prefix (`>`, `@`,
+ * `#`…) strips to an empty query. The engine's default `emptyMode: 'none'`
+ * would return a blank palette, so `searchOmnibar` defaults a BARE prefix to
+ * `'all'` — the user immediately sees the whole scoped domain (the standard
+ * VS Code / Raycast palette behaviour) instead of a blank menu until they
+ * type a second character. A genuinely empty raw query (no prefix, nothing
+ * typed) still returns `[]` unless `emptyMode` is passed explicitly.
  */
 export function searchOmnibar(
   items: readonly IndexedItem[],
   rawQuery: string,
-  opts?: { limit?: number; emptyMode?: 'none' | 'all' | 'top' },
+  opts?: { limit?: number; emptyMode?: EmptyQueryMode },
 ): FuzzyResult[] {
   const { items: scoped, query } = filterByPrefix(items, rawQuery);
-  return searchItems(scoped, query, { limit: opts?.limit, emptyMode: opts?.emptyMode });
+  const isBarePrefix = rawQuery.trim() !== '' && query.trim() === '';
+  const emptyMode: EmptyQueryMode = isBarePrefix
+    ? (opts?.emptyMode ?? 'all')
+    : (opts?.emptyMode ?? 'none');
+  return searchItems(scoped, query, { limit: opts?.limit, emptyMode });
 }

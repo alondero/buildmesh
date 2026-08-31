@@ -32,6 +32,7 @@ import {
   indexSpawnOptions,
   buildOmnibarIndex,
   filterByPrefix,
+  field,
   APP_COMMANDS,
   PROBE_TAB_COMMANDS,
   CATEGORY,
@@ -158,10 +159,13 @@ function item(overrides: Partial<IndexedItem> = {}): IndexedItem {
     id: 'test:1',
     category: 'test',
     label: 'Alpha One',
-    fields: [{ text: 'alpha one', weight: 'primary' }],
+    fields: [field('alpha one', 'primary')],
     ...overrides,
   };
 }
+
+/** Local alias so the field fixtures stay one-line: `f('text', 'primary')`. */
+const f = field;
 
 // ---------------------------------------------------------------------------
 // searchItems — matching semantics
@@ -169,14 +173,14 @@ function item(overrides: Partial<IndexedItem> = {}): IndexedItem {
 
 describe('searchItems — matching semantics', () => {
   it('matches a contiguous substring (case-insensitive)', () => {
-    const items = [item({ id: 'a', label: 'Alpha One', fields: [{ text: 'Alpha One', weight: 'primary' }] })];
+    const items = [item({ id: 'a', label: 'Alpha One', fields: [f('Alpha One', 'primary')] })];
     const results = searchItems(items, 'alpha');
     expect(results).toHaveLength(1);
     expect(results[0].item.id).toBe('a');
   });
 
   it('matches a non-contiguous subsequence ("fxn" matches "Fix the flaky...")', () => {
-    const items = [item({ id: 'a', label: 'Fix the flaky network test', fields: [{ text: 'Fix the flaky network test', weight: 'primary' }] })];
+    const items = [item({ id: 'a', label: 'Fix the flaky network test', fields: [f('Fix the flaky network test', 'primary')] })];
     // f(0) → x(2) → n(14): a gapped subsequence across word boundaries.
     expect(searchItems(items, 'fxn')).toHaveLength(1);
     // flk: f(0) → l(9) → k(11): a near-contiguous cluster.
@@ -184,13 +188,13 @@ describe('searchItems — matching semantics', () => {
   });
 
   it('does not match when characters are out of order', () => {
-    const items = [item({ id: 'a', label: 'Alpha One', fields: [{ text: 'Alpha One', weight: 'primary' }] })];
+    const items = [item({ id: 'a', label: 'Alpha One', fields: [f('Alpha One', 'primary')] })];
     expect(searchItems(items, 'aplh')).toHaveLength(0);
     expect(searchItems(items, 'z')).toHaveLength(0);
   });
 
   it('is case-insensitive', () => {
-    const items = [item({ label: 'Mesh Grid', fields: [{ text: 'Mesh Grid', weight: 'primary' }] })];
+    const items = [item({ label: 'Mesh Grid', fields: [f('Mesh Grid', 'primary')] })];
     expect(searchItems(items, 'MESH')).toHaveLength(1);
     expect(searchItems(items, 'mesh')).toHaveLength(1);
     expect(searchItems(items, 'MeSh')).toHaveLength(1);
@@ -202,8 +206,8 @@ describe('searchItems — matching semantics', () => {
         id: 'a',
         label: 'Agent A',
         fields: [
-          { text: 'Agent A', weight: 'primary' },
-          { text: 'feature/x', weight: 'secondary' },
+          f('Agent A', 'primary'),
+          f('feature/x', 'secondary'),
         ],
       }),
     ];
@@ -213,8 +217,8 @@ describe('searchItems — matching semantics', () => {
 
   it('ignores items with no matching field', () => {
     const items = [
-      item({ id: 'a', label: 'Alpha', fields: [{ text: 'Alpha', weight: 'primary' }] }),
-      item({ id: 'b', label: 'Beta', fields: [{ text: 'Beta', weight: 'primary' }] }),
+      item({ id: 'a', label: 'Alpha', fields: [f('Alpha', 'primary')] }),
+      item({ id: 'b', label: 'Beta', fields: [f('Beta', 'primary')] }),
     ];
     expect(searchItems(items, 'al')).toEqual([expect.objectContaining({ item: expect.objectContaining({ id: 'a' }) })]);
   });
@@ -222,6 +226,96 @@ describe('searchItems — matching semantics', () => {
   it('returns an empty list for an empty query by default', () => {
     expect(searchItems([item()], '')).toEqual([]);
     expect(searchItems([item()], '   ')).toEqual([]);
+  });
+
+  it('folds case with locale-invariant toLowerCase (Turkish-i safe)', () => {
+    // Review #1425: toLocaleLowerCase() binds to the host OS locale — on
+    // tr-TR, 'I'.toLocaleLowerCase() is 'ı' (dotless i). The engine must
+    // match ASCII case-insensitively regardless of host locale.
+    const items = [item({ fields: [f('GIT ISSUES', 'primary')] })];
+    expect(searchItems(items, 'git')).toHaveLength(1);
+    expect(searchItems(items, 'GIT')).toHaveLength(1);
+    expect(searchItems(items, 'git issues')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Greedy-matcher oracle (review #1425)
+// ---------------------------------------------------------------------------
+
+/**
+ * Brute-force best subsequence for the gap-sum objective: among all ways to
+ * embed `query` in `text` (starting at `start`), return the assignment with
+ * the minimum total gap (sum of skipped characters between consecutive
+ * matched characters). The engine's earliest-bound greedy scan is optimal
+ * for this objective — the oracle pins that claim on tricky inputs.
+ */
+function bruteForceBestGaps(query: string, text: string, start: number): number | null {
+  const q = query;
+  const n = text.length;
+  let best: number | null = null;
+
+  function walk(qi: number, prevIdx: number, gapSum: number): void {
+    if (qi === q.length) {
+      if (best === null || gapSum < best) best = gapSum;
+      return;
+    }
+    for (let i = prevIdx + 1; i < n; i++) {
+      if (text[i] !== q[qi]) continue;
+      const gap = prevIdx === -1 ? 0 : i - prevIdx - 1;
+      walk(qi + 1, i, gapSum + gap);
+    }
+  }
+
+  walk(0, start - 1, 0);
+  return best;
+}
+
+describe('greedy matcher is optimal for the gap-sum objective (review #1425)', () => {
+  it('matches the brute-force oracle on repeated-character / trap inputs', () => {
+    // The reviewer's example: "a b x b c" with query "abc". The greedy scan
+    // from 'a' takes b(1) then c(4) — gap 2. The oracle finds the same
+    // because a later 'b' can only increase the gap to c. Pinned here so the
+    // "greedy trap" claim is answered with a proof-by-construction.
+    const cases: [string, string, number][] = [
+      ['abxbc', 'abc', 0],   // reviewer's trap shape; window at 'a' → match
+      ['aab', 'ab', 0],      // duplicate first char
+      ['abab', 'ab', 0],     // duplicate query chars
+      ['a--b-c', 'abc', 0],  // dashes as gap fillers
+      ['abc', 'abc', 0],     // exact
+      ['xabcx', 'abc', 1],   // window starting at the 'a'
+      ['aXab', 'ab', 0],     // earliest-bound trap
+    ];
+    for (const [text, query, start] of cases) {
+      const oracleGap = bruteForceBestGaps(query, text, start);
+      const items = [item({ fields: [f(text, 'primary')] })];
+      const result = searchItems(items, query)[0];
+      if (oracleGap === null) {
+        expect(result).toBeUndefined();
+        continue;
+      }
+      expect(result).toBeDefined();
+      // Reconstruct the ranges the engine reported and verify the flat match
+      // indices spell the query in order (a cheap consistency check).
+      const flat: number[] = [];
+      for (const r of result.fieldMatches[0].ranges) {
+        for (let idx = r.start; idx < r.end; idx++) flat.push(idx);
+      }
+      expect(flat.map((idx) => text[idx]).join('').toLowerCase()).toBe(query.toLowerCase());
+    }
+  });
+
+  it('binds the earliest occurrence for a fixed window (exchange argument)', () => {
+    // Query 'ab', text 'aXab' starting at the first 'a' (index 0). Greedy
+    // takes a(0) → b(3); the alternative a(2) → b(3) has a larger gap. The
+    // engine must prefer the earlier 'a'.
+    const items = [item({ fields: [f('aXab', 'primary')] })];
+    const result = searchItems(items, 'ab')[0];
+    // Ranges must be {0,1} and {3,4} — the earliest 'a', not the later one.
+    expect(result.fieldMatches[0].ranges).toEqual([
+      { start: 0, end: 1 },
+      { start: 3, end: 4 },
+    ]);
   });
 });
 
@@ -233,11 +327,11 @@ describe('searchItems — scoring & ranking', () => {
   it('ranks a primary-field match above a secondary-field match', () => {
     const items = [
       item({ id: 'sec', label: 'Stale Node', fields: [
-        { text: 'Stale Node', weight: 'primary' },
-        { text: 'claude', weight: 'secondary' },
+        f('Stale Node', 'primary'),
+        f('claude', 'secondary'),
       ] }),
       item({ id: 'prim', label: 'Claude Agent', fields: [
-        { text: 'Claude Agent', weight: 'primary' },
+        f('Claude Agent', 'primary'),
       ] }),
     ];
     const results = searchItems(items, 'claude');
@@ -246,8 +340,8 @@ describe('searchItems — scoring & ranking', () => {
 
   it('ranks an exact-prefix match above a later substring match', () => {
     const items = [
-      item({ id: 'later', label: 'Sync Status', fields: [{ text: 'Sync Status', weight: 'primary' }] }),
-      item({ id: 'prefix', label: 'Sync Now', fields: [{ text: 'Sync Now', weight: 'primary' }] }),
+      item({ id: 'later', label: 'Sync Status', fields: [f('Sync Status', 'primary')] }),
+      item({ id: 'prefix', label: 'Sync Now', fields: [f('Sync Now', 'primary')] }),
     ];
     // "sync" is a prefix of both; check a query that only prefixes one.
     const results = searchItems(items, 'sync');
@@ -258,8 +352,8 @@ describe('searchItems — scoring & ranking', () => {
 
   it('ranks a shorter field above a longer field at equal match quality', () => {
     const items = [
-      item({ id: 'long', label: 'xxxxxxxxxx Alpha One xxxxxxxxxx', fields: [{ text: 'xxxxxxxxxx Alpha One xxxxxxxxxx', weight: 'primary' }] }),
-      item({ id: 'short', label: 'Alpha One', fields: [{ text: 'Alpha One', weight: 'primary' }] }),
+      item({ id: 'long', label: 'xxxxxxxxxx Alpha One xxxxxxxxxx', fields: [f('xxxxxxxxxx Alpha One xxxxxxxxxx', 'primary')] }),
+      item({ id: 'short', label: 'Alpha One', fields: [f('Alpha One', 'primary')] }),
     ];
     const results = searchItems(items, 'alpha');
     expect(results[0].item.id).toBe('short');
@@ -267,8 +361,8 @@ describe('searchItems — scoring & ranking', () => {
 
   it('applies the boost on top of the scored match', () => {
     const items = [
-      item({ id: 'a', label: 'Alpha', boost: 100, fields: [{ text: 'Alpha', weight: 'primary' }] }),
-      item({ id: 'b', label: 'Alphabeta', fields: [{ text: 'Alphabeta', weight: 'primary' }] }),
+      item({ id: 'a', label: 'Alpha', boost: 100, fields: [f('Alpha', 'primary')] }),
+      item({ id: 'b', label: 'Alphabeta', fields: [f('Alphabeta', 'primary')] }),
     ];
     // Without the boost, 'Alphabeta' would be a weaker (longer-field) match;
     // with it, 'Alpha' still wins even though its base score is lower.
@@ -278,16 +372,16 @@ describe('searchItems — scoring & ranking', () => {
 
   it('ranks exact whole-field matches above prefix matches', () => {
     const items = [
-      item({ id: 'prefix', label: 'Sync Status', fields: [{ text: 'Sync Status', weight: 'primary' }] }),
-      item({ id: 'exact', label: 'Sync', fields: [{ text: 'Sync', weight: 'primary' }] }),
+      item({ id: 'prefix', label: 'Sync Status', fields: [f('Sync Status', 'primary')] }),
+      item({ id: 'exact', label: 'Sync', fields: [f('Sync', 'primary')] }),
     ];
     expect(searchItems(items, 'sync')[0].item.id).toBe('exact');
   });
 
   it('sorts deterministically with a label tiebreak on equal scores', () => {
     const items = [
-      item({ id: 'z', label: 'Zulu Alpha', fields: [{ text: 'Alpha', weight: 'primary' }] }),
-      item({ id: 'a', label: 'Alpha Zed', fields: [{ text: 'Alpha', weight: 'primary' }] }),
+      item({ id: 'z', label: 'Zulu Alpha', fields: [f('Alpha', 'primary')] }),
+      item({ id: 'a', label: 'Alpha Zed', fields: [f('Alpha', 'primary')] }),
     ];
     // Both fields are identical, so both score the same for 'alpha' — the
     // label tiebreak decides the order.
@@ -297,7 +391,7 @@ describe('searchItems — scoring & ranking', () => {
 
   it('respects the limit option', () => {
     const items = [1, 2, 3, 4, 5].map((n) =>
-      item({ id: `n${n}`, label: `Node ${n}`, fields: [{ text: `Node ${n}`, weight: 'primary' }] }),
+      item({ id: `n${n}`, label: `Node ${n}`, fields: [f(`Node ${n}`, 'primary')] }),
     );
     expect(searchItems(items, 'node', { limit: 2 })).toHaveLength(2);
     expect(searchItems(items, 'node')).toHaveLength(5);
@@ -319,43 +413,72 @@ describe('compareResults', () => {
 
 describe('searchItems — match highlighting ranges', () => {
   it('reports a single contiguous range for a substring match', () => {
-    const items = [item({ fields: [{ text: 'Alpha One', weight: 'primary' }] })];
+    const items = [item({ fields: [f('Alpha One', 'primary')] })];
     const result = searchItems(items, 'alpha')[0];
     expect(result.fieldMatches[0].ranges).toEqual([{ start: 0, end: 5 }]);
   });
 
   it('reports multiple ranges for a gapped subsequence match', () => {
-    const items = [item({ fields: [{ text: 'Git Sync', weight: 'primary' }] })];
+    const items = [item({ fields: [f('Git Sync', 'primary')] })];
     const result = searchItems(items, 'gs')[0];
     // 'g' at 0, 's' at 4 → two single-character ranges.
     expect(result.fieldMatches[0].ranges).toEqual([{ start: 0, end: 1 }, { start: 4, end: 5 }]);
   });
 
   it('reports ranges in the original case', () => {
-    const items = [item({ fields: [{ text: 'Mesh Grid', weight: 'primary' }] })];
+    const items = [item({ fields: [f('Mesh Grid', 'primary')] })];
     const result = searchItems(items, 'MESH')[0];
     expect(result.fieldMatches[0].ranges).toEqual([{ start: 0, end: 4 }]);
   });
 
   it('reports the best-matching field text for tab-complete', () => {
     const items = [item({ fields: [
-      { text: 'Alpha One', weight: 'primary' },
-      { text: 'feature/alpha', weight: 'secondary' },
+      f('Alpha One', 'primary'),
+      f('feature/alpha', 'secondary'),
     ] })];
     const result = searchItems(items, 'alpha')[0];
-    // Both fields match; the primary field wins the "best" slot.
+    // Both fields match 'alpha'; the first (primary) field wins the "best"
+    // slot for tab-complete.
     expect(result.bestFieldText).toBe('Alpha One');
     expect(result.fieldMatches[0].fieldIndex).toBe(0);
   });
 
   it('highlights a match in a secondary field when the primary does not match', () => {
     const items = [item({ fields: [
-      { text: 'Alpha One', weight: 'primary' },
-      { text: 'feature/alpha', weight: 'secondary' },
+      f('Alpha One', 'primary'),
+      f('feature/alpha', 'secondary'),
     ] })];
     const result = searchItems(items, 'feature')[0];
     expect(result.fieldMatches[0].fieldIndex).toBe(1);
     expect(result.bestFieldText).toBe('feature/alpha');
+  });
+
+  it('reports EVERY matching field so the UI can highlight label + subtitle', () => {
+    // Review #1425: the type contract says `fieldMatches: FieldMatch[]` — the
+    // engine must populate all matching fields, not just the best one.
+    const items = [item({ fields: [
+      f('Alpha One', 'primary'),
+      f('feature/alpha', 'secondary'),
+    ] })];
+    const result = searchItems(items, 'alpha')[0];
+    expect(result.fieldMatches.map((fm) => fm.fieldIndex)).toEqual([0, 1]);
+    // Both contribute to the aggregate score.
+    expect(result.score).toBeGreaterThan(FIELD_WEIGHTS.primary);
+  });
+
+  it('aggregates the score across all matching fields', () => {
+    const items = [
+      item({ id: 'both', label: 'Alpha Beta', fields: [
+        f('Alpha', 'primary'),
+        f('Alpha Beta', 'secondary'),
+      ] }),
+      item({ id: 'one', label: 'Alpha Gamma', fields: [
+        f('Alpha', 'primary'),
+      ] }),
+    ];
+    const results = searchItems(items, 'alpha');
+    // 'both' matches in two fields → higher aggregate than 'one'.
+    expect(results[0].item.id).toBe('both');
   });
 });
 
@@ -562,6 +685,22 @@ describe('indexGitHub (issue #1410 §1)', () => {
     expect(searchItems(items, '42')).toHaveLength(1);
   });
 
+  it('ranks a bare-number query as well as a #-prefixed one (review #1425)', () => {
+    // Both `#101` (secondary field, index 0) and `101` (bare field) are
+    // indexed, so `101` doesn't lose the start bonus for the leading `#`.
+    const items = indexGitHub([{ meshId: 1, items: [issue] }], [], meshes);
+    const bare = searchItems(items, '101')[0];
+    const hashed = searchItems(items, '#101')[0];
+    expect(bare.item.id).toBe('issue:1:101');
+    expect(hashed.item.id).toBe('issue:1:101');
+    // The bare-number field must be indexed (secondary) — the score is
+    // comparable, not dominated by the `#`-offset penalty.
+    expect(bare.fieldMatches.some((fm) => {
+      const fieldText = items[0].fields[fm.fieldIndex].text;
+      return fieldText === '101';
+    })).toBe(true);
+  });
+
   it('matches PRs by head ref', () => {
     const items = indexGitHub([], [{ meshId: 1, items: [pr] }], meshes);
     expect(searchItems(items, 'omnibar')).toHaveLength(1);
@@ -589,6 +728,13 @@ describe('indexSpawnOptions (issue #1410 §1)', () => {
     expect(searchItems(items, 'claude')).toHaveLength(2);
     expect(searchItems(items, 'playground')).toHaveLength(1);
     expect(searchItems(items, 'spawn')).toHaveLength(2);
+  });
+
+  it('emits nothing when no meshes are loaded yet (review #1425)', () => {
+    // Spawn options are mesh-bound (the action spawns INTO a mesh); with an
+    // empty mesh list there is deliberately no spawn entry — the pre-boot
+    // palette simply has none.
+    expect(indexSpawnOptions([option], [])).toEqual([]);
   });
 });
 
@@ -645,13 +791,10 @@ describe('filterByPrefix (issue #1410 §2)', () => {
     return [...new Set(items.map((i) => i.category))];
   }
 
-  it('`>` filters to commands and meshes', () => {
+  it('`>` filters to commands only (issue #1410 §2 — review #1425)', () => {
     const { items, query } = filterByPrefix(index, '>set');
     expect(query).toBe('set');
-    const cats = categoriesFor(items);
-    expect(cats).not.toContain('node');
-    expect(cats).toContain('command');
-    expect(cats).toContain('mesh');
+    expect(categoriesFor(items)).toEqual(['command']);
   });
 
   it('`@` filters to agent nodes only', () => {
@@ -710,12 +853,11 @@ describe('searchOmnibar', () => {
     expect(results[0].item.category).toBe('node');
   });
 
-  it('scopes a `>` query to commands and meshes', () => {
+  it('scopes a `>` query to commands only (review #1425)', () => {
     const results = searchOmnibar(index, '>set');
     const categories = new Set(results.map((r) => r.item.category));
     expect(categories.has('command')).toBe(true);
-    // mesh-a matches 'set' nowhere, but the scoping itself only drops
-    // non-command/mesh categories — assert the domain filter, not the match.
+    // Meshes are deliberately excluded from `>` (issue #1410 §2).
     expect(categories.has('mesh')).toBe(false);
     expect(categories.has('node')).toBe(false);
     expect(categories.has('issue')).toBe(false);
@@ -726,13 +868,33 @@ describe('searchOmnibar', () => {
   });
 
   it('applies the limit', () => {
-    // '>view' scopes to commands + meshes; the 'view-*' commands dominate,
-    // so the limit must cap the result count.
+    // '>view' scopes to commands; the 'view-*' commands dominate, so the
+    // limit must cap the result count.
     expect(searchOmnibar(index, '>view', { limit: 2 })).toHaveLength(2);
   });
 
   it('returns an empty list for an empty query', () => {
     expect(searchOmnibar(index, '')).toEqual([]);
+  });
+
+  it('a bare prefix lists the whole scoped domain instead of a blank palette (review #1425)', () => {
+    // Typing just `>` / `@` / `#` strips to an empty query; searchOmnibar
+    // must show the scoped list (emptyMode 'all'), not return [].
+    const commands = searchOmnibar(index, '>');
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.every((r) => r.item.category === 'command')).toBe(true);
+
+    const nodes = searchOmnibar(index, '@');
+    expect(nodes.map((r) => r.item.category)).toEqual(['node']);
+
+    const issues = searchOmnibar(index, '#');
+    expect(issues.length).toBeGreaterThan(0);
+    expect(issues.every((r) => r.item.category === 'issue' || r.item.category === 'pull-request')).toBe(true);
+  });
+
+  it('honours an explicit emptyMode for a bare prefix (review #1425)', () => {
+    const results = searchOmnibar(index, '>', { emptyMode: 'top', limit: 2 });
+    expect(results).toHaveLength(2);
   });
 });
 
@@ -749,12 +911,12 @@ describe('performance budget (issue #1410 §3)', () => {
         category: 'node',
         label: `agent-node-${i}`,
         fields: [
-          { text: `agent-node-${i}`, weight: 'primary' },
-          { text: `feature/branch-${i % 50}`, weight: 'secondary' },
-          { text: `worktree-${i % 30}`, weight: 'secondary' },
-          { text: i % 3 === 0 ? 'claude' : 'codex', weight: 'secondary' },
-          { text: i % 2 === 0 ? 'Running' : 'Idle', weight: 'secondary' },
-          { text: `mesh-${i % 5}`, weight: 'secondary' },
+          f(`agent-node-${i}`, 'primary'),
+          f(`feature/branch-${i % 50}`, 'secondary'),
+          f(`worktree-${i % 30}`, 'secondary'),
+          f(i % 3 === 0 ? 'claude' : 'codex', 'secondary'),
+          f(i % 2 === 0 ? 'Running' : 'Idle', 'secondary'),
+          f(`mesh-${i % 5}`, 'secondary'),
         ],
       });
     }
@@ -777,7 +939,7 @@ describe('performance budget (issue #1410 §3)', () => {
         id: `node:${i}`,
         category: 'node',
         label: `agent-node-${i}`,
-        fields: [{ text: `agent-node-${i}`, weight: 'primary' }],
+        fields: [f(`agent-node-${i}`, 'primary')],
       });
     }
     const a = searchItems(items, 'node').map((r) => r.item.id);

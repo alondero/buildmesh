@@ -7,6 +7,12 @@
  * module is unit-testable in isolation and trivially cheap to re-run on every
  * keystroke. The indexers in `./indexers.ts` hand this engine flat text
  * strings plus per-item weights; the engine never sees the domain model.
+ *
+ * Hot-path note: matching runs against PRE-FOLDED text. Each `IndexedField`
+ * carries its own `foldedText` (computed once when the index is built); the
+ * per-keystroke path allocates nothing on the indexed strings. Case folding
+ * uses `toLowerCase()` (locale-invariant — `toLocaleLowerCase()` binds to the
+ * host OS locale, which breaks ASCII matching on Turkish/Azeri locales).
  */
 
 /**
@@ -15,6 +21,12 @@
  * field" ranking contract (issue #1410: "weighted score algorithm with exact
  * prefix bonus"). They are deliberately small integers so score totals stay
  * in a legible range and the bonuses below can outrank a whole extra field.
+ *
+ * The weight is an **additive bias**: a field's match contributes
+ * `matchQuality + weight`. It is NOT a multiplier — the numbers are chosen so
+ * that a full-quality secondary match (30 + 12 + 18 + brevity + 60 ≈ 132)
+ * can outrank a degraded primary match (gap-heavy quality + 100), which is
+ * the behaviour the field hierarchy wants.
  */
 export type FieldWeight = 'primary' | 'secondary';
 
@@ -28,6 +40,12 @@ export const FIELD_WEIGHTS: Record<FieldWeight, number> = {
 export interface IndexedField {
   /** The raw text the matcher searches and the UI highlights against. */
   text: string;
+  /**
+   * The pre-folded (lowercased) form of `text`, computed once at index-build
+   * time so the per-keystroke hot path never allocates. Indexers build this
+   * via the `field()` helper in `./indexers.ts`.
+   */
+  foldedText: string;
   /** How much a match in this field contributes to the item's score. */
   weight: FieldWeight;
 }
@@ -70,7 +88,7 @@ export interface MatchRange {
 export interface FieldMatch {
   /** The field's ordinal in the item's `fields` array. */
   fieldIndex: number;
-  /** Score contributed by this field (already multiplied by weight). */
+  /** Score contributed by this field (match quality + field weight). */
   score: number;
   /** The exact match ranges in the ORIGINAL case of this field. */
   ranges: MatchRange[];
@@ -79,9 +97,16 @@ export interface FieldMatch {
 /** The scored result of matching a query against one item. */
 export interface FuzzyResult {
   item: IndexedItem;
-  /** Aggregate score (field contributions + boosts). Higher is better. */
+  /**
+   * Aggregate score: the sum of every matching field's contribution plus any
+   * item boost. Higher is better. (Review #1425 note: this is a SUM, not a
+   * max — all matching fields contribute.)
+   */
   score: number;
-  /** Per-field match detail, for the UI's highlight rendering. */
+  /**
+   * One entry per field that matched — the UI can highlight a match in the
+   * label AND the subtitle simultaneously. Sorted by fieldIndex ascending.
+   */
   fieldMatches: FieldMatch[];
   /** The full original text of the best-matching field (for tab-complete). */
   bestFieldText: string;
@@ -107,10 +132,11 @@ const EMPTY_RESULTS: FuzzyResult[] = [];
  * dependency fuzzy scoring in `src/lib/omnibar/fuzzySearch.ts` with match
  * highlighting and category weighting").
  *
- * Matching is character-by-character subsequence matching: every character of
- * the folded query must appear in order in a folded field (no gaps are
- * required). The result is a flat score, not a percentage — the caller
- * decides which results to show and how to cut ties.
+ * Matching is character-by-character subsequence matching against each
+ * field's pre-folded text: every character of the folded query must appear
+ * in order in the field (no gaps are required). The result is a flat score,
+ * not a percentage — the caller decides which results to show and how to
+ * cut ties.
  *
  * `emptyMode` governs an empty/whitespace query:
  *   - `'none'` — return `[]` (the palette shows its default/recents view).
@@ -128,16 +154,18 @@ export function searchItems(
 
   if (query.trim() === '') {
     if (emptyMode === 'none') return EMPTY_RESULTS;
-    const list = items.map((item) => ({
+    // Slice BEFORE mapping so an emptyMode 'top' preview doesn't allocate
+    // wrapper objects for items it will immediately discard.
+    const scoped = emptyMode === 'top' ? items.slice(0, limit) : items;
+    return scoped.map((item) => ({
       item,
       score: 0,
       fieldMatches: [] as FieldMatch[],
       bestFieldText: item.fields[0]?.text ?? '',
     }));
-    return emptyMode === 'top' ? list.slice(0, limit) : list;
   }
 
-  const foldedQuery = query.toLocaleLowerCase();
+  const foldedQuery = query.toLowerCase();
   const results: FuzzyResult[] = [];
   for (const item of items) {
     const scored = scoreItem(item, foldedQuery);
@@ -154,35 +182,29 @@ export function searchItems(
  * Returns `null` when no field matches the query.
  */
 function scoreItem(item: IndexedItem, foldedQuery: string): FuzzyResult | null {
-  let best: FuzzyResult | null = null;
+  const fieldMatches: FieldMatch[] = [];
+  let bestScore = 0;
+  let bestFieldText = '';
 
   for (let fieldIndex = 0; fieldIndex < item.fields.length; fieldIndex++) {
     const field = item.fields[fieldIndex];
-    if (field.text === '') continue;
-    const folded = field.text.toLocaleLowerCase();
-    const match = scoreField(foldedQuery, folded, FIELD_WEIGHTS[field.weight]);
+    if (field.text === '' || field.foldedText === '') continue;
+    const match = scoreField(foldedQuery, field.foldedText, FIELD_WEIGHTS[field.weight]);
     if (match === null) continue;
-    if (best === null || match.score > best.score) {
-      best = {
-        item,
-        score: match.score,
-        fieldMatches: [{ fieldIndex, score: match.score, ranges: match.ranges }],
-        bestFieldText: field.text,
-      };
-    }
+    fieldMatches.push({ fieldIndex, score: match.score, ranges: match.ranges });
+    bestScore += match.score;
+    if (bestFieldText === '') bestFieldText = field.text;
   }
 
-  if (best === null) return null;
-  if (item.boost !== undefined && item.boost !== 0) {
-    best.score += item.boost;
-  }
-  return best;
+  if (fieldMatches.length === 0) return null;
+  if (item.boost !== undefined && item.boost !== 0) bestScore += item.boost;
+  return { item, score: bestScore, fieldMatches, bestFieldText };
 }
 
 /**
- * Score a single field. `foldedQuery` and `foldedText` are lowercased forms
- * of the query and field text; `weight` is the field weight to multiply the
- * match quality by.
+ * Score a single field. `foldedQuery` is the lowercased query;
+ * `foldedText` is the field's pre-folded text (see `IndexedField.foldedText`);
+ * `weight` is the field's additive weight bias.
  *
  * Scoring components (all relative to the field's weight):
  *   - exact-prefix bonus: the folded query is a prefix of the folded field
@@ -197,6 +219,9 @@ function scoreItem(item: IndexedItem, foldedQuery: string): FuzzyResult | null {
  *     whole-field boundary).
  *   - brevity: shorter fields outrank longer ones at equal quality (a 6-char
  *     field matching `node` beats a 30-char field that also contains `node`).
+ *
+ * The final field contribution is `matchQuality + weight` (additive, NOT
+ * multiplicative — see the `FieldWeight` doc).
  *
  * Returns `null` when the query is not a subsequence of the field.
  */
@@ -233,6 +258,19 @@ function scoreField(
  * Try to match the query starting at `start` in `foldedText`. Returns
  * `null` when no subsequence match exists from this start; otherwise the
  * scored match with its original-case ranges.
+ *
+ * The scan is SINGLE-PASS: the greedy forward walk records the index of each
+ * consumed query character in `matched`, and the ranges + gap sum are derived
+ * from that array afterwards — no second scan of the field text.
+ *
+ * Greedy note (review #1425): binding the earliest possible character is
+ * optimal for the gap penalty — by exchange, if a later occurrence of the
+ * same query character were used, swapping it for the earlier one can only
+ * shrink (never grow) the sum of gaps, because every subsequent match index
+ * shifts no later. So the "greedy trap" critique does not apply to the
+ * gap-sum objective; the oracle test in
+ * `tests/unit/omnibar-fuzzy-search.test.ts` pins this against a brute-force
+ * best-subsequence oracle.
  */
 function scoreAtStart(
   foldedQuery: string,
@@ -241,22 +279,28 @@ function scoreAtStart(
 ): { score: number; ranges: MatchRange[] } | null {
   const q = foldedQuery;
   const n = foldedText.length;
+  const matched: number[] = new Array(q.length);
   let qi = 0;
   let i = start;
   let prev = -1;
-  let gapSum = 0;
 
-  // Greedy forward scan: consume query characters in order. Gaps (skipped
-  // field characters) are counted for the density penalty below.
+  // Greedy forward scan: consume query characters in order, recording the
+  // index of each consumed character.
   while (qi < q.length && i < n) {
     if (foldedText[i] === q[qi]) {
-      if (prev !== -1) gapSum += i - prev - 1;
+      matched[qi] = i;
       prev = i;
       qi++;
     }
     i++;
   }
   if (qi < q.length) return null; // ran off the end without consuming the query
+
+  // Derive the gap sum from the matched indices.
+  let gapSum = 0;
+  for (let k = 1; k < q.length; k++) {
+    gapSum += matched[k] - matched[k - 1] - 1;
+  }
 
   let base = 0;
   if (start === 0) base += 30; // field-leading match
@@ -266,26 +310,16 @@ function scoreAtStart(
 
   const score = base + Math.max(0, 12 - n); // brevity: shorter fields win ties
 
-  // Recover the ORIGINAL (case-preserved) ranges: the caller indexes into
-  // the item's field text, which keeps its original case. The fold is
-  // length-preserving (both sides use toLocaleLowerCase), so walking the
-  // folded text with the same indices lands on the same characters. Emit
-  // maximal runs of characters the greedy match actually consumed.
+  // Build maximal runs of matched indices — the ranges in ORIGINAL-case
+  // positions (the fold is length-preserving, so the indices line up).
   const ranges: MatchRange[] = [];
-  let rangeStart = -1;
-  let qi2 = 0;
-  for (let idx = start; idx <= prev; idx++) {
-    if (qi2 < q.length && foldedText[idx] === q[qi2]) {
-      if (rangeStart === -1) rangeStart = idx;
-      qi2++;
-    } else if (rangeStart !== -1) {
-      ranges.push({ start: rangeStart, end: idx });
-      rangeStart = -1;
-    }
+  let runStart = matched[0];
+  for (let k = 1; k < q.length; k++) {
+    if (matched[k] === matched[k - 1] + 1) continue;
+    ranges.push({ start: runStart, end: matched[k - 1] + 1 });
+    runStart = matched[k];
   }
-  if (rangeStart !== -1) {
-    ranges.push({ start: rangeStart, end: prev + 1 });
-  }
+  ranges.push({ start: runStart, end: prev + 1 });
 
   return { score, ranges };
 }
