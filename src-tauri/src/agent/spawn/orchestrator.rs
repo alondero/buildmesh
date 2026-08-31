@@ -2,11 +2,11 @@ use super::provision::{
     emit_sync_outcome_event, resolve_base_ref_for_spawn, run_provider_provisioning,
     SpawnInFlightClaim, DEFAULT_WORKTREE_MODE,
 };
-use super::reader::{
-    build_spawn_command_prepared, is_agent_already_running, open_pty_pair,
-    reader_should_capture_session_id, register_agent, sandbox_spawn, spawn_child, start_reader,
-    SessionIdMode, SpawnTimer, EARLY_EXIT_WINDOW,
-};
+use super::reader::{reader_should_capture_session_id, start_reader, SessionIdMode, SpawnTimer, EARLY_EXIT_WINDOW};
+use super::command::build_spawn_command_prepared;
+use super::process::{is_agent_already_running, sandbox_spawn, spawn_child};
+use super::process::register_agent;
+use super::reader::open_pty_pair;
 use super::{
     AgentSpawnedPayload, ExplicitSpawnOverrides, MeshSyncOutcome, MeshSyncWarningPayload,
     ProviderErrorPayload, ResumeCause, SpawnIntent, SpawnOutcome, SpawnRequest,
