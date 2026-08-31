@@ -16,16 +16,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
 import { render, cleanup, fireEvent, screen, act } from '@testing-library/react';
 import { CommandOmnibar } from '../../src/components/CommandOmnibar/CommandOmnibar';
-import {
-  OPEN_CHEATSHEET_EVENT,
-  resetSpawnOptionsCacheForTests,
-  runOmnibarCommand,
-} from '../../src/components/CommandOmnibar/omnibarActions';
+import { executeOmnibarItem, runOmnibarCommand } from '../../src/components/CommandOmnibar/omnibarActions';
 import { useUIStore, type OmnibarMode } from '../../src/stores/uiStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { Mesh } from '../../src/types/generated/Mesh';
+import type { SpawnOption } from '../../src/lib/groups';
 
 // jsdom doesn't implement scrollIntoView; the palette calls it on every
 // active-index move ("auto-scroll into view").
@@ -90,8 +87,26 @@ const node: AgentNode = {
   created_at: '2026-01-01T00:00:00Z',
 };
 
+const spawnOption: SpawnOption = {
+  id: 'claude',
+  label: 'Claude Code',
+  icon: '',
+  harness_id: 'claude',
+  provider_id: 'claude',
+  is_proxied: false,
+  group_key: 'claude',
+  color: 'bg-blue-500',
+};
+
 function seedStores(): void {
-  useUIStore.setState({ omnibarOpen: false, omnibarMode: 'files', viewMode: 'all' });
+  useUIStore.setState({
+    omnibarOpen: false,
+    omnibarMode: 'files',
+    viewMode: 'all',
+    cheatsheetOpen: false,
+    appSettingsOpen: false,
+    remoteAccessOpen: false,
+  });
   useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: null });
   useMeshStore.setState({ meshesById: new Map([[mesh.id, mesh]]), selectedMeshId: null });
 }
@@ -117,9 +132,17 @@ function options(): HTMLElement[] {
   return screen.queryAllByTestId('command-omnibar-option');
 }
 
+/** Map a rendered view-command row's label to the ViewMode it switches to. */
+function viewModeForRow(rowText: string): string {
+  if (rowText.includes('Single')) return 'single';
+  if (rowText.includes('Mesh Grid')) return 'mesh';
+  if (rowText.includes('Pinned')) return 'pinned';
+  if (rowText.includes('All Nodes')) return 'all';
+  throw new Error(`Unexpected view row text: ${rowText}`);
+}
+
 beforeEach(() => {
   seedStores();
-  resetSpawnOptionsCacheForTests();
 });
 
 afterEach(cleanup);
@@ -288,13 +311,82 @@ describe('CommandOmnibar — keyboard interaction', () => {
     expect(useUIStore.getState().omnibarOpen).toBe(false);
   });
 
-  it('a click on an option row executes it and closes', () => {
+  it('a click on an option row executes THE CLICKED row, not the keyboard-active one', () => {
+    // Regression pin (issue #1411 review): the executor must receive the
+    // clicked item. Move the keyboard highlight to row 2 first — if the
+    // click executed the active item instead, viewMode would be row 2's.
     render(<CommandOmnibar />);
     openOmnibar('commands');
-    type('pinned');
-    fireEvent.click(options()[0]);
-    expect(useUIStore.getState().viewMode).toBe('pinned');
-    expect(useUIStore.getState().omnibarOpen).toBe(false);
+    type('>view');
+    const rows = options().filter((r) => (r.textContent ?? '').includes('Switch view:'));
+    expect(rows.length).toBeGreaterThan(2);
+    const input = screen.getByRole('combobox');
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    const target = rows[1];
+    fireEvent.click(target);
+    expect(useUIStore.getState().viewMode).toBe(viewModeForRow(target.textContent ?? ''));
+  });
+
+  it('clicking the LAST row executes that row (off-by-active regression pin)', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('>view');
+    const rows = options().filter((r) => (r.textContent ?? '').includes('Switch view:'));
+    const target = rows[rows.length - 1];
+    fireEvent.click(target);
+    expect(useUIStore.getState().viewMode).toBe(viewModeForRow(target.textContent ?? ''));
+  });
+
+  it('re-seeds the query when the mode changes while the palette is open', () => {
+    // The openOmnibar contract: pressing the other chord on an open palette
+    // re-seeds to that mode rather than being ignored (uiStore doc).
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    type('alpha');
+    act(() => {
+      useUIStore.getState().openOmnibar('commands');
+    });
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+    expect(useUIStore.getState().omnibarMode).toBe('commands');
+    expect(input.value).toBe('>');
+    expect(options().length).toBeGreaterThan(0);
+  });
+
+  it('Shift+Tab falls through untouched (no completion, no focus trap)', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('>sync');
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+    fireEvent.keyDown(input, { key: 'Tab', shiftKey: true });
+    expect(input.value).toBe('>sync');
+  });
+
+  it('Tab on an empty result set does not preventDefault (no silent focus trap)', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    type('zzzznope');
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+    const event = fireEvent.keyDown(input, { key: 'Tab' });
+    // fireEvent returns false when preventDefault was called.
+    expect(event).toBe(true);
+  });
+
+  it('wraps the overlay in dialog semantics (role=dialog, aria-modal, labelled)', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(dialog.getAttribute('aria-label')).toMatch(/omnibar/i);
+  });
+
+  it('renders one badge per domain in the footer (no duplicate spawn badges)', () => {
+    // `/` and `+` both scope spawning — they share ONE badge, so the
+    // description text appears exactly once.
+    const { container } = render(<CommandOmnibar />);
+    openOmnibar('commands');
+    const occurrences = container.textContent!.split('Spawning actions').length - 1;
+    expect(occurrences).toBe(1);
   });
 
   it('Tab drills into the active result’s domain by applying its prefix filter', () => {
@@ -323,15 +415,21 @@ describe('CommandOmnibar — keyboard interaction', () => {
 });
 
 describe('CommandOmnibar — command execution routing', () => {
-  it('routes the show-cheatsheet command through its window event', () => {
-    const onOpen = vi.fn();
-    window.addEventListener(OPEN_CHEATSHEET_EVENT, onOpen);
+  it('routes the show-cheatsheet command through uiStore (no window-event side channel)', () => {
     render(<CommandOmnibar />);
     openOmnibar('commands');
     type('cheatsheet');
     fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
-    expect(onOpen).toHaveBeenCalledTimes(1);
-    window.removeEventListener(OPEN_CHEATSHEET_EVENT, onOpen);
+    expect(useUIStore.getState().cheatsheetOpen).toBe(true);
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+  });
+
+  it('routes the open-settings command through uiStore', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('settings');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
+    expect(useUIStore.getState().appSettingsOpen).toBe(true);
   });
 
   it('runOmnibarCommand returns false for an unknown command id (catalog drift pin)', () => {
@@ -347,6 +445,49 @@ describe('CommandOmnibar — command execution routing', () => {
     ).toBe(false);
     expect(setViewMode).not.toHaveBeenCalled();
     expect(openProbeTab).not.toHaveBeenCalled();
+  });
+
+  it('routes a spawn item through selectProviderForMesh with the right mesh and option', () => {
+    const spy = vi
+      .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
+      .mockResolvedValue(node);
+    executeOmnibarItem(`spawn:${spawnOption.id}:${mesh.id}`, {
+      meshes: [mesh],
+      spawnOptions: [spawnOption],
+      setViewMode: vi.fn(),
+      openProbeTab: vi.fn(),
+    });
+    expect(spy).toHaveBeenCalledWith(mesh.id, mesh.name, mesh.path, spawnOption.id);
+    spy.mockRestore();
+  });
+
+  it('routes an issue item to ITS mesh before opening the Issues tab', () => {
+    // The palette can list issues from any mesh; the Probe's GitHub tabs
+    // read the selected mesh, so the router must select the item's mesh
+    // (2, not the currently selected 1) before opening the tab.
+    useMeshStore.setState({ selectedMeshId: 1 });
+    const openProbeTab = vi.fn();
+    executeOmnibarItem('issue:2:7', {
+      meshes: [],
+      spawnOptions: [],
+      setViewMode: vi.fn(),
+      openProbeTab,
+    });
+    expect(useMeshStore.getState().selectedMeshId).toBe(2);
+    expect(openProbeTab).toHaveBeenCalledWith('issues');
+  });
+
+  it('routes a pull item to its mesh and the Pull Requests tab', () => {
+    useMeshStore.setState({ selectedMeshId: 1 });
+    const openProbeTab = vi.fn();
+    executeOmnibarItem('pull:3:42', {
+      meshes: [],
+      spawnOptions: [],
+      setViewMode: vi.fn(),
+      openProbeTab,
+    });
+    expect(useMeshStore.getState().selectedMeshId).toBe(3);
+    expect(openProbeTab).toHaveBeenCalledWith('pulls');
   });
 
   it('routes a mesh result to mesh selection', () => {

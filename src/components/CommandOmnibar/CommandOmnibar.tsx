@@ -37,6 +37,7 @@ import {
   buildOmnibarIndex,
   searchOmnibar,
   type Category,
+  type IndexedItem,
   type OmnibarIndex,
 } from '../../lib/omnibar';
 import type { FuzzyResult } from '../../lib/omnibar';
@@ -71,13 +72,19 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   const inputRef = useRef<HTMLInputElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
-  // `omnibarMode` seeds the search box once at mount (the editors' quick-open
-  // convention): 'commands' opens in command mode (`>` prefix), 'files' with
-  // an empty query over the whole palette. Mode switching inside the palette
-  // happens via the prefix characters, not the store.
+  // `omnibarMode` seeds the search box at mount AND re-seeds when the mode
+  // changes while the palette is open (the editors' quick-open convention):
+  // pressing the other chord (e.g. ⌘/Ctrl+P while the files palette is up)
+  // re-seeds to that mode per the `openOmnibar` contract in uiStore. Mode
+  // switching inside the palette happens via the prefix characters, not the
+  // store.
   const [query, setQuery] = useState(() => (mode === 'commands' ? '>' : ''));
   const [activeIndex, setActiveIndex] = useState(0);
   const [spawnOptions, setSpawnOptions] = useState<SpawnOption[]>([]);
+  useEffect(() => {
+    setQuery(mode === 'commands' ? '>' : '');
+    setActiveIndex(0);
+  }, [mode]);
 
   const agentNodes = useAgentNodeStore((s) => s.agentNodes);
   const meshesById = useMeshStore((s) => s.meshesById);
@@ -120,9 +127,10 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     };
   }, []);
 
-  // Lazy-load the spawn menu on first open (one IPC per app run — see
-  // `loadSpawnOptions`). Guarded against unmount: state writes after the
-  // palette closed are dropped.
+  // Refresh the spawn menu on every open (one IPC per open — see
+  // `loadSpawnOptions`; no module cache, so providers added in Settings
+  // appear without a restart). Guarded against unmount: state writes after
+  // the palette closed are dropped.
   useEffect(() => {
     let cancelled = false;
     loadSpawnOptions().then((options) => {
@@ -155,16 +163,14 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
       ?.scrollIntoView({ block: 'nearest' });
   }, [clampedActive, results.length]);
 
-  const executeActive = () => {
-    const result = results[clampedActive];
-    if (!result) return;
+  const executeItem = (item: IndexedItem) => {
     const ctx: OmnibarActionContext = {
       meshes,
       spawnOptions,
       setViewMode: useUIStore.getState().setViewMode,
       openProbeTab: useUIStore.getState().openProbeTab,
     };
-    executeOmnibarItem(result.item.id, ctx);
+    executeOmnibarItem(item.id, ctx);
     onClose();
   };
 
@@ -172,32 +178,41 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (results.length > 0) {
-        setActiveIndex((i) => (i + 1) % results.length);
+        // Navigate from the CLAMPED index: if the result set shrank since
+        // the last move (spawn options loaded, store updates), the raw
+        // activeIndex may exceed the list — wrapping from it would jump to
+        // the wrong row (issue #1411 review).
+        setActiveIndex((clampedActive + 1) % results.length);
       }
       return;
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (results.length > 0) {
-        setActiveIndex((i) => (i - 1 + results.length) % results.length);
+        setActiveIndex((clampedActive - 1 + results.length) % results.length);
       }
       return;
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      executeActive();
+      const result = results[clampedActive];
+      if (result) executeItem(result.item);
       return;
     }
-    if (e.key === 'Tab') {
-      // Tab drills in: with an unscoped query and a prefixable active
-      // result, apply that domain's prefix filter (e.g. `settings` + a
-      // command hit → `>settings`). Once the query is already scoped (or
-      // the domain has no prefix, e.g. meshes), Tab completes the query to
-      // the active result's primary field — the standard palette
-      // tab-complete gesture.
-      e.preventDefault();
+    if (e.key === 'Tab' && !e.shiftKey) {
+      // Forward Tab drills in; Shift+Tab falls through untouched so the
+      // browser's reverse focus navigation keeps working. Tab drills into
+      // the active result's domain: with an unscoped query and a
+      // prefixable active result, apply that domain's prefix filter (e.g.
+      // `settings` + a command hit → `>settings`). Once the query is
+      // already scoped (or the domain has no prefix, e.g. meshes), Tab
+      // completes the query to the active result's primary field — the
+      // standard palette tab-complete gesture. preventDefault only fires
+      // when there IS a completion action, so an empty result set never
+      // traps Tab.
       const result = results[clampedActive];
       if (!result) return;
+      e.preventDefault();
       const category = result.item.category as Category;
       const prefix = CATEGORY_PREFIX[category];
       if (prefix !== undefined && !isKnownPrefix(query)) {
@@ -222,6 +237,9 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     >
       <div className="absolute inset-0 bg-bg-base/70 backdrop-blur-sm animate-fade-in" />
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command Omnibar"
         className="relative w-full max-w-xl bg-bg-overlay border border-border-default rounded-lg shadow-md animate-scale-in outline-none overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
@@ -263,7 +281,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
                 // mousedown preventDefault keeps the input focused — the
                 // combobox owns focus for the palette's whole lifetime.
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={executeActive}
+                onClick={() => executeItem(result.item)}
               />
             ))}
           </ul>
@@ -274,11 +292,21 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
         )}
 
         <div className="flex items-center gap-3 px-4 py-2 border-t border-border-subtle text-2xs text-text-muted">
-          {PREFIX_FILTERS.map((f) => (
-            <span key={f.prefix} className="flex items-center gap-1">
-              <kbd className="px-1 rounded-md bg-bg-card border border-border-default font-mono">
-                {f.prefix}
-              </kbd>
+          {/* One badge per description, not per prefix — `/` and `+` both
+              scope spawning (issue #1410 §2) and would render two
+              identical badges. */}
+          {PREFIX_FILTERS.filter(
+            (f, i, all) => all.findIndex((o) => o.description === f.description) === i,
+          ).map((f) => (
+            <span key={f.description} className="flex items-center gap-1">
+              {PREFIX_FILTERS.filter((o) => o.description === f.description).map((o) => (
+                <kbd
+                  key={o.prefix}
+                  className="px-1 rounded-md bg-bg-card border border-border-default font-mono"
+                >
+                  {o.prefix}
+                </kbd>
+              ))}
               {f.description}
             </span>
           ))}
@@ -309,10 +337,23 @@ function ResultRow({
 }) {
   const { item } = result;
   const primaryField = item.fields[0];
-  const labelMatchesPrimary = primaryField !== undefined && primaryField.text === item.label;
-  const ranges = labelMatchesPrimary
-    ? result.fieldMatches.find((m) => m.fieldIndex === 0)?.ranges
-    : undefined;
+  // The label usually IS the primary field's text (nodes, meshes, commands,
+  // spawn), so the match ranges apply 1:1. GitHub rows differ: the label is
+  // `#N <title>` while the primary field is just the title — the ranges
+  // still apply, shifted by the `#N ` prefix the label adds (issue #1411
+  // review: don't disable highlighting for the whole GitHub domain).
+  let ranges: { start: number; end: number }[] | undefined;
+  if (primaryField !== undefined) {
+    const raw = result.fieldMatches.find((m) => m.fieldIndex === 0)?.ranges;
+    if (raw !== undefined) {
+      if (primaryField.text === item.label) {
+        ranges = raw;
+      } else if (item.label.endsWith(primaryField.text)) {
+        const offset = item.label.length - primaryField.text.length;
+        ranges = raw.map((r) => ({ start: r.start + offset, end: r.end + offset }));
+      }
+    }
+  }
 
   return (
     <li

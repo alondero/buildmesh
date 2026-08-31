@@ -5,10 +5,7 @@ import { isMac } from '../../lib/platform';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
-import {
-  OPEN_REMOTE_ACCESS_EVENT,
-  OPEN_SETTINGS_EVENT,
-} from '../CommandOmnibar/omnibarActions';
+import { useUIStore } from '../../stores/uiStore';
 
 /**
  * Bespoke window chrome for the frameless window (`decorations: false`).
@@ -191,23 +188,13 @@ function WordmarkImg() {
 }
 
 export function TitleBar() {
-  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
-  const [remoteAccessOpen, setRemoteAccessOpen] = useState(false);
+  // Issue #1411 review: the two modals' open state lives in `uiStore` (not
+  // local state) so the Omnibar's "Open Settings" / "Open Remote Access"
+  // commands summon the same modals through the same source of truth the
+  // header buttons use — no window-event side channel.
+  const appSettingsOpen = useUIStore((s) => s.appSettingsOpen);
+  const remoteAccessOpen = useUIStore((s) => s.remoteAccessOpen);
   const [isMaximized, setIsMaximized] = useState(false);
-
-  // "Open Settings" / "Open Remote Access" omnibar commands (issue #1411)
-  // — routed here as window CustomEvents because the modals' open state is
-  // TitleBar-owned. See `omnibarActions.ts` for the canonical rationale.
-  useEffect(() => {
-    const onOpenSettings = () => setAppSettingsOpen(true);
-    const onOpenRemoteAccess = () => setRemoteAccessOpen(true);
-    window.addEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
-    window.addEventListener(OPEN_REMOTE_ACCESS_EVENT, onOpenRemoteAccess);
-    return () => {
-      window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
-      window.removeEventListener(OPEN_REMOTE_ACCESS_EVENT, onOpenRemoteAccess);
-    };
-  }, []);
 
   // Track the maximized state so the middle window control can swap between
   // the maximize and restore glyphs. `onResized` fires for maximize,
@@ -276,7 +263,7 @@ export function TitleBar() {
         <div className="flex items-center gap-1 pr-1">
           <button
             type="button"
-            onClick={() => setAppSettingsOpen(true)}
+            onClick={() => useUIStore.getState().openAppSettings()}
             className="p-1 rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors"
             title="Settings"
             aria-label="Open settings"
@@ -285,7 +272,7 @@ export function TitleBar() {
           </button>
           <button
             type="button"
-            onClick={() => setRemoteAccessOpen(true)}
+            onClick={() => useUIStore.getState().openRemoteAccess()}
             className="p-1 rounded-md text-accent-cyan hover:text-accent-blue hover:bg-bg-card transition-colors"
             title="Remote access"
             aria-label="Open remote access"
@@ -320,8 +307,8 @@ export function TitleBar() {
         )}
       </header>
 
-      {appSettingsOpen && <AppSettingsModal onClose={() => setAppSettingsOpen(false)} />}
-      {remoteAccessOpen && <RemoteAccessModal onClose={() => setRemoteAccessOpen(false)} />}
+      {appSettingsOpen && <AppSettingsModal onClose={() => useUIStore.getState().closeAppSettings()} />}
+      {remoteAccessOpen && <RemoteAccessModal onClose={() => useUIStore.getState().closeRemoteAccess()} />}
     </>
   );
 }

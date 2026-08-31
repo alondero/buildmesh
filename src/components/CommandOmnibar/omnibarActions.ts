@@ -8,28 +8,20 @@
  * makes it unit-testable without rendering React and keeps the palette a
  * pure "search + select" surface.
  *
- * Surfaces that already own their own open-state (Settings and Remote Access
- * modals in <TitleBar>, the cheatsheet in <App>) are reached with window
- * CustomEvents rather than new store fields: the events reuse the existing
- * `window.dispatchEvent` pattern App.tsx already uses for
- * `shortcut-triggered`, and avoid growing `uiStore` with modal flags that
- * only one consumer reads.
+ * Modal opens go through `uiStore` (`cheatsheetOpen` / `appSettingsOpen` /
+ * `remoteAccessOpen`), the same source of truth App's `?` key and TitleBar's
+ * header buttons already use — no window-event side channel.
  */
 import type { Mesh } from '../../types/generated/Mesh';
 import type { ProbeTab, ViewMode } from '../../stores/uiStore';
 import type { SpawnOption } from '../../lib/groups';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { mapBackendProviders } from '../../lib/groups';
+import { addToast } from '../../stores/toastStore';
 import * as api from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
-
-/** Window event that asks <App> to open the keyboard cheatsheet. */
-export const OPEN_CHEATSHEET_EVENT = 'buildmesh:open-cheatsheet';
-/** Window event that asks <TitleBar> to open the Settings modal. */
-export const OPEN_SETTINGS_EVENT = 'buildmesh:open-settings';
-/** Window event that asks <TitleBar> to open the Remote Access modal. */
-export const OPEN_REMOTE_ACCESS_EVENT = 'buildmesh:open-remote-access';
+import { useUIStore } from '../../stores/uiStore';
 
 /** Everything `executeOmnibarItem` needs beyond the stores themselves. */
 export interface OmnibarActionContext {
@@ -39,10 +31,6 @@ export interface OmnibarActionContext {
   spawnOptions: SpawnOption[];
   setViewMode: (mode: ViewMode) => void;
   openProbeTab: (tab: ProbeTab) => void;
-}
-
-function dispatchWindowEvent(name: string): void {
-  window.dispatchEvent(new CustomEvent(name));
 }
 
 /**
@@ -62,24 +50,16 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
       ctx.setViewMode(id.slice('view-'.length) as ViewMode);
       return true;
     case 'open-settings':
-      dispatchWindowEvent(OPEN_SETTINGS_EVENT);
+      useUIStore.getState().openAppSettings();
       return true;
     case 'open-remote-access':
-      dispatchWindowEvent(OPEN_REMOTE_ACCESS_EVENT);
+      useUIStore.getState().openRemoteAccess();
       return true;
     case 'show-cheatsheet':
-      dispatchWindowEvent(OPEN_CHEATSHEET_EVENT);
+      useUIStore.getState().openCheatsheet();
       return true;
     case 'git-sync':
-      // "Fetch and pull all meshes" (issue #1410 §1). Fire-and-forget per
-      // mesh — the palette closes immediately; failures surface through the
-      // existing mesh-sync-warning toasts the backend emits.
-      for (const mesh of ctx.meshes) {
-        void api.gitSync(mesh.path).catch(() => {
-          // The backend already toasts sync failures; swallow here so an
-          // unhandled rejection can't escape the palette's Enter handler.
-        });
-      }
+      void gitSyncAllMeshes(ctx.meshes);
       return true;
     default:
       if (id.startsWith('probe-')) {
@@ -87,6 +67,29 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
         return true;
       }
       return false;
+  }
+}
+
+/**
+ * "Git sync" command — fetch and pull every mesh (issue #1410 §1). Runs the
+ * `git_sync` IPC SEQUENTIALLY (issue #1411 review): each sync is a real git
+ * fetch/pull on the mesh's worktree, and launching a dozen of them in
+ * parallel floods the backend and the disk. Failures are collected, don't
+ * abort the remaining meshes, and surface as one summary toast — the same
+ * feedback channel the per-mesh sync in <MeshItem> uses via mesh-sync
+ * toasts.
+ */
+export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
+  const failed: string[] = [];
+  for (const mesh of meshes) {
+    try {
+      await api.gitSync(mesh.path);
+    } catch {
+      failed.push(mesh.name);
+    }
+  }
+  if (failed.length > 0) {
+    addToast('Git sync', `Sync failed for: ${failed.join(', ')}`, 'warning');
   }
 }
 
@@ -136,6 +139,15 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     return;
   }
   if (id.startsWith('issue:') || id.startsWith('pull:')) {
+    // Id shape is `issue:<meshId>:<number>` / `pull:<meshId>:<number>`.
+    // The Probe's GitHub tabs read their mesh from `meshStore`, so an item
+    // belonging to a mesh other than the currently selected one must
+    // select its mesh first — otherwise the user lands on the tab showing
+    // a DIFFERENT mesh's issues (issue #1411 review).
+    const meshId = Number(id.split(':')[1]);
+    if (Number.isFinite(meshId)) {
+      useMeshStore.getState().selectMesh(meshId);
+    }
     // Navigation entry point: jump the Probe to the mesh's GitHub tab. The
     // row itself doesn't carry enough context to deep-link into a single
     // issue/PR view — the tab is the discoverable surface for it.
@@ -147,29 +159,18 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
 /**
  * The harness menu for the spawn domain. The provider list has no store —
  * every surface (Sidebar, Probe tabs, Settings) fetches `listProviders()`
- * on demand — so the palette caches its first successful projection in a
- * module-level variable: one IPC round-trip per app run, taken lazily on
- * the first palette open. A failed fetch resolves to `[]` (the spawn domain
- * simply shows nothing) rather than poisoning the cache, so the next open
- * retries.
+ * on demand — so the palette fetches it fresh on EVERY open (issue #1411
+ * review): one IPC per open keeps providers added in Settings (or newly
+ * installed harnesses) appearing without an app restart, and there is no
+ * module-level cache to invalidate. A failed fetch resolves to `[]` (the
+ * spawn domain simply shows nothing).
  */
-let spawnOptionsCache: SpawnOption[] | null = null;
 export async function loadSpawnOptions(): Promise<SpawnOption[]> {
-  if (spawnOptionsCache !== null) return spawnOptionsCache;
   try {
     const backend = await api.listProviders();
-    if (Array.isArray(backend)) {
-      spawnOptionsCache = mapBackendProviders(backend);
-    } else {
-      spawnOptionsCache = [];
-    }
+    if (Array.isArray(backend)) return mapBackendProviders(backend);
   } catch {
-    return [];
+    // Provider list unavailable (backend not ready, test env) — empty menu.
   }
-  return spawnOptionsCache;
-}
-
-/** Test-only: drop the cached spawn menu so a test's next open re-fetches. */
-export function resetSpawnOptionsCacheForTests(): void {
-  spawnOptionsCache = null;
+  return [];
 }

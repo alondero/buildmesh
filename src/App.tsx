@@ -17,7 +17,6 @@ import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
-import { OPEN_CHEATSHEET_EVENT } from './components/CommandOmnibar/omnibarActions';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
 import { formatError } from './lib/errorUtils';
@@ -91,7 +90,10 @@ function App() {
   // mounts only while true, which is what arms the <Modal>-owned Escape
   // listener — otherwise Escape would be stolen from agent terminals in
   // the grid. Same mount/unmount discipline as WorktreeCloseDialog.
-  const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
+  // Issue #1411 review: hoisted into `uiStore` (not local state) so the
+  // Omnibar's "Show Cheatsheet" command opens the same modal without a
+  // window-event side channel.
+  const cheatsheetOpen = useUIStore((s) => s.cheatsheetOpen);
 
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
@@ -365,20 +367,11 @@ function App() {
       if (isTextInputFocused()) return;
       e.preventDefault();
       cheatsheetGuard(async () => {
-        setCheatsheetOpen(open => !open);
+        useUIStore.getState().toggleCheatsheet();
       });
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  // "Show Cheatsheet" omnibar command (issue #1411). The palette routes the
-  // command here as a window CustomEvent because the cheatsheet's open state
-  // is App-owned. See `omnibarActions.ts` for the canonical rationale.
-  useEffect(() => {
-    const onOpen = () => setCheatsheetOpen(true);
-    window.addEventListener(OPEN_CHEATSHEET_EVENT, onOpen);
-    return () => window.removeEventListener(OPEN_CHEATSHEET_EVENT, onOpen);
   }, []);
 
   useEffect(() => {
@@ -640,7 +633,7 @@ function App() {
       </div>
 
       <WorktreeCloseDialog />
-      <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => setCheatsheetOpen(false)} />
+      <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => useUIStore.getState().closeCheatsheet()} />
       {/* Universal Command Omnibar (issue #1411). Same mount/unmount
           discipline as the cheatsheet: it renders only while
           `omnibarOpen` is true, so the overlay never touches the terminal
