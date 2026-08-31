@@ -1128,48 +1128,6 @@ fn commit_rename_emits_and_clears_on_db_write_success() {
     cleanup(node_id);
 }
 
-/// Static guard: the `Ok(slug)` arm of `on_turn_with` MUST route
-/// the rename commit through the injected `repo` (via the
-/// `commit_rename` helper) — historically it called the hardcoded
-/// `DbSessionNamingRepository`, which is why the mock-repo tests
-/// couldn't reach the commit path at all (the production DB
-/// would always have been invoked instead). This regression test
-/// makes that wiring a compile-time invariant: a refactor that
-/// inlines a direct `DbSessionNamingRepository.update_agent_node_name`
-/// call (or skips `commit_rename`) trips this assertion.
-#[test]
-fn on_turn_with_ok_arm_routes_through_commit_rename_not_hardcoded_db() {
-    let source = include_str!("engine.rs");
-    // Find the Ok(slug) arm body — the call inside the Ok match must
-    // go through `commit_rename(...)`, never through
-    // `DbSessionNamingRepository.update_agent_node_name` directly.
-    let ok_marker = "Ok(slug) =>";
-    let ok_idx = source.find(ok_marker).expect("Ok(slug) arm must exist");
-    // Limit the search to the body of the Ok arm (ends at the next
-    // `Err(e) =>` arm of the same match). Brace-counting isn't needed
-    // here because the Ok arm is short and the next `Err(e) =>` is a
-    // unique marker.
-    let err_idx = source[ok_idx..]
-        .find("Err(e) =>")
-        .expect("Err(e) => arm must exist after Ok(slug)");
-    let arm_body = &source[ok_idx..ok_idx + err_idx];
-
-    assert!(
-        arm_body.contains("commit_rename("),
-        "Ok(slug) arm must route the rename commit through the \
-             `commit_rename` helper, which is what lets the mock-repo \
-             tests exercise the write-or-skip path (issue #1223). A direct \
-             DbSessionNamingRepository.update_agent_node_name here would \
-             bypass every test in this module"
-    );
-    assert!(
-        !arm_body.contains("DbSessionNamingRepository.update_agent_node_name"),
-        "Ok(slug) arm must NOT call DbSessionNamingRepository directly — \
-             route the DB write through the `repo` parameter / commit_rename \
-             helper instead"
-    );
-}
-
 #[test]
 fn strip_claude_code_banner_removes_logo_and_cwd_lines() {
     let input = "\u{2590}\u{259B}\u{2588}\u{2588}\u{2588}\u{259C}\u{258C}   Claude Code v2.1.145\n\

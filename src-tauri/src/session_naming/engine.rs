@@ -230,7 +230,7 @@ pub(super) fn on_turn_with(repo: Arc<dyn SessionNamingRepository>, node_id: i64,
                 // and overwritten the node's name in the DB. Re-read and skip
                 // both the write and the event emit if the user has taken
                 // ownership — the user always wins.
-                if user_renamed_mid_flight(&DbSessionNamingRepository, node_id) {
+                if user_renamed_mid_flight(&*repo_for_task, node_id) {
                     tracing::info!(
                         "Node {} was manually renamed during LLM call; skipping slug '{}'",
                         node_id,
