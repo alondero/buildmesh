@@ -57,8 +57,8 @@ describe('NodeItem', () => {
   it('renders the status dot in a fixed-size box so ●/○/⏸/✗ align in the sidebar', () => {
     // jsdom can't measure layout, so assert className structure. The dot
     // span must carry the same fixed-width/height classes regardless of
-    // status; otherwise Outfit renders the outline of ○ visibly larger
-    // than the filled ●, misaligning the dots down the sidebar list.
+    // status; otherwise the sans stack renders the outline of ○ visibly
+    // larger than the filled ●, misaligning the dots down the sidebar list.
     //
     // Iterate every SessionStatus so the regression guard covers the
     // `text-violet` (suspended) and `animate-pulse-fast` (awaiting_input)

@@ -245,7 +245,7 @@ describe('AppSettingsModal — Appearance theme picker (#734)', () => {
     });
     fireEvent.click(screen.getByTestId('theme-radio-dark'));
     await waitFor(() => {
-      expect(themeOf()).toMatchObject({ background: '#09090f' });
+      expect(themeOf()).toMatchObject({ background: '#0a0a0e' });
     });
 
     terminalManager.dispose(9003);

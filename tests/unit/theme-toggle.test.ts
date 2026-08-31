@@ -197,7 +197,7 @@ describe('TerminalRegistry.applyTheme — xterm palette update', () => {
     // Flip back to dark.
     registry.applyTheme('dark');
     expect((inst1 as { term: { options: { theme: object } } }).term.options.theme).toEqual({
-      background: '#09090f',
+      background: '#0a0a0e',
       foreground: '#e2e8f0',
       cursor: '#00d4ff',
       selectionBackground: 'rgba(0, 212, 255, 0.15)',

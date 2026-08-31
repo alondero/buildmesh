@@ -62,7 +62,7 @@ export function onTerminalFontSizeChange(cb: FontSizeListener): () => void {
 // onThemeChange and pushes the new palette to every live terminal on flip.
 
 const DARK_TERMINAL_THEME = {
-  background: '#09090f',
+  background: '#0a0a0e',
   foreground: '#e2e8f0',
   cursor: '#00d4ff',
   selectionBackground: 'rgba(0, 212, 255, 0.15)',

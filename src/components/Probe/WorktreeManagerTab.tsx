@@ -1076,7 +1076,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                         </span>
                       )}
                       {b.last_commit_date && (
-                        <span className="text-2xs text-text-secondary">
+                        <span className="text-2xs text-text-secondary tabular-nums">
                           {formatDate(b.last_commit_date)}
                         </span>
                       )}

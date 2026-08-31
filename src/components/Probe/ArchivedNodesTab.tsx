@@ -295,7 +295,7 @@ export function ArchivedNodesTab() {
                       <span className="text-2xs text-accent-violet font-mono">{session.worktree_name}</span>
                     )}
                     {session.timestamp && (
-                      <span className="text-2xs text-text-secondary">{timeAgo(session.timestamp)}</span>
+                      <span className="text-2xs text-text-secondary tabular-nums">{timeAgo(session.timestamp)}</span>
                     )}
                   </div>
                 </div>

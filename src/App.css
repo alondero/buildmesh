@@ -1,26 +1,32 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Outfit:wght@400;500;600;700&display=swap');
+/* Web fonts load via <link> in index.html (single request, preconnected,
+   render-parallel — not a CSS @import waterfall). Keep the families and
+   weights there in sync with the --font-* stacks below. */
 @import "tailwindcss";
 
 @theme {
-  /* Backgrounds — layered dark surfaces */
-  --color-bg-base: #09090f;
-  --color-bg-surface: #0d0d16;
-  --color-bg-overlay: #13131e;
-  --color-bg-card: #18182a;
-  --color-bg-card-hover: #1e1e2e;
-  --color-bg-input: #111120;
+  /* Backgrounds — layered neutral dark zinc surfaces (issue #1376).
+     --color-bg-card-hover is #1b1b23 rather than the #1c1c24 originally
+     proposed in #1376: at #1c1c24 text-muted lands at 4.47:1, just under
+     WCAG AA; #1b1b23 clears it (4.52:1) with no visible difference. */
+  --color-bg-base: #0a0a0e;
+  --color-bg-surface: #111116;
+  --color-bg-overlay: #15151c;
+  --color-bg-card: #16161d;
+  --color-bg-card-hover: #1b1b23;
+  --color-bg-input: #0e0e13;
   --color-bg-selection: #1a2a3a;
   --color-bg-highlight: rgba(0, 212, 255, 0.06);
 
   /* Text. --color-text-muted was bumped from #4a5568 → #7a8492 to clear
-     WCAG AA body-text on bg-base / bg-surface (5.2:1 / 5.1:1) while
+     WCAG AA body-text on bg-base / bg-surface (5.2:1 / 5.0:1) while
      staying subordinate to --color-text-secondary (7.7:1). The
      regression test that pins this contract lives in
-     tests/unit/theme-tokens-contrast.test.ts. See issue #732. */
+     tests/unit/theme-tokens-contrast.test.ts. See issues #732 and #1376
+     (the #1376 surface retune re-measured every surface). */
   --color-text-primary: #e2e8f0;
   --color-text-secondary: #94a3b8;
   --color-text-muted: #7a8492;
-  --color-text-inverse: #09090f;
+  --color-text-inverse: #0a0a0e;
 
   /* Accent — Electric Cyan/Blue */
   --color-accent-cyan: #00d4ff;
@@ -55,17 +61,19 @@
   --color-status-running-bg: rgba(0, 212, 255, 0.10);
   --color-status-blocked: #f59e0b;
 
-  /* Borders & Dividers */
-  --color-border-subtle: #1a1a28;
-  --color-border-default: #22223a;
-  --color-border-strong: #2d2d4a;
+  /* Borders & Dividers — 1px white-alpha hairlines (issue #1376). Alpha
+     over the surface luminance keeps panel boundaries crisp on every
+     elevation, instead of pre-mixed hexes tuned to one background. */
+  --color-border-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-default: rgba(255, 255, 255, 0.07);
+  --color-border-strong: rgba(255, 255, 255, 0.14);
   --color-border-active: #00d4ff;
 
-  /* Typography */
-  --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* Typography. --font-sans / --font-mono are the single source: Tailwind
+     v4 generates the `font-sans` / `font-mono` utilities from them, and the
+     base body rule reads --font-sans directly. */
+  --font-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  --font-family-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-family-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   /* `--text-2xs` is the one step below Tailwind's default scale (text-xs =
      12px). It's the smallest legible size in the app — badges, gutter
      labels, micro-captions. Nothing may go below it. (Tailwind v4 only
@@ -195,10 +203,14 @@
   --color-status-running-bg: rgba(8, 145, 178, 0.10);
   --color-status-blocked: #d97706;
 
-  /* Borders & Dividers — light hairlines */
-  --color-border-subtle: #ebebed;
-  --color-border-default: #d4d4d8;
-  --color-border-strong: #a1a1aa;
+  /* Borders & Dividers — light hairlines. Same alpha-hairline architecture
+     as dark (issue #1376): black over the light surface luminance, so
+     boundaries composite cleanly on every elevation instead of pre-mixed
+     hexes tuned to one background (0.08 ≈ #ebebed, 0.17 ≈ #d4d4d8,
+     0.37 ≈ #a1a1aa on white). */
+  --color-border-subtle: rgba(0, 0, 0, 0.08);
+  --color-border-default: rgba(0, 0, 0, 0.17);
+  --color-border-strong: rgba(0, 0, 0, 0.37);
   --color-border-active: #0891b2;
 
   /* Shadows — lower alpha on light bg; shadows read stronger there */
@@ -262,7 +274,7 @@
 html, body {
   margin: 0;
   padding: 0;
-  font-family: var(--font-family-sans);
+  font-family: var(--font-sans);
   font-size: var(--font-size-base);
   font-weight: 400;
   line-height: 1.5;
