@@ -92,10 +92,9 @@ pub fn list_circuits_with_runs(
 /// loop). A GitHub-labelled circuit requests an immediate poll so its
 /// first run can start without waiting out the 120s cadence.
 // Tauri IPC commands carry every primitive as a separate wire parameter;
-// collapsing into a struct would change the wire shape and is out of scope.
+// collapsing into a struct would change the wire shape.
 #[allow(clippy::too_many_arguments)]
 #[command]
-#[allow(clippy::too_many_arguments)] // Tauri command surface — one arg per UI field
 pub fn create_circuit(
     mesh_id: i64,
     name: String,

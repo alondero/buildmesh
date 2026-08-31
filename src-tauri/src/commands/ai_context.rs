@@ -96,8 +96,6 @@ fn append_separator(buf: &mut Vec<u8>) {
     };
     let line_ending: &[u8] = if last_two == b"\r\n" || (buf.len() == 1 && buf[0] == b'\r') {
         b"\r\n"
-    } else if last_two.last() == Some(&b'\n') {
-        b"\n"
     } else {
         b"\n"
     };
