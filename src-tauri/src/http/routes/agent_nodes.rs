@@ -21,17 +21,36 @@ pub async fn discover(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
 ) {
-    let mesh = match db::get_mesh_by_id(mesh_id) {
-        Ok(m) => m,
-        Err(_) => {
-            request::send_json_error(lines, "404 Not Found", "Mesh not found").await;
-            return;
-        }
-    };
-    match crate::services::agent_node_discovery::discover(mesh_id, &mesh.path) {
-        Ok(nodes) => {
+    // Issue #1389 — `services::agent_node_discovery::discover` walks every
+    // session directory under `~/.claude/projects/`, `~/.cursor/projects/`,
+    // and `~/.gemini/antigravity-cli/brain/` and reads each JSONL line by
+    // line. That's tens of milliseconds of `std::fs` + `serde_json` work
+    // that would otherwise park the tokio worker that's polling the
+    // WebSocket and PTY streams. Offload the whole sequence (mesh lookup
+    // + disk walk) in one `run_blocking` so the worker only hops once.
+    //
+    // `run_blocking` is generic over `T: Send + 'static`, so the closure
+    // returns `Result<Option<Vec<ArchivedAgentNode>>, String>` — `None`
+    // means "mesh not found" (route → 404), `Some(_)` is the discovery
+    // payload (route → 200). The route distinguishes 404 vs 500 without
+    // string sentinels or a second offload.
+    match crate::commands::run_blocking("http_discover_agent_nodes", move || {
+        let mesh = match db::get_mesh_by_id(mesh_id) {
+            Ok(m) => m,
+            Err(_) => return Ok(None),
+        };
+        crate::services::agent_node_discovery::discover(mesh_id, &mesh.path)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    {
+        Ok(Some(nodes)) => {
             let body = serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
+        }
+        Ok(None) => {
+            request::send_json_error(lines, "404 Not Found", "Mesh not found").await;
         }
         Err(e) => {
             request::send_json_error(lines, "500 Internal Server Error", &e).await;
@@ -97,58 +116,75 @@ pub async fn import_and_resume(
         }
     };
 
-    let mesh = match db::get_mesh_by_id(mesh_id) {
-        Ok(m) => m,
-        Err(_) => {
+    let mesh_id = mesh_id;
+    let session_name = crate::session_naming::on_spawn();
+    // Store the harness/profile id verbatim (issue #535); resolve to a
+    // concrete executor only at the spawn seam. Absent → "anthropic".
+    let provider_id = req.provider.as_deref().unwrap_or("anthropic").to_string();
+    let branch_owned = req.branch.clone();
+    let worktree_owned = req.worktree_name.clone();
+    let cli_session_id_for_closure = cli_session_id.clone();
+
+    // Issue #1389 / PR #1429 review feedback: bundle the entire pre-spawn
+    // SQLite sequence (mesh lookup + create_agent_node + cli_session_id
+    // update + reload) into a single `run_blocking` call so the tokio
+    // worker only hops once. The closure returns
+    // `Result<Option<AgentNode>, String>` — three outcomes:
+    //   * `Ok(Some(node))` — pre-spawn setup succeeded, ready to spawn.
+    //   * `Ok(None)`       — mesh lookup failed → route returns 404.
+    //   * `Err(msg)`       — any SQLite failure → route returns 500.
+    // The reload is folded into the same closure (rather than a fourth
+    // offload) so the returned row already carries the just-written
+    // `cli_session_id`.
+    let node = match crate::commands::run_blocking(
+        "http_import_resume_prepare",
+        move || -> Result<Option<crate::models::AgentNode>, String> {
+            let mesh = match db::get_mesh_by_id(mesh_id) {
+                Ok(m) => m,
+                Err(_) => return Ok(None),
+            };
+            let resolved = crate::env::resolve_agent_path(&mesh.path, None);
+            let use_worktree = worktree_owned.is_some();
+            let mut node = match db::create_agent_node(
+                mesh_id,
+                &session_name,
+                &mesh.path,
+                &branch_owned,
+                resolved.env_type,
+                &provider_id,
+                worktree_owned.as_deref(),
+                None,
+                None,
+                None, // source_pr_pinned_sha — HTTP route doesn't accept a pinned SHA
+                use_worktree,
+                None,
+                None,
+            ) {
+                Ok(n) => n,
+                Err(e) => return Err(format!("create_agent_node failed: {e}")),
+            };
+            if let Err(e) = db::update_cli_session_id(node.id, &cli_session_id_for_closure) {
+                return Err(format!("update_cli_session_id failed: {e}"));
+            }
+            node = match db::get_agent_node_by_id(node.id) {
+                Ok(n) => n,
+                Err(e) => return Err(format!("Failed to reload node: {e}")),
+            };
+            Ok(Some(node))
+        },
+    )
+    .await
+    {
+        Ok(Some(node)) => node,
+        Ok(None) => {
             request::send_json_error(lines, "404 Not Found", "Mesh not found").await;
             return;
         }
-    };
-
-    let session_name = crate::session_naming::on_spawn();
-    let resolved = crate::env::resolve_agent_path(&mesh.path, None);
-    let env_type = resolved.env_type;
-    // Store the harness/profile id verbatim (issue #535); resolve to a concrete
-    // executor only at the spawn seam. Absent provider defaults to "anthropic".
-    let provider_id = req.provider.as_deref().unwrap_or("anthropic");
-
-    let use_worktree = req.worktree_name.is_some();
-    let node = match db::create_agent_node(
-        mesh_id,
-        &session_name,
-        &mesh.path,
-        &req.branch,
-        env_type,
-        provider_id,
-        req.worktree_name.as_deref(),
-        None,
-        None,
-        None, // source_pr_pinned_sha — HTTP route doesn't accept a pinned SHA
-        use_worktree,
-        None,
-        None,
-    ) {
-        Ok(n) => n,
-        Err(e) => {
-            request::send_json_error(
-                lines,
-                "500 Internal Server Error",
-                &format!("create_agent_node failed: {}", e),
-            )
-            .await;
+        Err(msg) => {
+            request::send_json_error(lines, "500 Internal Server Error", &msg).await;
             return;
         }
     };
-
-    if let Err(e) = db::update_cli_session_id(node.id, &cli_session_id) {
-        request::send_json_error(
-            lines,
-            "500 Internal Server Error",
-            &format!("update_cli_session_id failed: {}", e),
-        )
-        .await;
-        return;
-    }
 
     let Some(app) = crate::http::app_handle() else {
         request::send_json_error(lines, "503 Service Unavailable", "App not ready").await;
@@ -182,18 +218,6 @@ pub async fn import_and_resume(
         return;
     }
 
-    let node = match db::get_agent_node_by_id(node.id) {
-        Ok(node) => node,
-        Err(e) => {
-            request::send_json_error(
-                lines,
-                "500 Internal Server Error",
-                &format!("Failed to reload node: {}", e),
-            )
-            .await;
-            return;
-        }
-    };
     let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
     let _ = request::write_json(lines, "200 OK", &body).await;
 }

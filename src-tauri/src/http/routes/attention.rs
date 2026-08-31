@@ -252,7 +252,20 @@ pub async fn handle_post(
     // the first turn. The conditional DB update prevents a delayed callback
     // from an old process overwriting the active session (issue #1089).
     if let Some(cli_session_id) = hook_session_id(&body) {
-        match crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id) {
+        // Issue #1389 — `set_cli_session_id_if_missing` is a sync SQLite
+        // write; offload it so the tokio worker that just received this
+        // hook POST can go straight back to polling WebSocket/PTY streams
+        // instead of holding a `Mutex<Connection>` lock.
+        let cli_session_id_for_closure = cli_session_id.clone();
+        let capture_result = crate::commands::run_blocking(
+            "http_attention_capture_session_id",
+            move || {
+                crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id_for_closure)
+                    .map_err(|e| e.to_string())
+            },
+        )
+        .await;
+        match capture_result {
             Ok(true) => tracing::info!(
                 "attention webhook captured session ID {} for node {}",
                 cli_session_id,
@@ -300,7 +313,28 @@ pub async fn handle_post(
 
     match decide(&body, crate::services::transcript_reader::count_pending_background_tasks) {
         Decision::Mark => {
-            crate::node_turn::publish(session_id, app);
+            // Issue #1389 — `node_turn::publish` writes SQLite through
+            // `session_lifecycle::on_attention`, arms the autoclear mutex,
+            // and fans out to the session-naming + autopilot-pipeline
+            // workers. Every step is blocking; offload the whole fan-out
+            // so the tokio worker that handled the webhook POST goes back
+            // to polling the WebSocket / PTY streams immediately.
+            //
+            // `app` is `&'static AppHandle` (returned by
+            // `crate::http::app_handle()`, which reads from a process-
+            // global `OnceLock<AppHandle>`). The `'static` lifetime is
+            // what lets `move ||` capture it — `spawn_blocking` requires
+            // `F: 'static`, and a non-`'static` borrow would be dropped
+            // the moment the async function returns. No clone is needed
+            // because the reference is already cheap to share.
+            let _ = crate::commands::run_blocking(
+                "http_attention_publish_mark",
+                move || -> Result<(), String> {
+                    crate::node_turn::publish(session_id, app);
+                    Ok(())
+                },
+            )
+            .await;
             crate::http::events::emit(crate::http::events::EventMsg::AttentionNeeded {
                 session_id,
             });
@@ -311,7 +345,15 @@ pub async fn handle_post(
                  turn published without attention marking (issue #878)",
                 session_id
             );
-            crate::node_turn::publish_without_attention(session_id, app);
+            // Issue #1389 — same offload for the background-yield path.
+            let _ = crate::commands::run_blocking(
+                "http_attention_publish_suppress",
+                move || -> Result<(), String> {
+                    crate::node_turn::publish_without_attention(session_id, app);
+                    Ok(())
+                },
+            )
+            .await;
         }
     }
 

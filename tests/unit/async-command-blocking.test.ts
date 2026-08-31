@@ -15,13 +15,36 @@ import { join, resolve } from 'node:path';
  *
  * Per-line opt-out: `// allow-blocking-on-async: <reason>` on the
  * violation line, mirroring `// allow-webapi-on-this`.
+ *
+ * Issue #1389 extends the scope in two directions:
+ *
+ *   1. The session_lifecycle sink writes (`on_attention`,
+ *      `on_attention_cleared`) are forbidden in **every** `#[command]`
+ *      body, sync or async — they're an internal detail that callers
+ *      must reach through the public `mark_attention` / `clear_attention`
+ *      helpers. Sync `#[command] fn` already runs on Tauri's IPC thread
+ *      pool (NOT Tokio), so it doesn't need `run_blocking` for offload
+ *      purposes — but the helper indirection is still required for
+ *      testability and so the guard stays in one place.
+ *
+ *   2. The same session_lifecycle sink-write tokens are forbidden inside
+ *      `src-tauri/src/http/routes/` too — those handlers run on Tokio
+ *      workers, so a direct sink call there would park the worker on
+ *      `db::update_agent_node_status`. The previous guard didn't scan
+ *      that directory at all, leaving the route changes for #1389
+ *      without automated coverage (PR #1429 review feedback).
  */
 
 const REPO_ROOT = resolve(__dirname, '..', '..');
 const COMMANDS_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'commands');
+const HTTP_ROUTES_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'http', 'routes');
 const ESCAPE_HATCH = 'allow-blocking-on-async';
 
-const FORBIDDEN = [
+/** Tokens that may ONLY appear inside `run_blocking`/`spawn_blocking` closures
+ *  in **async** `#[command]` bodies. Sync `#[command] fn` is allowed to call
+ *  these directly because Tauri 2 dispatches sync commands to its IPC thread
+ *  pool, not Tokio — the offload isn't needed. */
+const FORBIDDEN_ASYNC = [
   { kind: 'db', re: /\b(?:crate::)?db::/g },
   { kind: 'std::fs', re: /\bstd::fs::/g },
   { kind: 'preferences::load', re: /\b(?:crate::)?preferences::load\s*\(/g },
@@ -51,6 +74,25 @@ const FORBIDDEN = [
   {
     kind: 'services::agent_node::regenerate',
     re: /\bservices::agent_node::regenerate\s*\(/g,
+  },
+] as const;
+
+/** Tokens forbidden in **every** `#[command]` body (sync or async) AND in
+ *  every `pub async fn` body inside `src-tauri/src/http/routes/`. These are
+ *  internal lifecycle sinks — the public surface is `mark_attention` /
+ *  `clear_attention`. A direct call from a command or HTTP route bypasses
+ *  the helper indirection and is a structural defect, not just a perf bug.
+ *
+ *  The regex makes `agent::` optional so a `use crate::agent::session_lifecycle;`
+ *  at the top of the file is covered too (PR #1429 review feedback). */
+const FORBIDDEN_ALL = [
+  {
+    kind: 'session_lifecycle::on_attention',
+    re: /\b(?:(?:crate::)?agent::)?session_lifecycle::on_attention\s*\(/g,
+  },
+  {
+    kind: 'session_lifecycle::on_attention_cleared',
+    re: /\b(?:(?:crate::)?agent::)?session_lifecycle::on_attention_cleared\s*\(/g,
   },
 ] as const;
 
@@ -262,7 +304,10 @@ const COMMAND_ATTR = /#\[(?:tauri::)?command(?:\(([^)]*)\))?\]/g;
 const FN_AFTER_ATTR =
   /(?:#\[[^\]]*\][\s\S]*?)*pub(?:\s*\(\s*crate\s*\))?\s+(async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/;
 
-export function extractAsyncCommandBodies(source: string): AsyncCommand[] {
+export function extractAsyncCommandBodies(
+  source: string,
+  requireAsync: boolean = true,
+): AsyncCommand[] {
   const stripped = stripCommentsPreserveLines(source);
   const found: AsyncCommand[] = [];
   COMMAND_ATTR.lastIndex = 0;
@@ -273,7 +318,7 @@ export function extractAsyncCommandBodies(source: string): AsyncCommand[] {
     const fnMatch = FN_AFTER_ATTR.exec(after);
     if (!fnMatch) continue;
     const isAsyncFn = Boolean(fnMatch[1]);
-    if (!attrAsync && !isAsyncFn) continue;
+    if (requireAsync && !attrAsync && !isAsyncFn) continue;
     const name = fnMatch[2];
     // PR #1388 review point 3 — when an async command is annotated
     // with `#[blocking_command]` (the proc-macro that wraps the body
@@ -319,11 +364,59 @@ export function findBlockingInAsyncCommands(
   source: string,
 ): BlockingViolation[] {
   const originalLines = source.split('\n');
-  const commands = extractAsyncCommandBodies(source);
+  const commands = extractAsyncCommandBodies(source, /* requireAsync */ true);
+  return scanCommandsForTokens(filePath, source, originalLines, commands, FORBIDDEN_ASYNC);
+}
+
+/** Scan ALL `#[command]` bodies (sync or async) for the
+ *  `session_lifecycle::on_attention[_cleared]` sink writes. The sink is an
+ *  internal detail — the public surface is `mark_attention` /
+ *  `clear_attention` in `commands::attention`. Sync commands on Tauri's IPC
+ *  thread pool don't need `run_blocking` for offload, but the helper
+ *  indirection is still mandatory so this single guard can pin the rule. */
+export function findSinkWritesInAllCommands(
+  filePath: string,
+  source: string,
+): BlockingViolation[] {
+  const originalLines = source.split('\n');
+  const commands = extractAsyncCommandBodies(source, /* requireAsync */ false);
+  return scanCommandsForTokens(filePath, source, originalLines, commands, FORBIDDEN_ALL);
+}
+
+/** Scan every `pub async fn` (and `pub fn`) body inside
+ *  `src-tauri/src/http/routes/` for `session_lifecycle::on_attention[_cleared]`.
+ *  Route handlers run on Tokio workers, so a direct sink call would park
+ *  the worker on `db::update_agent_node_status`; route code must reach
+ *  through `crate::commands::attention::{mark,clear}_attention` instead.
+ *  PR #1429 review feedback: the previous guard never scanned this
+ *  directory, leaving the #1389 HTTP route changes without automated
+ *  coverage. */
+export function findSinkWritesInHttpRoutes(
+  filePath: string,
+  source: string,
+): BlockingViolation[] {
+  const originalLines = source.split('\n');
+  const bodies = extractRouteHandlerBodies(source);
+  return scanCommandsForTokens(
+    filePath,
+    source,
+    originalLines,
+    bodies,
+    FORBIDDEN_ALL,
+  );
+}
+
+function scanCommandsForTokens(
+  filePath: string,
+  source: string,
+  originalLines: string[],
+  commands: AsyncCommand[],
+  tokens: readonly { kind: string; re: RegExp }[],
+): BlockingViolation[] {
   const violations: BlockingViolation[] = [];
   for (const cmd of commands) {
     const remaining = stripOffloadedCalls(cmd.body);
-    for (const { kind, re } of FORBIDDEN) {
+    for (const { kind, re } of tokens) {
       re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = re.exec(remaining)) !== null) {
@@ -338,6 +431,39 @@ export function findBlockingInAsyncCommands(
   return violations;
 }
 
+/** Walk every top-level `pub fn` / `pub async fn` body in a source file.
+ *  Used for `src-tauri/src/http/routes/` where handlers are plain
+ *  `pub async fn`, not `#[command]`-annotated. Mirrors the body-extraction
+ *  logic in `extractAsyncCommandBodies` but skips the `#[command]` attribute
+ *  search entirely. */
+const FN_DEF =
+  /pub(?:\s*\(\s*crate\s*\))?\s+(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+
+function extractRouteHandlerBodies(source: string): AsyncCommand[] {
+  const stripped = stripCommentsPreserveLines(source);
+  const found: AsyncCommand[] = [];
+  FN_DEF.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = FN_DEF.exec(stripped)) !== null) {
+    const name = m[1];
+    const sigStart = stripped.indexOf('(', m.index + m[0].length);
+    if (sigStart < 0) continue;
+    const sigEnd = matchPair(stripped, sigStart, '(', ')');
+    if (sigEnd < 0) continue;
+    const brace = stripped.indexOf('{', sigEnd);
+    if (brace < 0) continue;
+    const braceEnd = matchPair(stripped, brace, '{', '}');
+    if (braceEnd < 0) continue;
+    found.push({
+      name,
+      body: stripped.slice(brace, braceEnd + 1),
+      bodyStart: brace,
+    });
+    FN_DEF.lastIndex = braceEnd + 1;
+  }
+  return found;
+}
+
 function relPath(absFile: string): string {
   return absFile.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
 }
@@ -348,8 +474,25 @@ describe('async Tauri commands must offload blocking db/fs/prefs (#1380)', () =>
     findBlockingInAsyncCommands(file, readFileSync(file, 'utf8')),
   );
 
+  // Issue #1389 second pass: session_lifecycle sink writes are forbidden
+  // in every #[command] body (sync or async) and in every HTTP route
+  // handler. Pre-#1429 the guard only checked async command bodies, so the
+  // #1389 HTTP route changes had zero automated coverage.
+  const sinkWriteViolations = [
+    ...files.flatMap((file) =>
+      findSinkWritesInAllCommands(file, readFileSync(file, 'utf8')),
+    ),
+    ...walkRsFiles(HTTP_ROUTES_DIR).flatMap((file) =>
+      findSinkWritesInHttpRoutes(file, readFileSync(file, 'utf8')),
+    ),
+  ];
+
   it('walks src-tauri/src/commands and finds Rust files', () => {
     expect(files.length).toBeGreaterThan(10);
+  });
+
+  it('walks src-tauri/src/http/routes and finds Rust files', () => {
+    expect(walkRsFiles(HTTP_ROUTES_DIR).length).toBeGreaterThan(5);
   });
 
   it('no async #[command] body calls db::*, std::fs::*, or preferences::load/save outside run_blocking', () => {
@@ -371,6 +514,32 @@ describe('async Tauri commands must offload blocking db/fs/prefs (#1380)', () =>
         `\n  crate::commands::run_blocking("command_name", move || { ... }).await` +
         `\n\nIf the call is genuinely non-blocking, add on the same line:` +
         `\n  db::foo(); // allow-blocking-on-async: <reason>`,
+    );
+  });
+
+  // Issue #1389 — sink writes are forbidden in every #[command] body
+  // (sync or async) and in every HTTP route handler. Callers must reach
+  // through the public `mark_attention` / `clear_attention` helpers in
+  // `commands::attention` — direct sink calls are an internal detail.
+  it('no #[command] body or HTTP route handler calls session_lifecycle::on_attention[_cleared] directly (#1389)', () => {
+    if (sinkWriteViolations.length === 0) return;
+    const report = sinkWriteViolations
+      .map(
+        (v) =>
+          `  ${v.command}  ${v.kind}  (${relPath(v.file)}:${v.line})`,
+      )
+      .join('\n');
+    throw new Error(
+      `Found ${sinkWriteViolations.length} direct session_lifecycle sink write(s):\n` +
+        report +
+        `\n\nThe sink writes (session_lifecycle::on_attention / on_attention_cleared)` +
+        `\nare an internal detail. Callers (Tauri commands, mobile HTTP routes)` +
+        `\nmust reach through the public helpers:` +
+        `\n  crate::commands::attention::mark_attention(node_id, &app)` +
+        `\n  crate::commands::attention::clear_attention(node_id, &app)` +
+        `\nSync commands don't need run_blocking for offload (Tauri 2 dispatches` +
+        `\nsync #[command] fn to its IPC thread pool, not Tokio), but the helper` +
+        `\nindirection is still mandatory so the guard stays in one place.`,
     );
   });
 
@@ -701,5 +870,167 @@ pub async fn read_count() -> Result<i64, String> {
 }
 `;
     expect(findBlockingInAsyncCommands('synth.rs', src)).toEqual([]);
+  });
+
+  // Issue #1389 — the lifecycle sink writes the DB through
+  // `db::update_agent_node_status` with no `db::` token in the
+  // command body. Guard must flag the helper name so a future
+  // async command that calls it gets caught.
+  it('flags session_lifecycle::on_attention in an async command body (issue #1389)', () => {
+    const src = `
+#[command]
+pub async fn register_attention_node(app: tauri::AppHandle, node_id: i64) -> Result<(), String> {
+    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+    let _ = crate::agent::session_lifecycle::on_attention(&sink, node_id);
+    Ok(())
+}
+`;
+    const found = findSinkWritesInAllCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['session_lifecycle::on_attention']);
+    expect(found[0].command).toBe('register_attention_node');
+  });
+
+  it('flags session_lifecycle::on_attention_cleared in an async command body (issue #1389)', () => {
+    const src = `
+#[command]
+pub async fn clear_attention_node(app: tauri::AppHandle, node_id: i64) -> Result<(), String> {
+    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+    crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id)
+}
+`;
+    const found = findSinkWritesInAllCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual([
+      'session_lifecycle::on_attention_cleared',
+    ]);
+    expect(found[0].command).toBe('clear_attention_node');
+  });
+
+  // Issue #1389 / PR #1429 review feedback: sync `#[command] fn` runs on
+  // Tauri's IPC thread pool, NOT Tokio, so it doesn't need run_blocking
+  // for offload purposes. But the helper indirection is still mandatory —
+  // direct sink calls in a sync command body are a structural defect
+  // because they bypass `mark_attention` / `clear_attention`.
+  it('flags session_lifecycle::on_attention in a SYNC command body (issue #1389, PR #1429 feedback)', () => {
+    const src = `
+#[command]
+pub fn register_attention_node(app: tauri::AppHandle, node_id: i64) -> Result<(), String> {
+    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+    let _ = crate::agent::session_lifecycle::on_attention(&sink, node_id);
+    Ok(())
+}
+`;
+    const found = findSinkWritesInAllCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['session_lifecycle::on_attention']);
+    expect(found[0].command).toBe('register_attention_node');
+  });
+
+  it('flags session_lifecycle::on_attention_cleared in a SYNC command body (issue #1389, PR #1429 feedback)', () => {
+    const src = `
+#[command]
+pub fn clear_attention_node(app: tauri::AppHandle, node_id: i64) -> Result<(), String> {
+    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+    crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id)
+}
+`;
+    const found = findSinkWritesInAllCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual([
+      'session_lifecycle::on_attention_cleared',
+    ]);
+    expect(found[0].command).toBe('clear_attention_node');
+  });
+
+  // Issue #1389 / PR #1429 review feedback: the regex used to require
+  // `agent::session_lifecycle::` exactly. A `use
+  // crate::agent::session_lifecycle;` at the top of the file would let
+  // the bare `session_lifecycle::on_attention(...)` slip through. The
+  // FORBIDDEN_ALL regex now makes `agent::` optional.
+  it('flags session_lifecycle::on_attention via use-import (PR #1429 feedback)', () => {
+    const src = `
+use crate::agent::session_lifecycle;
+
+#[command]
+pub async fn mark(app: tauri::AppHandle, node_id: i64) -> Result<(), String> {
+    let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
+    session_lifecycle::on_attention(&sink, node_id);
+    Ok(())
+}
+`;
+    const found = findSinkWritesInAllCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['session_lifecycle::on_attention']);
+  });
+
+  it('does not flag session_lifecycle::on_attention inside run_blocking (issue #1389 negative)', () => {
+    // The closure inside `run_blocking(...)` is blanked by the guard's
+    // OFFLOAD_RE pass, so the helper call inside the closure is invisible
+    // to FORBIDDEN_ALL.
+    const src = `
+#[command]
+pub async fn register_attention_node(app: tauri::AppHandle, node_id: i64) -> Result<(), String> {
+    crate::commands::run_blocking("register_attention_node", move || {
+        let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+        let _ = crate::agent::session_lifecycle::on_attention(&sink, node_id);
+        Ok(())
+    })
+    .await
+}
+`;
+    expect(findSinkWritesInAllCommands('synth.rs', src)).toEqual([]);
+  });
+
+  it('does not flag session_lifecycle::on_attention when reached through mark_attention (issue #1389 negative)', () => {
+    // The public surface — `mark_attention` is the only sanctioned entry
+    // point. Direct sink calls live inside the helper, which the guard
+    // does not scan (it's not a #[command] body).
+    const src = `
+#[command]
+pub fn register_attention_node(app: tauri::AppHandle, node_id: i64) -> Result<(), String> {
+    crate::commands::attention::mark_attention(node_id, &app);
+    Ok(())
+}
+`;
+    expect(findSinkWritesInAllCommands('synth.rs', src)).toEqual([]);
+  });
+
+  it('does not flag session_lifecycle::on_attention_cleared when reached through clear_attention (issue #1389 negative)', () => {
+    const src = `
+#[command]
+pub fn clear_attention_node(app: tauri::AppHandle, node_id: i64) -> Result<(), String> {
+    crate::commands::attention::clear_attention(node_id, &app);
+    Ok(())
+}
+`;
+    expect(findSinkWritesInAllCommands('synth.rs', src)).toEqual([]);
+  });
+
+  // Issue #1389 / PR #1429 review feedback: the previous guard didn't
+  // scan src-tauri/src/http/routes/ at all. The session_lifecycle sink
+  // writes are forbidden in HTTP route handlers too — those run on Tokio
+  // workers, so a direct sink call would park the worker on
+  // db::update_agent_node_status.
+  it('flags session_lifecycle::on_attention in an HTTP route handler (issue #1389, PR #1429 feedback)', () => {
+    const src = `
+pub async fn discover(lines: &mut tokio::io::BufStream<MaybeTls>, mesh_id: i64) {
+    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+    crate::agent::session_lifecycle::on_attention(&sink, 7);
+}
+`;
+    const found = findSinkWritesInHttpRoutes('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual(['session_lifecycle::on_attention']);
+    expect(found[0].command).toBe('discover');
+  });
+
+  it('does not flag a session_lifecycle::on_attention call inside run_blocking inside an HTTP route (issue #1389 negative)', () => {
+    const src = `
+pub async fn discover(lines: &mut tokio::io::BufStream<MaybeTls>) {
+    let app = crate::http::app_handle().unwrap();
+    crate::commands::run_blocking("http_discover_attention", move || {
+        let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+        crate::agent::session_lifecycle::on_attention(&sink, 7);
+        Ok(())
+    })
+    .await;
+}
+`;
+    expect(findSinkWritesInHttpRoutes('synth.rs', src)).toEqual([]);
   });
 });
