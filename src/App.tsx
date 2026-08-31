@@ -28,6 +28,7 @@ import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { traversalTargetId } from './lib/gridTraversal';
 import { toggleGridMaximize, cycleGridMode } from './lib/gridShortcuts';
+import { focusGridSearch } from './lib/gridSearchFocus';
 import { scopeNodesForMode } from './lib/viewModes';
 import type { NonSingleViewMode } from './stores/uiStore';
 import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
@@ -147,6 +148,26 @@ function App() {
         { key: 'CommandOrControl+Shift+P', action: 'open-omnibar-commands' as const },
       ];
 
+  // Issue #998 — focus the grid search input. `Cmd/Ctrl+F` is the
+  // editors' universal "find" chord, so the issue text asks for it
+  // verbatim. The Tauri global-shortcut plugin only exposes
+  // `CommandOrControl` (a single canonical key per action) and not
+  // per-platform `Alt+F` / `Cmd+F` like `Alt+G` does — so we branch
+  // the whole binding on `isMac`, same shape as `gridToggleShortcut`
+  // and `omnibarShortcuts` above. On Win/Linux, bare `Ctrl+F` is free
+  // (no readline gesture uses it). On macOS, bare `⌘+F` is already
+  // taken by the terminal's find action (xterm's
+  // `attachCustomKeyEventHandler` matches `Cmd+F` to `'find'`) — a
+  // global-shortcut registration would beat that focus-level handler
+  // and every `⌘+F` in an agent terminal would jump to the grid
+  // search. The two-modifier `⌘+⌥+F` carve-out matches
+  // `cycle-grid-modes`'s `⌘+⌥+G` (also a one-modifier-away collision
+  // on macOS): no readline, terminal, or other app shortcut uses two
+  // meta+alt modifiers together.
+  const focusGridSearchShortcut = isMac
+    ? { key: 'CommandOrControl+Alt+F', action: 'focus-grid-search' as const }
+    : { key: 'CommandOrControl+F', action: 'focus-grid-search' as const };
+
   const shortcuts = [
     { key: 'CommandOrControl+T', action: 'new-agent' },
     ...omnibarShortcuts,
@@ -169,6 +190,7 @@ function App() {
     // collide with the Single solo toggle (`Alt+G` on Win/Linux, `Cmd+G` on
     // macOS) because it carries the extra Alt/⌥ modifier.
     { key: 'CommandOrControl+Alt+G', action: 'cycle-grid-modes' },
+    focusGridSearchShortcut,
     gridToggleShortcut,
   ];
 
@@ -252,6 +274,26 @@ function App() {
         cycleViewModeGuard(async () => {
           cycleGridMode();
         });
+        return;
+      }
+
+      if (action === 'focus-grid-search') {
+        // Issue #998 — Ctrl+F (Win/Linux) / ⌘+⌥+F (macOS) focuses the grid
+        // search input. The actual `.focus()` call lives in
+        // `src/lib/gridSearchFocus.ts` (a module-level ref registered by
+        // the `GridControls` component in a layout effect) so the binding
+        // doesn't need a ref forwarded through the View Header wrapper.
+        //
+        // No cooldown: a held key must not burn a window — the user
+        // re-pressing while already focused is a harmless re-focus.
+        // No `isTextInputFocused()` guard: the target IS a text input,
+        // and the user's deliberate "focus the search" gesture is the
+        // only thing this action does, so blocking it because the user
+        // is already in a text input would defeat the binding. The
+        // singleton's `registerGridSearchInput` is the one source of
+        // truth for "is there a target", and a no-op `.focus()` is
+        // cheap.
+        focusGridSearch();
         return;
       }
 

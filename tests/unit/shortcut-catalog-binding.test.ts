@@ -65,6 +65,14 @@ describe('App.tsx Tauri global-shortcut bindings map to SHORTCUT_CATALOG entries
     expect(wiredActions.has('arrow-up')).toBe(true);
     expect(wiredActions.has('arrow-down')).toBe(true);
     expect(wiredActions.has('toggle-maximize-grid')).toBe(true);
+    // Issue #998 — focus-grid-search is wired through a platform-branched
+    // `focusGridSearchShortcut` const (like `gridToggleShortcut`), so the
+    // `key:`-then-`action:` regex still matches it on the same object
+    // literal. If the regex drift-fails here, the platform-branched wiring
+    // was likely refactored to a different shape (e.g. `as const` removed
+    // or arrow-body fattened) and the catalog-orphan guard would silently
+    // lose coverage.
+    expect(wiredActions.has('focus-grid-search')).toBe(true);
   });
 
   it('every wired action has a matching SHORTCUT_CATALOG entry', () => {

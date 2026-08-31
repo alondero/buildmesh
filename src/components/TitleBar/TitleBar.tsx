@@ -3,6 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import Wordmark from '../../assets/wordmark.png';
 import { isMac } from '../../lib/platform';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
+import { GridControls } from '../AgentNodeView/GridControls';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';
@@ -259,6 +260,20 @@ export function TitleBar() {
         {/* Drag-region spacer — the "empty" part of the strip the user grabs
             to move the window; grows to push the right-side controls over. */}
         <div data-tauri-drag-region className="flex-1" />
+
+        {/* Issue #998 — grid search control. Lives on the right side of the
+            slim top bar, between the drag-region spacer and the
+            Settings / Remote Access buttons, per the wayfinder #988 spec
+            ("Controls live on the right side of the slim top View Header,
+            introduced in #983"). The component itself is a subset of the
+            full #997 work — just the search input + clear button; the
+            filter popover, sort selector, badges, and reset button called
+            out in #997 land in a follow-up. The component is non-draggable
+            (`[data-tauri-drag-region]` is on the header, not bubbled here)
+            so clicks on the input don't grab the window. */}
+        <div className="flex items-center pr-1">
+          <GridControls />
+        </div>
 
         <div className="flex items-center gap-1 pr-1">
           <button
