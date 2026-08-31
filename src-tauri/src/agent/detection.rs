@@ -127,6 +127,16 @@ const DETECTABLE: &[Detectable] = &[
         binaries: &["cmd"],
         config_dirs: &[".commandcode"],
     },
+    Detectable {
+        id: "freebuff",
+        name: "Freebuff",
+        harness: "freebuff",
+        binaries: &["freebuff"],
+        // npm global install lands in the npm prefix bin; config lives under
+        // ~/.config/manicode/ (the upstream project home). Both count as
+        // "installed" so a shell-function or alias install still surfaces.
+        config_dirs: &[".config/manicode"],
+    },
 ];
 
 /// True if `binary` (plus any of `exts`) exists in one of the `path_dirs`.
@@ -497,6 +507,7 @@ mod tests {
             "/bin/dsh",
             "/bin/cmdc",
             "/bin/cmd",
+            "/bin/freebuff",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -514,6 +525,7 @@ mod tests {
                 "mcode" => assert_eq!(provider, Provider::Mcode),
                 "dsh" => assert_eq!(provider, Provider::Dsh),
                 "commandcode" => assert_eq!(provider, Provider::CommandCode),
+                "freebuff" => assert_eq!(provider, Provider::Freebuff),
                 other => panic!("unexpected detected id {other}"),
             }
         }

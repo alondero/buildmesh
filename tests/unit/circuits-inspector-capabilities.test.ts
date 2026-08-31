@@ -34,6 +34,7 @@ const REQUIRED_HARNESSES: InspectorHarnessId[] = [
   'mcode',
   'dsh',
   'commandcode',
+  'freebuff',
   'terminal',
 ];
 
@@ -163,6 +164,16 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.supports_prefill).toBe(true);
     expect(c.effort_control.kind).toBe('closed');
     expect(effortAllowedFor(c)).toEqual(['low', 'medium', 'high']);
+  });
+
+  it('Freebuff matches the Rust inventory', () => {
+    const c = HARNESS_CAPABILITIES.freebuff;
+    expect(c.harness_id).toBe('freebuff');
+    expect(c.supports_model_override).toBe(false);
+    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_extra_args).toBe(true);
+    expect(c.supports_prefill).toBe(true);
+    expect(c.effort_control.kind).toBe('none');
   });
 
   // Terminal — plain shell; every override OFF. The issue #1362 review

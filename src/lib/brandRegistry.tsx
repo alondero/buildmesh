@@ -1,6 +1,7 @@
 import minimaxLogo from '../assets/providers/minimax.svg';
 import antigravityLogo from '../assets/providers/antigravity.png';
 import grokLogo from '../assets/providers/grok.svg';
+import freebuffLogo from '../assets/providers/freebuff.svg';
 
 export type InlineIconProps = { className?: string; title?: string };
 
@@ -137,6 +138,7 @@ const BRANDS: readonly BrandRegistration[] = [
   { id: 'codex', icon: { kind: 'inline', component: OpenAIIcon }, chipHex: '#10a37f', chipClass: 'bg-gray-500' },
   { id: 'openrouter', icon: { kind: 'inline', component: OpenRouterIcon }, chipHex: '#615EFF', chipClass: 'bg-gray-500' },
   { id: 'grok', icon: { kind: 'image', src: grokLogo }, chipHex: '#0A0A0A', chipClass: 'bg-gray-500' },
+  { id: 'freebuff', icon: { kind: 'image', src: freebuffLogo }, chipHex: '#f97316', chipClass: 'bg-orange-500' },
 ];
 
 const BRAND_REGISTRY = new Map<string, Brand>();
