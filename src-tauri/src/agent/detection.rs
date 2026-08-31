@@ -127,6 +127,17 @@ const DETECTABLE: &[Detectable] = &[
         binaries: &["cmd"],
         config_dirs: &[".commandcode"],
     },
+    Detectable {
+        id: "freebuff",
+        name: "Freebuff",
+        harness: "freebuff",
+        binaries: &["freebuff"],
+        // Freebuff (issue #1437) is an interactive AI coding agent CLI built on
+        // Codebuff. Global npm installs place `freebuff` (or `freebuff.cmd` on
+        // Windows) in the npm prefix bin, while its configuration and upstream
+        // state live in `~/.config/manicode/`. Either signal counts as installed.
+        config_dirs: &[".config/manicode"],
+    },
 ];
 
 /// True if `binary` (plus any of `exts`) exists in one of the `path_dirs`.
@@ -200,15 +211,38 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Real-filesystem entry point: scan `PATH`/`PATHEXT` and the home config dirs
-/// for installed harnesses. Called once at startup from `lib.rs` `setup()`.
+/// Standard global npm prefix bin locations to probe even if missing from PATH
+/// (e.g. when PATH was stripped or user did not configure npm prefix in PATH).
+fn standard_npm_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+    }
+    if let Some(home) = home {
+        dirs.push(home.join(".npm-global").join("bin"));
+        dirs.push(home.join(".npm").join("bin"));
+        dirs.push(home.join("AppData").join("Roaming").join("npm"));
+    }
+    dirs
+}
+
+/// Real-filesystem entry point: scan `PATH`/`PATHEXT`, standard npm bin locations,
+/// and the home config dirs for installed harnesses. Called once at startup from
+/// `lib.rs` `setup()`.
 pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
-    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+    let mut path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
+    let home = home_dir();
+    for npm_dir in standard_npm_bin_dirs(home.as_deref()) {
+        if !path_dirs.contains(&npm_dir) {
+            path_dirs.push(npm_dir);
+        }
+    }
     let exts = path_exts();
     let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
-    let home = home_dir();
     detect_profiles(&path_dirs, &ext_refs, home.as_deref(), &|p| p.exists())
 }
 
@@ -480,6 +514,28 @@ mod tests {
         );
     }
 
+    /// Freebuff (issue #1437) stores its upstream config under `~/.config/manicode/`.
+    /// A shell-function or alias install that exposes only the config dir (no
+    /// PATH entry) must still surface as a Freebuff harness.
+    #[test]
+    fn freebuff_config_dir_alone_counts_as_installed() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.config/manicode"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["freebuff"]);
+    }
+
+    /// Freebuff installed globally via npm in `%APPDATA%\npm` or `~/.npm-global/bin`
+    /// must be detected when that directory is on the search path.
+    #[test]
+    fn freebuff_npm_prefix_bin_detected() {
+        let path_dirs = dirs(&["C:/Users/me/AppData/Roaming/npm"]);
+        let exists = fake_fs(&["C:/Users/me/AppData/Roaming/npm/freebuff.cmd"]);
+        let profiles = detect_profiles(&path_dirs, &["", ".CMD", ".EXE"], None, &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["freebuff"]);
+    }
+
     #[test]
     fn detected_ids_resolve_to_their_legacy_provider() {
         use crate::models::Provider;
@@ -497,6 +553,7 @@ mod tests {
             "/bin/dsh",
             "/bin/cmdc",
             "/bin/cmd",
+            "/bin/freebuff",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -514,6 +571,7 @@ mod tests {
                 "mcode" => assert_eq!(provider, Provider::Mcode),
                 "dsh" => assert_eq!(provider, Provider::Dsh),
                 "commandcode" => assert_eq!(provider, Provider::CommandCode),
+                "freebuff" => assert_eq!(provider, Provider::Freebuff),
                 other => panic!("unexpected detected id {other}"),
             }
         }

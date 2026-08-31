@@ -89,6 +89,9 @@ pub enum Provider {
     /// Command Code CLI (`commandcode`) — interactive agent harness.
     /// See `agent::provider::adapters::commandcode` (wayfinder #1394).
     CommandCode,
+    /// Freebuff CLI (`freebuff`) — interactive AI coding agent harness.
+    /// See `agent::provider::adapters::freebuff` (issue #1437).
+    Freebuff,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -109,6 +112,7 @@ impl Provider {
             Provider::Mcode,
             Provider::Dsh,
             Provider::CommandCode,
+            Provider::Freebuff,
             Provider::Terminal,
         ]
     }
@@ -135,6 +139,7 @@ impl Provider {
             "mcode" | "minimax-code" => Provider::Mcode,
             "dsh" | "deepseek-harness" | "deepseek" => Provider::Dsh,
             "commandcode" | "command-code" | "cmdc" | "cmd" => Provider::CommandCode,
+            "freebuff" => Provider::Freebuff,
             "terminal" => Provider::Terminal,
             // "minimax" is no longer a first-class executor: it is Claude Code
             // with a swapped backend, configured as a harness profile whose
@@ -169,6 +174,7 @@ impl Provider {
             Provider::Mcode => &adapters::MCODE,
             Provider::Dsh => &adapters::DSH,
             Provider::CommandCode => &adapters::COMMANDCODE,
+            Provider::Freebuff => &adapters::FREEBUFF,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -187,6 +193,7 @@ impl std::fmt::Display for Provider {
             Provider::Mcode => write!(f, "mcode"),
             Provider::Dsh => write!(f, "dsh"),
             Provider::CommandCode => write!(f, "commandcode"),
+            Provider::Freebuff => write!(f, "freebuff"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }
@@ -1432,6 +1439,12 @@ mod tests {
         assert!(Provider::Dsh.adapter().supports_resume());
         assert!(Provider::Dsh.adapter().supports_model_override());
         assert!(!Provider::Dsh.adapter().requires_attention_hook());
+        // Issue #1437: Freebuff is an interactive TUI harness with session resumption
+        // via --continue but no model override (the interactive TUI does not accept
+        // --model). Pinning the matrix so a future adapter change trips this test.
+        assert!(Provider::Freebuff.adapter().supports_resume());
+        assert!(!Provider::Freebuff.adapter().supports_model_override());
+        assert!(!Provider::Freebuff.adapter().requires_attention_hook());
     }
 
     /// The "produces a readable transcript" capability (#317) — the
@@ -1468,6 +1481,8 @@ mod tests {
         );
         assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
         assert!(!Provider::Terminal.adapter().produces_readable_transcript());
+        // Issue #1437: Freebuff does not write a transcript the coordinator can parse.
+        assert!(!Provider::Freebuff.adapter().produces_readable_transcript());
     }
 
     #[test]
@@ -1551,6 +1566,14 @@ mod tests {
         assert_eq!(Provider::from_db_str("DSH"), Provider::Dsh);
         assert_eq!(Provider::from_db_str("deepseek-harness"), Provider::Dsh);
         assert_eq!(Provider::from_db_str("deepseek"), Provider::Dsh);
+    }
+
+    /// Freebuff CLI (`freebuff`) is a native binary executor on PATH as `freebuff`.
+    #[test]
+    fn provider_from_db_str_freebuff_resolves_to_native_harness() {
+        assert_eq!(Provider::from_db_str("freebuff"), Provider::Freebuff);
+        assert_eq!(Provider::from_db_str("Freebuff"), Provider::Freebuff);
+        assert_eq!(Provider::from_db_str("FREEBUFF"), Provider::Freebuff);
     }
 
     /// Whitespace around the value shouldn't break matching either — a
@@ -1738,6 +1761,7 @@ mod tests {
         assert!(Provider::OpenCode.adapter().self_assigns_session_id());
         assert!(!Provider::OpenCode.adapter().captures_session_id_from_pty());
         assert!(!Provider::Terminal.adapter().self_assigns_session_id());
+        assert!(!Provider::Freebuff.adapter().self_assigns_session_id());
     }
 
     /// `is_plain_terminal` is the single trait method that switches the

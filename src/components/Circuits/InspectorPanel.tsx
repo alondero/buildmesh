@@ -75,6 +75,7 @@ const HARNESS_OPTIONS: { value: InspectorHarnessId; label: string }[] = [
   { value: 'mcode', label: HARNESS_LABEL.mcode },
   { value: 'dsh', label: HARNESS_LABEL.dsh },
   { value: 'commandcode', label: HARNESS_LABEL.commandcode },
+  { value: 'freebuff', label: HARNESS_LABEL.freebuff },
   { value: 'terminal', label: HARNESS_LABEL.terminal },
 ];
 
@@ -131,6 +132,7 @@ function harnessIdFromProvider(provider: string | null | undefined): InspectorHa
     normalised === 'mcode' ||
     normalised === 'dsh' ||
     normalised === 'commandcode' ||
+    normalised === 'freebuff' ||
     normalised === 'terminal'
   ) {
     return normalised as InspectorHarnessId;

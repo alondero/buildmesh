@@ -420,6 +420,10 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::COMMANDCODE)
     }
 
+    fn freebuff_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::FREEBUFF)
+    }
+
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
     /// descriptor must match the matrix documented in `docs/knowledge-primer.md`
     /// and the #1143 research summary. Drift here means a future adapter
@@ -601,6 +605,23 @@ mod tests {
             commandcode.available_on,
             vec!["windows".to_string(), "macos".to_string(), "linux".to_string()]
         );
+
+        let freebuff = freebuff_caps();
+        assert_eq!(freebuff.harness_id, "freebuff");
+        assert!(freebuff.supports_resume);
+        assert!(freebuff.auto_resume_on_startup);
+        assert!(!freebuff.requires_attention_hook);
+        assert!(!freebuff.produces_readable_transcript);
+        assert!(!freebuff.supports_model_override);
+        assert!(!freebuff.supports_effort_override);
+        assert!(freebuff.supports_extra_args);
+        assert!(freebuff.supports_prefill);
+        assert!(!freebuff.is_plain_terminal);
+        assert_eq!(freebuff.effort_control, EffortControlKind::None);
+        assert_eq!(
+            freebuff.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
     }
 
     /// `supports_effort_override` must mirror `effort_control != None`. The
@@ -621,6 +642,7 @@ mod tests {
             mcode_caps(),
             dsh_caps(),
             commandcode_caps(),
+            freebuff_caps(),
         ] {
             let has_effort_control = !matches!(caps.effort_control, EffortControlKind::None);
             assert_eq!(
@@ -656,6 +678,7 @@ mod tests {
             &crate::agent::provider::adapters::MCODE,
             &crate::agent::provider::adapters::DSH,
             &crate::agent::provider::adapters::COMMANDCODE,
+            &crate::agent::provider::adapters::FREEBUFF,
         ] {
             let from_trait = adapter.effort_control();
             let from_descriptor = capabilities_for(adapter).effort_control;

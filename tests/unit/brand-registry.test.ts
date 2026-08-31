@@ -61,6 +61,16 @@ describe('brandFor', () => {
     });
   });
 
+  it('registers Freebuff with its official brand treatment', () => {
+    const fb = brandFor('freebuff');
+    expect(brandFor('claude:freebuff')).toBe(fb);
+    expect(fb).toMatchObject({
+      id: 'freebuff',
+      chipHex: '#f97316',
+      chipClass: 'bg-orange-500',
+    });
+  });
+
   it('returns undefined for an unregistered provider', () => {
     expect(brandFor('claude:custom-account')).toBeUndefined();
     expect(brandFor('mystery')).toBeUndefined();
