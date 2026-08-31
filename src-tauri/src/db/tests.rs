@@ -836,10 +836,10 @@ fn ensure_mesh_default_provider_normalized_is_idempotent() {
 }
 
 /// Issue #1224 — poison-recovery regression. A panic while holding the
-/// global DB `Mutex` used to permanently poison it: every subsequent
+/// writer DB `Mutex` used to permanently poison it: every subsequent
 /// caller re-panicked with "poisoned lock" and persistence, preferences,
-/// and the worker reads that go through `lock_db()` all bricked. The
-/// helper `lock_db()` now calls `into_inner()` instead, so the DB stays
+/// and later writes through `write_conn()` all bricked. The
+/// helper `write_conn()` now calls `into_inner()` instead, so the DB stays
 /// usable across transient panics.
 ///
 /// This test pins that path against the actual singleton. The `DB`
@@ -848,7 +848,7 @@ fn ensure_mesh_default_provider_normalized_is_idempotent() {
 /// describes. The recovery helper must hand back a usable guard, and
 /// a round-trip read must still see the rows we wrote.
 #[test]
-fn lock_db_recovers_from_poison() {
+fn write_conn_recovers_from_poison() {
     // The global DB must be initialized before the test can lock it.
     // Other db-tests use a per-test temp file; we follow that pattern
     // so this test stays self-contained and cleans up after itself.
@@ -863,7 +863,7 @@ fn lock_db_recovers_from_poison() {
     // Poison the singleton. `catch_unwind` keeps the test binary alive;
     // the panic payload is the assertion that the inner path panicked.
     let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = crate::db::lock_db();
+        let _guard = crate::db::write_conn();
         panic!("intentional db singleton poison for issue #1224 regression test");
     }));
     assert!(
@@ -871,25 +871,25 @@ fn lock_db_recovers_from_poison() {
         "test fixture must panic to poison the DB mutex"
     );
 
-    // After the panic, the OLD `get().lock().unwrap()` form would now
+    // After the panic, locking the writer with `lock().unwrap()` would now
     // return `Err(Poisoned)` for every subsequent caller until the
     // process restarts. The recovery helper must hand back a usable
     // guard, and the underlying `Connection` must still answer
     // queries correctly. We round-trip through a write+read pair so
     // the test fails loudly if the recovery shape regresses.
-    crate::db::lock_db()
+    crate::db::write_conn()
         .execute(
             "CREATE TABLE IF NOT EXISTS issue_1224_poison_probe (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
             [],
         )
         .unwrap();
-    crate::db::lock_db()
+    crate::db::write_conn()
         .execute(
             "INSERT OR REPLACE INTO issue_1224_poison_probe (id, label) VALUES (1, 'after-poison')",
             [],
         )
         .unwrap();
-    let label: String = crate::db::lock_db()
+    let label: String = crate::db::write_conn()
         .query_row(
             "SELECT label FROM issue_1224_poison_probe WHERE id = 1",
             [],
@@ -905,9 +905,110 @@ fn lock_db_recovers_from_poison() {
     // other tests. The OnceCell is process-wide, so a sibling test
     // that calls `init` against the same path would otherwise race
     // with us — a unique path per run keeps the test re-orderable.
-    crate::db::lock_db()
+    crate::db::write_conn()
         .execute("DROP TABLE IF EXISTS issue_1224_poison_probe", [])
         .unwrap();
-    drop(crate::db::lock_db()); // release the guard before delete
+    drop(crate::db::write_conn()); // release the guard before delete
     std::fs::remove_file(&temp_path).ok();
+}
+
+/// Issue #1383: hold an uncommitted writer transaction open and require a
+/// pooled read to finish before that transaction is released. A regression
+/// to one process-wide connection blocks until the timeout.
+#[test]
+fn reader_pool_reads_while_writer_transaction_is_active() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-writer-concurrency.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer).unwrap();
+    writer
+        .execute_batch(
+            "CREATE TABLE probe (value INTEGER NOT NULL);
+             INSERT INTO probe (value) VALUES (1);",
+        )
+        .unwrap();
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+
+    let writer_tx = writer.unchecked_transaction().unwrap();
+    writer_tx
+        .execute("INSERT INTO probe (value) VALUES (2)", [])
+        .unwrap();
+
+    std::thread::scope(|scope| {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let readers = &readers;
+        scope.spawn(move || {
+            let reader = readers.checkout();
+            let count: i64 = reader
+                .query_row("SELECT COUNT(*) FROM probe", [], |row| row.get(0))
+                .unwrap();
+            done_tx.send(count).unwrap();
+        });
+
+        assert_eq!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("pooled read must not wait for the active writer transaction"),
+            1,
+            "reader must see the last committed WAL snapshot"
+        );
+    });
+
+    writer_tx.rollback().unwrap();
+}
+
+#[test]
+fn reader_pool_serves_a_second_reader_while_the_first_is_checked_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-reader-concurrency.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+
+    let first_reader = readers.checkout();
+    let mut first_statement = first_reader.prepare("SELECT value FROM probe").unwrap();
+    let mut first_rows = first_statement.query([]).unwrap();
+
+    std::thread::scope(|scope| {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let readers = &readers;
+        scope.spawn(move || {
+            let second_reader = readers.checkout();
+            let count: i64 = second_reader
+                .query_row("SELECT COUNT(*) FROM probe", [], |row| row.get(0))
+                .unwrap();
+            done_tx.send(count).unwrap();
+        });
+        assert_eq!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("a checked-out reader must not serialize another reader"),
+            0
+        );
+    });
+
+    assert!(first_rows.next().unwrap().is_none());
+}
+
+#[test]
+fn reader_pool_connections_reject_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("read-only-pool.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+    let reader = readers.checkout();
+    assert!(
+        reader
+            .execute("INSERT INTO probe (value) VALUES (1)", [])
+            .is_err(),
+        "reader-pool handles must be enforced read-only by SQLite"
+    );
 }

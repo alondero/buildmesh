@@ -67,7 +67,7 @@ pub fn resolve_role(headers: &str) -> Option<Role> {
     {
         return None;
     }
-    let conn = db::lock_db();
+    let conn = db::read_conn();
     resolve_role_inner(&conn, headers)
 }
 
@@ -128,7 +128,7 @@ pub fn resolve_device_session(headers: &str) -> Option<i64> {
     {
         return None;
     }
-    let conn = db::lock_db();
+    let conn = db::read_conn();
     resolve_device_session_inner(&conn, headers)
 }
 

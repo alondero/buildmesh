@@ -368,7 +368,7 @@ impl Drop for JobHandle {
 ///
 /// **Mutex recovery is intentionally NOT this helper's job.** Each
 /// worker-static has its own per-module lock helper
-/// (`db::lock_db()`, `services::autopilot::lock_planner_set`,
+/// (`db::write_conn()`, `services::autopilot::lock_planner_set`,
 /// `services::circuit_worker::lock_circuit_worker_static`) introduced
 /// in #1224 — those wrap the poison recovery in worker-specific logging.
 /// `run_worker_pass` covers the orthogonal concern: keep the THREAD alive
@@ -558,7 +558,7 @@ mod tests {
     // thread. The per-worker fault-injection tests (in
     // services::autopilot etc.) exercise the full wiring; here we only
     // pin the helper itself. Mutex-recovery coverage lives with the
-    // per-module helpers (`db::lock_db`, `lock_planner_set`,
+    // per-module helpers (`db::write_conn`, `lock_planner_set`,
     // `lock_circuit_worker_static`) introduced by issue #1224.
 
     #[test]

@@ -178,7 +178,7 @@ pub fn run() {
             // Idempotent — the underlying UPDATE has a `provider NOT LIKE
             // '%:%'` guard, so re-running on a v19+ DB is a no-op.
             if let Err(e) = db::ensure_agent_node_provider_id_custom_accounts_migrated(
-                &db::lock_db(),
+                &db::write_conn(),
                 &preferences::provider_accounts(),
             ) {
                 tracing::warn!(
@@ -198,7 +198,7 @@ pub fn run() {
             // spawning Claude-CLI sessions against the wrong endpoint.
             // Idempotent — the `WHERE default_provider IN (...)` guard is a
             // no-op on already-migrated rows.
-            if let Err(e) = db::ensure_mesh_default_provider_normalized(&db::lock_db()) {
+            if let Err(e) = db::ensure_mesh_default_provider_normalized(&db::write_conn()) {
                 tracing::warn!(
                     "mesh-default provider normalization failed (non-fatal, meshes \
                      will keep legacy bare ids until the next launch): {}",

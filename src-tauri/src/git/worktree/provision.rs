@@ -1764,7 +1764,7 @@ mod tests {
             .expect("mesh must be creatable");
         let mesh_id = mesh.id;
         let node_id: i64 = {
-            let db = crate::db::lock_db();
+            let db = crate::db::write_conn();
             db.execute(
                 "INSERT INTO agent_nodes (mesh_id, name, path, worktree_name)                  VALUES (?1, 'tidy-sorrowful-nautilus', ?2, 'tidy-sorrowful-nautilus')",
                 rusqlite::params![mesh_id, root.to_str().unwrap()],
@@ -1790,7 +1790,7 @@ mod tests {
         // caught #1080 — the bug was that name got written but
         // worktree_name did not.
         let (name, worktree_name): (String, Option<String>) = {
-            let db = crate::db::lock_db();
+            let db = crate::db::write_conn();
             db.query_row(
                 "SELECT name, worktree_name FROM agent_nodes WHERE id = ?1",
                 rusqlite::params![node_id],

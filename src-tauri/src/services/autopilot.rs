@@ -131,7 +131,7 @@ static LOGGED_BLOCKS: Lazy<Mutex<HashSet<(i64, i64)>>> =
 /// `.unwrap()` on `PoisonError` permanently bricks the planner: the next
 /// collaborator-gate pass or blocked-by dedupe would panic the polling
 /// thread and the daemon silently stops scheduling work. The recover
-/// shape matches `db::lock_db()`, `preferences::save`, and
+/// shape matches `db::write_conn()`, `preferences::save`, and
 /// `services::circuit_worker::lock_circuit_worker_static` (which is the
 /// companion helper for the circuit-worker's `APPROVALS`/`WAKE` statics).
 fn lock_planner_set<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {

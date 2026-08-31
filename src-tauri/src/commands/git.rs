@@ -442,7 +442,7 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
     // lockstep on `git::sync::SyncOutcome` / `git::sync::FetchOutcome`
     // (issue #634).
     // The `is_initialized` guard keeps this hermetic under `cargo test`:
-    // `db::get()` panics on an uninitialized global DB, and a filtered test
+    // `db::read_conn()` panics on an uninitialized global DB, and a filtered test
     // run may execute `git_sync` before any DB-initializing test has run.
     // In production the DB is always initialized at startup.
     if outcome.advanced_ref() && crate::db::is_initialized() {
