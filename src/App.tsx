@@ -16,6 +16,8 @@ import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
+import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
+import { OPEN_CHEATSHEET_EVENT } from './components/CommandOmnibar/omnibarActions';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
 import { formatError } from './lib/errorUtils';
@@ -370,6 +372,15 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // "Show Cheatsheet" omnibar command (issue #1411). The palette routes the
+  // command here as a window CustomEvent because the cheatsheet's open state
+  // is App-owned. See `omnibarActions.ts` for the canonical rationale.
+  useEffect(() => {
+    const onOpen = () => setCheatsheetOpen(true);
+    window.addEventListener(OPEN_CHEATSHEET_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_CHEATSHEET_EVENT, onOpen);
+  }, []);
+
   useEffect(() => {
     const unlisten = listen<ProviderErrorPayload>('provider-error', (event) => {
       addToast(event.payload.provider, event.payload.message, 'error');
@@ -630,6 +641,11 @@ function App() {
 
       <WorktreeCloseDialog />
       <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => setCheatsheetOpen(false)} />
+      {/* Universal Command Omnibar (issue #1411). Same mount/unmount
+          discipline as the cheatsheet: it renders only while
+          `omnibarOpen` is true, so the overlay never touches the terminal
+          grid underneath — xterm instances stay mounted and focused. */}
+      <CommandOmnibar />
       <UpdatePrompt />
 
       {/* Toast notifications. Each toast carries role="status" (implicit

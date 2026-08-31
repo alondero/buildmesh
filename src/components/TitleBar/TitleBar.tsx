@@ -5,6 +5,10 @@ import { isMac } from '../../lib/platform';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
+import {
+  OPEN_REMOTE_ACCESS_EVENT,
+  OPEN_SETTINGS_EVENT,
+} from '../CommandOmnibar/omnibarActions';
 
 /**
  * Bespoke window chrome for the frameless window (`decorations: false`).
@@ -190,6 +194,20 @@ export function TitleBar() {
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const [remoteAccessOpen, setRemoteAccessOpen] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
+
+  // "Open Settings" / "Open Remote Access" omnibar commands (issue #1411)
+  // — routed here as window CustomEvents because the modals' open state is
+  // TitleBar-owned. See `omnibarActions.ts` for the canonical rationale.
+  useEffect(() => {
+    const onOpenSettings = () => setAppSettingsOpen(true);
+    const onOpenRemoteAccess = () => setRemoteAccessOpen(true);
+    window.addEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
+    window.addEventListener(OPEN_REMOTE_ACCESS_EVENT, onOpenRemoteAccess);
+    return () => {
+      window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
+      window.removeEventListener(OPEN_REMOTE_ACCESS_EVENT, onOpenRemoteAccess);
+    };
+  }, []);
 
   // Track the maximized state so the middle window control can swap between
   // the maximize and restore glyphs. `onResized` fires for maximize,

@@ -1,0 +1,359 @@
+/**
+ * Tests for the <CommandOmnibar> palette (issue #1411).
+ *
+ * Coverage map to the ticket's acceptance criteria:
+ *   - WAI-ARIA 1.2 combobox semantics (role=combobox on the input,
+ *     aria-expanded / aria-controls / aria-activedescendant, role=listbox,
+ *     role=option + aria-selected).
+ *   - Keyboard interaction: ArrowUp/Down wrap-around with auto-scroll into
+ *     view, Enter executes the active selection, Escape and backdrop click
+ *     dismiss, Tab drills into the active result's domain prefix.
+ *   - Focus restoration on close (captured on open, restored on unmount).
+ *   - Terminal persistence proxy: opening/closing the palette never
+ *     remounts sibling content (the terminal grid is a sibling overlay
+ *     target — the same invariant TerminalManager relies on).
+ */
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
+import { render, cleanup, fireEvent, screen, act } from '@testing-library/react';
+import { CommandOmnibar } from '../../src/components/CommandOmnibar/CommandOmnibar';
+import {
+  OPEN_CHEATSHEET_EVENT,
+  resetSpawnOptionsCacheForTests,
+  runOmnibarCommand,
+} from '../../src/components/CommandOmnibar/omnibarActions';
+import { useUIStore, type OmnibarMode } from '../../src/stores/uiStore';
+import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { useMeshStore } from '../../src/stores/meshStore';
+import type { AgentNode } from '../../src/types/generated/AgentNode';
+import type { Mesh } from '../../src/types/generated/Mesh';
+
+// jsdom doesn't implement scrollIntoView; the palette calls it on every
+// active-index move ("auto-scroll into view").
+beforeAll(() => {
+  Element.prototype.scrollIntoView = vi.fn();
+});
+
+const mesh: Mesh = {
+  id: 1,
+  name: 'buildmesh',
+  path: 'F:/src/buildmesh',
+  layout: 'grid',
+  position: 0,
+  created_at: '2026-01-01T00:00:00Z',
+  build_command: null,
+  run_command: null,
+  model: null,
+  effort: null,
+  use_worktree: true,
+  worktree_mode: null,
+  default_provider: null,
+  base_ref: 'main',
+  scratchpad: '',
+  sandbox: false,
+  pre_spawn_pool_size: 1,
+  color: null,
+  autopilot_enabled: false,
+  autopilot_trigger_label: null,
+  autopilot_concurrency_limit: 2,
+  autopilot_provider: null,
+  autopilot_action_on_success: null,
+  root_build_command: null,
+  root_run_command: null,
+  autopilot_mode: 'issue_driven',
+  loop_initial_prompt: null,
+  loop_suffix_prompt: null,
+  loop_max_iterations: null,
+  loop_interval_seconds: 0,
+  loop_consecutive_failures: 0,
+  harness_overrides: {},
+};
+
+const node: AgentNode = {
+  id: 11,
+  mesh_id: 1,
+  name: 'alpha-node',
+  path: 'F:/src/buildmesh/.worktrees/alpha',
+  branch: 'feat/alpha',
+  env: 'windows',
+  provider: 'anthropic',
+  status: 'running',
+  cli_session_id: null,
+  worktree_name: 'alpha',
+  use_worktree: true,
+  is_pinned: false,
+  source_issue: null,
+  source_pr: null,
+  head_repo_owner: null,
+  head_repo_clone_url: null,
+  source_pr_pinned_sha: null,
+  position: 0,
+  created_at: '2026-01-01T00:00:00Z',
+};
+
+function seedStores(): void {
+  useUIStore.setState({ omnibarOpen: false, omnibarMode: 'files', viewMode: 'all' });
+  useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: null });
+  useMeshStore.setState({ meshesById: new Map([[mesh.id, mesh]]), selectedMeshId: null });
+}
+
+function openOmnibar(mode: OmnibarMode = 'files'): void {
+  act(() => {
+    useUIStore.getState().openOmnibar(mode);
+  });
+}
+
+function closeOmnibar(): void {
+  act(() => {
+    useUIStore.getState().closeOmnibar();
+  });
+}
+
+function type(query: string): void {
+  const input = screen.getByRole('combobox') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: query } });
+}
+
+function options(): HTMLElement[] {
+  return screen.queryAllByTestId('command-omnibar-option');
+}
+
+beforeEach(() => {
+  seedStores();
+  resetSpawnOptionsCacheForTests();
+});
+
+afterEach(cleanup);
+
+describe('CommandOmnibar — mount/unmount discipline', () => {
+  it('renders nothing while closed and the combobox while open', () => {
+    const { container } = render(<CommandOmnibar />);
+    expect(container.firstChild).toBeNull();
+    openOmnibar();
+    expect(screen.getByRole('combobox')).toBeTruthy();
+    closeOmnibar();
+    expect(container.firstChild).toBeNull();
+  });
+
+  it('seeds the query from omnibarMode: empty for files, ">" for commands', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+    expect(input.value).toBe('>');
+    // Command mode shows the whole command domain with a bare prefix.
+    expect(options().length).toBeGreaterThan(0);
+  });
+
+  it('never remounts sibling content across open/close (terminal persistence invariant)', () => {
+    // The ref callback re-runs if the sibling ever remounts, so identity
+    // surviving the open/close cycles is the assertion.
+    const siblingRef = { current: null as HTMLDivElement | null };
+    render(
+      <>
+        <div
+          data-testid="omnibar-sibling"
+          ref={(el) => {
+            siblingRef.current = el;
+          }}
+        />
+        <CommandOmnibar />
+      </>,
+    );
+    const before = siblingRef.current;
+    expect(before).not.toBeNull();
+    openOmnibar();
+    closeOmnibar();
+    openOmnibar();
+    closeOmnibar();
+    // Same DOM node, still connected — nothing underneath the overlay was
+    // torn down or remounted by the palette cycling.
+    expect(siblingRef.current).toBe(before);
+    expect(before!.isConnected).toBe(true);
+  });
+});
+
+describe('CommandOmnibar — WAI-ARIA combobox semantics', () => {
+  it('wires combobox → listbox → option per WAI-ARIA 1.2', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    const input = screen.getByRole('combobox');
+    expect(input.getAttribute('aria-expanded')).toBe('true');
+    const controls = input.getAttribute('aria-controls');
+    expect(controls).toBeTruthy();
+    const listbox = document.getElementById(controls!);
+    expect(listbox?.getAttribute('role')).toBe('listbox');
+
+    const activeDescendant = input.getAttribute('aria-activedescendant');
+    expect(activeDescendant).toBeTruthy();
+    const activeOption = document.getElementById(activeDescendant!);
+    expect(activeOption?.getAttribute('role')).toBe('option');
+    expect(activeOption?.getAttribute('aria-selected')).toBe('true');
+    // Exactly one selected option.
+    const selected = options().filter((o) => o.getAttribute('aria-selected') === 'true');
+    expect(selected).toHaveLength(1);
+  });
+
+  it('reports aria-expanded=false and shows the empty state for an empty files query', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const input = screen.getByRole('combobox');
+    expect((input as HTMLInputElement).value).toBe('');
+    expect(input.getAttribute('aria-expanded')).toBe('false');
+    expect(input.getAttribute('aria-activedescendant')).toBeNull();
+    expect(screen.getByTestId('command-omnibar-empty').textContent).toMatch(/no matching/i);
+  });
+
+  it('narrows results per keystroke and keeps the highlight highlightable', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('settings');
+    const rows = options();
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].textContent).toMatch(/open settings/i);
+    type('zzzznope');
+    expect(options()).toHaveLength(0);
+    expect(screen.getByTestId('command-omnibar-empty')).toBeTruthy();
+  });
+});
+
+describe('CommandOmnibar — keyboard interaction', () => {
+  it('moves the active option with ArrowDown/ArrowUp and wraps around', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('>view');
+    const rows = options();
+    expect(rows.length).toBeGreaterThan(1);
+    const count = rows.length;
+    const input = screen.getByRole('combobox');
+
+    const activeAfter = (key: string): number => {
+      fireEvent.keyDown(input, { key });
+      const id = input.getAttribute('aria-activedescendant');
+      return Number(id!.slice('command-omnibar-option-'.length));
+    };
+
+    expect(activeAfter('ArrowDown')).toBe(1);
+    expect(activeAfter('ArrowDown')).toBe(2);
+    // Wrap past the end → first option.
+    for (let i = 2; i < count; i++) activeAfter('ArrowDown');
+    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-option-0');
+    // Wrap before the start → last option.
+    expect(activeAfter('ArrowUp')).toBe(count - 1);
+  });
+
+  it('auto-scrolls the active option into view', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('>view');
+    const scrollSpy = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
+    scrollSpy.mockClear();
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'ArrowDown' });
+    expect(scrollSpy).toHaveBeenCalledWith({ block: 'nearest' });
+  });
+
+  it('Enter executes the active selection and closes the palette', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('pinned');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
+    expect(useUIStore.getState().viewMode).toBe('pinned');
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+  });
+
+  it('Enter on a node result activates the node', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    type('alpha');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(node.id);
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+  });
+
+  it('Escape dismisses and restores focus to the previously-focused element', () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+    render(<CommandOmnibar />);
+    openOmnibar();
+    expect(document.activeElement).toBe(screen.getByRole('combobox'));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+    trigger.remove();
+  });
+
+  it('a backdrop click dismisses the palette', () => {
+    render(<CommandOmnibar />);
+    openOmnibar();
+    fireEvent.click(screen.getByTestId('command-omnibar-backdrop'));
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+  });
+
+  it('a click on an option row executes it and closes', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('pinned');
+    fireEvent.click(options()[0]);
+    expect(useUIStore.getState().viewMode).toBe('pinned');
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+  });
+
+  it('Tab drills into the active result’s domain by applying its prefix filter', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    type('settings');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Tab' });
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+    // The first hit for "settings" is the "Open Settings" command — Tab
+    // scopes the (unprefixed) query to the commands domain.
+    expect(input.value.startsWith('>')).toBe(true);
+    expect(input.value).toContain('settings');
+    // The list is now scoped to commands only.
+    const categories = options().map((o) => o.lastElementChild?.textContent);
+    expect(categories.every((c) => c === 'command')).toBe(true);
+  });
+
+  it('Tab completes the query to the active result once the query is already scoped', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    type('>sync');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Tab' });
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+    expect(input.value).toBe('>Git sync');
+  });
+});
+
+describe('CommandOmnibar — command execution routing', () => {
+  it('routes the show-cheatsheet command through its window event', () => {
+    const onOpen = vi.fn();
+    window.addEventListener(OPEN_CHEATSHEET_EVENT, onOpen);
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('cheatsheet');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_CHEATSHEET_EVENT, onOpen);
+  });
+
+  it('runOmnibarCommand returns false for an unknown command id (catalog drift pin)', () => {
+    const setViewMode = vi.fn();
+    const openProbeTab = vi.fn();
+    expect(
+      runOmnibarCommand('no-such-command', {
+        meshes: [],
+        spawnOptions: [],
+        setViewMode,
+        openProbeTab,
+      }),
+    ).toBe(false);
+    expect(setViewMode).not.toHaveBeenCalled();
+    expect(openProbeTab).not.toHaveBeenCalled();
+  });
+
+  it('routes a mesh result to mesh selection', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    type('buildmesh');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+  });
+});
