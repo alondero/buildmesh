@@ -3,4 +3,4 @@
 /**
  * Session status
  */
-export type SessionStatus = "running" | "idle" | "awaiting_input" | "error" | "archived" | "suspended" | "pending" | "spawning" | "completed";
+export type SessionStatus = "running" | "idle" | "awaiting_input" | "error" | "archived" | "suspended" | "pending" | "spawning" | "completed" | "ready";

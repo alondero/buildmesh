@@ -544,9 +544,10 @@ pub fn validate_status_eligible(status: SessionStatus) -> Result<(), String> {
         | SessionStatus::Error
         | SessionStatus::Running
         | SessionStatus::Suspended
-        | SessionStatus::Completed => Ok(()),
+        | SessionStatus::Completed
+        | SessionStatus::Ready => Ok(()),
         _ => Err(format!(
-            "regenerate unavailable: node is in {} state (must be idle, awaiting_input, error, running, suspended, or completed)",
+            "regenerate unavailable: node is in {} state (must be idle, awaiting_input, error, running, suspended, completed, or ready)",
             status.to_db_str()
         )),
     }

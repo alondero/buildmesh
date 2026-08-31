@@ -1103,6 +1103,22 @@ impl AgentProvider for CodexAdapter {
         true
     }
 
+    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
+        use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+        use crate::agent::session_lifecycle::LifecycleKind;
+        AttentionCapability::Hook {
+            events: vec![
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::InputRequired,
+                LifecycleKind::PermissionRequested,
+                LifecycleKind::BackgroundRunning,
+            ],
+            launch_mode: AttentionLaunchMode::PermissionAsk,
+            trust: Some("codex project trust (#1379)".into()),
+            min_version: None,
+        }
+    }
+
     /// Codex's global project trust is a launch prerequisite, not an attention
     /// hook side effect. Proxy preflight supplies the exact runtime home/distro
     /// so this edits the same trust store the child will read.

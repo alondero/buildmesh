@@ -40,6 +40,7 @@
 import { listen } from '@tauri-apps/api/event';
 import type { AttentionNeededPayload } from '../types/generated/AttentionNeededPayload';
 import type { AttentionClearedPayload } from '../types/generated/AttentionClearedPayload';
+import type { LifecycleChangedPayload } from '../types/generated/LifecycleChangedPayload';
 import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 import type { NodeRenamedPayload } from '../types/generated/NodeRenamedPayload';
 import type { NodeCreatedPayload } from '../types/generated/NodeCreatedPayload';
@@ -123,6 +124,32 @@ export async function attachAgentNodeListeners(
       const nodeId = event.payload[SESSION_ID_KEY];
       surface.setSemanticTurn(nodeId, null);
       surface.patchAgentNode(nodeId, { status: 'running' });
+    }),
+  );
+
+  // `agent-lifecycle` (issue #1364) is the normalized lifecycle event —
+  // the wire carries the resulting status, the normalized kind, and the
+  // full provider envelope. Both transports (this desktop bus and the
+  // mobile /ws/events broadcast) share the one shape, so both clients
+  // patch the affected node identically. The legacy attention events
+  // above stay for backward compat and are idempotent with this handler.
+  unlistens.push(
+    await listen<LifecycleChangedPayload>('agent-lifecycle', (event) => {
+      const nodeId = event.payload.session_id;
+      surface.patchAgentNode(nodeId, { status: event.payload.status });
+      if (event.payload.signal_health) {
+        surface.patchAgentNode(nodeId, { signal_health: event.payload.signal_health });
+      }
+      if (event.payload.semantic_turn) {
+        surface.setSemanticTurn(nodeId, event.payload.semantic_turn);
+      } else if (
+        event.payload.kind === 'turn_completed' ||
+        event.payload.kind === 'input_required' ||
+        event.payload.kind === 'permission_requested' ||
+        event.payload.kind === 'question_requested'
+      ) {
+        surface.setSemanticTurn(nodeId, null);
+      }
     }),
   );
 

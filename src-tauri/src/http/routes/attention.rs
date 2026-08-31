@@ -121,6 +121,9 @@ struct HookPayload {
     /// AGY model name.
     #[serde(alias = "modelName", alias = "model_name", default)]
     model_name: Option<String>,
+    /// Grok Stop callbacks carry `reason` (e.g. `"end_turn"`).
+    #[serde(alias = "reason", default)]
+    reason: Option<String>,
 }
 
 /// Provider-neutral action shown above an awaiting Agent Node's terminal.
@@ -230,15 +233,39 @@ fn hook_session_id(body: &[u8]) -> Option<String> {
     request::parse_cli_session_id(&id)
 }
 
-/// What to do with an incoming attention webhook.
+/// What to do with an incoming attention webhook (issue #1364).
 #[derive(Debug, PartialEq, Eq)]
 enum Decision {
-    /// Publish the Node Turn with attention marking — the user is needed.
-    Mark,
+    /// The user is needed — publish the Node Turn with attention marking and
+    /// land the node in `AwaitingInput`.
+    MarkInput,
+    /// An ordinary turn finished with no user input needed — land the node in
+    /// `Ready` (never the Autopilot-only `Completed`).
+    Ready,
     /// Publish the Node Turn without attention marking: the turn ended only
     /// because background tasks are still running and the harness will
     /// re-invoke itself when they finish (issue #878).
     SuppressPendingBackground,
+}
+
+/// The result of classifying a hook POST body: the [`Decision`] plus the
+/// provider envelope that survives into the `agent-lifecycle` event.
+#[derive(Debug, PartialEq, Eq)]
+struct Classified {
+    decision: Decision,
+    detail: crate::agent::session_lifecycle::HookSignalDetail,
+}
+
+impl Classified {
+    fn mark_input(detail: crate::agent::session_lifecycle::HookSignalDetail) -> Self {
+        Self { decision: Decision::MarkInput, detail }
+    }
+    fn ready(detail: crate::agent::session_lifecycle::HookSignalDetail) -> Self {
+        Self { decision: Decision::Ready, detail }
+    }
+    fn suppress(detail: crate::agent::session_lifecycle::HookSignalDetail) -> Self {
+        Self { decision: Decision::SuppressPendingBackground, detail }
+    }
 }
 
 /// Classify a hook POST body. `count_pending` is the transcript scan
@@ -246,13 +273,15 @@ enum Decision {
 /// don't need real transcript files.
 ///
 /// The rules, in order:
-/// 1. Unparseable/absent body → `Mark` (pre-#878 behaviour; old hook configs
-///    that post no body keep working until the next spawn migrates them).
+/// 1. Unparseable/absent body → `MarkInput` (pre-#878 behaviour; old hook
+///    configs that post no body keep working until the next spawn migrates
+///    them) with `signal_health = Degraded` — an unknown payload is never
+///    silently presented as a high-confidence signal.
 /// 2. A permission-prompt Notification (Claude Code), a `PermissionRequest`
 ///    event (Codex's dedicated hook for tool approval, issue #884), a
 ///    Grok `Notification` with `notificationType == "permission_prompt"`
 ///    (issue #1282), or an AGY `PreToolUse` event (the harness's pre-tool
-///    approval hook, issue #1285) → `Mark` always. The agent is blocked
+///    approval hook, issue #1285) → `MarkInput` always. The agent is blocked
 ///    on a tool-approval decision — that needs the user even while
 ///    background tasks run.
 /// 3. AGY's `Stop` with `fullyIdle: false` (or explicit `fullyIdle: false`,
@@ -262,33 +291,88 @@ enum Decision {
 ///    directly by the harness because AGY has no background task scan.
 /// 4. Anything else (Stop, idle Notification) with launched-but-unfinished
 ///    background tasks in the transcript → `SuppressPendingBackground`.
-/// 5. No transcript path, unreadable transcript, or no pending tasks → `Mark`.
-///    "Unknown" must never read as "no attention needed".
-fn decide(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> Decision {
+/// 5. No transcript path, unreadable transcript, or no pending tasks →
+///    `Ready` (issue #1364): a clean turn completion is NOT a user-input
+///    request. The node lands in `Ready`, never in `AwaitingInput`.
+fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> Classified {
     let Ok(payload) = serde_json::from_slice::<HookPayload>(body) else {
-        return Decision::Mark;
+        return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
+            signal_health: crate::agent::session_lifecycle::SignalHealth::Degraded,
+            ..Default::default()
+        });
+    };
+    // A parseable but fieldless envelope (`{}`, legacy no-field POSTs) is an
+    // unknown signal — never "turn completed" and never "no attention
+    // needed". Mark for attention with a degraded health so the UI can
+    // render the uncertainty (issue #1364 §1). Comparing against the
+    // derived `Default` keeps this total over future `HookPayload` fields.
+    if payload == HookPayload::default() {
+        return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
+            signal_health: crate::agent::session_lifecycle::SignalHealth::Degraded,
+            ..Default::default()
+        });
+    }
+    let detail = crate::agent::session_lifecycle::HookSignalDetail {
+        provider_event: payload.hook_event_name.clone(),
+        provider_session_id: payload
+            .session_id
+            .as_deref()
+            .and_then(request::parse_cli_session_id),
+        completion_reason: payload
+            .termination_reason
+            .clone()
+            .or_else(|| payload.reason.clone()),
+        transcript_path: payload.transcript_path.clone(),
+        signal_health: crate::agent::session_lifecycle::SignalHealth::Ok,
+        message: payload.message.clone(),
+        ..Default::default()
     };
     if matches!(
-        payload.hook_event_name.as_deref(),
-        Some("PermissionRequest") | Some("PreToolUse")
+        payload.hook_event_name.as_deref().map(str::to_ascii_lowercase).as_deref(),
+        Some("permissionrequest") | Some("pretooluse")
     ) {
-        return Decision::Mark;
+        return Classified::mark_input(detail);
     }
-    if payload.hook_event_name.as_deref() == Some("Notification") {
+    // Grok posts `hookEventName: "notification"` (lowercase); Claude posts
+    // `"Notification"`. Match case-insensitively so the structured
+    // `notificationType` handling below applies to both.
+    if payload
+        .hook_event_name
+        .as_deref()
+        .is_some_and(|n| n.eq_ignore_ascii_case("Notification"))
+    {
         // Claude Code: human-readable message contains "permission".
         if payload
             .message
             .as_deref()
             .is_some_and(|m| m.to_ascii_lowercase().contains("permission"))
         {
-            return Decision::Mark;
+            return Classified::mark_input(detail);
         }
         // Grok Code (issue #1282): structured notificationType =
         // "permission_prompt". A matcher on the wire might catch it
         // before us, but the runner POSTs the envelope unconditionally
         // for every matched hook entry — we still see the callback.
-        if payload.notification_type.as_deref() == Some("permission_prompt") {
-            return Decision::Mark;
+        match payload.notification_type.as_deref() {
+            Some("permission_prompt") => return Classified::mark_input(detail),
+            Some("task_complete") => {
+                // Grok's structured task-complete notification: the turn
+                // finished, no user input needed (issue #1364).
+                return Classified::ready(detail);
+            }
+            _ => {}
+        }
+        // A question-shaped notification is the user being asked something
+        // that is not a tool approval — the normalized `QuestionRequested`
+        // kind (issue #1364 §1). Tool-approval detection above wins first.
+        if payload
+            .message
+            .as_deref()
+            .is_some_and(|m| m.to_ascii_lowercase().contains("question"))
+        {
+            let mut question = detail;
+            question.kind = Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested);
+            return Classified::mark_input(question);
         }
     }
     // AGY `Stop` with `fullyIdle: false` is a direct false-yield signal
@@ -299,25 +383,25 @@ fn decide(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> De
     // explicitly "Stop" or omitted from stdin JSON. When `fullyIdle: false`
     // arrives on a Stop event or an AGY payload (with session_id / conversationId
     // or terminationReason), suppress attention without scanning transcripts.
-    if (payload.hook_event_name.as_deref() == Some("Stop")
+    if (payload.hook_event_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("Stop"))
         || (payload.hook_event_name.is_none()
             && (payload.termination_reason.is_some() || payload.session_id.is_some())))
         && payload.fully_idle == Some(false)
     {
-        return Decision::SuppressPendingBackground;
+        return Classified::suppress(detail);
     }
     // A Stop with fullyIdle: true or absent falls through to the transcript-scan
     // path so any future transcript reader hooks in normally.
     let Some(transcript_path) = payload.transcript_path.filter(|p| !p.is_empty()) else {
-        return Decision::Mark;
+        return Classified::ready(detail);
     };
     // A WSL-side agent reports a Linux transcript path; convert before the
     // Windows-side read (the module rule: never hand a Linux path to a
     // Windows API).
     let host_path = crate::env::to_host_path(&transcript_path);
     match count_pending(Path::new(&host_path)) {
-        Some(n) if n > 0 => Decision::SuppressPendingBackground,
-        _ => Decision::Mark,
+        Some(n) if n > 0 => Classified::suppress(detail),
+        _ => Classified::ready(detail),
     }
 }
 
@@ -358,7 +442,15 @@ pub async fn handle_post(
     // source, while the hook payload is the exact structured fallback after
     // the first turn. The conditional DB update prevents a delayed callback
     // from an old process overwriting the active session (issue #1089).
-    if let Some(cli_session_id) = hook_session_id(&body) {
+    //
+    // Issue #1364 §1 — ordering token: one blocking read returns the node's
+    // stored session id AND its harness/provider id (for the lifecycle
+    // envelope). A hook whose provider session id is a valid UUID that
+    // differs from the stored one belongs to a previous process generation —
+    // it must never overwrite the newer state, so the POST is answered 200
+    // (the harness's fail-open contract) and dropped.
+    let hook_uuid = hook_session_id(&body);
+    if let Some(cli_session_id) = hook_uuid.clone() {
         // Issue #1389 — `set_cli_session_id_if_missing` is a sync SQLite
         // write; offload it so the tokio worker that just received this
         // hook POST can go straight back to polling WebSocket/PTY streams
@@ -384,6 +476,26 @@ pub async fn handle_post(
                 session_id,
                 error
             ),
+        }
+    }
+    let node_context = crate::commands::run_blocking("http_attention_node_context", move || {
+        Ok(crate::db::get_agent_node_by_id(session_id).ok().map(|n| (n.cli_session_id, n.provider)))
+    })
+    .await
+    .ok()
+    .flatten();
+    let (stored_cli_session_id, node_provider) = node_context
+        .map(|(id, provider)| (id, Some(provider)))
+        .unwrap_or((None, None));
+    if let (Some(hook), Some(current)) = (hook_uuid.as_deref(), stored_cli_session_id.as_deref()) {
+        if !current.is_empty() && hook != current {
+            tracing::info!(
+                "attention webhook for node {}: stale callback from a previous process \
+                 (hook session {hook} != active {current}) — dropped (issue #1364 ordering token)",
+                session_id
+            );
+            let _ = request::write_status_only(lines, "200 OK").await;
+            return;
         }
     }
 
@@ -420,14 +532,47 @@ pub async fn handle_post(
 
     let semantic = payload_parsed.as_ref().ok().and_then(semantic_turn);
 
-    match decide(&body, crate::services::transcript_reader::count_pending_background_tasks) {
-        Decision::Mark => {
-            // Issue #1389 — `node_turn::publish` writes SQLite through
-            // `session_lifecycle::on_attention`, arms the autoclear mutex,
-            // and fans out to the session-naming + autopilot-pipeline
-            // workers. Every step is blocking; offload the whole fan-out
-            // so the tokio worker that handled the webhook POST goes back
-            // to polling the WebSocket / PTY streams immediately.
+    let classified = classify(&body, crate::services::transcript_reader::count_pending_background_tasks);
+    let detail = {
+        let mut detail = classified.detail;
+        // The semantic turn always wins over the raw message for the
+        // human-facing description; keep the health the classifier set.
+        detail.semantic_turn = semantic.map(|turn| SemanticTurnPayload {
+            node_id: session_id,
+            kind: turn.kind,
+            description: turn.description,
+        });
+        detail.provider = node_provider;
+        detail
+    };
+
+    // A real, high-confidence callback proves hook delivery — persist the
+    // node's signal health as Ok so a provisioning failure earlier in the
+    // spawn doesn't linger. A degraded (unparseable/fieldless) callback
+    // does NOT clear a failure: its event says Degraded and the persisted
+    // health must agree (issue #1364 §3). Issue #1389 pattern: the SQLite
+    // write is offloaded off the Tokio worker.
+    if detail.signal_health == crate::agent::session_lifecycle::SignalHealth::Ok {
+        let _ = crate::commands::run_blocking("http_attention_mark_delivered", move || {
+            crate::db::update_agent_node_signal_health(
+                session_id,
+                Some(crate::agent::session_lifecycle::SignalHealth::Ok),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await;
+    }
+
+    match classified.decision {
+        Decision::MarkInput => {
+            // Issue #1389 — `node_turn::publish_with_signal` writes SQLite
+            // through `session_lifecycle::on_attention_with_signal` (one
+            // status write + one `attention-needed` + one `agent-lifecycle`
+            // on BOTH transports), arms the autoclear mutex, and fans out to
+            // the session-naming + autopilot-pipeline workers. Every step is
+            // blocking; offload the whole fan-out so the tokio worker that
+            // handled the webhook POST goes back to polling the WebSocket /
+            // PTY streams immediately.
             //
             // `app` is `&'static AppHandle` (returned by
             // `crate::http::app_handle()`, which reads from a process-
@@ -436,26 +581,38 @@ pub async fn handle_post(
             // `F: 'static`, and a non-`'static` borrow would be dropped
             // the moment the async function returns. No clone is needed
             // because the reference is already cheap to share.
-            let semantic_payload = semantic.map(|turn| SemanticTurnPayload {
-                node_id: session_id,
-                kind: turn.kind,
-                description: turn.description,
-            });
-            let semantic_for_publish = semantic_payload.clone();
+            let semantic_payload = detail.semantic_turn.clone();
+            let mark_detail = detail.clone();
             let _ = crate::commands::run_blocking(
                 "http_attention_publish_mark",
                 move || -> Result<(), String> {
-                    let encoded = semantic_for_publish.as_ref().map(|v| serde_json::to_string(v).map_err(|e| e.to_string())).transpose()?;
+                    let encoded = semantic_payload.as_ref().map(|v| serde_json::to_string(v).map_err(|e| e.to_string())).transpose()?;
                     crate::db::persist_semantic_turn(session_id, encoded.as_deref()).map_err(|e| e.to_string())?;
-                    crate::node_turn::publish_with_detail(session_id, app, semantic_for_publish);
+                    crate::node_turn::publish_with_signal(session_id, app, semantic_payload, mark_detail);
                     Ok(())
                 },
             )
             .await;
-            crate::http::events::emit(crate::http::events::EventMsg::AttentionNeeded {
-                session_id,
-                semantic_turn: semantic_payload,
-            });
+        }
+        Decision::Ready => {
+            tracing::info!(
+                "attention webhook for node {}: clean turn completion — \
+                 node lands in Ready (issue #1364)",
+                session_id
+            );
+            // Issue #1389 — same offload for the ready path. Naming and the
+            // autopilot pipeline still see the turn (`publish_passive`), then
+            // the lifecycle writes `Ready` and emits `agent-lifecycle` on both
+            // transports. No `attention-needed`, no autoclear arm.
+            let ready_detail = detail.clone();
+            let _ = crate::commands::run_blocking(
+                "http_attention_publish_ready",
+                move || -> Result<(), String> {
+                    crate::node_turn::publish_ready(session_id, app, ready_detail);
+                    Ok(())
+                },
+            )
+            .await;
         }
         Decision::SuppressPendingBackground => {
             tracing::info!(
@@ -464,10 +621,11 @@ pub async fn handle_post(
                 session_id
             );
             // Issue #1389 — same offload for the background-yield path.
+            let bg_detail = detail.clone();
             let _ = crate::commands::run_blocking(
                 "http_attention_publish_suppress",
                 move || -> Result<(), String> {
-                    crate::node_turn::publish_without_attention(session_id, app);
+                    crate::node_turn::publish_background(session_id, app, bg_detail);
                     Ok(())
                 },
             )
@@ -540,12 +698,40 @@ mod tests {
         .into_bytes()
     }
 
+    /// Test shim: classify and return just the [`Decision`].
+    fn classify_decision(
+        body: &[u8],
+        count_pending: impl FnOnce(&Path) -> Option<usize>,
+    ) -> Decision {
+        classify(body, count_pending).decision
+    }
+
     #[test]
-    fn empty_or_garbage_body_marks() {
+    fn empty_or_garbage_body_marks_input_with_degraded_health() {
         // Pre-#878 hooks post no body at all; a broken payload must degrade to
-        // the old always-mark behaviour, never to silence.
-        assert_eq!(decide(b"", |_| Some(5)), Decision::Mark);
-        assert_eq!(decide(b"not json", |_| Some(5)), Decision::Mark);
+        // the old always-mark behaviour, never to silence — but the signal is
+        // unknown, so the health is Degraded, never a high-confidence mark.
+        for body in [&b""[..], b"not json".as_slice()] {
+            let classified = classify(body, |_| Some(5));
+            assert_eq!(classified.decision, Decision::MarkInput);
+            assert_eq!(
+                classified.detail.signal_health,
+                crate::agent::session_lifecycle::SignalHealth::Degraded,
+                "an unparseable payload must record degraded signal health (issue #1364)"
+            );
+        }
+    }
+
+    #[test]
+    fn fieldless_json_body_marks_input_with_degraded_health() {
+        // A parseable `{}` with no recognized fields is an unknown signal —
+        // not "turn completed". Mark with degraded health (issue #1364).
+        let classified = classify(b"{}", |_| Some(0));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Degraded
+        );
     }
 
     #[test]
@@ -572,33 +758,36 @@ mod tests {
     fn stop_with_pending_background_tasks_suppresses() {
         let body = stop_body("/tmp/session.jsonl");
         assert_eq!(
-            decide(&body, |_| Some(2)),
+            classify_decision(&body, |_| Some(2)),
             Decision::SuppressPendingBackground
         );
     }
 
     #[test]
-    fn stop_with_no_pending_tasks_marks() {
+    fn stop_with_no_pending_tasks_is_ready() {
+        // Issue #1364 — a clean turn completion is NOT a user-input request;
+        // the node lands in Ready, never AwaitingInput.
         let body = stop_body("/tmp/session.jsonl");
-        assert_eq!(decide(&body, |_| Some(0)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
     }
 
     #[test]
-    fn unreadable_transcript_marks() {
-        // "Unknown" is not "no attention needed" — a missing/unreadable
-        // transcript falls back to marking.
+    fn unreadable_transcript_is_ready() {
+        // A missing/unreadable transcript means the background scan can't
+        // prove pending work — the turn is treated as completed (Ready),
+        // which still never blocks a later permission callback.
         let body = stop_body("/tmp/session.jsonl");
-        assert_eq!(decide(&body, |_| None), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| None), Decision::Ready);
     }
 
     #[test]
-    fn missing_transcript_path_marks() {
+    fn missing_transcript_path_is_ready() {
         let body = serde_json::json!({"hook_event_name": "Stop"}).to_string().into_bytes();
-        assert_eq!(decide(&body, |_| Some(3)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(3)), Decision::Ready);
     }
 
     #[test]
-    fn permission_prompt_notification_marks_even_with_pending_tasks() {
+    fn permission_prompt_notification_marks_input_even_with_pending_tasks() {
         // A tool-approval question blocks the whole turn — background work
         // running in parallel doesn't make the user less needed.
         let body = serde_json::json!({
@@ -608,11 +797,17 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+        let classified = classify(&body, |_| Some(2));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Ok,
+            "a structured permission payload is a high-confidence signal"
+        );
     }
 
     #[test]
-    fn codex_permission_request_marks_even_with_pending_tasks() {
+    fn codex_permission_request_marks_input_even_with_pending_tasks() {
         // Codex raises a dedicated PermissionRequest hook event when a tool
         // needs approval (issue #884) — the user is needed, same as a Claude
         // permission Notification, regardless of background work.
@@ -624,7 +819,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::MarkInput);
     }
 
     #[test]
@@ -639,7 +834,7 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(
-            decide(&body, |_| Some(1)),
+            classify_decision(&body, |_| Some(1)),
             Decision::SuppressPendingBackground
         );
     }
@@ -656,7 +851,7 @@ mod tests {
     /// keeping the signature uniform guards against a future
     /// transcript reader silently swallowing the permission yield).
     #[test]
-    fn grok_notification_with_permission_type_marks() {
+    fn grok_notification_with_permission_type_marks_input() {
         let body = serde_json::json!({
             "hookEventName": "notification",
             "sessionId": "550e8400-e29b-41d4-a716-446655440000",
@@ -667,15 +862,15 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::MarkInput);
     }
 
     /// Grok's idle prompt (`notificationType = "idle_prompt"`) carries
-    /// no transcript path, so it falls through to Mark — the right
-    /// outcome for a Node Turn signal we have no transcript scan to
-    /// disambiguate.
+    /// no transcript path. With no pending work it reads as a clean turn
+    /// completion → Ready (issue #1364); it must never show the amber
+    /// "Needs attention" for a turn that finished normally.
     #[test]
-    fn grok_idle_notification_marks_without_transcript() {
+    fn grok_idle_notification_without_transcript_is_ready() {
         let body = serde_json::json!({
             "hookEventName": "notification",
             "sessionId": "550e8400-e29b-41d4-a716-446655440000",
@@ -683,15 +878,29 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::Ready);
     }
 
-    /// Grok's `Stop` event is a Node Turn — Mark. The runner treats
-    /// the route's empty 200 OK as "allow the stop" (we never return
-    /// a `decision: "block"` JSON), so the agent doesn't loop on the
-    /// gate, but the node still flips to awaiting_input.
+    /// Grok's `task_complete` notification is an explicit completion signal
+    /// → Ready (issue #1364).
     #[test]
-    fn grok_stop_event_marks() {
+    fn grok_task_complete_notification_is_ready() {
+        let body = serde_json::json!({
+            "hookEventName": "notification",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "notificationType": "task_complete",
+            "message": "Task finished",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::Ready);
+    }
+
+    /// Grok's `Stop` event is a clean turn completion → Ready. The runner
+    /// treats the route's empty 200 OK as "allow the stop" (we never return
+    /// a `decision: "block"` JSON), so the agent doesn't loop on the gate.
+    #[test]
+    fn grok_stop_event_is_ready() {
         let body = serde_json::json!({
             "hookEventName": "stop",
             "sessionId": "550e8400-e29b-41d4-a716-446655440000",
@@ -701,7 +910,30 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(0)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
+    }
+
+    /// Grok's Stop carries `reason` and `stopHookActive` — parse them into
+    /// the envelope's completion reason so the lifecycle event preserves
+    /// the provider detail (issue #1364 §1).
+    #[test]
+    fn grok_stop_envelope_preserves_completion_reason() {
+        let body = serde_json::json!({
+            "hookEventName": "stop",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "stopHookActive": false,
+            "lastAssistantMessage": "Done.",
+            "reason": "end_turn",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(0));
+        assert_eq!(classified.decision, Decision::Ready);
+        assert_eq!(classified.detail.completion_reason.as_deref(), Some("end_turn"));
+        assert_eq!(
+            classified.detail.provider_session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
     }
 
     /// The payload parser accepts Grok's camelCase `sessionId` and
@@ -727,7 +959,7 @@ mod tests {
     /// classify as a permission yield so a hook that emits either
     /// shape gets marked.
     #[test]
-    fn grok_notification_type_via_snake_case_alias_also_marks() {
+    fn grok_notification_type_via_snake_case_alias_also_marks_input() {
         // The grok-agent-sdk converts camelCase top-level keys to
         // snake_case — accept both so the same parser handles both
         // delivery surfaces.
@@ -738,7 +970,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::MarkInput);
     }
 
     // -------------------------------------------------------------------
@@ -769,15 +1001,16 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(
-            decide(&body, |_| Some(0)),
+            classify_decision(&body, |_| Some(0)),
             Decision::SuppressPendingBackground
         );
     }
 
-    /// AGY's `Stop` with `fullyIdle: true` is a genuine yield — falls
-    /// through to the transcript-scan path. No pending tasks → Mark.
+    /// AGY's `Stop` with `fullyIdle: true` is a genuine turn completion —
+    /// falls through to the transcript-scan path. No pending tasks → Ready
+    /// (issue #1364: the user is NOT needed).
     #[test]
-    fn agy_stop_with_fully_idle_true_marks() {
+    fn agy_stop_with_fully_idle_true_is_ready() {
         let body = serde_json::json!({
             "conversationId": "abc-123",
             "transcriptPath": "/tmp/session.jsonl",
@@ -786,7 +1019,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(0)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
     }
 
     /// `fullyIdle: true` with pending tasks still suppresses — the
@@ -803,16 +1036,16 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(
-            decide(&body, |_| Some(2)),
+            classify_decision(&body, |_| Some(2)),
             Decision::SuppressPendingBackground
         );
     }
 
     /// An older AGY payload that omits `fullyIdle` entirely (or any
     /// future harness that doesn't set it) falls through to the
-    /// transcript-scan path — `Stop` with no transcript path → Mark,
-    /// matching the pre-#1285 safe default. The new field is additive,
-    /// not breaking.
+    /// transcript-scan path — `Stop` with no transcript path → Ready,
+    /// matching the issue #1364 clean-turn-completion semantics. The
+    /// field is additive, not breaking.
     #[test]
     fn agy_stop_without_fully_idle_uses_transcript_scan() {
         let body = serde_json::json!({
@@ -822,7 +1055,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(0)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
 
         let missing_transcript = serde_json::json!({
             "conversationId": "abc-123",
@@ -831,16 +1064,16 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(
-            decide(&missing_transcript, |_| Some(3)),
-            Decision::Mark
+            classify_decision(&missing_transcript, |_| Some(3)),
+            Decision::Ready
         );
     }
 
     /// AGY's `PreToolUse` fires before a tool call — analogous to Codex's
     /// `PermissionRequest`. The agent is at a tool-approval decision, so
-    /// the user is needed regardless of background work. Always marks.
+    /// the user is needed regardless of background work. Always marks input.
     #[test]
-    fn agy_pre_tool_use_marks_even_with_pending_tasks() {
+    fn agy_pre_tool_use_marks_input_even_with_pending_tasks() {
         let body = serde_json::json!({
             "conversationId": "abc-123",
             "transcriptPath": "/tmp/session.jsonl",
@@ -850,7 +1083,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(decide(&body, |_| Some(5)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(5)), Decision::MarkInput);
     }
 
     /// `hook_session_id` extracts the AGY UUID from `conversationId` via
@@ -919,7 +1152,7 @@ mod tests {
         assert_eq!(parsed.model_name.as_deref(), Some("gemini-3.7-flash"));
 
         assert_eq!(hook_session_id(&body).as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
-        assert_eq!(decide(&body, |_| Some(0)), Decision::Mark);
+        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
     }
 
     /// Issue #1367: Background yield fixture (`fullyIdle: false`) with no hook_event_name
@@ -935,7 +1168,7 @@ mod tests {
             "transcriptPath": "/work/proj/transcript.jsonl"
         });
         let body = json_body.to_string().into_bytes();
-        assert_eq!(decide(&body, |_| Some(0)), Decision::SuppressPendingBackground);
+        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::SuppressPendingBackground);
     }
 
     /// Issue #1367: Various termination reasons emitted by AGY releases.
@@ -956,9 +1189,9 @@ mod tests {
             .to_string()
             .into_bytes();
             assert_eq!(
-                decide(&body_idle, |_| Some(0)),
-                Decision::Mark,
-                "reason={reason} with fullyIdle=true must Mark"
+                classify_decision(&body_idle, |_| Some(0)),
+                Decision::Ready,
+                "reason={reason} with fullyIdle=true must be Ready"
             );
 
             let body_busy = serde_json::json!({
@@ -969,21 +1202,75 @@ mod tests {
             .to_string()
             .into_bytes();
             assert_eq!(
-                decide(&body_busy, |_| Some(0)),
+                classify_decision(&body_busy, |_| Some(0)),
                 Decision::SuppressPendingBackground,
                 "reason={reason} with fullyIdle=false must Suppress"
             );
         }
     }
 
-    /// Issue #1367: Malformed or unexpected JSON payloads degrade safely to Mark
-    /// so the user is alerted that attention may be required.
+    /// Issue #1367: Malformed or unexpected JSON payloads degrade safely to
+    /// MarkInput (never to a high-confidence completion or silence), with a
+    /// degraded signal health.
     #[test]
-    fn agy_malformed_payload_degrades_to_mark() {
+    fn agy_malformed_payload_degrades_to_mark_input() {
         let malformed = b"{not: valid, json";
-        assert_eq!(decide(malformed, |_| Some(0)), Decision::Mark);
+        let classified = classify(malformed, |_| Some(0));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Degraded
+        );
 
         let empty_obj = b"{}";
-        assert_eq!(decide(empty_obj, |_| Some(0)), Decision::Mark);
+        let classified = classify(empty_obj, |_| Some(0));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Degraded
+        );
+    }
+
+    /// A question-shaped Notification is the user being asked something
+    /// that is not a tool approval — the normalized `QuestionRequested`
+    /// kind, still a MarkInput decision (issue #1364 §1).
+    #[test]
+    fn question_shaped_notification_classifies_as_question_requested() {
+        let body = serde_json::json!({
+            "hookEventName": "notification",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "notificationType": "idle_prompt",
+            "message": "The agent asks a question: which database should I use?",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(2));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.kind,
+            Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
+        );
+    }
+
+    /// The classifier records the provider event name and a high-confidence
+    /// health for a structured permission payload — the lifecycle derives
+    /// `PermissionRequested` from the semantic turn (pinned in
+    /// `session_lifecycle` tests).
+    #[test]
+    fn permission_payload_preserves_provider_event_and_health() {
+        let body = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "transcript_path": "/tmp/session.jsonl",
+            "tool_name": "Bash",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(2));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(classified.detail.provider_event.as_deref(), Some("PermissionRequest"));
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Ok
+        );
     }
 }

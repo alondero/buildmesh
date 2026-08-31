@@ -85,6 +85,7 @@ describe('attachAgentNodeListeners', () => {
     expect(eventNames).toEqual(expect.arrayContaining([
       'attention-needed',
       'attention-cleared',
+      'agent-lifecycle',
       'node-renamed',
       'node-created',
       'node-activated',
@@ -95,7 +96,7 @@ describe('attachAgentNodeListeners', () => {
       'autopilot-finish-failed',
       'autopilot-node-closed',
     ]));
-    expect(eventNames).toHaveLength(11);
+    expect(eventNames).toHaveLength(12);
   });
 
   it('returns a single unlisten handle that detaches every registered handler', async () => {
@@ -113,12 +114,12 @@ describe('attachAgentNodeListeners', () => {
     const unlisten = await attachAgentNodeListeners(surface);
 
     expect(typeof unlisten).toBe('function');
-    // 11 events → 11 unlisten registrations.
-    expect(mockListen).toHaveBeenCalledTimes(11);
+    // 12 events → 12 unlisten registrations.
+    expect(mockListen).toHaveBeenCalledTimes(12);
     expect(unlistenFns).toHaveLength(0);
 
     unlisten();
-    expect(unlistenFns).toHaveLength(11);
+    expect(unlistenFns).toHaveLength(12);
   });
 
   // The narrow surface contract: every handler must dispatch to the
@@ -166,6 +167,85 @@ describe('attachAgentNodeListeners', () => {
       { method: 'setSemanticTurn', args: [7, null] },
       { method: 'patchAgentNode', args: [7, { status: 'running' }] },
     ]);
+  });
+
+  it('agent-lifecycle dispatches the resulting status + signal health (issue #1364)', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'agent-lifecycle') {
+        capturedHandler = handler;
+      }
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({
+      payload: {
+        session_id: 42,
+        kind: 'turn_completed',
+        status: 'ready',
+        message: 'turn finished',
+        provider_event: 'Stop',
+        provider_session_id: null,
+        completion_reason: 'end_turn',
+        transcript_path: null,
+        timestamp: '2026-08-31T00:00:00+00:00',
+        signal_health: 'ok',
+        semantic_turn: null,
+      },
+    });
+
+    expect(surface.__calls).toEqual([
+      { method: 'patchAgentNode', args: [42, { status: 'ready' }] },
+      { method: 'patchAgentNode', args: [42, { signal_health: 'ok' }] },
+      { method: 'setSemanticTurn', args: [42, null] },
+    ]);
+  });
+
+  it('agent-lifecycle with a semantic turn patches it through (issue #1364)', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'agent-lifecycle') {
+        capturedHandler = handler;
+      }
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({
+      payload: {
+        session_id: 42,
+        kind: 'permission_requested',
+        status: 'awaiting_input',
+        message: null,
+        provider_event: 'PermissionRequest',
+        provider_session_id: null,
+        completion_reason: null,
+        transcript_path: null,
+        timestamp: '2026-08-31T00:00:00+00:00',
+        signal_health: 'ok',
+        semantic_turn: {
+          node_id: 42,
+          kind: 'permission_request',
+          description: 'Allow edit: src/lib/auth.ts',
+        },
+      },
+    });
+
+    const calls = surface.__calls;
+    expect(calls[0]).toEqual({ method: 'patchAgentNode', args: [42, { status: 'awaiting_input' }] });
+    expect(calls[1]).toEqual({ method: 'patchAgentNode', args: [42, { signal_health: 'ok' }] });
+    // The semantic turn flows to the banner; it is NOT cleared.
+    expect(calls[2]).toEqual({
+      method: 'setSemanticTurn',
+      args: [42, { node_id: 42, kind: 'permission_request', description: 'Allow edit: src/lib/auth.ts' }],
+    });
   });
 
   it('node-renamed dispatches patchAgentNode with the new name', async () => {

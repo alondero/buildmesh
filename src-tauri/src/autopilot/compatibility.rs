@@ -641,6 +641,7 @@ mod tests {
             supports_resume: true,
             auto_resume_on_startup: true,
             requires_attention_hook: true,
+            attention_capability: crate::agent::capabilities::AttentionCapability::None,
             produces_readable_transcript: true,
             supports_model_override: true,
             supports_effort_override: false,

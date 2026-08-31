@@ -98,6 +98,7 @@ const AGENT_NODE_RECONCILE_SCHEMA: Record<ReconciledKey, true> = {
   head_repo_owner: true,
   head_repo_clone_url: true,
   source_pr_pinned_sha: true,
+  signal_health: true,
 };
 const AGENT_NODE_RECONCILE_FIELDS = Object.keys(
   AGENT_NODE_RECONCILE_SCHEMA,

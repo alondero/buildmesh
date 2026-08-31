@@ -13,6 +13,7 @@ use super::{
 };
 use crate::agent::process::PROCESS_REGISTRY;
 use crate::agent::session_lifecycle;
+use crate::agent::session_lifecycle::SessionLifecycleSink as _;
 use crate::git::worktree::provision::{
     fork_remote_alias, locked_fetch_pr_head, provision_for_spawn, read_origin_ref_sha,
     AppHandleSink, ProvisionHooks, SpawnContext, SpawnSource,
@@ -1097,6 +1098,30 @@ pub(crate) async fn spawn_agent_inner(
         );
     };
 
+    // Issue #1364 §3 — emit a `SignalUnavailable` lifecycle event on both
+    // transports when the attention hook could not be provisioned. The node
+    // stays spawnable; the clients just learn the harness signals can't be
+    // trusted yet.
+    let emit_signal_unavailable = |message: &str| {
+        if let Some(app) = crate::http::app_handle() {
+            let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
+            let detail = crate::agent::session_lifecycle::HookSignalDetail {
+                provider: Some(provider.to_string()),
+                message: Some(message.to_string()),
+                signal_health: crate::agent::session_lifecycle::SignalHealth::Unavailable,
+                ..Default::default()
+            };
+            let payload = crate::agent::session_lifecycle::LifecycleChangedPayload::new(
+                session_id,
+                crate::agent::session_lifecycle::LifecycleKind::SignalUnavailable,
+                crate::models::SessionStatus::Running,
+                &detail,
+                message,
+            );
+            sink.emit_lifecycle_changed(payload);
+        }
+    };
+
     // Trust is a launch prerequisite, independent of attention hooks. The
     // prepared routing carries the exact runtime identity for Codex proxy
     // launches so trust and child execution use one WSL distro/home. Both
@@ -1131,6 +1156,24 @@ pub(crate) async fn spawn_agent_inner(
                     e
                 );
                 emit_provider_error(&format!("attention hooks unavailable: {e}"));
+                // Issue #1364 §3 — surface the failed provisioning on the
+                // node itself (a layered health, never a status) and emit a
+                // `SignalUnavailable` lifecycle event to both clients. A
+                // failed hook must never prevent the user from opening the
+                // terminal — this is visibility, not a gate.
+                let _ = crate::db::update_agent_node_signal_health(
+                    session_id,
+                    Some(crate::agent::session_lifecycle::SignalHealth::Unavailable),
+                );
+                emit_signal_unavailable(&format!("attention hooks unavailable: {e}"));
+            } else if needs_attention_hook {
+                // Provisioning succeeded — the hook file is in place. The
+                // first real callback will confirm delivery; until then the
+                // health reads "ok" (provisioned, not yet proven).
+                let _ = crate::db::update_agent_node_signal_health(
+                    session_id,
+                    Some(crate::agent::session_lifecycle::SignalHealth::Ok),
+                );
             }
         }
         Err(error) => {
@@ -1140,6 +1183,13 @@ pub(crate) async fn spawn_agent_inner(
                 error
             );
             emit_provider_error(&format!("provider provisioning unavailable: {error}"));
+            if needs_attention_hook {
+                let _ = crate::db::update_agent_node_signal_health(
+                    session_id,
+                    Some(crate::agent::session_lifecycle::SignalHealth::Unavailable),
+                );
+                emit_signal_unavailable(&format!("provider provisioning unavailable: {error}"));
+            }
         }
     }
     timer.checkpoint("after_workspace_trust");

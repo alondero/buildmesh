@@ -27,23 +27,52 @@ pub fn publish(node_id: i64, app: &AppHandle) {
     publish_passive(node_id, app);
 }
 
-pub fn publish_with_detail(
+pub fn publish_with_signal(
     node_id: i64,
     app: &AppHandle,
     semantic_turn: Option<crate::agent::session_lifecycle::SemanticTurnPayload>,
+    detail: crate::agent::session_lifecycle::HookSignalDetail,
 ) {
-    crate::commands::attention::mark_attention_with_detail(node_id, app, semantic_turn);
+    crate::commands::attention::mark_attention_with_signal(node_id, app, semantic_turn, &detail);
     publish_passive(node_id, app);
 }
 
-/// Publish a Node Turn that is only a background-wait yield (issue #878): the
-/// harness ended its turn with background tasks still running and will
-/// re-invoke itself, so the user is NOT needed. Naming and the autopilot
-/// pipeline still see the turn (both are safe on a non-final turn — rename is
-/// idempotent, the pipeline classifies the tail and no-ops on "working"), but
-/// the node is not marked for attention.
-pub fn publish_without_attention(node_id: i64, app: &AppHandle) {
+/// Publish a Node Turn that is a clean turn completion (issue #1364): the
+/// harness signalled the turn finished with no user input needed and no
+/// background work pending. The node lands in `Ready` (never `Completed`).
+/// Naming and the autopilot pipeline still see the turn via
+/// [`publish_passive`]; the lifecycle writes `Ready` and emits
+/// `agent-lifecycle` on both transports.
+pub fn publish_ready(
+    node_id: i64,
+    app: &AppHandle,
+    detail: crate::agent::session_lifecycle::HookSignalDetail,
+) {
     publish_passive(node_id, app);
+    let _ = crate::agent::session_lifecycle::on_turn_completed(
+        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
+        node_id,
+        &detail,
+    );
+}
+
+/// Publish a Node Turn that is only a background-wait yield (issue #878,
+/// #1364): the harness ended its turn with background tasks still running
+/// and will re-invoke itself, so the user is NOT needed. No status write —
+/// the node stays `Running` — but the `agent-lifecycle` `BackgroundRunning`
+/// event is emitted on both transports so clients can distinguish "busy on
+/// background work" from "waiting for input".
+pub fn publish_background(
+    node_id: i64,
+    app: &AppHandle,
+    detail: crate::agent::session_lifecycle::HookSignalDetail,
+) {
+    publish_passive(node_id, app);
+    let _ = crate::agent::session_lifecycle::on_background_running(
+        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
+        node_id,
+        &detail,
+    );
 }
 
 /// The attention-independent consumers, shared by both publish flavours.

@@ -101,7 +101,11 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// `create_autopilot_circuit` writes `enabled = 0` explicitly so new
 /// rows are disabled regardless. Existing enabled circuits are left
 /// enabled.
-pub(crate) const SCHEMA_VERSION: u32 = 34;
+///
+/// v35 — Agent node hook/attention signal health (issue #1364): adds the
+/// nullable `agent_nodes.signal_health` TEXT column (`ok` / `degraded` /
+/// `unavailable`, NULL before first provisioning outcome or callback).
+pub(crate) const SCHEMA_VERSION: u32 = 35;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -355,6 +359,12 @@ const SPECS: &[ColumnSpec] = &[
     ColumnSpec { version: 16, table: "agent_nodes", column: "source_pr_pinned_sha", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
     // v29 — Pinned Grid view mode (wayfinder #982 / ticket #984).
     ColumnSpec { version: 29, table: "agent_nodes", column: "is_pinned", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::Nullable },
+    // v35 — Hook/attention signal health (issue #1364 §3). Layered nullable
+    // TEXT column: `ok` / `degraded` / `unavailable`, or NULL before the
+    // first provisioning outcome or callback. Never a status — the node
+    // lifecycle status stays the primary state, this field explains whether
+    // the harness's lifecycle signals can be trusted.
+    ColumnSpec { version: 35, table: "agent_nodes", column: "signal_health", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // autopilot_runs
