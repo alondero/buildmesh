@@ -39,8 +39,12 @@ describe('resolveKeyAction', () => {
       expect(resolveKeyAction(makeState({ isMac: true, metaKey: true, key: 'f' }))).toBe('find');
     });
 
-    it('Cmd+K → clear', () => {
-      expect(resolveKeyAction(makeState({ isMac: true, metaKey: true, key: 'k' }))).toBe('clear');
+    it('Cmd+Shift+K → clear', () => {
+      expect(resolveKeyAction(makeState({ isMac: true, metaKey: true, shiftKey: true, key: 'k' }))).toBe('clear');
+    });
+
+    it('Cmd+K (no Shift) → passthrough (freed for the Omnibar, issue #1409)', () => {
+      expect(resolveKeyAction(makeState({ isMac: true, metaKey: true, key: 'k' }))).toBe('passthrough');
     });
 
     it('Ctrl+C (no Cmd) → passthrough (SIGINT)', () => {

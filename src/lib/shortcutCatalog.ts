@@ -123,6 +123,32 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     macKey: '⌘+.',
     splash: true,
   },
+  {
+    // Issue #1409 — the Universal Command Omnibar. ⌘/Ctrl+K opens the palette
+    // with the default (files) mode; ⌘/Ctrl+P opens it in command mode
+    // (editors' "quick open file / run command" convention). `splash: true`
+    // on the K row only: the splash is the pre-spawn empty-state hint, where
+    // "command" mode has nothing to run yet — same discipline as
+    // `cycle-grid-modes`.
+    //
+    // Windows/Linux carry the Shift modifier: bare Ctrl+K (readline
+    // kill-line) and Ctrl+P (previous-history) must keep reaching the shell,
+    // so the palette chords are Ctrl+Shift+K / Ctrl+Shift+P — matching the
+    // platform branch in App.tsx (issue #1409 review).
+    action: 'open-omnibar',
+    group: 'app',
+    description: 'Open the universal command bar',
+    winKey: 'Ctrl+Shift+K',
+    macKey: '⌘+K',
+    splash: true,
+  },
+  {
+    action: 'open-omnibar-commands',
+    group: 'app',
+    description: 'Open the universal command bar (commands)',
+    winKey: 'Ctrl+Shift+P',
+    macKey: '⌘+P',
+  },
 
   // --- Grid (window-global) -----------------------------------------------
   {
@@ -240,7 +266,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     group: 'terminal',
     description: 'Clear focused terminal',
     winKey: 'Ctrl+Shift+K',
-    macKey: '⌘+K',
+    macKey: '⌘+Shift+K',
   },
 
   // --- Modal (context-bound Escape) ---------------------------------------

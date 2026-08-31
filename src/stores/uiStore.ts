@@ -11,6 +11,14 @@ import type { SessionStatus } from '../types/generated/SessionStatus';
 // it's a pure UI concern — no backend serialises it.
 export type ViewMode = 'single' | 'mesh' | 'pinned' | 'all';
 
+// The Universal Command Omnibar's preselected palette mode (issue #1409 —
+// map #1371 Decision #2): 'files' is the default search (⌘/Ctrl+K),
+// 'commands' is the command-runner (⌘/Ctrl+P) — the editors' "quick open
+// file / run command" convention. The palette UI reads `omnibarMode` once
+// at mount to seed its search box; the user can switch modes inside the
+// palette without touching the store.
+export type OmnibarMode = 'files' | 'commands';
+
 // The grid modes 'single' can be entered from — `exitSingleMode()` returns
 // here. 'single' itself is never a valid return target.
 export type NonSingleViewMode = Exclude<ViewMode, 'single'>;
@@ -311,6 +319,17 @@ interface UIState extends GridControls {
   openCircuitEditor: (circuitId: number) => void;
   closeCircuitEditor: () => void;
 
+  // ---- Universal Command Omnibar (map #1371 Decision #2 / issue #1409) ----
+  // Same overlay discipline as the circuit editor and diff overlay above:
+  // the palette floats over the terminal grid while open. `omnibarMode`
+  // seeds the palette's search box; the user can switch modes inside the
+  // palette without touching the store.
+  omnibarOpen: boolean;
+  omnibarMode: OmnibarMode;
+  openOmnibar: (mode?: OmnibarMode) => void;
+  closeOmnibar: () => void;
+  toggleOmnibar: (mode?: OmnibarMode) => void;
+
   // Agent node currently under an OS file-drag, or null. Drives the terminal
   // "drop file to paste path" overlay; set by the window-level drop listener.
   dragTargetNodeId: number | null;
@@ -389,6 +408,29 @@ export const useUIStore = create<UIState>((set, get) => {
     },
     closeCircuitEditor: () => {
       set({ activeCircuitEditorId: null });
+    },
+
+    omnibarOpen: false,
+    omnibarMode: 'files',
+    openOmnibar: (mode = 'files') => {
+      // Opening an already-open palette just re-seeds the mode — the user
+      // pressed the other chord while the palette was up, so switch it to
+      // that mode rather than stacking a second palette.
+      set({ omnibarOpen: true, omnibarMode: mode });
+    },
+    closeOmnibar: () => {
+      if (!get().omnibarOpen) return;
+      set({ omnibarOpen: false });
+    },
+    // Pressing the palette's activation chord while it is already open in
+    // the same mode closes it (universal modal-toggle expectation).
+    toggleOmnibar: (mode = 'files') => {
+      const { omnibarOpen, omnibarMode } = get();
+      if (omnibarOpen && omnibarMode === mode) {
+        set({ omnibarOpen: false });
+      } else {
+        set({ omnibarOpen: true, omnibarMode: mode });
+      }
     },
 
     // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +

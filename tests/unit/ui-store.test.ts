@@ -557,4 +557,72 @@ describe('useUIStore', () => {
       });
     });
   });
+
+  describe('Omnibar (map #1371 Decision #2 / issue #1409)', () => {
+    beforeEach(() => {
+      useUIStore.setState({ omnibarOpen: false, omnibarMode: 'files' });
+    });
+
+    describe('openOmnibar', () => {
+      it('opens the palette in files mode by default (⌘/Ctrl+K)', () => {
+        useUIStore.getState().openOmnibar();
+        expect(useUIStore.getState().omnibarOpen).toBe(true);
+        expect(useUIStore.getState().omnibarMode).toBe('files');
+      });
+
+      it('opens the palette in the requested mode (⌘/Ctrl+P → commands)', () => {
+        useUIStore.getState().openOmnibar('commands');
+        expect(useUIStore.getState().omnibarOpen).toBe(true);
+        expect(useUIStore.getState().omnibarMode).toBe('commands');
+      });
+
+      it('re-seeds the mode when the palette is already open (no stacking)', () => {
+        useUIStore.getState().openOmnibar('files');
+        useUIStore.getState().openOmnibar('commands');
+        expect(useUIStore.getState().omnibarOpen).toBe(true);
+        expect(useUIStore.getState().omnibarMode).toBe('commands');
+      });
+    });
+
+    describe('closeOmnibar', () => {
+      it('closes the palette', () => {
+        useUIStore.getState().openOmnibar();
+        useUIStore.getState().closeOmnibar();
+        expect(useUIStore.getState().omnibarOpen).toBe(false);
+      });
+
+      it('is a no-op when the palette is already closed', () => {
+        useUIStore.getState().closeOmnibar();
+        expect(useUIStore.getState().omnibarOpen).toBe(false);
+      });
+    });
+
+    describe('toggleOmnibar', () => {
+      it('opens the palette when closed', () => {
+        useUIStore.getState().toggleOmnibar();
+        expect(useUIStore.getState().omnibarOpen).toBe(true);
+        expect(useUIStore.getState().omnibarMode).toBe('files');
+      });
+
+      it('closes the palette when already open in the same mode (activation chord toggles)', () => {
+        useUIStore.getState().openOmnibar('files');
+        useUIStore.getState().toggleOmnibar('files');
+        expect(useUIStore.getState().omnibarOpen).toBe(false);
+      });
+
+      it('switches mode instead of closing when open in a different mode', () => {
+        useUIStore.getState().openOmnibar('files');
+        useUIStore.getState().toggleOmnibar('commands');
+        expect(useUIStore.getState().omnibarOpen).toBe(true);
+        expect(useUIStore.getState().omnibarMode).toBe('commands');
+      });
+
+      it('leaves the mode untouched when toggling closed', () => {
+        useUIStore.getState().openOmnibar('commands');
+        useUIStore.getState().toggleOmnibar('commands');
+        expect(useUIStore.getState().omnibarOpen).toBe(false);
+        expect(useUIStore.getState().omnibarMode).toBe('commands');
+      });
+    });
+  });
 });
