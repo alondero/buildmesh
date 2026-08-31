@@ -43,8 +43,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   diffFileAgainstHead,
   diffNodeFileAgainstBase,
+  getGitStatus,
+  nodeChangedFiles,
+  stageFile,
+  revertFile,
   type DiffResult,
   type FileDiff,
+  type GitStatus,
 } from '../../lib/tauri';
 import { useUIStore, type DiffContext } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
@@ -53,6 +58,7 @@ import { useGitPathInvalidation } from '../../hooks/useGitPathInvalidation';
 import { Diff } from '../Diff/Diff';
 import { PrDiffView } from './PrDiffView';
 import { DiffOverlayShell } from './DiffOverlayShell';
+import { DiffFileNavDrawer } from './DiffFileNavDrawer';
 import { LoadingState } from '../shared/Spinner';
 
 interface CenterDiffOverlayProps {
@@ -156,16 +162,20 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   // signal that the live refresh is failing. Cleared on the next
   // successful refresh.
   const [backgroundError, setBackgroundError] = useState<string | null>(null);
-
-  // Monotonic token so an older in-flight fetch (rapid file switching, or a
-  // burst of GIT_CHANGED events) can't overwrite the newest result.
-  const reqId = useRef(0);
+  // Issue #1374 (item 3) — Quick File Navigation Drawer. Closed by
+  // default so the diff gets the full center workspace on first paint;
+  // the user opens it to hop between files without leaving the overlay.
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const openDiff = useUIStore((s) => s.openDiff);
 
   // Issue #1181 — per-file diffs also go through `run_blocking`, and rapid
   // file switching in
   // the overlay + `git-changed` bursts can pile up the same way the
   // review panel does. Owning an AbortController + matching the
   // existing reqId pattern keeps the two consumers symmetric.
+  // Monotonic token so an older in-flight fetch (rapid file switching,
+  // or a burst of GIT_CHANGED events) can't overwrite the newest result.
+  const reqId = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
 
   const fetchDiff = useCallback(
@@ -235,10 +245,56 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
     minRefetchIntervalMs: 2_000,
   });
 
+  // Issue #1374 — per-file quick actions. All three operate on the diff's
+  // `rootPath` + `filePath`. Errors are swallowed into a console log for now;
+  // a future ticket can surface them as toasts. Copy Diff serializes the
+  // fetched `FileDiff[]` into a GitHub-style unified diff text block.
+  const quickActions = {
+    onStageFile: () => {
+      stageFile(diff.rootPath, diff.filePath).catch((e) =>
+        console.error('[CenterDiffOverlay] stage_file failed:', e),
+      );
+    },
+    onRevertFile: () => {
+      revertFile(diff.rootPath, diff.filePath).catch((e) =>
+        console.error('[CenterDiffOverlay] revert_file failed:', e),
+      );
+    },
+    onCopyDiff: () => {
+      const text = buildDiffClipboardText(diff.filePath, files);
+      navigator.clipboard.writeText(text).catch((e) =>
+        console.error('[CenterDiffOverlay] copy diff failed:', e),
+      );
+    },
+  };
+
+  // Issue #1374 — bulk file-list fetch for the Quick File Navigation
+  // Drawer. Base diffs use `node_changed_files` (per-node cancel-aware,
+  // see `commands/diff.rs`); head diffs use `get_git_status` for the
+  // session's working tree. The drawer re-fetches when this callback's
+  // identity changes (memoised per lens below).
+  const fetchAllFiles = useCallback((): Promise<GitStatus[]> => {
+    if (diff.source === 'base' && diff.nodeId !== null) {
+      return nodeChangedFiles(diff.nodeId);
+    }
+    return getGitStatus(diff.rootPath);
+  }, [diff.source, diff.nodeId, diff.rootPath]);
+
+  // Jump-to-file: update `activeDiffFile` in the UI store so the overlay
+  // body re-fetches the new file's diff via the existing `fetchDiff`
+  // path. Reuses the same context shape, only the `filePath` changes.
+  const jumpToFile = useCallback(
+    (path: string) => {
+      openDiff({ ...diff, filePath: path });
+    },
+    [openDiff, diff],
+  );
+
   return (
     <DiffOverlayShell
       diff={diff}
       onClose={closeDiff}
+      quickActions={quickActions}
       modeLabel={{
         text: diff.source === 'base' ? 'vs base' : 'vs HEAD',
         title:
@@ -264,41 +320,105 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
         </>
       }
     >
-      {error ? (
-        <div className="h-full flex items-center justify-center text-accent-red text-xs px-3 text-center">
-          {error}
-        </div>
-      ) : files === null ? (
-        <div className="h-full flex items-center justify-center">
-          <LoadingState label="Loading diff…" />
-        </div>
-      ) : (
-        <>
-          {backgroundError && (
-            // Issue #1264 — subtle "refresh failed" chip. The diff
-            // below is still the last-successful render; the chip
-            // tells the user the live refresh is failing so the
-            // visible diff is potentially stale. Non-blocking so a
-            // transient git hiccup doesn't tear down the overlay.
-            <div
-              role="status"
-              aria-live="polite"
-              data-testid="background-refresh-failed"
-              className="px-3 py-1.5 bg-status-warning/10 border-b border-status-warning/30 text-2xs text-status-warning flex items-center gap-2"
-            >
-              <span
-                aria-hidden="true"
-                className="inline-block h-1.5 w-1.5 rounded-full bg-status-warning"
+      {/* Issue #1374 — render-prop so the shell's Unified/Split mode is
+          threaded into `<Diff>` as a single source of truth. The shell's
+          toolbar toggle AND each `<FileDiffCard>`'s inline toggle both
+          route through `setViewMode`, so they stay in sync without
+          duplicating the localStorage write. */}
+      {(viewMode, setViewMode) =>
+        error ? (
+          <div className="h-full flex items-center justify-center text-accent-red text-xs px-3 text-center">
+            {error}
+          </div>
+        ) : files === null ? (
+          <div className="h-full flex items-center justify-center">
+            <LoadingState label="Loading diff…" />
+          </div>
+        ) : (
+          <div className="h-full flex min-h-0">
+            {/* Issue #1374 (item 3) — collapsible Quick File Navigation
+                Drawer. Sits as a left-edge side panel inside the body;
+                closed by default so the diff gets the full width. The
+                toggle button sits at the top of the panel so the user
+                always has a place to collapse it back. */}
+            {drawerOpen && (
+              <DiffFileNavDrawer
+                fetchFiles={fetchAllFiles}
+                currentFilePath={diff.filePath}
+                onSelectFile={jumpToFile}
               />
-              Refresh failed — showing last known diff
-              <span className="text-text-muted truncate" title={backgroundError}>
-                ({backgroundError})
-              </span>
+            )}
+            <div className="flex-1 min-w-0 flex flex-col min-h-0">
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-subtle bg-bg-surface shrink-0">
+                <button
+                  type="button"
+                  data-testid="diff-file-nav-toggle"
+                  onClick={() => setDrawerOpen((v) => !v)}
+                  aria-pressed={drawerOpen}
+                  aria-label={drawerOpen ? 'Hide file navigation' : 'Show file navigation'}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs text-text-secondary hover:text-accent-cyan hover:bg-bg-card transition-colors border border-border-subtle"
+                >
+                  {drawerOpen ? '◂ Hide files' : '▸ Show files'}
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 overflow-auto">
+                {backgroundError && (
+                  // Issue #1264 — subtle "refresh failed" chip. The diff
+                  // below is still the last-successful render; the chip
+                  // tells the user the live refresh is failing so the
+                  // visible diff is potentially stale. Non-blocking so a
+                  // transient git hiccup doesn't tear down the overlay.
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    data-testid="background-refresh-failed"
+                    className="px-3 py-1.5 bg-status-warning/10 border-b border-status-warning/30 text-2xs text-status-warning flex items-center gap-2"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="inline-block h-1.5 w-1.5 rounded-full bg-status-warning"
+                    />
+                    Refresh failed — showing last known diff
+                    <span className="text-text-muted truncate" title={backgroundError}>
+                      ({backgroundError})
+                    </span>
+                  </div>
+                )}
+                <Diff files={files} mode={viewMode} onModeChange={setViewMode} />
+              </div>
             </div>
-          )}
-          <Diff files={files} />
-        </>
-      )}
+          </div>
+        )
+      }
     </DiffOverlayShell>
   );
+}
+
+/** Serialize a single file's diff into GitHub-style unified diff text for
+ *  clipboard copying (issue #1374 "Copy Diff"). `files` may be null while
+ *  loading — fall back to a header-only stub so the button never silently
+ *  no-ops. */
+function buildDiffClipboardText(
+  filePath: string,
+  files: FileDiff[] | null,
+): string {
+  if (!files || files.length === 0) {
+    return `diff --git a/${filePath} b/${filePath}\n(no diff data loaded)`;
+  }
+  const lines: string[] = [];
+  for (const f of files) {
+    lines.push(`diff --git a/${f.path} b/${f.path}`);
+    if (f.old_path && f.old_path !== f.path) {
+      lines.push(`rename from ${f.old_path}`);
+      lines.push(`rename to ${f.path}`);
+    }
+    for (const h of f.hunks) {
+      lines.push(`@@ -${h.old_start},${h.old_lines} +${h.new_start},${h.new_lines} @@`);
+      for (const l of h.lines) {
+        const marker = l.line_type === 'add' ? '+' : l.line_type === 'remove' ? '-' : ' ';
+        lines.push(`${marker}${l.content}`);
+      }
+    }
+  }
+  return lines.join('\n');
 }

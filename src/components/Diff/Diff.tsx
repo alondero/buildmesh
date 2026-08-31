@@ -1,7 +1,34 @@
 import { useState } from 'react';
 import type { DiffHunk, DiffLine, FileDiff } from '../../lib/tauri';
 import { fileDiffStatusMeta } from '../../lib/status';
-import { splitPath } from './diffFormat';
+import { splitPath, alignHunkRows, type SplitRow } from './diffFormat';
+
+/** Where the Unified/Split preference is saved (issue #1374). */
+export const DIFF_VIEW_STORAGE_KEY = 'buildmesh.diff-view';
+export type DiffViewMode = 'unified' | 'split';
+
+/** Boot the Unified/Split preference from localStorage, try/catch-wrapped
+ *  like `loadViewMode` in `uiStore` (storage unavailable in tests / private
+ *  mode). Anything but 'split' falls back to 'unified'. */
+export function loadDiffViewMode(): DiffViewMode {
+  try {
+    const stored = localStorage.getItem(DIFF_VIEW_STORAGE_KEY);
+    if (stored === 'split') return 'split';
+  } catch {
+    // localStorage unavailable — default to unified.
+  }
+  return 'unified';
+}
+
+/** Write-on-change persistence, try/catch-wrapped like `persistViewMode` —
+ *  a storage failure must never block the toggle itself. */
+export function persistDiffViewMode(mode: DiffViewMode): void {
+  try {
+    localStorage.setItem(DIFF_VIEW_STORAGE_KEY, mode);
+  } catch {
+    // localStorage unavailable — in-memory state still flips.
+  }
+}
 
 /**
  * Shared diff renderer: a GitHub-style stacked, unified, syntax-highlighted
@@ -102,10 +129,81 @@ export function HunkBlock({ hunk, last }: { hunk: DiffHunk; last: boolean }) {
   );
 }
 
+/** One cell of a split row: gutter (its own side's line number) + content.
+ *  `html` is the preserved syntect server-side token HTML (issue #1374). */
+function SplitCell({
+  line,
+  html,
+  side,
+}: {
+  line: DiffLine | null;
+  html?: string;
+  side: 'old' | 'new';
+}) {
+  const type = line?.line_type;
+  const bg =
+    type === 'add' && side === 'new'
+      ? DIFF_LINE_BG.add
+      : type === 'remove' && side === 'old'
+        ? DIFF_LINE_BG.remove
+        : '';
+  return (
+    <div className={`flex flex-1 min-w-0 ${bg}`}>
+      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted/50 select-none flex-shrink-0`}>
+        {/* Left pane shows the old file's line numbers, right pane the
+            new file's — matching GitHub's split view (#1374). */}
+        {side === 'old' ? line?.old_num ?? '' : line?.new_num ?? ''}
+      </span>
+      <span className={`w-4 text-center select-none flex-shrink-0 ${markerColor(type ?? 'context')}`}>
+        {line ? marker(line.line_type) : ''}
+      </span>
+      {line && html ? (
+        // Highlighted HTML is generated server-side by syntect (trusted,
+        // not user-controlled markup), one span run per line.
+        <span
+          className="whitespace-pre flex-1 min-w-0 overflow-x-auto"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      ) : (
+        <span className="whitespace-pre flex-1 min-w-0">{line?.content ?? ''}</span>
+      )}
+    </div>
+  );
+}
+
+/** One row of a side-by-side diff: left (old) cell + right (new) cell. */
+function SplitRowView({ row }: { row: SplitRow }) {
+  return (
+    <div className="flex">
+      <SplitCell line={row.old} html={row.oldHtml} side="old" />
+      <div className="w-px bg-border-subtle flex-shrink-0" />
+      <SplitCell line={row.new} html={row.newHtml} side="new" />
+    </div>
+  );
+}
+
+/** A hunk rendered side-by-side: `@@ … @@` header + aligned rows. Rows are
+ *  paired by `alignHunkRows` (issue #1374) — a remove+add run shares one
+ *  row, so left and right panes stay in sync without line desynchronization. */
+export function SplitHunkBlock({ hunk, last }: { hunk: DiffHunk; last: boolean }) {
+  return (
+    <div className={last ? '' : 'border-b border-border-subtle'}>
+      <div className="px-2 py-0.5 bg-bg-overlay/60 text-text-muted select-none">
+        @@ -{hunk.old_start},{hunk.old_lines} +{hunk.new_start},{hunk.new_lines} @@
+      </div>
+      {alignHunkRows(hunk).map((row, i) => (
+        <SplitRowView key={i} row={row} />
+      ))}
+    </div>
+  );
+}
+
 export function FileDiffCard({
   file,
   defaultOpen = true,
   onOpenFile,
+  mode: modeProp,
+  onModeChange,
 }: {
   file: FileDiff;
   defaultOpen?: boolean;
@@ -113,8 +211,19 @@ export function FileDiffCard({
    *  calls this with the file's path (issue #379). Omit it where there's no
    *  spacious surface to open into (e.g. the overlay renders its own diff). */
   onOpenFile?: (path: string) => void;
+  /** Diff view mode — 'unified' (default) or 'split' (issue #1374). */
+  mode?: DiffViewMode;
+  /** Called when the mode changes — the parent persists it. */
+  onModeChange?: (mode: DiffViewMode) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [ownMode, setOwnMode] = useState<DiffViewMode>(loadDiffViewMode);
+  const mode = modeProp ?? ownMode;
+  const setMode = (m: DiffViewMode) => {
+    setOwnMode(m);
+    persistDiffViewMode(m);
+    onModeChange?.(m);
+  };
   const meta = fileDiffStatusMeta(file.status);
   const { dir, name } = splitPath(file.path);
 
@@ -156,6 +265,28 @@ export function FileDiffCard({
             -{file.deletions}
           </span>
         )}
+        {/* Unified/Split toggle (issue #1374) — a sibling of the open-in-
+            overlay button, same invalid-HTML-in-button reasoning. */}
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label={`Toggle ${mode === 'split' ? 'unified' : 'split'} diff view`}
+          title={mode === 'split' ? 'Switch to unified view' : 'Switch to split view'}
+          onClick={(e) => {
+            e.stopPropagation();
+            setMode(mode === 'split' ? 'unified' : 'split');
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              setMode(mode === 'split' ? 'unified' : 'split');
+            }
+          }}
+          className="flex-shrink-0 text-text-muted hover:text-accent-cyan transition-colors cursor-pointer font-mono text-2xs px-1"
+        >
+          {mode === 'split' ? '⬛⬛' : '⬛'}
+        </span>
         {onOpenFile && (
           // Rendered as a sibling — nesting a <button> inside the header
           // button is invalid HTML and breaks click handling. `stopPropagation`
@@ -212,6 +343,14 @@ export function FileDiffCard({
             </div>
           ) : file.hunks.length === 0 ? (
             <div className="px-3 py-2 text-text-muted italic">No changes</div>
+          ) : mode === 'split' ? (
+            file.hunks.map((hunk, i) => (
+              <SplitHunkBlock
+                key={i}
+                hunk={hunk}
+                last={i === file.hunks.length - 1}
+              />
+            ))
           ) : (
             file.hunks.map((hunk, i) => (
               <HunkBlock
@@ -244,15 +383,35 @@ export function diffTotals(files: FileDiff[]): DiffTotals {
   );
 }
 
-/** Stacked review surface: every changed file's diff in one scroll column. */
+/** Stacked review surface: every changed file's diff in one scroll column.
+ *  Issue #1374: `mode` switches between the unified stacked format and a
+ *  2-column side-by-side (split) format with synchronized scrolling — the
+ *  panes scroll together because each split row is ONE flex row, so row
+ *  heights match by construction and the gutters never desynchronize. */
 export function Diff({
   files,
   onOpenFile,
+  mode: modeProp,
+  onModeChange,
 }: {
   files: FileDiff[];
   /** Threaded to each card's "open in center overlay" affordance (#379). */
   onOpenFile?: (path: string) => void;
+  /** Diff view mode — 'unified' (default) or 'split' (issue #1374).
+   *  Controlled by the parent (DiffOverlayShell); when omitted, the
+   *  component manages its own persisted preference. */
+  mode?: DiffViewMode;
+  /** Called when the mode changes — the parent persists it. */
+  onModeChange?: (mode: DiffViewMode) => void;
 }) {
+  const [ownMode, setOwnMode] = useState<DiffViewMode>(loadDiffViewMode);
+  const mode = modeProp ?? ownMode;
+  const setMode = (m: DiffViewMode) => {
+    setOwnMode(m);
+    persistDiffViewMode(m);
+    onModeChange?.(m);
+  };
+
   if (files.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-text-muted text-xs">
@@ -263,7 +422,13 @@ export function Diff({
   return (
     <div>
       {files.map((file) => (
-        <FileDiffCard key={file.path} file={file} onOpenFile={onOpenFile} />
+        <FileDiffCard
+          key={file.path}
+          file={file}
+          onOpenFile={onOpenFile}
+          mode={mode}
+          onModeChange={setMode}
+        />
       ))}
     </div>
   );

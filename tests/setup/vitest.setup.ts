@@ -1,4 +1,5 @@
 import { vi } from 'vitest';
+import { cleanup } from '@testing-library/react';
 
 // ============================================================
 // Tauri API Mocks
@@ -193,4 +194,20 @@ beforeEach(async () => {
     ]);
   resetPathInvalidatedCacheForTests();
   resetProviderCachesForTests();
+});
+
+// React Testing Library does not auto-unmount rendered components between
+// tests by default. Without an explicit `cleanup()`, a component mounted
+// in test N is still in the React fiber tree when test N+1 starts. Async
+// store mutations fired in test N (e.g. `deleteAgentNode`'s Phase 2
+// `setState` that removes a row from `nodesById` after the test's
+// `waitFor` resolved on Phase 0 — see tests/unit/grid-node-header-
+// responsive.test.tsx's "toggles Close from the kebab item") land during
+// test N+1's setup and re-render the *orphaned* fiber with `node =
+// undefined`. React then trips "Rendered fewer hooks than expected" on
+// the next render attempt — and vitest reports the unhandled error
+// against test N+1's file even though the actual cause was the leaked
+// render from test N.
+afterEach(() => {
+  cleanup();
 });

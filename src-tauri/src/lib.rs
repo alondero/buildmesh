@@ -612,6 +612,8 @@ pub fn run() {
             commands::git::get_mesh_git_static,
             commands::git::restore_mesh_to_base,
             commands::git::free_base_branch,
+            commands::git::stage_file,
+            commands::git::revert_file,
             // Prune (branches & worktrees)
             commands::prune::get_git_prune_info,
             commands::prune::delete_branches,

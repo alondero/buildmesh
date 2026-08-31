@@ -152,6 +152,24 @@ mod tests {
         (total, added, modified, deleted)
     }
 
+    /// Read the git2 status flags for a single repo-relative path. Returns
+    /// `StatusFlags::empty()` when the path has no status entry — call sites
+    /// typically follow up with an explicit `is_*` predicate. Used by
+    /// `stage_file` / `revert_file` tests that need worktree-vs-index
+    /// precision (`count_status` collapses those flags into shared
+    /// buckets). Issue #1374.
+    fn flags_for_path(repo: &git2::Repository, file_path: &str) -> git2::Status {
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true).recurse_untracked_dirs(true);
+        let statuses = repo.statuses(Some(&mut opts)).unwrap();
+        for entry in statuses.iter() {
+            if entry.path().unwrap_or("") == file_path {
+                return entry.status();
+            }
+        }
+        git2::Status::empty()
+    }
+
     // ─── Tests ────────────────────────────────────────────────────────────────
 
     #[test]
@@ -921,5 +939,137 @@ mod tests {
         let (wt_total, wt_added, _, _) = count_status(&wt_repo);
         assert_eq!(wt_total, 1, "worktree sees only its own changes");
         assert_eq!(wt_added, 1);
+    }
+
+    // ─── Per-file stage / revert (issue #1374) ──────────────────────────────
+
+    use crate::commands::git::{revert_file_blocking, stage_file_blocking};
+
+    #[test]
+    fn reject_traversal_blocks_dotdot_and_absolute_paths() {
+        // Tested indirectly through the public blocking functions, which
+        // call reject_traversal before any filesystem access.
+        assert!(stage_file_blocking("/tmp/repo", "../outside.txt").is_err());
+        assert!(stage_file_blocking("/tmp/repo", "/etc/passwd").is_err());
+        assert!(revert_file_blocking("/tmp/repo", "src/../../../etc/passwd").is_err());
+        // `..bar` is a valid POSIX filename but escapes the worktree when
+        // joined onto the host root; the gate must catch it too.
+        assert!(stage_file_blocking("/tmp/repo", "src/..bar").is_err());
+        assert!(revert_file_blocking("/tmp/repo", "..bar").is_err());
+    }
+
+    #[test]
+    fn stage_file_stages_untracked_and_modified_files() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+        let path = _repo.path().to_str().unwrap();
+
+        // Stage an untracked file → index_new.
+        fs::write(_repo.path().join("new.txt"), "hello").unwrap();
+        stage_file_blocking(path, "new.txt").unwrap();
+        let (total, added, _, _) = count_status(&repo);
+        assert_eq!((total, added), (1, 1), "staged untracked = index_new");
+
+        // Commit, edit, re-stage → no worktree modification remains. The
+        // file is still INDEX_MODIFIED (staged-but-not-committed), so we
+        // assert directly on the worktree-side flag, not on count_status'
+        // combined bucket (which lumps INDEX_MODIFIED + WT_MODIFIED).
+        commit_staged(&repo, "add new.txt");
+        fs::write(_repo.path().join("new.txt"), "edited").unwrap();
+        let wt_pre = flags_for_path(&repo, "new.txt");
+        assert!(wt_pre.is_wt_modified(), "precondition: worktree edit is unstaged");
+        stage_file_blocking(path, "new.txt").unwrap();
+        let wt_post = flags_for_path(&repo, "new.txt");
+        assert!(!wt_post.is_wt_modified(), "re-stage clears the worktree delta");
+        assert!(wt_post.is_index_modified(), "re-stage still differs from HEAD");
+    }
+
+    #[test]
+    fn stage_file_stages_deletion_of_tracked_file() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+        let path = _repo.path().to_str().unwrap();
+
+        stage_file(&repo, _repo.path(), "gone.txt", "to be deleted");
+        commit_staged(&repo, "add gone.txt");
+        fs::remove_file(_repo.path().join("gone.txt")).unwrap();
+
+        // Precondition: worktree deletion is unstaged (WT_DELETED).
+        let wt_pre = flags_for_path(&repo, "gone.txt");
+        assert!(wt_pre.is_wt_deleted(), "precondition: file missing from worktree");
+
+        stage_file_blocking(path, "gone.txt").unwrap();
+
+        // The deletion is staged → INDEX_DELETED, not WT_DELETED (the index
+        // also lacks the entry, so the worktree-vs-index comparison is
+        // vacuously clean). count_status' "deleted" bucket would still be
+        // 1 because it counts INDEX_DELETED; assert the precise flags.
+        let wt_post = flags_for_path(&repo, "gone.txt");
+        assert!(!wt_post.is_wt_deleted(), "staged deletion must not read as wt_deleted");
+        assert!(wt_post.is_index_deleted(), "the entry must be index_deleted (staged deletion)");
+    }
+
+    #[test]
+    fn stage_file_rejects_traversal() {
+        let _repo = TempGitRepo::new();
+        init_git_repo(_repo.path());
+        let path = _repo.path().to_str().unwrap();
+        assert!(stage_file_blocking(path, "../outside.txt").is_err());
+        assert!(stage_file_blocking(path, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn revert_file_restores_tracked_file_to_head_state() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+        let path = _repo.path().to_str().unwrap();
+
+        stage_file(&repo, _repo.path(), "keep.txt", "original");
+        commit_staged(&repo, "add keep.txt");
+
+        // Uncommitted edit + staged edit → revert must clear both.
+        fs::write(_repo.path().join("keep.txt"), "worktree edit").unwrap();
+        stage_file(&repo, _repo.path(), "keep.txt", "staged edit");
+        let (total, _, modified, _) = count_status(&repo);
+        assert!(total >= 1 && modified >= 1, "precondition: dirty file");
+
+        revert_file_blocking(path, "keep.txt").unwrap();
+
+        let (total, _, modified, _) = count_status(&repo);
+        assert_eq!((total, modified), (0, 0), "revert restores HEAD state exactly");
+        assert_eq!(
+            fs::read_to_string(_repo.path().join("keep.txt")).unwrap(),
+            "original",
+            "worktree content must match the HEAD blob"
+        );
+    }
+
+    #[test]
+    fn revert_file_deletes_file_not_in_head() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+        let path = _repo.path().to_str().unwrap();
+
+        // A brand-new untracked file.
+        fs::write(_repo.path().join("added.txt"), "brand new").unwrap();
+        // A previously `git add`ed (staged) new file.
+        stage_file(&repo, _repo.path(), "staged-new.txt", "staged only");
+
+        revert_file_blocking(path, "added.txt").unwrap();
+        revert_file_blocking(path, "staged-new.txt").unwrap();
+
+        assert!(! _repo.path().join("added.txt").exists(), "untracked file removed");
+        assert!(! _repo.path().join("staged-new.txt").exists(), "staged-new file removed");
+        let (total, _, _, _) = count_status(&repo);
+        assert_eq!(total, 0, "index entries dropped too");
+    }
+
+    #[test]
+    fn revert_file_rejects_traversal() {
+        let _repo = TempGitRepo::new();
+        init_git_repo(_repo.path());
+        let path = _repo.path().to_str().unwrap();
+        assert!(revert_file_blocking(path, "../outside.txt").is_err());
+        assert!(revert_file_blocking(path, "/etc/passwd").is_err());
     }
 }
