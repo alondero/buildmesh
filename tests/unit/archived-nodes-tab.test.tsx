@@ -236,8 +236,10 @@ describe('ArchivedNodesTab (#378)', () => {
     // `nodeId` (matching the original tauri command's snake_case).
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('spawn_agent', expect.objectContaining({
-        sessionId: 99,
-        provider: 'anthropic',
+        request: expect.objectContaining({
+          sessionId: 99,
+          provider: 'anthropic',
+        }),
       }));
     });
     // The probe should hide so the user lands on the terminal — mirrors

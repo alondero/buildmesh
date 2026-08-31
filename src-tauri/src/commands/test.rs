@@ -284,7 +284,12 @@ fn handle_get_agent_node(args: &serde_json::Value) -> String {
 fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
     let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
     let provider = args.get("provider").and_then(|v| v.as_str()).unwrap_or("anthropic").to_string();
-    let resume = args.get("resume").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+    let resume = args.get("resume").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let intent = if resume.is_some() {
+        crate::commands::agent::SpawnAgentIntent::Resume
+    } else {
+        crate::commands::agent::SpawnAgentIntent::Fresh
+    };
 
     tracing::info!("[test_server] spawn_agent: spawning thread for node_id={}", node_id);
 
@@ -293,11 +298,13 @@ fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
     let result = std::thread::spawn(move || {
         tauri::async_runtime::block_on(crate::commands::agent::spawn_agent(
             app_clone,
-            node_id,
-            provider,
-            resume,
-            None,
-            None,
+            crate::commands::agent::SpawnAgentRequest {
+                session_id: node_id,
+                provider,
+                intent,
+                rows: None,
+                cols: None,
+            },
         ))
     }).join();
 

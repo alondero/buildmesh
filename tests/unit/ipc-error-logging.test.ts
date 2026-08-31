@@ -79,7 +79,13 @@ describe('central IPC error logging (#386)', () => {
 
     it('logs command name + shape + error on rejection and re-throws', async () => {
       mockInvoke.mockRejectedValueOnce(new Error('command not found'));
-      await expect(api.spawnAgent(1, 'anthropic')).rejects.toThrow('command not found');
+      await expect(api.spawnAgent({
+        sessionId: 1,
+        provider: 'anthropic',
+        intent: { type: 'fresh' },
+        rows: null,
+        cols: null,
+      })).rejects.toThrow('command not found');
       expect(mockLog).toHaveBeenCalledTimes(1);
       const [level, msg] = mockLog.mock.calls[0];
       expect(level).toBe('error');

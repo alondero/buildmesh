@@ -719,8 +719,9 @@ describe('indexSpawnOptions (issue #1410 §1)', () => {
     const items = indexSpawnOptions([option], meshes);
     expect(items).toHaveLength(2);
     expect(items[0].id).toBe('spawn:claude:1');
-    expect(items[0].label).toBe('Spawn Claude Code');
+    expect(items[0].label).toBe('Spawn Claude Code on buildmesh');
     expect(items[0].subtitle).toBe('buildmesh');
+    expect(items[1].label).toBe('Spawn Claude Code on playground');
   });
 
   it('matches by harness label and mesh name', () => {
@@ -791,10 +792,10 @@ describe('filterByPrefix (issue #1410 §2)', () => {
     return [...new Set(items.map((i) => i.category))];
   }
 
-  it('`>` filters to commands only (issue #1410 §2 — review #1425)', () => {
+  it('`>` filters to the action menu: commands and spawn (issue #1413)', () => {
     const { items, query } = filterByPrefix(index, '>set');
     expect(query).toBe('set');
-    expect(categoriesFor(items)).toEqual(['command']);
+    expect(categoriesFor(items).sort()).toEqual(['command', 'spawn']);
   });
 
   it('`@` filters to agent nodes only', () => {
@@ -853,14 +854,23 @@ describe('searchOmnibar', () => {
     expect(results[0].item.category).toBe('node');
   });
 
-  it('scopes a `>` query to commands only (review #1425)', () => {
+  it('scopes a `>` query to the action menu and excludes repo entities (issue #1413)', () => {
     const results = searchOmnibar(index, '>set');
     const categories = new Set(results.map((r) => r.item.category));
     expect(categories.has('command')).toBe(true);
-    // Meshes are deliberately excluded from `>` (issue #1410 §2).
+    // Meshes / nodes / issues stay out of `>` (issue #1410 §2 / review #1425).
     expect(categories.has('mesh')).toBe(false);
     expect(categories.has('node')).toBe(false);
     expect(categories.has('issue')).toBe(false);
+  });
+
+  it('a `>` or `spawn` query surfaces Spawn [Harness] on [Mesh] recipes (issue #1413 §1)', () => {
+    const bySpawn = searchOmnibar(index, 'spawn');
+    expect(bySpawn.some((r) => r.item.label === 'Spawn Claude Code on mesh-a')).toBe(true);
+
+    const byActionPrefix = searchOmnibar(index, '>spawn');
+    expect(byActionPrefix.some((r) => r.item.category === 'spawn')).toBe(true);
+    expect(byActionPrefix.some((r) => r.item.label === 'Spawn Claude Code on mesh-a')).toBe(true);
   });
 
   it('returns an empty list when the prefix matches nothing', () => {
@@ -882,7 +892,9 @@ describe('searchOmnibar', () => {
     // must show the scoped list (emptyMode 'all'), not return [].
     const commands = searchOmnibar(index, '>');
     expect(commands.length).toBeGreaterThan(0);
-    expect(commands.every((r) => r.item.category === 'command')).toBe(true);
+    expect(commands.every((r) => r.item.category === 'command' || r.item.category === 'spawn')).toBe(true);
+    expect(commands.some((r) => r.item.category === 'command')).toBe(true);
+    expect(commands.some((r) => r.item.category === 'spawn')).toBe(true);
 
     const nodes = searchOmnibar(index, '@');
     expect(nodes.map((r) => r.item.category)).toEqual(['node']);
@@ -922,14 +934,25 @@ describe('performance budget (issue #1410 §3)', () => {
     }
 
     const queries = ['agent', 'node-42', 'claude', 'branch-7', 'worktree', 'mesh-3', 'xyzzy'];
-    let total = 0;
+    // Warmup so the measured loop isn't paying first-call / JIT costs —
+    // under a loaded vitest pool this test otherwise flakes above 5ms
+    // even though the engine itself is well under budget in isolation.
     for (const q of queries) {
-      const t0 = performance.now();
       searchItems(items, q, { limit: 50 });
-      total += performance.now() - t0;
     }
 
-    expect(total / queries.length).toBeLessThan(5);
+    const measure = (): number => {
+      let total = 0;
+      for (const q of queries) {
+        const t0 = performance.now();
+        searchItems(items, q, { limit: 50 });
+        total += performance.now() - t0;
+      }
+      return total / queries.length;
+    };
+
+    const avg = measure();
+    expect(avg).toBeLessThan(5);
   });
 
   it('is deterministic across runs', () => {
