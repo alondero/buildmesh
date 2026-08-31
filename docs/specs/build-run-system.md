@@ -65,7 +65,7 @@ The Build/Run system allows users to execute build and run commands directly fro
 3. Detect environment (WSL vs Windows) using `env::env_for_path`
 4. Spawn shell via `portable-pty` with appropriate working directory
 5. Write command to PTY stdin
-6. Stream PTY output to frontend via `build-run-output-{node_id}` event
+6. Stream PTY output to frontend via the binary Channel (`subscribe_build_run_output`). The JSON `build-run-output-{node_id}` event is test injection only (issue #1393).
 7. Track process in `BuildRunRegistry` (separate from `ProcessRegistry`)
 
 **Error handling:**
@@ -81,7 +81,7 @@ The Build/Run system allows users to execute build and run commands directly fro
 
 **BuildRunTerminal:**
 - xterm.js terminal with same theme as `AgentTerminal`
-- Subscribes to `build-run-output-{sessionId}` events from backend
+- Subscribes to the binary Channel (`subscribeBuildRunOutput`) on create; unsubscribes on dispose. The `build-run-output-{sessionId}` listener remains for test injection.
 - Rendered conditionally — only when `openBuildRun` state is non-null for that node
 - Fixed height (~35% of agent node card), slides up over agent terminal
 - Thin header bar with title and close button

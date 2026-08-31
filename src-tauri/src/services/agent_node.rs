@@ -319,7 +319,10 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     // The raw-output subscription is node-scoped, so process exit/restart
     // deliberately preserves it. Once the row deletion commits, this is the
     // authoritative backend cleanup seam (idempotent with frontend disposal).
-    crate::agent::output::unregister(session_id);
+    // Both Agent and Build/Run maps key by node id, so a single helper
+    // releases them in lock-step -- reaching into the globals directly would
+    // risk half-cleaning a node that exists on both surfaces.
+    crate::pty::sink::unregister_node_sinks(session_id);
     Ok(())
 }
 

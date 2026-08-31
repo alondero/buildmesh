@@ -384,4 +384,61 @@ describe('BuildRunTerminal component — survival of the user-reported bug', () 
     const written = term.write.mock.calls.map((c) => c[0]).join('');
     expect(written).toContain('[process exited]');
   });
+
+  it('H: subscribes to the binary Channel on create and unsubscribes only on dispose', async () => {
+    const container = document.createElement('div');
+    await buildRunTerminalManager.attach(70, 'build', true, container);
+
+    expect(vi.mocked(invoke).mock.calls).toEqual(
+      expect.arrayContaining([
+        ['subscribe_build_run_output', { sessionId: 70, onChunk: expect.any(Object) }],
+      ]),
+    );
+
+    vi.mocked(invoke).mockClear();
+    buildRunTerminalManager.detach(70, 'build', true);
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'unsubscribe_build_run_output'),
+      'detach (mesh switch) must keep the session-scoped Channel',
+    ).toBe(false);
+
+    const containerB = document.createElement('div');
+    await buildRunTerminalManager.attach(70, 'build', true, containerB);
+    expect(
+      vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'subscribe_build_run_output'),
+    ).toHaveLength(0);
+
+    await Promise.resolve();
+    buildRunTerminalManager.dispose(70, 'build', true);
+    expect(vi.mocked(invoke).mock.calls).toEqual(
+      expect.arrayContaining([
+        ['unsubscribe_build_run_output', { sessionId: 70 }],
+      ]),
+    );
+  });
+
+  it('I: Channel frames write through to xterm, including the fetch-path Response', async () => {
+    const container = document.createElement('div');
+    await buildRunTerminalManager.attach(71, 'run', true, container);
+
+    const subscribeCall = vi.mocked(invoke).mock.calls.find(
+      ([cmd]) => cmd === 'subscribe_build_run_output',
+    );
+    expect(subscribeCall).toBeDefined();
+    const { onChunk } = subscribeCall![1] as {
+      onChunk: { onmessage: (message: unknown) => void };
+    };
+
+    const term = terminalInstances[0];
+    term.write.mockClear();
+
+    const startupFrame = new Uint8Array(1024).fill('B'.charCodeAt(0));
+    onChunk.onmessage(new Response(startupFrame.buffer));
+    // Response.arrayBuffer() is async; give the Channel decode queue a
+    // macrotask, then flush TerminalWriter's rAF coalesce.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+    expect(term.write).toHaveBeenCalledWith(startupFrame);
+  });
 });

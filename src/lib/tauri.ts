@@ -850,18 +850,20 @@ async function bytesFromChannelMessageAsync(message: unknown): Promise<Uint8Arra
   return new Uint8Array(await message.arrayBuffer());
 }
 
+type PtyOutputCommand = 'subscribe_agent_output' | 'subscribe_build_run_output';
+
 /**
- * Subscribe this webview to raw PTY bytes for `sessionId` (issue #1385).
- * Production output skips Base64+JSON. Small frames arrive as an
- * `ArrayBuffer`; Tauri delivers larger frames as a fetch `Response` whose
- * body must be read asynchronously.
+ * Shared Channel subscriber for raw PTY bytes (issues #1385 / #1393).
+ * Small frames arrive as an `ArrayBuffer`; Tauri delivers larger frames
+ * as a fetch `Response` whose body must be read asynchronously.
  * No-ops in tests whose `@tauri-apps/api/core` mock omits `Channel` —
- * those suites keep using the `agent-output` event fallback.
+ * those suites keep using the JSON event fallback.
  */
-export const subscribeAgentOutput = (
+function subscribeRawPtyOutput(
+  command: PtyOutputCommand,
   sessionId: number,
   onChunk: (data: Uint8Array) => void,
-): Promise<void> => {
+): Promise<void> {
   if (typeof Channel !== 'function') return Promise.resolve();
   const onChunkChannel = new Channel<ArrayBuffer | Uint8Array | ChannelResponse>();
   // Tauri's large-raw-payload path hands the callback a Response. Its body
@@ -875,8 +877,15 @@ export const subscribeAgentOutput = (
     // extra microtask for keystroke echoes, this preserves the existing
     // interactive latency contract. Once a Response is queued, subsequent
     // direct frames join the queue so they cannot overtake it.
+    // The sync path still has to mirror the queued path's error handling --
+    // a throwing onChunk here would otherwise escape unhandled (the queued
+    // .catch would swallow it).
     if (directBytes && queuedFrames === 0) {
-      onChunk(directBytes);
+      try {
+        onChunk(directBytes);
+      } catch (error) {
+        console.error(`[PTY] failed to decode ${command} Channel frame:`, error);
+      }
       return;
     }
     queuedFrames++;
@@ -886,18 +895,40 @@ export const subscribeAgentOutput = (
         if (bytes) onChunk(bytes);
       })
       .catch((error) => {
-        console.error('[PTY] failed to decode agent output Channel frame:', error);
+        console.error(`[PTY] failed to decode ${command} Channel frame:`, error);
       })
       .finally(() => {
         queuedFrames--;
       });
   };
-  return _invoke('subscribe_agent_output', { sessionId, onChunk: onChunkChannel });
-};
+  return _invoke(command, { sessionId, onChunk: onChunkChannel });
+}
+
+/**
+ * Subscribe this webview to raw agent PTY bytes for `sessionId` (issue #1385).
+ * Production output skips Base64+JSON.
+ */
+export const subscribeAgentOutput = (
+  sessionId: number,
+  onChunk: (data: Uint8Array) => void,
+): Promise<void> => subscribeRawPtyOutput('subscribe_agent_output', sessionId, onChunk);
 
 /** Drop the binary Channel registered by [`subscribeAgentOutput`]. Idempotent. */
 export const unsubscribeAgentOutput = (sessionId: number) =>
   _invoke('unsubscribe_agent_output', { sessionId });
+
+/**
+ * Subscribe this webview to raw Build/Run PTY bytes for `sessionId`
+ * (issue #1393). Same Channel transport as [`subscribeAgentOutput`].
+ */
+export const subscribeBuildRunOutput = (
+  sessionId: number,
+  onChunk: (data: Uint8Array) => void,
+): Promise<void> => subscribeRawPtyOutput('subscribe_build_run_output', sessionId, onChunk);
+
+/** Drop the binary Channel registered by [`subscribeBuildRunOutput`]. Idempotent. */
+export const unsubscribeBuildRunOutput = (sessionId: number) =>
+  _invoke('unsubscribe_build_run_output', { sessionId });
 
 /** Reply to a remote-pane snapshot request from the HTTP server. The pair
  *  (`request_id`, `data`) is matched against an in-flight promise on the
@@ -909,8 +940,9 @@ export const submitTerminalSnapshot = (requestId: string, data: string) =>
 //
 // Separate PTY surface from the agent terminal — keeps a long-running build
 // or `npm run dev` independent of the agent's PTY lifecycle. `build_run`
-// returns once the child has been spawned; output flows via the
-// `build-run-output-<nodeId>` event.
+// returns once the child has been spawned; production output flows via
+// `subscribeBuildRunOutput`. The `build-run-output-<nodeId>` event is the
+// test-injection fallback.
 export const buildRun = (nodeId: number, mode: 'build' | 'run' | 'terminal') =>
   _invoke('build_run', { nodeId, mode });
 

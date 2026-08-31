@@ -60,8 +60,8 @@ export interface BuildRunInstance {
   useWorktree: boolean;
   term: Terminal;
   fitAddon: FitAddon;
-  /** Unlisten for the `build-run-output-{sessionId}` listener. Released by
-   *  `disposeInstance`. */
+  /** Unlisten for the `build-run-output-{sessionId}` test-injection listener.
+   *  Released by `disposeInstance`. Production bytes use the binary Channel. */
   outputUnlisten: UnlistenFn | null;
   /** Unlisten for the `build-run-exited-{sessionId}` listener. Released by
    *  `disposeInstance`. The listener closure checks the per-instance
@@ -307,6 +307,7 @@ export class BuildRunTerminalRegistry {
     terminalWebglPool.release(`buildRun:${key}`);
     if (inst.outputUnlisten) inst.outputUnlisten();
     if (inst.exitUnlisten) inst.exitUnlisten();
+    api.unsubscribeBuildRunOutput(inst.sessionId).catch(() => {});
     inst.writer.unregister(inst.sessionId);
     // Issue #734: symmetric with doCreate's register — same composite key,
     // so a future flip doesn't push a stale palette into a dead xterm.
@@ -438,15 +439,19 @@ export class BuildRunTerminalRegistry {
         });
       }
 
-      // Subscribe to per-sessionId output events. The event name itself is
-      // namespaced by sessionId (e.g. `build-run-output-42`) so we don't
-      // need a payload filter — Rust only emits for that node.
+      // JSON event fallback (issue #1393). Production bytes arrive on the
+      // binary Channel below; this listener stays for test injection
+      // (`build-run-output-{sessionId}` string or `{ data }` payloads).
       const outputEventName = `build-run-output-${sessionId}`;
       const outputUnlisten = await listen<string | BuildRunOutputPayload>(outputEventName, (event) => {
         const data = payloadToBytes(event.payload);
         if (data !== '') writer.append(sessionId, data);
       });
       inst.outputUnlisten = outputUnlisten;
+
+      api.subscribeBuildRunOutput(sessionId, (bytes) => {
+        writer.append(sessionId, bytes);
+      }).catch(console.error);
 
       // Per-instance exit listener (NOT per-sessionId module-level). Each
       // instance owns its own subscription and unlistens in disposeInstance.
