@@ -1,6 +1,6 @@
 //! Account list — effective-account resolution, key lookups, mutators.
 
-use super::super::model::{AppPreferences, ProviderAccount, ProviderPairing};
+use super::super::model::{AppPreferences, ProviderAccount};
 use super::super::storage::{load, save};
 use super::catalog::{
     default_provider_accounts, is_claude_compatible_id, keyed_first_class_template,
@@ -175,29 +175,6 @@ pub fn upsert_provider_account(prefs: &mut AppPreferences, account: ProviderAcco
 /// default (which carries no key, so it drops out of the derived spawn menu).
 pub fn remove_provider_account(prefs: &mut AppPreferences, id: &str) {
     prefs.provider_accounts.retain(|a| a.id != id);
-}
-
-/// Upsert a **Proxied Provider** pairing into `prefs` by its
-/// `(harness_id, provider_id)` key (issue #576). Pure: mutates the passed
-/// `prefs` so the command layer stays a thin load→mutate→save.
-pub fn upsert_provider_pairing(prefs: &mut AppPreferences, pairing: ProviderPairing) {
-    if let Some(existing) = prefs
-        .provider_pairings
-        .iter_mut()
-        .find(|p| p.harness_id == pairing.harness_id && p.provider_id == pairing.provider_id)
-    {
-        *existing = pairing;
-    } else {
-        prefs.provider_pairings.push(pairing);
-    }
-}
-
-/// Remove a stored **Proxied Provider** pairing by its `(harness_id,
-/// `provider_id`)` key (issue #576 / ADR-0025).
-pub fn remove_provider_pairing(prefs: &mut AppPreferences, harness_id: &str, provider_id: &str) {
-    prefs
-        .provider_pairings
-        .retain(|p| !(p.harness_id == harness_id && p.provider_id == provider_id));
 }
 
 /// Set a provider account's **global** API key only if it currently has none

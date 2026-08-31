@@ -49,8 +49,7 @@ pub(crate) use catalog::{
 pub use accounts::{
     deepseek_api_key_resolved, kimi_api_key_resolved, minimax_api_key_resolved,
     openai_api_key_resolved, openrouter_api_key_resolved, provider_accounts, remove_provider_account,
-    remove_provider_pairing, set_account_key_if_absent, upsert_provider_account,
-    upsert_provider_pairing,
+    set_account_key_if_absent, upsert_provider_account,
 };
 
 // ----- Re-exports: pairings ----------------------------------------------
@@ -58,8 +57,8 @@ pub use accounts::{
 #[allow(unused_imports)]
 pub use pairings::{
     compatible_providers_for_harness, effective_provider_pairings, pairing_for, provider_pairings,
-    proxied_order_for, proxied_provider_order, resolve_stored_pairing_and_account,
-    set_proxied_provider_order,
+    proxied_order_for, proxied_provider_order, remove_provider_pairing, resolve_stored_pairing_and_account,
+    set_proxied_provider_order, upsert_provider_pairing,
 };
 #[allow(unused_imports)]
 pub(crate) use pairings::effective_pairings;

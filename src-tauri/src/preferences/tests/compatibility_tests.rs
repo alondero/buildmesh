@@ -9,7 +9,7 @@ use super::super::model::{HarnessConfigValue, ModelTiers, ProviderPairing};
 use super::super::storage::{load, save};
 use super::with_temp_dir;
 use crate::preferences::{
-    AppPreferences, ProxiedProviderOrder, ProviderAccount,
+    AppPreferences, ProviderAccount,
 };
 use crate::preferences::ApiSurface;
 
@@ -436,10 +436,4 @@ fn validate_harness_default_returns_normalized_value() {
     .unwrap();
     assert_eq!(normalized.model.as_deref(), Some("opus-4-1"));
     assert_eq!(normalized.effort.as_deref(), Some("high"));
-}
-
-// Suppress unused-import warnings on test builds.
-#[allow(dead_code)]
-fn _unused_types() -> Option<ProxiedProviderOrder> {
-    None
 }

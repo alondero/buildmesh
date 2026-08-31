@@ -2,7 +2,6 @@
 
 use super::super::migrations::migrate_prefs_json;
 use super::with_temp_dir;
-use crate::agent::provider::compatibility::WireApi;
 use crate::preferences::{
     load, save, ApiSurface, AppPreferences, ProviderAccount,
 };
@@ -148,25 +147,4 @@ fn load_full_round_trip_includes_load_completed() {
         let loaded = load().unwrap();
         assert!(loaded.ad0025_account_pairings_migrated);
     });
-}
-
-#[test]
-fn pairing_compatibility_rejects_unverified_minimax_alias() {
-    use crate::preferences::{pairing_compatibility, ProviderPairing};
-    let pairing = ProviderPairing {
-        harness_id: "codex".to_string(),
-        provider_id: "minimax".to_string(),
-        surface: ApiSurface::OpenAI,
-        base_url: Some("https://api.minimax.io/v1".to_string()),
-        model_tiers: crate::preferences::ModelTiers {
-            default: Some("MiniMax-M3[1m]".to_string()),
-            ..Default::default()
-        },
-    };
-    let decision = pairing_compatibility(&pairing);
-    assert!(!decision.compatible);
-    assert!(decision.reason.is_some());
-    // The descriptor surfaces WireApi::Responses for minimax non-M3.
-    let descriptor = crate::preferences::endpoint_model_descriptor(&pairing);
-    assert_eq!(descriptor.wire_api, WireApi::Responses);
 }

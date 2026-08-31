@@ -62,7 +62,7 @@ pub enum BillingMode {
 /// Claude Code asks its backend for several model *aliases*: a primary, a cheap
 /// "small/fast" model for background tasks (titles, etc.), and the Sonnet / Opus
 /// / Haiku defaults. Each field here, when set, maps to the matching env var the
-/// `claude` binary reads (see [`super::provider_account_env`]):
+/// `claude` binary reads (see [`super::compatibility::resolve_provider_env`]):
 ///   - `default`    → `ANTHROPIC_MODEL`
 ///   - `small_fast` → `ANTHROPIC_SMALL_FAST_MODEL`
 ///   - `sonnet`     → `ANTHROPIC_DEFAULT_SONNET_MODEL`
@@ -125,7 +125,7 @@ impl ModelTiers {
 /// provider can be proxied through harnesses on different surfaces (MiniMax via
 /// Claude Code over its Anthropic-compatible endpoint *and* via Codex over its
 /// OpenAI-compatible endpoint). The surface is what drives which env vars
-/// [`super::surface_env`] emits at spawn (`ANTHROPIC_*` vs `OPENAI_*`).
+/// [`super::compatibility::resolve_provider_env`] emits at spawn (`ANTHROPIC_*` vs `OPENAI_*`).
 ///
 /// Generated to src/types/generated/ApiSurface.ts.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -275,7 +275,7 @@ pub struct ProviderAccount {
     /// proxy-capable harness (#568). False for self-authenticating built-ins
     /// (anthropic/codex/agy), which hold no creds in Buildmesh.
     ///
-    /// **Derived from `id` on read** ([`super::merge_provider_accounts`] normalizes it) —
+    /// **Derived from `id` on read** (`merge_provider_accounts` normalizes it) —
     /// the stored value is not authoritative, so an older `preferences.json` that
     /// predates this field still gates correctly.
     #[serde(default)]

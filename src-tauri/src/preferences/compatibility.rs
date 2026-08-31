@@ -421,11 +421,3 @@ fn openai_surface_env(
     }
     env
 }
-
-// Re-export for tests that used `super::pairing_can_potentially_match` directly.
-#[allow(unused_imports)]
-pub(crate) use super::resolver::pairing_can_potentially_match;
-
-// Allow tests to reach `is_known_harness_id` via this module's path.
-#[allow(unused_imports)]
-pub(crate) use super::resolver::is_known_harness_id as _re_is_known_harness_id;

@@ -1,32 +1,25 @@
 //! Shared test fixtures for the `preferences` submodules.
 //!
 //! Tests in this module share `APP_DATA_DIR` and `CACHE` global state, so
-//! they must run serially. The shared [`TEST_LOCK`] gates everything;
-//! [`lock_test_state`] is the seam other test files use to take it.
-//!
-//! Splitting the monolithic inline `tests` mod into per-feature files keeps
-//! each file small, but the fixtures need to live somewhere they can be
-//! imported — this file is that somewhere.
+//! they must run serially. The shared [`TEST_LOCK`] lives in
+//! [`super::storage`] alongside the state it guards; [`with_temp_dir`]
+//! takes it for the duration of a test fixture.
 
-use super::storage::{init_for_tests, reset_for_tests};
+use super::storage::{init_for_tests, reset_for_tests, TEST_LOCK};
 use std::path::PathBuf;
-use std::sync::Mutex as TestMutex;
 
 // Per-feature test files. Each tests a single concern; the cross-module
 // fixtures live here.
-mod accounts;
+mod accounts_tests;
 mod catalog_tests;
 mod compatibility_tests;
-mod default_provider;
+mod default_provider_tests;
 mod harness_tests;
 mod migrations_tests;
-mod pairings;
+mod pairings_tests;
+mod pairing_compat_tests;
 mod storage_tests;
 
-/// Tests in this module share `APP_DATA_DIR` and `CACHE` global state, so
-/// they must run serially. Other modules reach this via
-/// [`super::storage::test_state_guard`].
-pub(crate) static TEST_LOCK: TestMutex<()> = TestMutex::new(());
 static TEST_DIR_COUNTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 

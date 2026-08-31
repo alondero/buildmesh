@@ -1,10 +1,12 @@
-//! Pairing resolution — stored-pairing lookups, attach-form defaults, ordering.
+//! Pairing resolution — stored-pairing lookups, attach-form defaults, ordering, mutators.
 
-use super::super::compatibility::pairing_can_potentially_match;
-use super::super::model::{ApiSurface, ModelTiers, ProxiedProviderOrder, ProviderAccount, ProviderPairing};
+use super::super::model::{
+    ApiSurface, AppPreferences, ModelTiers, ProxiedProviderOrder, ProviderAccount, ProviderPairing,
+};
 use super::super::storage::{load, save};
 use super::accounts::provider_accounts;
 use super::catalog::{first_class_surfaces, harness_surface, keyed_first_class_template, provider_surfaces};
+use super::pairing_compat::pairing_can_potentially_match;
 
 /// Dedupe an id sequence keeping the first occurrence of each id, preserving
 /// order. A malformed caller (or hand-edited prefs) sending `[claude, claude]`
@@ -259,4 +261,27 @@ pub fn pairing_for(harness_id: &str, provider_id: &str) -> Option<ProviderPairin
         .cloned()
         .or_else(|| keyed_first_class_template(provider_id))?;
     attach_pairing_defaults(harness_id, &account, &provider_pairings(), harness_surface)
+}
+
+/// Upsert a **Proxied Provider** pairing into `prefs` by its
+/// `(harness_id, provider_id)` key (issue #576). Pure: mutates the passed
+/// `prefs` so the command layer stays a thin load→mutate→save.
+pub fn upsert_provider_pairing(prefs: &mut AppPreferences, pairing: ProviderPairing) {
+    if let Some(existing) = prefs
+        .provider_pairings
+        .iter_mut()
+        .find(|p| p.harness_id == pairing.harness_id && p.provider_id == pairing.provider_id)
+    {
+        *existing = pairing;
+    } else {
+        prefs.provider_pairings.push(pairing);
+    }
+}
+
+/// Remove a stored **Proxied Provider** pairing by its `(harness_id,
+/// `provider_id`)` key (issue #576 / ADR-0025).
+pub fn remove_provider_pairing(prefs: &mut AppPreferences, harness_id: &str, provider_id: &str) {
+    prefs
+        .provider_pairings
+        .retain(|p| !(p.harness_id == harness_id && p.provider_id == provider_id));
 }

@@ -39,7 +39,7 @@ billing_mode: BillingMode,
  * proxy-capable harness (#568). False for self-authenticating built-ins
  * (anthropic/codex/agy), which hold no creds in Buildmesh.
  *
- * **Derived from `id` on read** ([`super::merge_provider_accounts`] normalizes it) —
+ * **Derived from `id` on read** (`merge_provider_accounts` normalizes it) —
  * the stored value is not authoritative, so an older `preferences.json` that
  * predates this field still gates correctly.
  */

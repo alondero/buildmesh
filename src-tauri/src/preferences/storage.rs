@@ -10,6 +10,7 @@
 
 use super::model::AppPreferences;
 use super::migrations::migrate_prefs_json;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -20,39 +21,12 @@ static APP_DATA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// the cache is empty (first read).
 static CACHE: Mutex<Option<AppPreferences>> = Mutex::new(None);
 
-/// Lock the in-process preferences cache, recovering from a poisoned
-/// mutex instead of panicking (issue #1224).
-///
-/// `CACHE` is a process-wide static — a panic in any `load`/`save`/
-/// test helper that holds the guard permanently bricks the entire
-/// preferences surface for the rest of the process. The cache value
-/// itself is a plain `Option<AppPreferences>`; the panic cannot
-/// corrupt it (the guard drops on unwind, leaving the value in a
-/// consistent None-or-fully-populated state). `into_inner()` extracts
-/// the value and trusts the next caller to decide whether to refresh
-/// from disk. Mirrors `db::lock_db()` and `services::autopilot::
-/// lock_planner_set`.
-///
-/// Production callers use `CACHE.lock().unwrap_or_else(|p| p.into_inner())`
-/// directly so the helper is gated to `#[cfg(test)]` — clippy's lib-build
-/// dead-code check doesn't see across the test boundary, and the helper
-/// only saves the test module from repeating the recover pattern in
-/// every fixture. Mirrors the `#[allow(dead_code)]` pattern on
-/// `db::is_initialized`.
-#[cfg(test)]
-#[allow(dead_code)]
-fn lock_cache() -> std::sync::MutexGuard<'static, Option<AppPreferences>> {
-    match CACHE.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::warn!(
-                "preferences CACHE mutex was poisoned by a prior panic — recovering (issue #1224)"
-            );
-            poisoned.into_inner()
-        }
-    }
-}
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serialises every test that mutates the process-global [`APP_DATA_DIR`]
+/// and [`CACHE`] statics via [`init_for_tests`] / [`reset_for_tests`].
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init(app_data_dir: PathBuf) {
     *APP_DATA_DIR.lock().unwrap_or_else(|p| p.into_inner()) = Some(app_data_dir);
@@ -70,6 +44,15 @@ pub(crate) fn reset_for_tests() {
     *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
+/// Test-side helper: serialises external test code (e.g. `services::provider_verification`)
+/// that mutates the same global statics via [`init_for_tests`] / [`reset_for_tests`].
+/// Lives next to the state it guards so production code never reaches into a
+/// test submodule.
+#[cfg(test)]
+pub(crate) fn test_state_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// The app-data directory `init` was wired to, for sibling config files
 /// that live next to `preferences.json` (e.g. Autopilot's `finish.md`,
 /// issue #484). `None` before `init` runs (tests without a Tauri setup).
@@ -78,15 +61,6 @@ pub fn app_data_dir() -> Option<PathBuf> {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone()
-}
-
-/// Serialises tests outside this module against the shared `TEST_LOCK`
-/// while they use the process-global `APP_DATA_DIR`/`CACHE` state via
-/// [`init_for_tests`] — without it, a parallel test in another module can
-/// swap the globals mid-run.
-#[cfg(test)]
-pub(crate) fn test_state_guard() -> std::sync::MutexGuard<'static, ()> {
-    super::tests::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 fn preferences_path() -> Result<PathBuf, String> {
@@ -141,7 +115,6 @@ pub(crate) fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
         .ok_or_else(|| "preferences path has no parent directory".to_string())?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .map_err(|e| format!("failed to create temporary preferences file: {e}"))?;
-    use std::io::Write;
     temporary
         .write_all(json.as_bytes())
         .and_then(|_| temporary.as_file().sync_all())

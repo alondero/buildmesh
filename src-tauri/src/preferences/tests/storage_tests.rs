@@ -77,27 +77,3 @@ fn malformed_json_falls_back_to_default() {
         assert_eq!(load().unwrap(), AppPreferences::default());
     });
 }
-
-#[test]
-fn preferences_load_recovers_from_cache_poison() {
-    use std::sync::Mutex;
-    let _guard = super::lock_test_state();
-    let tmp = test_dir();
-    std::fs::create_dir_all(&tmp).unwrap();
-    init_for_tests(tmp.clone());
-
-    // Poison a separate mutex so we know our catch_unwind machinery works.
-    let panic_result = std::panic::catch_unwind(|| {
-        let m = Mutex::new(Some(AppPreferences::default()));
-        let _guard = m.lock().unwrap();
-        panic!("poison the mutex");
-    });
-    assert!(panic_result.is_err());
-
-    // After a poisoned CACHE, load() should still recover via into_inner()
-    // and return defaults rather than re-panicking.
-    assert_eq!(load().unwrap(), AppPreferences::default());
-
-    reset_for_tests();
-    let _ = std::fs::remove_dir_all(&tmp);
-}
