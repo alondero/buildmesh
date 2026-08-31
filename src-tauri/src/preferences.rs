@@ -464,7 +464,7 @@ static CACHE: Mutex<Option<AppPreferences>> = Mutex::new(None);
 /// corrupt it (the guard drops on unwind, leaving the value in a
 /// consistent None-or-fully-populated state). `into_inner()` extracts
 /// the value and trusts the next caller to decide whether to refresh
-/// from disk. Mirrors `db::lock_db()` and `services::autopilot::
+/// from disk. Mirrors `db::write_conn()` and `services::autopilot::
 /// lock_planner_set`.
 ///
 /// Production callers use `CACHE.lock().unwrap_or_else(|p| p.into_inner())`

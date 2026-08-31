@@ -252,7 +252,7 @@ pub fn recheck_after_claim(id: i64, path: &str) -> bool {
 
 /// `_inner`-style testable variant. Takes the row-delete and tombstone-cancel
 /// functions as injected dependencies so a test can run against an in-memory
-/// `Connection` without touching the global DB mutex.
+/// `Connection` without touching the global DB writer.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn recheck_after_claim_inner(
     conn: &Connection,
@@ -2115,7 +2115,7 @@ mod tests {
         ensure_maintenance_db();
 
         let (_tmp, repo_path) = fresh_git_repo();
-        let conn = crate::db::lock_db();
+        let conn = crate::db::write_conn();
         let mesh_id = insert_mesh(&conn, &repo_path);
 
         // Cut three warm worktrees in order — the first is the OLDEST.
