@@ -112,16 +112,9 @@ export async function attachAgentNodeListeners(
   unlistens.push(
     await listen<AttentionNeededPayload>('attention-needed', (event) => {
       const nodeId = event.payload[SESSION_ID_KEY];
-      // A generic mark starts a new turn. Clear any prior detail before the
-      // optional `semantic-turn` enrichment arrives immediately afterwards.
-      surface.setSemanticTurn(nodeId, null);
+      const semantic = event.payload.semantic_turn;
+      surface.setSemanticTurn(nodeId, semantic ? { ...semantic, node_id: nodeId } : null);
       surface.patchAgentNode(nodeId, { status: 'awaiting_input' });
-    }),
-  );
-
-  unlistens.push(
-    await listen<SemanticTurnPayload>('semantic-turn', (event) => {
-      surface.setSemanticTurn(event.payload.node_id, event.payload);
     }),
   );
 

@@ -128,6 +128,25 @@ pub(crate) const FORBIDDEN_TERMINAL: &[SessionStatus] =
 pub struct AttentionNeededPayload {
     #[ts(as = "i32")]
     pub session_id: i64,
+    pub semantic_turn: Option<SemanticTurnPayload>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export, export_to = "SemanticTurnPayload.ts")]
+pub struct SemanticTurnPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub kind: SemanticTurnKind,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, rename_all = "snake_case", export_to = "SemanticTurnKind.ts")]
+pub enum SemanticTurnKind {
+    PermissionRequest,
+    CommandConfirmation,
+    TurnFinished,
 }
 
 /// Payload of the `attention-cleared` Tauri event. Emitted by
@@ -190,6 +209,10 @@ pub trait SessionLifecycleSink {
     ) -> Result<bool, String>;
 
     fn emit_attention_needed(&self, node_id: i64);
+    fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
+        let _ = semantic_turn;
+        self.emit_attention_needed(node_id);
+    }
     fn emit_attention_cleared(&self, node_id: i64);
     fn emit_resume_failed(&self, node_id: i64, reason: &str);
 }
@@ -230,12 +253,17 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
     }
 
     fn emit_attention_needed(&self, node_id: i64) {
+        self.emit_attention_needed_with_payload(node_id, None);
+    }
+
+    fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
         let _ = self
             .app
-            .emit("attention-needed", AttentionNeededPayload { session_id: node_id });
+            .emit("attention-needed", AttentionNeededPayload { session_id: node_id, semantic_turn });
     }
 
     fn emit_attention_cleared(&self, node_id: i64) {
+        let _ = db::persist_semantic_turn(node_id, None);
         let _ = self
             .app
             .emit("attention-cleared", AttentionClearedPayload { session_id: node_id });
@@ -287,7 +315,7 @@ impl SessionLifecycleSink for DbOnlySink {
     }
 
     fn emit_attention_needed(&self, _node_id: i64) {}
-    fn emit_attention_cleared(&self, _node_id: i64) {}
+    fn emit_attention_cleared(&self, node_id: i64) { let _ = db::persist_semantic_turn(node_id, None); }
     fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
 }
 
@@ -357,8 +385,16 @@ pub fn on_resume_failed(
 /// callers should still call `attention_autoclear::on_marked` directly
 /// because that module is a separable safety net, not a status writer.
 pub fn on_attention(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(), String> {
+    on_attention_with_detail(sink, node_id, None)
+}
+
+pub fn on_attention_with_detail(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    semantic_turn: Option<SemanticTurnPayload>,
+) -> Result<(), String> {
     sink.write_status(node_id, SessionStatus::AwaitingInput)?;
-    sink.emit_attention_needed(node_id);
+    sink.emit_attention_needed_with_payload(node_id, semantic_turn);
     tracing::info!("Node {node_id} awaiting user input (Node Turn)");
     Ok(())
 }

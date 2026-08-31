@@ -627,6 +627,7 @@ pub fn run() {
             // Attention (renamed from `*_attention_session` to `*_attention_node`)
             commands::attention::register_attention_node,
             commands::attention::clear_attention_node,
+            commands::attention::list_semantic_turns,
             commands::attention::is_attention_pending,
             // PR
             commands::pr::create_pr,

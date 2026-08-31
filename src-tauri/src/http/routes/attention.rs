@@ -16,8 +16,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::http::MaybeTls;
-use tauri::Emitter;
-use ts_rs::TS;
+use crate::agent::session_lifecycle::{SemanticTurnKind, SemanticTurnPayload};
 
 use crate::http::request;
 
@@ -125,31 +124,20 @@ struct HookPayload {
 }
 
 /// Provider-neutral action shown above an awaiting Agent Node's terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, rename_all = "snake_case", export_to = "SemanticTurnKind.ts")]
-pub enum SemanticTurnKind {
-    PermissionRequest,
-    CommandConfirmation,
-    TurnFinished,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SemanticTurn {
     kind: SemanticTurnKind,
     description: String,
 }
 
-/// Payload of the `semantic-turn` Tauri event. The lifecycle event remains the
-/// status source of truth; this event only enriches it when the hook supplied
-/// trustworthy human-facing details.
-#[derive(Debug, Clone, serde::Serialize, TS)]
-#[ts(export, export_to = "SemanticTurnPayload.ts")]
-pub struct SemanticTurnPayload {
-    #[ts(as = "i32")]
-    pub node_id: i64,
-    pub kind: SemanticTurnKind,
-    pub description: String,
+const MAX_SEMANTIC_DESCRIPTION: usize = 240;
+
+fn clean_description(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() { return None; }
+    let mut chars = normalized.chars();
+    let clipped: String = chars.by_ref().take(MAX_SEMANTIC_DESCRIPTION).collect();
+    Some(if chars.next().is_some() { format!("{clipped}…") } else { clipped })
 }
 
 fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
@@ -184,17 +172,13 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
         payload.hook_event_name.as_deref(),
         Some("PermissionRequest") | Some("PreToolUse")
     ) || payload.notification_type.as_deref() == Some("permission_prompt")
-        || (payload.hook_event_name.as_deref() == Some("Notification")
-            && payload
-                .message
-                .as_deref()
-                .is_some_and(|message| message.to_ascii_lowercase().contains("permission")));
+    ;
 
     if permission_event {
         if let Some(command) = command {
             return Some(SemanticTurn {
                 kind: SemanticTurnKind::CommandConfirmation,
-                description: format!("Run: {}", command.trim()),
+                description: clean_description(&format!("Run: {}", command.trim()))?,
             });
         }
 
@@ -202,20 +186,17 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
             string_field(value, &["file_path"]).or_else(|| string_field(value, &["path"]))
         });
         let description = match (tool_name, path) {
-            (Some(name), Some(path)) if name.eq_ignore_ascii_case("edit") => {
-                format!("Allow edit: {}", path.trim())
+            (Some(name), Some(path)) => {
+                let label = if name.eq_ignore_ascii_case("edit") { "edit" } else { name.trim() };
+                format!("Allow {}: {}", label, path.trim())
             }
-            _ => payload
-                .message
-                .as_deref()
-                .filter(|message| !message.trim().is_empty())
-                .map(str::trim)
-                .map(str::to_owned)
-                .or_else(|| tool_name.map(|name| format!("Allow: {name}")))?,
+            (Some(name), None) => format!("Allow: {}", name.trim()),
+            (None, Some(path)) => format!("Allow: {}", path.trim()),
+            _ => payload.message.as_deref().map(str::trim).unwrap_or("Allow tool" ).to_owned(),
         };
         return Some(SemanticTurn {
             kind: SemanticTurnKind::PermissionRequest,
-            description,
+            description: clean_description(&description)?,
         });
     }
 
@@ -231,9 +212,9 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
             .flatten()
         })?
         .trim();
-    (!description.is_empty()).then(|| SemanticTurn {
+    clean_description(description).map(|description| SemanticTurn {
         kind: SemanticTurnKind::TurnFinished,
-        description: description.to_owned(),
+        description,
     })
 }
 
@@ -455,26 +436,25 @@ pub async fn handle_post(
             // `F: 'static`, and a non-`'static` borrow would be dropped
             // the moment the async function returns. No clone is needed
             // because the reference is already cheap to share.
+            let semantic_payload = semantic.map(|turn| SemanticTurnPayload {
+                node_id: session_id,
+                kind: turn.kind,
+                description: turn.description,
+            });
+            let semantic_for_publish = semantic_payload.clone();
             let _ = crate::commands::run_blocking(
                 "http_attention_publish_mark",
                 move || -> Result<(), String> {
-                    crate::node_turn::publish(session_id, app);
+                    let encoded = semantic_for_publish.as_ref().map(|v| serde_json::to_string(v).map_err(|e| e.to_string())).transpose()?;
+                    crate::db::persist_semantic_turn(session_id, encoded.as_deref()).map_err(|e| e.to_string())?;
+                    crate::node_turn::publish_with_detail(session_id, app, semantic_for_publish);
                     Ok(())
                 },
             )
             .await;
-            if let Some(turn) = semantic {
-                let _ = app.emit(
-                    "semantic-turn",
-                    SemanticTurnPayload {
-                        node_id: session_id,
-                        kind: turn.kind,
-                        description: turn.description,
-                    },
-                );
-            }
             crate::http::events::emit(crate::http::events::EventMsg::AttentionNeeded {
                 session_id,
+                semantic_turn: semantic_payload,
             });
         }
         Decision::SuppressPendingBackground => {

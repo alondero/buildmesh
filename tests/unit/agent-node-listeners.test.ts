@@ -85,7 +85,6 @@ describe('attachAgentNodeListeners', () => {
     expect(eventNames).toEqual(expect.arrayContaining([
       'attention-needed',
       'attention-cleared',
-      'semantic-turn',
       'node-renamed',
       'node-created',
       'node-activated',
@@ -96,7 +95,7 @@ describe('attachAgentNodeListeners', () => {
       'autopilot-finish-failed',
       'autopilot-node-closed',
     ]));
-    expect(eventNames).toHaveLength(12);
+    expect(eventNames).toHaveLength(11);
   });
 
   it('returns a single unlisten handle that detaches every registered handler', async () => {
@@ -115,11 +114,11 @@ describe('attachAgentNodeListeners', () => {
 
     expect(typeof unlisten).toBe('function');
     // 11 events → 11 unlisten registrations.
-    expect(mockListen).toHaveBeenCalledTimes(12);
+    expect(mockListen).toHaveBeenCalledTimes(11);
     expect(unlistenFns).toHaveLength(0);
 
     unlisten();
-    expect(unlistenFns).toHaveLength(12);
+    expect(unlistenFns).toHaveLength(11);
   });
 
   // The narrow surface contract: every handler must dispatch to the
@@ -140,33 +139,11 @@ describe('attachAgentNodeListeners', () => {
     await attachAgentNodeListeners(surface);
 
     expect(capturedHandler).toBeDefined();
-    capturedHandler!({ payload: { session_id: 42 } });
+    capturedHandler!({ payload: { session_id: 42, semantic_turn: null } });
 
     expect(surface.__calls).toEqual([
       { method: 'setSemanticTurn', args: [42, null] },
       { method: 'patchAgentNode', args: [42, { status: 'awaiting_input' }] },
-    ]);
-  });
-
-  it('semantic-turn stores actionable metadata for its node', async () => {
-    const mockListen = listen as ReturnType<typeof vi.fn>;
-    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
-    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
-      if (eventName === 'semantic-turn') capturedHandler = handler;
-      return Promise.resolve(() => {});
-    });
-
-    const surface = makeSurface();
-    await attachAgentNodeListeners(surface);
-    const payload = {
-      node_id: 42,
-      kind: 'permission_request' as const,
-      description: 'Allow edit: src/lib/auth.ts',
-    };
-    capturedHandler!({ payload });
-
-    expect(surface.__calls).toEqual([
-      { method: 'setSemanticTurn', args: [42, payload] },
     ]);
   });
 

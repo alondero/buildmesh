@@ -189,6 +189,7 @@ interface AgentNodeState {
   killAgent: (nodeId: number) => Promise<void>;
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
   writeToAgent: (nodeId: number, data: string) => Promise<void>;
+  clearAttention: (nodeId: number) => Promise<void>;
   // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
   // The listener module never reaches into `set`/`get` directly; it
   // dispatches through these actions (plus `fetchAgentNodes` /
@@ -246,9 +247,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     try {
       // Autopilot states ride along with every node refresh, but their
       // failure must never blank the node list — degrade to "no pills".
-      const [agentNodes, autopilotRuns] = await Promise.all([
+      const [agentNodes, autopilotRuns, semanticTurns] = await Promise.all([
         api.listAgentNodes(),
         api.listAutopilotRuns().catch(() => []),
+        api.listSemanticTurns().catch(() => []),
       ]);
       const autopilotStates = Object.fromEntries(
         (Array.isArray(autopilotRuns) ? autopilotRuns : []).map((r) => [r.node_id, r.state]),
@@ -284,6 +286,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       set({
         agentNodes,
         autopilotStates,
+        semanticTurns: Object.fromEntries((Array.isArray(semanticTurns) ? semanticTurns : []).map((turn) => [turn.node_id, turn])),
         loading: false,
         ...(schedulesChanged && { schedules: keptSchedules }),
       });
@@ -435,10 +438,13 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     set((state) => {
       const closing = new Set(state.closingNodeIds);
       closing.delete(id);
+      const semanticTurns = { ...state.semanticTurns };
+      delete semanticTurns[id];
       return {
         agentNodes: state.agentNodes.filter(s => s.id !== id),
         activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
         closingNodeIds: closing,
+        semanticTurns,
       };
     });
 
@@ -692,6 +698,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     } catch (e) {
       set({ error: formatError(e) });
     }
+  },
+
+  clearAttention: async (nodeId) => {
+    try { await api.clearAttentionNode(nodeId); } catch (e) { set({ error: formatError(e) }); }
   },
 
   setSemanticTurn: (id, turn) => {

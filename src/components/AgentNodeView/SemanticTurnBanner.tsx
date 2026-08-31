@@ -1,20 +1,18 @@
 import { useEffect, useState } from 'react';
+import type { KeyboardEvent } from 'react';
 import type { SemanticTurnPayload } from '../../types/generated/SemanticTurnPayload';
 import { diffNodeAgainstBase } from '../../lib/tauri';
 
 interface SemanticTurnBannerProps {
   turn: SemanticTurnPayload;
   isActive: boolean;
-  onResolve: (data: string) => void;
+  onResolve: (data: string) => void | Promise<void>;
+  onFinish: () => void | Promise<void>;
 }
 
-function isTextEntry(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement
-    && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
-}
-
-export function SemanticTurnBanner({ turn, isActive, onResolve }: SemanticTurnBannerProps) {
+export function SemanticTurnBanner({ turn, isActive, onResolve, onFinish }: SemanticTurnBannerProps) {
   const [diffCounts, setDiffCounts] = useState<{ additions: number; deletions: number } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (turn.kind !== 'turn_finished') {
@@ -40,41 +38,35 @@ export function SemanticTurnBanner({ turn, isActive, onResolve }: SemanticTurnBa
     return () => controller.abort();
   }, [turn.kind, turn.node_id]);
 
-  useEffect(() => {
-    if (!isActive) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.repeat || event.altKey || event.ctrlKey || event.metaKey || isTextEntry(event.target)) {
-        return;
-      }
-
+  const submit = (data: string | null) => {
+    if (submitting) return;
+    setSubmitting(true);
+    void Promise.resolve(data === null ? onFinish() : onResolve(data));
+  };
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!isActive || submitting || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+    if ((event.target as HTMLElement).tagName === 'BUTTON' && event.key === 'Enter') return;
       const key = event.key.toLowerCase();
       let data: string | null = null;
-      if (key === 'enter') data = turn.kind === 'turn_finished' ? '\r' : 'y\r';
+      if (key === 'enter') data = turn.kind === 'turn_finished' ? null : 'y\r';
       if (turn.kind !== 'turn_finished' && key === 'y') data = 'y\r';
       if (turn.kind !== 'turn_finished' && key === 'n') data = 'n\r';
-      if (data === null) return;
+      if (data === null && key !== 'enter') return;
 
       event.preventDefault();
       event.stopPropagation();
-      onResolve(data);
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isActive, onResolve, turn.kind]);
+      submit(data);
+  };
 
   const isFinished = turn.kind === 'turn_finished';
   const approveLabel = turn.kind === 'command_confirmation' ? 'Approve (Y)' : 'Allow (Y)';
   const rejectLabel = turn.kind === 'command_confirmation' ? 'Deny (N)' : 'Reject (N)';
-  const resolve = (data: string) => (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
-    onResolve(data);
-  };
-
   return (
     <div
       role="status"
+      data-semantic-turn-banner
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
       aria-live="polite"
       className="flex min-h-9 shrink-0 items-center gap-2 border-b border-accent-amber/35 bg-accent-amber/15 px-2 py-1 text-xs text-text-primary"
     >
@@ -85,7 +77,8 @@ export function SemanticTurnBanner({ turn, isActive, onResolve }: SemanticTurnBa
         {isFinished ? (
           <button
             type="button"
-            onClick={resolve('\r')}
+            onClick={() => submit(null)}
+            disabled={submitting}
             className="rounded-sm border border-accent-amber/50 bg-bg-card px-2 py-1 font-semibold text-accent-amber hover:bg-accent-amber/15 focus-visible:outline-2 focus-visible:outline-accent-cyan"
           >
             Continue (Enter)
@@ -94,14 +87,16 @@ export function SemanticTurnBanner({ turn, isActive, onResolve }: SemanticTurnBa
           <>
             <button
               type="button"
-              onClick={resolve('y\r')}
+              onClick={() => submit('y\r')}
+              disabled={submitting}
               className="rounded-sm border border-accent-green/50 bg-bg-card px-2 py-1 font-semibold text-accent-green hover:bg-accent-green/10 focus-visible:outline-2 focus-visible:outline-accent-cyan"
             >
               {approveLabel}
             </button>
             <button
               type="button"
-              onClick={resolve('n\r')}
+              onClick={() => submit('n\r')}
+              disabled={submitting}
               className="rounded-sm border border-status-error/50 bg-bg-card px-2 py-1 font-semibold text-status-error hover:bg-status-error-bg focus-visible:outline-2 focus-visible:outline-accent-cyan"
             >
               {rejectLabel}
