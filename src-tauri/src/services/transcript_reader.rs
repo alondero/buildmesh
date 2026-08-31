@@ -1002,173 +1002,9 @@ fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed
 //   {"type":"message", "id":"...", "message": {
 //       "role":"user"|"assistant", "content":[...]}}
 //
-// Thinking blocks are retained in the normalized turn text because `Turn` has
-// no separate reasoning field. The digest tracks only user-visible text, so
-// internal reasoning and diff output do not replace the Coordinator's latest
-// assistant response. Ordinary tool results remain suppressed.
-
-#[derive(Default)]
-struct CommandCodeContent {
-    text: String,
-    visible_text: String,
-}
-
-fn visible_commandcode_content(text: String) -> CommandCodeContent {
-    CommandCodeContent {
-        visible_text: text.clone(),
-        text,
-    }
-}
-
-fn hidden_commandcode_content(text: String) -> CommandCodeContent {
-    CommandCodeContent {
-        text,
-        visible_text: String::new(),
-    }
-}
-
-fn join_commandcode_content(parts: impl IntoIterator<Item = CommandCodeContent>) -> CommandCodeContent {
-    let parts: Vec<CommandCodeContent> = parts
-        .into_iter()
-        .filter(|part| !part.text.trim().is_empty())
-        .collect();
-    CommandCodeContent {
-        text: parts
-            .iter()
-            .map(|part| part.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        visible_text: parts
-            .iter()
-            .filter(|part| !part.visible_text.trim().is_empty())
-            .map(|part| part.visible_text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
-}
-
-/// Convert a Command Code content block into the text that belongs in a
-/// normalized turn. Tool-result prose is intentionally omitted, but an
-/// explicit diff nested in a result is useful session history and is
-/// surfaced as text.
-fn parse_commandcode_content_block(block: &serde_json::Value) -> Option<CommandCodeContent> {
-    let kind = block.get("type").and_then(|value| value.as_str())?;
-    match kind {
-        "text" => block
-            .get("text")
-            .and_then(|value| value.as_str())
-            .map(|text| visible_commandcode_content(text.to_string())),
-        "thinking" => block
-            .get("thinking")
-            .and_then(|value| value.as_str())
-            .map(|text| hidden_commandcode_content(text.to_string())),
-        "reasoning" => ["reasoning", "text"]
-            .iter()
-            .find_map(|key| parse_commandcode_content_value(block.get(*key)))
-            .map(|content| hidden_commandcode_content(content.text)),
-        "diff" => ["diff", "text", "content"]
-            .iter()
-            .find_map(|key| parse_commandcode_content_value(block.get(*key)))
-            .map(|content| hidden_commandcode_content(content.text)),
-        "tool_result" => commandcode_diff_text(block.get("content"))
-            .map(hidden_commandcode_content),
-        _ => None,
-    }
-}
-
-/// Read text from a Command Code value that is either a block, a block array,
-/// or a scalar text value. Unknown block types contribute no text but do not
-/// make the complete message unreadable; this keeps metadata additions
-/// forward-compatible.
-fn parse_commandcode_content_value(
-    value: Option<&serde_json::Value>,
-) -> Option<CommandCodeContent> {
-    match value {
-        Some(serde_json::Value::String(text)) => Some(visible_commandcode_content(text.clone())),
-        Some(serde_json::Value::Array(blocks)) => Some(join_commandcode_content(
-            blocks.iter().filter_map(parse_commandcode_content_block),
-        )),
-        Some(value @ serde_json::Value::Object(object)) if object.contains_key("type") => {
-            Some(parse_commandcode_content_block(value).unwrap_or_default())
-        }
-        Some(serde_json::Value::Null) => Some(CommandCodeContent::default()),
-        _ => None,
-    }
-}
-
-/// Extract only explicit diff blocks from a tool result. Ordinary tool
-/// output is an echo of the command and is intentionally not a conversation
-/// turn, matching the other transcript readers.
-fn commandcode_diff_text(value: Option<&serde_json::Value>) -> Option<String> {
-    match value {
-        Some(serde_json::Value::String(text)) if looks_like_commandcode_diff(text) => {
-            Some(text.clone())
-        }
-        Some(serde_json::Value::Array(blocks)) => {
-            let text = blocks
-                .iter()
-                .filter_map(commandcode_diff_block_text)
-                .collect::<Vec<_>>()
-                .join("\n");
-            (!text.is_empty()).then_some(text)
-        }
-        Some(value @ serde_json::Value::Object(object)) => {
-            if matches!(
-                object.get("type").and_then(|value| value.as_str()),
-                Some("diff")
-            ) {
-                return commandcode_diff_payload_text(value);
-            }
-            if object.get("type").and_then(|value| value.as_str()) == Some("text") {
-                return object
-                    .get("text")
-                    .and_then(|value| value.as_str())
-                    .filter(|text| looks_like_commandcode_diff(text))
-                    .map(str::to_string);
-            }
-            ["diff"]
-                .iter()
-                .find_map(|key| object.get(*key).and_then(|value| value.as_str()))
-                .map(str::to_string)
-        }
-        _ => None,
-    }
-}
-
-fn commandcode_diff_block_text(block: &serde_json::Value) -> Option<String> {
-    match block.get("type").and_then(|value| value.as_str()) {
-        Some("diff") => commandcode_diff_payload_text(block),
-        Some("text") => block
-            .get("text")
-            .and_then(|value| value.as_str())
-            .filter(|text| looks_like_commandcode_diff(text))
-            .map(str::to_string),
-        Some("tool_result") => commandcode_diff_text(block.get("content")),
-        _ => None,
-    }
-}
-
-fn commandcode_diff_payload_text(block: &serde_json::Value) -> Option<String> {
-    ["diff", "text", "content"]
-        .iter()
-        .find_map(|key| match block.get(*key) {
-            Some(serde_json::Value::String(text)) => Some(text.clone()),
-            Some(value @ serde_json::Value::Array(_))
-            | Some(value @ serde_json::Value::Object(_)) => {
-                parse_commandcode_content_value(Some(value)).map(|content| content.text)
-            }
-            _ => None,
-        })
-}
-
-fn looks_like_commandcode_diff(text: &str) -> bool {
-    text.lines().any(|line| {
-        line.starts_with("diff --git ")
-            || line.starts_with("@@ ")
-            || line.starts_with("--- ")
-            || line.starts_with("+++ ")
-    })
-}
+// Thinking, reasoning, and tool-result blocks are transport details rather
+// than Coordinator dialogue. They are deliberately omitted from `Turn.text`;
+// tool invocations remain available through the shared `ToolCall` shape.
 
 /// Parse Command Code JSONL lines into normalized turns. The rolling buffer,
 /// assistant digest, malformed-shape signal, and assistant-id coalescing all
@@ -1179,7 +1015,6 @@ fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> 
     let mut last_assistant_message: Option<String> = None;
     let mut saw_malformed = false;
     let mut open_assistant_id: Option<String> = None;
-    let mut open_assistant_visible_text: Option<String> = None;
 
     for line in lines {
         if line.trim().is_empty() {
@@ -1212,39 +1047,18 @@ fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> 
             saw_malformed = true;
             continue;
         };
-        let Some(content) = parse_commandcode_content_value(Some(raw_content)) else {
+        if !matches!(
+            raw_content,
+            serde_json::Value::String(_) | serde_json::Value::Array(_) | serde_json::Value::Null
+        ) {
             saw_malformed = true;
             continue;
-        };
-        let CommandCodeContent {
-            mut text,
-            visible_text,
-        } = content;
+        }
+        let text = concat_text_blocks(Some(raw_content));
         let mut tool_calls = extract_tool_calls(Some(raw_content));
-        let has_tool_result = commandcode_has_tool_result(raw_content);
-        let diff_text = commandcode_diff_text(Some(raw_content));
 
         if role == "user" {
-            let diff_merged = diff_text.as_deref().is_some_and(|diff| {
-                merge_commandcode_tool_result_diff(
-                    &mut turns,
-                    value.get("parentId").and_then(|id| id.as_str()),
-                    open_assistant_id.as_deref(),
-                    diff,
-                )
-            });
-            if diff_merged {
-                // A tool_result is transport output, not a new user prompt.
-                // Keep only any genuine user-visible text in this envelope.
-                text = visible_text.clone();
-            }
-            if has_tool_result && text.trim().is_empty() && (diff_merged || diff_text.is_none()) {
-                // Preserve the open assistant id across tool-result envelopes
-                // so a later assistant continuation can still coalesce.
-                continue;
-            }
             open_assistant_id = None;
-            open_assistant_visible_text = None;
             if is_synthetic_message(&text) || text.trim().is_empty() {
                 continue;
             }
@@ -1260,7 +1074,7 @@ fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> 
             continue;
         }
 
-        // A message that only reports an ordinary tool result has no
+        // An assistant message containing only internal blocks has no
         // user-facing normalized content. Keep the open id so a split
         // assistant message can still merge a following continuation.
         if text.trim().is_empty() && tool_calls.is_empty() {
@@ -1276,16 +1090,8 @@ fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> 
             if id == open {
                 if let Some(last) = turns.back_mut() {
                     merge_into(last, &text, tool_calls);
-                    if !visible_text.trim().is_empty() {
-                        let combined = if let Some(previous) = &open_assistant_visible_text {
-                            format!("{}\n{}", previous, visible_text)
-                        } else {
-                            visible_text.clone()
-                        };
-                        open_assistant_visible_text = Some(truncate(&combined, MAX_TURN_TEXT));
-                    }
-                    if let Some(visible) = &open_assistant_visible_text {
-                        last_assistant_message = Some(visible.clone());
+                    if !last.text.trim().is_empty() {
+                        last_assistant_message = Some(last.text.clone());
                     }
                     continue;
                 }
@@ -1293,16 +1099,14 @@ fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> 
         }
 
         open_assistant_id = id;
-        let visible_text = truncate(&visible_text, MAX_TURN_TEXT);
-        open_assistant_visible_text = (!visible_text.trim().is_empty()).then_some(visible_text.clone());
         cap_tool_calls(&mut tool_calls);
         let turn = Turn {
             role: "assistant".to_string(),
             text: truncate(&text, MAX_TURN_TEXT),
             tool_calls,
         };
-        if !visible_text.is_empty() {
-            last_assistant_message = Some(visible_text);
+        if !turn.text.trim().is_empty() {
+            last_assistant_message = Some(turn.text.clone());
         }
         push_bounded(&mut turns, turn, keep);
     }
@@ -1312,40 +1116,6 @@ fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> 
         last_assistant_message,
         saw_malformed,
     }
-}
-
-fn commandcode_has_tool_result(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Array(values) => values.iter().any(commandcode_has_tool_result),
-        serde_json::Value::Object(object) => {
-            object.get("type").and_then(|kind| kind.as_str()) == Some("tool_result")
-                || object
-                    .get("content")
-                    .is_some_and(commandcode_has_tool_result)
-        }
-        _ => false,
-    }
-}
-
-fn merge_commandcode_tool_result_diff(
-    turns: &mut VecDeque<Turn>,
-    parent_id: Option<&str>,
-    open_assistant_id: Option<&str>,
-    diff: &str,
-) -> bool {
-    if let Some(parent_id) = parent_id {
-        if open_assistant_id != Some(parent_id) {
-            return false;
-        }
-    }
-    let Some(last) = turns.back_mut() else {
-        return false;
-    };
-    if last.role != "assistant" {
-        return false;
-    }
-    merge_into(last, diff, Vec::new());
-    true
 }
 
 // --- Antigravity transcript parser (issue #1283) ---
@@ -2442,7 +2212,7 @@ mod tests {
     }
 
     #[test]
-    fn commandcode_contract_parses_nested_messages_and_preserves_reasoning_and_tools() {
+    fn commandcode_contract_parses_nested_messages_and_drops_internal_blocks_and_tool_results() {
         let tail = read_tail_from_file(
             &fixture("commandcode_transcript.jsonl"),
             10,
@@ -2462,28 +2232,19 @@ mod tests {
             vec!["user", "assistant", "assistant", "user", "assistant"],
             "ordinary tool_result echoes and non-message events should be skipped; turns: {turns:#?}"
         );
-        assert_eq!(
-            turns[0].text,
-            "Inspect src/login.ts for the redirect bug."
-        );
-        assert_eq!(
-            turns[1].text,
-            "I should inspect the redirect path before changing anything.\nI'll inspect the file first."
-        );
+        assert_eq!(turns[0].text, "Inspect src/login.ts for the redirect bug.");
+        assert_eq!(turns[1].text, "I'll inspect the file first.");
         assert_eq!(turns[1].tool_calls.len(), 1);
         assert_eq!(turns[1].tool_calls[0].name, "read_file");
         assert_eq!(turns[1].tool_calls[0].input["file_path"], "src/login.ts");
-        assert_eq!(
-            turns[2].text,
-            "The query string is dropped while building the redirect URL.\nI have prepared the redirect fix.\n@@ -1 +1 @@\n-const redirect = nextUrl;\n+const redirect = new URL(nextUrl, window.location.origin);"
-        );
+        assert_eq!(turns[2].text, "I have prepared the redirect fix.");
         assert_eq!(
             turns[2].tool_calls[0].input["diff"],
             "@@ -1 +1 @@\n-const redirect = nextUrl;\n+const redirect = new URL(nextUrl, window.location.origin);"
         );
         assert_eq!(
             turns[4].text,
-            "The requested change is now applied.\nThe redirect now preserves the query string."
+            "The redirect now preserves the query string."
         );
         assert_eq!(
             last_assistant_message.as_deref(),
@@ -2512,17 +2273,123 @@ mod tests {
     }
 
     #[test]
-    fn commandcode_thinking_only_turn_is_visible_but_not_digest_text() {
+    fn commandcode_thinking_only_turn_is_skipped() {
         let lines = [
             r#"{"type":"message","id":"user-1","message":{"role":"user","content":"Inspect the redirect."}}"#,
             r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"I am still inspecting the redirect."}]}}"#,
         ];
-        let parsed = parse_commandcode_turns(
-            lines.into_iter().map(str::to_string),
-            10,
+        let parsed = parse_commandcode_turns(lines.into_iter().map(str::to_string), 10);
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].text, "Inspect the redirect.");
+        assert_eq!(parsed.last_assistant_message, None);
+    }
+
+    #[test]
+    fn commandcode_renamed_fields_degrade_to_shape_changed() {
+        let cases = [
+            r#"{"type":"message","id":"assistant-1","message":{"author":"assistant","content":[{"type":"text","text":"renamed"}]}}"#,
+            r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","blocks":[{"type":"text","text":"renamed"}]}}"#,
+        ];
+
+        for line in cases {
+            let parsed = parse_commandcode_turns(std::iter::once(line.to_string()), 10);
+            assert!(
+                parsed.turns.is_empty(),
+                "renamed shape should not produce turns"
+            );
+            assert!(
+                parsed.saw_malformed,
+                "renamed fields must be marked malformed"
+            );
+            assert_eq!(
+                empty_or_shape_changed(parsed.saw_malformed),
+                UnavailableReason::ShapeChanged
+            );
+        }
+    }
+
+    #[test]
+    fn commandcode_non_message_stream_degrades_to_empty() {
+        let path = write_fixture(
+            "commandcode_empty",
+            r#"{"type":"session","id":"sess-commandcode-empty"}
+{"type":"model_change","model":"commandcode-default"}
+{"type":"telemetry","event":"heartbeat"}
+"#,
         );
-        assert_eq!(parsed.turns.len(), 2);
-        assert_eq!(parsed.turns[1].text, "I am still inspecting the redirect.");
+        let tail = read_tail_from_file(&path, 10, TranscriptFormat::CommandCode);
+        std::fs::remove_file(path).ok();
+
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::Empty),
+            "metadata-only streams are quiet, not malformed"
+        );
+    }
+
+    #[test]
+    fn commandcode_rolling_buffer_evicts_old_turns_but_keeps_digest() {
+        let mut lines = Vec::new();
+        for i in 0..50 {
+            lines.push(format!(
+                r#"{{"type":"message","id":"user-{i}","message":{{"role":"user","content":"prompt {i}"}}}}"#
+            ));
+            lines.push(format!(
+                r#"{{"type":"message","id":"assistant-{i}","message":{{"role":"assistant","content":[{{"type":"text","text":"reply {i}"}}]}}}}"#
+            ));
+        }
+
+        let parsed = parse_commandcode_turns(lines.into_iter(), 3);
+        assert_eq!(parsed.turns.len(), 3, "the rolling buffer must honor keep");
+        assert_eq!(
+            parsed.turns.last().map(|turn| turn.text.as_str()),
+            Some("reply 49")
+        );
+        assert_eq!(parsed.last_assistant_message.as_deref(), Some("reply 49"));
+    }
+
+    #[test]
+    fn commandcode_tool_call_input_truncates_large_string_leaves() {
+        let big = "x".repeat(100 * 1024);
+        let line = serde_json::json!({
+            "type": "message",
+            "id": "assistant-big-input",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "name": "write_file",
+                    "input": {"path": "src/main.rs", "content": big}
+                }]
+            }
+        })
+        .to_string();
+
+        let parsed = parse_commandcode_turns(std::iter::once(line), 10);
+        let content = parsed.turns[0].tool_calls[0].input["content"]
+            .as_str()
+            .expect("tool input content should remain a string");
+        assert!(content.ends_with('…'));
+        assert!(content.chars().count() <= MAX_TOOL_STRING + 1);
+    }
+
+    #[test]
+    fn commandcode_whitespace_tool_turn_does_not_update_digest() {
+        let line = serde_json::json!({
+            "type": "message",
+            "id": "assistant-whitespace",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "   "},
+                    {"type": "tool_use", "name": "Read", "input": {}}
+                ]
+            }
+        })
+        .to_string();
+
+        let parsed = parse_commandcode_turns(std::iter::once(line), 10);
+        assert_eq!(parsed.turns.len(), 1);
         assert_eq!(parsed.last_assistant_message, None);
     }
 
