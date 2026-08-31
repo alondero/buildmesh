@@ -27,7 +27,7 @@ import { createShortcutGuard } from './lib/shortcutGuard';
 import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { traversalTargetId } from './lib/gridTraversal';
-import { toggleGridMaximize, cycleGridMode } from './lib/gridShortcuts';
+import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding } from './lib/gridShortcuts';
 import { scopeNodesForMode } from './lib/viewModes';
 import type { NonSingleViewMode } from './stores/uiStore';
 import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
@@ -147,6 +147,13 @@ function App() {
         { key: 'CommandOrControl+Shift+P', action: 'open-omnibar-commands' as const },
       ];
 
+  // Issue #998 — focus the grid search input. The platform-branch logic
+  // and the macOS `⌘+⌥+F` collision carve-out (vs. `term-find` on bare
+  // `⌘+F`) live in `buildFocusGridSearchBinding` so the branch can be
+  // unit-tested directly without regexing this file. See
+  // `src/lib/gridShortcuts.ts` for the full rationale.
+  const focusGridSearchShortcut = buildFocusGridSearchBinding(isMac);
+
   const shortcuts = [
     { key: 'CommandOrControl+T', action: 'new-agent' },
     ...omnibarShortcuts,
@@ -169,6 +176,7 @@ function App() {
     // collide with the Single solo toggle (`Alt+G` on Win/Linux, `Cmd+G` on
     // macOS) because it carries the extra Alt/⌥ modifier.
     { key: 'CommandOrControl+Alt+G', action: 'cycle-grid-modes' },
+    focusGridSearchShortcut,
     gridToggleShortcut,
   ];
 
@@ -252,6 +260,26 @@ function App() {
         cycleViewModeGuard(async () => {
           cycleGridMode();
         });
+        return;
+      }
+
+      if (action === 'focus-grid-search') {
+        // Issue #998 — Ctrl+F (Win/Linux) / ⌘+⌥+F (macOS) focuses the grid
+        // search input. The actual `.focus()` + `.select()` calls live
+        // in the `GridControls` component's `useLayoutEffect` (which
+        // subscribes to `useUIStore.focusGridSearchRequest`); we just
+        // bump the request counter here. A request counter is the
+        // React-idiomatic channel for "imperative command from outside
+        // the component tree" — no ref forwarding, no module-level
+        // singleton, no leaky DOM registration. The component handles
+        // the "no input mounted" case as a no-op (the effect's
+        // `inputRef.current?.focus()` short-circuits).
+        //
+        // No cooldown: a held key must not burn a window — the user
+        // re-pressing while already focused is a harmless re-focus, and
+        // the counter pattern (0 → 1 → 2) naturally fires the effect
+        // on every distinct press.
+        useUIStore.getState().requestFocusGridSearch();
         return;
       }
 

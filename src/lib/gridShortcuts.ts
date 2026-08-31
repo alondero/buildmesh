@@ -63,3 +63,40 @@ export function cycleGridMode(): void {
   const idx = GRID_MODE_CYCLE.indexOf(ui.viewMode);
   ui.setViewMode(GRID_MODE_CYCLE[(idx + 1) % GRID_MODE_CYCLE.length]);
 }
+
+// ---- Issue #998 — focus grid search ----
+
+/**
+ * Tauri global-shortcut binding for the `focus-grid-search` action. Lifted
+ * out of App.tsx so the platform-branch logic (and, more importantly, the
+ * macOS `⌘+⌥+F` two-modifier collision carve-out) can be unit-tested
+ * directly without regexing App.tsx source.
+ *
+ * Why the macOS branch carries the extra `Alt+` modifier: bare `⌘+F` is
+ * already taken by the terminal's find action (xterm's
+ * `attachCustomKeyEventHandler` matches `Cmd+F` to the terminal's
+ * `'find'` KeyAction). The Tauri global-shortcut plugin registers at the
+ * OS level, so claiming `⌘+F` would beat the focus-level handler and every
+ * `⌘+F` in an agent terminal would jump to the grid search instead of
+ * opening the terminal's find bar. The two-modifier `⌘+⌥+F` follows the
+ * readline-free two-modifier principle shared by the
+ * `Ctrl/Cmd+Alt+Arrow*` grid-traversal bindings — no readline, terminal,
+ * or other app shortcut uses two meta+alt modifiers together, so the
+ * chord stays free.
+ *
+ * On Windows/Linux, bare `Ctrl+F` is free (no readline gesture uses it)
+ * so no carve-out is needed.
+ *
+ * `as const` on the action string is required so the App.tsx handler's
+ * `if (action === 'focus-grid-search')` type-narrows correctly; the
+ * `key` field stays a plain string so the Tauri plugin accepts both
+ * branches uniformly.
+ */
+export function buildFocusGridSearchBinding(isMac: boolean): {
+  key: string;
+  action: 'focus-grid-search';
+} {
+  return isMac
+    ? { key: 'CommandOrControl+Alt+F', action: 'focus-grid-search' }
+    : { key: 'CommandOrControl+F', action: 'focus-grid-search' };
+}

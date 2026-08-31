@@ -140,6 +140,41 @@ describe('shortcutCatalog', () => {
     expect(cycle?.splash).toBeUndefined();
   });
 
+  it('surfaces focus-grid-search (issue #998) with the macOS ⌘+⌥+F two-modifier collision carve-out', () => {
+    // Cmd/Ctrl+F is the editors' universal "find" chord. On Win/Linux bare
+    // Ctrl+F is free (no readline gesture uses it), but on macOS bare ⌘+F
+    // is already taken by `term-find` (xterm's `attachCustomKeyEventHandler`
+    // matches ⌘+F to the terminal's find action). The catalog MUST reflect
+    // the platform split App.tsx wires: Ctrl+F on Win/Linux, ⌘+⌥+F on
+    // macOS. A regression that drops the ⌘+⌥+F modifier would re-collide
+    // with `term-find` and silently steal it from focused agent terminals.
+    const focus = SHORTCUT_CATALOG.find(s => s.action === 'focus-grid-search');
+    expect(focus).toBeDefined();
+    expect(focus?.group).toBe('grid');
+    expect(focus?.winKey).toBe('Ctrl+F');
+    expect(focus?.macKey).toBe('⌘+⌥+F');
+    // Not a splash entry — the splash advertises gestures useful on the
+    // pre-spawn empty canvas, where there are no nodes to search.
+    expect(focus?.splash).toBeUndefined();
+  });
+
+  it('surfaces clear-grid-search (issue #998) as Esc in the grid group, distinct from close-modal', () => {
+    // Esc already lives in the catalog as `close-modal` (modal group, owned
+    // by the <Modal> primitive's window keydown listener). The grid-search
+    // Esc is a *contextual* clear — handled inside the input's own
+    // onKeyDown so it only fires when the input has focus, never when
+    // the user is closing a dialog. Pin both entries so the cheatsheet
+    // doesn't accidentally collapse them into one.
+    const clear = SHORTCUT_CATALOG.find(s => s.action === 'clear-grid-search');
+    expect(clear).toBeDefined();
+    expect(clear?.group).toBe('grid');
+    expect(clear?.winKey).toBe('Esc');
+    expect(clear?.macKey).toBe('Esc');
+    // Not splash — the splash is the pre-spawn empty state, where there
+    // is no grid to search.
+    expect(clear?.splash).toBeUndefined();
+  });
+
   it('does not advertise the obsolete Ctrl+Alt+D shortcut the README once phantom-documented', () => {
     // The keyboard-shortcut-conventions memory notes: "drift here has
     // shipped at least once (Ctrl+Alt+D was phantom-documented)".

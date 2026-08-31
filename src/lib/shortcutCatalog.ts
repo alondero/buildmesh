@@ -201,6 +201,46 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     macKey: '⌘+⌥+↓',
     splash: true,
   },
+  {
+    // Issue #998 — focus the grid search input. `Cmd/Ctrl+F` is the
+    // editors' universal "find" chord, so the issue text asks for it
+    // verbatim. On Win/Linux bare `Ctrl+F` is free (no readline gesture
+    // uses it), so we use it as-is. On macOS, bare `⌘+F` is already
+    // taken by `term-find` (the xterm helper's find action, registered
+    // at the focus level by Terminal.tsx's `attachCustomKeyEventHandler`),
+    // and Tauri's global-shortcut plugin would beat that focus-level
+    // registration if we claimed it here — every `⌘+F` in an agent
+    // terminal would jump to the grid search instead of opening the
+    // terminal's find bar. The two-modifier carve-out (⌘+⌥+F) follows
+    // the readline-free two-modifier principle shared by the
+    // `Ctrl/Cmd+Alt+Arrow*` grid-traversal bindings in App.tsx — no
+    // readline, terminal, or other app shortcut uses two meta+alt
+    // modifiers together, so the chord stays free. Not flagged
+    // `splash`: searching the grid is meaningless on the pre-spawn
+    // empty canvas the splash advertises (no nodes to search).
+    action: 'focus-grid-search',
+    group: 'grid',
+    description: 'Focus grid search',
+    winKey: 'Ctrl+F',
+    macKey: '⌘+⌥+F',
+  },
+  {
+    // Issue #998 — Esc clears the grid search. Handled contextually by
+    // the search input's own `onKeyDown` (it `e.preventDefault()`s the
+    // event so the Modal/AgentNodeView Esc listeners don't fire when
+    // the input is the active element), so this entry is the
+    // discoverability surface only — no App.tsx Tauri global-shortcut
+    // registration, no shortcut-triggered dispatch. Listing it in the
+    // `grid` group (not `modal`) tells the user this Esc is "for the
+    // grid", distinct from the modal group's "close dialog" Esc. Not
+    // flagged `splash` for the same reason as `focus-grid-search`
+    // above.
+    action: 'clear-grid-search',
+    group: 'grid',
+    description: 'Clear grid search',
+    winKey: 'Esc',
+    macKey: 'Esc',
+  },
 
   // --- Terminal (window-level or xterm-only) ------------------------------
   // The zoom keys are window-level (Terminal.tsx keydown listener).

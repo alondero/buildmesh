@@ -11,7 +11,7 @@ import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
 import { resolveSingleNode } from '../../lib/viewModes';
-import { deriveVisibleNodes } from './gridControls';
+import { deriveVisibleNodes } from './gridFilterSort';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
 import { NodeCard, type BuildRunState } from './NodeCard';
