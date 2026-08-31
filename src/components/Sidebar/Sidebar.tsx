@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
-import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useAgentNodeStore, useAllAgentNodes } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import { listProviders } from '../../lib/tauri';
@@ -57,16 +57,10 @@ export function Sidebar() {
   const selectMesh = useMeshStore(state => state.selectMesh);
   const reorderMeshes = useMeshStore(state => state.reorderMeshes);
   const getDefaultProvider = useMeshStore(state => state.getDefaultProvider);
-  // Issue #1384 — subscribe to the normalized split. `nodeIds` is the
-  // ordered id sequence; `nodesById` is the lookup. The derived array
-  // (used by `meshNodes={…}` below) keeps the existing call shape — the
-  // per-mesh filter only re-computes when either dependency changes.
-  const nodeIds = useAgentNodeStore(state => state.nodeIds);
-  const nodesById = useAgentNodeStore(state => state.nodesById);
-  const agentNodes = useMemo(
-    () => nodeIds.map(id => nodesById[id]).filter((n): n is AgentNode => n !== undefined),
-    [nodeIds, nodesById],
-  );
+  // Issue #1384 — `useAllAgentNodes` is the canonical derived selector.
+  // The per-mesh filter below only re-computes when the array reference
+  // changes (useShallow equality on the underlying selector).
+  const agentNodes = useAllAgentNodes();
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);

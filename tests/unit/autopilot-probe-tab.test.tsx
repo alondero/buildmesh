@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Tests for the Autopilot Probe tab — wayfinder #990, ticket #994.
  *
  * Strategy mirrors `mesh-properties-tab.test.tsx`: mount the full
@@ -538,7 +538,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
   });
 });
 
-// â”€â”€ Issue-driven Autopilot Policy (ticket #1013) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue-driven Autopilot Policy (ticket #1013) ────────────────────────────â”€
 // The four policy columns + master enable flag moved out of
 // `MeshPropertiesTab` and into this tab's issue-driven branch. They
 // persist atomically through `update_mesh_autopilot` (same IPC shape

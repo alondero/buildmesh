@@ -1,5 +1,6 @@
 import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
+import { useShallow } from 'zustand/react/shallow';
 import * as api from '../lib/tauri';
 import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
@@ -68,27 +69,39 @@ export type { AgentNode };
 // in that case we'd silently fail to reconcile and the cascade comes back).
 // A typed field-by-field compare is fast (≤20 primitives per node in the
 // current wire shape), deterministic, and pins the contract in the type
-// system: adding a new field requires updating the comparator.
-const AGENT_NODE_RECONCILE_FIELDS = [
-  'mesh_id',
-  'name',
-  'path',
-  'branch',
-  'worktree_name',
-  'env',
-  'provider',
-  'status',
-  'cli_session_id',
-  'use_worktree',
-  'is_pinned',
-  'position',
-  'created_at',
-  'source_issue',
-  'source_pr',
-  'head_repo_owner',
-  'head_repo_clone_url',
-  'source_pr_pinned_sha',
-] as const satisfies ReadonlyArray<keyof AgentNode>;
+// system via the exhaustiveness trick below.
+// Exhaustiveness contract — the comparator MUST list every field on
+// `AgentNode` except `id`. If the Rust struct gains a field, `tsc` will
+// fail the build at the next `cargo test` regeneration (the
+// `ReconciledKey` mapped type only compiles when every key is present).
+// `id` is excluded because it is the map key itself; comparing it would
+// be a tautology (`a.id === b.id` whenever both rows are valid). The
+// `Omit<AgentNode, 'id'>` mapped type pins the *absence* of `id`, the
+// `Record<..., true>` literal pins the *presence* of every other field.
+type ReconciledKey = keyof Omit<AgentNode, 'id'>;
+const AGENT_NODE_RECONCILE_SCHEMA: Record<ReconciledKey, true> = {
+  mesh_id: true,
+  name: true,
+  path: true,
+  branch: true,
+  worktree_name: true,
+  env: true,
+  provider: true,
+  status: true,
+  cli_session_id: true,
+  use_worktree: true,
+  is_pinned: true,
+  position: true,
+  created_at: true,
+  source_issue: true,
+  source_pr: true,
+  head_repo_owner: true,
+  head_repo_clone_url: true,
+  source_pr_pinned_sha: true,
+};
+const AGENT_NODE_RECONCILE_FIELDS = Object.keys(
+  AGENT_NODE_RECONCILE_SCHEMA,
+) as ReadonlyArray<ReconciledKey>;
 
 function shallowEqualAgentNode(a: AgentNode, b: AgentNode): boolean {
   for (const k of AGENT_NODE_RECONCILE_FIELDS) {
@@ -313,6 +326,28 @@ interface AgentNodeState {
   /// pending send per node at a time (issue #785).
   scheduleInput: (nodeId: number, delayMs: number, message: string, label: string) => void;
   cancelSchedule: (nodeId: number) => void;
+}
+
+/// Issue #1384 — derived selector for the full ordered node array. Components
+/// that genuinely need the list (Sidebar, AgentNodeView, CommandOmnibar)
+/// use this hook instead of the duplicated `useMemo(() => nodeIds.map(id =>
+/// nodesById[id]).filter(...), [nodeIds, nodesById])` block. `useShallow`
+/// does the shallow equality on the array's elements so unrelated writes
+/// (autopilot pill, closing flag, error string) don't churn the consumer.
+///
+/// Returns a fresh array reference on every `nodeIds` change (e.g. a delete
+/// or reorder), so `useMemo`-style downstream derivations in consumers
+/// recompute correctly. Per-id selectors (`state.nodesById[id]`) are
+/// preferred when the consumer only needs one node — they preserve identity
+/// through the shallow reconciliation in `fetchAgentNodes`.
+export function useAllAgentNodes(): AgentNode[] {
+  return useAgentNodeStore(
+    useShallow((s) =>
+      s.nodeIds
+        .map((id) => s.nodesById[id])
+        .filter((n): n is AgentNode => n !== undefined),
+    ),
+  );
 }
 
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {

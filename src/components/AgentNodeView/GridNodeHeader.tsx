@@ -161,12 +161,9 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   // this node's review right now". `AgentChangesTab` reads `activeNodeId`
   // from this store to pick which node's review to render, so we compare
   // the same value to keep the highlight and the body in sync.
-  const isReviewingThisNode = useAgentNodeStore((s) => s.activeNodeId === node?.id);
+  const isReviewingThisNode = useAgentNodeStore((s) => s.activeNodeId === nodeId);
+  const autopilotState = useAgentNodeStore((s) => s.autopilotStates[nodeId]);
   const meshesById = useMeshStore(state => state.meshesById);
-  const meshColor = node ? getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color) : null;
-  // Autopilot pipeline state for this node (undefined = not piloted). String
-  // selector so only headers whose own state changes re-render.
-  const autopilotState = useAgentNodeStore((s) => node ? s.autopilotStates[node.id] : undefined);
 
   // Issue #736 — measure the rendered header width and bucket it into a tier
   // that decides which chips render and whether the close/max buttons live
@@ -187,9 +184,10 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   // an id that no longer exists.
   const gitPath = node ? getNodeGitPath(node) : null;
   const { summary } = useGitSummary(gitPath);
-  const { pr: openPr } = useOpenPr(node?.id ?? -1, gitPath);
+  const { pr: openPr } = useOpenPr(nodeId, gitPath);
 
   if (!node) return null;
+  const meshColor = getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color);
   const tier = getHeaderTier(width);
   // Convenience booleans for readability — avoids noisy `tier === 'xl' || tier === 'wide'`
   // chains at every chip.

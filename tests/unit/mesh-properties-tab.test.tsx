@@ -570,7 +570,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(sandboxes).toHaveLength(1);
   });
 
-  // â”€â”€ Regression: Autopilot Policy moved to AutopilotProbeTab (#1013) â”€â”€â”€â”€â”€
+  // ── Regression: Autopilot Policy moved to AutopilotProbeTab (#1013) ────â”€
   // The `update_mesh_autopilot` IPC and its four-policy-fields shape were
   // intentionally moved out of Mesh Properties (ticket #1013, follow-up to
   // #994). The Mesh Properties tab is no longer the configure surface for

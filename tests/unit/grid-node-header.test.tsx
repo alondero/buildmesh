@@ -1,4 +1,4 @@
-﻿/**
+/**
  * The git-summary chip in the Agent Node header used to render all three
  * counts in one muted-grey span, so added / modified / deleted blurred into
  * a single "+3 ~2 -1" smudge that washed out against the mesh tint. Each
@@ -164,11 +164,7 @@ describe('GridNodeHeader worktree/root pill', () => {
   it('shows a muted "worktree" pill when the node runs in a worktree', () => {
     summaryMock.mockReturnValue(null);
     const overrideNode = { ...NODE, use_worktree: true };
-    useAgentNodeStore.setState({ nodesById: { [overrideNode.id]: overrideNode }, nodeIds: [overrideNode.id] });
-    useAgentNodeStore.setState({
-      nodesById: { [overrideNode.id]: overrideNode },
-      nodeIds: [overrideNode.id],
-    });
+    seedAgentNodes([overrideNode]);
     const { getByText } = render(
       <GridNodeHeader nodeId={overrideNode.id} onBuildRun={() => {}} />
     );
@@ -243,14 +239,14 @@ describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
   // counterpart to the double-click and the explicit button. The header
   // tooltip must surface it so users discover the shortcut without
   // hunting through the empty-state splash.
-  it('mentions the platform-specific Alt+G / âŒ˜+G shortcut in the maximize tooltip', () => {
+  it('mentions the platform-specific Alt+G / ⌥+G shortcut in the maximize tooltip', () => {
     const { container } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     const title = (container.firstChild as Element).getAttribute('title') ?? '';
     // Canonical sentence — substring-only asserts would accept broken
     // strings like "Alt+G to do something unrelated maximize".
     const isMac = navigator.platform.toUpperCase().includes('MAC');
     const expected = isMac
-      ? 'Double-click or press âŒ˜+G to maximize'
+      ? 'Double-click or press ⌥+G to maximize'
       : 'Double-click or press Alt+G to maximize';
     expect(title).toBe(expected);
   });
@@ -261,7 +257,7 @@ describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
     const title = (container.firstChild as Element).getAttribute('title') ?? '';
     const isMac = navigator.platform.toUpperCase().includes('MAC');
     const expected = isMac
-      ? 'Double-click or press âŒ˜+G to restore grid'
+      ? 'Double-click or press ⌥+G to restore grid'
       : 'Double-click or press Alt+G to restore grid';
     expect(title).toBe(expected);
   });
@@ -269,12 +265,12 @@ describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
   // Issue #668 — the explicit maximize button (visible on hover) must
   // advertise the same shortcut so discoverability isn't gated on the
   // header-bar double-click affordance.
-  it('the maximize button tooltip mentions the Alt+G / âŒ˜+G shortcut', () => {
+  it('the maximize button tooltip mentions the Alt+G / ⌥+G shortcut', () => {
     const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     const button = getByLabelText('Maximize agent node');
     const title = button.getAttribute('title') ?? '';
     const isMac = navigator.platform.toUpperCase().includes('MAC');
-    expect(title).toMatch(isMac ? /âŒ˜\+G/ : /Alt\+G/);
+    expect(title).toMatch(isMac ? /⌥\+G/ : /Alt\+G/);
     expect(title.toLowerCase()).toContain('maximize');
   });
 
@@ -284,7 +280,7 @@ describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
     const button = getByLabelText('Restore grid layout');
     const title = button.getAttribute('title') ?? '';
     const isMac = navigator.platform.toUpperCase().includes('MAC');
-    expect(title).toMatch(isMac ? /âŒ˜\+G/ : /Alt\+G/);
+    expect(title).toMatch(isMac ? /⌥\+G/ : /Alt\+G/);
     expect(title.toLowerCase()).toContain('restore');
   });
 });

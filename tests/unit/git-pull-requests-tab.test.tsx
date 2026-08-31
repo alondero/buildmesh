@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Tests for the Git Pull Requests probe tab (ðŸ”€).
  *
  * Pins the panel's invariants:
@@ -1131,7 +1131,7 @@ describe('GitPullRequestsTab', () => {
 
   // ----- Expand body + title link (issue #461) --------------------------
 
-  // Per memory feedback-probe-tab-test-and-jsdoc-gotchas Â§4: row's
+  // Per memory feedback-probe-tab-test-and-jsdoc-gotchas §4: row's
   // bounding-box center is on the title <a> (stopPropagation), so
   // click the body / link directly, not the row.
   it('expands the body to the full text when the body is clicked', async () => {

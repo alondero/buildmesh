@@ -3,7 +3,7 @@ import {
   DndContext, DragOverlay, PointerSensor, useSensor, useSensors, pointerWithin,
   type DragStartEvent, type DragMoveEvent, type DragEndEvent,
 } from '@dnd-kit/core';
-import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
@@ -235,19 +235,15 @@ export function AgentNodeView() {
   // Granular selectors: subscribing to the whole store (useAgentNodeStore())
   // re-rendered the view on every unrelated change — including each
   // attention status flip — even though only agentNodes/activeNodeId affect
-  // this view. Issue #1384 — we now subscribe to the normalized split:
-  // `nodeIds` for the ordered id sequence and `nodesById` for the lookup.
-  // Children that consume a single node (`GridNodeHeader`, `AgentTerminal`)
-  // already subscribe to `state.nodesById[id]` directly, so this view's
-  // own re-render no longer cascades into them when an unrelated node
+  // this view. Issue #1384 — `useAllAgentNodes` is the canonical derived
+  // selector (useShallow over the nodeIds + nodesById pair). Children that
+  // consume a single node (`GridNodeHeader`, `AgentTerminal`) already
+  // subscribe to `state.nodesById[id]` directly, so this view's own
+  // re-render no longer cascades into them when an unrelated node
   // changes.
-  const nodeIds = useAgentNodeStore(state => state.nodeIds);
-  const nodesById = useAgentNodeStore(state => state.nodesById);
-  const agentNodes = useMemo(
-    () => nodeIds.map(id => nodesById[id]).filter((n): n is AgentNode => n !== undefined),
-    [nodeIds, nodesById],
-  );
+  const agentNodes = useAllAgentNodes();
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
+  const nodesById = useAgentNodeStore(state => state.nodesById);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const reorderAgentNode = useAgentNodeStore(state => state.reorderAgentNode);
   const swapAgentNodes = useAgentNodeStore(state => state.swapAgentNodes);

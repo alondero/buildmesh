@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Issue #736 — Agent node title collapses first when the pane is narrow.
  * Make the header responsive.
  *
@@ -465,7 +465,7 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       renderHeader(200);
       expect(useUIStore.getState().viewMode).toBe('mesh');
       fireEvent.click(screen.getByLabelText('Agent node actions'));
-      // Find the item by its label — note it varies by platform (Alt vs âŒ˜).
+      // Find the item by its label — note it varies by platform (Alt vs ⌥).
       const maximizeItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
         .find((el) => /maximize/i.test(el.textContent ?? '')) as HTMLElement | undefined;
       expect(maximizeItem).toBeTruthy();
@@ -488,7 +488,6 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
 
     it('labels the kebab pin item "Unpin node" when the node is pinned', () => {
       const pinned = { ...NODE, is_pinned: true };
-    useAgentNodeStore.setState({ nodesById: { [pinned.id]: pinned }, nodeIds: [pinned.id] });
       seedAgentNodes([pinned]);
       render(<GridNodeHeader nodeId={pinned.id} onBuildRun={() => {}} />);
       fireResize(screen.getByTestId('grid-node-header'), 200);
