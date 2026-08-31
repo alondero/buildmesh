@@ -832,8 +832,8 @@ mod tests {
             .expect("agent_node.rs");
         let agent_prod = agent_node.split("#[cfg(test)]").next().unwrap_or(&agent_node);
         assert!(
-            agent_prod.contains("BUILD_RUN.unregister("),
-            "Agent Node deletion must release the Build/Run output subscription"
+            agent_prod.contains("pty::sink::unregister_node_sinks("),
+            "Agent Node deletion must release the Build/Run output subscription via the unified sink helper"
         );
     }
 }

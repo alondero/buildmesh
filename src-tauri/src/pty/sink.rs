@@ -15,19 +15,23 @@
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 
 /// Cap on bytes buffered before the frontend has subscribed. Matches
-/// `TerminalWriter.MAX_PENDING_BYTES` — past this, older bytes are dropped
+/// `TerminalWriter.MAX_PENDING_BYTES` -- past this, older bytes are dropped
 /// because xterm's scrollback cannot retain more anyway.
 const PENDING_CAP: usize = 4 * 1024 * 1024;
 
 enum SinkState {
     /// Frontend has not subscribed yet. Append-only; flushed on `set`.
-    Pending(Vec<u8>),
-    /// Live Channel. `send` uses this handle in place — no clone.
+    /// `VecDeque` so overflow drops the oldest bytes in O(1) per pop
+    /// instead of memmoving a multi-MiB `Vec::drain` tail each batcher
+    /// chunk (see the 4 MiB trap when a noisy build script dumps output
+    /// before the frontend mounts).
+    Pending(VecDeque<u8>),
+    /// Live Channel. `send` uses this handle in place -- no clone.
     Live(Channel<InvokeResponseBody>),
     /// Terminal disposed or node deleted. Further sends are dropped.
     /// Process exit must not enter this state.
@@ -42,7 +46,7 @@ pub struct OutputSink {
 impl OutputSink {
     pub fn new() -> Self {
         Self {
-            inner: RwLock::new(SinkState::Pending(Vec::new())),
+            inner: RwLock::new(SinkState::Pending(VecDeque::new())),
         }
     }
 
@@ -65,10 +69,9 @@ impl OutputSink {
                 let _ = channel.send(InvokeResponseBody::Raw(data));
             }
             SinkState::Pending(buf) => {
-                buf.extend_from_slice(&data);
-                let excess = buf.len().saturating_sub(PENDING_CAP);
-                if excess > 0 {
-                    buf.drain(..excess);
+                buf.extend(data);
+                while buf.len() > PENDING_CAP {
+                    buf.pop_front();
                 }
             }
             SinkState::Closed => {}
@@ -77,9 +80,14 @@ impl OutputSink {
 
     pub(crate) fn set(&self, channel: Channel<InvokeResponseBody>) {
         let mut inner = self.inner.write();
-        let pending = match &mut *inner {
-            SinkState::Pending(buf) => std::mem::take(buf),
-            SinkState::Live(_) | SinkState::Closed => Vec::new(),
+        let pending: Vec<u8> = match &mut *inner {
+            SinkState::Pending(buf) => std::mem::take(buf).into(),
+            SinkState::Live(_) => Vec::new(),
+            // Closed is a terminal state (terminal disposed or node
+            // deleted). Do not resurrect it into Live -- the prior
+            // subscription was deliberately torn down and any new
+            // caller here is a stale reference. Drop the channel.
+            SinkState::Closed => return,
         };
         if !pending.is_empty() {
             let _ = channel.send(InvokeResponseBody::Raw(pending));
@@ -145,6 +153,17 @@ pub static AGENT: Lazy<OutputSinks> = Lazy::new(OutputSinks::new);
 /// Build/Run-terminal output sinks (issue #1393). Separate from [`AGENT`]
 /// because both surfaces key by the same node id.
 pub static BUILD_RUN: Lazy<OutputSinks> = Lazy::new(OutputSinks::new);
+
+/// Drop the node-scoped sinks for `session_id` across both Agent and
+/// Build/Run maps. Idempotent. Called only when the Agent Node is
+/// deleted -- process exit, retry, resume, and regenerate deliberately
+/// preserve the subscription (issue #1405). Callers must use this
+/// helper instead of reaching into [`AGENT`] / [`BUILD_RUN`] directly
+/// so both maps stay in lock-step with the node lifecycle.
+pub fn unregister_node_sinks(session_id: i64) {
+    AGENT.unregister(session_id);
+    BUILD_RUN.unregister(session_id);
+}
 
 #[cfg(test)]
 mod tests {
@@ -293,5 +312,100 @@ mod tests {
         assert_eq!(&*build_got.lock().unwrap(), b"build");
         AGENT.unregister(id);
         BUILD_RUN.unregister(id);
+    }
+
+    #[test]
+    fn pending_buffer_truncates_to_cap_without_panicking_or_reordering() {
+        // Reproduces the noisy-build-pre-mount scenario: a batcher pushes
+        // chunks well past PENDING_CAP before the frontend subscribes.
+        // The retained tail must be the LAST PENDING_CAP bytes in arrival
+        // order, with no panic, no deadlock, and no interleaving between
+        // chunks that arrived in separate send_owned calls.
+        let id = 9_000_207;
+        let sink = OutputSink::new();
+        let chunk = vec![0xAB_u8; 64 * 1024]; // 64 KiB -- typical batcher batch
+        let chunk_count = (PENDING_CAP / chunk.len()) + 8; // ~overflow by 8 chunks
+        for n in 0..chunk_count {
+            // Stamp each chunk with its index in the low byte of its tail so
+            // we can detect reordering after truncation.
+            let mut stamped = chunk.clone();
+            let last = stamped.len() - 1;
+            stamped[last] = n as u8;
+            sink.send_owned(stamped);
+        }
+
+        let received = Arc::new(Mutex::new(Vec::new()));
+        sink.set(collecting_channel(&received));
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(
+            got.len(),
+            PENDING_CAP,
+            "subscription flush must deliver exactly the kept tail, no more"
+        );
+        // First retained byte must come from a mid-stream chunk (the leading
+        // bytes of the very first chunks were dropped). We can verify
+        // ordering by walking the trailing stamp and asserting the indexes
+        // are strictly ascending and contiguous.
+        let stamps: Vec<u8> = got.iter().copied().filter(|b| *b < chunk_count as u8).collect();
+        assert!(
+            stamps.windows(2).all(|w| w[0] < w[1]),
+            "chunk stamps must remain in arrival order after truncation"
+        );
+        // The first stamp is the lowest non-dropped chunk index. Its
+        // preceding bytes (all 0xAB except the last) must be the bulk of
+        // the chunk -- the truncation can only have lopped off whole
+        // chunks plus possibly a partial tail of one.
+        assert!(
+            stamps[0] >= (chunk_count - (PENDING_CAP / chunk.len()) - 1) as u8,
+            "truncation must not retain more than PENDING_CAP worth of chunks"
+        );
+
+        BUILD_RUN.unregister(id);
+    }
+
+    #[test]
+    fn pending_buffer_single_chunk_larger_than_cap_keeps_only_its_tail() {
+        // A single oversize send (e.g. one mega-payload from a noisy tool)
+        // must keep the LAST PENDING_CAP bytes of that single chunk --
+        // dropping the leading bytes, not the trailing ones.
+        let id = 9_000_208;
+        let sink = OutputSink::new();
+        let big: Vec<u8> = (0..(PENDING_CAP * 2) as u32)
+            .map(|i| (i & 0xFF) as u8)
+            .collect();
+        sink.send_owned(big.clone());
+
+        let received = Arc::new(Mutex::new(Vec::new()));
+        sink.set(collecting_channel(&received));
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.len(), PENDING_CAP);
+        let expected_tail: Vec<u8> = big[big.len() - PENDING_CAP..].to_vec();
+        assert_eq!(
+            got, expected_tail,
+            "single oversize chunk must retain only its trailing PENDING_CAP bytes"
+        );
+
+        BUILD_RUN.unregister(id);
+    }
+
+    #[test]
+    fn set_on_closed_sink_does_not_resurrect_into_live() {
+        // Closed is documented terminal. A subsequent set() (e.g. a stale
+        // subscribe callback landing after disposal) must NOT bring the
+        // sink back to Live and leak bytes through the new channel.
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = OutputSink::new();
+        sink.set(collecting_channel(&received));
+        sink.send_owned(b"keep".to_vec());
+        sink.close();
+        sink.set(collecting_channel(&received)); // must be a no-op
+        sink.send_owned(b"drop".to_vec());
+        assert_eq!(
+            &*received.lock().unwrap(),
+            b"keep",
+            "set on a closed sink must not transition back to Live"
+        );
     }
 }

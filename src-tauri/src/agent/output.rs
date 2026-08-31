@@ -101,12 +101,9 @@ mod tests {
     fn process_lifecycle_does_not_unregister_node_output_subscription() {
         let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut unregister_sites = Vec::new();
-        collect_output_unregister_sites(&src_root, &src_root, &mut unregister_sites);
+        collect_sink_unregister_sites(&src_root, &src_root, &mut unregister_sites);
 
-        let allowed = [
-            std::path::Path::new("agent").join("output.rs"),
-            std::path::Path::new("services").join("agent_node.rs"),
-        ];
+        let allowed = [std::path::Path::new("services").join("agent_node.rs")];
         let unexpected: Vec<_> = unregister_sites
             .iter()
             .filter(|(rel, _)| !allowed.iter().any(|ok| rel == ok))
@@ -114,15 +111,15 @@ mod tests {
             .collect();
         assert!(
             unexpected.is_empty(),
-            "output::unregister is node-scoped; process kill / PTY EOF / retry must not call it. Unexpected sites: {unexpected:?}"
+            "pty::sink::unregister_node_sinks is node-scoped; process kill / PTY EOF / retry must not call it. Unexpected sites: {unexpected:?}"
         );
         assert!(
-            unregister_sites.iter().any(|(rel, _)| rel == &allowed[1]),
-            "Agent Node deletion must release the output subscription"
+            unregister_sites.iter().any(|(rel, _)| rel == &allowed[0]),
+            "Agent Node deletion must release the output subscription (unregister_node_sinks)"
         );
     }
 
-    fn collect_output_unregister_sites(
+    fn collect_sink_unregister_sites(
         dir: &std::path::Path,
         src_root: &std::path::Path,
         out: &mut Vec<(std::path::PathBuf, usize)>,
@@ -131,7 +128,7 @@ mod tests {
         for entry in entries {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
-                collect_output_unregister_sites(&path, src_root, out);
+                collect_sink_unregister_sites(&path, src_root, out);
                 continue;
             }
             if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -140,7 +137,7 @@ mod tests {
             let source = std::fs::read_to_string(&path).expect("read rust file");
             let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
             for (idx, line) in production.lines().enumerate() {
-                if line.contains("output::unregister(") {
+                if line.contains("pty::sink::unregister_node_sinks(") {
                     let rel = path.strip_prefix(src_root).unwrap_or(&path).to_path_buf();
                     out.push((rel, idx + 1));
                 }

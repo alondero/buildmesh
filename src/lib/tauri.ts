@@ -877,8 +877,15 @@ function subscribeRawPtyOutput(
     // extra microtask for keystroke echoes, this preserves the existing
     // interactive latency contract. Once a Response is queued, subsequent
     // direct frames join the queue so they cannot overtake it.
+    // The sync path still has to mirror the queued path's error handling --
+    // a throwing onChunk here would otherwise escape unhandled (the queued
+    // .catch would swallow it).
     if (directBytes && queuedFrames === 0) {
-      onChunk(directBytes);
+      try {
+        onChunk(directBytes);
+      } catch (error) {
+        console.error(`[PTY] failed to decode ${command} Channel frame:`, error);
+      }
       return;
     }
     queuedFrames++;
