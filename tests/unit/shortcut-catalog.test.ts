@@ -48,6 +48,38 @@ describe('shortcutCatalog', () => {
     expect(actions.has('arrow-up')).toBe(true);
     expect(actions.has('arrow-down')).toBe(true);
     expect(actions.has('jump-to-next-awaiting')).toBe(true);
+    expect(actions.has('open-omnibar')).toBe(true);
+    expect(actions.has('open-omnibar-commands')).toBe(true);
+  });
+
+  it('pins the Omnibar bindings (issue #1409): ⌘/Ctrl+K and ⌘/Ctrl+P, K is splash, P is not', () => {
+    const omnibar = SHORTCUT_CATALOG.find(s => s.action === 'open-omnibar');
+    const omnibarCommands = SHORTCUT_CATALOG.find(s => s.action === 'open-omnibar-commands');
+    expect(omnibar).toBeDefined();
+    expect(omnibar?.winKey).toBe('Ctrl+Shift+K');
+    expect(omnibar?.macKey).toBe('⌘+K');
+    expect(omnibar?.group).toBe('app');
+    expect(omnibar?.splash).toBe(true);
+    expect(omnibarCommands).toBeDefined();
+    expect(omnibarCommands?.winKey).toBe('Ctrl+Shift+P');
+    expect(omnibarCommands?.macKey).toBe('⌘+P');
+    expect(omnibarCommands?.splash).toBeUndefined();
+  });
+
+  it('does not advertise bare Ctrl+K / Ctrl+P on Windows/Linux (readline collision, issue #1409 review)', () => {
+    // Bare Ctrl+K (kill-line) and Ctrl+P (previous-history) must keep
+    // reaching Win/Linux shells; the palette chords carry Shift there.
+    const omnibar = SHORTCUT_CATALOG.find(s => s.action === 'open-omnibar');
+    const omnibarCommands = SHORTCUT_CATALOG.find(s => s.action === 'open-omnibar-commands');
+    expect(omnibar?.winKey).not.toBe('Ctrl+K');
+    expect(omnibarCommands?.winKey).not.toBe('Ctrl+P');
+  });
+
+  it('pins terminal clear as ⌘+Shift+K on macOS (issue #1409 — ⌘+K freed for the Omnibar)', () => {
+    const clear = SHORTCUT_CATALOG.find(s => s.action === 'term-clear');
+    expect(clear).toBeDefined();
+    expect(clear?.winKey).toBe('Ctrl+Shift+K');
+    expect(clear?.macKey).toBe('⌘+Shift+K');
   });
 
   it('surfaces terminal-zoom shortcuts (issue #667) wired in Terminal.tsx', () => {
@@ -132,6 +164,7 @@ describe('shortcutCatalog', () => {
       'jump-to-next-awaiting',
       'new-agent',
       'open-cheatsheet',
+      'open-omnibar',
       'toggle-maximize-grid',
     ]);
   });

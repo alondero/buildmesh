@@ -24,7 +24,9 @@ export function resolveKeyAction(state: KeyEventState): KeyAction {
     if (k === 'v') return 'paste';
     if (k === 'a') return 'selectAll';
     if (k === 'f') return 'find';
-    if (k === 'k') return 'clear';
+    // Issue #1409 — ⌘+K is claimed by the Omnibar (global CommandOrControl+K).
+    // Terminal clear moves to ⌘+Shift+K, mirroring Windows/Linux Ctrl+Shift+K.
+    if (shiftKey && k === 'k') return 'clear';
     return 'passthrough';
   }
 

@@ -123,8 +123,29 @@ function App() {
     ? { key: 'CommandOrControl+G', action: 'toggle-maximize-grid' as const }
     : { key: 'Alt+G', action: 'toggle-maximize-grid' as const };
 
+  // Issue #1409 — the Universal Command Omnibar. The chord MUST fire while
+  // an xterm terminal has focus, so it lives here as a Tauri global
+  // shortcut (same reason as Ctrl+T / Ctrl+. above). But bare
+  // CommandOrControl+K / +P would steal readline's Ctrl+K (kill-line) and
+  // Ctrl+P (previous-history) from every Win/Linux shell — the same war
+  // the Alt+Grid-toggle and Ctrl/Cmd+Alt+Arrow bindings already fought
+  // (see the arrow comment above). So like the grid toggle, we branch the
+  // binding on platform: Cmd+K / Cmd+P on macOS (meta is free), and
+  // Ctrl+Shift+K / Ctrl+Shift+P elsewhere (Shift-augmented, no readline
+  // collision). Both dispatch the same two actions.
+  const omnibarShortcuts = isMac
+    ? [
+        { key: 'CommandOrControl+K', action: 'open-omnibar' as const },
+        { key: 'CommandOrControl+P', action: 'open-omnibar-commands' as const },
+      ]
+    : [
+        { key: 'CommandOrControl+Shift+K', action: 'open-omnibar' as const },
+        { key: 'CommandOrControl+Shift+P', action: 'open-omnibar-commands' as const },
+      ];
+
   const shortcuts = [
     { key: 'CommandOrControl+T', action: 'new-agent' },
+    ...omnibarShortcuts,
     { key: 'CommandOrControl+Alt+ArrowLeft', action: 'arrow-left' },
     { key: 'CommandOrControl+Alt+ArrowRight', action: 'arrow-right' },
     { key: 'CommandOrControl+Alt+ArrowUp', action: 'arrow-up' },
@@ -241,6 +262,17 @@ function App() {
         // gesture, and the cycle is purely synchronous so there's no IPC
         // round-trip to rate-limit.
         jumpToNextAwaitingNode();
+        return;
+      }
+
+      if (action === 'open-omnibar' || action === 'open-omnibar-commands') {
+        // Issue #1409 — ⌘/Ctrl+K and ⌘/Ctrl+P (Cmd on macOS, Ctrl+Shift on
+        // Win/Linux — see the binding split above) open the Universal
+        // Command Omnibar. The K/P distinction is carried in the action so
+        // the palette can preselect its mode. `toggleOmnibar` gives the
+        // universal "activation chord closes the open modal" behaviour.
+        const mode = action === 'open-omnibar-commands' ? 'commands' : 'files';
+        useUIStore.getState().toggleOmnibar(mode);
         return;
       }
 
