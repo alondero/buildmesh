@@ -276,6 +276,115 @@ describe('useAgentNodeStore', () => {
       expect(useMeshStore.getState().selectedMeshId).toBe(99); // unchanged
       expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
     });
+
+    it('spawns immediately with a Loop intent when given a non-empty initial prompt (issue #1413)', async () => {
+      const newNode = {
+        id: 42, mesh_id: 7, name: 'm', path: '/p', branch: 'main',
+        env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+        use_worktree: true, position: 0,
+      };
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'create_agent_node') return Promise.resolve(newNode);
+        if (cmd === 'spawn_agent') return Promise.resolve(undefined);
+        if (cmd === 'list_agent_nodes') return Promise.resolve([{ ...newNode, status: 'running' }]);
+        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
+        return Promise.resolve(undefined);
+      });
+
+      await useAgentNodeStore.getState().selectProviderForMesh(
+        7, 'm', '/p', 'anthropic', undefined, '  fix the flaky test  ',
+      );
+
+      expect(mockInvoke).toHaveBeenCalledWith('spawn_agent', {
+        request: expect.objectContaining({
+          sessionId: 42,
+          provider: 'anthropic',
+          intent: { type: 'loop', initial_prompt: 'fix the flaky test' },
+        }),
+      });
+      expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
+    });
+
+    it('does not spawn when the initial prompt is whitespace-only', async () => {
+      const newNode = {
+        id: 44, mesh_id: 7, name: 'm', path: '/p', branch: 'main',
+        env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+        use_worktree: true, position: 0,
+      };
+      mockInvoke.mockResolvedValueOnce(newNode);
+
+      await useAgentNodeStore.getState().selectProviderForMesh(
+        7, 'm', '/p', 'anthropic', undefined, '   ',
+      );
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('spawn_agent', expect.anything());
+    });
+  });
+
+  describe('spawnAgent intent (issue #1413)', () => {
+    it('forwards a prefill option as a Loop intent', async () => {
+      const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
+      useAgentNodeStore.setState({
+        agentNodes: [existing],
+      });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'spawn_agent') return Promise.resolve(undefined);
+        if (cmd === 'list_agent_nodes') return Promise.resolve([existing]);
+        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
+        return Promise.resolve(undefined);
+      });
+
+      await useAgentNodeStore.getState().spawnAgent(42, 'anthropic', {
+        rows: 24,
+        cols: 80,
+        prefill: 'fix the flaky test',
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith('spawn_agent', {
+        request: expect.objectContaining({
+          sessionId: 42,
+          provider: 'anthropic',
+          intent: { type: 'loop', initial_prompt: 'fix the flaky test' },
+          rows: 24,
+          cols: 80,
+        }),
+      });
+    });
+
+    it('marks an idle node spawning before the IPC resolves so auto-spawn cannot race', async () => {
+      const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
+      useAgentNodeStore.setState({ agentNodes: [existing] });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'spawn_agent') return gate;
+        if (cmd === 'list_agent_nodes') return Promise.resolve([{ ...existing, status: 'running' }]);
+        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
+        return Promise.resolve(undefined);
+      });
+
+      const pending = useAgentNodeStore.getState().spawnAgent(42, 'anthropic', {
+        prefill: 'fix the flaky test',
+      });
+      expect(useAgentNodeStore.getState().agentNodes[0]?.status).toBe('spawning');
+      release();
+      await pending;
+    });
+
+    it('reverts idle status when spawn_agent rejects', async () => {
+      const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
+      useAgentNodeStore.setState({ agentNodes: [existing] });
+      mockInvoke.mockRejectedValueOnce(new Error('pty failed'));
+
+      await expect(
+        useAgentNodeStore.getState().spawnAgent(42, 'anthropic', { prefill: 'go' }),
+      ).rejects.toThrow('pty failed');
+
+      expect(useAgentNodeStore.getState().agentNodes[0]?.status).toBe('idle');
+      expect(useAgentNodeStore.getState().error).toContain('pty failed');
+    });
   });
 
   describe('setActiveNode', () => {

@@ -115,9 +115,11 @@ describe('NodeItem restart button', () => {
     expect(mockInvoke).toHaveBeenCalledWith(
       'spawn_agent',
       expect.objectContaining({
-        sessionId: 42,
-        provider: 'anthropic',
-        resume: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+        request: expect.objectContaining({
+          sessionId: 42,
+          provider: 'anthropic',
+          intent: { type: 'resume' },
+        }),
       }),
     );
   });
@@ -137,7 +139,7 @@ describe('NodeItem restart button', () => {
   it('clicking Resume invokes spawn_agent with the stored cli_session_id so the resume re-attempts', async () => {
     // The Resume button re-attempts the same `--resume` the failed
     // auto-resume tried. Mirrors the Restart click test (line 81-101)
-    // — both call `spawn_agent` with `resume: <cli_session_id>`. For
+    // — both call `spawn_agent` with `intent: { type: 'resume' }`. For
     // adapters that don't honour resume (OpenCode, Terminal) the
     // backend now falls through to Fresh; the IPC contract here is
     // unchanged (the fall-through is internal to `spawn_with_intent`).
@@ -153,9 +155,11 @@ describe('NodeItem restart button', () => {
     expect(mockInvoke).toHaveBeenCalledWith(
       'spawn_agent',
       expect.objectContaining({
-        sessionId: 42,
-        provider: 'anthropic',
-        resume: 'a53dd36f-e703-4f27-9356-8e523472d94e',
+        request: expect.objectContaining({
+          sessionId: 42,
+          provider: 'anthropic',
+          intent: { type: 'resume' },
+        }),
       }),
     );
   });
@@ -176,7 +180,7 @@ describe('NodeItem restart button', () => {
 
 // ---------------------------------------------------------------------------
 // Issue #1306 — restartFreshAgent and spawnAgent fresh option:
-// passes `resume: null` to spawn_agent IPC, clearing stale session ID and booting fresh.
+// passes `intent: { type: 'fresh' }` to spawn_agent IPC, clearing stale session ID and booting fresh.
 // ---------------------------------------------------------------------------
 describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
   beforeEach(() => {
@@ -189,7 +193,7 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
     vi.clearAllMocks();
   });
 
-  it('restartFreshAgent calls spawn_agent with resume=null when node has a cli_session_id', async () => {
+  it('restartFreshAgent calls spawn_agent with a Fresh intent when node has a cli_session_id', async () => {
     mockInvoke.mockResolvedValueOnce(undefined); // spawn_agent
     mockInvoke.mockResolvedValueOnce([]);        // list_agent_nodes
     mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
@@ -202,9 +206,11 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
     expect(mockInvoke).toHaveBeenCalledWith(
       'spawn_agent',
       expect.objectContaining({
-        sessionId: 42,
-        provider: 'anthropic',
-        resume: null,
+        request: expect.objectContaining({
+          sessionId: 42,
+          provider: 'anthropic',
+          intent: { type: 'fresh' },
+        }),
       }),
     );
   });
@@ -222,11 +228,13 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
     expect(mockInvoke).toHaveBeenCalledWith(
       'spawn_agent',
       expect.objectContaining({
-        sessionId: 42,
-        provider: 'anthropic',
-        resume: null,
-        rows: 30,
-        cols: 100,
+        request: expect.objectContaining({
+          sessionId: 42,
+          provider: 'anthropic',
+          intent: { type: 'fresh' },
+          rows: 30,
+          cols: 100,
+        }),
       }),
     );
   });

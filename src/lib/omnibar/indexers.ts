@@ -51,16 +51,21 @@ export type Category = (typeof CATEGORY)[keyof typeof CATEGORY];
  * The prefix characters that scope the palette to a domain (issue #1410 §2).
  * Maps each leading character to the categories its scope includes — `'/'`
  * and `'+'` both scope spawning, `'#'` spans GitHub issues and pull
- * requests, `'>'` is commands ONLY (the issue spec; meshes are intentionally
- * excluded — see the `filterByPrefix` doc). The UI layer can render the
- * prefix hints from this table and/or delegate to `filterByPrefix`.
+ * requests, `'>'` is the action menu (commands + spawn; meshes are
+ * intentionally excluded — see the `filterByPrefix` doc). The UI layer
+ * can render the prefix hints from this table and/or delegate to
+ * `filterByPrefix`.
  */
 export const PREFIX_FILTERS: ReadonlyArray<{
   prefix: string;
   description: string;
   categories: readonly Category[];
 }> = [
-  { prefix: '>', description: 'Commands', categories: [CATEGORY.command] },
+  // `>` is the action menu (issue #1413): built-in commands PLUS quick-spawn
+  // recipes. Repo entities (meshes, nodes, issues) stay out so an action
+  // query never surfaces them — the #1410 / review #1425 exclusion, now
+  // with spawn included as an action rather than a repo entity.
+  { prefix: '>', description: 'Commands', categories: [CATEGORY.command, CATEGORY.spawn] },
   { prefix: '@', description: 'Agent nodes', categories: [CATEGORY.node] },
   { prefix: '/', description: 'Spawning actions', categories: [CATEGORY.spawn] },
   { prefix: '+', description: 'Spawning actions', categories: [CATEGORY.spawn] },
@@ -308,9 +313,11 @@ export function indexGitHub(
   return items;
 }
 
-/** Spawning Recipes (issue #1410 §1 — quick-spawn actions for all registered
- *  harnesses across available meshes). One item per `SpawnOption`, with the
- *  mesh name as a secondary field so the `/spawn mesh` drill-down works.
+/** Spawning Recipes (issue #1410 §1 / #1413 — quick-spawn actions for all
+ *  registered harnesses across available meshes). One item per
+ *  `(option, mesh)` pair. The label is `Spawn [Harness] on [Mesh]` so a
+ *  `>` or `spawn` query surfaces the full recipe (issue #1413 §1); mesh
+ *  name also stays a secondary field so `/spawn mesh` still drills down.
  *
  *  Spawn options are intentionally mesh-bound (the action spawns INTO a
  *  specific mesh): with an empty `meshes` list the indexer emits nothing —
@@ -322,13 +329,8 @@ export function indexSpawnOptions(
 ): IndexedItem[] {
   const items: IndexedItem[] = [];
   for (const option of spawnOptions) {
-    const label = `Spawn ${option.label}`;
-    const fields: IndexedItem['fields'] = [
-      field(label, 'primary'),
-      field(option.label, 'secondary'),
-      field(option.harness_id, 'secondary'),
-    ];
     for (const mesh of meshes) {
+      const label = `Spawn ${option.label} on ${mesh.name}`;
       items.push({
         id: `spawn:${option.id}:${mesh.id}`,
         category: CATEGORY.spawn,
@@ -336,7 +338,9 @@ export function indexSpawnOptions(
         subtitle: mesh.name,
         icon: option.icon || 'spawn',
         fields: [
-          ...fields,
+          field(label, 'primary'),
+          field(option.label, 'secondary'),
+          field(option.harness_id, 'secondary'),
           field(mesh.name, 'secondary'),
         ],
       });
@@ -348,11 +352,12 @@ export function indexSpawnOptions(
 /**
  * Apply an omnibar domain prefix to a raw query (issue #1410 §2). Returns
  * the filtered items plus the remaining search text. Prefixes:
- *   `>` → commands only · `@` → agent nodes · `/` or `+` → spawning actions ·
- *   `#` → GitHub issues and pull requests.
+ *   `>` → commands + spawn actions · `@` → agent nodes · `/` or `+` →
+ *   spawning actions · `#` → GitHub issues and pull requests.
  *
- * `>` is commands ONLY per the issue spec (review #1425) — meshes are
- * deliberately excluded so an action-menu query never surfaces repo entities.
+ * `>` is the action menu (issue #1413): commands AND spawn recipes.
+ * Meshes / nodes / issues stay out so an action-menu query never
+ * surfaces repo entities (review #1425).
  * A bare prefix (e.g. just `>`) yields the scoped list with an empty search
  * query; callers can combine this with an `emptyMode` to show the whole
  * domain instead of a blank palette.
@@ -366,7 +371,10 @@ export function filterByPrefix(
   const rest = trimmed.slice(1);
   switch (first) {
     case '>':
-      return { items: items.filter((i) => i.category === CATEGORY.command), query: rest };
+      return {
+        items: items.filter((i) => i.category === CATEGORY.command || i.category === CATEGORY.spawn),
+        query: rest,
+      };
     case '@':
       return { items: items.filter((i) => i.category === CATEGORY.node), query: rest };
     case '/':

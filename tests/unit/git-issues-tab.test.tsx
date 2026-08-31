@@ -20,6 +20,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { GitIssuesTab } from '../../src/components/Probe/GitIssuesTab';
+import { requestIssueNavigation, resetIssueNavigationForTests } from '../../src/lib/omnibar/issueNavigation';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { addToast } from '../../src/stores/toastStore';
@@ -154,6 +155,7 @@ describe('GitIssuesTab (#378)', () => {
     // "calls addToast on failure" assertion below doesn't see calls
     // from a prior test.
     addToastMock.mockReset();
+    resetIssueNavigationForTests();
     useUIStore.setState({ probeOpen: true, probeTab: 'issues', activeDiffFile: null });
     useMeshStore.setState({
       meshesById: new Map([[MESH.id, MESH]]),
@@ -170,6 +172,52 @@ describe('GitIssuesTab (#378)', () => {
     // Issue numbers are shown as a `#NN` prefix.
     expect(screen.getByText('#101')).toBeTruthy();
     expect(screen.getByText('#102')).toBeTruthy();
+  });
+
+  it('consumes a cross-surface jump by revealing and focusing the issue row', async () => {
+    const scrollIntoView = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    requestIssueNavigation({ meshId: MESH.id, issueNumber: 102 });
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Add a /v2 endpoint');
+    const row = title.closest<HTMLElement>('[data-issue-row]')!;
+    const interactive = row.querySelector<HTMLElement>('[role="button"]')!;
+    await waitFor(() => expect(document.activeElement).toBe(interactive));
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+  });
+
+  it('surfaces a missing jump target instead of silently consuming it', async () => {
+    requestIssueNavigation({ meshId: MESH.id, issueNumber: 999 });
+    mockBackend();
+    render(<GitIssuesTab />);
+    await screen.findByText('Fix the wobble');
+    await waitFor(() => {
+      expect(addToastMock).toHaveBeenCalledWith(
+        'GitHub',
+        'Issue #999 was not found.',
+        'warning',
+      );
+    });
+  });
+
+  it('surfaces a failed jump load instead of silently consuming it', async () => {
+    requestIssueNavigation({ meshId: MESH.id, issueNumber: 101 });
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_issues') return Promise.reject(new Error('gh: not authenticated'));
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      return Promise.resolve({});
+    });
+    render(<GitIssuesTab />);
+    await screen.findByText('Failed to load issues');
+    await waitFor(() => {
+      expect(addToastMock).toHaveBeenCalledWith(
+        'GitHub',
+        'Issue #101 could not be loaded.',
+        'warning',
+      );
+    });
   });
 
   it('shows a friendly empty state when there are no open issues', async () => {

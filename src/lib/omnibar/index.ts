@@ -56,7 +56,8 @@ import type { FuzzyResult, IndexedItem } from './fuzzySearch';
 
 /**
  * Search the full palette with prefix filtering (issue #1410 §2 and §3):
- * applies the leading `>` / `@` / `/` / `+` / `#` domain filter, then runs
+ * applies the leading `>` (commands + spawn) / `@` / `/` / `+` / `#`
+ * domain filter, then runs
  * the remaining query through the fuzzy engine. `limit` caps the returned
  * result count.
  *

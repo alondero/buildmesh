@@ -8,7 +8,8 @@
  * around, Enter to execute the active option, Escape or a backdrop click to
  * dismiss, and Tab to drill into the active result's domain (apply its
  * prefix filter) or complete its primary text once the query is already
- * scoped.
+ * scoped. Tab on a spawn recipe enters a secondary Prompt mode (issue
+ * #1413) whose input is the new node's first-turn prefill.
  *
  * Mount/unmount discipline (same as <Modal>): the palette renders only while
  * `omnibarOpen` is true, so arming the window-level Escape listener is the
@@ -32,6 +33,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import {
   APP_COMMANDS,
+  CATEGORY,
   CATEGORY_PREFIX,
   PREFIX_FILTERS,
   buildOmnibarIndex,
@@ -71,6 +73,9 @@ export function CommandOmnibar() {
 function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const isExecutingRef = useRef(false);
+  // Query to restore when Esc backs out of prompt mode (issue #1413).
+  const promptReturnQueryRef = useRef('');
 
   // `omnibarMode` seeds the search box at mount AND re-seeds when the mode
   // changes while the palette is open (the editors' quick-open convention):
@@ -81,9 +86,14 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   const [query, setQuery] = useState(() => (mode === 'commands' ? '>' : ''));
   const [activeIndex, setActiveIndex] = useState(0);
   const [spawnOptions, setSpawnOptions] = useState<SpawnOption[]>([]);
+  // Issue #1413 — Tab on a spawn result enters this secondary "Prompt"
+  // mode. The selected recipe is the chip; `query` becomes the first-turn
+  // text forwarded to `selectProviderForMesh`.
+  const [promptTarget, setPromptTarget] = useState<IndexedItem | null>(null);
   useEffect(() => {
     setQuery(mode === 'commands' ? '>' : '');
     setActiveIndex(0);
+    setPromptTarget(null);
   }, [mode]);
 
   const agentNodes = useAgentNodeStore((s) => s.agentNodes);
@@ -92,11 +102,8 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     () => [...meshesById.values()].sort((a, b) => a.position - b.position),
     [meshesById],
   );
-
-  // GitHub issues/PRs have no cache store — they're fetched per-tab in the
-  // Probe — so those two domains index empty until a cache exists (the '#'
-  // prefix then simply shows no results). Nodes, meshes, commands and the
-  // spawn menu cover the remaining domains live.
+  // GitHub lists are owned and loaded by the Probe tabs; the palette does not
+  // initiate network requests while the user is searching.
   const index: OmnibarIndex = useMemo(
     () =>
       buildOmnibarIndex({
@@ -110,10 +117,13 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     [agentNodes, meshes, spawnOptions],
   );
 
-  const results = useMemo(
-    () => searchOmnibar(index, query, { limit: RESULT_LIMIT }),
-    [index, query],
-  );
+  // Prompt mode holds a free-form first-turn draft in `query`. Scoring
+  // that text against the entity index is wasted work — the listbox is
+  // hidden for the duration — so skip search until we leave this mode.
+  const results = useMemo(() => {
+    if (!index || promptTarget) return [];
+    return searchOmnibar(index, query, { limit: RESULT_LIMIT });
+  }, [index, query, promptTarget]);
 
   // Focus: capture the element the user came from, move into the search box,
   // restore on unmount (the palette's version of the <Modal> contract). This
@@ -123,7 +133,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
     inputRef.current?.focus();
     return () => {
-      previouslyFocusedRef.current?.focus?.();
+      if (!isExecutingRef.current) previouslyFocusedRef.current?.focus?.();
     };
   }, []);
 
@@ -142,16 +152,23 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   }, []);
 
   // Escape dismisses from anywhere (backdrop clicks move focus to body, so
-  // the input's own keydown can't be the only Escape path).
+  // the input's own keydown can't be the only Escape path). In prompt mode
+  // the first Escape backs out to the spawn results instead of closing.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       e.preventDefault();
+      if (promptTarget) {
+        setPromptTarget(null);
+        setQuery(promptReturnQueryRef.current);
+        setActiveIndex(0);
+        return;
+      }
       onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, promptTarget]);
 
   // Keep the active index valid as the result set shrinks/grows.
   const clampedActive = results.length === 0 ? 0 : Math.min(activeIndex, results.length - 1);
@@ -163,18 +180,27 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
       ?.scrollIntoView({ block: 'nearest' });
   }, [clampedActive, results.length]);
 
-  const executeItem = (item: IndexedItem) => {
+  const executeItem = (item: IndexedItem, initialPrompt?: string) => {
     const ctx: OmnibarActionContext = {
       meshes,
       spawnOptions,
       setViewMode: useUIStore.getState().setViewMode,
       openProbeTab: useUIStore.getState().openProbeTab,
+      initialPrompt,
     };
+    isExecutingRef.current = true;
     executeOmnibarItem(item.id, ctx);
     onClose();
   };
 
   const handleKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (promptTarget) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        executeItem(promptTarget, query);
+      }
+      return;
+    }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (results.length > 0) {
@@ -201,18 +227,24 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     }
     if (e.key === 'Tab' && !e.shiftKey) {
       // Forward Tab drills in; Shift+Tab falls through untouched so the
-      // browser's reverse focus navigation keeps working. Tab drills into
-      // the active result's domain: with an unscoped query and a
-      // prefixable active result, apply that domain's prefix filter (e.g.
-      // `settings` + a command hit → `>settings`). Once the query is
-      // already scoped (or the domain has no prefix, e.g. meshes), Tab
-      // completes the query to the active result's primary field — the
-      // standard palette tab-complete gesture. preventDefault only fires
-      // when there IS a completion action, so an empty result set never
-      // traps Tab.
+      // browser's reverse focus navigation keeps working. Tab on a spawn
+      // recipe enters prompt mode (issue #1413) instead of prefix-complete.
+      // Otherwise Tab drills into the active result's domain: with an
+      // unscoped query and a prefixable active result, apply that domain's
+      // prefix filter (e.g. `settings` + a command hit → `>settings`).
+      // Once the query is already scoped (or the domain has no prefix,
+      // e.g. meshes), Tab completes the query to the active result's
+      // primary field. preventDefault only fires when there IS a
+      // completion action, so an empty result set never traps Tab.
       const result = results[clampedActive];
       if (!result) return;
       e.preventDefault();
+      if (result.item.category === CATEGORY.spawn) {
+        promptReturnQueryRef.current = query;
+        setPromptTarget(result.item);
+        setQuery('');
+        return;
+      }
       const category = result.item.category as Category;
       const prefix = CATEGORY_PREFIX[category];
       if (prefix !== undefined && !isKnownPrefix(query)) {
@@ -225,7 +257,8 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     }
   };
 
-  const activeId = results.length > 0 ? optionId(clampedActive) : undefined;
+  const showingList = !promptTarget && results.length > 0;
+  const activeId = showingList ? optionId(clampedActive) : undefined;
 
   return (
     // Backdrop. The panel stops propagation, so clicks that reach this
@@ -244,28 +277,47 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle">
+          {promptTarget && (
+            <span
+              data-testid="command-omnibar-prompt-context"
+              className="shrink-0 max-w-[55%] truncate px-2 py-0.5 rounded-md bg-bg-card border border-border-default text-2xs text-text-muted"
+            >
+              {promptTarget.label}
+            </span>
+          )}
           <input
             ref={inputRef}
             role="combobox"
-            aria-expanded={results.length > 0}
-            aria-controls={results.length > 0 ? LISTBOX_ID : undefined}
+            aria-expanded={showingList}
+            aria-controls={showingList ? LISTBOX_ID : undefined}
             aria-activedescendant={activeId}
             aria-haspopup="listbox"
             aria-autocomplete="list"
-            aria-label="Search commands, nodes, meshes and more"
+            aria-label={promptTarget ? 'Initial prompt' : 'Search commands, nodes, meshes and more'}
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
-              setActiveIndex(0);
+              if (!promptTarget) setActiveIndex(0);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Type to search…  > commands  @ nodes  / spawn  # issues"
+            placeholder={
+              promptTarget
+                ? 'Initial prompt…'
+                : 'Type to search…  > commands  @ nodes  / spawn  # issues'
+            }
             spellCheck={false}
             className="flex-1 bg-transparent outline-none text-base text-text-primary placeholder:text-text-muted"
           />
         </div>
 
-        {results.length > 0 ? (
+        {promptTarget ? (
+          <div
+            className="px-4 py-3 text-2xs text-text-muted"
+            data-testid="command-omnibar-prompt-hint"
+          >
+            Enter to spawn · Esc to go back
+          </div>
+        ) : results.length > 0 ? (
           <ul
             id={LISTBOX_ID}
             role="listbox"
@@ -291,26 +343,28 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
           </div>
         )}
 
-        <div className="flex items-center gap-3 px-4 py-2 border-t border-border-subtle text-2xs text-text-muted">
-          {/* One badge per description, not per prefix — `/` and `+` both
-              scope spawning (issue #1410 §2) and would render two
-              identical badges. */}
-          {PREFIX_FILTERS.filter(
-            (f, i, all) => all.findIndex((o) => o.description === f.description) === i,
-          ).map((f) => (
-            <span key={f.description} className="flex items-center gap-1">
-              {PREFIX_FILTERS.filter((o) => o.description === f.description).map((o) => (
-                <kbd
-                  key={o.prefix}
-                  className="px-1 rounded-md bg-bg-card border border-border-default font-mono"
-                >
-                  {o.prefix}
-                </kbd>
-              ))}
-              {f.description}
-            </span>
-          ))}
-        </div>
+        {!promptTarget && (
+          <div className="flex items-center gap-3 px-4 py-2 border-t border-border-subtle text-2xs text-text-muted">
+            {/* One badge per description, not per prefix — `/` and `+` both
+                scope spawning (issue #1410 §2) and would render two
+                identical badges. */}
+            {PREFIX_FILTERS.filter(
+              (f, i, all) => all.findIndex((o) => o.description === f.description) === i,
+            ).map((f) => (
+              <span key={f.description} className="flex items-center gap-1">
+                {PREFIX_FILTERS.filter((o) => o.description === f.description).map((o) => (
+                  <kbd
+                    key={o.prefix}
+                    className="px-1 rounded-md bg-bg-card border border-border-default font-mono"
+                  >
+                    {o.prefix}
+                  </kbd>
+                ))}
+                {f.description}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

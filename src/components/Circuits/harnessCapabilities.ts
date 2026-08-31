@@ -53,6 +53,7 @@ export type InspectorHarnessId =
   | 'mcode'
   | 'dsh'
   | 'commandcode'
+  | 'freebuff'
   | 'terminal';
 
 const ANTHROPIC_CAPS: HarnessCapabilities = {
@@ -222,6 +223,22 @@ const COMMANDCODE_CAPS: HarnessCapabilities = {
   available_on: ['windows', 'macos', 'linux'],
 };
 
+// freebuff — interactive AI coding agent; model OFF, effort OFF, prefill yes
+const FREEBUFF_CAPS: HarnessCapabilities = {
+  harness_id: 'freebuff',
+  supports_resume: true,
+  auto_resume_on_startup: true,
+  requires_attention_hook: false,
+  produces_readable_transcript: false,
+  supports_model_override: false,
+  supports_effort_override: false,
+  supports_extra_args: true,
+  supports_prefill: true,
+  is_plain_terminal: false,
+  effort_control: { kind: 'none' },
+  available_on: ['windows', 'linux', 'macos'],
+};
+
 // Terminal — the plain-shell harness; every override OFF (issue #1358
 // declared `supports_extra_args: false` so the resolver drops it)
 const TERMINAL_CAPS: HarnessCapabilities = {
@@ -255,6 +272,7 @@ export const HARNESS_CAPABILITIES: Record<InspectorHarnessId, HarnessCapabilitie
   mcode: MCODE_CAPS,
   dsh: DSH_CAPS,
   commandcode: COMMANDCODE_CAPS,
+  freebuff: FREEBUFF_CAPS,
   terminal: TERMINAL_CAPS,
 };
 
@@ -276,6 +294,7 @@ export const HARNESS_LABEL: Record<InspectorHarnessId, string> = {
   mcode: 'MiniMax Code',
   dsh: 'DeepSeek Harness',
   commandcode: 'Command Code',
+  freebuff: 'Freebuff',
   terminal: 'Terminal',
 };
 

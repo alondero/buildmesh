@@ -94,31 +94,79 @@ pub struct NodeSpawnFailedPayload {
 // Spawn / resume
 // ---------------------------------------------------------------------------
 
+/// Wire-facing spawn intent for [`spawn_agent`]. Internally tagged so
+/// resume vs first-turn prompt vs fresh boot cannot be sent together —
+/// the previous `resume: Option<String>` + `prefill: Option<String>`
+/// pair silently dropped the prompt whenever a session id was present.
+///
+/// This is a subset of [`SpawnIntent`]: Issue / PullRequest / Handover
+/// stay on their dedicated commands. Generated to
+/// `src/types/generated/SpawnAgentIntent.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export, export_to = "SpawnAgentIntent.ts")]
+pub enum SpawnAgentIntent {
+    Fresh,
+    Resume,
+    Loop { initial_prompt: String },
+}
+
+impl SpawnAgentIntent {
+    /// Map the IPC intent onto the orchestrator's [`SpawnIntent`].
+    /// Whitespace-only `Loop` degrades to `Fresh` (no first turn).
+    pub(crate) fn into_spawn_intent(self) -> SpawnIntent {
+        match self {
+            Self::Fresh => SpawnIntent::Fresh,
+            Self::Resume => SpawnIntent::Resume {
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
+            Self::Loop { initial_prompt } => {
+                if initial_prompt.trim().is_empty() {
+                    SpawnIntent::Fresh
+                } else {
+                    SpawnIntent::Loop { initial_prompt }
+                }
+            }
+        }
+    }
+}
+
+/// IPC payload for [`spawn_agent`]. The invoke object is
+/// `{ request: SpawnAgentRequest }`; field names on the payload are
+/// camelCase (`sessionId`, `provider`, `intent`, `rows`, `cols`).
+///
+/// Generated to `src/types/generated/SpawnAgentRequest.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "SpawnAgentRequest.ts")]
+pub struct SpawnAgentRequest {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+    pub provider: String,
+    pub intent: SpawnAgentIntent,
+    #[serde(default)]
+    pub rows: Option<u16>,
+    #[serde(default)]
+    pub cols: Option<u16>,
+}
+
 /// Spawn a new agent for the given session. The `provider` argument is
 /// resolved by the spawner from the persisted `AgentNode` row.
+///
+/// `request.intent` (issue #1413 review) is a tagged enum: `Loop` is
+/// the first-turn prompt path (same verbatim-prefill intent the circuit
+/// spawn-with-prompt path uses). Resume vs prompt vs fresh cannot be
+/// combined on the wire.
 #[command]
-pub async fn spawn_agent(
-    app: AppHandle,
-    session_id: i64,
-    _provider: String,
-    resume: Option<String>,
-    rows: Option<u16>,
-    cols: Option<u16>,
-) -> Result<(), String> {
+pub async fn spawn_agent(app: AppHandle, request: SpawnAgentRequest) -> Result<(), String> {
     crate::agent::spawn::spawn_with_intent(
         &app,
         SpawnRequest::new(
-            session_id,
-            if resume.is_some() {
-                SpawnIntent::Resume {
-                    cause: crate::agent::spawn::ResumeCause::Explicit,
-                }
-            } else {
-                SpawnIntent::Fresh
-            },
+            request.session_id,
+            request.intent.into_spawn_intent(),
             TerminalSize {
-                rows: rows.unwrap_or(24),
-                cols: cols.unwrap_or(80),
+                rows: request.rows.unwrap_or(24),
+                cols: request.cols.unwrap_or(80),
             },
         ),
     )
@@ -1198,5 +1246,63 @@ mod tests {
     // `provider_info_marks_*_as_resumable`) and `write_to_agent_blocking_unknown_*`
     // migrated with their fns to `crate::agent::provider_menu::tests` and
     // `crate::agent::process::tests` (issue #1052).
+
+    #[test]
+    fn spawn_agent_intent_fresh_maps_to_orchestrator_fresh() {
+        assert_eq!(
+            super::SpawnAgentIntent::Fresh.into_spawn_intent(),
+            SpawnIntent::Fresh
+        );
+        assert_eq!(
+            super::SpawnAgentIntent::Loop {
+                initial_prompt: "   ".into()
+            }
+            .into_spawn_intent(),
+            SpawnIntent::Fresh,
+            "whitespace-only Loop is not a first turn"
+        );
+    }
+
+    #[test]
+    fn spawn_agent_intent_loop_maps_to_orchestrator_loop() {
+        assert_eq!(
+            super::SpawnAgentIntent::Loop {
+                initial_prompt: "fix the flaky test".into()
+            }
+            .into_spawn_intent(),
+            SpawnIntent::Loop {
+                initial_prompt: "fix the flaky test".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn spawn_agent_intent_resume_maps_to_explicit_resume() {
+        assert_eq!(
+            super::SpawnAgentIntent::Resume.into_spawn_intent(),
+            SpawnIntent::Resume {
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
+        );
+    }
+
+    #[test]
+    fn spawn_agent_intent_rejects_resume_plus_prompt_on_the_wire() {
+        // The tagged enum cannot represent resume+loop at once. Pin the
+        // three legal shapes so a future flatten back into Option pairs
+        // fails this test rather than silently dropping the prompt.
+        let fresh = serde_json::to_value(super::SpawnAgentIntent::Fresh).unwrap();
+        let resume = serde_json::to_value(super::SpawnAgentIntent::Resume).unwrap();
+        let loop_ = serde_json::to_value(super::SpawnAgentIntent::Loop {
+            initial_prompt: "go".into(),
+        })
+        .unwrap();
+        assert_eq!(fresh["type"], "fresh");
+        assert_eq!(resume["type"], "resume");
+        assert_eq!(loop_["type"], "loop");
+        assert!(loop_.get("initial_prompt").is_some());
+        assert!(fresh.get("initial_prompt").is_none());
+        assert!(resume.get("initial_prompt").is_none());
+    }
 }
 

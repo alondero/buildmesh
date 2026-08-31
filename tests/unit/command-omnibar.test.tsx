@@ -14,7 +14,7 @@
  *     target — the same invariant TerminalManager relies on).
  */
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-import { render, cleanup, fireEvent, screen, act } from '@testing-library/react';
+import { render, cleanup, fireEvent, screen, act, waitFor } from '@testing-library/react';
 import { CommandOmnibar } from '../../src/components/CommandOmnibar/CommandOmnibar';
 import { executeOmnibarItem, runOmnibarCommand } from '../../src/components/CommandOmnibar/omnibarActions';
 import { useUIStore, type OmnibarMode } from '../../src/stores/uiStore';
@@ -23,6 +23,18 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { Mesh } from '../../src/types/generated/Mesh';
 import type { SpawnOption } from '../../src/lib/groups';
+
+const { loadSpawnOptionsMock } = vi.hoisted(() => ({
+  loadSpawnOptionsMock: vi.fn(),
+}));
+
+vi.mock('../../src/components/CommandOmnibar/omnibarActions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/components/CommandOmnibar/omnibarActions')>();
+  return {
+    ...actual,
+    loadSpawnOptions: loadSpawnOptionsMock,
+  };
+});
 
 // jsdom doesn't implement scrollIntoView; the palette calls it on every
 // active-index move ("auto-scroll into view").
@@ -106,6 +118,9 @@ function seedStores(): void {
     cheatsheetOpen: false,
     appSettingsOpen: false,
     remoteAccessOpen: false,
+    probeOpen: false,
+    probeTab: 'files',
+    activeDiffFile: null,
   });
   useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: null });
   useMeshStore.setState({ meshesById: new Map([[mesh.id, mesh]]), selectedMeshId: null });
@@ -143,6 +158,7 @@ function viewModeForRow(rowText: string): string {
 
 beforeEach(() => {
   seedStores();
+  loadSpawnOptionsMock.mockResolvedValue([]);
 });
 
 afterEach(cleanup);
@@ -415,6 +431,42 @@ describe('CommandOmnibar — keyboard interaction', () => {
 });
 
 describe('CommandOmnibar — command execution routing', () => {
+  it('activates a node, selects its mesh, and enters Mesh Grid', () => {
+    executeOmnibarItem(`node:${node.id}`, {
+      meshes: [mesh],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(node.id);
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+  });
+
+  it('retargets an existing Single view without dropping back to Mesh Grid', () => {
+    useUIStore.setState({ viewMode: 'single' });
+    executeOmnibarItem(`node:${node.id}`, {
+      meshes: [mesh],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().viewMode).toBe('single');
+  });
+
+  it('selects a mesh and aligns the canvas with Mesh Grid', () => {
+    useUIStore.setState({ viewMode: 'pinned' });
+    executeOmnibarItem(`mesh:${mesh.id}`, {
+      meshes: [mesh],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+  });
+
   it('routes the show-cheatsheet command through uiStore (no window-event side channel)', () => {
     render(<CommandOmnibar />);
     openOmnibar('commands');
@@ -430,6 +482,18 @@ describe('CommandOmnibar — command execution routing', () => {
     type('settings');
     fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
     expect(useUIStore.getState().appSettingsOpen).toBe(true);
+  });
+
+  it('does not restore the pre-palette focus target after executing an action', () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('settings');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
+    expect(document.activeElement).not.toBe(trigger);
+    trigger.remove();
   });
 
   it('runOmnibarCommand returns false for an unknown command id (catalog drift pin)', () => {
@@ -457,7 +521,36 @@ describe('CommandOmnibar — command execution routing', () => {
       setViewMode: vi.fn(),
       openProbeTab: vi.fn(),
     });
-    expect(spy).toHaveBeenCalledWith(mesh.id, mesh.name, mesh.path, spawnOption.id);
+    expect(spy).toHaveBeenCalledWith(
+      mesh.id,
+      mesh.name,
+      mesh.path,
+      spawnOption.id,
+      undefined,
+      undefined,
+    );
+    spy.mockRestore();
+  });
+
+  it('forwards an initial prompt turn to selectProviderForMesh (issue #1413)', () => {
+    const spy = vi
+      .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
+      .mockResolvedValue(node);
+    executeOmnibarItem(`spawn:${spawnOption.id}:${mesh.id}`, {
+      meshes: [mesh],
+      spawnOptions: [spawnOption],
+      setViewMode: vi.fn(),
+      openProbeTab: vi.fn(),
+      initialPrompt: 'fix the flaky test',
+    });
+    expect(spy).toHaveBeenCalledWith(
+      mesh.id,
+      mesh.name,
+      mesh.path,
+      spawnOption.id,
+      undefined,
+      'fix the flaky test',
+    );
     spy.mockRestore();
   });
 
@@ -468,7 +561,7 @@ describe('CommandOmnibar — command execution routing', () => {
     useMeshStore.setState({ selectedMeshId: 1 });
     const openProbeTab = vi.fn();
     executeOmnibarItem('issue:2:7', {
-      meshes: [],
+      meshes: [{ ...mesh, id: 2, name: 'other' }],
       spawnOptions: [],
       setViewMode: vi.fn(),
       openProbeTab,
@@ -481,13 +574,21 @@ describe('CommandOmnibar — command execution routing', () => {
     useMeshStore.setState({ selectedMeshId: 1 });
     const openProbeTab = vi.fn();
     executeOmnibarItem('pull:3:42', {
-      meshes: [],
+      meshes: [{ ...mesh, id: 3, name: 'other-pr-mesh' }],
       spawnOptions: [],
       setViewMode: vi.fn(),
       openProbeTab,
     });
     expect(useMeshStore.getState().selectedMeshId).toBe(3);
     expect(openProbeTab).toHaveBeenCalledWith('pulls');
+    expect(useUIStore.getState().activeDiffFile).toEqual({
+      filePath: '',
+      rootPath: mesh.path,
+      nodeId: null,
+      meshId: 3,
+      source: 'pr',
+      prNumber: 42,
+    });
   });
 
   it('routes a mesh result to mesh selection', () => {
@@ -496,5 +597,105 @@ describe('CommandOmnibar — command execution routing', () => {
     type('buildmesh');
     fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
     expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+  });
+});
+
+describe('CommandOmnibar — quick spawn prompt mode (issue #1413)', () => {
+  beforeEach(() => {
+    loadSpawnOptionsMock.mockResolvedValue([spawnOption]);
+  });
+
+  async function openSpawnResults(): Promise<HTMLInputElement> {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    await waitFor(() => expect(loadSpawnOptionsMock).toHaveBeenCalled());
+    type('/claude');
+    await waitFor(() => {
+      expect(options().some((o) => (o.textContent ?? '').includes('Spawn Claude Code on buildmesh'))).toBe(true);
+    });
+    return screen.getByRole('combobox') as HTMLInputElement;
+  }
+
+  it('surfaces Spawn [Harness] on [Mesh] for `/` and `spawn` queries', async () => {
+    const input = await openSpawnResults();
+    expect(options()[0].textContent).toMatch(/Spawn Claude Code on buildmesh/);
+
+    fireEvent.change(input, { target: { value: 'spawn' } });
+    await waitFor(() => {
+      expect(options().some((o) => (o.textContent ?? '').includes('Spawn Claude Code on buildmesh'))).toBe(true);
+    });
+  });
+
+  it('Tab on a spawn result enters prompt mode with the recipe as context', async () => {
+    const input = await openSpawnResults();
+    fireEvent.keyDown(input, { key: 'Tab' });
+    expect(input.getAttribute('aria-label')).toMatch(/initial prompt/i);
+    expect(input.value).toBe('');
+    expect(screen.getByTestId('command-omnibar-prompt-context').textContent).toBe(
+      'Spawn Claude Code on buildmesh',
+    );
+    expect(screen.getByTestId('command-omnibar-prompt-hint')).toBeTruthy();
+    expect(options()).toHaveLength(0);
+  });
+
+  it('does not fuzzy-search the draft prompt while prompt mode is active', async () => {
+    const input = await openSpawnResults();
+    fireEvent.keyDown(input, { key: 'Tab' });
+    fireEvent.change(input, {
+      target: { value: 'Refactor the auth middleware to support bearer tokens' },
+    });
+    expect(options()).toHaveLength(0);
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('Enter in prompt mode dispatches selectProviderForMesh with the typed prompt and closes', async () => {
+    const spy = vi
+      .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
+      .mockResolvedValue(node);
+    const input = await openSpawnResults();
+    fireEvent.keyDown(input, { key: 'Tab' });
+    fireEvent.change(input, { target: { value: 'fix the flaky test' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(spy).toHaveBeenCalledWith(
+      mesh.id,
+      mesh.name,
+      mesh.path,
+      spawnOption.id,
+      undefined,
+      'fix the flaky test',
+    );
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+    spy.mockRestore();
+  });
+
+  it('Enter on a spawn result without Tab spawns immediately with no prompt', async () => {
+    const spy = vi
+      .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
+      .mockResolvedValue(node);
+    const input = await openSpawnResults();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(spy).toHaveBeenCalledWith(
+      mesh.id,
+      mesh.name,
+      mesh.path,
+      spawnOption.id,
+      undefined,
+      undefined,
+    );
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+    spy.mockRestore();
+  });
+
+  it('Escape from prompt mode returns to the spawn results instead of closing', async () => {
+    const input = await openSpawnResults();
+    fireEvent.keyDown(input, { key: 'Tab' });
+    expect(screen.getByTestId('command-omnibar-prompt-context')).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(useUIStore.getState().omnibarOpen).toBe(true);
+    expect(screen.queryByTestId('command-omnibar-prompt-context')).toBeNull();
+    expect((screen.getByRole('combobox') as HTMLInputElement).value).toBe('/claude');
+    await waitFor(() => {
+      expect(options().some((o) => (o.textContent ?? '').includes('Spawn Claude Code on buildmesh'))).toBe(true);
+    });
   });
 });

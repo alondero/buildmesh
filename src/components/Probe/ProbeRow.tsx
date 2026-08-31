@@ -55,7 +55,7 @@
  * list that wants the same row body without `data-pr-*`).
  */
 
-import type { ReactNode } from 'react';
+import type { ReactNode, Ref } from 'react';
 import { SafeLink } from '../shared/SafeLink';
 
 export interface ProbeRowProps {
@@ -114,6 +114,8 @@ export interface ProbeRowProps {
    * ProbeRow.
    */
   belowSlot?: ReactNode;
+  /** Ref for the interactive row body used by cross-surface navigation. */
+  focusRef?: Ref<HTMLDivElement>;
 }
 
 export function ProbeRow({
@@ -128,6 +130,7 @@ export function ProbeRow({
   body,
   rightSlot,
   belowSlot,
+  focusRef,
 }: ProbeRowProps) {
   const hasBody = body !== null && body !== undefined && body !== '';
 
@@ -149,10 +152,11 @@ export function ProbeRow({
             here, each with stopPropagation so the row handler
             doesn't fire when the user navigates to GitHub. */}
         <div
+          ref={focusRef}
           role="button"
           tabIndex={0}
           aria-expanded={isExpanded}
-          className="flex-1 min-w-0 cursor-pointer"
+          className="flex-1 min-w-0 cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm"
           onClick={onToggle}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
