@@ -68,8 +68,18 @@ pub fn device_label_from_user_agent(ua: Option<&str>) -> Option<String> {
 /// `GET /admin/devices` → JSON array of `DeviceSession` (never the token hash).
 /// Degrades to `[]` on a read error rather than 500ing, mirroring the
 /// coordinator read routes.
-pub fn list_devices_json() -> String {
-    match db::list_device_sessions() {
+///
+/// Issue #1389 — the sync SQLite read used to run on whatever thread the
+/// dispatcher called us from (the tokio worker that just accepted the
+/// connection). Convert to `async` + `run_blocking` so the read moves to
+/// Tauri's blocking pool, matching the shape `http/routes/meshes.rs` and
+/// `nodes.rs` adopted in PR #1388.
+pub async fn list_devices_json() -> String {
+    match crate::commands::run_blocking("http_list_devices", || {
+        db::list_device_sessions().map_err(|e| e.to_string())
+    })
+    .await
+    {
         Ok(devices) => serde_json::to_string(&devices).unwrap_or_else(|_| "[]".to_string()),
         Err(_) => "[]".to_string(),
     }
@@ -79,8 +89,17 @@ pub fn list_devices_json() -> String {
 /// kick any live WebSocket it holds. `204 No Content` when a device was revoked,
 /// `404 Not Found` when the id was already gone (idempotent-ish: a double-revoke
 /// is a clear 404, not a silent 204).
+///
+/// Issue #1389 — `revoke_device_session` is a sync SQLite write that used to
+/// run on the request tokio worker. Offload it via `run_blocking`; the
+/// follow-up `revocation::revoke(device_id)` kick remains cheap and
+/// non-blocking, so it stays on the async worker.
 pub async fn revoke(lines: &mut BufStream<MaybeTls>, device_id: i64) {
-    match db::revoke_device_session(device_id) {
+    match crate::commands::run_blocking("http_revoke_device", move || {
+        db::revoke_device_session(device_id).map_err(|e| e.to_string())
+    })
+    .await
+    {
         Ok(true) => {
             // Row gone (blocks future requests); now drop any open socket.
             revocation::revoke(device_id);
@@ -90,7 +109,7 @@ pub async fn revoke(lines: &mut BufStream<MaybeTls>, device_id: i64) {
             request::send_json_error(lines, "404 Not Found", "Unknown device").await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e.to_string()).await;
+            request::send_json_error(lines, "500 Internal Server Error", &e).await;
         }
     }
 }
