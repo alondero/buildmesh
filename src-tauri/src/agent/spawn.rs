@@ -39,3 +39,5 @@ pub use wire::{
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_reader;
