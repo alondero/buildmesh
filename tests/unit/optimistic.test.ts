@@ -16,6 +16,12 @@ import type { AgentNode } from '../../src/types/generated/AgentNode';
  * store) lives in `tests/unit/agent-node-store.test.ts`. Here the
  * helper is exercised in isolation against a fake `OptimisticSurface`
  * — every test reads as one promise, one outcome.
+ *
+ * Issue #1384 — the surface now operates on a single node at a time
+ * (`getAgentNode` + `setAgentNode`) rather than the whole array. The
+ * per-node scope is what makes the helper composable with the
+ * normalized `nodesById` map; a future Zustand-style entity adapter
+ * could swap the fake for the real store without changing this file.
  */
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
@@ -29,7 +35,7 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
 }
 
 interface FakeSurface extends OptimisticSurface {
-  __setAgentNodesCalls: number;
+  __setAgentNodeCalls: number;
   __errorWrites: Array<string | null>;
   __lastNodes: AgentNode[];
 }
@@ -37,16 +43,16 @@ interface FakeSurface extends OptimisticSurface {
 function makeSurface(initial: AgentNode[]): FakeSurface {
   let nodes: AgentNode[] = initial;
   const fake: FakeSurface = {
-    getAgentNodes: () => nodes,
-    setAgentNodes: (next) => {
-      fake.__setAgentNodesCalls += 1;
-      nodes = typeof next === 'function' ? next(nodes) : next;
+    getAgentNode: (nodeId) => nodes.find(n => n.id === nodeId),
+    setAgentNode: (nodeId, next) => {
+      fake.__setAgentNodeCalls += 1;
+      nodes = nodes.map(n => (n.id === nodeId ? next(n) : n));
       fake.__lastNodes = nodes;
     },
     setError: (error) => {
       fake.__errorWrites.push(error);
     },
-    __setAgentNodesCalls: 0,
+    __setAgentNodeCalls: 0,
     __errorWrites: [],
     __lastNodes: nodes,
   };
@@ -70,7 +76,7 @@ describe('withOptimistic', () => {
     expect(mutation).not.toHaveBeenCalled();
     // No patch, no error — the precondition guard fired before either
     // side effect could run.
-    expect(surface.__setAgentNodesCalls).toBe(0);
+    expect(surface.__setAgentNodeCalls).toBe(0);
     expect(surface.__errorWrites).toEqual([]);
   });
 
@@ -88,8 +94,8 @@ describe('withOptimistic', () => {
       mutation,
     });
 
-    // One setAgentNodes call (the optimistic patch), no error writes.
-    expect(surface.__setAgentNodesCalls).toBe(1);
+    // One setAgentNode call (the optimistic patch), no error writes.
+    expect(surface.__setAgentNodeCalls).toBe(1);
     expect(surface.__lastNodes[0].name).toBe('new');
     expect(surface.__errorWrites).toEqual([]);
   });
@@ -106,8 +112,8 @@ describe('withOptimistic', () => {
 
     expect(result).toBeUndefined();
     // One write: optimistic patch. No adoption (adoptResult omitted),
-    // so the helper does not call setAgentNodes a second time.
-    expect(surface.__setAgentNodesCalls).toBe(1);
+    // so the helper does not call setAgentNode a second time.
+    expect(surface.__setAgentNodeCalls).toBe(1);
     expect(surface.__lastNodes[0].name).toBe('new');
     expect(surface.__errorWrites).toEqual([]);
   });
@@ -124,10 +130,10 @@ describe('withOptimistic', () => {
       adoptResult: (r) => r,
     });
 
-    // Three writes: optimistic patch + adopt. The adopted row is the
+    // Two writes: optimistic patch + adopt. The adopted row is the
     // source of truth — backend-returned columns (status, name)
     // overwrite whatever the optimistic patch set.
-    expect(surface.__setAgentNodesCalls).toBe(2);
+    expect(surface.__setAgentNodeCalls).toBe(2);
     expect(surface.__lastNodes[0]).toEqual(adopted);
     expect(surface.__errorWrites).toEqual([]);
   });
@@ -146,7 +152,7 @@ describe('withOptimistic', () => {
     // One write: optimistic patch only. The helper short-circuits the
     // adoption when `adoptResult` returns undefined — same outcome as
     // the "adoptResult omitted" case.
-    expect(surface.__setAgentNodesCalls).toBe(1);
+    expect(surface.__setAgentNodeCalls).toBe(1);
     expect(surface.__lastNodes[0].name).toBe('new');
   });
 
@@ -164,7 +170,7 @@ describe('withOptimistic', () => {
 
     // Two writes: optimistic patch + rollback. The final name is the
     // pre-call value.
-    expect(surface.__setAgentNodesCalls).toBe(2);
+    expect(surface.__setAgentNodeCalls).toBe(2);
     expect(surface.__lastNodes[0].name).toBe('old');
     // The error reaches the store via `surface.setError`.
     expect(surface.__errorWrites).toEqual(['db locked']);
@@ -205,9 +211,9 @@ describe('withOptimistic', () => {
       optimisticPatch: { is_pinned: true },
       mutation: () => new Promise<never>((_, reject) => {
         // Concurrent event-driven write fires while we're awaiting.
-        surface.setAgentNodes((nodes) =>
-          nodes.map(n => (n.id === 1 ? { ...n, status: 'awaiting_input' as const } : n)),
-        );
+        // Issue #1384 — the surface now operates per-node; simulate a
+        // concurrent status flip on the same id via the same setter.
+        surface.setAgentNode(1, (prev) => ({ ...prev, status: 'awaiting_input' as const }));
         setTimeout(() => reject(new Error('db locked')), 0);
       }),
     });

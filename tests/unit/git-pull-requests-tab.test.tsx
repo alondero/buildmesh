@@ -1,10 +1,10 @@
 /**
- * Tests for the Git Pull Requests probe tab (🔀).
+ * Tests for the Git Pull Requests probe tab (ðŸ”€).
  *
  * Pins the panel's invariants:
  *   - lists PRs for the active mesh (open by default)
  *   - the Open/Closed toggle refetches with the chosen `state`
- *   - a mergeable open PR exposes a confirm→merge flow that calls `merge_pr`
+ *   - a mergeable open PR exposes a confirmâ†’merge flow that calls `merge_pr`
  *     with the PR url and then refetches the list
  *   - draft / conflicting PRs are flagged non-mergeable (no merge button)
  *   - a `mergeable: null` detail (GitHub still computing) shows "Checking…"
@@ -14,7 +14,7 @@
  *   - removing the mesh after mount doesn't crash (ProbeTabBody owns the
  *     "no project selected" empty state, like GitIssuesTab)
  *   - open PRs expose a split Spawn button (issue #420) that calls
- *     `create_pr_node` → `start_node_background` mirroring the issue-spawn
+ *     `create_pr_node` â†’ `start_node_background` mirroring the issue-spawn
  *     flow; dock stays open across the spawn; rejected spawns surface
  *     inline and leave the dock open for retry
  */
@@ -30,6 +30,7 @@ import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { GitHubPullRequest } from '../../src/types/generated/GitHubPullRequest';
 import type { PrMergeability } from '../../src/types/generated/PrMergeability';
 import type { PrMergeabilityEntry } from '../../src/types/generated/PrMergeabilityEntry';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 // `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
 // external URL. Tauri 2's WebView silently drops `target="_blank"` without
@@ -202,7 +203,7 @@ describe('GitPullRequestsTab', () => {
     // Clear any agent nodes left over from sibling tests — this tab
     // doesn't render them, but the merge-wiring test below reads them
     // via `useAgentNodeStore`.
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
   });
 
   // RTL doesn't auto-unmount between tests in this vitest setup, so the
@@ -293,7 +294,7 @@ describe('GitPullRequestsTab', () => {
   // pins the wiring between the merge flow and the cache primitive.
   it('after a successful merge, refreshOpenPrByPath fires for matching agent nodes', async () => {
     // Agent node whose branch matches PR 201's head ref (`feat/201-add-widget`).
-    // Worktree name is empty → `getNodeGitPath` returns `node.path`
+    // Worktree name is empty â†’ `getNodeGitPath` returns `node.path`
     // (the mesh root), which is the simplest assertion target.
     const matchingNode = {
       id: 99,
@@ -320,7 +321,7 @@ describe('GitPullRequestsTab', () => {
       name: 'other-branch',
       branch: 'feat/999-different',
     };
-    useAgentNodeStore.setState({ agentNodes: [matchingNode, unrelatedNode] });
+    seedAgentNodes([matchingNode, unrelatedNode]);
 
     mockBackend();
     render(<GitPullRequestsTab />);
@@ -373,7 +374,7 @@ describe('GitPullRequestsTab', () => {
       source_pr: null,
       is_pinned: false,
     };
-    useAgentNodeStore.setState({ agentNodes: [worktreeNode] });
+    seedAgentNodes([worktreeNode]);
 
     mockBackend();
     render(<GitPullRequestsTab />);
@@ -399,7 +400,7 @@ describe('GitPullRequestsTab', () => {
     // node has the merged PR's head ref as its branch, there is no
     // chip to update and the refresh is a no-op (the spy confirms no
     // spurious invalidations are emitted for unrelated nodes).
-    useAgentNodeStore.setState({ agentNodes: [] });
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [] });
 
     mockBackend();
     render(<GitPullRequestsTab />);
@@ -427,8 +428,7 @@ describe('GitPullRequestsTab', () => {
     // touch the Open PR cache. A regression that wires refresh into
     // the wrong branch (e.g. the cancel button's onClick) would be
     // caught here.
-    useAgentNodeStore.setState({
-      agentNodes: [{
+    seedAgentNodes([{
         id: 99,
         mesh_id: 42,
         name: 'feat-201',
@@ -445,8 +445,7 @@ describe('GitPullRequestsTab', () => {
         source_issue: null,
         source_pr: null,
         is_pinned: false,
-      }],
-    });
+      }]);
 
     mockBackend();
     render(<GitPullRequestsTab />);
@@ -573,7 +572,7 @@ describe('GitPullRequestsTab', () => {
             return Promise.resolve(
               nums.map((n) => {
                 if (n === 204) {
-                  // First call for PR 204 → null; second → real.
+                  // First call for PR 204 â†’ null; second â†’ real.
                   const prior = callsByNumber.flat().filter((x) => x === 204).length;
                   return {
                     number: 204,
@@ -606,7 +605,7 @@ describe('GitPullRequestsTab', () => {
       // Initial batch carried all 3 non-draft open PRs (201, 202, 204).
       expect(callsByNumber[0]).toEqual(expect.arrayContaining([201, 202, 204]));
 
-      // Advance past the first retry delay (1.5s base × 1 attempt = 1.5s).
+      // Advance past the first retry delay (1.5s base Ã— 1 attempt = 1.5s).
       // The timer's callback re-issues the probe; the second response is
       // mergeable: true, so the row flips to a Merge button.
       await act(async () => {
@@ -620,7 +619,7 @@ describe('GitPullRequestsTab', () => {
       expect(mergeButtons.length).toBeGreaterThanOrEqual(2);
       expect(screen.queryByText('Checking…')).toBeNull();
       // Issue #418 — the retry is itself a batched call carrying ONLY
-      // PR 204, not the full list. Pin both: ≥2 calls total (initial +
+      // PR 204, not the full list. Pin both: â‰¥2 calls total (initial +
       // retry), AND the retry's numbers are exactly [204] (not the
       // full list). If a future refactor reverts to per-PR retries or
       // re-batches the whole list, this assertion catches it.
@@ -747,7 +746,7 @@ describe('GitPullRequestsTab', () => {
   /// invariant — useful to keep the wire off the slow path.
   it('skips the mergeability batch when there are no non-draft PRs (issue #418)', async () => {
     mockBackend({
-      // One draft PR, no non-draft entries → nothing to enrich.
+      // One draft PR, no non-draft entries â†’ nothing to enrich.
       open: [
         { number: 203, title: 'WIP spike', body: '', url: 'https://github.com/acme/demo/pull/203', state: 'open', draft: true, head_ref: 'wip/203-spike', head_sha: 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3' },
       ],
@@ -1234,14 +1233,14 @@ describe('GitPullRequestsTab', () => {
     expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/pull/201');
   });
 
-  it('opens the PR URL via openUrl when the ↗ icon is clicked', async () => {
+  it('opens the PR URL via openUrl when the â†— icon is clicked', async () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
     // Wait for the list to render before querying the icons — the
     // initial render is the "Loading pull requests…" spinner, so a
     // sync getByLabelText would throw on a not-yet-mounted element.
-    // The ↗ icon is the discoverability hint — same target, same
+    // The â†— icon is the discoverability hint — same target, same
     // routing. aria-label distinguishes it from the issue-tab variant.
     // The fixture has 4 open PRs, so there are 4 icon links with the
     // same aria-label. Click the first and assert it routes to that
@@ -1346,7 +1345,7 @@ describe('GitPullRequestsTab', () => {
   /// View changes) where the Issues tab only has one. Long PR titles
   /// were wrapping to multiple lines and visually colliding with the
   /// action buttons to the right. Root cause was a flexbox `truncate`
-  /// trap: the nested flex (caret / # / title / ↗) had no `min-w-0`, so
+  /// trap: the nested flex (caret / # / title / â†—) had no `min-w-0`, so
   /// the title's `truncate` class could not shrink it below its
   /// intrinsic content width and the text wrapped instead. Pin the
   /// classes on the title element + its flex parent so a future
@@ -1364,7 +1363,7 @@ describe('GitPullRequestsTab', () => {
     expect(titleLink.className).toContain('truncate');
     expect(titleLink.className).toContain('min-w-0');
     expect(titleLink.className).toContain('flex-1');
-    // The parent flex (caret / # / title / ↗) also needs `min-w-0` —
+    // The parent flex (caret / # / title / â†—) also needs `min-w-0` —
     // its children's `min-w-0` won't help if the flex container itself
     // can't shrink below the sum of its children's intrinsic widths.
     const parentFlex = titleLink.parentElement!;

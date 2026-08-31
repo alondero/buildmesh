@@ -1,12 +1,12 @@
-/**
- * Tests for the Scratch Pad probe tab (📝) — issue / scratch-pad-probe.
+﻿/**
+ * Tests for the Scratch Pad probe tab (ðŸ“) — issue / scratch-pad-probe.
  *
  * Pins the tab's core invariants:
  *   - appears in the activity bar with the right icon/label
  *   - loads the mesh's scratch pad from the backend on mount
  *   - typing debounces to a single `set_mesh_scratchpad` IPC ~500ms
  *     after the last change
- *   - the corner indicator transitions Saving… → Saved
+ *   - the corner indicator transitions Saving… â†’ Saved
  *   - a mesh switch flushes any in-flight debounced write to the
  *     *outgoing* mesh before loading the new one (otherwise the user
  *     would silently lose their last keystrokes)
@@ -34,6 +34,7 @@ import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 function makeMesh(id: number, name: string): Mesh {
   return {
@@ -102,7 +103,7 @@ beforeEach(() => {
     ]),
     selectedMeshId: MESH_A.id,
   });
-  useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+  seedAgentNodes([]);
   useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
   // Reset per-test scratch pad state. MESH_A starts with a non-empty
   // preloaded value so the "loaded content visible" assertion is
@@ -181,7 +182,7 @@ describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
     }
   });
 
-  it('flips the corner indicator Saving… → Saved across the debounce', async () => {
+  it('flips the corner indicator Saving… â†’ Saved across the debounce', async () => {
     vi.useFakeTimers();
     try {
       renderWithScratchpadOpen();

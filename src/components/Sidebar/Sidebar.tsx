@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
-import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useAgentNodeStore, useAllAgentNodes } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import { listProviders } from '../../lib/tauri';
@@ -57,7 +57,10 @@ export function Sidebar() {
   const selectMesh = useMeshStore(state => state.selectMesh);
   const reorderMeshes = useMeshStore(state => state.reorderMeshes);
   const getDefaultProvider = useMeshStore(state => state.getDefaultProvider);
-  const agentNodes = useAgentNodeStore(state => state.agentNodes);
+  // Issue #1384 — `useAllAgentNodes` is the canonical derived selector.
+  // The per-mesh filter below only re-computes when the array reference
+  // changes (useShallow equality on the underlying selector).
+  const agentNodes = useAllAgentNodes();
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);

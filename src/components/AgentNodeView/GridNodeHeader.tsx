@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, useEffect, useLayoutEffect } from 'react';
-import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
@@ -20,7 +20,12 @@ import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 
 interface GridNodeHeaderProps {
-  node: AgentNode;
+  /// Issue #1384 — pass the id only; the header subscribes to
+  /// `state.nodesById[nodeId]` directly. Resolving the node here means
+  /// the parent doesn't have to ship a fresh object reference on every
+  /// fetch, and unrelated attention events on other nodes no longer
+  /// re-render this header.
+  nodeId: number;
   onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
   /// dnd-kit drag listeners/attributes that turn the whole title bar into the
   /// reorder/swap drag handle. Undefined when dragging is disabled (e.g. the
@@ -102,7 +107,18 @@ export function getHeaderTier(width: number): HeaderTier {
   return 'compact';
 }
 
-export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
+export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
+  // Issue #1384 — per-id subscription: this header now subscribes directly
+  // to `state.nodesById[nodeId]` rather than receiving `node` as a prop. The
+  // store's shallow reconciliation keeps the same object reference for
+  // unchanged rows, so this selector only re-renders the header when THIS
+  // specific node changes. Other nodes' attention/rename events no longer
+  // cascade into this header, satisfying the spec's Point 4 / acceptance
+  // criterion directly at the header level.
+  const node = useAgentNodeStore((state) => state.nodesById[nodeId]);
+  // All hooks below MUST run unconditionally (Rules of Hooks). The
+  // `node?.id` guard handles the not-yet-loaded case; the JSX section
+  // uses `if (!node) return null` once all hooks have run.
   // Issue #376: the chip now opens the unified Probe Panel on the 🔍
   // (Agent Changes) tab for this node, rather than toggling the legacy
   // FileExplorerPanel in the SessionView left pane (deleted in #380; the
@@ -145,21 +161,33 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   // this node's review right now". `AgentChangesTab` reads `activeNodeId`
   // from this store to pick which node's review to render, so we compare
   // the same value to keep the highlight and the body in sync.
-  const isReviewingThisNode = useAgentNodeStore((s) => s.activeNodeId === node.id);
+  const isReviewingThisNode = useAgentNodeStore((s) => s.activeNodeId === nodeId);
+  const autopilotState = useAgentNodeStore((s) => s.autopilotStates[nodeId]);
   const meshesById = useMeshStore(state => state.meshesById);
-  const meshColor = getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color);
-  // Autopilot pipeline state for this node (undefined = not piloted). String
-  // selector so only headers whose own state changes re-render.
-  const autopilotState = useAgentNodeStore((s) => s.autopilotStates[node.id]);
 
   // Issue #736 — measure the rendered header width and bucket it into a tier
   // that decides which chips render and whether the close/max buttons live
   // inline or inside a kebab menu. The hook starts at `Infinity` so the
   // initial render shows everything until the ResizeObserver reports; on
   // shrunken panes the worst case is one flash of "wide" before the tier
-  // drops on the next frame.
+  // drops on the next frame. Hook placed BEFORE the early-return below
+  // to preserve Rules of Hooks ordering across renders.
   const headerRef = useRef<HTMLDivElement>(null);
   const width = useResizeWidth(headerRef);
+
+  // Git summary + open-PR cache hooks. Both must run unconditionally —
+  // placing them after the `if (!node) return null` guard would skip
+  // them on the re-render where the node was just removed (e.g. after
+  // `deleteAgentNode` removes the row from `nodesById`), which would
+  // trip React's "rendered fewer hooks than expected" assertion. Pass
+  // null when the node isn't loaded so the hooks don't issue IPC for
+  // an id that no longer exists.
+  const gitPath = node ? getNodeGitPath(node) : null;
+  const { summary } = useGitSummary(gitPath);
+  const { pr: openPr } = useOpenPr(nodeId, gitPath);
+
+  if (!node) return null;
+  const meshColor = getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color);
   const tier = getHeaderTier(width);
   // Convenience booleans for readability — avoids noisy `tier === 'xl' || tier === 'wide'`
   // chains at every chip.
@@ -209,8 +237,6 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
     void spawnAgent(node.id, node.provider).catch(() => {});
   };
 
-  const gitPath = getNodeGitPath(node);
-
   // Same predicate as the sidebar NodeItem's `showResume` — the
   // shared `canResumeSuspendedNode` helper keeps both surfaces in
   // lockstep (a Suspended OpenCode node shows the Resume affordance
@@ -235,9 +261,6 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   // its underlying `trigger_finish` IPC) was removed. The autopilot's
   // automatic wrap-up injection lives in `src-tauri/src/autopilot/pipeline.rs`
   // and still emits `autopilot-finishing` for the pill transition.)
-
-  const { summary } = useGitSummary(gitPath || null);
-  const { pr: openPr } = useOpenPr(node.id, gitPath || null);
 
   const isPanelNode = probeOpen && probeTab === 'review' && isReviewingThisNode;
 

@@ -1,16 +1,16 @@
-/**
+﻿/**
  * Tests for the Archive probe tab (issue #378; component renamed from
- * ArchivedNodesTab → ArchivedNodesTab after PR #523 set the visible
+ * ArchivedNodesTab â†’ ArchivedNodesTab after PR #523 set the visible
  * label to "Archive").
  *
  * Pins the migration invariants:
  *   - the tab discovers sessions for the active *mesh root* path (not
  *     a focused worktree's working directory)
  *   - the search input filters by message / branch / worktree
- *   - the primary Resume button does the import → set-active → spawn
+ *   - the primary Resume button does the import â†’ set-active â†’ spawn
  *     sequence and toggles the probe off so the user lands on the
  *     terminal
- *   - the `▾` provider picker only exposes providers whose backend-
+ *   - the `â–¾` provider picker only exposes providers whose backend-
  *     supplied `resumable` flag is true. The flag replaces the
  *     hardcoded `['anthropic','minimax','kimi']` allow-list so a
  *     custom Claude-compatible profile (e.g. "DeepSeek via Claude")
@@ -27,6 +27,7 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { __resetProviderCachesForTests } from '../../src/lib/tauri';
 import type { ArchivedAgentNode } from '../../src/lib/tauri';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {
   id: 42,
@@ -140,7 +141,7 @@ describe('ArchivedNodesTab (#378)', () => {
       meshesById: new Map([[MESH.id, MESH]]),
       selectedMeshId: MESH.id,
     });
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
   });
 
   it('lists discovered sessions for the active mesh', async () => {
@@ -210,7 +211,7 @@ describe('ArchivedNodesTab (#378)', () => {
     expect(await screen.findByText('No matches')).toBeTruthy();
   });
 
-  it('does the import → spawn sequence on the primary Resume button and hides the probe', async () => {
+  it('does the import â†’ spawn sequence on the primary Resume button and hides the probe', async () => {
     mockBackend();
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions' });
     render(<ArchivedNodesTab />);
@@ -269,7 +270,7 @@ describe('ArchivedNodesTab (#378)', () => {
     });
   });
 
-  it('uses the explicit provider from the `▾` picker for the resume', async () => {
+  it('uses the explicit provider from the `â–¾` picker for the resume', async () => {
     mockBackend();
     render(<ArchivedNodesTab />);
 
@@ -288,7 +289,7 @@ describe('ArchivedNodesTab (#378)', () => {
     });
   });
 
-  it('only exposes resumable providers in the `▾` picker', async () => {
+  it('only exposes resumable providers in the `â–¾` picker', async () => {
     // The picker filters by the backend-supplied `resumable` flag (the
     // resolved adapter's `supports_resume() && produces_readable_transcript()`).
     // Antigravity and OpenCode write transcripts the coordinator read API
@@ -307,7 +308,7 @@ describe('ArchivedNodesTab (#378)', () => {
     expect(screen.queryByText('Antigravity')).toBeNull();
   });
 
-  it('exposes custom Claude-compatible profiles in the `▾` picker (issue #550 follow-up)', async () => {
+  it('exposes custom Claude-compatible profiles in the `â–¾` picker (issue #550 follow-up)', async () => {
     // Regression: the picker used to filter by a hardcoded
     // `['anthropic','minimax','kimi']` id allow-list, which silently hid
     // any custom Claude-compatible profile (e.g. "DeepSeek via Claude").

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Grid Controls (wayfinder #988 / #996) — the AgentNodeView must apply the
  * uiStore controls to the node sequence it hands to the grid, and manual
  * drag-and-drop must disappear while a non-custom sort is active.
@@ -11,11 +11,22 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 
 vi.mock('../../src/components/AgentNodeView/NodeCard', () => ({
-  NodeCard: ({ node, draggable = true }: { node: AgentNode; draggable?: boolean }) => (
-    <div data-testid="grid-node" data-node-id={node.id} data-draggable={draggable}>
-      {node.name}
-    </div>
-  ),
+  // Issue #1384 — NodeCard now subscribes per-id via `state.nodesById[nodeId]`
+  // and passes `nodeId` instead of `node`. The mock mirrors the new prop
+  // shape so the test surface doesn't depend on the subscription
+  // implementation.
+  NodeCard: ({ nodeId, draggable = true }: { nodeId: number; draggable?: boolean }) => {
+    // The mock factory is hoisted above the import, so the imported
+    // `useAgentNodeStore` binding is in scope by render-time.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const node = useAgentNodeStore.getState().nodesById[nodeId];
+    if (!node) return null;
+    return (
+      <div data-testid="grid-node" data-node-id={node.id} data-draggable={draggable}>
+        {node.name}
+      </div>
+    );
+  },
 }));
 
 vi.mock('../../src/components/AgentNodeView/GridSplitter', () => ({
@@ -31,6 +42,7 @@ vi.mock('../../src/components/AgentNodeView/GridSplitter', () => ({
 }));
 
 import { AgentNodeView } from '../../src/components/AgentNodeView/AgentNodeView';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 function makeNode(overrides: Partial<AgentNode>): AgentNode {
   return {
@@ -69,7 +81,7 @@ function renderedNodeIds(): number[] {
 }
 
 beforeEach(() => {
-  useAgentNodeStore.setState({ agentNodes: NODES, activeNodeId: NODES[0].id });
+  seedAgentNodes(NODES, NODES[0].id);
   useMeshStore.setState({ selectedMeshId: null });
   useUIStore.setState({
     viewMode: 'all',
@@ -123,7 +135,11 @@ describe('AgentNodeView grid controls', () => {
 
   it('applies the selected mesh scope before the other grid controls', () => {
     useAgentNodeStore.setState({
-      agentNodes: [...NODES.slice(0, 3), { ...NODES[3], mesh_id: 2 }],
+      // Issue #1384 — normalised state; NODES slice is reshaped to map+ids.
+      nodesById: Object.fromEntries(
+        [...NODES.slice(0, 3), { ...NODES[3], mesh_id: 2 }].map(n => [n.id, n])
+      ),
+      nodeIds: [...NODES.slice(0, 3), { ...NODES[3], mesh_id: 2 }].map(n => n.id),
     });
     useMeshStore.setState({ selectedMeshId: 1 });
     useUIStore.setState({ viewMode: 'mesh' });
@@ -135,7 +151,10 @@ describe('AgentNodeView grid controls', () => {
 
   it('preserves the source sequence when custom ordering is active', () => {
     useAgentNodeStore.setState({
-      agentNodes: [NODES[2], NODES[0], NODES[3], NODES[1]],
+      nodesById: Object.fromEntries(
+        [NODES[2], NODES[0], NODES[3], NODES[1]].map(n => [n.id, n])
+      ),
+      nodeIds: [NODES[2], NODES[0], NODES[3], NODES[1]].map(n => n.id),
     });
 
     render(<AgentNodeView />);

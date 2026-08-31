@@ -244,7 +244,7 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen,
                 return (
                   <div key={node.id} className="flex" style={colStyle}>
                     <NodeCard
-                      node={node}
+                      nodeId={node.id}
                       isActive={node.id === activeNodeId}
                       onActivate={setActiveNode}
                       onBuildRun={onBuildRun}

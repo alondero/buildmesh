@@ -115,7 +115,12 @@ export function ViewModeSwitcher() {
       // renders its empty state).
       const { selectedMeshId, selectMesh } = useMeshStore.getState();
       if (selectedMeshId === null) {
-        const { agentNodes, activeNodeId } = useAgentNodeStore.getState();
+        // Issue #1384 — the resolver reads the ordered array, so we
+        // derive it from the normalized split (or use the `getAgentNodes`
+        // helper). `getAgentNodes()` is the lightweight option here:
+        // this branch runs only on click, not in a render loop.
+        const { getAgentNodes, activeNodeId } = useAgentNodeStore.getState();
+        const agentNodes = getAgentNodes();
         const meshId = resolveMeshScopeId(agentNodes, null, activeNodeId);
         if (meshId !== null) {
           selectMesh(meshId);

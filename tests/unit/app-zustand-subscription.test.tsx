@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Issue #1246 — whole-store Zustand subscriptions caused the entire app to
  * re-render on every `patchAgentNode` (attention flip, status update,
  * spawn event, …). The fix in src/App.tsx replaces `useMeshStore()` /
@@ -28,8 +28,18 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render, act, cleanup } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
+
+function makeAgentNode(overrides: Partial<AgentNode> = {}): AgentNode {
+  return {
+    id: 1, mesh_id: 1, name: 'agent', path: '/p', branch: 'main',
+    env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+    use_worktree: true, position: 0, is_pinned: false,
+    ...overrides,
+  };
+}
 
 /** Reproduces the post-fix subscription block from src/App.tsx (issue #1246).
  *  Each render increments `onRender` so the parent can count. */
@@ -56,7 +66,7 @@ describe('App.tsx Zustand subscription pattern (issue #1246)', () => {
     // Reset state so each test starts with a known baseline (no leftover
     // agentNodes from a sibling test would keep the whole-store re-render
     // count deterministic).
-    useAgentNodeStore.setState({ agentNodes: [], error: null });
+    seedAgentNodes([]);
   });
   afterEach(() => cleanup());
 
@@ -70,10 +80,12 @@ describe('App.tsx Zustand subscription pattern (issue #1246)', () => {
     expect(baseline).toBeGreaterThan(0);
 
     act(() => {
-      // node id 1 doesn't exist in `agentNodes` — `state.agentNodes.map(...)`
-      // still returns a fresh `[]` reference, so the parent state object
-      // changes and the whole-store subscriber re-renders.
-      useAgentNodeStore.getState().patchAgentNode(1, { status: 'attention_needed' });
+      // Issue #1384 — `patchAgentNode` writes the entry under id 1 and
+      // rebuilds `nodesById`, so the top-level state object still gets a
+      // new reference. The whole-store destructure subscribes via Zustand's
+      // default `Object.is` and re-renders on any state shape change.
+      seedAgentNodes([makeAgentNode({ id: 1 })]);
+      useAgentNodeStore.getState().patchAgentNode(1, { status: 'awaiting_input' });
     });
 
     expect(renders).toBeGreaterThan(baseline);
@@ -91,7 +103,10 @@ describe('App.tsx Zustand subscription pattern (issue #1246)', () => {
     expect(baseline).toBeGreaterThan(0);
 
     act(() => {
-      useAgentNodeStore.getState().patchAgentNode(1, { status: 'attention_needed' });
+      // Issue #1384 — even after normalisation, the per-action selectors
+      // see a stable function reference and short-circuit. The
+      // `nodesById` rebuild does not affect them.
+      useAgentNodeStore.getState().patchAgentNode(1, { status: 'awaiting_input' });
     });
 
     expect(renders).toBe(baseline);

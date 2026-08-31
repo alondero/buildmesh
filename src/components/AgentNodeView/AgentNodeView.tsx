@@ -3,7 +3,7 @@ import {
   DndContext, DragOverlay, PointerSensor, useSensor, useSensors, pointerWithin,
   type DragStartEvent, type DragMoveEvent, type DragEndEvent,
 } from '@dnd-kit/core';
-import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
@@ -104,7 +104,7 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen, drag
               style={isMultiPane ? { width: `${widths[idx]}%`, flex: '0 0 auto' } : { flex: '1 1 0%' }}
             >
               <NodeCard
-                node={node}
+                nodeId={node.id}
                 isActive={node.id === activeNodeId}
                 onActivate={setActiveNode}
                 onBuildRun={onBuildRun}
@@ -235,16 +235,22 @@ export function AgentNodeView() {
   // Granular selectors: subscribing to the whole store (useAgentNodeStore())
   // re-rendered the view on every unrelated change — including each
   // attention status flip — even though only agentNodes/activeNodeId affect
-  // this view.
-  const agentNodes = useAgentNodeStore(state => state.agentNodes);
+  // this view. Issue #1384 — `useAllAgentNodes` is the canonical derived
+  // selector (useShallow over the nodeIds + nodesById pair). Children that
+  // consume a single node (`GridNodeHeader`, `AgentTerminal`) already
+  // subscribe to `state.nodesById[id]` directly, so this view's own
+  // re-render no longer cascades into them when an unrelated node
+  // changes.
+  const agentNodes = useAllAgentNodes();
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
+  const nodesById = useAgentNodeStore(state => state.nodesById);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const reorderAgentNode = useAgentNodeStore(state => state.reorderAgentNode);
   const swapAgentNodes = useAgentNodeStore(state => state.swapAgentNodes);
 
   const activeNode = useMemo(
-    () => agentNodes.find(s => s.id === activeNodeId) ?? null,
-    [agentNodes, activeNodeId],
+    () => (activeNodeId === null ? null : nodesById[activeNodeId] ?? null),
+    [nodesById, activeNodeId],
   );
 
   // View Modes (wayfinder #982): 'single' solos the active node (it subsumes
@@ -379,8 +385,8 @@ export function AgentNodeView() {
   );
 
   const activeDragNode = useMemo(
-    () => (activeDragNodeId == null ? null : agentNodes.find(n => n.id === activeDragNodeId) ?? null),
-    [activeDragNodeId, agentNodes],
+    () => (activeDragNodeId == null ? null : nodesById[activeDragNodeId] ?? null),
+    [activeDragNodeId, nodesById],
   );
   const dragEnabled = viewMode !== 'pinned' && gridSortBy === 'custom';
 
@@ -427,9 +433,18 @@ export function AgentNodeView() {
       swapAgentNodes(data.nodeId, intent.targetNodeId);
       return;
     }
-    const meshNodes = useAgentNodeStore.getState().agentNodes
-      .filter(n => n.mesh_id === data.meshId)
-      .sort((a, b) => a.position - b.position);
+    // Issue #1384 — iterate `nodeIds` and dereference through `nodesById`
+    // rather than reading the (now-removed) `agentNodes` array. The
+    // imperative read inside the drag handler is the only place we touch
+    // the ordered list directly; React state subscriptions above go
+    // through the same normalized shape.
+    const dragState = useAgentNodeStore.getState();
+    const meshNodes: AgentNode[] = [];
+    for (const id of dragState.nodeIds) {
+      const n = dragState.nodesById[id];
+      if (n && n.mesh_id === data.meshId) meshNodes.push(n);
+    }
+    meshNodes.sort((a, b) => a.position - b.position);
     const targetIdx = meshNodes.findIndex(n => n.id === intent.targetNodeId);
     if (targetIdx === -1) return;
     reorderAgentNode(data.nodeId, intent.kind === 'insert-before' ? targetIdx : targetIdx + 1);
@@ -468,7 +483,7 @@ export function AgentNodeView() {
             singleNode ? (
               <div className="flex-1 flex flex-col p-1 bg-bg-surface overflow-hidden">
                 <NodeCard
-                  node={singleNode}
+                  nodeId={singleNode.id}
                   isActive={singleNode.id === activeNodeId}
                   onActivate={setActiveNode}
                   onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}

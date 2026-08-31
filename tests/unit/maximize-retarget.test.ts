@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Issue: clicking a sidebar NodeItem while a node is soloed should
  * retarget the solo view to the clicked node (not exit the solo view, not
  * stick on the previous node). Migrated to View Modes in wayfinder #982
@@ -17,6 +17,7 @@ import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { Mesh } from '../../src/types/generated/Mesh';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 // Minimal AgentNode for store setup — mirrors the shape used by sibling
 // shortcut tests (`grid-shortcuts.test.ts`, `grid-node-header.test.tsx`).
@@ -106,10 +107,7 @@ describe('sidebar click and View Modes (wayfinder #982)', () => {
       error: null,
     });
     useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
-    useAgentNodeStore.setState({
-      agentNodes: [nodeA, nodeB, nodeC],
-      activeNodeId: null,
-    });
+    seedAgentNodes([nodeA, nodeB, nodeC], null);
   });
 
   it('same-mesh retarget: clicking B while A is soloed keeps Single and retargets to B', () => {

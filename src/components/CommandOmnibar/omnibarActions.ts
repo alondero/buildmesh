@@ -124,7 +124,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
   if (id.startsWith('node:')) {
     const nodeId = Number(id.slice('node:'.length));
     if (!Number.isFinite(nodeId)) return;
-    const node = useAgentNodeStore.getState().agentNodes.find((item) => item.id === nodeId);
+    const node = useAgentNodeStore.getState().nodesById[nodeId];
     if (!node) return;
     const wasSingle = useUIStore.getState().viewMode === 'single';
     useAgentNodeStore.getState().setActiveNode(node.id);

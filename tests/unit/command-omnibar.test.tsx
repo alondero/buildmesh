@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tests for the <CommandOmnibar> palette (issue #1411).
  *
  * Coverage map to the ticket's acceptance criteria:
@@ -23,6 +23,7 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { Mesh } from '../../src/types/generated/Mesh';
 import type { SpawnOption } from '../../src/lib/groups';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const { loadSpawnOptionsMock } = vi.hoisted(() => ({
   loadSpawnOptionsMock: vi.fn(),
@@ -122,7 +123,7 @@ function seedStores(): void {
     probeTab: 'files',
     activeDiffFile: null,
   });
-  useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: null });
+  seedAgentNodes([node], null);
   useMeshStore.setState({ meshesById: new Map([[mesh.id, mesh]]), selectedMeshId: null });
 }
 
@@ -211,7 +212,7 @@ describe('CommandOmnibar — mount/unmount discipline', () => {
 });
 
 describe('CommandOmnibar — WAI-ARIA combobox semantics', () => {
-  it('wires combobox → listbox → option per WAI-ARIA 1.2', () => {
+  it('wires combobox â†’ listbox â†’ option per WAI-ARIA 1.2', () => {
     render(<CommandOmnibar />);
     openOmnibar('commands');
     const input = screen.getByRole('combobox');
@@ -272,10 +273,10 @@ describe('CommandOmnibar — keyboard interaction', () => {
 
     expect(activeAfter('ArrowDown')).toBe(1);
     expect(activeAfter('ArrowDown')).toBe(2);
-    // Wrap past the end → first option.
+    // Wrap past the end â†’ first option.
     for (let i = 2; i < count; i++) activeAfter('ArrowDown');
     expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-option-0');
-    // Wrap before the start → last option.
+    // Wrap before the start â†’ last option.
     expect(activeAfter('ArrowUp')).toBe(count - 1);
   });
 

@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+﻿import { describe, it, expect, beforeEach } from 'vitest';
 import { toggleGridMaximize, cycleGridMode } from '../../src/lib/gridShortcuts';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 // Minimal valid AgentNode — we never invoke any backend; `getActiveNode` only
 // scans the in-memory array. Mirrors the shape used by sibling shortcut tests
@@ -36,13 +37,13 @@ describe('toggleGridMaximize (#668 Alt+G / Cmd+G; View Modes wayfinder #982)', (
   beforeEach(() => {
     // Reset both stores to a known grid-mode baseline; tests opt-in to state.
     useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
   });
 
   it('no-ops when there is no active node', () => {
     // Acceptance criterion #1: pressing Alt+G with no active node is a no-op,
     // not an error and not a phantom entry into Single.
-    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: null });
+    seedAgentNodes([NODE], null);
     toggleGridMaximize();
     expect(useUIStore.getState().viewMode).toBe('mesh');
   });
@@ -53,10 +54,10 @@ describe('toggleGridMaximize (#668 Alt+G / Cmd+G; View Modes wayfinder #982)', (
   });
 
   it('enters Single on the active node from a grid mode', () => {
-    // Acceptance criterion #2: grid mode + active node → Single solo view.
+    // Acceptance criterion #2: grid mode + active node â†’ Single solo view.
     // Single renders the active node, so the mode switch alone solos it —
     // there is no per-node id to assert anymore.
-    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    seedAgentNodes([NODE], NODE.id);
     toggleGridMaximize();
     expect(useUIStore.getState().viewMode).toBe('single');
   });
@@ -69,17 +70,14 @@ describe('toggleGridMaximize (#668 Alt+G / Cmd+G; View Modes wayfinder #982)', (
     useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'pinned' });
     // Note: we deliberately leave `activeNodeId` pointing at a different
     // node to prove the restore doesn't depend on the active node matching.
-    useAgentNodeStore.setState({
-      agentNodes: [NODE, { ...NODE, id: 9, name: 'agent-9', position: 1 }],
-      activeNodeId: 9,
-    });
+    seedAgentNodes([NODE, { ...NODE, id: 9, name: 'agent-9', position: 1 }], 9);
     toggleGridMaximize();
     expect(useUIStore.getState().viewMode).toBe('pinned');
   });
 
-  it('toggles back and forth: mesh → single → mesh → single', () => {
+  it('toggles back and forth: mesh â†’ single â†’ mesh â†’ single', () => {
     // Sequence covers all three acceptance criteria in one call chain.
-    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    seedAgentNodes([NODE], NODE.id);
 
     toggleGridMaximize();
     expect(useUIStore.getState().viewMode).toBe('single');
@@ -95,7 +93,7 @@ describe('toggleGridMaximize (#668 Alt+G / Cmd+G; View Modes wayfinder #982)', (
     // The Ctrl+Arrow "exit-and-move" path in App.tsx is the navigation
     // gesture. Alt+G is the *toggle* — it must not mutate `activeNodeId`,
     // because the user is in solo-view of the node they're already on.
-    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    seedAgentNodes([NODE], NODE.id);
     toggleGridMaximize();
     toggleGridMaximize();
     expect(useAgentNodeStore.getState().activeNodeId).toBe(NODE.id);
@@ -107,10 +105,10 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     // The cycle is a pure store rotation — it never reads the node arrays, so
     // agentNodes stays empty. Only the UI store's mode state matters.
     useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
   });
 
-  it('advances Mesh → Pinned → All → Mesh in switcher order', () => {
+  it('advances Mesh â†’ Pinned â†’ All â†’ Mesh in switcher order', () => {
     cycleGridMode();
     expect(useUIStore.getState().viewMode).toBe('pinned');
     cycleGridMode();
@@ -134,9 +132,9 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
   it('records each grid mode it lands on as the Single restore target', () => {
     // Every non-single mode set updates lastNonSingleMode (uiStore.setViewMode),
     // so a later Alt+G solo/exit returns to wherever the cycle left the user.
-    cycleGridMode(); // mesh → pinned
+    cycleGridMode(); // mesh â†’ pinned
     expect(useUIStore.getState().lastNonSingleMode).toBe('pinned');
-    cycleGridMode(); // pinned → all
+    cycleGridMode(); // pinned â†’ all
     expect(useUIStore.getState().lastNonSingleMode).toBe('all');
   });
 

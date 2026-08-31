@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Regression test for the "focus stolen mid-typing" bug.
  *
  * Symptom (reported in a 3+ pane grid with a stable node list): while typing
@@ -155,6 +155,7 @@ vi.mock('@xterm/addon-unicode11', () => ({
 // separate cache mock is needed.
 
 import { AgentTerminal, terminalManager } from '../../src/components/Terminal/Terminal';
+import { seedAgentNodes } from '../unit/helpers/seedAgentNodes';
 
 // 'running' (not 'idle') so the auto-spawn effect stays out of the way — we
 // only care about the focus lifecycle here.
@@ -217,7 +218,7 @@ describe('AgentTerminal focus guardian', () => {
   beforeEach(() => {
     mockListeners.clear();
     vi.clearAllMocks();
-    useAgentNodeStore.setState({ agentNodes: [RUNNING_NODE], activeNodeId: RUNNING_NODE.id });
+    seedAgentNodes([RUNNING_NODE], RUNNING_NODE.id);
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     useUIStore.setState({ dragTargetNodeId: null });
     terminalManager.dispose(RUNNING_NODE.id);
@@ -310,7 +311,7 @@ describe('AgentTerminal focus guardian', () => {
   it('does NOT reclaim focus from a sibling-mounted text input when probe opens', async () => {
     // Mount the terminal first, with the helper textarea actually focused
     // — that's the steady-state when the user is mid-typing and decides to
-    // click 📝 to open the dock.
+    // click ðŸ“ to open the dock.
     const { inst } = await mountAndSettle();
     inst.term.helperTextarea?.focus();
     expect(document.activeElement).toBe(inst.term.helperTextarea);

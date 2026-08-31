@@ -3,8 +3,8 @@
  * Make the header responsive.
  *
  * The header should prioritise showing the node name, status dot, and
- * provider icon. Lower-priority elements (mesh label → worktree chip →
- * summary → PR chip → inline actions) should hide progressively before
+ * provider icon. Lower-priority elements (mesh label â†’ worktree chip â†’
+ * summary â†’ PR chip â†’ inline actions) should hide progressively before
  * the title gets truncated, and the destructive close+maximise controls
  * should move into a kebab overflow menu when space is too tight for
  * them inline.
@@ -94,7 +94,7 @@ afterEach(() => {
 // acceptance criterion "BuildRunDropdown must never be the sole visible
 // element" by checking the title is always co-rendered.
 vi.mock('../../src/components/BuildRun/BuildRunDropdown', () => ({
-  BuildRunDropdown: () => <span data-testid="build-run">Build ▼</span>,
+  BuildRunDropdown: () => <span data-testid="build-run">Build â–¼</span>,
 }));
 
 const summaryMock = vi.fn();
@@ -165,7 +165,7 @@ function setupWithSummaryAndPr() {
 }
 
 function setupCommonState() {
-  useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+  seedAgentNodes([NODE], NODE.id);
   useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
   // Baseline grid mode — Single (which subsumes the old maximize) flips
   // the header's solo/restore affordances, so tests opt into it explicitly.
@@ -177,7 +177,7 @@ function setupCommonState() {
 }
 
 function renderHeader(width: number) {
-  const { getByTestId, ...rest } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+  const { getByTestId, ...rest } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
   const root = getByTestId('grid-node-header');
   fireResize(root, width);
   return { ...rest, root, getByTestId };
@@ -185,6 +185,7 @@ function renderHeader(width: number) {
 
 // ----- Tier classification pure-function tests --------------------------
 import { getHeaderTier, HEADER_TIER_BREAKPOINTS } from '../../src/components/AgentNodeView/GridNodeHeader';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 describe('getHeaderTier()', () => {
   it('returns xl at the wide breakpoint and above', () => {
@@ -447,7 +448,8 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       // through the same wrapper rather than its own private copy.
       openInFileManagerMock.mockClear();
       const node = { ...NODE, use_worktree: true, worktree_name: 'kebab-feat' };
-      render(<GridNodeHeader node={node} onBuildRun={() => {}} />);
+      useAgentNodeStore.setState({ nodesById: { [node.id]: node }, nodeIds: [node.id] });
+      render(<GridNodeHeader nodeId={node.id} onBuildRun={() => {}} />);
       // Drive the responsive tier below the kebab threshold (compact =
       // < 280px) so the kebab, not the inline trio, is what renders.
       fireResize(screen.getByTestId('grid-node-header'), 200);
@@ -463,7 +465,7 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       renderHeader(200);
       expect(useUIStore.getState().viewMode).toBe('mesh');
       fireEvent.click(screen.getByLabelText('Agent node actions'));
-      // Find the item by its label — note it varies by platform (Alt vs ⌘).
+      // Find the item by its label — note it varies by platform (Alt vs ⌥).
       const maximizeItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
         .find((el) => /maximize/i.test(el.textContent ?? '')) as HTMLElement | undefined;
       expect(maximizeItem).toBeTruthy();
@@ -486,8 +488,8 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
 
     it('labels the kebab pin item "Unpin node" when the node is pinned', () => {
       const pinned = { ...NODE, is_pinned: true };
-      useAgentNodeStore.setState({ agentNodes: [pinned] });
-      render(<GridNodeHeader node={pinned} onBuildRun={() => {}} />);
+      seedAgentNodes([pinned]);
+      render(<GridNodeHeader nodeId={pinned.id} onBuildRun={() => {}} />);
       fireResize(screen.getByTestId('grid-node-header'), 200);
       fireEvent.click(screen.getByLabelText('Agent node actions'));
       const pinItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
@@ -555,13 +557,13 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
 
     it('hides the kebab and reveals inline buttons at wider tiers', () => {
       // Render at wide tier (medium+) — kebab absent, inline present.
-      const { rerender } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+      const { rerender } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
       const root = screen.getByTestId('grid-node-header');
       fireResize(root, 500);
       expect(screen.queryByLabelText('Agent node actions')).toBeNull();
       expect(screen.getByLabelText('Close agent node')).toBeTruthy();
       expect(screen.getByLabelText('Maximize agent node')).toBeTruthy();
-      rerender(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+      rerender(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     });
   });
 });

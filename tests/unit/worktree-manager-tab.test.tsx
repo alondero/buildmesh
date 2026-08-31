@@ -9,7 +9,7 @@
  *
  * Rendering strategy: mount the full `ProbePanel` and click the 🌳 tab
  * button, the same way the existing `mesh-properties-tab.test.tsx` does
- * for ⚙️. This keeps the routing wiring in `ProbePanel.tsx` covered by
+ * for âš™ï¸. This keeps the routing wiring in `ProbePanel.tsx` covered by
  * the same suite — a separate routing test would have to know the tab's
  * internal structure.
  */
@@ -25,6 +25,7 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
 import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {
   id: 42,
@@ -245,7 +246,7 @@ beforeEach(() => {
     meshesById: new Map([[MESH.id, MESH]]),
     selectedMeshId: MESH.id,
   });
-  useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+  seedAgentNodes([]);
   useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
 });
 
@@ -395,7 +396,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
 
   it('clicking Prune disables the button with a "Pruning…" label and surfaces a success message (issue #657)', async () => {
     // The default `mockBackend()` returns `''` from `prune_remote_tracking`,
-    // which the frontend treats as "nothing to report" → success message
+    // which the frontend treats as "nothing to report" â†’ success message
     // shows the fallback text.
     const user = userEvent.setup();
     mockBackend();
@@ -577,7 +578,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
   // The Configuration card ports the worktree-config sub-section that
   // used to live at the top of the legacy `MeshPropertiesPanel` (deleted
   // in #380). The card has three controls: a `use_worktree` checkbox,
-  // a "Starting point" radio (Fresh/Head ↔ origin/main/HEAD on the
+  // a "Starting point" radio (Fresh/Head â†” origin/main/HEAD on the
   // wire), and a "Worktree mode" radio (Branched/Detached).
 
   it('initial load populates the form from get_mesh_properties', async () => {
@@ -587,7 +588,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // Wait for the form to populate from the load effect.
     const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
     expect(checkbox.checked).toBe(true);
-    // Default base_ref is origin/main → Fresh; default mode is branched.
+    // Default base_ref is origin/main â†’ Fresh; default mode is branched.
     const fresh = (await screen.findByLabelText(/Fresh — start new session/i)) as HTMLInputElement;
     expect(fresh.checked).toBe(true);
     const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
@@ -721,7 +722,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     expect(detached.checked).toBe(false);
   });
 
-  // ── Open-in-file-explorer (regression for the lost affordance) ─────
+  // ── Open-in-file-explorer (regression for the lost affordance) ────â”€
   // The 🌳 tab used to host an open-in-OS-file-manager action per
   // worktree row in the legacy MeshPropertiesPanel; the lift to Probe
   // (#377) kept the path text but dropped the icon button. The new
@@ -791,7 +792,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     expect((deleteBtn as HTMLButtonElement).disabled).toBe(true);
   });
 
-  // ── active-branch flag (sibling of worktree `is_active`) ───────────────
+  // ── active-branch flag (sibling of worktree `is_active`) ──────────────â”€
 
   /**
    * Pin the user-symptom contract for the active-branch block in the 🌳
@@ -823,7 +824,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
               is_head: false,
               is_merged_into_main: true,
               is_orphan: false,
-              // Held by an agent node → cannot delete.
+              // Held by an agent node â†’ cannot delete.
               is_active: true,
               has_uncommitted: false,
               last_commit_date: null,
@@ -1021,7 +1022,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
   });
 
   it('shows "0 / Y ready" with a present-but-empty bar when the pool is enabled but empty', async () => {
-    // After a shrink (target 3 → 0 → 1) the badge must show 0 / 1 ready,
+    // After a shrink (target 3 â†’ 0 â†’ 1) the badge must show 0 / 1 ready,
     // not "…/1 ready" (the count IS known, just zero). The Plan agent's
     // synchronous-drain UX fix is what makes this settle immediately on
     // a config change — but the badge format itself is tested here.
@@ -1272,7 +1273,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
               is_orphan: false,
               is_active: false,
               // Same prune flags as feature/merged-clean, but HEAD of a
-              // surviving worktree directory → must NOT be recommended.
+              // surviving worktree directory â†’ must NOT be recommended.
               checked_out_in_worktree: '/repos/demo/.claude/worktrees/hefty-slick-ocean',
               has_uncommitted: false,
               last_commit_date: null,

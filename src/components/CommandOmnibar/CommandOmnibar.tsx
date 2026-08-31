@@ -29,7 +29,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useUIStore, type OmnibarMode } from '../../stores/uiStore';
-import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useAllAgentNodes } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import {
   APP_COMMANDS,
@@ -96,7 +96,11 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     setPromptTarget(null);
   }, [mode]);
 
-  const agentNodes = useAgentNodeStore((s) => s.agentNodes);
+  // Issue #1384 — `useAllAgentNodes` is the canonical derived selector.
+  // The omnibar indexes every node by name/provider; useShallow on the
+  // underlying selector keeps unrelated writes (autopilot pill, closing
+  // flag) from churning the index builder below.
+  const agentNodes = useAllAgentNodes();
   const meshesById = useMeshStore((s) => s.meshesById);
   const meshes = useMemo(
     () => [...meshesById.values()].sort((a, b) => a.position - b.position),

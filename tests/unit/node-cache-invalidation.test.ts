@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+﻿import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
@@ -53,9 +53,17 @@ beforeEach(async () => {
   mockInvoke.mockResolvedValue(null);
 });
 
-/** Seeds the node into the store and wires the event listeners. */
+/** Seeds the node into the store and wires the event listeners. The
+ *  `vi.resetModules()` re-import above means `useAgentNodeStore` is a
+ *  fresh module instance — issue #1384 normalised state lives there,
+ *  so we seed via the fresh instance directly. The shared
+ *  `seedAgentNodes` helper holds a reference to the original (pre-reset)
+ *  module, which would write to the wrong store. */
 async function attachListeners(node: AgentNode = makeNode()) {
-  useAgentNodeStore.setState({ agentNodes: [node] });
+  useAgentNodeStore.setState({
+    nodesById: { [node.id]: node },
+    nodeIds: [node.id],
+  });
   await useAgentNodeStore.getState().initAttentionListeners();
 }
 
@@ -134,7 +142,7 @@ describe('node cache invalidation (issue #1004)', () => {
     const { result } = renderHook(() => useOpenPr(7, GIT_PATH));
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('get_open_pr_for_node', { nodeId: 7 }));
 
-    useAgentNodeStore.setState({ agentNodes: [] });
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: []});
     await useAgentNodeStore.getState().initAttentionListeners();
 
     mockInvoke.mockResolvedValue(PR);

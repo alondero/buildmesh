@@ -101,11 +101,12 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   const [handoverProviderLabel, setHandoverProviderLabel] = useState<string | null>(null);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
-  // Subscribe to *this* node only. Selecting the whole agentNodes array would
-  // re-render every open pane whenever any node's status flips (attention
-  // events fire constantly while agents work); find() returns the same object
-  // reference unless this specific node changed, so Zustand skips the render.
-  const node = useAgentNodeStore(state => state.agentNodes.find(s => s.id === nodeId));
+  // Subscribe to *this* node only via the normalized `nodesById` map (issue
+  // #1384). The store reconciles on every fetch, preserving the same object
+  // reference for unchanged rows — so this selector only triggers a re-render
+  // when THIS specific node changes (status flip, rename, etc.). Other
+  // nodes' attention events no longer cascade into this pane.
+  const node = useAgentNodeStore(state => state.nodesById[nodeId]);
 
   // OS file drops (Explorer / Finder) are handled window-level in
   // useFileDropToTerminal — Tauri intercepts the native drop before the DOM, so

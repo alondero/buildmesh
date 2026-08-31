@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+﻿import { describe, it, expect, beforeEach } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import { useProbeContext } from '../../src/hooks/useProbeContext';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useUIStore } from '../../src/stores/uiStore';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
@@ -53,9 +54,7 @@ describe('useProbeContext (issue #373)', () => {
       loading: false,
       error: null,
     });
-    useAgentNodeStore.setState({
-      agentNodes: [],
-      activeNodeId: null,
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,
       loading: false,
       error: null,
       closingNodeIds: new Set(),
@@ -96,10 +95,7 @@ describe('useProbeContext (issue #373)', () => {
       meshesById: new Map([[1, makeMesh(1, '/a')]]),
       selectedMeshId: 1,
     });
-    useAgentNodeStore.setState({
-      agentNodes: [makeNode({ id: 7, mesh_id: 1 })],
-      activeNodeId: 7,
-    });
+    seedAgentNodes([makeNode({ id: 7, mesh_id: 1 })], 7);
     const { result } = renderHook(() => useProbeContext());
     expect(result.current).toEqual({
       activeMeshId: 1,
@@ -128,13 +124,10 @@ describe('useProbeContext (issue #373)', () => {
       ]),
       selectedMeshId: null,
     });
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 11, mesh_id: 1, path: '/a', worktree_name: 'x' }),
         makeNode({ id: 22, mesh_id: 2, path: '/b', worktree_name: 'y' }),
-      ],
-      activeNodeId: 22,
-    });
+      ], 22);
     const { result } = renderHook(() => useProbeContext());
     expect(result.current).toEqual({
       activeMeshId: 2,
@@ -154,13 +147,10 @@ describe('useProbeContext (issue #373)', () => {
       ]),
       selectedMeshId: 1,
     });
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 11, mesh_id: 1, path: '/a', worktree_name: 'x' }),
         makeNode({ id: 22, mesh_id: 2, path: '/b', worktree_name: 'y' }),
-      ],
-      activeNodeId: 11,
-    });
+      ], 11);
     useUIStore.setState({ viewMode: 'single' });
 
     const { result } = renderHook(() => useProbeContext());
@@ -189,13 +179,10 @@ describe('useProbeContext (issue #373)', () => {
       ]),
       selectedMeshId: 1,
     });
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 11, mesh_id: 1, path: '/a', worktree_name: 'x' }),
         makeNode({ id: 22, mesh_id: 2, path: '/b', worktree_name: 'y' }),
-      ],
-      activeNodeId: 22,
-    });
+      ], 22);
     const { result } = renderHook(() => useProbeContext());
     // The selected mesh (1) wins, but the focused node (22) is still
     // surfaced as activeNodeId; activePath follows the focused node

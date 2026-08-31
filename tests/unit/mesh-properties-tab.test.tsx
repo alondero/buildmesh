@@ -1,3 +1,4 @@
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 /**
  * Tests for the clean Mesh Properties tab — issue #375.
  *
@@ -205,13 +206,13 @@ beforeEach(() => {
     meshesById: new Map([[MESH.id, MESH]]),
     selectedMeshId: MESH.id,
   });
-  useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+  seedAgentNodes([]);
   useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
   mockBackend();
 });
 
 describe('MeshPropertiesTab (issue #375)', () => {
-  it('renders the config form when the ⚙️ tab is open and a mesh is selected', async () => {
+  it('renders the config form when the âš™ï¸ tab is open and a mesh is selected', async () => {
     await openPropertiesTab();
 
     // Config fields that the new tab must keep. The label regex anchors
@@ -344,7 +345,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(rootBuild.labels?.[0].textContent).toMatch(/optional.*falls back/i);
     expect(rootRun.labels?.[0].textContent).toMatch(/optional.*falls back/i);
     // Empty in the base fixture (both columns null) — the load path maps
-    // null → ''.
+    // null â†’ ''.
     expect(rootBuild.value).toBe('');
     expect(rootRun.value).toBe('');
   });
@@ -569,7 +570,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(sandboxes).toHaveLength(1);
   });
 
-  // ── Regression: Autopilot Policy moved to AutopilotProbeTab (#1013) ─────
+  // ── Regression: Autopilot Policy moved to AutopilotProbeTab (#1013) ────â”€
   // The `update_mesh_autopilot` IPC and its four-policy-fields shape were
   // intentionally moved out of Mesh Properties (ticket #1013, follow-up to
   // #994). The Mesh Properties tab is no longer the configure surface for
@@ -648,10 +649,7 @@ describe('MeshPropertiesTab — Directory field shows the mesh root (not the foc
       ]),
       selectedMeshId: MESH_A.id,
     });
-    useAgentNodeStore.setState({
-      agentNodes: [FOCUSED_NODE],
-      activeNodeId: FOCUSED_NODE.id,
-    });
+    seedAgentNodes([FOCUSED_NODE], FOCUSED_NODE.id);
     useUIStore.setState({ probeOpen: true, probeTab: 'properties' });
   }
 
@@ -760,7 +758,7 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
   it('confirms: calls delete_mesh via the store, refetches, and closes the probe', async () => {
     const user = userEvent.setup();
     // `openPropertiesTab()` opens the probe by clicking the activity bar
-    // (handleTabClick toggles probeOpen false→true on a non-active tab).
+    // (handleTabClick toggles probeOpen falseâ†’true on a non-active tab).
     await openPropertiesTab();
     expect(useUIStore.getState().probeOpen).toBe(true);
 
@@ -855,7 +853,7 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     await user.type(model, 'sonnet-4');
     fireEvent.blur(model);
 
-    // Wait for the save's transition: Saving… → Saved. The save itself
+    // Wait for the save's transition: Saving… â†’ Saved. The save itself
     // is fire-and-await'd inside onBlur, so the indicator resolves once
     // the IPC's `.then` runs.
     expect(await screen.findByText('Saved')).toBeTruthy();

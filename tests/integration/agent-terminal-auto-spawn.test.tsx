@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Regression test for the fresh-spawn 80-col wrap bug (#302).
  *
  * Symptom: a freshly created agent node wrapped its first ~1s of PTY output at
@@ -172,6 +172,7 @@ vi.mock('@xterm/addon-unicode11', () => ({
 // separate cache mock is needed.
 
 import { AgentTerminal, terminalManager } from '../../src/components/Terminal/Terminal';
+import { seedAgentNodes } from '../unit/helpers/seedAgentNodes';
 
 const IDLE_NODE: AgentNode = {
   id: 1,
@@ -210,7 +211,7 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
   beforeEach(() => {
     mockListeners.clear();
     vi.clearAllMocks();
-    useAgentNodeStore.setState({ agentNodes: [IDLE_NODE], activeNodeId: IDLE_NODE.id });
+    seedAgentNodes([IDLE_NODE], IDLE_NODE.id);
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     useUIStore.setState({ dragTargetNodeId: null });
     terminalManager.dispose(IDLE_NODE.id);
@@ -237,10 +238,10 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
     // touch the DOM) so its continuation races ahead of the term being
     // parented.
     //
-    // Buggy code path: auto-spawn calls getOrCreate (fast) → proposeDimensions
-    //   runs against an unparented term → 80x24 fallback.
-    // Fixed code path: auto-spawn calls attach (slow) → waits for term to be
-    //   parented → proposeDimensions returns real dims.
+    // Buggy code path: auto-spawn calls getOrCreate (fast) â†’ proposeDimensions
+    //   runs against an unparented term â†’ 80x24 fallback.
+    // Fixed code path: auto-spawn calls attach (slow) â†’ waits for term to be
+    //   parented â†’ proposeDimensions returns real dims.
     const realAttach = terminalManager.attach.bind(terminalManager);
     const attachSpy = vi.spyOn(terminalManager, 'attach').mockImplementation(
       async (nodeId, container) => {

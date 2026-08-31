@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -6,6 +6,7 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { DiffResult, FileNode, GitStatus } from '../../src/lib/tauri';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {
   id: 1,
@@ -79,7 +80,7 @@ describe('ProbePanel', () => {
     // body renders content rather than an empty state. Individual tests narrow
     // this to exercise the empty-state branches.
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    seedAgentNodes([NODE], NODE.id);
     useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_git_status') return Promise.resolve(FILES);
@@ -160,7 +161,7 @@ describe('ProbePanel', () => {
     // there is no name to render so the subheading line is omitted
     // (not blank-padded) — keeps the no-project empty state tidy.
     useMeshStore.setState({ meshesById: new Map(), selectedMeshId: null });
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
@@ -170,7 +171,7 @@ describe('ProbePanel', () => {
 
   it('renders a friendly empty state when no project is active', () => {
     useMeshStore.setState({ meshesById: new Map(), selectedMeshId: null });
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
@@ -180,15 +181,15 @@ describe('ProbePanel', () => {
   it('renders a node-specific empty state on the review tab when no node is focused', () => {
     // A mesh is selected but no agent node is focused: files/properties can
     // still anchor on the mesh root, but "Agent Changes" has nothing to review.
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
     useUIStore.setState({ probeOpen: true, probeTab: 'review' });
     render(<ProbePanel />);
 
     expect(screen.getByText('No active agent node')).toBeTruthy();
   });
 
-  it('renders the Project Files tab body (Changed Files + File Tree) when the 📁 tab is active', async () => {
-    // Issue #376 — the 📁 tab no longer shows a "coming soon" placeholder,
+  it('renders the Project Files tab body (Changed Files + File Tree) when the ðŸ“ tab is active', async () => {
+    // Issue #376 — the ðŸ“ tab no longer shows a "coming soon" placeholder,
     // it shows the same ChangedFilesSection + collapsible FileTree that
     // FileExplorerPanel used to render for a mesh context.
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
@@ -198,8 +199,8 @@ describe('ProbePanel', () => {
     expect(screen.getByText('File Tree')).toBeTruthy();
   });
 
-  it('renders the Agent Changes tab body for the focused node when the 🔍 tab is active', async () => {
-    // Issue #376 — the 🔍 tab loads the focused node's lightweight
+  it('renders the Agent Changes tab body for the focused node when the ðŸ” tab is active', async () => {
+    // Issue #376 — the ðŸ” tab loads the focused node's lightweight
     // base-relative file list. The file title is the canary that the
     // nodeChangedFiles call landed without loading a full diff.
     useUIStore.setState({ probeOpen: true, probeTab: 'review' });
@@ -214,7 +215,7 @@ describe('ProbePanel', () => {
     expect(invoke).not.toHaveBeenCalledWith('diff_node_against_base', { nodeId: NODE.id });
   });
 
-  it('renders the Mesh Properties form (issue #375) when the ⚙️ tab is open', () => {
+  it('renders the Mesh Properties form (issue #375) when the âš™ï¸ tab is open', () => {
     // Sanity check on the wiring: the properties tab now hosts the new
     // `<MeshPropertiesTab>` (config form), not the legacy placeholder
     // "coming soon" message. A specific input label is enough to prove
@@ -229,8 +230,8 @@ describe('ProbePanel', () => {
     expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
   });
 
-  it('renders the Git Issues tab body (issue #378) when the 🐙 tab is open', async () => {
-    // Issue #378 — the 🐙 tab hosts the new `<GitIssuesTab>` (ported
+  it('renders the Git Issues tab body (issue #378) when the ðŸ™ tab is open', async () => {
+    // Issue #378 — the ðŸ™ tab hosts the new `<GitIssuesTab>` (ported
     // from `GitHubIssuesModal`), not the legacy placeholder. The
     // "Loading issues..." canary is enough to prove the tab mounted
     // before the mocked `get_repo_issues` resolves.
@@ -246,8 +247,8 @@ describe('ProbePanel', () => {
     expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
   });
 
-  it('renders the Session History tab body (issue #378) when the 🕒 tab is open', async () => {
-    // Issue #378 — the 🕒 tab hosts the new `<ArchivedNodesTab>`
+  it('renders the Session History tab body (issue #378) when the ðŸ•’ tab is open', async () => {
+    // Issue #378 — the ðŸ•’ tab hosts the new `<ArchivedNodesTab>`
     // (ported from `SessionBrowserModal`). The "Scanning sessions…"
     // canary is enough to prove the tab mounted before the mocked
     // `discover_agent_nodes` resolves.

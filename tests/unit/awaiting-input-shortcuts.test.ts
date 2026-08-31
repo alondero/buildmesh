@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+﻿import { describe, it, expect, beforeEach } from 'vitest';
 import { nextAwaitingNodeId, jumpToNextAwaitingNode } from '../../src/lib/awaitingInputShortcuts';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { SessionStatus } from '../../src/types/generated/SessionStatus';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 /**
  * Tests for the Ctrl/Cmd+. cycle logic (issue #64). The cycle is a pure
@@ -42,32 +43,26 @@ function makeNode(overrides: Partial<AgentNode> & Pick<AgentNode, 'id' | 'mesh_i
 
 describe('awaitingInputShortcuts — nextAwaitingNodeId (issue #64)', () => {
   beforeEach(() => {
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
   });
 
   it('returns null when there is no active node', () => {
     // No-op case: the user hasn't selected a mesh/node yet, so we have no
     // scope to search within. Matches the arrow-traversal handler's policy.
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' }),
         makeNode({ id: 2, mesh_id: 1, position: 1, status: 'awaiting_input' }),
-      ],
-      activeNodeId: null,
-    });
+      ], null);
     expect(nextAwaitingNodeId()).toBeNull();
   });
 
   it('returns null when no nodes are awaiting input', () => {
     // Acceptance criterion: "No-op when no nodes are awaiting input".
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' }),
         makeNode({ id: 2, mesh_id: 1, position: 1, status: 'idle' }),
         makeNode({ id: 3, mesh_id: 1, position: 2, status: 'error' }),
-      ],
-      activeNodeId: 2,
-    });
+      ], 2);
     expect(nextAwaitingNodeId()).toBeNull();
   });
 
@@ -77,10 +72,7 @@ describe('awaitingInputShortcuts — nextAwaitingNodeId (issue #64)', () => {
     // intentional — "no awaiting nodes" returns null, but "the only
     // awaiting node is the one I'm on" returns that id rather than
     // leaving the user staring at a `Ctrl+. did nothing` dead key.
-    useAgentNodeStore.setState({
-      agentNodes: [makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' })],
-      activeNodeId: 1,
-    });
+    seedAgentNodes([makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' })], 1);
     expect(nextAwaitingNodeId()).toBe(1);
   });
 
@@ -88,14 +80,11 @@ describe('awaitingInputShortcuts — nextAwaitingNodeId (issue #64)', () => {
     // Multi-mesh invariant: switching meshes via the sidebar must not let
     // Ctrl+. leak into the previous mesh's awaiting nodes. The active node
     // here is in mesh 1, so mesh 2's awaiting node is invisible to the cycle.
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' }),
         makeNode({ id: 2, mesh_id: 1, position: 1, status: 'awaiting_input' }),
         makeNode({ id: 10, mesh_id: 2, position: 0, status: 'awaiting_input' }),
-      ],
-      activeNodeId: 1,
-    });
+      ], 1);
     expect(nextAwaitingNodeId()).toBe(2);
   });
 
@@ -103,15 +92,12 @@ describe('awaitingInputShortcuts — nextAwaitingNodeId (issue #64)', () => {
     // Core cycle: next-after-current. The active node is at position 0 and
     // itself awaiting; the next press must advance to the *following*
     // awaiting node, not stay on the current one (git log --skip convention).
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' }),
         makeNode({ id: 2, mesh_id: 1, position: 1, status: 'running' }),
         makeNode({ id: 3, mesh_id: 1, position: 2, status: 'awaiting_input' }),
         makeNode({ id: 4, mesh_id: 1, position: 3, status: 'awaiting_input' }),
-      ],
-      activeNodeId: 1,
-    });
+      ], 1);
     expect(nextAwaitingNodeId()).toBe(3);
   });
 
@@ -119,15 +105,12 @@ describe('awaitingInputShortcuts — nextAwaitingNodeId (issue #64)', () => {
     // Acceptance criterion: "Wraps around when reaching the end of the node
     // list". Active is at position 3 (the last awaiting); cycle wraps to
     // position 0, which is the next awaiting node.
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' }),
         makeNode({ id: 2, mesh_id: 1, position: 1, status: 'running' }),
         makeNode({ id: 3, mesh_id: 1, position: 2, status: 'running' }),
         makeNode({ id: 4, mesh_id: 1, position: 3, status: 'awaiting_input' }),
-      ],
-      activeNodeId: 4,
-    });
+      ], 4);
     expect(nextAwaitingNodeId()).toBe(1);
   });
 
@@ -137,17 +120,21 @@ describe('awaitingInputShortcuts — nextAwaitingNodeId (issue #64)', () => {
     // MUST sort by `position` so the cycle matches the user's visual
     // mental model.
     useAgentNodeStore.setState({
-      // Intentionally scrambled insertion order.
-      agentNodes: [
-        makeNode({ id: 4, mesh_id: 1, position: 3, status: 'awaiting_input' }),
-        makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' }),
-        makeNode({ id: 3, mesh_id: 1, position: 2, status: 'awaiting_input' }),
-        makeNode({ id: 2, mesh_id: 1, position: 1, status: 'awaiting_input' }),
-      ],
+      // Intentionally scrambled insertion order — issue #1384 normalised
+      // state splits the array into `nodesById` + `nodeIds`; the helper
+      // preserves the array order in `nodeIds` so the test still proves
+      // the sort-by-position invariant.
+      nodesById: {
+        4: makeNode({ id: 4, mesh_id: 1, position: 3, status: 'awaiting_input' }),
+        1: makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' }),
+        3: makeNode({ id: 3, mesh_id: 1, position: 2, status: 'awaiting_input' }),
+        2: makeNode({ id: 2, mesh_id: 1, position: 1, status: 'awaiting_input' }),
+      },
+      nodeIds: [4, 1, 3, 2],
       activeNodeId: 1,
     });
     // Sorted by position: 1(running), 2(awaiting), 3(awaiting), 4(awaiting).
-    // Next after position 0 → position 1 → id 2.
+    // Next after position 0 â†’ position 1 â†’ id 2.
     expect(nextAwaitingNodeId()).toBe(2);
   });
 
@@ -158,11 +145,12 @@ describe('awaitingInputShortcuts — nextAwaitingNodeId (issue #64)', () => {
     // node" — a no-op. This matches the arrow-traversal handler's policy
     // and keeps the cycle strictly scoped to a known active node.
     useAgentNodeStore.setState({
-      agentNodes: [
-        makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' }),
-        makeNode({ id: 2, mesh_id: 1, position: 1, status: 'awaiting_input' }),
-      ],
-      activeNodeId: 999, // not in agentNodes
+      nodesById: {
+        1: makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' }),
+        2: makeNode({ id: 2, mesh_id: 1, position: 1, status: 'awaiting_input' }),
+      },
+      nodeIds: [1, 2],
+      activeNodeId: 999, // not in nodesById
     });
     expect(nextAwaitingNodeId()).toBeNull();
   });
@@ -171,34 +159,28 @@ describe('awaitingInputShortcuts — nextAwaitingNodeId (issue #64)', () => {
     // Only `status === 'awaiting_input'` qualifies. Every other SessionStatus
     // variant is invisible to the cycle, even if the node is between the
     // active node and a later awaiting one.
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' }),
         makeNode({ id: 2, mesh_id: 1, position: 1, status: 'idle' }),
         makeNode({ id: 3, mesh_id: 1, position: 2, status: 'error' }),
         makeNode({ id: 4, mesh_id: 1, position: 3, status: 'suspended' }),
         makeNode({ id: 5, mesh_id: 1, position: 4, status: 'completed' }),
         makeNode({ id: 6, mesh_id: 1, position: 5, status: 'awaiting_input' }),
-      ],
-      activeNodeId: 1,
-    });
+      ], 1);
     expect(nextAwaitingNodeId()).toBe(6);
   });
 });
 
 describe('jumpToNextAwaitingNode (issue #64 — mutating entry point)', () => {
   beforeEach(() => {
-    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    seedAgentNodes([]);
   });
 
   it('sets activeNodeId to the next awaiting node', () => {
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' }),
         makeNode({ id: 2, mesh_id: 1, position: 1, status: 'awaiting_input' }),
-      ],
-      activeNodeId: 1,
-    });
+      ], 1);
     jumpToNextAwaitingNode();
     expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
   });
@@ -208,31 +190,22 @@ describe('jumpToNextAwaitingNode (issue #64 — mutating entry point)', () => {
     // point: pressing Ctrl+. with nothing awaiting must leave the active
     // node alone. The terminal-focus effect would otherwise steal focus
     // from the user's current prompt if we set null.
-    useAgentNodeStore.setState({
-      agentNodes: [makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' })],
-      activeNodeId: 1,
-    });
+    seedAgentNodes([makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' })], 1);
     jumpToNextAwaitingNode();
     expect(useAgentNodeStore.getState().activeNodeId).toBe(1);
   });
 
   it('returns the id it set, or null when it no-opped (handy for future observability hooks)', () => {
-    // Two-return paths in one test: with a target → returns the id;
-    // without → returns null. The handler doesn't use the return value yet
+    // Two-return paths in one test: with a target â†’ returns the id;
+    // without â†’ returns null. The handler doesn't use the return value yet
     // but pinning it now means a future toast/status-line consumer can't
     // accidentally regress the contract.
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' }),
-      ],
-      activeNodeId: 1,
-    });
+      ], 1);
     expect(jumpToNextAwaitingNode()).toBe(1);
 
-    useAgentNodeStore.setState({
-      agentNodes: [makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' })],
-      activeNodeId: 1,
-    });
+    seedAgentNodes([makeNode({ id: 1, mesh_id: 1, position: 0, status: 'running' })], 1);
     expect(jumpToNextAwaitingNode()).toBeNull();
   });
 
@@ -241,20 +214,17 @@ describe('jumpToNextAwaitingNode (issue #64 — mutating entry point)', () => {
     // in on-screen order, wrapping at the end. This is the user-facing
     // contract pinned in one test so a regression to "always picks the
     // same node" or "skips an awaiting node" is caught here.
-    useAgentNodeStore.setState({
-      agentNodes: [
+    seedAgentNodes([
         makeNode({ id: 1, mesh_id: 1, position: 0, status: 'awaiting_input' }),
         makeNode({ id: 2, mesh_id: 1, position: 1, status: 'running' }),
         makeNode({ id: 3, mesh_id: 1, position: 2, status: 'awaiting_input' }),
-      ],
-      activeNodeId: 1,
-    });
+      ], 1);
 
-    // Press 1: active=1 (awaiting) → next is 3.
+    // Press 1: active=1 (awaiting) â†’ next is 3.
     jumpToNextAwaitingNode();
     expect(useAgentNodeStore.getState().activeNodeId).toBe(3);
 
-    // Press 2: active=3 (awaiting) → wrap → 1.
+    // Press 2: active=3 (awaiting) â†’ wrap â†’ 1.
     jumpToNextAwaitingNode();
     expect(useAgentNodeStore.getState().activeNodeId).toBe(1);
 

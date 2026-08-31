@@ -1,5 +1,6 @@
 import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
+import { useShallow } from 'zustand/react/shallow';
 import * as api from '../lib/tauri';
 import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
@@ -52,20 +53,92 @@ export type { AgentNode };
 // call can do so in-place; the listener module already shows the
 // "typed dispatch surface" pattern that would scale.
 
+// Issue #1384 — shallow-equal reconciliation. When `fetchAgentNodes` returns
+// a fresh list, we compare each row against the existing `nodesById[id]`
+// field-by-field. If every field matches, we keep the *old object reference*
+// so subscribed components (`state.nodesById[id]` or `state.agentNodes.find(...)`)
+// don't see a new ref and Zustand's `Object.is` selector skips the render.
+// Fields not present on either side (e.g. an `undefined` row missing a
+// generated `null`) are treated as equal so a wire-shape tweak on the Rust
+// side doesn't churn every component on every fetch.
+//
+// Why the custom loop and not `Object.is`-per-field via JSON.stringify —
+// `JSON.stringify` allocates a string per node and is order-sensitive for
+// key insertion (V8 object-key order is insertion-order for string keys, so
+// the only false-positive is if the Rust backend ever reorders its columns;
+// in that case we'd silently fail to reconcile and the cascade comes back).
+// A typed field-by-field compare is fast (≤20 primitives per node in the
+// current wire shape), deterministic, and pins the contract in the type
+// system via the exhaustiveness trick below.
+// Exhaustiveness contract — the comparator MUST list every field on
+// `AgentNode` except `id`. If the Rust struct gains a field, `tsc` will
+// fail the build at the next `cargo test` regeneration (the
+// `ReconciledKey` mapped type only compiles when every key is present).
+// `id` is excluded because it is the map key itself; comparing it would
+// be a tautology (`a.id === b.id` whenever both rows are valid). The
+// `Omit<AgentNode, 'id'>` mapped type pins the *absence* of `id`, the
+// `Record<..., true>` literal pins the *presence* of every other field.
+type ReconciledKey = keyof Omit<AgentNode, 'id'>;
+const AGENT_NODE_RECONCILE_SCHEMA: Record<ReconciledKey, true> = {
+  mesh_id: true,
+  name: true,
+  path: true,
+  branch: true,
+  worktree_name: true,
+  env: true,
+  provider: true,
+  status: true,
+  cli_session_id: true,
+  use_worktree: true,
+  is_pinned: true,
+  position: true,
+  created_at: true,
+  source_issue: true,
+  source_pr: true,
+  head_repo_owner: true,
+  head_repo_clone_url: true,
+  source_pr_pinned_sha: true,
+};
+const AGENT_NODE_RECONCILE_FIELDS = Object.keys(
+  AGENT_NODE_RECONCILE_SCHEMA,
+) as ReadonlyArray<ReconciledKey>;
+
+function shallowEqualAgentNode(a: AgentNode, b: AgentNode): boolean {
+  for (const k of AGENT_NODE_RECONCILE_FIELDS) {
+    if (a[k] !== b[k]) return false;
+  }
+  return true;
+}
+
 /// Apply a mesh's re-positioned nodes optimistically and persist them. The
-/// updated nodes replace that mesh's entries; the whole array is re-sorted by
-/// (mesh_id, position) so the in-memory order matches `list_agent_nodes`. On a
-/// backend error we resync from the DB rather than leave the UI out of step.
+/// updated nodes replace that mesh's entries; the whole id list is re-sorted
+/// by (mesh_id, position) so the in-memory order matches `list_agent_nodes`.
+/// On a backend error we resync from the DB rather than leave the UI out of
+/// step.
 async function persistPositions(
   set: (partial: Partial<AgentNodeState>) => void,
   get: () => AgentNodeState,
   updatedMeshNodes: AgentNode[],
 ) {
+  // Compute the new id ordering (full list, mesh-sorted, position-sorted).
+  // We rebuild both the map and the id list so subscribers that read either
+  // see a consistent snapshot — the alternative (mutating only the affected
+  // mesh's nodes) would leave a half-sorted state during the optimistic
+  // window, which is invisible because the id list still references the same
+  // node objects.
   const byId = new Map(updatedMeshNodes.map(n => [n.id, n]));
-  const merged = get().agentNodes
+  const mergedNodes = get().nodeIds
+    .map(id => get().nodesById[id])
+    .filter(n => n !== undefined)
     .map(n => byId.get(n.id) ?? n)
     .sort((x, y) => x.mesh_id - y.mesh_id || x.position - y.position);
-  set({ agentNodes: merged });
+  const mergedById: Record<number, AgentNode> = {};
+  const mergedIds: number[] = [];
+  for (const n of mergedNodes) {
+    mergedById[n.id] = n;
+    mergedIds.push(n.id);
+  }
+  set({ nodesById: mergedById, nodeIds: mergedIds });
   try {
     const updates = updatedMeshNodes.map(n => [n.id, n.position] as [number, number]);
     await api.updateAgentNodePositions(updates);
@@ -129,7 +202,18 @@ function resolveSpawnAgentIntent(
 }
 
 interface AgentNodeState {
-  agentNodes: AgentNode[];
+  // Issue #1384 — normalized entity state. Two structures back the same data:
+  //   `nodesById` — keyed lookup, preserves object identity per node so
+  //                 per-id subscribers (`state.nodesById[id]`) skip renders
+  //                 when only OTHER nodes change.
+  //   `nodeIds`   — ordered list of ids (canonical `(mesh_id, position)`
+  //                 order, matching `list_agent_nodes`); consumers that need
+  //                 the ordered array iterate this and dereference through
+  //                 `nodesById`. The id list itself is rebuilt on each
+  //                 fetch, but the per-id object references are preserved
+  //                 by the shallow reconciliation in `fetchAgentNodes`.
+  nodesById: Record<number, AgentNode>;
+  nodeIds: number[];
   // Autopilot pipeline state per piloted node id ('implementing' /
   // 'finishing' / 'completed' / 'failed' / 'merged'). Absent key = not an
   // autopilot node. Drives the header's Autopilot pill; refreshed with the
@@ -155,6 +239,16 @@ interface AgentNodeState {
   schedules: Record<number, ScheduledTask>;
 
   // Derived getters
+  /// Returns the ordered array of agent nodes (mesh_id, position) for code
+  /// paths that genuinely need the list (test seeds, view-mode helpers,
+  /// imperative `getState()` callers). Subscribed React components should
+  /// NOT use this — they get O(N) re-renders on every fetch. Use
+  /// `state.nodesById[id]` for per-node reads and a `useMemo` over
+  /// `state.nodeIds.map(id => state.nodesById[id])` for full-list views.
+  /// Each call returns a fresh array (cheap; no caching) — tests rely on
+  /// this so `setState({ nodesById, nodeIds })` followed by a
+  /// `getAgentNodes()` round-trip returns the freshly-seeded nodes.
+  getAgentNodes: () => AgentNode[];
   getActiveNode: () => AgentNode | null;
   getActiveMeshId: () => number | null;
 
@@ -234,21 +328,54 @@ interface AgentNodeState {
   cancelSchedule: (nodeId: number) => void;
 }
 
+/// Issue #1384 — derived selector for the full ordered node array. Components
+/// that genuinely need the list (Sidebar, AgentNodeView, CommandOmnibar)
+/// use this hook instead of the duplicated `useMemo(() => nodeIds.map(id =>
+/// nodesById[id]).filter(...), [nodeIds, nodesById])` block. `useShallow`
+/// does the shallow equality on the array's elements so unrelated writes
+/// (autopilot pill, closing flag, error string) don't churn the consumer.
+///
+/// Returns a fresh array reference on every `nodeIds` change (e.g. a delete
+/// or reorder), so `useMemo`-style downstream derivations in consumers
+/// recompute correctly. Per-id selectors (`state.nodesById[id]`) are
+/// preferred when the consumer only needs one node — they preserve identity
+/// through the shallow reconciliation in `fetchAgentNodes`.
+export function useAllAgentNodes(): AgentNode[] {
+  return useAgentNodeStore(
+    useShallow((s) =>
+      s.nodeIds
+        .map((id) => s.nodesById[id])
+        .filter((n): n is AgentNode => n !== undefined),
+    ),
+  );
+}
+
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // Issue #1054 — shared `OptimisticSurface` for the three sites
   // (`renameAgentNode`, `setNodePinned`, `toggleNodePinned`) that
   // route through `withOptimistic`. Built once per `create()` call so
   // the closures capture the right `set`/`get`. Functional updater
   // only — matches the helper's contract and Zustand's `set(updater)`
-  // shape.
+  // shape. Issue #1384 — the surface now operates per-node via the
+  // normalized `nodesById` map; the helper writes a single node at a
+  // time, never the whole list, so subscribers to other nodes are not
+  // disturbed.
   const optimisticSurface: OptimisticSurface = {
-    getAgentNodes: () => get().agentNodes,
-    setAgentNodes: (updater) =>
-      set((state) => ({ agentNodes: updater(state.agentNodes) })),
+    getAgentNode: (nodeId) => get().nodesById[nodeId],
+    setAgentNode: (nodeId, next) => {
+      set((state) => {
+        const current = state.nodesById[nodeId];
+        if (!current) return state;
+        return {
+          nodesById: { ...state.nodesById, [nodeId]: next(current) },
+        };
+      });
+    },
     setError: (error) => set({ error }),
   };
   return {
-  agentNodes: [],
+  nodesById: {},
+  nodeIds: [],
   autopilotStates: {},
   semanticTurns: {},
   activeNodeId: null,
@@ -257,10 +384,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   closingNodeIds: new Set(),
   schedules: {},
 
+  getAgentNodes: () => {
+    const { nodesById, nodeIds } = get();
+    return nodeIds.map(id => nodesById[id]).filter((n): n is AgentNode => n !== undefined);
+  },
+
   getActiveNode: () => {
-    const { agentNodes, activeNodeId } = get();
+    const { nodesById, activeNodeId } = get();
     if (activeNodeId === null) return null;
-    return agentNodes.find(s => s.id === activeNodeId) || null;
+    return nodesById[activeNodeId] ?? null;
   },
 
   getActiveMeshId: () => {
@@ -281,6 +413,21 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       const autopilotStates = Object.fromEntries(
         (Array.isArray(autopilotRuns) ? autopilotRuns : []).map((r) => [r.node_id, r.state]),
       );
+      // Issue #1384 — shallow reconciliation. For each incoming node, check
+      // against the existing entry under the same id; if all reconciled
+      // fields match, keep the old object reference. The new `nodesById`
+      // and `nodeIds` are always fresh containers (so Zustand subscribers
+      // re-evaluate), but the per-id references they hold are the original
+      // objects for unchanged nodes — `state.nodesById[id]` is the same
+      // reference as before, and per-id selectors skip the render.
+      const oldById = get().nodesById;
+      const newById: Record<number, AgentNode> = {};
+      const newIds: number[] = [];
+      for (const n of agentNodes) {
+        const old = oldById[n.id];
+        newById[n.id] = old && shallowEqualAgentNode(old, n) ? old : n;
+        newIds.push(n.id);
+      }
       // Issue #1252 — a schedule that outlives its target node would
       // fire `send_to_agent` (or `write_to_agent` for the empty-message
       // "hit Enter" sentinel) at an archived node, the backend would
@@ -300,7 +447,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       const keptSchedules: Record<number, ScheduledTask> = {};
       for (const idStr of Object.keys(oldSchedules)) {
         const id = Number(idStr);
-        const node = agentNodes.find((n) => n.id === id);
+        const node = newById[id];
         if (node && node.status !== 'archived') {
           keptSchedules[id] = oldSchedules[id];
         } else {
@@ -310,7 +457,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       const schedulesChanged =
         Object.keys(keptSchedules).length !== Object.keys(oldSchedules).length;
       set({
-        agentNodes,
+        nodesById: newById,
+        nodeIds: newIds,
         autopilotStates,
         semanticTurns: Object.fromEntries((Array.isArray(semanticTurns) ? semanticTurns : []).map((turn) => [turn.node_id, turn])),
         loading: false,
@@ -323,18 +471,22 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
 
   // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
   // One-liners that the listeners dispatch through; also exposed on the
-  // public surface in case future code wants the same seam.
+  // public surface in case future code wants the same seam. Issue #1384 —
+  // now updates the single entry in `nodesById` (preserving identity for
+  // every other node), rather than remapping the whole array.
   patchAgentNode: (id, patch) => {
-    set((state) => ({
-      agentNodes: state.agentNodes.map((s) =>
-        s.id === id ? { ...s, ...patch } : s
-      ),
-    }));
+    set((state) => {
+      const current = state.nodesById[id];
+      if (!current) return state;
+      return {
+        nodesById: { ...state.nodesById, [id]: { ...current, ...patch } },
+      };
+    });
   },
   patchAutopilotState: (id, state) => {
     set((s) => ({ autopilotStates: { ...s.autopilotStates, [id]: state } }));
   },
-  findAgentNode: (id) => get().agentNodes.find((s) => s.id === id),
+  findAgentNode: (id) => get().nodesById[id],
 
   ...(() => {
     let listenersAttached = false;
@@ -367,7 +519,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean): Promise<AgentNode> => {
     try {
       const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree);
-      set((state) => ({ agentNodes: [...state.agentNodes, node] }));
+      set((state) => ({
+        nodesById: { ...state.nodesById, [node.id]: node },
+        nodeIds: [...state.nodeIds, node.id],
+      }));
       return node;
     } catch (e) {
       set({ error: formatError(e) });
@@ -421,8 +576,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
 
     // Capture the row up-front so a Phase-2 (delete_commit) failure can
     // re-insert it. By the time the IPC rejects the row is already gone from
-    // `agentNodes`, so reading from get() would not find it.
-    const node = get().agentNodes.find(s => s.id === id);
+    // the store, so reading from get() would not find it.
+    const node = get().nodesById[id];
 
     // Phase 1: safety check + worktree-confirmation prompt. Failures here
     // release the closing flag (the row is still on screen and retryable) and
@@ -453,7 +608,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // (Phase 1 awaited `getWorktree_close_safety`, and a `node-renamed`
     // event could fire during that window — capturing after the await closes
     // that race). Reading after the optimistic remove would find nothing.
-    const nodeForRestore = get().agentNodes.find(s => s.id === id);
+    const nodeForRestore = get().nodesById[id];
 
     // Phase 2: optimistic close + backend commit. The row drops from the UI
     // here so closing feels instant; the backend kills the agent and removes
@@ -474,10 +629,18 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     set((state) => {
       const closing = new Set(state.closingNodeIds);
       closing.delete(id);
+      if (!(id in state.nodesById)) return { closingNodeIds: closing };
+      const nextById = { ...state.nodesById };
+      delete nextById[id];
+      // Issue #1384 — `semanticTurns` keyed by id, so the row's turn
+      // metadata evaporates with the row on optimistic remove. The
+      // listener re-keys when a node with the same id returns, but
+      // id stability is enforced by the DB autoincrement.
       const semanticTurns = { ...state.semanticTurns };
       delete semanticTurns[id];
       return {
-        agentNodes: state.agentNodes.filter(s => s.id !== id),
+        nodesById: nextById,
+        nodeIds: state.nodeIds.filter(nid => nid !== id),
         activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
         closingNodeIds: closing,
         semanticTurns,
@@ -522,9 +685,17 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // the three toast slots would burn on a single failure). Every
       // other `state.error` setter (Phase 1 worktree safety check, etc.)
       // continues to use the App.tsx System pipeline unchanged.
-      set((state) => ({
-        agentNodes: nodeForRestore ? [...state.agentNodes, nodeForRestore] : state.agentNodes,
-      }));
+      if (nodeForRestore) {
+        set((state) => {
+          // Only restore if the row is still absent — a concurrent
+          // `node-created` refetch may have already replaced it.
+          if (state.nodesById[id]) return state;
+          return {
+            nodesById: { ...state.nodesById, [id]: nodeForRestore },
+            nodeIds: state.nodeIds.includes(id) ? state.nodeIds : [...state.nodeIds, id],
+          };
+        });
+      }
       addToast('Node', `Failed to close node: ${formatError(e)}`, 'error');
       throw e;
     }
@@ -539,7 +710,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // Issue #1054 — precheck matches the pre-refactor behaviour: a
     // missing node is a silent no-op, not a throw. (The two pin
     // actions throw; the rename path was always a quiet return.)
-    const prior = get().agentNodes.find(s => s.id === id);
+    const prior = get().nodesById[id];
     if (!prior) return;
     // Optimistic update so the UI reflects the new name before the
     // round-trip. The backend emits `node-renamed` on success, which
@@ -578,7 +749,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // as `setNodePinned`. Compute the flipped value up front so
     // `withOptimistic` has a single `optimisticPatch` to roll back;
     // the helper's `prior` capture handles the "node not loaded" throw.
-    const prior = get().agentNodes.find(s => s.id === nodeId);
+    const prior = get().nodesById[nodeId];
     if (!prior) {
       throw new Error(`toggleNodePinned: node ${nodeId} is not loaded`);
     }
@@ -598,12 +769,13 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // same-mesh-only drag guard in the UI). The merged array is re-sorted by
   // (mesh_id, position) to mirror `list_agent_nodes`' ordering exactly.
   reorderAgentNode: async (nodeId, insertIndex) => {
-    const dragged = get().agentNodes.find(n => n.id === nodeId);
+    const dragged = get().nodesById[nodeId];
     if (!dragged) return;
     const meshId = dragged.mesh_id;
 
-    const meshNodes = get().agentNodes
-      .filter(n => n.mesh_id === meshId)
+    const meshNodes = get().nodeIds
+      .map(id => get().nodesById[id])
+      .filter((n): n is AgentNode => n !== undefined && n.mesh_id === meshId)
       .sort((a, b) => a.position - b.position);
     const from = meshNodes.findIndex(n => n.id === nodeId);
     if (from === -1) return;
@@ -623,12 +795,13 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // `position` values. Only those two rows change, so we send just two updates.
   swapAgentNodes: async (aId, bId) => {
     if (aId === bId) return;
-    const a = get().agentNodes.find(n => n.id === aId);
-    const b = get().agentNodes.find(n => n.id === bId);
+    const a = get().nodesById[aId];
+    const b = get().nodesById[bId];
     if (!a || !b || a.mesh_id !== b.mesh_id) return;
 
-    const swapped = get().agentNodes
-      .filter(n => n.mesh_id === a.mesh_id)
+    const swapped = get().nodeIds
+      .map(id => get().nodesById[id])
+      .filter((n): n is AgentNode => n !== undefined && n.mesh_id === a.mesh_id)
       .map(n => n.id === aId ? { ...n, position: b.position }
                 : n.id === bId ? { ...n, position: a.position }
                 : n);
@@ -650,17 +823,20 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
             rows: typeof rowsOrOptions === 'number' ? rowsOrOptions : undefined,
             cols: maybeCols,
           };
-    const node = get().agentNodes.find(s => s.id === nodeId);
+    const node = get().nodesById[nodeId];
     const previousStatus = node?.status;
     const intent = resolveSpawnAgentIntent(options, node);
     // Flip idle → spawning *before* the first await so Terminal's
     // auto-spawn effect (keyed on `status === 'idle'`) cannot start a
-    // second spawn_agent while this one is in flight.
+    // second spawn_agent while this one is in flight. Issue #1384 —
+    // optimistic patch goes through `nodesById` so other entries keep
+    // their identity.
     if (node?.status === 'idle') {
       set((state) => ({
-        agentNodes: state.agentNodes.map((n) =>
-          n.id === nodeId ? { ...n, status: 'spawning' } : n,
-        ),
+        nodesById: {
+          ...state.nodesById,
+          [nodeId]: { ...state.nodesById[nodeId]!, status: 'spawning' },
+        },
       }));
     }
     try {
@@ -678,12 +854,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // so the prior `console.error` here produced a duplicate entry. The
       // store-side catch keeps doing two things the wrapper does not: it
       // surfaces the error on `state.error` for the UI to render, and it
-      // re-throws so the caller's catch can react.
+      // re-throws so the caller's catch can react. Issue #1384 —
+      // rollback through `nodesById` so other entries keep their identity.
       if (previousStatus !== undefined) {
         set((state) => ({
-          agentNodes: state.agentNodes.map((n) =>
-            n.id === nodeId ? { ...n, status: previousStatus } : n,
-          ),
+          nodesById: {
+            ...state.nodesById,
+            [nodeId]: { ...state.nodesById[nodeId]!, status: previousStatus },
+          },
           error: formatError(e),
         }));
       } else {
@@ -706,7 +884,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // all line up.
       await api.regenerateAgentNode(nodeId, newProviderId);
       await get().fetchAgentNodes();
-      const updated = get().agentNodes.find((n) => n.id === nodeId);
+      const updated = get().nodesById[nodeId];
       if (!updated) {
         throw new Error(`regenerate_agent_node: node ${nodeId} not found after refetch`);
       }
@@ -718,7 +896,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   restartFreshAgent: async (nodeId, options) => {
-    const node = get().agentNodes.find(s => s.id === nodeId);
+    const node = get().nodesById[nodeId];
     if (!node) {
       throw new Error(`Node ${nodeId} not found`);
     }
@@ -728,7 +906,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   spawnHandoverAgent: async (meshId: number, prefill: string, provider?: string) => {
     try {
       const node = await api.spawnHandoverAgent(meshId, prefill, provider);
-      set((state) => ({ agentNodes: [...state.agentNodes, node] }));
+      set((state) => ({
+        nodesById: { ...state.nodesById, [node.id]: node },
+        nodeIds: state.nodeIds.includes(node.id) ? state.nodeIds : [...state.nodeIds, node.id],
+      }));
       await get().fetchAgentNodes();
       return node;
     } catch (e) {

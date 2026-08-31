@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ViewModeSwitcher (wayfinder #982 / #983 / #986) — the four-segment
  * control in the canvas header that drives uiStore.viewMode. Pins the
  * segment rendering, ARIA semantics, and the deliberate sidebar-sync
@@ -12,6 +12,7 @@ import { ViewModeSwitcher } from '../../src/components/ViewModeSwitcher/ViewMode
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH_1: Mesh = {
   id: 1, name: 'demo-1', path: '/repo/1', branch: 'main', position: 0,
@@ -107,7 +108,7 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
 
     it('clicking Mesh Grid with no selection falls back to the active node\'s mesh and syncs', () => {
       // The "fallback to the active node's mesh" branch (ticket #983).
-      useAgentNodeStore.setState({ agentNodes: [NODE_A, NODE_B], activeNodeId: NODE_B.id });
+      seedAgentNodes([NODE_A, NODE_B], NODE_B.id);
       useMeshStore.setState({
         meshes: [MESH_1, MESH_2],
         meshesById: new Map([[1, MESH_1], [2, MESH_2]]),
