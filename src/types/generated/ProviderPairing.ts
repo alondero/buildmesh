@@ -16,7 +16,7 @@ import type { ModelTiers } from "./ModelTiers";
  *
  * Only **stored** pairings exist (ADR-0025) — there is no derived default
  * Anthropic pairing on key alone. Attach (Harnesses page) materialises a row
- * in [`AppPreferences::provider_pairings`]; [`effective_pairings`] returns
+ * in [`AppPreferences::provider_pairings`]; [`super::effective_pairings`] returns
  * those stored rows for proxiable accounts.
  *
  * `model_tiers` carries the per-tier Claude alias map for an `Anthropic`-surface
@@ -41,7 +41,7 @@ provider_id: string,
 surface: ApiSurface, 
 /**
  * Endpoint base URL for this surface. For a first-class provider this is
- * published (see [`first_class_surfaces`]); for a Generic provider it's
+ * published (see [`super::first_class_surfaces`]); for a Generic provider it's
  * declared once at creation. Injected as `ANTHROPIC_BASE_URL` /
  * `OPENAI_BASE_URL` by surface.
  */

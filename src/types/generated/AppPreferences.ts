@@ -20,7 +20,7 @@ default_provider: string | null,
 /**
  * MiniMax API key for usage fetching. **Deprecated** by `provider_accounts`
  * (#537) — kept so existing preferences.json files still load and the stored
- * key survives via [`minimax_api_key_resolved`]'s read-through fallback.
+ * key survives via [`super::minimax_api_key_resolved`]'s read-through fallback.
  */
 minimax_api_key: string | null, 
 /**
@@ -29,15 +29,15 @@ minimax_api_key: string | null,
 google_cloud_project: string | null, 
 /**
  * User customizations to the code-defined default harness profiles.
- * Merged over [`default_harness_profiles`] by `id` (user wins) in
- * [`harness_profiles`]; the defaults are always present even when this
+ * Merged over [`super::default_harness_profiles`] by `id` (user wins) in
+ * [`super::harness_profiles`]; the defaults are always present even when this
  * is empty, so a built-in like Terminal can never go missing.
  */
 harness_profiles: Array<HarnessProfile>, 
 /**
  * User customizations to the code-defined default model-provider accounts.
- * Merged over [`default_provider_accounts`] by `id` (user wins) in
- * [`provider_accounts`]; the built-ins are always present even when this is
+ * Merged over [`super::default_provider_accounts`] by `id` (user wins) in
+ * [`super::provider_accounts`]; the built-ins are always present even when this is
  * empty. Custom (non-built-in) entries are appended (issue #537).
  */
 provider_accounts: Array<ProviderAccount>, 
@@ -56,7 +56,7 @@ harness_order: Array<string>,
  * Only stored pairings exist — there is no derived default on key alone
  * (ADR-0025). An additive field — an older `preferences.json` without it
  * loads with an empty list (legacy account endpoint fields are migrated
- * into Claude Anthropic pairings on read — see [`migrate_prefs_json`]).
+ * into Claude Anthropic pairings on read — see [`super::migrate_prefs_json`]).
  */
 provider_pairings: Array<ProviderPairing>, 
 /**
@@ -123,8 +123,8 @@ autopilot_pool_size: number | null,
  * the harness runs with its native behaviour".
  *
  * The map is **sparse**: an entry whose every field collapses to absent
- * (blank after trimming) is removed entirely by [`upsert_harness_default`]
- * / [`remove_harness_default`], so a stored empty `{}` is unreachable.
+ * (blank after trimming) is removed entirely by [`super::upsert_harness_default`]
+ * / [`super::remove_harness_default`], so a stored empty `{}` is unreachable.
  * Additive on disk — an older `preferences.json` without this field
  * loads as an empty `HashMap` (issue #1148 acceptance criteria 1) via
  * `#[serde(default)]`.
