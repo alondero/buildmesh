@@ -70,6 +70,7 @@ test-results/
 docs/superpowers/
 
 # Claude, Codex, AGY, and other Agent Harnesses (runtime, local settings, and ephemeral files)
+.commandcode/
 .codex/
 CODEX.local.md
 codex.local.md
