@@ -42,6 +42,10 @@ const mockState = vi.hoisted(() => {
     registerCalls: [] as Array<{ key: string }>,
     unregisterCalls: [] as Array<{ key: string }>,
     isRegisteredCalls: [] as Array<{ key: string }>,
+    registeredHandlers: new Map<
+      string,
+      (event: { state: 'Pressed' | 'Released' }) => void
+    >(),
 
     // Focus-listener bookkeeping — every `onFocusChanged` call adds an
     // entry; calling the entry's `unlisten` marks it torn down. The
@@ -63,8 +67,12 @@ const mockState = vi.hoisted(() => {
 });
 
 vi.mock('@tauri-apps/plugin-global-shortcut', () => ({
-  register: vi.fn(async (key: string) => {
+  register: vi.fn(async (
+    key: string,
+    handler: (event: { state: 'Pressed' | 'Released' }) => void,
+  ) => {
     mockState.registerCalls.push({ key });
+    mockState.registeredHandlers.set(key, handler);
     await mockState.trackablePromise();
   }),
   unregister: vi.fn(async (key: string) => {
@@ -132,6 +140,7 @@ beforeEach(() => {
   mockState.registerCalls.length = 0;
   mockState.unregisterCalls.length = 0;
   mockState.isRegisteredCalls.length = 0;
+  mockState.registeredHandlers.clear();
   mockState.focusListeners.length = 0;
   mockState.isFocusedCalls = 0;
   // The module-level per-key queue persists across tests if a case
@@ -170,6 +179,27 @@ describe('useGlobalShortcuts (issue #1249)', () => {
 
     // The focus listener was torn down.
     expect(mockState.focusListeners[0].tornDown).toBe(true);
+  });
+
+  it('fires actions only for Pressed events, not the matching Released event', async () => {
+    const onTrigger = vi.fn();
+    const { unmount } = renderHook(() =>
+      useGlobalShortcuts({ bindings: TEST_BINDINGS, onTrigger }),
+    );
+    await quiesce();
+
+    const key = TEST_BINDINGS[0].key;
+    const handler = mockState.registeredHandlers.get(key);
+    expect(handler).toBeDefined();
+
+    handler!({ state: 'Pressed' });
+    handler!({ state: 'Released' });
+
+    expect(onTrigger).toHaveBeenCalledTimes(1);
+    expect(onTrigger).toHaveBeenCalledWith(TEST_BINDINGS[0].action);
+
+    unmount();
+    await quiesce();
   });
 
   it('StrictMode mount→unmount→mount with held plugin calls leaves exactly ONE focus listener registered and ALL shortcut keys registered', async () => {
