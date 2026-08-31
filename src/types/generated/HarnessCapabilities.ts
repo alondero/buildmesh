@@ -38,7 +38,9 @@ supports_resume: boolean,
 auto_resume_on_startup: boolean, 
 /**
  * Whether the spawn path installs an attention hook for this harness
- * (issue #886).
+ * (issue #886). For Antigravity (issue #1367), this delivers a
+ * completion/background signal via Stop hook and `fullyIdle`; approval
+ * is unavailable under skip-permissions mode.
  */
 requires_attention_hook: boolean, 
 /**
@@ -68,11 +70,11 @@ supports_effort_override: boolean,
  * orchestrator, so a future harness can opt in by overriding
  * `supports_extra_args` on its adapter.
  */
-supports_extra_args: boolean,
+supports_extra_args: boolean, 
 /**
  * Whether `--prefill <text>` (or equivalent positional) is accepted.
  */
-supports_prefill: boolean,
+supports_prefill: boolean, 
 /**
  * True for plain shell providers — LLM-specific paths (naming, the
  * 3-second early-exit heuristic, etc.) all skip.

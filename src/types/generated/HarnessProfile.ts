@@ -7,10 +7,10 @@
  * **Model Provider** (credentials/endpoint). This struct is the first
  * concrete shape of that split: `id` is the value stored in the DB
  * `provider` column and on the wire, `name` is the menu label, and
- * `harness` names the backing executor — for now a legacy [`Provider`]
- * id, resolved by [`resolve_harness_provider`]. Later slices will give
+ * `harness` names the backing executor — for now a legacy [`crate::models::Provider`]
+ * id, resolved by [`super::resolve_harness_provider`]. Later slices will give
  * `harness` richer meaning (its own binary recipe) and retire the
- * duplicated legacy [`Provider`] enum.
+ * duplicated legacy [`crate::models::Provider`] enum.
  *
  * Generated to src/types/generated/HarnessProfile.ts (issue #535).
  */
@@ -24,6 +24,6 @@ id: string,
  */
 name: string, 
 /**
- * Backing executor; for this slice a legacy [`Provider`] id.
+ * Backing executor; for this slice a legacy [`crate::models::Provider`] id.
  */
 harness: string, };

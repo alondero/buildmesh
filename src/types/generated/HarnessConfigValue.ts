@@ -10,7 +10,7 @@
  * just one of them; an instance with both fields `None` is the empty
  * representation (the cascade treats it as absent).
  *
- * Whitespace-only inputs are collapsed to `None` by [`normalize_harness_default`]
+ * Whitespace-only inputs are collapsed to `None` by [`super::normalize_harness_default`]
  * before the resolver ever sees them — issue #1148 acceptance criteria 32.
  *
  * Generated to `src/types/generated/HarnessConfigValue.ts`.

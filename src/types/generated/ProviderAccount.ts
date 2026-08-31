@@ -9,9 +9,9 @@ import type { BillingMode } from "./BillingMode";
  * remap live on [`ProviderPairing`] (Harnesses page), not here.
  *
  * Self-auth built-ins (anthropic, codex, agy, grok, opencode) always appear via
- * [`default_provider_accounts`]. Keyed first-class providers (minimax, kimi,
- * openrouter) live in [`BUILTIN_PROVIDER_ACCOUNTS`] but are only materialised
- * when the user adds them from [`keyed_first_class_catalog`]. Users may also
+ * [`super::default_provider_accounts`]. Keyed first-class providers (minimax, kimi,
+ * openrouter) live in [`super::BUILTIN_PROVIDER_ACCOUNTS`] but are only materialised
+ * when the user adds them from [`super::keyed_first_class_catalog`]. Users may also
  * add custom Claude-compatible accounts (name + API key).
  *
  * Generated to src/types/generated/ProviderAccount.ts (issue #537).
@@ -39,7 +39,7 @@ billing_mode: BillingMode,
  * proxy-capable harness (#568). False for self-authenticating built-ins
  * (anthropic/codex/agy), which hold no creds in Buildmesh.
  *
- * **Derived from `id` on read** ([`merge_provider_accounts`] normalizes it) —
+ * **Derived from `id` on read** (`merge_provider_accounts` normalizes it) —
  * the stored value is not authoritative, so an older `preferences.json` that
  * predates this field still gates correctly.
  */

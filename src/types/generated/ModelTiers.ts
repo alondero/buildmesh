@@ -7,7 +7,7 @@
  * Claude Code asks its backend for several model *aliases*: a primary, a cheap
  * "small/fast" model for background tasks (titles, etc.), and the Sonnet / Opus
  * / Haiku defaults. Each field here, when set, maps to the matching env var the
- * `claude` binary reads (see [`provider_account_env`]):
+ * `claude` binary reads (see [`super::compatibility::resolve_provider_env`]):
  *   - `default`    → `ANTHROPIC_MODEL`
  *   - `small_fast` → `ANTHROPIC_SMALL_FAST_MODEL`
  *   - `sonnet`     → `ANTHROPIC_DEFAULT_SONNET_MODEL`

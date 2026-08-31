@@ -9,7 +9,7 @@
  * provider can be proxied through harnesses on different surfaces (MiniMax via
  * Claude Code over its Anthropic-compatible endpoint *and* via Codex over its
  * OpenAI-compatible endpoint). The surface is what drives which env vars
- * [`surface_env`] emits at spawn (`ANTHROPIC_*` vs `OPENAI_*`).
+ * [`super::compatibility::resolve_provider_env`] emits at spawn (`ANTHROPIC_*` vs `OPENAI_*`).
  *
  * Generated to src/types/generated/ApiSurface.ts.
  */
