@@ -4,6 +4,7 @@ import { AgentTerminal } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { GridNodeHeader } from './GridNodeHeader';
 import { NodeDropCue } from './nodeDrag';
+import { SemanticTurnBanner } from './SemanticTurnBanner';
 
 export type BuildRunState = { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
 
@@ -35,6 +36,8 @@ export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen,
   // resolves the card stays mounted, so cover its viewport with a clear
   // "Closing…" overlay rather than leaving the terminal looking live but inert.
   const isClosing = useAgentNodeStore((s) => s.closingNodeIds.has(node.id));
+  const semanticTurn = useAgentNodeStore((s) => s.semanticTurns[node.id]);
+  const writeToAgent = useAgentNodeStore((s) => s.writeToAgent);
 
   const dragData = { nodeId: node.id, meshId: node.mesh_id };
   const { setNodeRef: setDragRef, listeners, attributes, isDragging } = useDraggable({
@@ -66,6 +69,13 @@ export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen,
         onBuildRun={onBuildRun}
         dragHandleProps={draggable ? { ...listeners, ...attributes } : undefined}
       />
+      {node.status === 'awaiting_input' && semanticTurn && (
+        <SemanticTurnBanner
+          turn={semanticTurn}
+          isActive={isActive}
+          onResolve={(data) => { void writeToAgent(node.id, data); }}
+        />
+      )}
       <div className="flex-1 flex flex-col overflow-hidden bg-black">
         <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
           <AgentTerminal nodeId={node.id} />

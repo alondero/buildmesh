@@ -28,6 +28,7 @@ import { attachAgentNodeListeners } from './agentNodeListeners';
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
 import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
+import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 export type { AgentNode };
 
 // Issue #1054 — cross-store reach, kept narrow on purpose
@@ -113,6 +114,7 @@ interface AgentNodeState {
   // autopilot node. Drives the header's Autopilot pill; refreshed with the
   // node list and nudged by the `autopilot-*` lifecycle events.
   autopilotStates: Record<number, AutopilotRunState>;
+  semanticTurns: Record<number, SemanticTurnPayload>;
   activeNodeId: number | null;
   loading: boolean;
   error: string | null;
@@ -195,6 +197,7 @@ interface AgentNodeState {
   // future refactor needs the same seam.
   patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
   patchAutopilotState: (id: number, state: AutopilotRunState) => void;
+  setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
   findAgentNode: (id: number) => AgentNode | undefined;
   initAttentionListeners: () => Promise<void>;
   /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
@@ -220,6 +223,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   return {
   agentNodes: [],
   autopilotStates: {},
+  semanticTurns: {},
   activeNodeId: null,
   loading: false,
   error: null,
@@ -324,6 +328,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           setActiveNode: get().setActiveNode,
           patchAgentNode: get().patchAgentNode,
           patchAutopilotState: get().patchAutopilotState,
+          setSemanticTurn: get().setSemanticTurn,
           findAgentNode: get().findAgentNode,
         });
       },
@@ -687,6 +692,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     } catch (e) {
       set({ error: formatError(e) });
     }
+  },
+
+  setSemanticTurn: (id, turn) => {
+    set((state) => {
+      const semanticTurns = { ...state.semanticTurns };
+      if (turn) semanticTurns[id] = turn;
+      else delete semanticTurns[id];
+      return { semanticTurns };
+    });
   },
 
   scheduleInput: (nodeId, delayMs, message, label) => {
