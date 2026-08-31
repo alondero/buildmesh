@@ -68,6 +68,21 @@ export const PREFIX_FILTERS: ReadonlyArray<{
 ];
 
 /**
+ * The inverse of `PREFIX_FILTERS`: one canonical prefix per category, for
+ * consumers that need to drill a category INTO its domain (the omnibar's
+ * Tab gesture, issue #1411). Spawn has two legal prefixes (`/` and `+`);
+ * `/` is the canonical drill-in target. Categories absent from the map
+ * (meshes) have no prefix domain.
+ */
+export const CATEGORY_PREFIX: Partial<Record<Category, string>> = {
+  [CATEGORY.command]: '>',
+  [CATEGORY.node]: '@',
+  [CATEGORY.spawn]: '/',
+  [CATEGORY.issue]: '#',
+  [CATEGORY.pullRequest]: '#',
+};
+
+/**
  * The searchable palette: every indexed item, regardless of domain. The UI
  * layer owns keeping this in sync with the stores (subscribe to the stores,
  * re-run the indexers, replace the array).

@@ -41,6 +41,7 @@ export {
   PROBE_TAB_COMMANDS,
   CATEGORY,
   PREFIX_FILTERS,
+  CATEGORY_PREFIX,
   viewModeCommandId,
 } from './indexers';
 export type {

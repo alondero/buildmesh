@@ -330,6 +330,24 @@ interface UIState extends GridControls {
   closeOmnibar: () => void;
   toggleOmnibar: (mode?: OmnibarMode) => void;
 
+  // ---- Cross-surface modal open state (issue #1411 review) ----
+  // The three modals a palette command can summon, hoisted here so every
+  // owner (App's `?` key, TitleBar's header buttons, the Omnibar's command
+  // router) reads and writes the same source of truth instead of gluing
+  // themselves together with window CustomEvents. Same discipline as
+  // `probeOpen` above: state + open/close actions, rendering decided by the
+  // owning component.
+  cheatsheetOpen: boolean;
+  openCheatsheet: () => void;
+  closeCheatsheet: () => void;
+  toggleCheatsheet: () => void;
+  appSettingsOpen: boolean;
+  openAppSettings: () => void;
+  closeAppSettings: () => void;
+  remoteAccessOpen: boolean;
+  openRemoteAccess: () => void;
+  closeRemoteAccess: () => void;
+
   // Agent node currently under an OS file-drag, or null. Drives the terminal
   // "drop file to paste path" overlay; set by the window-level drop listener.
   dragTargetNodeId: number | null;
@@ -431,6 +449,34 @@ export const useUIStore = create<UIState>((set, get) => {
       } else {
         set({ omnibarOpen: true, omnibarMode: mode });
       }
+    },
+
+    cheatsheetOpen: false,
+    openCheatsheet: () => {
+      set({ cheatsheetOpen: true });
+    },
+    closeCheatsheet: () => {
+      set({ cheatsheetOpen: false });
+    },
+    // The `?` key toggles (issue #731); the Omnibar command only opens.
+    toggleCheatsheet: () => {
+      set({ cheatsheetOpen: !get().cheatsheetOpen });
+    },
+
+    appSettingsOpen: false,
+    openAppSettings: () => {
+      set({ appSettingsOpen: true });
+    },
+    closeAppSettings: () => {
+      set({ appSettingsOpen: false });
+    },
+
+    remoteAccessOpen: false,
+    openRemoteAccess: () => {
+      set({ remoteAccessOpen: true });
+    },
+    closeRemoteAccess: () => {
+      set({ remoteAccessOpen: false });
     },
 
     // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
