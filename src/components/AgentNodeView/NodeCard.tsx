@@ -1,9 +1,11 @@
 import { useDraggable, useDroppable } from '@dnd-kit/core';
+import type { KeyboardEvent } from 'react';
 import { type AgentNode, useAgentNodeStore } from '../../stores/agentNodeStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { GridNodeHeader } from './GridNodeHeader';
 import { NodeDropCue } from './nodeDrag';
+import { SemanticTurnBanner } from './SemanticTurnBanner';
 
 export type BuildRunState = { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
 
@@ -35,6 +37,22 @@ export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen,
   // resolves the card stays mounted, so cover its viewport with a clear
   // "Closing…" overlay rather than leaving the terminal looking live but inert.
   const isClosing = useAgentNodeStore((s) => s.closingNodeIds.has(node.id));
+  const semanticTurn = useAgentNodeStore((s) => s.semanticTurns[node.id]);
+  const writeToAgent = useAgentNodeStore((s) => s.writeToAgent);
+  const clearAttention = useAgentNodeStore((s) => s.clearAttention);
+  const handleNodeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!isActive || !semanticTurn || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.target as HTMLElement;
+    if (!target.classList.contains('xterm-helper-textarea')) return;
+    const key = event.key.toLowerCase();
+    if (semanticTurn.kind === 'turn_finished' && key === 'enter') {
+      event.preventDefault();
+      void clearAttention(node.id);
+    } else if (semanticTurn.kind !== 'turn_finished' && (key === 'y' || key === 'n' || key === 'enter')) {
+      event.preventDefault();
+      void writeToAgent(node.id, key === 'n' ? 'n\r' : 'y\r');
+    }
+  };
 
   const dragData = { nodeId: node.id, meshId: node.mesh_id };
   const { setNodeRef: setDragRef, listeners, attributes, isDragging } = useDraggable({
@@ -59,6 +77,7 @@ export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen,
     <div
       ref={setRefs}
       onClick={() => { if (!isActive) onActivate(node.id); }}
+      onKeyDown={handleNodeKeyDown}
       className={`relative flex-1 flex flex-col bg-bg-card border-2 rounded-sm overflow-hidden group transition-[color,background-color,border-color,opacity] ${borderClass} ${isDragging ? 'opacity-40' : ''}`}
     >
       <GridNodeHeader
@@ -66,6 +85,14 @@ export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen,
         onBuildRun={onBuildRun}
         dragHandleProps={draggable ? { ...listeners, ...attributes } : undefined}
       />
+      {node.status === 'awaiting_input' && semanticTurn && (
+        <SemanticTurnBanner
+          turn={semanticTurn}
+          isActive={isActive}
+          onResolve={(data) => { void writeToAgent(node.id, data); }}
+          onFinish={() => { void clearAttention(node.id); }}
+        />
+      )}
       <div className="flex-1 flex flex-col overflow-hidden bg-black">
         <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
           <AgentTerminal nodeId={node.id} />

@@ -28,6 +28,7 @@
 //! surface; the sink writes are an internal detail.
 
 use crate::agent::session_lifecycle::AppSessionLifecycleSink;
+use crate::agent::session_lifecycle::SemanticTurnPayload;
 use crate::db;
 use crate::models::{AgentNode, SessionStatus};
 use tauri::{command, AppHandle};
@@ -48,8 +49,16 @@ use tauri::{command, AppHandle};
 /// running on the Tokio worker pool must wrap this in
 /// `crate::commands::run_blocking` (see `http/routes/attention.rs`).
 pub fn mark_attention(node_id: i64, app: &AppHandle) {
+    mark_attention_with_detail(node_id, app, None);
+}
+
+pub fn mark_attention_with_detail(
+    node_id: i64,
+    app: &AppHandle,
+    semantic_turn: Option<crate::agent::session_lifecycle::SemanticTurnPayload>,
+) {
     let sink = AppSessionLifecycleSink { app };
-    let _ = crate::agent::session_lifecycle::on_attention(&sink, node_id);
+    let _ = crate::agent::session_lifecycle::on_attention_with_detail(&sink, node_id, semantic_turn);
     // Arm the resume-detection safety net (issue #878): if the agent starts
     // producing output again without user input, the mark was stale and gets
     // auto-cleared.
@@ -62,6 +71,7 @@ pub fn mark_attention(node_id: i64, app: &AppHandle) {
 /// in `#[command]` bodies fail CI).
 pub fn clear_attention(node_id: i64, app: &AppHandle) {
     crate::attention_autoclear::disarm(node_id);
+    let _ = db::persist_semantic_turn(node_id, None);
     let sink = AppSessionLifecycleSink { app };
     let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
 }
@@ -85,6 +95,12 @@ pub fn register_attention_node(app: AppHandle, node_id: i64) -> Result<(), Strin
 pub fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
     clear_attention(node_id, &app);
     Ok(())
+}
+
+#[command]
+pub fn list_semantic_turns() -> Result<Vec<SemanticTurnPayload>, String> {
+    let rows = db::list_semantic_turns().map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().filter_map(|(_, value)| serde_json::from_str(&value).ok()).collect())
 }
 
 /// Whether a node is currently awaiting user input. Derived from the lifecycle

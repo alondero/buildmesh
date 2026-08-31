@@ -28,6 +28,7 @@ import { attachAgentNodeListeners } from './agentNodeListeners';
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
 import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
+import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 import type { SpawnAgentIntent } from '../types/generated/SpawnAgentIntent';
 export type { AgentNode };
 
@@ -134,6 +135,7 @@ interface AgentNodeState {
   // autopilot node. Drives the header's Autopilot pill; refreshed with the
   // node list and nudged by the `autopilot-*` lifecycle events.
   autopilotStates: Record<number, AutopilotRunState>;
+  semanticTurns: Record<number, SemanticTurnPayload>;
   activeNodeId: number | null;
   loading: boolean;
   error: string | null;
@@ -213,6 +215,7 @@ interface AgentNodeState {
   killAgent: (nodeId: number) => Promise<void>;
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
   writeToAgent: (nodeId: number, data: string) => Promise<void>;
+  clearAttention: (nodeId: number) => Promise<void>;
   // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
   // The listener module never reaches into `set`/`get` directly; it
   // dispatches through these actions (plus `fetchAgentNodes` /
@@ -221,6 +224,7 @@ interface AgentNodeState {
   // future refactor needs the same seam.
   patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
   patchAutopilotState: (id: number, state: AutopilotRunState) => void;
+  setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
   findAgentNode: (id: number) => AgentNode | undefined;
   initAttentionListeners: () => Promise<void>;
   /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
@@ -246,6 +250,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   return {
   agentNodes: [],
   autopilotStates: {},
+  semanticTurns: {},
   activeNodeId: null,
   loading: false,
   error: null,
@@ -268,9 +273,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     try {
       // Autopilot states ride along with every node refresh, but their
       // failure must never blank the node list — degrade to "no pills".
-      const [agentNodes, autopilotRuns] = await Promise.all([
+      const [agentNodes, autopilotRuns, semanticTurns] = await Promise.all([
         api.listAgentNodes(),
         api.listAutopilotRuns().catch(() => []),
+        api.listSemanticTurns().catch(() => []),
       ]);
       const autopilotStates = Object.fromEntries(
         (Array.isArray(autopilotRuns) ? autopilotRuns : []).map((r) => [r.node_id, r.state]),
@@ -306,6 +312,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       set({
         agentNodes,
         autopilotStates,
+        semanticTurns: Object.fromEntries((Array.isArray(semanticTurns) ? semanticTurns : []).map((turn) => [turn.node_id, turn])),
         loading: false,
         ...(schedulesChanged && { schedules: keptSchedules }),
       });
@@ -350,6 +357,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           setActiveNode: get().setActiveNode,
           patchAgentNode: get().patchAgentNode,
           patchAutopilotState: get().patchAutopilotState,
+          setSemanticTurn: get().setSemanticTurn,
           findAgentNode: get().findAgentNode,
         });
       },
@@ -466,10 +474,13 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     set((state) => {
       const closing = new Set(state.closingNodeIds);
       closing.delete(id);
+      const semanticTurns = { ...state.semanticTurns };
+      delete semanticTurns[id];
       return {
         agentNodes: state.agentNodes.filter(s => s.id !== id),
         activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
         closingNodeIds: closing,
+        semanticTurns,
       };
     });
 
@@ -749,6 +760,19 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     } catch (e) {
       set({ error: formatError(e) });
     }
+  },
+
+  clearAttention: async (nodeId) => {
+    try { await api.clearAttentionNode(nodeId); } catch (e) { set({ error: formatError(e) }); }
+  },
+
+  setSemanticTurn: (id, turn) => {
+    set((state) => {
+      const semanticTurns = { ...state.semanticTurns };
+      if (turn) semanticTurns[id] = turn;
+      else delete semanticTurns[id];
+      return { semanticTurns };
+    });
   },
 
   scheduleInput: (nodeId, delayMs, message, label) => {

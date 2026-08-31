@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@dnd-kit/core', () => ({
   useDraggable: () => ({ setNodeRef: vi.fn(), listeners: {}, attributes: {}, isDragging: false }),
@@ -31,6 +32,8 @@ vi.mock('../../src/components/AgentNodeView/nodeDrag', () => ({
 
 import { NodeCard } from '../../src/components/AgentNodeView/NodeCard';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+
+const originalWriteToAgent = useAgentNodeStore.getState().writeToAgent;
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
@@ -62,6 +65,8 @@ describe('NodeCard closing overlay', () => {
       loading: false,
       error: null,
       closingNodeIds: new Set(),
+      semanticTurns: {},
+      writeToAgent: originalWriteToAgent,
     });
     vi.clearAllMocks();
   });
@@ -84,5 +89,58 @@ describe('NodeCard closing overlay', () => {
     renderCard(makeNode({ id: 6 }));
 
     expect(screen.queryByText('Closing…')).toBeNull();
+  });
+
+  it('shows structured turn metadata only while the node awaits input', () => {
+    useAgentNodeStore.setState({
+      semanticTurns: {
+        5: { node_id: 5, kind: 'permission_request', description: 'Allow edit: src/lib/auth.ts' },
+      },
+    });
+    const { rerender } = renderCard(makeNode({ id: 5, status: 'awaiting_input' }));
+    expect(screen.getByText('Allow edit: src/lib/auth.ts')).toBeTruthy();
+
+    rerender(
+      <NodeCard
+        node={makeNode({ id: 5, status: 'running' })}
+        isActive={false}
+        onActivate={vi.fn()}
+        onBuildRun={vi.fn()}
+        buildRunOpen={null}
+        setBuildRunOpen={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('Allow edit: src/lib/auth.ts')).toBeNull();
+  });
+
+  it('keeps the pulsing card without adding layout when metadata is absent', () => {
+    const { container } = renderCard(makeNode({ id: 5, status: 'awaiting_input' }));
+
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(container.firstElementChild?.className).toContain('animate-border-pulse');
+  });
+
+  it('writes the banner response directly to the node PTY', async () => {
+    const user = userEvent.setup();
+    const writeToAgent = vi.fn(async () => undefined);
+    useAgentNodeStore.setState({
+      writeToAgent,
+      semanticTurns: {
+        5: { node_id: 5, kind: 'permission_request', description: 'Allow: Bash' },
+      },
+    });
+    render(
+      <NodeCard
+        node={makeNode({ id: 5, status: 'awaiting_input' })}
+        isActive
+        onActivate={vi.fn()}
+        onBuildRun={vi.fn()}
+        buildRunOpen={null}
+        setBuildRunOpen={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Reject (N)' }));
+    expect(writeToAgent).toHaveBeenCalledWith(5, 'n\r');
   });
 });

@@ -46,6 +46,7 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
     setActiveNode: spy('setActiveNode', () => {}),
     patchAgentNode: spy('patchAgentNode', () => {}),
     patchAutopilotState: spy('patchAutopilotState', () => {}),
+    setSemanticTurn: spy('setSemanticTurn', () => {}),
     findAgentNode: spy('findAgentNode', (id: number) =>
       nodes.find(n => n.id === id),
     ),
@@ -138,9 +139,10 @@ describe('attachAgentNodeListeners', () => {
     await attachAgentNodeListeners(surface);
 
     expect(capturedHandler).toBeDefined();
-    capturedHandler!({ payload: { session_id: 42 } });
+    capturedHandler!({ payload: { session_id: 42, semantic_turn: null } });
 
     expect(surface.__calls).toEqual([
+      { method: 'setSemanticTurn', args: [42, null] },
       { method: 'patchAgentNode', args: [42, { status: 'awaiting_input' }] },
     ]);
   });
@@ -161,6 +163,7 @@ describe('attachAgentNodeListeners', () => {
     capturedHandler!({ payload: { session_id: 7 } });
 
     expect(surface.__calls).toEqual([
+      { method: 'setSemanticTurn', args: [7, null] },
       { method: 'patchAgentNode', args: [7, { status: 'running' }] },
     ]);
   });

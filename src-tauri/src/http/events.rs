@@ -15,7 +15,10 @@ use tokio::sync::broadcast;
 #[serde(tag = "type")]
 pub enum EventMsg {
     #[serde(rename = "attention-needed")]
-    AttentionNeeded { session_id: i64 },
+    AttentionNeeded {
+        session_id: i64,
+        semantic_turn: Option<crate::agent::session_lifecycle::SemanticTurnPayload>,
+    },
     #[serde(rename = "attention-cleared")]
     AttentionCleared { session_id: i64 },
 }
@@ -48,13 +51,13 @@ mod tests {
     #[tokio::test]
     async fn subscribe_then_emit_delivers_message() {
         let mut rx = subscribe();
-        emit(EventMsg::AttentionNeeded { session_id: 7 });
+        emit(EventMsg::AttentionNeeded { session_id: 7, semantic_turn: None });
         let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
             .expect("timed out")
             .expect("channel closed");
         match got {
-            EventMsg::AttentionNeeded { session_id } => assert_eq!(session_id, 7),
+            EventMsg::AttentionNeeded { session_id, .. } => assert_eq!(session_id, 7),
             _ => panic!("wrong variant"),
         }
     }

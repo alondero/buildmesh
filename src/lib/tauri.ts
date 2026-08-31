@@ -252,6 +252,9 @@ export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
 export const listAutopilotRuns = () =>
   _invoke<AutopilotRunStateRow[]>('list_autopilot_runs');
 
+export const listSemanticTurns = () =>
+  _invoke<import('../types/generated/SemanticTurnPayload').SemanticTurnPayload[]>('list_semantic_turns');
+
 /** Persist a mesh's Autopilot Policy in one write (issue #481, PRD #480).
  *  Dedicated typed command like `updateMeshSandbox` — the backend
  *  range-checks the concurrency limit (1..=8) and collapses blank

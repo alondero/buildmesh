@@ -7,4 +7,5 @@
  *
  * Generated to `src/types/generated/AttentionNeededPayload.ts`.
  */
-export type AttentionNeededPayload = { session_id: number, };
+import type { SemanticTurnPayload } from './SemanticTurnPayload';
+export type AttentionNeededPayload = { session_id: number, semantic_turn: SemanticTurnPayload | null, };

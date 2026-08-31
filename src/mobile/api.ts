@@ -498,7 +498,7 @@ export async function eventsWsUrl(): Promise<string> {
 }
 
 export type EventMsg =
-  | { type: "attention-needed"; session_id: number }
+  | { type: "attention-needed"; session_id: number; semantic_turn: import("../types/generated/SemanticTurnPayload").SemanticTurnPayload | null }
   | { type: "attention-cleared"; session_id: number };
 
 export { ApiError };

@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::http::MaybeTls;
+use crate::agent::session_lifecycle::{SemanticTurnKind, SemanticTurnPayload};
 
 use crate::http::request;
 
@@ -79,6 +80,17 @@ struct HookPayload {
     /// Notification hooks carry the human-readable notification text, e.g.
     /// "Claude needs your permission to use Bash".
     message: Option<String>,
+    /// Tool metadata used by Claude/Codex permission callbacks.
+    #[serde(alias = "toolName", alias = "tool_name")]
+    tool_name: Option<String>,
+    #[serde(alias = "toolInput", alias = "tool_input")]
+    tool_input: Option<serde_json::Value>,
+    /// AGY's nested pre-tool envelope.
+    #[serde(alias = "toolCall", alias = "tool_call")]
+    tool_call: Option<serde_json::Value>,
+    /// Grok Stop callbacks carry the final assistant text inline.
+    #[serde(alias = "lastAssistantMessage", alias = "last_assistant_message")]
+    last_assistant_message: Option<String>,
     /// AGY signals "the turn truly settled" with `fullyIdle: true` and
     /// "the harness is still busy on background work" with `fullyIdle:
     /// false` (issue #1285, #1367). The latter is the false-yield analogue of
@@ -109,6 +121,101 @@ struct HookPayload {
     /// AGY model name.
     #[serde(alias = "modelName", alias = "model_name", default)]
     model_name: Option<String>,
+}
+
+/// Provider-neutral action shown above an awaiting Agent Node's terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticTurn {
+    kind: SemanticTurnKind,
+    description: String,
+}
+
+const MAX_SEMANTIC_DESCRIPTION: usize = 240;
+
+fn clean_description(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() { return None; }
+    let mut chars = normalized.chars();
+    let clipped: String = chars.by_ref().take(MAX_SEMANTIC_DESCRIPTION).collect();
+    Some(if chars.next().is_some() { format!("{clipped}…") } else { clipped })
+}
+
+fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    let mut cursor = value;
+    for key in path {
+        cursor = cursor.get(*key)?;
+    }
+    cursor.as_str().filter(|value| !value.trim().is_empty())
+}
+
+/// Normalize known hook shapes without guessing from arbitrary terminal text.
+fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
+    let nested_name = payload
+        .tool_call
+        .as_ref()
+        .and_then(|value| string_field(value, &["name"]));
+    let tool_name = payload.tool_name.as_deref().or(nested_name);
+    let command = payload
+        .tool_input
+        .as_ref()
+        .and_then(|value| {
+            string_field(value, &["command"]).or_else(|| string_field(value, &["cmd"]))
+        })
+        .or_else(|| {
+            payload.tool_call.as_ref().and_then(|value| {
+                string_field(value, &["args", "command"])
+                    .or_else(|| string_field(value, &["args", "cmd"]))
+            })
+        });
+
+    let permission_event = matches!(
+        payload.hook_event_name.as_deref(),
+        Some("PermissionRequest") | Some("PreToolUse")
+    ) || payload.notification_type.as_deref() == Some("permission_prompt")
+    ;
+
+    if permission_event {
+        if let Some(command) = command {
+            return Some(SemanticTurn {
+                kind: SemanticTurnKind::CommandConfirmation,
+                description: clean_description(&format!("Run: {}", command.trim()))?,
+            });
+        }
+
+        let path = payload.tool_input.as_ref().and_then(|value| {
+            string_field(value, &["file_path"]).or_else(|| string_field(value, &["path"]))
+        });
+        let description = match (tool_name, path) {
+            (Some(name), Some(path)) => {
+                let label = if name.eq_ignore_ascii_case("edit") { "edit" } else { name.trim() };
+                format!("Allow {}: {}", label, path.trim())
+            }
+            (Some(name), None) => format!("Allow: {}", name.trim()),
+            (None, Some(path)) => format!("Allow: {}", path.trim()),
+            _ => payload.message.as_deref().map(str::trim).unwrap_or("Allow tool" ).to_owned(),
+        };
+        return Some(SemanticTurn {
+            kind: SemanticTurnKind::PermissionRequest,
+            description: clean_description(&description)?,
+        });
+    }
+
+    let description = payload
+        .last_assistant_message
+        .as_deref()
+        .or_else(|| {
+            matches!(
+                payload.notification_type.as_deref(),
+                Some("idle_prompt") | Some("task_complete")
+            )
+            .then_some(payload.message.as_deref())
+            .flatten()
+        })?
+        .trim();
+    clean_description(description).map(|description| SemanticTurn {
+        kind: SemanticTurnKind::TurnFinished,
+        description,
+    })
 }
 
 /// Extract the provider-owned UUID from a structured hook callback. An
@@ -311,6 +418,8 @@ pub async fn handle_post(
         }
     }
 
+    let semantic = payload_parsed.as_ref().ok().and_then(semantic_turn);
+
     match decide(&body, crate::services::transcript_reader::count_pending_background_tasks) {
         Decision::Mark => {
             // Issue #1389 — `node_turn::publish` writes SQLite through
@@ -327,16 +436,25 @@ pub async fn handle_post(
             // `F: 'static`, and a non-`'static` borrow would be dropped
             // the moment the async function returns. No clone is needed
             // because the reference is already cheap to share.
+            let semantic_payload = semantic.map(|turn| SemanticTurnPayload {
+                node_id: session_id,
+                kind: turn.kind,
+                description: turn.description,
+            });
+            let semantic_for_publish = semantic_payload.clone();
             let _ = crate::commands::run_blocking(
                 "http_attention_publish_mark",
                 move || -> Result<(), String> {
-                    crate::node_turn::publish(session_id, app);
+                    let encoded = semantic_for_publish.as_ref().map(|v| serde_json::to_string(v).map_err(|e| e.to_string())).transpose()?;
+                    crate::db::persist_semantic_turn(session_id, encoded.as_deref()).map_err(|e| e.to_string())?;
+                    crate::node_turn::publish_with_detail(session_id, app, semantic_for_publish);
                     Ok(())
                 },
             )
             .await;
             crate::http::events::emit(crate::http::events::EventMsg::AttentionNeeded {
                 session_id,
+                semantic_turn: semantic_payload,
             });
         }
         Decision::SuppressPendingBackground => {
@@ -363,6 +481,51 @@ pub async fn handle_post(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_turn_normalizes_permission_command_and_finished_payloads() {
+        let permission: HookPayload = serde_json::from_value(serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "src/lib/auth.ts" }
+        }))
+        .unwrap();
+        assert_eq!(
+            semantic_turn(&permission),
+            Some(SemanticTurn {
+                kind: SemanticTurnKind::PermissionRequest,
+                description: "Allow edit: src/lib/auth.ts".into(),
+            })
+        );
+
+        let command: HookPayload = serde_json::from_value(serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "toolCall": { "name": "run_command", "args": { "cmd": "npm test -- --coverage" } }
+        }))
+        .unwrap();
+        assert_eq!(
+            semantic_turn(&command),
+            Some(SemanticTurn {
+                kind: SemanticTurnKind::CommandConfirmation,
+                description: "Run: npm test -- --coverage".into(),
+            })
+        );
+
+        let finished: HookPayload = serde_json::from_value(serde_json::json!({
+            "hookEventName": "Stop",
+            "lastAssistantMessage": "Implemented the auth guard."
+        }))
+        .unwrap();
+        assert_eq!(
+            semantic_turn(&finished),
+            Some(SemanticTurn {
+                kind: SemanticTurnKind::TurnFinished,
+                description: "Implemented the auth guard.".into(),
+            })
+        );
+
+        assert_eq!(semantic_turn(&HookPayload::default()), None);
+    }
 
     /// A representative Stop-hook stdin payload.
     fn stop_body(transcript_path: &str) -> Vec<u8> {

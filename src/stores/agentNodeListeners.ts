@@ -40,6 +40,7 @@
 import { listen } from '@tauri-apps/api/event';
 import type { AttentionNeededPayload } from '../types/generated/AttentionNeededPayload';
 import type { AttentionClearedPayload } from '../types/generated/AttentionClearedPayload';
+import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 import type { NodeRenamedPayload } from '../types/generated/NodeRenamedPayload';
 import type { NodeCreatedPayload } from '../types/generated/NodeCreatedPayload';
 import type { NodeActivatedPayload } from '../types/generated/NodeActivatedPayload';
@@ -76,6 +77,8 @@ export interface AgentNodeActionSurface {
    *  `autopilot-finishing` / `autopilot-pr-created` /
    *  `autopilot-finish-failed`. */
   patchAutopilotState: (id: number, state: AutopilotRunState) => void;
+  /** Set or clear the structured action shown above an awaiting terminal. */
+  setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
   /** Read a single agent node by id — the cache-invalidation handlers
    *  need its git path. Returns `undefined` if the node is unknown
    *  (the caller treats that as a no-op; see `invalidateNodeCaches`
@@ -109,6 +112,8 @@ export async function attachAgentNodeListeners(
   unlistens.push(
     await listen<AttentionNeededPayload>('attention-needed', (event) => {
       const nodeId = event.payload[SESSION_ID_KEY];
+      const semantic = event.payload.semantic_turn;
+      surface.setSemanticTurn(nodeId, semantic ? { ...semantic, node_id: nodeId } : null);
       surface.patchAgentNode(nodeId, { status: 'awaiting_input' });
     }),
   );
@@ -116,6 +121,7 @@ export async function attachAgentNodeListeners(
   unlistens.push(
     await listen<AttentionClearedPayload>('attention-cleared', (event) => {
       const nodeId = event.payload[SESSION_ID_KEY];
+      surface.setSemanticTurn(nodeId, null);
       surface.patchAgentNode(nodeId, { status: 'running' });
     }),
   );
