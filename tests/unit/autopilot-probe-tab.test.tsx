@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tests for the Autopilot Probe tab — wayfinder #990, ticket #994.
  *
  * Strategy mirrors `mesh-properties-tab.test.tsx`: mount the full
@@ -21,6 +21,7 @@ import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
 import type { LoopStatusDto } from '../../src/types/generated/LoopStatus';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 // The Mesh store's `Mesh` is the full generated 14+ field wire type
 // (wayfinder #990 ticket #991 added the six `loop_*` and the
@@ -187,7 +188,7 @@ beforeEach(() => {
     meshesById: new Map([[MESH.id, MESH]]),
     selectedMeshId: MESH.id,
   });
-  useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+  seedAgentNodes([]);
   useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
 });
 
@@ -357,7 +358,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
     await openAutopilotTab();
 
     const checkbox = await screen.findByLabelText(/Run loop iterations in a worktree/i);
-    // Fixture use_worktree=true → uncheck on click.
+    // Fixture use_worktree=true â†’ uncheck on click.
     await user.click(checkbox);
 
     await waitFor(() => {
@@ -391,7 +392,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
     });
     expect(badge.textContent).toContain('Stopped');
 
-    // Loop is off + a prompt is set → Start is the live action, Stop is inert.
+    // Loop is off + a prompt is set â†’ Start is the live action, Stop is inert.
     expect(screen.getByRole('button', { name: 'Start loop' }).hasAttribute('disabled')).toBe(false);
     expect(screen.getByRole('button', { name: 'Stop loop' }).hasAttribute('disabled')).toBe(true);
     // No Pause in the Start/Stop MVP.
@@ -419,7 +420,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
       meshId: 42,
       enabled: true,
     });
-    // The immediate refetch reflects the flipped flag → Idle (enabled, no
+    // The immediate refetch reflects the flipped flag â†’ Idle (enabled, no
     // iteration running yet).
     await waitFor(() => {
       expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('idle');
@@ -487,7 +488,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
     expect(screen.getByTestId('loop-status-badge').textContent).toContain(
       'Active loop iteration 3'
     );
-    // A running loop → Start is inert, Stop is live.
+    // A running loop â†’ Start is inert, Stop is live.
     expect(screen.getByRole('button', { name: 'Start loop' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Stop loop' }).hasAttribute('disabled')).toBe(false);
   });
@@ -537,7 +538,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
   });
 });
 
-// ── Issue-driven Autopilot Policy (ticket #1013) ─────────────────────────────
+// â”€â”€ Issue-driven Autopilot Policy (ticket #1013) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The four policy columns + master enable flag moved out of
 // `MeshPropertiesTab` and into this tab's issue-driven branch. They
 // persist atomically through `update_mesh_autopilot` (same IPC shape

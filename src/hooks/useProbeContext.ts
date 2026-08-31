@@ -75,13 +75,18 @@ export function useProbeContext(): ProbeContext {
   const selectedMeshId = useMeshStore((s) => s.selectedMeshId);
   const meshesById = useMeshStore((s) => s.meshesById);
   const activeNodeId = useAgentNodeStore((s) => s.activeNodeId);
-  const agentNodes = useAgentNodeStore((s) => s.agentNodes);
+  // Issue #1384 — subscribe to the normalized `nodesById` directly. We
+  // only need a single-node read here (the active node); the old
+  // array-subscriber pattern re-rendered on every node's status flip,
+  // including unrelated agents, which cascaded into every consumer of
+  // `useProbeContext` (the dock header, the GitHub Issues/PR tabs, etc.).
+  const nodesById = useAgentNodeStore((s) => s.nodesById);
   const viewMode = useUIStore((s) => s.viewMode);
 
   return useMemo<ProbeContext>(() => {
     const activeNode =
       activeNodeId !== null
-        ? agentNodes.find((n) => n.id === activeNodeId) ?? null
+        ? nodesById[activeNodeId] ?? null
         : null;
 
     // Single mode is an explicit node lens: the focused node can belong to a
@@ -119,5 +124,5 @@ export function useProbeContext(): ProbeContext {
     const activeMeshName = mesh?.name ?? null;
 
     return { activeMeshId, activeNodeId, activePath, activeMeshPath, activeMeshName };
-  }, [selectedMeshId, meshesById, activeNodeId, agentNodes, viewMode]);
+  }, [selectedMeshId, meshesById, activeNodeId, nodesById, viewMode]);
 }

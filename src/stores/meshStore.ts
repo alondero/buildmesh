@@ -158,9 +158,15 @@ export const useMeshStore = create<MeshState>((set) => ({
     const agentNodeModule = await import('./agentNodeStore') as AgentNodeStoreModule;
     const { useAgentNodeStore } = agentNodeModule;
     const agentStoreBefore = useAgentNodeStore.getState();
-    const doomedNodeIds = agentStoreBefore.agentNodes
-      .filter((n) => n.mesh_id === id)
-      .map((n) => n.id);
+    // Issue #1384 — iterate `nodeIds` and dereference through `nodesById`
+    // rather than reading the (now-removed) `agentNodes` array. We only
+    // care which ids belong to the doomed mesh, so we collect the ids
+    // directly without rebuilding the node objects.
+    const doomedNodeIds: number[] = [];
+    for (const nid of agentStoreBefore.nodeIds) {
+      const n = agentStoreBefore.nodesById[nid];
+      if (n && n.mesh_id === id) doomedNodeIds.push(nid);
+    }
 
     try {
       await api.deleteMesh(id);

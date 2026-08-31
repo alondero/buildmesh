@@ -127,9 +127,7 @@ describe('NodeItem context menu (issue #776)', () => {
     // Reset the store between tests so a previous test's pre-populated
     // `agentNodes` (the spawnAgent mock looks the node up by id) doesn't
     // leak into the next case and silently satisfy the lookup.
-    useAgentNodeStore.setState({
-      agentNodes: [],
-      activeNodeId: null,
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,
       loading: false,
       error: null,
       closingNodeIds: new Set(),
@@ -141,11 +139,11 @@ describe('NodeItem context menu (issue #776)', () => {
     // tests can assert the call without going through the Tauri
     // `invoke` mock — the store method is the public surface
     // NodeItem uses. The mock returns a minimal `AgentNode` so the
-    // caller's `agentNodes.find` after `fetchAgentNodes` doesn't
-    // trip on `undefined`.
+    // caller's read after `fetchAgentNodes` doesn't trip on `undefined`.
+    // Issue #1384 — read by id from the normalized map.
     vi.spyOn(useAgentNodeStore.getState(), 'regenerateAgentNode').mockImplementation(
       async (nodeId, newProviderId) => {
-        const existing = useAgentNodeStore.getState().agentNodes.find(n => n.id === nodeId);
+        const existing = useAgentNodeStore.getState().nodesById[nodeId];
         return { ...(existing ?? makeNode()), provider: newProviderId } as AgentNode;
       },
     );
@@ -155,7 +153,7 @@ describe('NodeItem context menu (issue #776)', () => {
     // mutating the in-memory node list (optimistic patch included).
     vi.spyOn(useAgentNodeStore.getState(), 'toggleNodePinned').mockImplementation(
       async (nodeId) => {
-        const existing = useAgentNodeStore.getState().agentNodes.find(n => n.id === nodeId);
+        const existing = useAgentNodeStore.getState().nodesById[nodeId];
         return { ...(existing ?? makeNode()), is_pinned: !(existing?.is_pinned ?? false) } as AgentNode;
       },
     );

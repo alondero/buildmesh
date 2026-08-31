@@ -540,11 +540,13 @@ export function GitPullRequestsTab() {
         // Snapshot at click-time (not a reactive subscription) — we
         // only need the current set of nodes to find matching branches
         // for this one merge, and a stale store read doesn't matter
-        // because `agentNodes.filter(branch === pr.head_ref)` is a
-        // per-node branch match, not an identity check.
-        const agentNodes = useAgentNodeStore.getState().agentNodes;
-        for (const node of agentNodes) {
-          if (node.mesh_id === activeMeshId && node.branch === pr.head_ref) {
+        // because the per-node branch match is not an identity check.
+        // Issue #1384 — iterate `nodeIds` and dereference through
+        // `nodesById` rather than the removed `agentNodes` array.
+        const { nodeIds, nodesById } = useAgentNodeStore.getState();
+        for (const id of nodeIds) {
+          const node = nodesById[id];
+          if (node && node.mesh_id === activeMeshId && node.branch === pr.head_ref) {
             refreshOpenPrByPath(getNodeGitPath(node));
           }
         }

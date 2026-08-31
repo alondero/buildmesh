@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tests for the Autopilot Circuits Probe tab (spec #1205 / walking
  * skeleton #1206).
  *
@@ -19,6 +19,7 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 // Direct wrapper access for the IPC-contract block below.
 import {
   listCircuitsWithRuns,
@@ -143,7 +144,7 @@ beforeEach(() => {
     meshesById: new Map([[MESH.id, MESH]]),
     selectedMeshId: MESH.id,
   });
-  useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+  seedAgentNodes([]);
   useUIStore.setState({
     probeOpen: false,
     probeTab: 'files',

@@ -8,8 +8,8 @@ const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 // Issue #1247 — `deleteMesh` reaches into `useAgentNodeStore` to capture
 // doomed node ids, refetch after the IPC commits, and null `activeNodeId`
 // when it pointed into the deleted mesh. Mock the store module with a
-// hoisted shared-state object so each test can pre-load `agentNodes` /
-// `activeNodeId` and observe the post-call side effects
+// hoisted shared-state object so each test can pre-load `nodesById` /
+// `nodeIds` / `activeNodeId` and observe the post-call side effects
 // (`fetchAgentNodes` invocation, `setActiveNode` invocation) without
 // driving the real store's IPC plumbing.
 //
@@ -21,12 +21,18 @@ const agentStoreMock = vi.hoisted(() => {
   const fetchAgentNodes = vi.fn().mockResolvedValue(undefined);
   const setActiveNode = vi.fn();
   const state: {
-    agentNodes: AgentNode[];
+    // Issue #1384 — normalized state (`nodesById` + `nodeIds`) replaces
+    // the previous flat `agentNodes` array. The mesh-store test only
+    // cares about the doomed-id list, so we keep a derived array in
+    // sync via a setter helper.
+    nodesById: Record<number, AgentNode>;
+    nodeIds: number[];
     activeNodeId: number | null;
     fetchAgentNodes: typeof fetchAgentNodes;
     setActiveNode: typeof setActiveNode;
   } = {
-    agentNodes: [],
+    nodesById: {},
+    nodeIds: [],
     activeNodeId: null,
     fetchAgentNodes,
     setActiveNode,
@@ -80,6 +86,20 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   };
 }
 
+// Issue #1384 — populate the mocked `nodesById` + `nodeIds` from an
+// array, mirroring the normalized store shape. The mesh-store test only
+// uses the doomed-id walk, so we don't care about canonical ordering.
+function seedAgentNodes(nodes: AgentNode[]) {
+  const nodesById: Record<number, AgentNode> = {};
+  const nodeIds: number[] = [];
+  for (const n of nodes) {
+    nodesById[n.id] = n;
+    nodeIds.push(n.id);
+  }
+  agentStoreMock.state.nodesById = nodesById;
+  agentStoreMock.state.nodeIds = nodeIds;
+}
+
 describe('useMeshStore', () => {
   beforeEach(() => {
     useMeshStore.setState({
@@ -92,7 +112,8 @@ describe('useMeshStore', () => {
     // Reset the agent-store mock state + call history so each test starts
     // from a clean slate. `vi.clearAllMocks` only clears call history;
     // it does NOT reset the state object the hoisted closures capture.
-    agentStoreMock.state.agentNodes = [];
+    agentStoreMock.state.nodesById = {};
+    agentStoreMock.state.nodeIds = [];
     agentStoreMock.state.activeNodeId = null;
     vi.clearAllMocks();
   });
@@ -214,11 +235,11 @@ describe('useMeshStore', () => {
       // Two doomed nodes (mesh 1) and one survivor (mesh 2). The fix
       // must only dispose the doomed ids — the survivor's terminal
       // stays alive because the node IS still alive.
-      agentStoreMock.state.agentNodes = [
+      seedAgentNodes([
         makeNode({ id: 10, mesh_id: 1 }),
         makeNode({ id: 11, mesh_id: 1 }),
         makeNode({ id: 12, mesh_id: 2 }),
-      ];
+      ]);
       mockInvoke
         .mockResolvedValueOnce(undefined)
         .mockResolvedValueOnce([]);
@@ -235,7 +256,7 @@ describe('useMeshStore', () => {
       // No nodes belong to mesh 7 — the doomed-id list is empty, so
       // the dispose loop is a no-op (matches the registry's "missing
       // id → silent no-op" discipline, TerminalRegistry.dispose).
-      agentStoreMock.state.agentNodes = [makeNode({ id: 99, mesh_id: 2 })];
+      seedAgentNodes([makeNode({ id: 99, mesh_id: 2 })]);
       mockInvoke
         .mockResolvedValueOnce(undefined)
         .mockResolvedValueOnce([]);
@@ -269,7 +290,7 @@ describe('useMeshStore', () => {
 
     it('nulls activeNodeId when it pointed at a doomed node', async () => {
       agentStoreMock.state.activeNodeId = 10;
-      agentStoreMock.state.agentNodes = [makeNode({ id: 10, mesh_id: 1 })];
+      seedAgentNodes([makeNode({ id: 10, mesh_id: 1 })]);
       mockInvoke
         .mockResolvedValueOnce(undefined)
         .mockResolvedValueOnce([]);
@@ -285,11 +306,11 @@ describe('useMeshStore', () => {
       // (which would take nodes 10 + 11). Node 99 survives — the fix must
       // NOT clobber a still-active node id.
       agentStoreMock.state.activeNodeId = 99;
-      agentStoreMock.state.agentNodes = [
+      seedAgentNodes([
         makeNode({ id: 10, mesh_id: 1 }),
         makeNode({ id: 11, mesh_id: 1 }),
         makeNode({ id: 99, mesh_id: 2 }),
-      ];
+      ]);
       mockInvoke
         .mockResolvedValueOnce(undefined)
         .mockResolvedValueOnce([]);
@@ -305,7 +326,7 @@ describe('useMeshStore', () => {
       // regression where the post-IPC cleanup leaks past the try/catch
       // and quietly disposes a mesh that the backend refused to delete.
       agentStoreMock.state.activeNodeId = 10;
-      agentStoreMock.state.agentNodes = [makeNode({ id: 10, mesh_id: 1 })];
+      seedAgentNodes([makeNode({ id: 10, mesh_id: 1 })]);
       useMeshStore.setState({ selectedMeshId: 1 });
       mockInvoke.mockRejectedValueOnce(new Error('backend says no'));
 

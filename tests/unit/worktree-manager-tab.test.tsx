@@ -1,5 +1,5 @@
-/**
- * Tests for the 🌳 Worktree Manager tab — issue #377.
+﻿/**
+ * Tests for the ðŸŒ³ Worktree Manager tab — issue #377.
  *
  * The tab ports the legacy `<BranchesWorktreesSection>` (which used to live
  * at the bottom of the old MeshPropertiesPanel drawer) into the unified
@@ -7,9 +7,9 @@
  * collapsible header (the probe already provides the surface chrome) and
  * the always-visible one-liner (the probe header shows the tab name).
  *
- * Rendering strategy: mount the full `ProbePanel` and click the 🌳 tab
+ * Rendering strategy: mount the full `ProbePanel` and click the ðŸŒ³ tab
  * button, the same way the existing `mesh-properties-tab.test.tsx` does
- * for ⚙️. This keeps the routing wiring in `ProbePanel.tsx` covered by
+ * for âš™ï¸. This keeps the routing wiring in `ProbePanel.tsx` covered by
  * the same suite — a separate routing test would have to know the tab's
  * internal structure.
  */
@@ -25,6 +25,7 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
 import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {
   id: 42,
@@ -134,7 +135,7 @@ const DRIFTED_HEALTH: Record<string, unknown> = {
  * re-mocking.
  *
  * `meshRow` controls the response of `get_mesh_properties` (issue
- * #451 — the Configuration card on the 🌳 tab). The default matches
+ * #451 — the Configuration card on the ðŸŒ³ tab). The default matches
  * the legacy `MeshPropertiesPanel` initial state so the existing
  * health / prune / recovery tests stay deterministic. `saveUseWorktree
  * Fails` and `saveBaseRefFails` are opt-in knobs that flip the two
@@ -245,12 +246,12 @@ beforeEach(() => {
     meshesById: new Map([[MESH.id, MESH]]),
     selectedMeshId: MESH.id,
   });
-  useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+  seedAgentNodes([]);
   useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
 });
 
 describe('WorktreeManagerTab (issue #377)', () => {
-  it('renders the 🌳 tab body when clicked (no longer the "coming soon" placeholder)', async () => {
+  it('renders the ðŸŒ³ tab body when clicked (no longer the "coming soon" placeholder)', async () => {
     mockBackend();
     await openWorktreesTab();
 
@@ -395,7 +396,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
 
   it('clicking Prune disables the button with a "Pruning…" label and surfaces a success message (issue #657)', async () => {
     // The default `mockBackend()` returns `''` from `prune_remote_tracking`,
-    // which the frontend treats as "nothing to report" → success message
+    // which the frontend treats as "nothing to report" â†’ success message
     // shows the fallback text.
     const user = userEvent.setup();
     mockBackend();
@@ -552,12 +553,12 @@ describe('WorktreeManagerTab (issue #377)', () => {
   });
 });
 
-describe('ProbePanel routing for the 🌳 tab (issue #377)', () => {
+describe('ProbePanel routing for the ðŸŒ³ tab (issue #377)', () => {
   beforeEach(() => {
     mockBackend();
   });
 
-  it('the 🌳 tab no longer renders the "coming soon" placeholder when a mesh is selected', async () => {
+  it('the ðŸŒ³ tab no longer renders the "coming soon" placeholder when a mesh is selected', async () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'worktrees' });
     render(<ProbePanel />);
 
@@ -565,7 +566,7 @@ describe('ProbePanel routing for the 🌳 tab (issue #377)', () => {
     expect(screen.queryByText("This tab's content is coming soon.")).toBeNull();
   });
 
-  it('the 🌳 tab in the activity bar opens the panel on the worktrees tab', () => {
+  it('the ðŸŒ³ tab in the activity bar opens the panel on the worktrees tab', () => {
     render(<ProbePanel />);
     fireEvent.click(screen.getByRole('button', { name: 'Worktree Manager' }));
     expect(useUIStore.getState().probeOpen).toBe(true);
@@ -577,7 +578,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
   // The Configuration card ports the worktree-config sub-section that
   // used to live at the top of the legacy `MeshPropertiesPanel` (deleted
   // in #380). The card has three controls: a `use_worktree` checkbox,
-  // a "Starting point" radio (Fresh/Head ↔ origin/main/HEAD on the
+  // a "Starting point" radio (Fresh/Head â†” origin/main/HEAD on the
   // wire), and a "Worktree mode" radio (Branched/Detached).
 
   it('initial load populates the form from get_mesh_properties', async () => {
@@ -587,7 +588,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // Wait for the form to populate from the load effect.
     const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
     expect(checkbox.checked).toBe(true);
-    // Default base_ref is origin/main → Fresh; default mode is branched.
+    // Default base_ref is origin/main â†’ Fresh; default mode is branched.
     const fresh = (await screen.findByLabelText(/Fresh — start new session/i)) as HTMLInputElement;
     expect(fresh.checked).toBe(true);
     const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
@@ -721,8 +722,8 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     expect(detached.checked).toBe(false);
   });
 
-  // ── Open-in-file-explorer (regression for the lost affordance) ─────
-  // The 🌳 tab used to host an open-in-OS-file-manager action per
+  // â”€â”€ Open-in-file-explorer (regression for the lost affordance) â”€â”€â”€â”€â”€
+  // The ðŸŒ³ tab used to host an open-in-OS-file-manager action per
   // worktree row in the legacy MeshPropertiesPanel; the lift to Probe
   // (#377) kept the path text but dropped the icon button. The new
   // tests pin both the repo-path button and the per-worktree button
@@ -791,10 +792,10 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     expect((deleteBtn as HTMLButtonElement).disabled).toBe(true);
   });
 
-  // ── active-branch flag (sibling of worktree `is_active`) ───────────────
+  // â”€â”€ active-branch flag (sibling of worktree `is_active`) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
-   * Pin the user-symptom contract for the active-branch block in the 🌳
+   * Pin the user-symptom contract for the active-branch block in the ðŸŒ³
    * tab: a branch held by a live agent node surfaces with the same
    * visual treatment as an active worktree — disabled checkbox, faded
    * row, "active" badge with a tooltip explaining why. Mirrors the
@@ -823,7 +824,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
               is_head: false,
               is_merged_into_main: true,
               is_orphan: false,
-              // Held by an agent node → cannot delete.
+              // Held by an agent node â†’ cannot delete.
               is_active: true,
               has_uncommitted: false,
               last_commit_date: null,
@@ -941,7 +942,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
   });
 });
 
-// ── Pre-spawn pool badge (PRD #608 §6 — pool observability) ──────────────
+// â”€â”€ Pre-spawn pool badge (PRD #608 Â§6 — pool observability) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // The Worktrees Probe shows a small progress-bar + numeric label under
 // the "Pre-spawn warm worktrees" header, driven by `get_mesh_pool_count`
@@ -1021,7 +1022,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
   });
 
   it('shows "0 / Y ready" with a present-but-empty bar when the pool is enabled but empty', async () => {
-    // After a shrink (target 3 → 0 → 1) the badge must show 0 / 1 ready,
+    // After a shrink (target 3 â†’ 0 â†’ 1) the badge must show 0 / 1 ready,
     // not "…/1 ready" (the count IS known, just zero). The Plan agent's
     // synchronous-drain UX fix is what makes this settle immediately on
     // a config change — but the badge format itself is tested here.
@@ -1130,7 +1131,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
     });
   });
 
-  // ── checked_out_in_worktree (orphan-worktree branch protection) ──────
+  // â”€â”€ checked_out_in_worktree (orphan-worktree branch protection) â”€â”€â”€â”€â”€â”€
 
   /**
    * Pin the orphan-worktree contract: a branch that is HEAD of some
@@ -1206,7 +1207,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
     // branch row. The branch row's accessible name concatenates without
     // spaces between adjacent `<span>`s — the "in <wt>" badge's text
     // runs into the branch name (`feature/orphanin hefty-slick-ocean…`).
-    // The worktree row's name is `<wt-name> · feature/orphan`, which
+    // The worktree row's name is `<wt-name> Â· feature/orphan`, which
     // starts with `hefty-slick-ocean`, not `feature/orphan`, so the
     // `^feature/orphan` anchor is sufficient to disambiguate.
     const orphanCheckbox = screen.getByRole('checkbox', {
@@ -1272,7 +1273,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
               is_orphan: false,
               is_active: false,
               // Same prune flags as feature/merged-clean, but HEAD of a
-              // surviving worktree directory → must NOT be recommended.
+              // surviving worktree directory â†’ must NOT be recommended.
               checked_out_in_worktree: '/repos/demo/.claude/worktrees/hefty-slick-ocean',
               has_uncommitted: false,
               last_commit_date: null,

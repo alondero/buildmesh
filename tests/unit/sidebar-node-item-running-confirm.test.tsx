@@ -101,16 +101,15 @@ async function openPicker(node: AgentNode, providers: SpawnOption[]) {
 
 describe('NodeItem running-node confirm dialog (issue #778)', () => {
   beforeEach(() => {
-    useAgentNodeStore.setState({
-      agentNodes: [],
-      activeNodeId: null,
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,
       loading: false,
       error: null,
       closingNodeIds: new Set(),
     });
     vi.spyOn(useAgentNodeStore.getState(), 'regenerateAgentNode').mockImplementation(
       async (nodeId, newProviderId) => {
-        const existing = useAgentNodeStore.getState().agentNodes.find(n => n.id === nodeId);
+        // Issue #1384 — read by id from the normalized map.
+        const existing = useAgentNodeStore.getState().nodesById[nodeId];
         return { ...(existing ?? makeNode()), provider: newProviderId } as AgentNode;
       },
     );

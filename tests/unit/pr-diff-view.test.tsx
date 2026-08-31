@@ -1,4 +1,4 @@
-/**
+﻿/**
  * PrDiffView — issue #421. Renders a GitHub pull request's diff inside the
  * Center Workspace Diff Overlay (`source: 'pr'`). The data comes from
  * `GET /repos/{o}/{r}/pulls/{n}/files` via `get_pr_files`, so the diff is
@@ -8,7 +8,7 @@
  *   - **List view** (`filePath === ''`): the PR's file list, each row
  *     clickable to drill in.
  *   - **File view** (`filePath !== ''`): that one file's unified `patch`
- *     text, classified +/−/context line-by-line.
+ *     text, classified +/âˆ’/context line-by-line.
  *
  * These tests pin the externally-observable contract: the fetch, the
  * toolbar breadcrumb, the list/file switch, and the patch classification.
@@ -21,6 +21,7 @@ import { CenterDiffOverlay } from '../../src/components/AgentNodeView/CenterDiff
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {
   id: 42,
@@ -124,7 +125,7 @@ describe('PrDiffView (#421)', () => {
     expect(screen.getByRole('button', { name: /src\/modified\.ts/ })).toBeTruthy();
     // The rename row shows the NEW name (the current `filename`) as the
     // prominent path and the OLD name (`previous_filename`) as the dimmed
-    // "→ old-name.ts" suffix — matching what github.com shows.
+    // "â†’ old-name.ts" suffix — matching what github.com shows.
     expect(screen.getByRole('button', { name: /src\/new-name\.ts/ })).toBeTruthy();
   });
 
@@ -154,9 +155,9 @@ describe('PrDiffView (#421)', () => {
     render(<CenterDiffOverlay diff={FILE_CTX} />);
 
     // The added line "added line" must be in the document (we don't pin
-    // the exact <span> structure because the +/−/context backgrounds are
+    // the exact <span> structure because the +/âˆ’/context backgrounds are
     // tailwind utility classes — the load-bearing assertion is the
-    // classification itself, which the +/− marker conveys).
+    // classification itself, which the +/âˆ’ marker conveys).
     await screen.findByText('src/modified.ts');
 
     // Use a regex on the marker span: the patch produces one '+' line and
@@ -286,10 +287,7 @@ describe('PrDiffView (#421)', () => {
       position: 0,
       created_at: '2026-01-01',
     };
-    useAgentNodeStore.setState({
-      agentNodes: [focusedNode],
-      activeNodeId: focusedNode.id,
-    });
+    seedAgentNodes([focusedNode], focusedNode.id);
     // Production flow: the caller (the "View changes" button) writes
     // LIST_CTX into the store; the parent (AgentNodeView) sees
     // `activeDiffFile !== null` and mounts CenterDiffOverlay. We mirror

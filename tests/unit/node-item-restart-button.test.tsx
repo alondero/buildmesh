@@ -1,4 +1,4 @@
-/**
+﻿/**
  * When buildmesh is force-closed (e.g. user opens and immediately exits)
  * during the auto-resume burst, the app-exit handler races the PTY
  * reader's post-pump "resume-failed" detector. The reader EOF is
@@ -14,6 +14,7 @@ import { render, fireEvent, screen } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { NodeItem } from '../../src/components/Sidebar/NodeItem';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 
@@ -49,9 +50,7 @@ function renderNode(node: AgentNode, onSelect: () => void = vi.fn()) {
 
 describe('NodeItem restart button', () => {
   beforeEach(() => {
-    useAgentNodeStore.setState({
-      agentNodes: [],
-      activeNodeId: null,
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,
       loading: false,
       error: null,
     });
@@ -106,7 +105,7 @@ describe('NodeItem restart button', () => {
     // its cli_session_id for the resume argument. Production populates
     // the store via fetchAgentNodes on startup; the test must too.
     const node = makeNode({ status: 'error' });
-    useAgentNodeStore.setState({ agentNodes: [node] });
+    seedAgentNodes([node]);
     renderNode(node);
     fireEvent.click(screen.getByTestId('restart-button'));
     // spawnAgent's invoke is async; await a microtask so the assertion
@@ -148,7 +147,7 @@ describe('NodeItem restart button', () => {
       status: 'suspended',
       cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e',
     });
-    useAgentNodeStore.setState({ agentNodes: [node] });
+    seedAgentNodes([node]);
     renderNode(node);
     fireEvent.click(screen.getByTitle('Resume agent'));
     await Promise.resolve();
@@ -184,9 +183,7 @@ describe('NodeItem restart button', () => {
 // ---------------------------------------------------------------------------
 describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
   beforeEach(() => {
-    useAgentNodeStore.setState({
-      agentNodes: [],
-      activeNodeId: null,
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,
       loading: false,
       error: null,
     });
@@ -199,7 +196,7 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
     mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
 
     const node = makeNode({ id: 42, status: 'error', cli_session_id: 'stale-uuid-1234' });
-    useAgentNodeStore.setState({ agentNodes: [node] });
+    seedAgentNodes([node]);
 
     await useAgentNodeStore.getState().restartFreshAgent(42);
 
@@ -221,7 +218,7 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
     mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
 
     const node = makeNode({ id: 42, status: 'error', cli_session_id: 'stale-uuid-1234' });
-    useAgentNodeStore.setState({ agentNodes: [node] });
+    seedAgentNodes([node]);
 
     await useAgentNodeStore.getState().restartFreshAgent(42, { rows: 30, cols: 100 });
 
@@ -248,9 +245,7 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
 
 describe('NodeItem closing state', () => {
   beforeEach(() => {
-    useAgentNodeStore.setState({
-      agentNodes: [],
-      activeNodeId: null,
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,
       loading: false,
       error: null,
       closingNodeIds: new Set(),
@@ -261,7 +256,7 @@ describe('NodeItem closing state', () => {
   it('shows a closing spinner and hides the delete button while the node is closing', () => {
     // Closing a node first runs a (potentially slow) worktree safety check
     // before the row can be removed. During that window the row must look
-    // busy rather than frozen, so the × is swapped for a spinner.
+    // busy rather than frozen, so the Ã— is swapped for a spinner.
     const node = makeNode({ id: 77, status: 'idle' });
     useAgentNodeStore.setState({ closingNodeIds: new Set([77]) });
     renderNode(node);

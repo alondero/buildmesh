@@ -1,4 +1,4 @@
-import { useAgentNodeStore } from '../stores/agentNodeStore';
+import { useAgentNodeStore, type AgentNode } from '../stores/agentNodeStore';
 
 /**
  * Cycle through agent nodes with `status === 'awaiting_input'` (issue #64).
@@ -42,9 +42,17 @@ export function nextAwaitingNodeId(): number | null {
   // ascending, same ordering the grid renders). Guaranteed non-empty
   // because the active node itself must be in the filtered list — we
   // wouldn't be here if `getActiveNode()` returned null.
-  const meshNodes = state.agentNodes
-    .filter(s => s.mesh_id === activeNode.mesh_id)
-    .sort((a, b) => a.position - b.position);
+  //
+  // Issue #1384 — iterate `nodeIds` and dereference through `nodesById`
+  // rather than the removed `agentNodes` array. The derived getter
+  // `getAgentNodes()` would also work but allocates a fresh array per
+  // call, which the imperative filter+sort path doesn't need.
+  const meshNodes: AgentNode[] = [];
+  for (const id of state.nodeIds) {
+    const n = state.nodesById[id];
+    if (n && n.mesh_id === activeNode.mesh_id) meshNodes.push(n);
+  }
+  meshNodes.sort((a, b) => a.position - b.position);
 
   const len = meshNodes.length;
   const currentIndex = meshNodes.findIndex(s => s.id === activeNode.id);

@@ -45,9 +45,15 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
 }
 
 function renderCard(node: AgentNode) {
+  // Issue #1384 — `NodeCard` subscribes per-id via `state.nodesById[nodeId]`,
+  // so the test must seed the node into the store before rendering.
+  useAgentNodeStore.setState({
+    nodesById: { [node.id]: node },
+    nodeIds: [node.id],
+  });
   return render(
     <NodeCard
-      node={node}
+      nodeId={node.id}
       isActive={false}
       onActivate={vi.fn()}
       onBuildRun={vi.fn()}
@@ -59,9 +65,7 @@ function renderCard(node: AgentNode) {
 
 describe('NodeCard closing overlay', () => {
   beforeEach(() => {
-    useAgentNodeStore.setState({
-      agentNodes: [],
-      activeNodeId: null,
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,
       loading: false,
       error: null,
       closingNodeIds: new Set(),

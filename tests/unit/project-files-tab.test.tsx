@@ -1,5 +1,5 @@
-/**
- * ProjectFilesTab — issue #376. The Probe Panel's 📁 tab body.
+﻿/**
+ * ProjectFilesTab — issue #376. The Probe Panel's ðŸ“ tab body.
  *
  * Mirrors the non-agent branch of the legacy `FileExplorerPanel`:
  * `ChangedFilesSection` on top, a collapsible `FileTree` underneath. A click
@@ -16,6 +16,7 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { FileNode, GitStatus, DiffResult } from '../../src/lib/tauri';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {
   id: 1,
@@ -77,7 +78,7 @@ describe('ProjectFilesTab (#376)', () => {
       meshesById: new Map([[MESH.id, MESH]]),
       selectedMeshId: MESH.id,
     });
-    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: null });
+    seedAgentNodes([NODE], null);
     useUIStore.setState({
       probeOpen: true,
       probeTab: 'files',
@@ -114,7 +115,7 @@ describe('ProjectFilesTab (#376)', () => {
     await waitFor(() => {
       const state = useUIStore.getState();
       // The overlay context is a 'head'-source diff anchored on the active
-      // mesh path (no node focused in this fixture → nodeId null).
+      // mesh path (no node focused in this fixture â†’ nodeId null).
       expect(state.activeDiffFile).toEqual({
         filePath: 'src/app.ts',
         rootPath: '/repo',
@@ -138,7 +139,7 @@ describe('ProjectFilesTab (#376)', () => {
 
     // The header strip shows the active path as the button's title text —
     // the legacy `FileExplorerPanel` rendered the same path as its
-    // header title (no node focused here → activePath is the mesh root).
+    // header title (no node focused here â†’ activePath is the mesh root).
     await screen.findByText('Changed Files');
     expect(screen.getByText('/repo')).toBeTruthy();
 
@@ -163,10 +164,7 @@ describe('ProjectFilesTab (#376)', () => {
     // `activePath` when a node is focused. Pin that the button follows
     // the same path semantics so opening Explorer lands the user in
     // the worktree, not the mesh root.
-    useAgentNodeStore.setState({
-      agentNodes: [NODE],
-      activeNodeId: NODE.id,
-    });
+    seedAgentNodes([NODE], NODE.id);
 
     render(<ProjectFilesTab />);
 

@@ -29,7 +29,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useUIStore, type OmnibarMode } from '../../stores/uiStore';
-import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import {
   APP_COMMANDS,
@@ -96,7 +96,16 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     setPromptTarget(null);
   }, [mode]);
 
-  const agentNodes = useAgentNodeStore((s) => s.agentNodes);
+  // Issue #1384 — subscribe to the normalized split. The omnibar indexes
+  // every node by name/provider, so we genuinely need the array; derive
+  // it from `nodeIds` + `nodesById` so per-id identity is preserved
+  // through the memoized index builder below.
+  const nodeIds = useAgentNodeStore((s) => s.nodeIds);
+  const nodesById = useAgentNodeStore((s) => s.nodesById);
+  const agentNodes = useMemo(
+    () => nodeIds.map(id => nodesById[id]).filter((n): n is AgentNode => n !== undefined),
+    [nodeIds, nodesById],
+  );
   const meshesById = useMeshStore((s) => s.meshesById);
   const meshes = useMemo(
     () => [...meshesById.values()].sort((a, b) => a.position - b.position),

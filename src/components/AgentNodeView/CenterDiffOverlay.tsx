@@ -68,8 +68,11 @@ export function CenterDiffOverlay({ diff }: CenterDiffOverlayProps) {
   // a mesh-scoped diff (Project Files with no node focused) falls back to the
   // mesh name. Looked up live (not stored in the context) so a rename shows
   // through immediately. Used by both head/base and PR breadcrumb paths.
+  // Issue #1384 — subscribe to the normalized `nodesById` directly. The
+  // selector returns the same object reference for any other node's change,
+  // so unrelated attention/rename events don't re-render this overlay.
   const node = useAgentNodeStore((s) =>
-    diff.nodeId === null ? null : s.agentNodes.find((n) => n.id === diff.nodeId) ?? null,
+    diff.nodeId === null ? null : s.nodesById[diff.nodeId] ?? null,
   );
   const meshName = useMeshStore((s) => s.meshesById.get(diff.meshId)?.name ?? null);
   const parentLabel = node?.name ?? meshName ?? 'Workspace';

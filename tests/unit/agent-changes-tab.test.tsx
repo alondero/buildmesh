@@ -1,5 +1,5 @@
-/**
- * AgentChangesTab — issue #376. The Probe Panel's 🔍 tab body.
+﻿/**
+ * AgentChangesTab — issue #376. The Probe Panel's ðŸ” tab body.
  *
  * The tab deliberately loads only the base-relative changed-file list on
  * mount. Full hunks are fetched lazily by CenterDiffOverlay after a row is
@@ -17,6 +17,7 @@ import { useUIStore } from '../../src/stores/uiStore';
 import type { GitStatus } from '../../src/lib/tauri';
 import { resetPathInvalidatedCacheForTests } from '../../src/lib/pathInvalidatedCache';
 import { GIT_CHANGED } from '../../src/lib/events';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {
   id: 1,
@@ -86,7 +87,7 @@ describe('AgentChangesTab (#376)', () => {
       meshesById: new Map([[MESH.id, MESH]]),
       selectedMeshId: MESH.id,
     });
-    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    seedAgentNodes([NODE], NODE.id );
     useUIStore.setState({ probeOpen: true, probeTab: 'review', activeDiffFile: null });
     resetPathInvalidatedCacheForTests();
   });

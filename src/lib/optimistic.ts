@@ -45,20 +45,24 @@ import { formatError } from './errorUtils';
 import type { AgentNode } from '../types/generated/AgentNode';
 
 /**
- * Narrow surface the helper writes through. Keeping the surface tight
- * (only `agentNodes` + `error`) means a future caller that holds any
- * Zustand store with that shape can reuse the helper without dragging
- * the rest of the agent-node state along.
+ * Narrow surface the helper writes through. Issue #1384 — the surface
+ * is now per-node (the store holds a normalized `nodesById` map), so
+ * patches never disturb other entries and other entries' identity is
+ * preserved across the optimistic window. The helper writes ONE node
+ * at a time via `setAgentNode(id, updater)`; rollback uses the same
+ * updater shape so it composes cleanly with the optimistic patch.
  */
 export interface OptimisticSurface {
-  /** Read the current node list — only used to capture `prior` and to
-   *  walk the list when patching. Cheap; the store is in-memory. */
-  getAgentNodes: () => AgentNode[];
-  /** Replace the agent-nodes array. Functional form only — matches
-   *  Zustand's `set(updater)` and avoids stale-closure bugs. The
-   *  helper passes a function; accepting an array would re-open a
-   *  full-replace path the helper never needs (issue #1054 review). */
-  setAgentNodes: (next: (prev: AgentNode[]) => AgentNode[]) => void;
+  /** Read the current row for `nodeId`. Used to capture `prior`
+   *  (the rollback reference). Returns `undefined` if the node isn't
+   *  loaded — the helper treats that as a thrown precondition. */
+  getAgentNode: (nodeId: number) => AgentNode | undefined;
+  /** Replace a single node in the store via a functional updater.
+   *  Functional form only — matches Zustand's `set(updater)` and
+   *  avoids stale-closure bugs. The store passes a function so we
+   *  never re-open a full-replace path the helper never needs (issue
+   *  #1054 review). */
+  setAgentNode: (nodeId: number, next: (prev: AgentNode) => AgentNode) => void;
   /** Write `state.error` on the rejection path. */
   setError: (error: string | null) => void;
 }
@@ -96,7 +100,7 @@ export interface WithOptimisticArgs<TPatch extends Partial<AgentNode>, TResult> 
 export async function withOptimistic<TPatch extends Partial<AgentNode>, TResult>(
   args: WithOptimisticArgs<TPatch, TResult>,
 ): Promise<TResult> {
-  const prior = args.surface.getAgentNodes().find(n => n.id === args.nodeId);
+  const prior = args.surface.getAgentNode(args.nodeId);
   if (!prior) {
     throw new Error(`withOptimistic: node ${args.nodeId} is not loaded`);
   }
@@ -112,26 +116,24 @@ export async function withOptimistic<TPatch extends Partial<AgentNode>, TResult>
   const rollbackPatch = Object.fromEntries(
     Object.keys(args.optimisticPatch).map(k => [k, (prior as unknown as Record<string, unknown>)[k]]),
   ) as Partial<AgentNode>;
-  const applyOptimistic = (nodes: AgentNode[]) =>
-    nodes.map(n => (n.id === args.nodeId ? { ...n, ...args.optimisticPatch } : n));
-  const applyRollback = (nodes: AgentNode[]) =>
-    nodes.map(n => (n.id === args.nodeId ? { ...n, ...rollbackPatch } : n));
+  const applyOptimistic = (current: AgentNode): AgentNode =>
+    ({ ...current, ...args.optimisticPatch });
+  const applyRollback = (current: AgentNode): AgentNode =>
+    ({ ...current, ...rollbackPatch });
 
-  args.surface.setAgentNodes(applyOptimistic);
+  args.surface.setAgentNode(args.nodeId, applyOptimistic);
 
   try {
     const result = await args.mutation();
     if (args.adoptResult) {
       const adopted = args.adoptResult(result);
       if (adopted) {
-        args.surface.setAgentNodes(nodes =>
-          nodes.map(n => (n.id === args.nodeId ? adopted : n)),
-        );
+        args.surface.setAgentNode(args.nodeId, () => adopted);
       }
     }
     return result;
   } catch (e) {
-    args.surface.setAgentNodes(applyRollback);
+    args.surface.setAgentNode(args.nodeId, applyRollback);
     args.surface.setError(formatError(e));
     throw e;
   }

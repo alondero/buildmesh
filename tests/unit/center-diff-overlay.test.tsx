@@ -1,4 +1,4 @@
-/**
+﻿/**
  * CenterDiffOverlay — issue #379. The full-height diff viewer that overlays the
  * center terminal grid when a changed file is clicked in the Probe.
  *
@@ -16,6 +16,7 @@ import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { DiffResult } from '../../src/lib/tauri';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {
   id: 1,
@@ -96,10 +97,7 @@ describe('CenterDiffOverlay (#379)', () => {
       meshesById: new Map([[MESH.id, MESH]]),
       selectedMeshId: MESH.id,
     });
-    useAgentNodeStore.setState({
-      agentNodes: [NODE, OTHER_NODE],
-      activeNodeId: NODE.id,
-    });
+    seedAgentNodes([NODE, OTHER_NODE], NODE.id);
     useUIStore.setState({ probeOpen: true, probeTab: 'files', activeDiffFile: BASE_CTX });
   });
 
@@ -153,7 +151,7 @@ describe('CenterDiffOverlay (#379)', () => {
   it('auto-closes when a different agent node is focused', async () => {
     render(<CenterDiffOverlay diff={BASE_CTX} />);
     await screen.findByText('src/app.ts');
-    // User clicks a background node card → activeNodeId changes away from the
+    // User clicks a background node card â†’ activeNodeId changes away from the
     // diff's owner.
     useAgentNodeStore.setState({ activeNodeId: OTHER_NODE.id });
     await waitFor(() => {
@@ -170,7 +168,7 @@ describe('CenterDiffOverlay (#379)', () => {
     });
   });
 
-  it('survives the diff source flipping base→pr on a live instance (Rules of Hooks, issue #803)', async () => {
+  it('survives the diff source flipping baseâ†’pr on a live instance (Rules of Hooks, issue #803)', async () => {
     // The Probe stays interactive, so a user with a base/head diff open can
     // click a PR in the Probe — `activeDiffFile` flips source on the SAME
     // mounted overlay. Before #803, the head/base body declared more hooks

@@ -320,7 +320,12 @@ function App() {
       // sidebar-sync subscription back into Mesh mode.
       const activeNode = useAgentNodeStore.getState().getActiveNode();
       if (!activeNode) return;
-      const { agentNodes } = useAgentNodeStore.getState();
+      // Issue #1384 — `getAgentNodes()` is the store's derived getter; it
+      // allocates a fresh ordered array from `nodesById` + `nodeIds` on
+      // each call. Cheaper than reading the old (now-removed) `agentNodes`
+      // field, and matches the imperative-reader pattern used by
+      // `awaitingInputShortcuts` / `meshStore.deleteMesh`.
+      const agentNodes = useAgentNodeStore.getState().getAgentNodes();
       const selectedMeshId = useMeshStore.getState().selectedMeshId;
       const visibleNodes = scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id);
       const targetId = traversalTargetId(visibleNodes, activeNode.id, direction);

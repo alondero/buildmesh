@@ -60,6 +60,22 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   };
 }
 
+// Issue #1384 — the store's normalized state is `nodesById` + `nodeIds`.
+// Tests seed via this helper so the `setState({ agentNodes: [...] })`
+// pattern doesn't have to be re-shaped at every call site. The helper
+// preserves the original array order in `nodeIds` (canonical
+// `(mesh_id, position)`); tests that don't care about order simply
+// pass their fixtures through as-is.
+function seedNodes(nodes: AgentNode[], activeNodeId: number | null = null) {
+  const nodesById: Record<number, AgentNode> = {};
+  const nodeIds: number[] = [];
+  for (const n of nodes) {
+    nodesById[n.id] = n;
+    nodeIds.push(n.id);
+  }
+  useAgentNodeStore.setState({ nodesById, nodeIds, activeNodeId });
+}
+
 function makeSafety(overrides: Partial<WorktreeCloseSafety> = {}): WorktreeCloseSafety {
   return {
     worktree_path: '/a/.claude/worktrees/bold-keen-brook',
@@ -80,7 +96,8 @@ function mockDeleteFlow(safety: WorktreeCloseSafety) {
 describe('useAgentNodeStore', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({
-      agentNodes: [],
+      nodesById: {},
+      nodeIds: [],
       activeNodeId: null,
       loading: false,
       error: null,
@@ -111,8 +128,45 @@ describe('useAgentNodeStore', () => {
 
       await useAgentNodeStore.getState().fetchAgentNodes();
 
-      expect(useAgentNodeStore.getState().agentNodes).toEqual(nodes);
+      // Issue #1384 — read via `getAgentNodes()` (the derived getter) so
+      // the test asserts the same shape consumers downstream will see.
+      expect(useAgentNodeStore.getState().getAgentNodes()).toEqual(nodes);
       expect(useAgentNodeStore.getState().loading).toBe(false);
+    });
+
+    // Issue #1384 — the perf contract. Polling (or any fetch) that does
+    // not mutate a node must NOT change that node's object identity, so
+    // per-id subscribers skip the render. Without the reconciliation,
+    // every fetch would replace every entry with a fresh IPC-parsed
+    // object, defeating the normalisation.
+    it('preserves object identity for unchanged nodes across a fetch', async () => {
+      const node = makeNode({ id: 7, status: 'idle' });
+      seedNodes([node]);
+
+      // Same wire shape, parsed fresh — the IPC layer always returns a
+      // new object tree, so the test has to mirror that.
+      mockInvoke.mockResolvedValueOnce([{ ...node }]);
+
+      const refBefore = useAgentNodeStore.getState().nodesById[7];
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      const refAfter = useAgentNodeStore.getState().nodesById[7];
+
+      expect(refAfter).toBe(refBefore);
+    });
+
+    it('allocates a new reference for a node whose serialized fields changed', async () => {
+      const node = makeNode({ id: 7, status: 'idle' });
+      seedNodes([node]);
+
+      // The wire shape carries a real change (status flipped).
+      mockInvoke.mockResolvedValueOnce([{ ...node, status: 'running' }]);
+
+      const refBefore = useAgentNodeStore.getState().nodesById[7];
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      const refAfter = useAgentNodeStore.getState().nodesById[7];
+
+      expect(refAfter).not.toBe(refBefore);
+      expect(refAfter?.status).toBe('running');
     });
 
     it('sets error on fetch failure', async () => {
@@ -131,13 +185,13 @@ describe('useAgentNodeStore', () => {
 
     it('returns the active node when set', () => {
       const node = makeNode({ id: 5 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 5 });
+      seedNodes([node], 5);
 
       expect(useAgentNodeStore.getState().getActiveNode()).toEqual(node);
     });
 
     it('returns null if activeNodeId does not match any node', () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 5 })], activeNodeId: 99 });
+      seedNodes([makeNode({ id: 5 })], 99);
 
       expect(useAgentNodeStore.getState().getActiveNode()).toBeNull();
     });
@@ -145,7 +199,7 @@ describe('useAgentNodeStore', () => {
 
   describe('getActiveMeshId', () => {
     it('returns mesh_id of active node', () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 3, mesh_id: 7 })], activeNodeId: 3 });
+      seedNodes([makeNode({ id: 3, mesh_id: 7 })], 3);
 
       expect(useAgentNodeStore.getState().getActiveMeshId()).toBe(7);
     });
@@ -161,17 +215,17 @@ describe('useAgentNodeStore', () => {
     // listeners alive across the mockListeners.clear() boundary.
     it('handles attention-needed, attention-cleared, and session-renamed events', async () => {
       const node = makeNode({ id: 10, name: 'test-node', status: 'running' });
-      useAgentNodeStore.setState({ agentNodes: [node] });
+      seedNodes([node]);
       await useAgentNodeStore.getState().initAttentionListeners();
 
       await mockEmit('attention-needed', { session_id: 10 });
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 10)?.status).toBe('awaiting_input');
+      expect(useAgentNodeStore.getState().nodesById[10]?.status).toBe('awaiting_input');
 
       await mockEmit('attention-cleared', { session_id: 10 });
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 10)?.status).toBe('running');
+      expect(useAgentNodeStore.getState().nodesById[10]?.status).toBe('running');
 
       await mockEmit('node-renamed', { node_id: 10, name: 'fix-auth-flow' });
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 10)?.name).toBe('fix-auth-flow');
+      expect(useAgentNodeStore.getState().nodesById[10]?.name).toBe('fix-auth-flow');
 
       // `node-created` is the internal event the Rust spawn paths
       // (`create_issue_node`, `create_pr_node`, mobile HTTP `/nodes`) emit
@@ -184,11 +238,11 @@ describe('useAgentNodeStore', () => {
       // fetchAgentNodes is async; await the microtask + the awaited promise.
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 99)).toBeDefined();
+      expect(useAgentNodeStore.getState().nodesById[99]).toBeDefined();
 
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 10, status: 'running' })] });
+      seedNodes([makeNode({ id: 10, status: 'running' })]);
       await mockEmit('attention-needed', { session_id: 999 });
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 10)?.status).toBe('running');
+      expect(useAgentNodeStore.getState().nodesById[10]?.status).toBe('running');
     });
   });
 
@@ -200,8 +254,8 @@ describe('useAgentNodeStore', () => {
       const result = await useAgentNodeStore.getState().createAgentNode(1, 'new-node', '/n', 'feat');
 
       expect(result.id).toBe(20);
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
-      expect(useAgentNodeStore.getState().agentNodes[0].name).toBe('new-node');
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(1);
+      expect(useAgentNodeStore.getState().nodesById[20]?.name).toBe('new-node');
     });
 
     it('sets error and throws on failure', async () => {
@@ -238,7 +292,7 @@ describe('useAgentNodeStore', () => {
         meshId: 7, name: 'mesh-7', path: '/p', branch: 'main',
         provider: 'anthropic', useWorktree: undefined,
       });
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(1);
       expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
       expect(useMeshStore.getState().selectedMeshId).toBe(7);
     });
@@ -274,7 +328,7 @@ describe('useAgentNodeStore', () => {
 
       expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
       expect(useMeshStore.getState().selectedMeshId).toBe(99); // unchanged
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(0);
     });
 
     it('spawns immediately with a Loop intent when given a non-empty initial prompt (issue #1413)', async () => {
@@ -408,7 +462,7 @@ describe('useAgentNodeStore', () => {
 
   describe('deleteAgentNode', () => {
     it('silently removes a clean worktree when closing the node', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 15 })], activeNodeId: 15 });
+      seedNodes([makeNode({ id: 15 })], 15);
       mockDeleteFlow(makeSafety());
       const prompt = vi.fn();
       setWorktreeCloseActionResolverForTests(prompt);
@@ -422,26 +476,23 @@ describe('useAgentNodeStore', () => {
         nodeId: 15,
         removeWorktree: true,
       });
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(0);
       expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
     });
 
     it('clears activeNodeId only if deleted node was active', async () => {
-      useAgentNodeStore.setState({
-        agentNodes: [makeNode({ id: 1 }), makeNode({ id: 2, path: '/b' })],
-        activeNodeId: 2,
-      });
+      seedNodes([makeNode({ id: 1 }), makeNode({ id: 2, path: '/b' })], 2);
       mockDeleteFlow(makeSafety());
 
       await useAgentNodeStore.getState().deleteAgentNode(1);
 
       expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(1);
     });
 
     it('keeps a risky worktree on disk when the prompt chooses keep', async () => {
       const node = makeNode({ id: 7 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 7 });
+      seedNodes([node], 7);
       mockDeleteFlow(makeSafety({ has_uncommitted: true }));
       const prompt = vi.fn().mockResolvedValue('keep');
       setWorktreeCloseActionResolverForTests(prompt);
@@ -453,12 +504,12 @@ describe('useAgentNodeStore', () => {
         nodeId: 7,
         removeWorktree: false,
       });
-      expect(useAgentNodeStore.getState().agentNodes).toEqual([]);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([]);
     });
 
     it('removes a risky worktree when the prompt chooses remove', async () => {
       const node = makeNode({ id: 8 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 8 });
+      seedNodes([node], 8);
       mockDeleteFlow(makeSafety({ has_unpushed: true }));
       const prompt = vi.fn().mockResolvedValue('remove');
       setWorktreeCloseActionResolverForTests(prompt);
@@ -470,12 +521,12 @@ describe('useAgentNodeStore', () => {
         nodeId: 8,
         removeWorktree: true,
       });
-      expect(useAgentNodeStore.getState().agentNodes).toEqual([]);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([]);
     });
 
     it('cancels close before killing or deleting when the prompt chooses cancel', async () => {
       const node = makeNode({ id: 9 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 9 });
+      seedNodes([node], 9);
       mockDeleteFlow(makeSafety({ has_uncommitted: true }));
       setWorktreeCloseActionResolverForTests(vi.fn().mockResolvedValue('cancel'));
 
@@ -483,12 +534,12 @@ describe('useAgentNodeStore', () => {
 
       expect(mockInvoke).toHaveBeenCalledTimes(1);
       expect(mockInvoke).toHaveBeenCalledWith('get_worktree_close_safety', { nodeId: 9 });
-      expect(useAgentNodeStore.getState().agentNodes).toEqual([node]);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([node]);
       expect(useAgentNodeStore.getState().activeNodeId).toBe(9);
     });
 
     it('removes the node from the UI before the worktree cleanup resolves', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 15 })], activeNodeId: 15 });
+      seedNodes([makeNode({ id: 15 })], 15);
       let resolveDelete!: () => void;
       const deletePending = new Promise<void>((r) => { resolveDelete = r; });
       mockInvoke.mockImplementation((cmd: string) => {
@@ -501,7 +552,7 @@ describe('useAgentNodeStore', () => {
 
       // The node must be gone optimistically while delete_agent_node is still pending.
       await vi.waitFor(() => {
-        expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+        expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(0);
         expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
       });
 
@@ -510,7 +561,7 @@ describe('useAgentNodeStore', () => {
     });
 
     it('still deletes the session when kill_agent rejects', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 22 })], activeNodeId: 22 });
+      seedNodes([makeNode({ id: 22 })], 22);
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
         if (cmd === 'kill_agent') return Promise.reject(new Error('status update failed'));
@@ -525,7 +576,7 @@ describe('useAgentNodeStore', () => {
         nodeId: 22,
         removeWorktree: true,
       });
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(0);
     });
 
     it('marks the node closing synchronously, before the slow safety check resolves', async () => {
@@ -535,7 +586,7 @@ describe('useAgentNodeStore', () => {
       // uncommitted work). Without an immediate "closing" flag the click looks
       // ignored for those seconds. This pins that the flag flips the instant
       // the user clicks — before any IPC resolves.
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 30 })], activeNodeId: 30 });
+      seedNodes([makeNode({ id: 30 })], 30);
       let resolveSafety!: (s: WorktreeCloseSafety) => void;
       const safetyPending = new Promise<WorktreeCloseSafety>((r) => { resolveSafety = r; });
       mockInvoke.mockImplementation((cmd: string) => {
@@ -549,18 +600,18 @@ describe('useAgentNodeStore', () => {
       // whether to prompt) but it is flagged closing so the UI can show a
       // spinner instead of looking frozen.
       expect(useAgentNodeStore.getState().closingNodeIds.has(30)).toBe(true);
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(1);
 
       resolveSafety(makeSafety());
       await closePromise;
 
       // Once the (clean) check resolves the node is gone and the flag is cleared.
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(0);
       expect(useAgentNodeStore.getState().closingNodeIds.has(30)).toBe(false);
     });
 
     it('clears the closing flag when the prompt cancels the close', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 31 })], activeNodeId: 31 });
+      seedNodes([makeNode({ id: 31 })], 31);
       mockDeleteFlow(makeSafety({ has_uncommitted: true }));
       setWorktreeCloseActionResolverForTests(vi.fn().mockResolvedValue('cancel'));
 
@@ -568,12 +619,12 @@ describe('useAgentNodeStore', () => {
 
       // Cancel keeps the node, and must not leave it stuck in the dimmed
       // "closing" state forever.
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(1);
       expect(useAgentNodeStore.getState().closingNodeIds.has(31)).toBe(false);
     });
 
     it('ignores a repeat close while one is already in flight', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 32 })], activeNodeId: 32 });
+      seedNodes([makeNode({ id: 32 })], 32);
       let resolveSafety!: (s: WorktreeCloseSafety) => void;
       const safetyPending = new Promise<WorktreeCloseSafety>((r) => { resolveSafety = r; });
       mockInvoke.mockImplementation((cmd: string) => {
@@ -594,7 +645,7 @@ describe('useAgentNodeStore', () => {
     });
 
     it('does not request worktree removal when the node has no worktree path', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 10, worktree_name: undefined })], activeNodeId: 10 });
+      seedNodes([makeNode({ id: 10, worktree_name: undefined })], 10);
       mockDeleteFlow(makeSafety({ worktree_path: null }));
 
       await useAgentNodeStore.getState().deleteAgentNode(10);
@@ -605,9 +656,9 @@ describe('useAgentNodeStore', () => {
       });
     });
 
-// Issue #645: when `delete_agent_node` rejects, the optimistic removal must
+    // Issue #645: when `delete_agent_node` rejects, the optimistic removal must
     // not be allowed to silently hide the failure. Three invariants:
-    //   1. The row is restored to `agentNodes` so UI/DB stay in sync — otherwise
+    //   1. The row is restored to `nodesById` so UI/DB stay in sync — otherwise
     //      the next fetchAgentNodes (any unrelated trigger — node-created,
     //      mesh switch, …) re-fetches from the DB and the row "zombie"
     //      reappears, looking like the close silently failed. Pin the row
@@ -625,7 +676,7 @@ describe('useAgentNodeStore', () => {
     //      which already re-throw.
     it('restores the node on delete_agent_node failure (issue #645 zombie-row fix)', async () => {
       const node = makeNode({ id: 41 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 41 });
+      seedNodes([node], 41);
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
         if (cmd === 'delete_agent_node') return Promise.reject(new Error('db locked'));
@@ -637,14 +688,14 @@ describe('useAgentNodeStore', () => {
       ).rejects.toThrow('db locked');
 
       // The row is back — UI matches the DB (which still holds the row).
-      const restored = useAgentNodeStore.getState().agentNodes;
+      const restored = useAgentNodeStore.getState().getAgentNodes();
       expect(restored).toHaveLength(1);
       expect(restored[0]).toEqual(node);
     });
 
     it('surfaces the delete_agent_node rejection through the shared toast pipeline (issue #1001)', async () => {
       const node = makeNode({ id: 42 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 42 });
+      seedNodes([node], 42);
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
         if (cmd === 'delete_agent_node') return Promise.reject(new Error('foreign key violation'));
@@ -671,7 +722,7 @@ describe('useAgentNodeStore', () => {
 
     it('rejects the outer promise so callers can react to a delete_agent_node failure', async () => {
       const node = makeNode({ id: 43 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 43 });
+      seedNodes([node], 43);
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
         if (cmd === 'delete_agent_node') return Promise.reject(new Error('ipc disconnected'));
@@ -695,7 +746,7 @@ describe('useAgentNodeStore', () => {
     // failure that follows it must not regress when we add the rollback.
     it('restores the row even when kill_agent rejects first', async () => {
       const node = makeNode({ id: 44 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 44 });
+      seedNodes([node], 44);
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
         if (cmd === 'kill_agent') return Promise.reject(new Error('status update failed'));
@@ -707,7 +758,7 @@ describe('useAgentNodeStore', () => {
         useAgentNodeStore.getState().deleteAgentNode(44)
       ).rejects.toThrow('db locked');
 
-      expect(useAgentNodeStore.getState().agentNodes).toEqual([node]);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([node]);
     });
 
     // Issue #647: `disposeTerminal(id)` ran BEFORE `delete_agent_node` was
@@ -719,7 +770,7 @@ describe('useAgentNodeStore', () => {
     // must NOT run at all.
     it('does NOT dispose the terminal when delete_agent_node rejects (#647)', async () => {
       const node = makeNode({ id: 45 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 45 });
+      seedNodes([node], 45);
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
         if (cmd === 'delete_agent_node') return Promise.reject(new Error('db locked'));
@@ -733,7 +784,7 @@ describe('useAgentNodeStore', () => {
       // The row is restored (issue #645 invariant) AND the terminal lives —
       // so a re-mount sees its scrollback + a usable PTY, not a blank
       // terminal bound to a dead agent.
-      expect(useAgentNodeStore.getState().agentNodes).toEqual([node]);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([node]);
       expect(mockDisposeTerminal).not.toHaveBeenCalled();
     });
 
@@ -743,7 +794,7 @@ describe('useAgentNodeStore', () => {
       // a controlled `delete_agent_node` promise so we can observe the
       // ordering against the store's optimistic remove + the IPC call.
       const node = makeNode({ id: 46 });
-      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 46 });
+      seedNodes([node], 46);
       const callOrder: string[] = [];
       let resolveDelete!: () => void;
       const deletePending = new Promise<void>((r) => { resolveDelete = r; });
@@ -773,7 +824,7 @@ describe('useAgentNodeStore', () => {
       // cleanup resolves' test), but the terminal must NOT be disposed yet —
       // the IPC has been invoked but not resolved.
       await vi.waitFor(() => {
-        expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+        expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(0);
       });
       expect(mockDisposeTerminal).not.toHaveBeenCalled();
 
@@ -796,7 +847,7 @@ describe('useAgentNodeStore', () => {
     it('clears the prior closing flag when a second close supersedes the first prompt', async () => {
       const nodeA = makeNode({ id: 50, name: 'alpha' });
       const nodeB = makeNode({ id: 51, name: 'beta' });
-      useAgentNodeStore.setState({ agentNodes: [nodeA, nodeB], activeNodeId: 50 });
+      seedNodes([nodeA, nodeB], 50);
       mockDeleteFlow(makeSafety({ has_unpushed: true }));
       // Use the real worktreeClosePromptStore resolver so this exercises the
       // actual orphan-promise code path.
@@ -818,7 +869,7 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().closingNodeIds.has(50)).toBe(false);
       // A is still in the list because 'cancel' is a no-op for the actual
       // delete — only the closing flag clears.
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 50)).toBeDefined();
+      expect(useAgentNodeStore.getState().nodesById[50]).toBeDefined();
 
       // B's prompt is the one currently displayed. Dismiss it so closeB can
       // also settle — proving the dialog still works for the second node.
@@ -830,13 +881,13 @@ describe('useAgentNodeStore', () => {
 
   describe('renameAgentNode', () => {
     it('optimistically updates the name and calls rename_agent_node', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 11, name: 'bold-keen-brook' })] });
+      seedNodes([makeNode({ id: 11, name: 'bold-keen-brook' })]);
       mockInvoke.mockResolvedValueOnce(undefined);
 
       await useAgentNodeStore.getState().renameAgentNode(11, 'Refactor OAuth callback');
 
       // The store reflects the new name.
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 11)?.name)
+      expect(useAgentNodeStore.getState().nodesById[11]?.name)
         .toBe('Refactor OAuth callback');
       // And the backend was told the same name, with the camelCase nodeId
       // convention used by every other agent-node invoke call.
@@ -847,7 +898,7 @@ describe('useAgentNodeStore', () => {
     });
 
     it('rolls back the optimistic update and re-throws on invoke failure', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 12, name: 'old-name' })] });
+      seedNodes([makeNode({ id: 12, name: 'old-name' })]);
       mockInvoke.mockRejectedValueOnce(new Error('name too long (max 80 chars)'));
 
       await expect(
@@ -855,25 +906,25 @@ describe('useAgentNodeStore', () => {
       ).rejects.toThrow('name too long');
 
       // Rollback restored the prior name, and the error is surfaced on the store.
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 12)?.name)
+      expect(useAgentNodeStore.getState().nodesById[12]?.name)
         .toBe('old-name');
       expect(useAgentNodeStore.getState().error).toContain('name too long');
     });
 
     it('is a no-op when the node is not in the store', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 13 })] });
+      seedNodes([makeNode({ id: 13 })]);
 
       await useAgentNodeStore.getState().renameAgentNode(999, 'whatever');
 
       // No invoke call was made and the store is untouched.
       expect(mockInvoke).not.toHaveBeenCalled();
-      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(1);
     });
   });
 
   describe('setNodePinned / toggleNodePinned (wayfinder #982 / #984)', () => {
     it('setNodePinned pins optimistically and adopts the backend-returned node', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 21, is_pinned: false, name: 'local-name' })] });
+      seedNodes([makeNode({ id: 21, is_pinned: false, name: 'local-name' })]);
       // The backend's returned AgentNode is the source of truth — a
       // concurrent column change on the backend side must survive.
       mockInvoke.mockResolvedValueOnce(makeNode({ id: 21, is_pinned: true, name: 'backend-name' }));
@@ -881,13 +932,13 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().setNodePinned(21, true);
 
       expect(mockInvoke).toHaveBeenCalledWith('set_node_pinned', { nodeId: 21, pinned: true });
-      const node = useAgentNodeStore.getState().agentNodes.find(n => n.id === 21)!;
+      const node = useAgentNodeStore.getState().nodesById[21]!;
       expect(node.is_pinned).toBe(true);
       expect(node.name).toBe('backend-name');
     });
 
     it('toggleNodePinned flips optimistically so the Pinned grid re-renders instantly', () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 22, is_pinned: false })] });
+      seedNodes([makeNode({ id: 22, is_pinned: false })]);
       // A never-settling IPC lets us observe the optimistic window directly.
       // (Left pending on purpose — an unresolved promise holds no timers and
       // can't outlive the test.)
@@ -895,52 +946,57 @@ describe('useAgentNodeStore', () => {
 
       void useAgentNodeStore.getState().toggleNodePinned(22);
 
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 22)!.is_pinned).toBe(true);
+      expect(useAgentNodeStore.getState().nodesById[22]!.is_pinned).toBe(true);
       expect(mockInvoke).toHaveBeenCalledWith('toggle_node_pinned', { nodeId: 22 });
     });
 
     it('toggleNodePinned adopts the backend-returned node on success', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 22, is_pinned: true })] });
+      seedNodes([makeNode({ id: 22, is_pinned: true })]);
       mockInvoke.mockResolvedValueOnce(makeNode({ id: 22, is_pinned: false }));
 
       await useAgentNodeStore.getState().toggleNodePinned(22);
 
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 22)!.is_pinned).toBe(false);
+      expect(useAgentNodeStore.getState().nodesById[22]!.is_pinned).toBe(false);
     });
 
     it('toggleNodePinned rolls back ONLY is_pinned on rejection, preserving concurrent writes', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 23, is_pinned: false, status: 'idle' })] });
+      seedNodes([makeNode({ id: 23, is_pinned: false, status: 'idle' })]);
       mockInvoke.mockRejectedValueOnce(new Error('db locked'));
 
       const promise = useAgentNodeStore.getState().toggleNodePinned(23);
       // A concurrent write to another column (e.g. an attention status
       // flip from the orchestrator) lands while the IPC is in flight.
+      // Issue #1384 — patch the single entry directly through `nodesById`
+      // so the concurrent write stays surgical.
       useAgentNodeStore.setState(s => ({
-        agentNodes: s.agentNodes.map(n => n.id === 23 ? { ...n, status: 'awaiting_input' as const } : n),
+        nodesById: {
+          ...s.nodesById,
+          23: { ...s.nodesById[23]!, status: 'awaiting_input' },
+        },
       }));
 
       await expect(promise).rejects.toThrow('db locked');
 
-      const node = useAgentNodeStore.getState().agentNodes.find(n => n.id === 23)!;
+      const node = useAgentNodeStore.getState().nodesById[23]!;
       expect(node.is_pinned).toBe(false); // rolled back
       expect(node.status).toBe('awaiting_input'); // concurrent write preserved
       expect(useAgentNodeStore.getState().error).toContain('db locked');
     });
 
     it('setNodePinned rolls back and re-throws on rejection', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 24, is_pinned: true })] });
+      seedNodes([makeNode({ id: 24, is_pinned: true })]);
       mockInvoke.mockRejectedValueOnce(new Error('node not found'));
 
       await expect(
         useAgentNodeStore.getState().setNodePinned(24, false)
       ).rejects.toThrow('node not found');
 
-      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 24)!.is_pinned).toBe(true);
+      expect(useAgentNodeStore.getState().nodesById[24]!.is_pinned).toBe(true);
       expect(useAgentNodeStore.getState().error).toContain('node not found');
     });
 
     it('throws before any IPC when the node is not loaded', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 25 })] });
+      seedNodes([makeNode({ id: 25 })]);
 
       await expect(useAgentNodeStore.getState().toggleNodePinned(999)).rejects.toThrow('not loaded');
       expect(mockInvoke).not.toHaveBeenCalled();
@@ -949,14 +1005,12 @@ describe('useAgentNodeStore', () => {
 
   describe('reorderAgentNode', () => {
     // Three nodes in one mesh, positions 0,1,2.
-    const seed = () => useAgentNodeStore.setState({
-      agentNodes: [
-        makeNode({ id: 1, position: 0 }),
-        makeNode({ id: 2, position: 1 }),
-        makeNode({ id: 3, position: 2 }),
-      ],
-    });
-    const order = () => useAgentNodeStore.getState().agentNodes.map(n => n.id);
+    const seed = () => seedNodes([
+      makeNode({ id: 1, position: 0 }),
+      makeNode({ id: 2, position: 1 }),
+      makeNode({ id: 3, position: 2 }),
+    ]);
+    const order = () => useAgentNodeStore.getState().nodeIds;
 
     it('moves a node forward and renumbers positions contiguously', async () => {
       seed();
@@ -966,7 +1020,7 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().reorderAgentNode(1, 3);
 
       expect(order()).toEqual([2, 3, 1]);
-      const positions = useAgentNodeStore.getState().agentNodes.map(n => n.position);
+      const positions = useAgentNodeStore.getState().nodeIds.map(id => useAgentNodeStore.getState().nodesById[id]?.position);
       expect(positions).toEqual([0, 1, 2]);
       // Persists the full new ordering for the mesh.
       expect(mockInvoke).toHaveBeenCalledWith('update_agent_node_positions', {
@@ -1014,30 +1068,26 @@ describe('useAgentNodeStore', () => {
 
   describe('swapAgentNodes', () => {
     it('exchanges two nodes’ positions and persists just those two', async () => {
-      useAgentNodeStore.setState({
-        agentNodes: [
-          makeNode({ id: 1, position: 0 }),
-          makeNode({ id: 2, position: 1 }),
-          makeNode({ id: 3, position: 2 }),
-        ],
-      });
+      seedNodes([
+        makeNode({ id: 1, position: 0 }),
+        makeNode({ id: 2, position: 1 }),
+        makeNode({ id: 3, position: 2 }),
+      ]);
       mockInvoke.mockResolvedValue(undefined);
 
       await useAgentNodeStore.getState().swapAgentNodes(1, 3);
 
-      expect(useAgentNodeStore.getState().agentNodes.map(n => n.id)).toEqual([3, 2, 1]);
+      expect(useAgentNodeStore.getState().nodeIds).toEqual([3, 2, 1]);
       expect(mockInvoke).toHaveBeenCalledWith('update_agent_node_positions', {
         updates: expect.arrayContaining([[1, 2], [3, 0]]),
       });
     });
 
     it('refuses to swap nodes that live in different meshes', async () => {
-      useAgentNodeStore.setState({
-        agentNodes: [
-          makeNode({ id: 1, mesh_id: 1, position: 0 }),
-          makeNode({ id: 2, mesh_id: 2, position: 0 }),
-        ],
-      });
+      seedNodes([
+        makeNode({ id: 1, mesh_id: 1, position: 0 }),
+        makeNode({ id: 2, mesh_id: 2, position: 0 }),
+      ]);
 
       await useAgentNodeStore.getState().swapAgentNodes(1, 2);
 
@@ -1069,7 +1119,7 @@ describe('useAgentNodeStore', () => {
       // guard bails if the node is missing or archived. The real
       // SchedulingPopover only ever schedules against a node already
       // on screen, so this is the realistic shape.
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 2, status: 'running' })] });
+      seedNodes([makeNode({ id: 2, status: 'running' })]);
       mockInvoke.mockResolvedValue(undefined);
       useAgentNodeStore.getState().scheduleInput(2, 1000, 'ping', '1m');
 
@@ -1080,7 +1130,7 @@ describe('useAgentNodeStore', () => {
     });
 
     it('writes a bare Enter instead of sendToAgent when message is empty', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 3, status: 'running' })] });
+      seedNodes([makeNode({ id: 3, status: 'running' })]);
       mockInvoke.mockResolvedValue(undefined);
       useAgentNodeStore.getState().scheduleInput(3, 1000, '', 'usage_reset');
 
@@ -1090,7 +1140,7 @@ describe('useAgentNodeStore', () => {
     });
 
     it('replaces an existing schedule for the same node instead of stacking', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 4, status: 'running' })] });
+      seedNodes([makeNode({ id: 4, status: 'running' })]);
       mockInvoke.mockResolvedValue(undefined);
       useAgentNodeStore.getState().scheduleInput(4, 1000, 'first', '1m');
       useAgentNodeStore.getState().scheduleInput(4, 2000, 'second', '2m');
@@ -1119,7 +1169,7 @@ describe('useAgentNodeStore', () => {
     });
 
     it('deleteAgentNode cancels an active schedule for the node being deleted', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 60 })], activeNodeId: 60 });
+      seedNodes([makeNode({ id: 60 })], 60);
       mockDeleteFlow(makeSafety());
       useAgentNodeStore.getState().scheduleInput(60, 1000, 'ping', '1m');
 
@@ -1140,7 +1190,7 @@ describe('useAgentNodeStore', () => {
     // (`stores/agentNodeListeners.ts`) routes through `fetchAgentNodes`,
     // so every archive transition sweeps schedules for free.
     it('cancels schedules whose node comes back archived from fetchAgentNodes', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 7, status: 'running' })] });
+      seedNodes([makeNode({ id: 7, status: 'running' })]);
       useAgentNodeStore.getState().scheduleInput(7, 1000, 'still there?', '5m');
       // The next list_agent_nodes reflects node 7 as archived — the
       // shape the autopilot-node-closed handler triggers via
@@ -1158,7 +1208,7 @@ describe('useAgentNodeStore', () => {
     });
 
     it('cancels schedules whose node is absent from fetchAgentNodes', async () => {
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 7, status: 'running' })] });
+      seedNodes([makeNode({ id: 7, status: 'running' })]);
       useAgentNodeStore.getState().scheduleInput(7, 1000, 'still there?', '5m');
       // The next list_agent_nodes returns a different mesh's nodes —
       // node 7 has been deleted out from under the schedule.
@@ -1180,13 +1230,11 @@ describe('useAgentNodeStore', () => {
       // handles the common case; this guard covers the narrow race
       // where a refetch between scheduling and firing hasn't yet
       // completed when the timer resolves.
-      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 8, status: 'running' })] });
+      seedNodes([makeNode({ id: 8, status: 'running' })]);
       useAgentNodeStore.getState().scheduleInput(8, 1000, 'ping', '1m');
       // Node 8 transitions to archived before the timer fires (e.g.
       // an autopilot close landed between the schedule and the tick).
-      useAgentNodeStore.setState({
-        agentNodes: [makeNode({ id: 8, status: 'archived' })],
-      });
+      seedNodes([makeNode({ id: 8, status: 'archived' })]);
 
       await vi.advanceTimersByTimeAsync(1000);
 
