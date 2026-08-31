@@ -3,14 +3,35 @@
 //! Tests that verify create_mesh handles duplicate paths gracefully,
 //! returning the existing mesh instead of crashing with UNIQUE constraint.
 //!
-//! Run with: cargo test --package buildmesh --lib db::mesh_tests -- --test-threads=1
+//! Each test acquires [`MESH_TESTS_LOCK`] at the top of its body to
+//! serialise against the other tests in this module. The process-wide
+//! `db::DB` is a `OnceCell<Mutex<Connection>>` — once any test in the
+//! binary calls `db::init`, every later `init` silently no-ops and
+//! writes go to the winner's connection (issue #1334). Tests outside
+//! this module are unaffected.
 
 #[cfg(test)]
 mod tests {
+    /// Module-scope serialisation lock for [`db::mesh_tests`]. Every test
+    /// in this module calls [`serial`] at the top of its body — module-wide
+    /// (not just the autopilot-counting tests) because all of them call
+    /// `db::init` and therefore contend on the same shared connection.
+    /// Poison recovery mirrors [`db::lock_db`](crate::db::lock_db) (issue #1224).
+    static MESH_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire [`MESH_TESTS_LOCK`], recovering from a poisoned mutex
+    /// instead of propagating the poison as a panic (issue #1224).
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        MESH_TESTS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Test: creating a project with a duplicate path should NOT crash.
     /// Expected behavior: return the existing project (idempotent upsert).
     #[test]
     fn test_create_project_with_duplicate_path_returns_existing() {
+        let _serial = serial();
         // Use a unique temp file per test so each test is fully isolated
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -49,6 +70,7 @@ mod tests {
     /// returns to the palette-fallback (`None`).
     #[test]
     fn test_mesh_color_round_trips() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -79,6 +101,7 @@ mod tests {
     /// strings with `None` returns them to `None` (poller defaults apply).
     #[test]
     fn test_mesh_autopilot_policy_round_trips() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -134,6 +157,7 @@ mod tests {
     /// command layer can surface "mesh not found".
     #[test]
     fn test_set_mesh_autopilot_enabled_is_narrow() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -202,6 +226,7 @@ mod tests {
     /// round-trip pattern just above.
     #[test]
     fn test_mesh_loop_config_round_trips() {
+        let _serial = serial();
         use crate::db::AutopilotMode;
 
         let test_id = std::time::SystemTime::now()
@@ -288,6 +313,7 @@ mod tests {
     /// state transitions, dedupe list, and slot release on completion.
     #[test]
     fn test_autopilot_runs_ledger_counts_and_dedupes() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -365,6 +391,7 @@ mod tests {
     /// stale window; fresh activity and state advances take it back off.
     #[test]
     fn test_stalled_finishing_runs_listing() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -435,6 +462,7 @@ mod tests {
     /// and archiving the node removes it from both.
     #[test]
     fn test_autopilot_run_pr_recording_and_sweep_listing() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -512,6 +540,7 @@ mod tests {
     /// future change removes BOTH the cascade AND the explicit delete.
     #[test]
     fn test_delete_mesh_removes_autopilot_runs_rows() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -578,6 +607,11 @@ mod tests {
     /// that suffix turn reaches `Completed`.
     #[test]
     fn test_loop_suffix_pending_preserves_context_and_capacity() {
+        // This test is the one that actually asserts the exact global
+        // total — a parallel autopilot row write would shift `total_after`
+        // from `total_before + 1` to `total_before + 2` (issue #1334).
+        let _serial = serial();
+
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

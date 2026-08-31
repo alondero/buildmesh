@@ -133,8 +133,7 @@ fn was_written_since(path: &Path, not_before_ms: i64) -> bool {
 
 fn rollout_days_newest_first(sessions_dir: &Path, created_not_before_ms: i64) -> Vec<PathBuf> {
     let cutoff = chrono::DateTime::from_timestamp_millis(created_not_before_ms)
-        .map(|time| time.date_naive().checked_sub_days(Days::new(1)))
-        .flatten()
+        .and_then(|time| time.date_naive().checked_sub_days(Days::new(1)))
         .unwrap_or(NaiveDate::MIN);
     let mut days = Vec::new();
     for year in subdirs_sorted_desc(sessions_dir) {

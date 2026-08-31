@@ -331,11 +331,11 @@ pub async fn regenerate_agent_node(
     // 7. Final reload off-thread — returns the post-spawn row state
     // (the spawn pipeline may have updated `cli_session_id` /
     // `status_changed_at`).
-    Ok(crate::commands::run_blocking(
+    crate::commands::run_blocking(
         "regenerate_agent_node_reload",
         move || regenerate_reload_blocking(node_id).map_err(|e| e.to_string()),
     )
-    .await?)
+    .await
 }
 
 #[cfg(test)]

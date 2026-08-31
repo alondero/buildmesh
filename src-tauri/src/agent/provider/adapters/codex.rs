@@ -1044,7 +1044,7 @@ fn ensure_codex_project_files(
     } else {
         Platform::current()
     };
-    let hooks_updated = ensure_hooks_json_content(&hooks_existing, &hook_command(platform))?;
+    let hooks_updated = ensure_hooks_json_content(hooks_existing, &hook_command(platform))?;
 
     let mut writes: Vec<(&Path, &str)> = Vec::new();
     if config_updated != *config_existing {
