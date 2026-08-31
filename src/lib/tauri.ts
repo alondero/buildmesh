@@ -1399,6 +1399,7 @@ export type {
 export type { CircuitGraph } from '../types/generated/CircuitGraph';
 export type { CircuitNode } from '../types/generated/CircuitNode';
 export type { CircuitNodeKind } from '../types/generated/CircuitNodeKind';
+export type { CircuitBlueprintKind } from '../types/generated/CircuitBlueprintKind';
 export type { CircuitEdge } from '../types/generated/CircuitEdge';
 export type { EdgeCondition } from '../types/generated/EdgeCondition';
 export type { StepOutcome } from '../types/generated/StepOutcome';
@@ -1423,6 +1424,7 @@ export const listCircuitsWithRuns = (meshId: number, limit?: number) =>
  *  github_issue_label, github_pr_label. */
 export type { CircuitTriggerKind } from '../types/generated/CircuitTriggerKind';
 import type { CircuitTriggerKind } from '../types/generated/CircuitTriggerKind';
+import type { CircuitBlueprintKind } from '../types/generated/CircuitBlueprintKind';
 
 export const createCircuit = (
   meshId: number,
@@ -1432,7 +1434,8 @@ export const createCircuit = (
   initialPrompt: string,
   triggerKind: CircuitTriggerKind = 'manual',
   triggerLabel?: string,
-  intervalSeconds?: number
+  intervalSeconds?: number,
+  blueprint: CircuitBlueprintKind = 'walking_skeleton'
 ) =>
   _invoke<AutopilotCircuit>('create_circuit', {
     meshId,
@@ -1443,6 +1446,7 @@ export const createCircuit = (
     triggerKind,
     triggerLabel: triggerLabel ?? null,
     intervalSeconds: intervalSeconds ?? null,
+    blueprint,
   });
 
 export const setCircuitEnabled = (circuitId: number, enabled: boolean) =>

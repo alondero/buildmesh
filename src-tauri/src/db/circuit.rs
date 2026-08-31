@@ -535,6 +535,19 @@ pub fn set_circuit_step_agent_node(
     Ok(())
 }
 
+/// Clear an agent association after a CloseAgentNode effect succeeds. The
+/// circuit step remains an audit record, but a retired reviewer must no
+/// longer consume mesh/global agent capacity on the run's remaining steps.
+pub fn clear_circuit_step_agent_node(run_id: i64, node_id: &str) -> SqlResult<()> {
+    let db = super::write_conn();
+    db.execute(
+        "UPDATE autopilot_circuit_run_steps SET agent_node_id = NULL \
+         WHERE run_id = ?1 AND node_id = ?2",
+        params![run_id, node_id],
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency counters — the inputs to the stepper's capacity snapshot.
 // ---------------------------------------------------------------------------
@@ -553,18 +566,36 @@ pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
     )
 }
 
-/// Distinct piloted agent nodes across running steps of active runs on
-/// this mesh — compared against `meshes.autopilot_concurrency_limit`
-/// (the mesh-wide auto-spawned-agent cap). NULL agent ids don't count.
-/// Paused runs count (see [`count_running_circuit_steps`]).
+/// Distinct piloted agent nodes attached to active runs on this mesh —
+/// compared against `meshes.autopilot_concurrency_limit` (the mesh-wide
+/// auto-spawned-agent cap). NULL agent ids don't count. Paused runs count
+/// (see [`count_running_circuit_steps`]); completed spawn steps remain
+/// attached while a later review/feedback step is active so the original
+/// implementation agent still consumes capacity.
 pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
     let db = super::read_conn();
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
          WHERE r.mesh_id = ?1 AND r.state IN ('running', 'paused') \
-           AND s.status = 'running' AND s.agent_node_id IS NOT NULL",
+           AND s.agent_node_id IS NOT NULL",
         params![mesh_id],
+        |row| row.get(0),
+    )
+}
+
+/// Distinct piloted agent nodes across all active circuit runs. The legacy
+/// Autopilot pool is app-wide, so the circuit worker combines this count with
+/// [`crate::db::count_active_autopilot_nodes_total`] before admitting a new
+/// circuit agent.
+pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
+         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+         WHERE r.state IN ('running', 'paused') \
+           AND s.agent_node_id IS NOT NULL",
+        [],
         |row| row.get(0),
     )
 }

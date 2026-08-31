@@ -37,6 +37,17 @@ pub(crate) enum ResumeCause {
     Explicit,
 }
 
+/// Worktree policy supplied by a caller that knows the spawn's purpose.
+/// Most spawns inherit the mesh setting; issue-driven circuit runs opt into a
+/// real branched worktree without pretending to be a legacy `autopilot_runs`
+/// row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WorktreePolicy {
+    #[default]
+    RespectMesh,
+    ForceBranched,
+}
+
 /// The authoritative initial prompt a [`SpawnIntent`] will hand to the
 /// harness (issue #1180). Built once, at the spawn seam, so the desktop
 /// draft, the background launch, and the Autopilot watcher all derive
@@ -176,6 +187,10 @@ pub(crate) struct SpawnRequest {
     /// Cascade layer-1 overrides (issue #1155). Empty / whitespace-only
     /// values are normalised to absent before reaching the resolver.
     pub(crate) explicit: ExplicitSpawnOverrides,
+    /// Worktree strategy override for this spawn. Kept on the request rather
+    /// than the persisted Agent Node so a circuit can use the shared spawn
+    /// orchestrator without adding mode-specific DB state.
+    pub(crate) worktree_policy: WorktreePolicy,
 }
 
 impl SpawnRequest {
@@ -198,6 +213,7 @@ impl SpawnRequest {
             intent,
             terminal_size,
             explicit: ExplicitSpawnOverrides::default(),
+            worktree_policy: WorktreePolicy::RespectMesh,
         }
     }
 
@@ -212,6 +228,13 @@ impl SpawnRequest {
     #[allow(dead_code)] // no production call site yet — exercised by `mod tests`
     pub(crate) fn with_explicit(mut self, explicit: ExplicitSpawnOverrides) -> Self {
         self.explicit = explicit;
+        self
+    }
+
+    /// Force a branched worktree for issue-driven circuit work while keeping
+    /// the ordinary mesh policy for all existing callers.
+    pub(crate) fn with_worktree_policy(mut self, policy: WorktreePolicy) -> Self {
+        self.worktree_policy = policy;
         self
     }
 }
@@ -230,6 +253,13 @@ pub(crate) enum SpawnOutcome {
 /// can construct equivalent `InitialPrompt` values for comparison.
 pub(crate) fn format_issue_prefill(owner: &str, repo: &str, number: i64, title: &str) -> String {
     let url = format!("https://github.com/{owner}/{repo}/issues/{number}");
+    format_issue_prefill_with_url(number, title, &url)
+}
+
+/// Format the GitHub-issue prefill when the canonical issue URL is already
+/// available from a trigger payload. Both the desktop spawn seam and circuit
+/// context use this formatter so the wording cannot drift between transports.
+pub(crate) fn format_issue_prefill_with_url(number: i64, title: &str, url: &str) -> String {
     let title = title.trim();
     if title.is_empty() {
         format!("Please work on GitHub issue #{number}\n{url}")

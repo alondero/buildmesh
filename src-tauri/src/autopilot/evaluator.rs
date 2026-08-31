@@ -49,6 +49,13 @@ pub enum Classification {
 /// Node ids whose output we buffer (auto-spawned + manual `/finish` nodes).
 static PILOTED: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
+/// Circuit-owned piloted nodes. Circuits share the evaluator's PTY blackboard
+/// and freshness clocks, but they do not have a legacy `autopilot_runs` row.
+/// Keeping ownership explicit prevents the legacy pipeline from treating a
+/// circuit node as stale and unregistering its evaluator state on the first
+/// Node Turn.
+static CIRCUIT_PILOTED: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
 /// Per-node PTY tail. Entries exist only for piloted nodes.
 static TAILS: Lazy<Mutex<HashMap<i64, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -77,15 +84,30 @@ pub fn register(node_id: i64) {
     PILOTED.lock().unwrap().insert(node_id);
 }
 
+/// Start buffering PTY output for a circuit-owned node. Circuit nodes share
+/// the evaluator blackboard with legacy Autopilot, but are deliberately not
+/// backed by an `autopilot_runs` ledger row.
+pub fn register_circuit(node_id: i64) {
+    PILOTED.lock().unwrap().insert(node_id);
+    CIRCUIT_PILOTED.lock().unwrap().insert(node_id);
+}
+
 /// Is this node under Autopilot management (fast, in-memory)?
 pub fn is_piloted(node_id: i64) -> bool {
     PILOTED.lock().unwrap().contains(&node_id)
+}
+
+/// Whether this node is owned by an Autopilot Circuit rather than the legacy
+/// issue-driven pipeline.
+pub fn is_circuit_piloted(node_id: i64) -> bool {
+    CIRCUIT_PILOTED.lock().unwrap().contains(&node_id)
 }
 
 /// Stop buffering and drop all state for a node (close / pipeline terminal
 /// state).
 pub fn unregister(node_id: i64) {
     PILOTED.lock().unwrap().remove(&node_id);
+    CIRCUIT_PILOTED.lock().unwrap().remove(&node_id);
     TAILS.lock().unwrap().remove(&node_id);
     LAST_OUTPUT.lock().unwrap().remove(&node_id);
     LAST_EVAL.lock().unwrap().remove(&node_id);
@@ -470,6 +492,21 @@ mod tests {
             None,
             "unregister drops the evaluation timestamp"
         );
+    }
+
+    #[test]
+    fn circuit_registration_is_visible_to_the_blackboard_but_not_legacy_pipeline() {
+        let id = 910_005;
+        register_circuit(id);
+        assert!(is_piloted(id));
+        assert!(is_circuit_piloted(id));
+        on_output(id, "circuit output");
+        assert_eq!(cleaned_tail(id), "circuit output");
+
+        unregister(id);
+        assert!(!is_piloted(id));
+        assert!(!is_circuit_piloted(id));
+        assert_eq!(cleaned_tail(id), "");
     }
 
     #[test]

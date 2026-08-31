@@ -186,6 +186,7 @@ describe('CircuitsProbeTab', () => {
         triggerKind: 'manual',
         triggerLabel: null,
         intervalSeconds: null,
+        blueprint: 'walking_skeleton',
       });
       // The editor overlay mounts over the center workspace…
       expect(useUIStore.getState().activeCircuitEditorId).toBe(7);
@@ -211,6 +212,34 @@ describe('CircuitsProbeTab', () => {
         name: 'issue-runner',
         triggerKind: 'github_issue_label',
         triggerLabel: 'buildmesh:run',
+      }));
+    });
+  });
+
+  it('creates the issue-driven Autopilot review blueprint with two agent slots', async () => {
+    mockBackend();
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    await user.type(await screen.findByTestId('circuit-name-input'), 'autopilot-review');
+    await user.selectOptions(
+      screen.getByTestId('circuit-blueprint-select'),
+      'issue_driven_autopilot_review'
+    );
+    expect((screen.getByTestId('circuit-trigger-select') as HTMLSelectElement).value).toBe(
+      'github_issue_label'
+    );
+    expect((screen.getByTestId('circuit-trigger-select') as HTMLSelectElement).disabled).toBe(true);
+    await user.type(screen.getByTestId('circuit-trigger-label-input'), 'buildmesh:run');
+    await user.click(screen.getByTestId('circuit-create-button'));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('create_circuit', expect.objectContaining({
+        name: 'autopilot-review',
+        concurrencyLimit: 2,
+        triggerKind: 'github_issue_label',
+        triggerLabel: 'buildmesh:run',
+        blueprint: 'issue_driven_autopilot_review',
       }));
     });
   });
@@ -361,6 +390,7 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
       triggerKind: 'manual',
       triggerLabel: null,
       intervalSeconds: null,
+      blueprint: 'walking_skeleton',
     });
 
     // Milestone-3 trigger vocabulary rides the same command (#1208).
@@ -374,6 +404,7 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
       triggerKind: 'interval',
       triggerLabel: null,
       intervalSeconds: 120,
+      blueprint: 'walking_skeleton',
     });
 
     await setCircuitEnabled(7, false);

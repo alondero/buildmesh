@@ -218,6 +218,21 @@ pub(crate) enum FinishOutcome {
 }
 
 pub(crate) fn decide_finishing(state: &WrapupState, attempts: i32) -> FinishOutcome {
+    let reasons = wrapup_reasons(state);
+    if reasons.is_empty() {
+        FinishOutcome::Complete
+    } else if attempts >= MAX_FINISH_ATTEMPTS {
+        FinishOutcome::Fail(reasons)
+    } else {
+        FinishOutcome::Retry(reasons)
+    }
+}
+
+/// Return the observable reasons a wrap-up is not ready to complete. Circuits
+/// use the same verification contract as legacy issue Autopilot before their
+/// `OpenPr` action: clean worktree, up-to-date pushed branch, and (when the
+/// caller requires it) an existing PR.
+pub(crate) fn wrapup_reasons(state: &WrapupState) -> Vec<String> {
     let mut reasons = Vec::new();
     if let Some(err) = &state.repo_error {
         // Unopenable repo: the git-state checks below would all be
@@ -235,13 +250,7 @@ pub(crate) fn decide_finishing(state: &WrapupState, attempts: i32) -> FinishOutc
             reasons.push("no open pull request exists for the branch".to_string());
         }
     }
-    if reasons.is_empty() {
-        FinishOutcome::Complete
-    } else if attempts >= MAX_FINISH_ATTEMPTS {
-        FinishOutcome::Fail(reasons)
-    } else {
-        FinishOutcome::Retry(reasons)
-    }
+    reasons
 }
 
 /// What a verified-green wrap-up does next. A suffix belongs only to the loop
@@ -466,7 +475,10 @@ fn clear_attention_after_injection(node_id: i64, app: &AppHandle) {
 
 /// Inspect the node's worktree + GitHub for the observable wrap-up state.
 /// Blocking (libgit2 walk + one GitHub round-trip) — worker thread only.
-fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> WrapupState {
+pub(crate) fn observe_wrapup_state(
+    node: &crate::models::AgentNode,
+    pr_required: bool,
+) -> WrapupState {
     // `node_working_path` resolves Worktree and Root Nodes alike (host path +
     // env), so the self-heal below covers both; on a Root Node the sanitize
     // is a no-op (`.git` is a directory, not a gitlink).
@@ -567,6 +579,13 @@ fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> W
 /// Node Turn hook — third consumer in `node_turn::publish`. Cheap for
 /// non-piloted nodes (one in-memory set lookup).
 pub fn on_turn(node_id: i64, app: &AppHandle) {
+    // Circuit-owned nodes use this module's evaluator blackboard but have no
+    // legacy `autopilot_runs` row. Let the circuit worker own their turn;
+    // otherwise the lookup below would classify them as stale and unregister
+    // the shared tail before the circuit observation pass can consume it.
+    if evaluator::is_circuit_piloted(node_id) {
+        return;
+    }
     if !evaluator::is_piloted(node_id) {
         return;
     }
@@ -614,10 +633,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
         }
     };
     let mesh = db::get_mesh_by_id(node.mesh_id).ok();
-    let action_on_success = mesh
-        .as_ref()
-        .and_then(|m| m.autopilot_action_on_success.clone())
-        .unwrap_or_else(|| "draft_pr".to_string());
+    let action_on_success = crate::services::autopilot::configured_action_on_success(node.mesh_id);
 
     match state {
         S::Implementing => {
@@ -972,10 +988,7 @@ fn redrive_one(node_id: i64, app: &AppHandle) {
         }
     };
     let mesh = db::get_mesh_by_id(node.mesh_id).ok();
-    let action_on_success = mesh
-        .as_ref()
-        .and_then(|m| m.autopilot_action_on_success.clone())
-        .unwrap_or_else(|| "draft_pr".to_string());
+    let action_on_success = crate::services::autopilot::configured_action_on_success(node.mesh_id);
 
     let observed = observe_wrapup_state(&node, action_on_success != "none");
     match decide_finishing(&observed, attempts) {

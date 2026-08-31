@@ -73,6 +73,27 @@ use crate::models::{
 use crate::process_util::run_worker_pass;
 use crate::services::github::{parse_blocked_by, GitHubClient, Issue};
 
+/// Resolve the mesh-level wrap-up policy at the point a run is created.
+/// Empty or missing values retain the historical `draft_pr` default; callers
+/// that need a PR can explicitly reject `none` before starting work.
+pub(crate) fn configured_action_on_success(mesh_id: i64) -> String {
+    db::get_mesh_by_id(mesh_id)
+        .ok()
+        .and_then(|mesh| mesh.autopilot_action_on_success)
+        .filter(|action| !action.trim().is_empty())
+        .unwrap_or_else(|| "draft_pr".to_string())
+}
+
+/// Resolve the provider chain used by issue-driven Autopilot: explicit
+/// Autopilot provider, then the mesh default, then the app default.
+pub(crate) fn configured_autopilot_provider(mesh: &Mesh) -> String {
+    crate::preferences::resolve_default_provider(
+        mesh.autopilot_provider.clone(),
+        mesh.default_provider.clone(),
+        crate::preferences::default_provider(),
+    )
+}
+
 /// Payload of the `autopilot-node-closed` Tauri event. Emitted from the
 /// merged-PR sweep when an autopilot-managed PR was merged and the node is
 /// being archived (NOT deleted — the branch and scrollback stay in the
@@ -905,7 +926,8 @@ pub(crate) fn plan_spawns<'a>(
 /// The log emission is intrinsically tied to the filter rejection (it's
 /// the diagnostic that names the blocker chain), so splitting it from
 /// the filter would create a confusing two-call API. The helper is
-/// `pub(crate)` and the only production caller is [`poll_mesh`].
+/// `pub(crate)` so the issue-driven Circuit blueprint can apply the same
+/// dependency rule while keeping its own run ledger and capacity scheduler.
 pub(crate) fn plan_spawns_with_blockers<'a>(
     issues: &'a [Issue],
     known_issue_numbers: &[i64],

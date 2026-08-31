@@ -39,6 +39,7 @@
 //! recovers quiet piloted nodes whose turn webhook was missed so
 //! multi-hour runs self-heal.
 
+use std::collections::HashSet;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -263,7 +264,10 @@ fn drive_run(
         // (possibly run_id-topped-up) context rides along with every
         // commit so the seeding above lands whenever anything else
         // writes; a pass with no commits simply re-seeds next time.
-        if !transition.step_writes.is_empty() || transition.run_state_changed {
+        if !transition.step_writes.is_empty()
+            || transition.run_state_changed
+            || transition.context_changed
+        {
             let ops = transition
                 .step_writes
                 .iter()
@@ -305,6 +309,7 @@ fn drive_run(
                     crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id }
                     | crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. }
                     | crate::autopilot::circuit::stepper::Effect::SetNodeStatus { node_id, .. }
+                    | crate::autopilot::circuit::stepper::Effect::CloseAgentNode { node_id, .. }
                     | crate::autopilot::circuit::stepper::Effect::CallGithub { node_id, .. } => {
                         Some(node_id.clone())
                     }
@@ -343,7 +348,10 @@ let ops = failed
         // Live ledger: every step transition or state change refreshes
         // the Probe tab, not just terminal ones — otherwise a long agent
         // run renders as a frozen list until it finishes.
-        if !transition.step_writes.is_empty() || transition.run_state_changed {
+        if !transition.step_writes.is_empty()
+            || transition.run_state_changed
+            || transition.context_changed
+        {
             let _ = app.emit(
                 "circuit-run-updated",
                 CircuitRunUpdatedPayload {
@@ -352,8 +360,47 @@ let ops = failed
                 },
             );
         }
+
+        // A failed circuit has no future step that can close its agents. Do
+        // the same best-effort cleanup used by an explicit CloseAgentNode so
+        // reviewer processes/worktrees cannot leak after a spawn, injection,
+        // classifier, or close effect failure.
+        if view.state == RunState::Failed {
+            close_run_agents(&view);
+            break;
+        }
     }
     Ok(())
+}
+
+/// Retire every agent attached to a failed circuit run. The operation is
+/// idempotent with the normal close effect: a missing row simply means a
+/// previous cleanup already won the race.
+fn close_run_agents(view: &RunView) {
+    let mut agent_ids = HashSet::new();
+    for agent_node_id in view.steps.iter().filter_map(|step| step.agent_node_id) {
+        if !agent_ids.insert(agent_node_id) {
+            continue;
+        }
+        match db::get_agent_node_by_id(agent_node_id) {
+            Ok(_) => {
+                if let Err(error) = crate::services::agent_node::delete(agent_node_id, true) {
+                    tracing::warn!(
+                        "circuits: failed to clean up agent {} after run failure: {}",
+                        agent_node_id,
+                        error
+                    );
+                }
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(error) => tracing::warn!(
+                "circuits: could not inspect agent {} during failed-run cleanup: {}",
+                agent_node_id,
+                error
+            ),
+        }
+        crate::autopilot::evaluator::unregister(agent_node_id);
+    }
 }
 
 /// Load this run's committed steps into the stepper's view shape.
@@ -431,6 +478,30 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
         }
     }
 
+    // A GitHub mutation is committed as Running before the network call. If
+    // the process dies after the remote mutation but before its result lands,
+    // the action has no live process to observe. Re-drive it on the next pass;
+    // the review blueprint's OpenPr effect first discovers an existing PR, so
+    // the crash window is safe to replay.
+    for step in &view.steps {
+        if step.status == StepStatus::Running
+            && matches!(
+                view.graph.node(&step.node_id).map(|node| &node.kind),
+                Some(CircuitNodeKind::GithubAction { .. })
+            )
+        {
+            events.push(CircuitEvent::GithubActionRetry {
+                node_id: step.node_id.clone(),
+            });
+        }
+    }
+
+    // CloseAgentNode is committed complete before its destructive effect is
+    // executed. Replay it while the completed step still points at an agent;
+    // this closes the crash window where a reviewer row could survive a
+    // restart after the step commit but before deletion.
+    observe_close_agent_retries(view, &mut events);
+
     // Injection readiness: any running InjectPty step whose target
     // process is now live fires its AgentReady event.
     for step in &view.steps {
@@ -455,7 +526,29 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     // parked run must not burn classifier calls or run verification
     // commands; the gates re-evaluate after Resume.
     if view.state == RunState::Running {
-        observe_gates(active, view, &mut events);
+        observe_gates(active, view, &mut events, _app);
+    }
+
+    // Issue-triggered review blueprints always include a CollaboratorCheck so
+    // an untrusted issue can park visibly for approval. The trigger pass has
+    // already made the network-backed trust decision and records `auto` in
+    // the run context for trusted authors; turn that durable decision into
+    // the same event the Probe's Approve button emits.
+    if view.state == RunState::Running
+        && view.context.get("autopilot.collaborator_gate") == Some("auto")
+    {
+        for step in &view.steps {
+            if step.status == StepStatus::Blocked
+                && matches!(
+                    view.graph.node(&step.node_id).map(|node| &node.kind),
+                    Some(CircuitNodeKind::CollaboratorCheck { require_approval: true })
+                )
+            {
+                events.push(CircuitEvent::CollaboratorApproved {
+                    node_id: step.node_id.clone(),
+                });
+            }
+        }
     }
 
     // Collaborator approvals queued since the last pass.
@@ -483,34 +576,107 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
             tracing::warn!("circuits: running-step count failed, failing closed: {}", e);
             i64::MAX
         });
-    let mesh_active =
+    let legacy_mesh_active = db::count_active_autopilot_nodes(active.run.mesh_id)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "circuits: legacy active-agent count failed, failing closed: {}",
+                e
+            );
+            i64::MAX
+        });
+    let circuit_mesh_active =
         db::count_active_circuit_agent_nodes(active.run.mesh_id).unwrap_or_else(|e| {
             tracing::warn!("circuits: active-agent count failed, failing closed: {}", e);
             i64::MAX
         });
+    let mesh_active = legacy_mesh_active.saturating_add(circuit_mesh_active);
+    let global_free_slots = match crate::preferences::autopilot_pool_size() {
+        None => i64::MAX,
+        Some(pool) => {
+            let legacy_total = db::count_active_autopilot_nodes_total();
+            let circuit_total = db::count_active_circuit_agent_nodes_total();
+            match (legacy_total, circuit_total) {
+                (Ok(legacy), Ok(circuits)) => {
+                    i64::from(pool).saturating_sub(legacy.saturating_add(circuits))
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    tracing::warn!(
+                        "circuits: global Autopilot pool count failed, failing closed: {}",
+                        e
+                    );
+                    0
+                }
+            }
+        }
+    };
     events.push(CircuitEvent::Tick(Capacity {
         circuit_free_slots: active.circuit_concurrency_limit - circuit_running,
-        mesh_agent_free_slots: mesh_limit - mesh_active,
+        mesh_agent_free_slots: (mesh_limit - mesh_active).min(global_free_slots),
     }));
 
     events
+}
+
+/// Add replay events for close effects whose target association is still
+/// present. Once the effect clears the target SpawnAgentNode association,
+/// this returns no event on the next observation pass.
+fn observe_close_agent_retries(view: &RunView, events: &mut Vec<CircuitEvent>) {
+    for step in &view.steps {
+        if step.status == StepStatus::Completed {
+            if let Some(CircuitNodeKind::CloseAgentNode { target_node_id }) =
+                view.graph.node(&step.node_id).map(|node| &node.kind)
+            {
+                if view
+                    .resolve_target_agent(&step.node_id, target_node_id.as_deref())
+                    .is_some()
+                {
+                    events.push(CircuitEvent::CloseAgentRetry {
+                        node_id: step.node_id.clone(),
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// Gate observation (#1207): for each Running gate step, perform the
 /// impure part of the gate (LLM classification / deterministic command)
 /// and feed the result back as a pure event in THIS pass — so a gate
 /// decision lands without waiting another tick.
-fn observe_gates(active: &db::ActiveCircuitRun, view: &RunView, events: &mut Vec<CircuitEvent>) {
+fn observe_gates(
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+    events: &mut Vec<CircuitEvent>,
+    app: &AppHandle,
+) {
     for step in &view.steps {
         if step.status != StepStatus::Running {
             continue;
         }
         match view.graph.node(&step.node_id).map(|n| &n.kind) {
-            Some(CircuitNodeKind::LlmTurnClassifier) => {
-                if let Some(classification) = classify_step_turn(active, view, &step.node_id) {
+            Some(CircuitNodeKind::LlmTurnClassifier { .. }) => {
+                if let Some((agent_node_id, classification, output)) =
+                    classify_step_turn(active, view, &step.node_id)
+                {
+                    if matches!(classification, Some(crate::autopilot::evaluator::Classification::Blocked))
+                    {
+                        let issue = view
+                            .context
+                            .get("issue.number")
+                            .and_then(|number| number.parse::<i64>().ok())
+                            .unwrap_or(0);
+                        let _ = app.emit(
+                            "autopilot-blocked",
+                            crate::autopilot::pipeline::AutopilotBlockedPayload {
+                                node_id: agent_node_id,
+                                issue,
+                            },
+                        );
+                    }
                     events.push(CircuitEvent::TurnClassified {
                         node_id: step.node_id.clone(),
                         classification,
+                        output: Some(output),
                     });
                 }
             }
@@ -544,9 +710,15 @@ fn classify_step_turn(
     active: &db::ActiveCircuitRun,
     view: &RunView,
     node_id: &str,
-) -> Option<Option<crate::autopilot::evaluator::Classification>> {
+) -> Option<(i64, Option<crate::autopilot::evaluator::Classification>, String)> {
     use crate::autopilot::evaluator;
-    let agent_node_id = view.resolve_target_agent(node_id, None)?;
+    let target_node_id = match view.graph.node(node_id).map(|n| &n.kind) {
+        Some(CircuitNodeKind::LlmTurnClassifier { target_node_id }) => {
+            target_node_id.as_deref()
+        }
+        _ => None,
+    };
+    let agent_node_id = view.resolve_target_agent(node_id, target_node_id)?;
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
         return None;
     }
@@ -570,12 +742,13 @@ fn classify_step_turn(
     }
     // Evaluator backend env: the mesh's Autopilot provider side-channel
     // (never the node's own model — the #824 lesson).
-    let provider = db::get_mesh_by_id(active.run.mesh_id)
+    let backend_provider = db::get_mesh_by_id(active.run.mesh_id)
         .ok()
-        .and_then(|m| m.autopilot_provider);
-    let backend_env =
-        crate::session_naming::naming_backend_env(provider.as_deref().unwrap_or("anthropic"));
+        .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
+        .unwrap_or_else(|| "claude".to_string());
+    let backend_env = crate::session_naming::naming_backend_env(&backend_provider);
     evaluator::note_evaluation(agent_node_id);
+    let output = evaluator::cleaned_turn_tail(agent_node_id);
     let classification = evaluator::classify(agent_node_id, &backend_env);
     tracing::info!(
         "circuits: turn classifier for run {} step {} agent {} → {:?}",
@@ -584,7 +757,7 @@ fn classify_step_turn(
         agent_node_id,
         classification
     );
-    Some(classification)
+    Some((agent_node_id, classification, output))
 }
 
 /// Run a DeterministicVerification command in the mesh directory and
@@ -758,8 +931,30 @@ fn call_github_effect(
                 })
             }
             GithubActionKind::OpenPr => {
+                let review_blueprint = view.graph.is_issue_driven_autopilot_review();
+                if review_blueprint
+                    && crate::services::autopilot::configured_action_on_success(active.run.mesh_id)
+                        == "none"
+                {
+                    return Err(
+                        "the issue-driven Autopilot review blueprint cannot open a PR while the mesh policy is none"
+                            .to_string(),
+                    );
+                }
+                let agent_node_id = view
+                    .resolve_target_agent(node_id, None)
+                    .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
+                let agent_node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
+                let wrapup =
+                    crate::autopilot::pipeline::observe_wrapup_state(&agent_node, review_blueprint);
+                let wrapup_reasons = crate::autopilot::pipeline::wrapup_reasons(&wrapup);
+                if !wrapup_reasons.is_empty() {
+                    return Err(format!(
+                        "autopilot wrap-up verification failed: {}",
+                        wrapup_reasons.join("; ")
+                    ));
+                }
                 let head = open_pr_head_branch(view, node_id)?;
-                let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
                 let title = view
                     .context
                     .get("issue.title")
@@ -767,23 +962,47 @@ fn call_github_effect(
                     .unwrap_or("Circuit run")
                     .to_string();
                 let body = resolved_comment.unwrap_or_default();
-                let pr_url = client
-                    .create_pull_request(&owner, &repo, &title, &body, &head, &base)
+                // The issue-driven finish prompt asks the agent to run
+                // `gh pr create` itself.  Treat this action as an
+                // idempotent ensure: discover that PR first, and only fall
+                // back to the API create when the agent did not create one.
+                // This also makes a crash/retry between the GitHub mutation
+                // and its ledger commit safe.
+                let existing = client
+                    .find_open_pr_for_branch(&owner, &repo, &head)
                     .map_err(|e| e.to_string())?;
-
-                let pr_num = pr_url
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .and_then(|s| s.parse::<i64>().ok());
+                let (pr_num, pr_url, pr_head_ref, pr_title) = if let Some(pr) = existing {
+                    (
+                        Some(pr.number),
+                        pr.html_url,
+                        if pr.head_ref.trim().is_empty() { head.clone() } else { pr.head_ref },
+                        if pr.title.trim().is_empty() { title.clone() } else { pr.title },
+                    )
+                } else if review_blueprint {
+                    return Err(
+                        "the implementation agent did not raise an open pull request for its branch"
+                            .to_string(),
+                    );
+                } else {
+                    let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
+                    let pr_url = client
+                        .create_pull_request(&owner, &repo, &title, &body, &head, &base)
+                        .map_err(|e| e.to_string())?;
+                    let pr_num = pr_url
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .and_then(|s| s.parse::<i64>().ok());
+                    (pr_num, pr_url, head.clone(), title.clone())
+                };
 
                 Ok(CircuitEvent::GithubActionResult {
                     node_id: node_id.to_string(),
                     success: true,
                     pr_number: pr_num,
                     pr_url: Some(pr_url),
-                    pr_head_ref: Some(head),
-                    pr_title: if !title.is_empty() { Some(title) } else { None },
+                    pr_head_ref: Some(pr_head_ref),
+                    pr_title: if !pr_title.is_empty() { Some(pr_title) } else { None },
                     error: None,
                 })
             }
@@ -867,6 +1086,33 @@ fn open_pr_head_branch(view: &RunView, node_id: &str) -> Result<String, String> 
         .ok_or_else(|| "the piloted agent has no worktree branch name".to_string())
 }
 
+/// Find the SpawnAgentNode row whose association owns a CloseAgentNode
+/// target. Explicit targets already name that spawn step; omitted targets
+/// use the same resolved agent as the close effect and find its owning step.
+fn close_target_spawn_step_id(
+    view: &RunView,
+    close_node_id: &str,
+    target_node_id: Option<&str>,
+    target_agent_id: i64,
+) -> String {
+    let fallback_spawn_step_id = target_node_id.unwrap_or(close_node_id);
+    target_node_id
+        .map(str::to_owned)
+        .or_else(|| {
+            view.steps
+                .iter()
+                .find(|step| {
+                    step.agent_node_id == Some(target_agent_id)
+                        && matches!(
+                            view.graph.node(&step.node_id).map(|node| &node.kind),
+                            Some(CircuitNodeKind::SpawnAgentNode { .. })
+                        )
+                })
+                .map(|step| step.node_id.clone())
+        })
+        .unwrap_or_else(|| fallback_spawn_step_id.to_string())
+}
+
 /// Execute one transition's effects against the real world. Takes the
 /// view mutably: a spawn attaches its new agent node id to the in-memory
 /// step (and the DB) so later effects in the same pass — and the
@@ -913,6 +1159,40 @@ fn execute_effects(
                 let kind = SessionStatus::from_db_str(status);
                 db::update_agent_node_status(agent_node_id, kind)
                     .map_err(|e| format!("status write failed: {}", e))?;
+            }
+            Effect::CloseAgentNode { node_id, target_node_id } => {
+                let target = view
+                    .resolve_target_agent(node_id, target_node_id.as_deref())
+                    .ok_or_else(|| {
+                        format!(
+                            "CloseAgentNode target agent not found in lineage for node {}",
+                            node_id
+                        )
+                    })?;
+                // Closing is intentionally idempotent.  A previous worker
+                // pass may have killed/deleted the row after committing the
+                // close step but before the effect was retried.
+                match db::get_agent_node_by_id(target) {
+                    Ok(_) => {
+                        crate::services::agent_node::delete(target, true)
+                            .map_err(|e| format!("agent node close failed: {}", e))?;
+                    }
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                    Err(e) => {
+                        return Err(format!("agent node lookup failed during close: {}", e));
+                    }
+                }
+                let spawn_step_id = close_target_spawn_step_id(
+                    view,
+                    node_id,
+                    target_node_id.as_deref(),
+                    target,
+                );
+                db::clear_circuit_step_agent_node(active.run.id, &spawn_step_id)
+                    .map_err(|e| format!("circuit close association cleanup failed: {}", e))?;
+                if let Some(step) = view.step_mut(&spawn_step_id) {
+                    step.agent_node_id = None;
+                }
             }
             Effect::Notify { message } => {
                 let _ = app.emit(
@@ -1033,7 +1313,7 @@ fn spawn_step_agent(
     view: &mut RunView,
     node_id: &str,
 ) -> Result<(), String> {
-    use crate::agent::spawn::{SpawnIntent, SpawnRequest};
+    use crate::agent::spawn::{SpawnIntent, SpawnRequest, WorktreePolicy};
     let kind = view
         .graph
         .node(node_id)
@@ -1052,6 +1332,43 @@ fn spawn_step_agent(
     } = resolve_circuit_spawn_inputs(&kind)?;
 
     let resolved_prompt = view.context.resolve(&prompt);
+    let source_issue = view
+        .context
+        .get("issue.number")
+        .and_then(|number| number.parse::<i64>().ok());
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let provider = provider_str
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
+    let worktree_policy = if source_issue.is_some() {
+        WorktreePolicy::ForceBranched
+    } else {
+        WorktreePolicy::RespectMesh
+    };
+    let use_worktree_override = match worktree_policy {
+        WorktreePolicy::ForceBranched => Some(true),
+        WorktreePolicy::RespectMesh => None,
+    };
+
+    // Issue-triggered circuit runs share the legacy Autopilot trust boundary:
+    // resolve the same harness/provider chain and reject an incompatible mesh
+    // before a pending Agent Node row is created. Manual circuits remain a
+    // general-purpose graph feature and are intentionally not subject to the
+    // Autopilot compatibility gate.
+    if source_issue.is_some() {
+        let verdict = crate::autopilot::compatibility::compute_for_mesh(
+            Some(provider.as_str()),
+            mesh.default_provider.as_deref(),
+            crate::preferences::default_provider().as_deref(),
+            mesh.use_worktree,
+        );
+        if !verdict.allowed {
+            return Err(format!(
+                "Autopilot circuit cannot spawn on mesh {}: incompatible provider/worktree configuration ({:?})",
+                mesh_id, verdict.reasons
+            ));
+        }
+    }
 
     // If step already has an agent node attached (e.g. from an earlier loop iteration/retry)
     if let Some(existing_agent_id) = view.step(node_id).and_then(|s| s.agent_node_id) {
@@ -1076,15 +1393,14 @@ fn spawn_step_agent(
                 node_id,
                 old_node.path
             );
-            let new_node = crate::services::agent_node::create_pending(
+            let new_node = crate::services::agent_node::create_pending_with_worktree_override(
                 mesh_id,
                 &old_node.path,
                 &old_node.branch,
-                provider_str.as_deref(),
-                None,
-                None,
-                None,
+                Some(provider.as_str()),
+                source_issue,
                 name.as_deref(),
+                use_worktree_override,
             )
             .map_err(|e| e.to_string())?;
 
@@ -1097,7 +1413,7 @@ fn spawn_step_agent(
             db::set_circuit_step_agent_node(run_id, node_id, new_node.id)
                 .map_err(|e| format!("could not attach new agent to step: {}", e))?;
             view.attach_agent_node(node_id, new_node.id);
-            crate::autopilot::evaluator::register(new_node.id);
+            crate::autopilot::evaluator::register_circuit(new_node.id);
             crate::autopilot::evaluator::note_turn_start(new_node.id);
 
             let app_for_spawn = app.clone();
@@ -1112,7 +1428,8 @@ fn spawn_step_agent(
                 if let Err(error) = crate::agent::spawn::spawn_with_intent(
                     &app_for_spawn,
                     SpawnRequest::new(new_node.id, intent, Default::default())
-                        .with_explicit(explicit.clone()),
+                        .with_explicit(explicit.clone())
+                        .with_worktree_policy(worktree_policy),
                 )
                 .await
                 {
@@ -1123,20 +1440,18 @@ fn spawn_step_agent(
         }
     }
 
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
         .unwrap_or_else(|_| "main".to_string());
 
-    let node = crate::services::agent_node::create_pending(
+    let node = crate::services::agent_node::create_pending_with_worktree_override(
         mesh.id,
         &mesh.path,
         &branch,
         // Issue #1358: per-node provider override flows here.
-        provider_str.as_deref(),
-        None,
-        None,
-        None,
+        Some(provider.as_str()),
+        source_issue,
         name.as_deref(),
+        use_worktree_override,
     )
     .map_err(|e| e.to_string())?;
 
@@ -1152,7 +1467,7 @@ fn spawn_step_agent(
 
     // Track output times for this piloted node (the PTY submit watcher
     // and future classifiers read them).
-    crate::autopilot::evaluator::register(node.id);
+    crate::autopilot::evaluator::register_circuit(node.id);
     crate::autopilot::evaluator::note_turn_start(node.id);
 
     let _ = app.emit(
@@ -1188,7 +1503,8 @@ fn spawn_step_agent(
             // `HarnessCapabilities.supports_extra_args` (Terminal drops;
             // every interactive harness keeps).
             SpawnRequest::new(node.id, intent, Default::default())
-                .with_explicit(explicit.clone()),
+                .with_explicit(explicit.clone())
+                .with_worktree_policy(worktree_policy),
         )
         .await
         {
@@ -1479,6 +1795,60 @@ mod tests {
         assert!(!should_drive_circuit_run(false, "issue:42:buildmesh:run"));
     }
 
+    #[test]
+    fn close_agent_retry_is_not_observed_after_close_clears_spawn_association() {
+        let mut view = RunView {
+            run_id: 42,
+            graph: CircuitGraph::issue_driven_autopilot_review("buildmesh:run"),
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView {
+                    node_id: "reviewer".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: Some(701),
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "close_reviewer".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+            ],
+        };
+        let mut events = Vec::new();
+
+        observe_close_agent_retries(&view, &mut events);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            CircuitEvent::CloseAgentRetry { node_id } if node_id == "close_reviewer"
+        ));
+
+        // This is the in-memory half of the real CloseAgentNode effect. The
+        // database half clears the same `reviewer` spawn step below it.
+        let spawn_step_id = close_target_spawn_step_id(
+            &view,
+            "close_reviewer",
+            Some("reviewer"),
+            701,
+        );
+        assert_eq!(spawn_step_id, "reviewer");
+        view.step_mut(&spawn_step_id).unwrap().agent_node_id = None;
+
+        events.clear();
+        observe_close_agent_retries(&view, &mut events);
+        assert!(
+            events.is_empty(),
+            "a completed close must not be replayed after its target association is cleared"
+        );
+    }
+
     // -- startup reconciliation -------------------------------------------------
 
     fn node_state(archived: bool, worktree_dir_exists: Option<bool>) -> ReconcileNodeState {
@@ -1744,6 +2114,7 @@ mod tests {
 
         let graph = CircuitGraph {
             version: 1,
+            blueprint: None,
             nodes: vec![
                 CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
                 CircuitNode {
@@ -1919,17 +2290,17 @@ mod tests {
         );
     }
 
-    /// `provider: None` resolves to `Provider::Anthropic` (the standing
-    /// default — matches `Provider::from_db_str("")`'s fallback and the
-    /// mesh-row compatibility default). The `provider_str` MUST be `None`
-    /// so the row uses the mesh's default provider.
+    /// `provider: None` leaves the AST override empty. The worker then
+    /// resolves the effective provider through the same explicit -> mesh ->
+    /// application default chain as legacy Autopilot before creating the
+    /// row, so this pure resolver remains free of database access.
     #[test]
     fn circuit_spawn_default_provider_is_none_when_unset() {
         let kind = spawn_kind(None, None, None, None);
         let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
         assert!(
             resolved.provider_str.is_none(),
-            "None ⇒ fall through to mesh default at `create_pending` time"
+            "None -> resolve the mesh/application default at spawn time"
         );
     }
 }

@@ -9,12 +9,10 @@
  * leaving the keyboard — a click-only menu is an obstacle, not
  * autocomplete (issue #1359 review feedback).
  *
- * Issue #1359: when the parent supplies a `reachable` reachability
- * summary, suggestions are grouped by namespace (Issue Context, Pull
- * Request, Node Outputs, …) and unreachable chips are dimmed but
- * remain selectable — the user may still want to author a prompt that
- * resolves empty in this branch (e.g. a draft for an issue-label branch
- * before the trigger is wired up).
+ * When the parent supplies a `reachable` reachability summary,
+ * suggestions are grouped by namespace and limited to values that have
+ * an upstream producer in the selected branch. This prevents authors
+ * from inserting placeholders that the runtime can only resolve empty.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -96,7 +94,9 @@ export function MustacheTextarea({
         dynamic.push(`node.${id}.output`);
       }
     }
-    const catalogue = [...MUSTACHE_PATHS, ...dynamic];
+    const catalogue = [...MUSTACHE_PATHS, ...dynamic].filter((path) =>
+      isReachablePath(path, reachable)
+    );
     const scored = catalogue
       .map((p) => ({ p, s: fuzzyScore(q, p) ?? -Infinity }))
       .filter((x) => x.s > -Infinity);
@@ -273,7 +273,6 @@ export function MustacheTextarea({
                 </div>
                 <ul role="group">
                   {paths.map((path) => {
-                    const live = isReachablePath(path, reachable);
                     // Compute the flat index for keyboard highlight.
                     const flatIdx = flatPaths.indexOf(path);
                     return (
@@ -283,36 +282,19 @@ export function MustacheTextarea({
                           role="option"
                           aria-selected={highlight === flatIdx}
                           data-testid={`mustache-chip-${path}`}
-                          data-reachable={live ? 'true' : 'false'}
+                          data-reachable="true"
                           data-highlighted={highlight === flatIdx ? 'true' : 'false'}
                           onMouseDown={(e) => e.preventDefault()}
                           onMouseEnter={() => setHighlight(flatIdx)}
                           onClick={() => pick(path)}
-                          title={
-                            live
-                              ? spec.description
-                              : `${spec.description} — not reachable in this branch`
-                          }
+                          title={spec.description}
                           className={`w-full flex items-center justify-between gap-2 px-2 py-1 text-xs font-mono text-left ${
                             highlight === flatIdx
-                              ? live
-                                ? 'bg-accent-cyan/25 text-accent-cyan'
-                                : 'bg-bg-card text-status-warning'
-                              : live
-                              ? 'text-text-secondary hover:bg-accent-cyan/15 hover:text-accent-cyan'
-                              : 'text-text-muted/60 hover:bg-bg-card'
+                              ? 'bg-accent-cyan/25 text-accent-cyan'
+                              : 'text-text-secondary hover:bg-accent-cyan/15 hover:text-accent-cyan'
                           }`}
                         >
                           <span>{path}</span>
-                          {!live && (
-                            <span
-                              data-testid={`mustache-chip-${path}-unreachable`}
-                              aria-label="unreachable in this branch"
-                              className="text-2xs uppercase tracking-wide text-status-warning/80"
-                            >
-                              empty
-                            </span>
-                          )}
                         </button>
                       </li>
                     );

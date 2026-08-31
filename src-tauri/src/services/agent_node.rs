@@ -212,6 +212,35 @@ pub fn create_pending(
     )
 }
 
+/// Pending-node creation with an explicit worktree policy. Issue-driven
+/// circuits use this instead of creating a legacy `autopilot_runs` row: the
+/// circuit ledger remains the owner of orchestration state while the shared
+/// Agent Node row still records the branch-backed environment it needs.
+#[allow(clippy::too_many_arguments)]
+pub fn create_pending_with_worktree_override(
+    mesh_id: i64,
+    path: &str,
+    branch: &str,
+    provider: Option<&str>,
+    source_issue: Option<i64>,
+    name_override: Option<&str>,
+    use_worktree_override: Option<bool>,
+) -> Result<AgentNode, AgentNodeError> {
+    create_pending_with_source_pr_fork_and_worktree(
+        mesh_id,
+        path,
+        branch,
+        provider,
+        source_issue,
+        None,
+        None,
+        name_override,
+        None,
+        None,
+        use_worktree_override,
+    )
+}
+
 /// Like [`create_pending`], but also records the fork's owner login and
 /// clone URL when the PR is from a fork (issue #443) and the PR's head
 /// commit SHA for exact-pinning (issue #444). `commands::agent::create_pr_node`
@@ -230,6 +259,35 @@ pub fn create_pending_with_source_pr_fork(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
+    create_pending_with_source_pr_fork_and_worktree(
+        mesh_id,
+        path,
+        branch,
+        provider,
+        source_issue,
+        source_pr,
+        source_pr_pinned_sha,
+        name_override,
+        head_repo_owner,
+        head_repo_clone_url,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_pending_with_source_pr_fork_and_worktree(
+    mesh_id: i64,
+    path: &str,
+    branch: &str,
+    provider: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    source_pr_pinned_sha: Option<&str>,
+    name_override: Option<&str>,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+    use_worktree_override: Option<bool>,
+) -> Result<AgentNode, AgentNodeError> {
     let mut node = create_with_source_pr_fork(
         mesh_id,
         path,
@@ -238,7 +296,7 @@ pub fn create_pending_with_source_pr_fork(
         source_issue,
         source_pr,
         source_pr_pinned_sha,
-        None,
+        use_worktree_override,
         name_override,
         head_repo_owner,
         head_repo_clone_url,

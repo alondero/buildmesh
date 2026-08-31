@@ -9,7 +9,7 @@ use super::process::register_agent;
 use super::reader::open_pty_pair;
 use super::{
     AgentSpawnedPayload, ExplicitSpawnOverrides, MeshSyncOutcome, MeshSyncWarningPayload,
-    ProviderErrorPayload, ResumeCause, SpawnIntent, SpawnOutcome, SpawnRequest,
+    ProviderErrorPayload, ResumeCause, SpawnIntent, SpawnOutcome, SpawnRequest, WorktreePolicy,
 };
 use crate::agent::process::PROCESS_REGISTRY;
 use crate::agent::session_lifecycle;
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tauri::Emitter;
 
 /// Options for spawning or resuming an agent process.
-pub struct SpawnOptions {
+pub(crate) struct SpawnOptions {
     pub session_id: i64,
     pub provider: Provider,
     pub resume: Option<String>,
@@ -50,6 +50,9 @@ pub struct SpawnOptions {
     /// the only one) silently drops the value at the resolver rather
     /// than splicing a synthetic flag into its argv.
     pub explicit_extra_args: Option<String>,
+    /// Caller-owned worktree policy. `ForceBranched` is used by issue-driven
+    /// circuit runs; `RespectMesh` preserves the normal spawn behaviour.
+    pub worktree_policy: WorktreePolicy,
 }
 
 /// Pure decision for "given the stored CLI session id, the resume cause,
@@ -141,6 +144,7 @@ pub(crate) async fn spawn_with_intent(
         intent,
         terminal_size,
         explicit,
+        worktree_policy,
     } = request;
     // Bind the type name so the `ExplicitSpawnOverrides` re-export stays
     // live at the module scope (the destructure pattern alone doesn't
@@ -265,6 +269,7 @@ pub(crate) async fn spawn_with_intent(
             // arg to the harness (issue #1148 AC #32 + #1155 AC #3).
             explicit_model: explicit.model,
             explicit_effort: explicit.effort,
+            worktree_policy,
         },
     )
     .await;
@@ -422,6 +427,7 @@ pub(crate) async fn spawn_agent_inner(
         explicit_model,
         explicit_effort,
         explicit_extra_args,
+        worktree_policy,
     } = opts;
 
     tracing::info!(
@@ -527,8 +533,9 @@ pub(crate) async fn spawn_agent_inner(
     // starts, so this read is ordered correctly. The node row itself already
     // carries `use_worktree = true` (spawn override in `services::autopilot`).
     let is_autopilot = db::get_autopilot_run(session_id).ok().flatten().is_some();
-    let use_worktree = use_worktree || is_autopilot;
-    let worktree_mode = if is_autopilot {
+    let force_branched = matches!(worktree_policy, WorktreePolicy::ForceBranched);
+    let use_worktree = use_worktree || is_autopilot || force_branched;
+    let worktree_mode = if is_autopilot || force_branched {
         "branched"
     } else {
         worktree_mode
