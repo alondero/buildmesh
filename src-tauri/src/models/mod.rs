@@ -1760,6 +1760,7 @@ mod tests {
         assert!(Provider::OpenCode.adapter().self_assigns_session_id());
         assert!(!Provider::OpenCode.adapter().captures_session_id_from_pty());
         assert!(!Provider::Terminal.adapter().self_assigns_session_id());
+        assert!(!Provider::Freebuff.adapter().self_assigns_session_id());
     }
 
     /// `is_plain_terminal` is the single trait method that switches the

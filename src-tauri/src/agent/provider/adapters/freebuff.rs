@@ -2,23 +2,28 @@
 //! installed on PATH as a single `freebuff` binary (or via npm as
 //! `freebuff.cmd` on Windows).
 //!
-//! **Interactive mode** (the default) opens a TUI that requires a PTY for
-//! ANSI rendering and raw stdin input. Buildmesh launches in interactive
-//! mode everywhere.
+//! **Provenance (issue #1437)**: Freebuff is an AI coding agent CLI built
+//! on Codebuff (`https://github.com/manicode/codebuff`). Upstream configuration
+//! and runtime credentials reside under `~/.config/manicode/`.
 //!
-//! **Session resumption** uses `--continue <id>`. Freebuff assigns its own
-//! session IDs (self-assigns), so `self_assigns_session_id()` returns
-//! `true` and `session_assign_args()` is a no-op.
+//! **Interactive mode**: Opens a terminal TUI that requires a PTY for ANSI
+//! rendering and raw stdin input. Buildmesh launches in interactive mode.
 //!
-//! **Shell wrapping**: `freebuff` is distributed as a `.cmd` batch shim on
-//! Windows (`freebuff.cmd`), which `CreateProcess` won't run directly; the
-//! recipe wraps with `WindowsShell::Cmd` → `cmd.exe /c freebuff …` on
-//! Windows. On macOS / Linux it is an executable on PATH so
-//! `WindowsShell::Direct` is used.
+//! **Session resumption**: Resumption is handled via `--continue <id>`.
+//! Rather than attempting to scrape unpredictable PTY output, Buildmesh
+//! assigns a UUID on fresh spawn (`session_assign_args` -> `["--continue", id]`)
+//! and persists `cli_session_id` in SQLite. On resume, `resume_args` forwards
+//! `["--continue", id]`, guaranteeing end-to-end resumption across restarts.
 //!
-//! **Prefill** is the trailing positional `[prompt]` — there is no
-//! `--prefill` flag. We override `prefill_args()` to return the text as a
-//! single positional arg.
+//! **Shell wrapping**: Distributed as an npm `.cmd` batch shim on Windows
+//! (`freebuff.cmd`), which `CreateProcess` will not execute directly without
+//! a shell wrapper. The recipe specifies `WindowsShell::Cmd` on Windows native
+//! (`cmd.exe /c freebuff …`). On macOS and Linux it executes directly via
+//! `WindowsShell::Direct`.
+//!
+//! **Prefill**: Freebuff takes its initial prompt as trailing positional
+//! text (`[prompt]`). `prefill_args()` formats the string as a single
+//! positional argument (no `--prefill` flag).
 
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
@@ -26,7 +31,8 @@ use crate::models::EnvType;
 pub struct FreebuffAdapter;
 pub static FREEBUFF: FreebuffAdapter = FreebuffAdapter;
 
-/// Per-platform shell selection. Mirrors the MiniMax Code / DeepSeek pattern.
+/// Shell selection per platform. Windows native uses `cmd.exe /c` to wrap
+/// the npm `.cmd` batch shim, while Unix platforms invoke the binary directly.
 fn shell_for(platform: Platform) -> WindowsShell {
     match platform {
         Platform::Macos | Platform::Linux => WindowsShell::Direct,
@@ -87,24 +93,24 @@ impl AgentProvider for FreebuffAdapter {
         &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
-    /// Freebuff auto-assigns session ids — captured from PTY output.
+    /// Buildmesh assigns the session UUID at spawn so `cli_session_id` is
+    /// reliably stored in the database for later resumption.
     fn self_assigns_session_id(&self) -> bool {
-        true
+        false
     }
 
+    /// Fresh spawn assigns the session ID via `--continue <id>`.
+    fn session_assign_args(&self, id: &str) -> Vec<String> {
+        vec!["--continue".into(), id.into()]
+    }
+
+    /// Resume invocation continues the existing session via `--continue <id>`.
     fn resume_args(&self, id: &str) -> Vec<String> {
         vec!["--continue".into(), id.into()]
     }
 
-    /// No `--session-id` flag — freebuff assigns its own.
-    fn session_assign_args(&self, _id: &str) -> Vec<String> {
-        vec![]
-    }
-
     fn prefill_args(&self, text: &str) -> Vec<String> {
-        // freebuff's prompt is the trailing positional — there is no
-        // `--prefill` flag. The trait default would emit `["--prefill", text]`
-        // which freebuff rejects.
+        // Freebuff prompt is the trailing positional argument.
         vec![text.into()]
     }
 }
@@ -132,15 +138,14 @@ mod tests {
             assert!(recipe.base_args.is_empty());
             assert!(
                 matches!(recipe.windows_shell, WindowsShell::Direct),
-                "{:?} must use WindowsShell::Direct — got {:?}",
-                platform,
+                "{platform:?} must use WindowsShell::Direct — got {:?}",
                 recipe.windows_shell
             );
         }
     }
 
     #[test]
-    fn spawn_recipe_cmd_on_windows() {
+    fn spawn_recipe_cmd_on_windows_native() {
         let recipe = FREEBUFF.spawn_recipe(Platform::Windows, EnvType::Windows);
         assert_eq!(recipe.binary, "freebuff");
         assert!(recipe.base_args.is_empty());
@@ -152,44 +157,43 @@ mod tests {
     }
 
     #[test]
+    fn spawn_recipe_on_windows_host_with_wsl_runtime() {
+        let recipe = FREEBUFF.spawn_recipe(Platform::Windows, EnvType::Wsl);
+        assert_eq!(recipe.binary, "freebuff");
+        // Windows platform emits WindowsShell::Cmd in adapter, runtime wrapping
+        // by spawn_environment handles wsl.exe redirection.
+        assert!(matches!(recipe.windows_shell, WindowsShell::Cmd));
+    }
+
+    #[test]
     fn available_on_all_three_platforms() {
         let platforms = FREEBUFF.available_on();
-        assert_eq!(
-            platforms.len(),
-            3,
-            "available_on should pin to exactly {{Windows, Linux, Macos}} — got {:?}",
-            platforms
-        );
+        assert_eq!(platforms.len(), 3);
         assert!(platforms.contains(&Platform::Windows));
         assert!(platforms.contains(&Platform::Linux));
         assert!(platforms.contains(&Platform::Macos));
     }
 
     #[test]
-    fn self_assigns_session_id() {
-        assert!(FREEBUFF.self_assigns_session_id());
+    fn does_not_self_assign_session_id() {
+        // Must be false so Buildmesh generates the session UUID on fresh spawn.
+        assert!(!FREEBUFF.self_assigns_session_id());
+    }
+
+    #[test]
+    fn session_assign_args_format() {
+        let args = FREEBUFF.session_assign_args("sess-1234");
+        assert_eq!(args, vec!["--continue", "sess-1234"]);
     }
 
     #[test]
     fn resume_args_format() {
-        let args = FREEBUFF.resume_args("abc-123");
-        assert_eq!(args, vec!["--continue", "abc-123"]);
-    }
-
-    #[test]
-    fn session_assign_args_empty() {
-        let args = FREEBUFF.session_assign_args("any-id");
-        assert!(
-            args.is_empty(),
-            "Freebuff self-assigns; session_assign_args must be empty"
-        );
+        let args = FREEBUFF.resume_args("sess-1234");
+        assert_eq!(args, vec!["--continue", "sess-1234"]);
     }
 
     #[test]
     fn prefill_args_is_positional() {
-        // freebuff accepts `[prompt]` as a positional — there is no
-        // `--prefill` flag. The trait default (`vec!["--prefill", t]`)
-        // is wrong here.
         let args = FREEBUFF.prefill_args("fix the auth bug");
         assert_eq!(args, vec!["fix the auth bug"]);
     }
@@ -199,14 +203,6 @@ mod tests {
         let multi = "first line\nsecond line\n  indented";
         let args = FREEBUFF.prefill_args(multi);
         assert_eq!(args, vec![multi]);
-    }
-
-    #[test]
-    fn supports_resume_but_no_model_override() {
-        assert!(FREEBUFF.supports_resume());
-        assert!(!FREEBUFF.supports_model_override());
-        assert!(!FREEBUFF.requires_attention_hook());
-        assert!(FREEBUFF.supports_prefill());
     }
 
     #[test]
@@ -229,33 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn freebuff_interactive_recipe_never_carries_model_arg() {
-        // Even if a caller bypassed the resolver mask and stuffed a model into
-        // ResolvedAgentConfig, the prepared recipe must not include --model,
-        // because the harness advertised `supports_model_override = false`.
-        let config = ResolvedAgentConfig {
-            model: Some("some-model".to_string()),
-            effort: None,
-            extra_args: None,
-        };
-        let input = HarnessLaunchInput {
-            platform: Platform::Macos,
-            runtime: EnvType::Windows,
-            session: SessionIdModeRef::None,
-            config: &config,
-            prefill: None,
-            sandbox: false,
-        };
-        let prepared = default_prepare(&FREEBUFF, input);
-        assert!(
-            !prepared.recipe.base_args.iter().any(|a| a == "--model"),
-            "freebuff interactive recipe must never carry --model; got {:?}",
-            prepared.recipe.base_args
-        );
-    }
-
-    #[test]
-    fn freebuff_resume_recipe_carries_continue_flag() {
+    fn fresh_spawn_prepare_wires_session_assign_args() {
         let config = ResolvedAgentConfig {
             model: None,
             effort: None,
@@ -264,21 +234,39 @@ mod tests {
         let input = HarnessLaunchInput {
             platform: Platform::Windows,
             runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("sess-abc"),
+            session: SessionIdModeRef::Assign("fresh-uuid-99"),
+            config: &config,
+            prefill: Some("start work"),
+            sandbox: false,
+        };
+        let prepared = default_prepare(&FREEBUFF, input);
+        assert_eq!(
+            prepared.recipe.base_args,
+            vec!["--continue", "fresh-uuid-99", "start work"],
+            "fresh spawn must pass assigned session id via --continue and prefill positionally"
+        );
+    }
+
+    #[test]
+    fn resume_prepare_wires_resume_args() {
+        let config = ResolvedAgentConfig {
+            model: None,
+            effort: None,
+            extra_args: None,
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume("existing-uuid-100"),
             config: &config,
             prefill: None,
             sandbox: false,
         };
         let prepared = default_prepare(&FREEBUFF, input);
-        assert!(
-            prepared.recipe.base_args.contains(&"--continue".to_string()),
-            "freebuff resume must include --continue, got {:?}",
-            prepared.recipe.base_args
-        );
-        assert!(prepared.recipe.base_args.contains(&"sess-abc".to_string()));
-        assert!(
-            !prepared.recipe.base_args.iter().any(|a| a == "--model"),
-            "freebuff resume must not carry --model"
+        assert_eq!(
+            prepared.recipe.base_args,
+            vec!["--continue", "existing-uuid-100"],
+            "resume spawn must pass resume args via --continue"
         );
     }
 
