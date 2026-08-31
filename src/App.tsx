@@ -160,10 +160,11 @@ function App() {
   // `attachCustomKeyEventHandler` matches `Cmd+F` to `'find'`) — a
   // global-shortcut registration would beat that focus-level handler
   // and every `⌘+F` in an agent terminal would jump to the grid
-  // search. The two-modifier `⌘+⌥+F` carve-out matches
-  // `cycle-grid-modes`'s `⌘+⌥+G` (also a one-modifier-away collision
-  // on macOS): no readline, terminal, or other app shortcut uses two
-  // meta+alt modifiers together.
+  // search. The two-modifier `⌘+⌥+F` carve-out follows the same
+  // readline-free two-modifier principle as the `Ctrl/Cmd+Alt+Arrow*`
+  // grid-traversal bindings (see the comment above): no readline,
+  // terminal, or other app shortcut uses two meta+alt modifiers
+  // together, so the chord stays free.
   const focusGridSearchShortcut = isMac
     ? { key: 'CommandOrControl+Alt+F', action: 'focus-grid-search' as const }
     : { key: 'CommandOrControl+F', action: 'focus-grid-search' as const };
@@ -286,13 +287,16 @@ function App() {
         //
         // No cooldown: a held key must not burn a window — the user
         // re-pressing while already focused is a harmless re-focus.
-        // No `isTextInputFocused()` guard: the target IS a text input,
-        // and the user's deliberate "focus the search" gesture is the
-        // only thing this action does, so blocking it because the user
-        // is already in a text input would defeat the binding. The
-        // singleton's `registerGridSearchInput` is the one source of
-        // truth for "is there a target", and a no-op `.focus()` is
-        // cheap.
+        // No `isTextInputFocused()` guard: `isTextInputFocused()` already
+        // excludes the xterm-helper-textarea (so a focused agent terminal
+        // still allows the chord to fire — the common "I just typed
+        // something for the agent and want to filter the grid" case), but
+        // a real text input (inline node rename, settings form) would
+        // block the chord. The user is asking to focus the search input;
+        // the only thing that should preempt that is if there's no
+        // search input to focus, which the singleton's
+        // `registerGridSearchInput` tracks. A no-op `.focus()` (no
+        // registered input) is cheap.
         focusGridSearch();
         return;
       }

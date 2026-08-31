@@ -211,10 +211,13 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     // and Tauri's global-shortcut plugin would beat that focus-level
     // registration if we claimed it here — every `⌘+F` in an agent
     // terminal would jump to the grid search instead of opening the
-    // terminal's find bar. The two-modifier carve-out (⌘+⌥+F) is the
-    // same collision-avoidance pattern `cycle-grid-modes` uses on
-    // macOS (⌘+⌥+G, see entry above) and that `Ctrl+Alt+Arrow*` uses
-    // everywhere — no readline or terminal gesture uses two modifiers.
+    // terminal's find bar. The two-modifier carve-out (⌘+⌥+F) follows
+    // the readline-free two-modifier principle shared by the
+    // `Ctrl/Cmd+Alt+Arrow*` grid-traversal bindings in App.tsx — no
+    // readline, terminal, or other app shortcut uses two meta+alt
+    // modifiers together, so the chord stays free. Not flagged
+    // `splash`: searching the grid is meaningless on the pre-spawn
+    // empty canvas the splash advertises (no nodes to search).
     action: 'focus-grid-search',
     group: 'grid',
     description: 'Focus grid search',
@@ -229,7 +232,9 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     // discoverability surface only — no App.tsx Tauri global-shortcut
     // registration, no shortcut-triggered dispatch. Listing it in the
     // `grid` group (not `modal`) tells the user this Esc is "for the
-    // grid", distinct from the modal group's "close dialog" Esc.
+    // grid", distinct from the modal group's "close dialog" Esc. Not
+    // flagged `splash` for the same reason as `focus-grid-search`
+    // above.
     action: 'clear-grid-search',
     group: 'grid',
     description: 'Clear grid search',

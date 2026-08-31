@@ -15,14 +15,6 @@ import { registerGridSearchInput } from '../../lib/gridSearchFocus';
  * that ticket is the natural home for them, and stacking them on this
  * PR would conflate the work and balloon the diff.
  *
- * Visibility: the search input lives in the right-hand area of the
- * grid, mounted only when there is at least one view mode that renders
- * the grid (i.e. NOT in `single` mode, where the soloed node fills the
- * canvas and a search input has nothing to filter). The single-mode
- * check is intentionally a render-time guard rather than a
- * `viewMode === 'single'` branch on the input itself, so the search
- * input doesn't briefly appear then vanish on the Single-mode toggle.
- *
  * Esc handling: handled inline in the input's `onKeyDown` (not in
  * App.tsx's window keydown listener), so it only fires when the input
  * itself has focus. `e.stopPropagation()` prevents the Event from

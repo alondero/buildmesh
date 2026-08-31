@@ -14,9 +14,9 @@
  *      outside the component tree. App.tsx isn't a parent of the input,
  *      so a `useImperativeHandle`/`forwardRef` chain would need a
  *      context provider, an effect, and a ref forwarded through any
- *      wrapper the View Header adds. A module-level ref is the same
- *      pattern `terminalManager` uses (a singleton service outside the
- *      React tree that the rest of the app talks to).
+ *      wrapper the View Header adds. A module-level `let` is the
+ *      lighter-weight alternative — a single ref, three free functions,
+ *      no provider.
  *
  * The input registers itself in a layout effect (synchronous, before the
  * browser paints, so the first ⌘+F from a cold load can't land before
@@ -26,8 +26,9 @@
  *
  * The test seam (`__resetGridSearchInputForTests`) lets unit tests
  * clear the singleton between cases without standing up a full
- * component mount cycle — same pattern `useSidebarResize.ts` uses
- * with its `__resetSidebarResizeForTests`.
+ * component mount cycle. The double-underscore `__resetXyzForTests`
+ * pattern is the same one `lib/updater.ts` uses for its identifier
+ * cache (`__resetIdentifierCacheForTests`).
  */
 let registeredInput: HTMLInputElement | null = null;
 
