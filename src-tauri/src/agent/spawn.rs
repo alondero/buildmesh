@@ -34,7 +34,6 @@ pub use reader::{open_pty_pair, pump_pty_output, SessionIdMode, EARLY_EXIT_WINDO
 pub use command::{build_spawn_command, build_spawn_command_prepared};
 pub use process::{inject_attention_hook, is_agent_already_running, spawn_child};
 #[cfg(test)]
-#[cfg(test)]
 pub(crate) use reader::{maybe_buffer_for_naming, post_exit_action, PostExitAction};
 pub use wire::{
     AgentOutputPayload, AgentSpawnedPayload, MeshSyncOutcome, MeshSyncWarningPayload,
