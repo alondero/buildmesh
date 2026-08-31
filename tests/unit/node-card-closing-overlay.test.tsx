@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 vi.mock('@dnd-kit/core', () => ({
   useDraggable: () => ({ setNodeRef: vi.fn(), listeners: {}, attributes: {}, isDragging: false }),
@@ -127,6 +128,8 @@ describe('NodeCard closing overlay', () => {
   it('writes the banner response directly to the node PTY', async () => {
     const user = userEvent.setup();
     const writeToAgent = vi.fn(async () => undefined);
+    const node = makeNode({ id: 5, status: 'awaiting_input' });
+    seedAgentNodes([node]);
     useAgentNodeStore.setState({
       writeToAgent,
       semanticTurns: {
@@ -135,7 +138,7 @@ describe('NodeCard closing overlay', () => {
     });
     render(
       <NodeCard
-        node={makeNode({ id: 5, status: 'awaiting_input' })}
+        nodeId={node.id}
         isActive
         onActivate={vi.fn()}
         onBuildRun={vi.fn()}

@@ -1,6 +1,6 @@
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import type { KeyboardEvent } from 'react';
-import { type AgentNode, useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { GridNodeHeader } from './GridNodeHeader';
