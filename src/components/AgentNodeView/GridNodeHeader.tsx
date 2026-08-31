@@ -186,6 +186,12 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   const { summary } = useGitSummary(gitPath);
   const { pr: openPr } = useOpenPr(nodeId, gitPath);
 
+  const meshLabel = useMemo(() => {
+    if (!node) return '';
+    const m = meshesById.get(node.mesh_id);
+    return m ? `[${m.name} #${node.id}]` : `[#${node.id}]`;
+  }, [meshesById, node?.mesh_id, node?.id]);
+
   if (!node) return null;
   const meshColor = getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color);
   const tier = getHeaderTier(width);
@@ -263,11 +269,6 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   // and still emits `autopilot-finishing` for the pill transition.)
 
   const isPanelNode = probeOpen && probeTab === 'review' && isReviewingThisNode;
-
-  const meshLabel = useMemo(() => {
-    const m = meshesById.get(node.mesh_id);
-    return m ? `[${m.name} #${node.id}]` : `[#${node.id}]`;
-  }, [meshesById, node.mesh_id, node.id]);
 
   // Issue #668 — advertise the Alt+G / Cmd+G shortcut in the title tooltip
   // alongside the existing double-click affordance, so discoverability

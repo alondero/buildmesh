@@ -1,5 +1,10 @@
 import { useEffect } from 'react';
-import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
+import {
+  register,
+  unregister,
+  isRegistered,
+  type ShortcutEvent,
+} from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 export type GlobalShortcutBinding = {
@@ -91,6 +96,15 @@ export function useGlobalShortcuts({ bindings, onTrigger }: UseGlobalShortcutsOp
     // emit while the user is typing in another app).
     const isFocusedRef: { current: boolean } = { current: true };
 
+    const triggerOnPress = (action: string) => (event: ShortcutEvent) => {
+      // Tauri emits both ends of a global shortcut's lifecycle. These
+      // actions are one-shot gestures, so release must not replay them
+      // (a toggle would otherwise open on press and close on release).
+      if (event.state !== 'Pressed') return;
+      if (!isFocusedRef.current) return;
+      onTrigger(action);
+    };
+
     async function tryRegister(key: string, action: string): Promise<void> {
       await enqueueKeyOp(key, async () => {
         try {
@@ -101,10 +115,7 @@ export function useGlobalShortcuts({ bindings, onTrigger }: UseGlobalShortcutsOp
           // preserves submission order; we just don't register against a
           // stale "not registered" snapshot.
           if (disposed) return;
-          await register(key, () => {
-            if (!isFocusedRef.current) return;
-            onTrigger(action);
-          });
+          await register(key, triggerOnPress(action));
         } catch (e) {
           console.warn(`Failed to register shortcut ${key}:`, e);
         }
@@ -155,10 +166,7 @@ export function useGlobalShortcuts({ bindings, onTrigger }: UseGlobalShortcutsOp
               try {
                 if (focused) {
                   if (!(await isRegistered(key))) {
-                    await register(key, () => {
-                      if (!isFocusedRef.current) return;
-                      onTrigger(action);
-                    });
+                    await register(key, triggerOnPress(action));
                   }
                 } else {
                   await unregister(key);
