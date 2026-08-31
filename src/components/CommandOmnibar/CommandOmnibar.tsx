@@ -71,6 +71,7 @@ export function CommandOmnibar() {
 function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const isExecutingRef = useRef(false);
 
   // `omnibarMode` seeds the search box at mount AND re-seeds when the mode
   // changes while the palette is open (the editors' quick-open convention):
@@ -92,11 +93,8 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     () => [...meshesById.values()].sort((a, b) => a.position - b.position),
     [meshesById],
   );
-
-  // GitHub issues/PRs have no cache store — they're fetched per-tab in the
-  // Probe — so those two domains index empty until a cache exists (the '#'
-  // prefix then simply shows no results). Nodes, meshes, commands and the
-  // spawn menu cover the remaining domains live.
+  // GitHub lists are owned and loaded by the Probe tabs; the palette does not
+  // initiate network requests while the user is searching.
   const index: OmnibarIndex = useMemo(
     () =>
       buildOmnibarIndex({
@@ -123,7 +121,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
     inputRef.current?.focus();
     return () => {
-      previouslyFocusedRef.current?.focus?.();
+      if (!isExecutingRef.current) previouslyFocusedRef.current?.focus?.();
     };
   }, []);
 
@@ -170,6 +168,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
       setViewMode: useUIStore.getState().setViewMode,
       openProbeTab: useUIStore.getState().openProbeTab,
     };
+    isExecutingRef.current = true;
     executeOmnibarItem(item.id, ctx);
     onClose();
   };

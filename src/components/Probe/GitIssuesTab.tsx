@@ -38,7 +38,7 @@
  */
 
 import { formatError } from '../../lib/errorUtils';
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 // `openUrl` is intentionally imported here even though the title + ↗
 // links now route through `<SafeLink>`. The blocked-by button (further
 // down in this file) is a `<button>`, not an `<a>`, so SafeLink
@@ -55,6 +55,7 @@ import {
   type GitHubIssue,
 } from '../../lib/tauri';
 import { useMeshStore } from '../../stores/meshStore';
+import { registerIssueNavigation, type IssueNavigationRequest } from '../../lib/omnibar/issueNavigation';
 import { addToast } from '../../stores/toastStore'; // Issue #1001
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
@@ -104,6 +105,8 @@ function buildBlockedByTooltip(
 
 export function GitIssuesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
+  const [navigationRequest, setNavigationRequest] = useState<IssueNavigationRequest | null>(null);
+  const rowRefs = useRef(new Map<number, HTMLDivElement>());
   // `getDefaultProvider` is mesh-scoped — the only call that needs the
   // meshId directly, since it resolves the per-mesh > app-wide > default
   // precedence chain server-side.
@@ -148,6 +151,8 @@ export function GitIssuesTab() {
   // reset into one hook so the load effect can call `expanded.clear()`
   // instead of `setExpanded(new Set())`.
   const expanded = useToggleSet<number>();
+
+  useEffect(() => registerIssueNavigation(setNavigationRequest), []);
 
   // Cross-reference index for the blocked-by indicator. Built once per
   // render of the loaded open issues list — both as a Set (for fast
@@ -198,6 +203,28 @@ export function GitIssuesTab() {
     setError(null);
     load();
   }, [activeMeshId, reloadKey]);
+
+  // A jump can originate outside the Probe (currently the Omnibar). Wait for
+  // the requested mesh's list to render, then reveal and focus that exact
+  // interactive row through its React ref. Missing/error targets are surfaced
+  // instead of being silently swallowed.
+  useEffect(() => {
+    if (loading || navigationRequest === null) return;
+    if (navigationRequest.meshId !== activeMeshId) {
+      setNavigationRequest(null);
+      return;
+    }
+    const row = rowRefs.current.get(navigationRequest.issueNumber);
+    if (row !== undefined) {
+      row.scrollIntoView?.({ block: 'center' });
+      row.focus({ preventScroll: true });
+    } else if (error !== null) {
+      addToast('GitHub', `Issue #${navigationRequest.issueNumber} could not be loaded.`, 'warning');
+    } else {
+      addToast('GitHub', `Issue #${navigationRequest.issueNumber} was not found.`, 'warning');
+    }
+    setNavigationRequest(null);
+  }, [activeMeshId, error, issues, loading, navigationRequest]);
 
   // Fetch the provider list once at mount. Platform filtering (e.g.
   // macOS-only Anthropic) is enforced server-side via
@@ -401,8 +428,12 @@ export function GitIssuesTab() {
             {issues.map(issue => {
               const isExpanded = expanded.isExpanded(issue.number);
               return (
-                <ProbeRow
-                  key={issue.number}
+                  <ProbeRow
+                    key={issue.number}
+                    focusRef={(row) => {
+                      if (row === null) rowRefs.current.delete(issue.number);
+                      else rowRefs.current.set(issue.number, row);
+                    }}
                   dataAttr="issue"
                   rowKey={issue.number}
                   number={issue.number}

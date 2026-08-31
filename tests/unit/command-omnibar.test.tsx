@@ -106,6 +106,9 @@ function seedStores(): void {
     cheatsheetOpen: false,
     appSettingsOpen: false,
     remoteAccessOpen: false,
+    probeOpen: false,
+    probeTab: 'files',
+    activeDiffFile: null,
   });
   useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: null });
   useMeshStore.setState({ meshesById: new Map([[mesh.id, mesh]]), selectedMeshId: null });
@@ -415,6 +418,42 @@ describe('CommandOmnibar — keyboard interaction', () => {
 });
 
 describe('CommandOmnibar — command execution routing', () => {
+  it('activates a node, selects its mesh, and enters Mesh Grid', () => {
+    executeOmnibarItem(`node:${node.id}`, {
+      meshes: [mesh],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(node.id);
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+  });
+
+  it('retargets an existing Single view without dropping back to Mesh Grid', () => {
+    useUIStore.setState({ viewMode: 'single' });
+    executeOmnibarItem(`node:${node.id}`, {
+      meshes: [mesh],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().viewMode).toBe('single');
+  });
+
+  it('selects a mesh and aligns the canvas with Mesh Grid', () => {
+    useUIStore.setState({ viewMode: 'pinned' });
+    executeOmnibarItem(`mesh:${mesh.id}`, {
+      meshes: [mesh],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+  });
+
   it('routes the show-cheatsheet command through uiStore (no window-event side channel)', () => {
     render(<CommandOmnibar />);
     openOmnibar('commands');
@@ -430,6 +469,18 @@ describe('CommandOmnibar — command execution routing', () => {
     type('settings');
     fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
     expect(useUIStore.getState().appSettingsOpen).toBe(true);
+  });
+
+  it('does not restore the pre-palette focus target after executing an action', () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('settings');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
+    expect(document.activeElement).not.toBe(trigger);
+    trigger.remove();
   });
 
   it('runOmnibarCommand returns false for an unknown command id (catalog drift pin)', () => {
@@ -468,7 +519,7 @@ describe('CommandOmnibar — command execution routing', () => {
     useMeshStore.setState({ selectedMeshId: 1 });
     const openProbeTab = vi.fn();
     executeOmnibarItem('issue:2:7', {
-      meshes: [],
+      meshes: [{ ...mesh, id: 2, name: 'other' }],
       spawnOptions: [],
       setViewMode: vi.fn(),
       openProbeTab,
@@ -481,13 +532,21 @@ describe('CommandOmnibar — command execution routing', () => {
     useMeshStore.setState({ selectedMeshId: 1 });
     const openProbeTab = vi.fn();
     executeOmnibarItem('pull:3:42', {
-      meshes: [],
+      meshes: [{ ...mesh, id: 3, name: 'other-pr-mesh' }],
       spawnOptions: [],
       setViewMode: vi.fn(),
       openProbeTab,
     });
     expect(useMeshStore.getState().selectedMeshId).toBe(3);
     expect(openProbeTab).toHaveBeenCalledWith('pulls');
+    expect(useUIStore.getState().activeDiffFile).toEqual({
+      filePath: '',
+      rootPath: mesh.path,
+      nodeId: null,
+      meshId: 3,
+      source: 'pr',
+      prNumber: 42,
+    });
   });
 
   it('routes a mesh result to mesh selection', () => {

@@ -22,6 +22,7 @@ import * as api from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
+import { requestIssueNavigation } from '../../lib/omnibar/issueNavigation';
 
 /** Everything `executeOmnibarItem` needs beyond the stores themselves. */
 export interface OmnibarActionContext {
@@ -44,10 +45,28 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
       setTheme((currentTheme() === 'light' ? 'dark' : 'light') as ThemeName);
       return true;
     case 'view-single':
-    case 'view-mesh':
     case 'view-pinned':
-    case 'view-all':
       ctx.setViewMode(id.slice('view-'.length) as ViewMode);
+      return true;
+    case 'view-mesh': {
+      const meshStore = useMeshStore.getState();
+      if (meshStore.selectedMeshId === null) {
+        const active = useAgentNodeStore.getState().getActiveNode();
+        const meshId = active?.mesh_id ?? ctx.meshes[0]?.id;
+        if (meshId !== undefined) {
+          meshStore.selectMesh(meshId);
+          return true;
+        }
+      }
+      if (useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+      return true;
+    }
+    case 'view-all':
+      if (useMeshStore.getState().selectedMeshId !== null) {
+        useMeshStore.getState().selectMesh(null);
+      } else if (useUIStore.getState().viewMode !== 'all') {
+        ctx.setViewMode('all');
+      }
       return true;
     case 'open-settings':
       useUIStore.getState().openAppSettings();
@@ -103,13 +122,23 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
   if (id.startsWith('node:')) {
     const nodeId = Number(id.slice('node:'.length));
     if (!Number.isFinite(nodeId)) return;
-    useAgentNodeStore.getState().setActiveNode(nodeId);
+    const node = useAgentNodeStore.getState().agentNodes.find((item) => item.id === nodeId);
+    if (!node) return;
+    const wasSingle = useUIStore.getState().viewMode === 'single';
+    useAgentNodeStore.getState().setActiveNode(node.id);
+    useMeshStore.getState().selectMesh(node.mesh_id);
+    // Mesh selection drives Mesh mode through the shared subscription. Only
+    // restore Single when that was the source lens.
+    if (wasSingle) ctx.setViewMode('single');
     return;
   }
   if (id.startsWith('mesh:')) {
     const meshId = Number(id.slice('mesh:'.length));
     if (!Number.isFinite(meshId)) return;
+    if (!ctx.meshes.some((mesh) => mesh.id === meshId)) return;
+    const changed = useMeshStore.getState().selectedMeshId !== meshId;
     useMeshStore.getState().selectMesh(meshId);
+    if (!changed) ctx.setViewMode('mesh');
     return;
   }
   if (id.startsWith('command:')) {
@@ -144,14 +173,28 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     // belonging to a mesh other than the currently selected one must
     // select its mesh first — otherwise the user lands on the tab showing
     // a DIFFERENT mesh's issues (issue #1411 review).
-    const meshId = Number(id.split(':')[1]);
-    if (Number.isFinite(meshId)) {
-      useMeshStore.getState().selectMesh(meshId);
+    const [, meshPart, numberPart] = id.split(':');
+    const meshId = Number(meshPart);
+    const number = Number(numberPart);
+    const mesh = ctx.meshes.find((item) => item.id === meshId);
+    if (!mesh || !Number.isFinite(number)) return;
+    const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
+    useMeshStore.getState().selectMesh(mesh.id);
+    if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+    if (id.startsWith('issue:')) {
+      requestIssueNavigation({ meshId: mesh.id, issueNumber: number });
+      ctx.openProbeTab('issues');
+    } else {
+      ctx.openProbeTab('pulls');
+      useUIStore.getState().openDiff({
+        filePath: '',
+        rootPath: mesh.path,
+        nodeId: null,
+        meshId: mesh.id,
+        source: 'pr',
+        prNumber: number,
+      });
     }
-    // Navigation entry point: jump the Probe to the mesh's GitHub tab. The
-    // row itself doesn't carry enough context to deep-link into a single
-    // issue/PR view — the tab is the discoverable surface for it.
-    ctx.openProbeTab(id.startsWith('pull:') ? 'pulls' : 'issues');
     return;
   }
 }
