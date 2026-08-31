@@ -102,6 +102,10 @@ export class MobileErrorBoundary extends Component<Props, State> {
             maxWidth: '32rem',
             width: '100%',
             background: '#111116',
+            // This boundary renders with literal colours, not var(--color-*):
+            // if App.css failed to load, CSS variables would resolve to
+            // nothing and the error UI would be invisible. Keep this palette
+            // in lockstep with the --color-* values in src/App.css (#1376).
             border: '1px solid rgba(239, 68, 68, 0.5)',
             borderRadius: '6px',
             padding: '1.25rem',
@@ -124,7 +128,9 @@ export class MobileErrorBoundary extends Component<Props, State> {
               fontSize: '0.72rem',
               color: '#e0e0e0',
               background: '#0a0a0e',
-              border: '1px solid #1f1f2e',
+              // Literal palette, not var(--color-*) — see the note on the
+              // card border above. 0.07 mirrors --color-border-default.
+              border: '1px solid rgba(255, 255, 255, 0.07)',
               borderRadius: '4px',
               padding: '0.7rem',
               overflow: 'auto',

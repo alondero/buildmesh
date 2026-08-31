@@ -96,6 +96,17 @@ const AA_BODY_THRESHOLD = 4.5;
 // ---------- Tests -----------------------------------------------------------
 
 describe('light theme text-token contrast (#734)', () => {
+  it.each([
+    ['bg-base', LIGHT_BG_BASE],
+    ['bg-surface', LIGHT_BG_SURFACE],
+    ['bg-card', LIGHT_BG_CARD],
+  ])('declares --color-%s as the pinned light value %s', (name, expected) => {
+    // Ties the constants below to the real [data-theme="light"] block in
+    // src/App.css — without this, the ratio tests could pass while the
+    // CSS drifted.
+    expect(readLightToken(name)).toBe(expected);
+  });
+
   it('declares --color-text-muted as the AA-passing palette grey', () => {
     expect(readLightToken('text-muted')).toBe(EXPECTED_LIGHT_TEXT_MUTED);
   });

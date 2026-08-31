@@ -1,4 +1,6 @@
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
+/* Web fonts load via <link> in index.html (single request, preconnected,
+   render-parallel — not a CSS @import waterfall). Keep the families and
+   weights there in sync with the --font-* stacks below. */
 @import "tailwindcss";
 
 @theme {
@@ -67,11 +69,11 @@
   --color-border-strong: rgba(255, 255, 255, 0.14);
   --color-border-active: #00d4ff;
 
-  /* Typography */
+  /* Typography. --font-sans / --font-mono are the single source: Tailwind
+     v4 generates the `font-sans` / `font-mono` utilities from them, and the
+     base body rule reads --font-sans directly. */
   --font-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  --font-family-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-family-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   /* `--text-2xs` is the one step below Tailwind's default scale (text-xs =
      12px). It's the smallest legible size in the app — badges, gutter
      labels, micro-captions. Nothing may go below it. (Tailwind v4 only
@@ -201,10 +203,14 @@
   --color-status-running-bg: rgba(8, 145, 178, 0.10);
   --color-status-blocked: #d97706;
 
-  /* Borders & Dividers — light hairlines */
-  --color-border-subtle: #ebebed;
-  --color-border-default: #d4d4d8;
-  --color-border-strong: #a1a1aa;
+  /* Borders & Dividers — light hairlines. Same alpha-hairline architecture
+     as dark (issue #1376): black over the light surface luminance, so
+     boundaries composite cleanly on every elevation instead of pre-mixed
+     hexes tuned to one background (0.08 ≈ #ebebed, 0.17 ≈ #d4d4d8,
+     0.37 ≈ #a1a1aa on white). */
+  --color-border-subtle: rgba(0, 0, 0, 0.08);
+  --color-border-default: rgba(0, 0, 0, 0.17);
+  --color-border-strong: rgba(0, 0, 0, 0.37);
   --color-border-active: #0891b2;
 
   /* Shadows — lower alpha on light bg; shadows read stronger there */
@@ -268,13 +274,10 @@
 html, body {
   margin: 0;
   padding: 0;
-  font-family: var(--font-family-sans);
+  font-family: var(--font-sans);
   font-size: var(--font-size-base);
   font-weight: 400;
   line-height: 1.5;
-  /* Tabular digits app-wide: stats, diff counters, and timestamps align
-     column-wise without per-site font-variant rules (#1376). */
-  font-variant-numeric: tabular-nums;
   color: var(--color-text-primary);
   background-color: var(--color-bg-base);
   -webkit-font-smoothing: antialiased;

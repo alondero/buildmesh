@@ -70,12 +70,35 @@ function readToken(name: string): string {
 // revert is caught at the test boundary — not just by visual review.
 // Surfaces retuned to neutral zinc in issue #1376; ratios re-measured
 // against --color-text-muted #7a8492 (5.22 / 4.97 / 4.80 / 4.75).
+// The AA assertions below feed readToken() output into contrastRatio(),
+// so an edit to src/App.css that drifts from these pins fails BOTH the
+// pin and the ratio maths.
 const EXPECTED_TEXT_MUTED = '#7a8492';
 const BG_BASE = '#0a0a0e';
 const BG_SURFACE = '#111116';
 const BG_OVERLAY = '#15151c';
 const BG_CARD = '#16161d';
+const BG_CARD_HOVER = '#1b1b23';
 const AA_BODY_THRESHOLD = 4.5;
+
+const PINNED_BG_TOKENS: Array<[string, string]> = [
+  ['bg-base', BG_BASE],
+  ['bg-surface', BG_SURFACE],
+  ['bg-overlay', BG_OVERLAY],
+  ['bg-card', BG_CARD],
+  ['bg-card-hover', BG_CARD_HOVER],
+];
+
+describe('pinned surface tokens (#1376)', () => {
+  it.each(PINNED_BG_TOKENS)(
+    'declares --color-%s as the pinned zinc value %s',
+    (name, expected) => {
+      // Ties the constants below to the real src/App.css declarations —
+      // without this, the ratio tests could pass while the CSS drifted.
+      expect(readToken(name)).toBe(expected);
+    },
+  );
+});
 
 // ---------- Tests ----------------------------------------------------------
 
@@ -86,7 +109,7 @@ describe('theme text-token contrast (#732)', () => {
   });
 
   it('--color-text-muted clears WCAG AA (4.5:1) on bg-base', () => {
-    const ratio = contrastRatio(EXPECTED_TEXT_MUTED, BG_BASE);
+    const ratio = contrastRatio(readToken('text-muted'), readToken('bg-base'));
     expect(ratio).toBeGreaterThanOrEqual(AA_BODY_THRESHOLD);
   });
 
@@ -94,7 +117,7 @@ describe('theme text-token contrast (#732)', () => {
     // bg-surface is the panel background — every probe tab renders onto
     // it. Failing on bg-surface is the same bug as on bg-base, just on
     // a different panel.
-    const ratio = contrastRatio(EXPECTED_TEXT_MUTED, BG_SURFACE);
+    const ratio = contrastRatio(readToken('text-muted'), readToken('bg-surface'));
     expect(ratio).toBeGreaterThanOrEqual(AA_BODY_THRESHOLD);
   });
 
@@ -103,7 +126,7 @@ describe('theme text-token contrast (#732)', () => {
     // The current ratio is 4.80:1 (4.86:1 before the #1376 surface
     // retune) — a future darkening of bg-overlay would push it below AA.
     // Pin the contract.
-    const ratio = contrastRatio(EXPECTED_TEXT_MUTED, BG_OVERLAY);
+    const ratio = contrastRatio(readToken('text-muted'), readToken('bg-overlay'));
     expect(ratio).toBeGreaterThanOrEqual(AA_BODY_THRESHOLD);
   });
 
@@ -113,7 +136,7 @@ describe('theme text-token contrast (#732)', () => {
     // #1376 surface retune — the darker zinc card actually widened the
     // margin). A future lighten of bg-card would fail this guard.
     // Pin the contract.
-    const ratio = contrastRatio(EXPECTED_TEXT_MUTED, BG_CARD);
+    const ratio = contrastRatio(readToken('text-muted'), readToken('bg-card'));
     expect(ratio).toBeGreaterThanOrEqual(AA_BODY_THRESHOLD);
   });
 
@@ -121,10 +144,10 @@ describe('theme text-token contrast (#732)', () => {
     // Hovered cards still render their text — muted copy must stay AA
     // on the hover surface too. #1376 originally proposed #1c1c24, which
     // measures 4.47:1 — under AA — so the token ships as #1b1b23
-    // (4.52:1). Pin both sides: the value AND the AA margin, so a future
-    // revert to the spec's original hex fails here, not at visual review.
-    expect(readToken('bg-card-hover')).toBe('#1b1b23');
-    const ratio = contrastRatio(EXPECTED_TEXT_MUTED, '#1b1b23');
+    // (4.52:1). The value is pinned by the bg-card-hover entry in
+    // PINNED_BG_TOKENS above, so a revert to the spec's original hex
+    // fails there, not at visual review.
+    const ratio = contrastRatio(readToken('text-muted'), readToken('bg-card-hover'));
     expect(ratio).toBeGreaterThanOrEqual(AA_BODY_THRESHOLD);
   });
 
@@ -132,8 +155,8 @@ describe('theme text-token contrast (#732)', () => {
     // Hierarchy guard: text-muted must be visually LESS prominent than
     // text-secondary, otherwise the two tokens collapse into one and the
     // design system loses a tier.
-    const muted = contrastRatio(readToken('text-muted'), BG_BASE);
-    const secondary = contrastRatio(readToken('text-secondary'), BG_BASE);
+    const muted = contrastRatio(readToken('text-muted'), readToken('bg-base'));
+    const secondary = contrastRatio(readToken('text-secondary'), readToken('bg-base'));
     expect(muted).toBeLessThan(secondary);
   });
 
@@ -141,12 +164,12 @@ describe('theme text-token contrast (#732)', () => {
     // A "let's brighten text-muted" change that overshoots text-secondary
     // would flatten the hierarchy. The four-way comparison catches that
     // here, not in a visual review after the PR ships.
-    const primary = contrastRatio(readToken('text-primary'), BG_BASE);
-    const secondary = contrastRatio(readToken('text-secondary'), BG_BASE);
-    const muted = contrastRatio(readToken('text-muted'), BG_BASE);
+    const primary = contrastRatio(readToken('text-primary'), readToken('bg-base'));
+    const secondary = contrastRatio(readToken('text-secondary'), readToken('bg-base'));
+    const muted = contrastRatio(readToken('text-muted'), readToken('bg-base'));
     expect(primary).toBeGreaterThan(secondary);
     expect(secondary).toBeGreaterThan(muted);
-    expect(muted).toBeGreaterThan(contrastRatio(BG_BASE, BG_BASE)); // == 1
+    expect(muted).toBeGreaterThan(contrastRatio(readToken('bg-base'), readToken('bg-base'))); // == 1
   });
 });
 

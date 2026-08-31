@@ -298,7 +298,7 @@ export function UsageTab() {
               dateTime={lastRefreshedAt!.toISOString()}
               aria-label={`Last refreshed at ${refreshedAbsolute}`}
               title={refreshedAbsolute!}
-              className="cursor-default"
+              className="cursor-default tabular-nums"
             >
               {`Refreshed ${refreshedRelative}`}
             </time>

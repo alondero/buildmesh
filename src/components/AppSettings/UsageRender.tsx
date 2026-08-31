@@ -48,7 +48,7 @@ export function UsageBar({ window }: { window: UsageWindow }) {
         />
       </div>
       {window.resetsAt && (
-        <p className="text-2xs text-text-muted mt-1">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
+        <p className="text-2xs text-text-muted mt-1 tabular-nums">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
       )}
     </div>
   );
