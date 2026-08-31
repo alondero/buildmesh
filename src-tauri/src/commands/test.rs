@@ -298,6 +298,7 @@ fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
             resume,
             None,
             None,
+            None,
         ))
     }).join();
 

@@ -404,7 +404,8 @@ export const spawnAgent = (
   resume?: string | null,
   rows?: number,
   cols?: number,
-) => _invoke('spawn_agent', { sessionId, provider, resume, rows, cols });
+  prefill?: string,
+) => _invoke('spawn_agent', { sessionId, provider, resume, rows, cols, prefill });
 
 // Issue #774 / #775 — swap a node's Model Provider. The worktree,
 // branch, name, and position are preserved; only `provider` changes. The

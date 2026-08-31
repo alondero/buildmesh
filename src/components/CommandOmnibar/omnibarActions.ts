@@ -32,6 +32,8 @@ export interface OmnibarActionContext {
   spawnOptions: SpawnOption[];
   setViewMode: (mode: ViewMode) => void;
   openProbeTab: (tab: ProbeTab) => void;
+  /** Optional first-turn prompt for a spawn item (issue #1413). */
+  initialPrompt?: string;
 }
 
 /**
@@ -159,9 +161,18 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     if (!option || !mesh) return;
     // Route through the same store action the sidebar spawn menu uses
     // (#283 invariant: create → activate → select mesh, atomically).
+    // The optional initial prompt is the Omnibar's first-turn prefill
+    // (issue #1413) — omitted / empty means a Fresh spawn.
     void useAgentNodeStore
       .getState()
-      .selectProviderForMesh(mesh.id, mesh.name, mesh.path, option.id)
+      .selectProviderForMesh(
+        mesh.id,
+        mesh.name,
+        mesh.path,
+        option.id,
+        undefined,
+        ctx.initialPrompt,
+      )
       .catch(() => {
         // Spawn failures already toast via the store's error surface.
       });

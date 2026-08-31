@@ -96,6 +96,11 @@ pub struct NodeSpawnFailedPayload {
 
 /// Spawn a new agent for the given session. The `provider` argument is
 /// resolved by the spawner from the persisted `AgentNode` row.
+///
+/// `prefill` (issue #1413) is an optional first-turn prompt. Ignored when
+/// `resume` is set (a resumed session already has a conversation). A
+/// non-empty prefill on a fresh spawn becomes `SpawnIntent::Loop`, the
+/// same verbatim-prefill intent the circuit spawn-with-prompt path uses.
 #[command]
 pub async fn spawn_agent(
     app: AppHandle,
@@ -104,18 +109,13 @@ pub async fn spawn_agent(
     resume: Option<String>,
     rows: Option<u16>,
     cols: Option<u16>,
+    prefill: Option<String>,
 ) -> Result<(), String> {
     crate::agent::spawn::spawn_with_intent(
         &app,
         SpawnRequest::new(
             session_id,
-            if resume.is_some() {
-                SpawnIntent::Resume {
-                    cause: crate::agent::spawn::ResumeCause::Explicit,
-                }
-            } else {
-                SpawnIntent::Fresh
-            },
+            spawn_agent_intent(resume, prefill),
             TerminalSize {
                 rows: rows.unwrap_or(24),
                 cols: cols.unwrap_or(80),
@@ -124,6 +124,23 @@ pub async fn spawn_agent(
     )
     .await
     .map(|_| ())
+}
+
+/// Pick the spawn intent for the `spawn_agent` IPC. Resume always wins
+/// (the captured conversation is the point); otherwise a non-empty
+/// prefill is the first turn, and everything else is a fresh boot.
+pub(crate) fn spawn_agent_intent(resume: Option<String>, prefill: Option<String>) -> SpawnIntent {
+    if resume.is_some() {
+        SpawnIntent::Resume {
+            cause: crate::agent::spawn::ResumeCause::Explicit,
+        }
+    } else if let Some(prompt) = prefill.filter(|s| !s.trim().is_empty()) {
+        SpawnIntent::Loop {
+            initial_prompt: prompt,
+        }
+    } else {
+        SpawnIntent::Fresh
+    }
 }
 
 /// Internal implementation shared by spawn_issue_agent and spawn_handover_agent.
@@ -1198,5 +1215,35 @@ mod tests {
     // `provider_info_marks_*_as_resumable`) and `write_to_agent_blocking_unknown_*`
     // migrated with their fns to `crate::agent::provider_menu::tests` and
     // `crate::agent::process::tests` (issue #1052).
+
+    #[test]
+    fn spawn_agent_intent_fresh_when_no_resume_and_no_prefill() {
+        assert_eq!(super::spawn_agent_intent(None, None), SpawnIntent::Fresh);
+        assert_eq!(
+            super::spawn_agent_intent(None, Some("   ".into())),
+            SpawnIntent::Fresh,
+            "whitespace-only prefill is not a first turn"
+        );
+    }
+
+    #[test]
+    fn spawn_agent_intent_loop_when_prefill_is_non_empty() {
+        assert_eq!(
+            super::spawn_agent_intent(None, Some("fix the flaky test".into())),
+            SpawnIntent::Loop {
+                initial_prompt: "fix the flaky test".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn spawn_agent_intent_resume_wins_over_prefill() {
+        assert_eq!(
+            super::spawn_agent_intent(Some("sess-1".into()), Some("ignored".into())),
+            SpawnIntent::Resume {
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
+        );
+    }
 }
 

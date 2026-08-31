@@ -86,6 +86,7 @@ describe('useAgentNodeStore', () => {
       error: null,
       closingNodeIds: new Set(),
       schedules: {},
+      pendingPrefills: {},
     });
     vi.clearAllMocks();
     setWorktreeCloseActionResolverForTests();
@@ -275,6 +276,61 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
       expect(useMeshStore.getState().selectedMeshId).toBe(99); // unchanged
       expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+    });
+
+    it('stages a non-empty initial prompt for the subsequent auto-spawn (issue #1413)', async () => {
+      const newNode = {
+        id: 42, mesh_id: 7, name: 'm', path: '/p', branch: 'main',
+        env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+        use_worktree: true, position: 0,
+      };
+      mockInvoke.mockResolvedValueOnce(newNode);
+
+      await useAgentNodeStore.getState().selectProviderForMesh(
+        7, 'm', '/p', 'anthropic', undefined, '  fix the flaky test  ',
+      );
+
+      expect(useAgentNodeStore.getState().pendingPrefills[42]).toBe('fix the flaky test');
+    });
+
+    it('does not stage a whitespace-only initial prompt', async () => {
+      const newNode = {
+        id: 44, mesh_id: 7, name: 'm', path: '/p', branch: 'main',
+        env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+        use_worktree: true, position: 0,
+      };
+      mockInvoke.mockResolvedValueOnce(newNode);
+
+      await useAgentNodeStore.getState().selectProviderForMesh(
+        7, 'm', '/p', 'anthropic', undefined, '   ',
+      );
+
+      expect(useAgentNodeStore.getState().pendingPrefills[44]).toBeUndefined();
+    });
+  });
+
+  describe('spawnAgent pending prefill (issue #1413)', () => {
+    it('forwards a staged prompt to spawn_agent and consumes it', async () => {
+      const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
+      useAgentNodeStore.setState({
+        agentNodes: [existing],
+        pendingPrefills: { 42: 'fix the flaky test' },
+      });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'spawn_agent') return Promise.resolve(undefined);
+        if (cmd === 'list_agent_nodes') return Promise.resolve([existing]);
+        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
+        return Promise.resolve(undefined);
+      });
+
+      await useAgentNodeStore.getState().spawnAgent(42, 'anthropic', 24, 80);
+
+      expect(mockInvoke).toHaveBeenCalledWith('spawn_agent', expect.objectContaining({
+        sessionId: 42,
+        provider: 'anthropic',
+        prefill: 'fix the flaky test',
+      }));
+      expect(useAgentNodeStore.getState().pendingPrefills[42]).toBeUndefined();
     });
   });
 
