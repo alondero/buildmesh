@@ -6,8 +6,8 @@
 //! `{{ path }}` placeholders. Whitespace inside the braces is tolerated
 //! (`{{circuit.name}}` == `{{ circuit.name }}`). Unknown paths resolve to
 //! the empty string — a template referencing a not-yet-populated namespace
-//! must not wedge a run, and the milestone-2 namespaces (`issue.*`,
-//! `pr.*`, `verification.*`, `retry.*`) simply resolve empty today.
+//! must not wedge a run. Trigger, Autopilot, and PR builders below populate
+//! the namespaces used by the executable blueprints.
 //!
 //! Deliberately NOT the full Mustache spec: no sections, no inverted
 //! sections, no partials, no HTML escaping (the consumers are PTY prompt
@@ -82,6 +82,36 @@ impl CircuitContext {
         self.set("issue.author", author);
         self.set("issue.url", url);
         self.set("issue.labels", labels.join(", "));
+        let prefill = crate::agent::spawn::format_issue_prefill_with_url(number, title, url);
+        self.set("issue.prefill", prefill);
+        self
+    }
+
+    /// Populate the dynamic wrap-up prompt used by the issue-driven circuit
+    /// blueprint. The template is loaded here, at run creation time, so the
+    /// user's current `finish.md` and mesh PR policy apply without freezing a
+    /// copy into the blueprint JSON.
+    pub fn with_autopilot_finish_prompt(
+        &mut self,
+        issue_number: Option<i64>,
+        action_on_success: Option<&str>,
+    ) -> &mut Self {
+        self.set(
+            "autopilot.finish_prompt",
+            crate::autopilot::finish::finish_prompt(issue_number, action_on_success),
+        );
+        self
+    }
+
+    /// Record the collaborator-gate result for an issue-triggered run. The
+    /// circuit graph always contains a human-approval gate; trusted issues
+    /// use this flag to auto-pass it, while untrusted issues remain blocked
+    /// until the Probe's Approve action supplies `CollaboratorApproved`.
+    pub fn with_collaborator_gate(&mut self, auto_run: bool) -> &mut Self {
+        self.set(
+            "autopilot.collaborator_gate",
+            if auto_run { "auto" } else { "approval" },
+        );
         self
     }
 
@@ -228,6 +258,19 @@ mod tests {
             "https://github.com/alondero/buildmesh/issues/1208"
         );
         assert_eq!(ctx.resolve("{{issue.labels}}"), "ready-for-agent, bug");
+        assert_eq!(
+            ctx.resolve("{{issue.prefill}}"),
+            "Please work on GitHub issue #1208 — React to the world\nhttps://github.com/alondero/buildmesh/issues/1208"
+        );
+    }
+
+    #[test]
+    fn collaborator_gate_context_resolves_each_decision() {
+        let mut ctx = CircuitContext::new();
+        ctx.with_collaborator_gate(true);
+        assert_eq!(ctx.resolve("{{autopilot.collaborator_gate}}"), "auto");
+        ctx.with_collaborator_gate(false);
+        assert_eq!(ctx.resolve("{{autopilot.collaborator_gate}}"), "approval");
     }
 
     #[test]

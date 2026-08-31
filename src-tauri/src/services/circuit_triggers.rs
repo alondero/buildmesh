@@ -22,10 +22,11 @@
 //! on the circuit worker's dedicated OS thread (blocking reqwest +
 //! SQLite are fine there), invoked from its tick loop.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
 use crate::autopilot::circuit::context::CircuitContext;
 use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind};
 use crate::db;
@@ -175,7 +176,7 @@ fn run_github_poll_pass() {
         for node in &graph.nodes {
             match &node.kind {
                 CircuitNodeKind::GithubIssueLabel { label } => {
-                    ingest_issues(&circuit, label);
+                    ingest_issues(&circuit, label, graph.is_issue_driven_autopilot_review());
                 }
                 CircuitNodeKind::GithubPullRequestLabel { label } => {
                     ingest_pull_requests(&circuit, label);
@@ -188,11 +189,20 @@ fn run_github_poll_pass() {
 
 /// Query labelled open issues for the circuit's mesh repo and mint one
 /// pending run per unseen source.
-fn ingest_issues(circuit: &AutopilotCircuit, label: &str) {
+fn ingest_issues(circuit: &AutopilotCircuit, label: &str, review_blueprint: bool) {
     let Some((owner, repo, client)) = repo_client_for(circuit) else {
         return;
     };
-    let issues = match client.list_open_issues_with_label(&owner, &repo, label) {
+    let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
+    if review_blueprint && action == "none" {
+        tracing::warn!(
+            "circuits: review blueprint {} is paused because mesh {} has autopilot_action_on_success=none",
+            circuit.id,
+            circuit.mesh_id
+        );
+        return;
+    }
+    let mut issues = match client.list_open_issues_with_label(&owner, &repo, label) {
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(
@@ -205,6 +215,79 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str) {
             return;
         }
     };
+
+    // Preserve issue-driven Autopilot's dependency ordering: a labelled
+    // issue whose `Blocked by` references an open or already-managed issue
+    // remains parked, so it cannot consume a circuit run before its
+    // prerequisite is resolved. The review blueprint adds this filter here
+    // because its circuit ledger, rather than the legacy autopilot ledger,
+    // owns deduplication.
+    if review_blueprint {
+        let known_issue_numbers = match db::list_circuit_trigger_identities(circuit.id) {
+            Ok(identities) => identities
+                .iter()
+                .filter_map(|identity| issue_number_from_identity(identity))
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::warn!(
+                    "circuits: could not read known issue identities for {}: {}",
+                    circuit.name,
+                    e
+                );
+                return;
+            }
+        };
+        let open_issue_numbers: HashSet<i64> = issues.iter().map(|issue| issue.number).collect();
+        issues.retain(|issue| {
+            match crate::services::autopilot::unresolved_blockers(
+                issue,
+                &open_issue_numbers,
+                &known_issue_numbers,
+            ) {
+                None => true,
+                Some(blockers) => {
+                    if crate::services::autopilot::mark_blocked_logged(circuit.id, issue.number) {
+                        tracing::info!(
+                            "circuits: issue #{} on circuit {} blocked by {:?} — parked, retry next pass",
+                            issue.number,
+                            circuit.id,
+                            blockers
+                        );
+                    }
+                    false
+                }
+            }
+        });
+    }
+
+    // The legacy issue-driven path checks collaborator push access before it
+    // launches an agent. The review blueprint keeps the same trust boundary,
+    // but records RequireApproval as a circuit gate so the user can approve
+    // it from the existing run ledger instead of silently discarding it.
+    let mut gate_decisions = HashMap::new();
+    if review_blueprint {
+        issues.retain(|issue| {
+            let trigger = AutopilotTrigger::from_issue(&owner, &repo, issue);
+            match gate_trigger(&client, &trigger) {
+                Ok(decision) => {
+                    gate_decisions.insert(issue.number, decision);
+                    true
+                }
+                Err(e) => {
+                    // A permission lookup failure is transient. Fail closed
+                    // and retry on the next poll rather than auto-running an
+                    // issue whose author we could not verify.
+                    tracing::warn!(
+                        "circuits: permission check for issue #{} on circuit {} failed: {}",
+                        issue.number,
+                        circuit.id,
+                        e
+                    );
+                    false
+                }
+            }
+        });
+    }
     let fetched: Vec<(String, i64)> = issues
         .iter()
         .map(|i| (issue_identity(i.number, label), i.number))
@@ -223,9 +306,23 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str) {
                     &i.html_url,
                     &i.labels,
                 );
+                if let Some(decision) = gate_decisions.get(&i.number) {
+                    ctx.with_collaborator_gate(matches!(decision, GateDecision::AutoRun));
+                }
+                ctx.with_autopilot_finish_prompt(Some(i.number), Some(action.as_str()));
                 ctx
             })
     });
+}
+
+/// Extract the source issue number from a circuit's stable `issue:<n>:label`
+/// identity. Manual, interval, and PR identities intentionally return None.
+fn issue_number_from_identity(identity: &str) -> Option<i64> {
+    let mut parts = identity.splitn(3, ':');
+    if parts.next()? != "issue" {
+        return None;
+    }
+    parts.next()?.parse().ok()
 }
 
 /// Query labelled open PRs for the circuit's mesh repo and mint one
@@ -300,6 +397,8 @@ fn repo_client_for(circuit: &AutopilotCircuit) -> Option<(String, String, GitHub
 fn base_context(circuit: &AutopilotCircuit) -> CircuitContext {
     let mut ctx = CircuitContext::new();
     ctx.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
+    let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
+    ctx.with_autopilot_finish_prompt(None, Some(action.as_str()));
     ctx
 }
 

@@ -243,6 +243,22 @@ function TargetNodeSelect({
   );
 }
 
+function TargetAgentField({
+  value,
+  upstreamSpawns,
+  onChange,
+}: {
+  value: string | null;
+  upstreamSpawns: string[];
+  onChange: (targetNodeId: string | null) => void;
+}) {
+  return (
+    <Field label="Target agent">
+      <TargetNodeSelect value={value} upstreamSpawns={upstreamSpawns} onChange={onChange} />
+    </Field>
+  );
+}
+
 /** One row of the context reference drawer. Renders the canonical path
  *  alongside the sample value the runtime will resolve; rows whose
  *  namespace isn't reachable in this branch get an "empty" badge so
@@ -289,17 +305,18 @@ function ContextReferenceDrawer({
   reachable: ReachableContext | undefined;
   hasTemplate: boolean;
 }) {
-  if (!hasTemplate) return null;
-
-  // Build the row list: static MUSTACHE_PATHS plus dynamic spawn-output
-  // chips (`node.<id>.output`) for every reachable spawn upstream.
+  // Build the row list from static paths plus dynamic spawn-output chips,
+  // then keep only values with an upstream producer for this node.
   const spawnOutputPaths = useMemo(
     () => (reachable?.nodeOutputIds ?? []).map((id) => `node.${id}.output`),
     [reachable]
   );
   const allPaths = useMemo(
-    () => [...MUSTACHE_PATHS, ...spawnOutputPaths],
-    [spawnOutputPaths]
+    () =>
+      [...MUSTACHE_PATHS, ...spawnOutputPaths].filter((path) =>
+        isReachablePath(path, reachable)
+      ),
+    [reachable, spawnOutputPaths]
   );
   const grouped = useMemo(() => {
     const buckets = new Map<string, string[]>();
@@ -319,6 +336,10 @@ function ContextReferenceDrawer({
     });
   }, [allPaths]);
 
+  // Keep hooks above this branch: the selected node can change from a gate
+  // to an action without unmounting this child component.
+  if (!hasTemplate) return null;
+
   return (
     <section
       data-testid="inspector-context-reference"
@@ -335,8 +356,7 @@ function ContextReferenceDrawer({
         )}
       </header>
       <p className="text-2xs text-text-muted mb-2">
-        Variables this template can interpolate at runtime.{" "}
-        <span className="text-status-warning/80">empty</span> means a producer upstream is missing.
+        Variables this template can interpolate at runtime.
       </p>
       {grouped.map(({ spec, paths }) => (
         <div key={spec.namespace} className="mb-2" data-testid={`context-group-${spec.namespace}`}>
@@ -520,6 +540,22 @@ export function InspectorPanel(props: InspectorPanelProps) {
         </>
       )}
 
+      {kind.type === 'close_agent_node' && (
+        <TargetAgentField
+          value={kind.target_node_id}
+          upstreamSpawns={upstreamSpawns}
+          onChange={(target_node_id) => onChange({ ...kind, target_node_id })}
+        />
+      )}
+
+      {kind.type === 'llm_turn_classifier' && (
+        <TargetAgentField
+          value={kind.target_node_id}
+          upstreamSpawns={upstreamSpawns}
+          onChange={(target_node_id) => onChange({ ...kind, target_node_id })}
+        />
+      )}
+
       {kind.type === 'interval' && (
         <Field label="Interval seconds">
           <NumberField
@@ -584,7 +620,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
       )}
 
       {/* Kinds with no configurable payload still get a readable line. */}
-      {['manual', 'llm_turn_classifier', 'all_completed', 'any_completed'].includes(kind.type) && (
+      {['manual', 'all_completed', 'any_completed'].includes(kind.type) && (
         <p className="text-xs text-text-secondary">{configSummary(kind)}</p>
       )}
 

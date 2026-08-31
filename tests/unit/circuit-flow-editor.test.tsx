@@ -294,7 +294,7 @@ describe('CircuitFlowEditor', () => {
     });
   });
 
-  it('offers {{ mustache chips across all context namespaces and inserts correctly', async () => {
+  it('offers only reachable mustache chips and inserts correctly', async () => {
     renderEditor();
 
     fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
@@ -304,12 +304,15 @@ describe('CircuitFlowEditor', () => {
     await userEvent.setup().type(prompt, 'Fix {{{{ ');
 
     const menu = screen.getByTestId('mustache-menu');
-    for (const ns of ['issue.number', 'pr.title', 'node.id', 'verification.outcome', 'retry.attempt', 'circuit.name']) {
+    for (const ns of ['node.id', 'circuit.name', 'autopilot.finish_prompt']) {
       expect(menu.querySelector(`[data-testid="mustache-chip-${ns}"]`)).not.toBeNull();
     }
-    await userEvent.setup().click(screen.getByTestId('mustache-chip-issue.number'));
+    for (const ns of ['issue.number', 'pr.title', 'verification.outcome', 'retry.attempt']) {
+      expect(menu.querySelector(`[data-testid="mustache-chip-${ns}"]`)).toBeNull();
+    }
+    await userEvent.setup().click(screen.getByTestId('mustache-chip-circuit.name'));
     expect((screen.getByTestId('inspector-prompt') as HTMLTextAreaElement).value).toBe(
-      'review the diffFix {{ issue.number }}'
+      'review the diffFix {{ circuit.name }}'
     );
   });
 
@@ -372,25 +375,51 @@ describe('CircuitFlowEditor', () => {
     // The bug: when the menu was grouped by namespace but pick()
     // indexed into the fuzzy-sorted `suggestions` array, ArrowDown
     // highlighted a grouped-first chip (e.g. circuit.id at DOM index
-    // 0) but Enter inserted the fuzzy-top chip (issue.author for an
-    // `{{ issue` query). The previous test passed because with an
-    // empty query both orderings happened to start with circuit.id.
-    // Type a non-empty prefix so the orderings diverge.
+    // 0) but Enter inserted the fuzzy-top chip. The first selection
+    // below proves the grouped render order; the later `{{ c` query
+    // proves the two orderings can diverge once multiple namespaces
+    // are reachable.
     const user = userEvent.setup();
-    renderEditor();
+    const GRAPH_WITH_REACHABLE_GROUPS = JSON.stringify({
+      version: 1,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        {
+          id: 'spawn_1',
+          type: { type: 'spawn_agent_node', prompt: 'first', name: null },
+        },
+        { id: 'gate', type: { type: 'deterministic_verification', command: 'cargo test' } },
+        {
+          id: 'spawn_2',
+          type: { type: 'spawn_agent_node', prompt: 'second', name: null },
+        },
+      ],
+      edges: [
+        { from: 'trigger', to: 'spawn_1', condition: 'always' },
+        { from: 'spawn_1', to: 'gate', condition: 'always' },
+        { from: 'gate', to: 'spawn_2', condition: 'always' },
+      ],
+    });
+    render(
+      <CircuitFlowEditor
+        circuit={{ ...CIRCUIT, graph_json: GRAPH_WITH_REACHABLE_GROUPS }}
+        runs={[]}
+        onClose={() => {}}
+      />
+    );
 
-    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn_2'));
     const prompt = await screen.findByTestId('inspector-prompt') as HTMLTextAreaElement;
     fireEvent.change(prompt, {
-      target: { value: 'review the diffFix {{ issue ', selectionStart: 28 },
+      target: { value: 'review the diffFix {{ ', selectionStart: 22 },
     });
     prompt.focus();
     const menu = await screen.findByTestId('mustache-menu');
 
     // Without any arrow press, Enter should pick the DOM first chip
     // (whatever the render order is — in grouped mode, that's the
-    // first chip of the first non-empty group, which for `{{ issue`
-    // is in the issue.* group).
+    // first chip of the first non-empty group, which for an empty
+    // query is in the circuit.* group.
     await user.keyboard('{Enter}');
     const highlighted = (menu.querySelector('[data-highlighted="true"]') ??
       menu.querySelector('[data-testid^="mustache-chip-"]')) as HTMLElement;
@@ -402,19 +431,16 @@ describe('CircuitFlowEditor', () => {
 
     // Now ArrowDown to a chip whose position is NOT 0, then Enter —
     // the inserted chip must match the highlighted one, not the
-    // fuzzy-top chip. For `{{ issue`, every issue.* chip is in the
-    // same group, so the render order matches the fuzzy order for
-    // the issue.* group. Pick a prefix that mixes two groups
-    // instead: `{{ issue` will still group everything together.
-    // Use `{{ c` — sorted by fuzzy, `circuit.*` ranks above
-    // `issue.*`/`pr.*` etc. because every chip matches.
+    // fuzzy-top chip. Pick a prefix that mixes the reachable
+    // circuit.* and verification.* groups so grouped render order
+    // differs from the fuzzy-sorted catalogue.
     fireEvent.change(prompt, {
       target: { value: 'review the diffFix {{ c', selectionStart: 24 },
     });
     prompt.focus();
     const menu2 = await screen.findByTestId('mustache-menu');
-    // ArrowDown to the SECOND chip in the menu (grouped order:
-    // circuit.id, circuit.name, …). Then Enter.
+    // ArrowDown to the SECOND chip in the menu (grouped order starts
+    // with circuit.id, circuit.name, ...). Then Enter.
     await user.keyboard('{ArrowDown}'); // -> first chip
     await user.keyboard('{ArrowDown}'); // -> second chip
     const second = menu2.querySelector('[data-highlighted="true"]') as HTMLElement;
@@ -516,38 +542,38 @@ describe('CircuitFlowEditor', () => {
     await userEvent.setup().type(spawnPrompt, 'Fix {{{{ ');
 
     const menu = await screen.findByTestId('mustache-menu');
-    // Group headers render for every namespace that has chips.
-    for (const group of ['circuit', 'node', 'issue', 'pr', 'verification', 'retry']) {
+    // Group headers render for every reachable namespace that has chips.
+    for (const group of ['circuit', 'node', 'autopilot']) {
       expect(menu.querySelector(`[data-testid="mustache-group-${group}"]`)).not.toBeNull();
     }
+    expect(menu.querySelector('[data-testid="mustache-group-issue"]')).toBeNull();
+    expect(menu.querySelector('[data-testid="mustache-group-verification"]')).toBeNull();
     // The spawn cannot reach its OWN output (temporal paradox guard).
     expect(menu.querySelector('[data-testid="mustache-chip-node.spawn.output"]')).toBeNull();
     // Silence the unused-variable lint.
     expect(prompt).toBeTruthy();
   });
 
-  it('marks unreachable mustache chips with an "empty" badge', async () => {
+  it('filters unreachable mustache chips from autocomplete', async () => {
     renderEditor();
 
     // The spawn node in the fixture has no issue-label trigger upstream
-    // (the trigger is `manual`), so `issue.*` chips must dim.
+    // (the trigger is `manual`), so `issue.*` chips must not be offered.
     fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
     const prompt = await screen.findByTestId('inspector-prompt');
     await userEvent.setup().type(prompt, 'Fix {{{{ ');
 
     const menu = await screen.findByTestId('mustache-menu');
     // circuit.* and node.id are always live (trigger wrapper / with_node).
-    expect(menu.querySelector('[data-testid="mustache-chip-issue.number"][data-reachable="true"]')).toBeNull();
-    expect(menu.querySelector('[data-testid="mustache-chip-issue.number"][data-reachable="false"]')).not.toBeNull();
-    expect(menu.querySelector('[data-testid="mustache-chip-issue.number-unreachable"]')).not.toBeNull();
-    // `circuit.name` is always reachable.
+    expect(menu.querySelector('[data-testid="mustache-chip-issue.number"]')).toBeNull();
+    // `circuit.name` and the Autopilot context are always reachable.
     expect(menu.querySelector('[data-testid="mustache-chip-circuit.name"][data-reachable="true"]')).not.toBeNull();
     // The spawn's own output is NOT reachable — a node cannot read
     // its own terminal output before it has produced any.
     expect(menu.querySelector('[data-testid="mustache-chip-node.spawn.output"]')).toBeNull();
   });
 
-  it('renders the inspector context reference drawer with reachable/empty markers', async () => {
+  it('renders only reachable values in the inspector context reference drawer', async () => {
     renderEditor();
 
     // Select the gate — its upstream IS the spawn, so spawn output
@@ -561,11 +587,11 @@ describe('CircuitFlowEditor', () => {
     // `issue.*` is empty (manual trigger, not an issue-label trigger),
     // and `node.spawn.output` is NOT reachable (the spawn cannot
     // consume its own output — the BFS seeds from predecessors).
-    expect(drawer.querySelector('[data-testid="context-reference-issue.number"]')!.getAttribute('data-reachable')).toBe('false');
+    expect(drawer.querySelector('[data-testid="context-reference-issue.number"]')).toBeNull();
     expect(drawer.querySelector('[data-testid="context-reference-circuit.name"]')!.getAttribute('data-reachable')).toBe('true');
     expect(drawer.querySelector('[data-testid="context-reference-node.spawn.output"]')).toBeNull();
-    // Group headers render under the spec ordering.
-    expect(drawer.querySelector('[data-testid="context-group-issue"]')).not.toBeNull();
+    // Group headers render under the spec ordering for reachable values.
+    expect(drawer.querySelector('[data-testid="context-group-issue"]')).toBeNull();
     expect(drawer.querySelector('[data-testid="context-group-circuit"]')).not.toBeNull();
   });
 

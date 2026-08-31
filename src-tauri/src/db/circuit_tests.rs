@@ -119,6 +119,7 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
 
     let new_graph = CircuitGraph {
         version: 1,
+        blueprint: None,
         nodes: vec![
             crate::autopilot::circuit::model::CircuitNode {
                 id: "trigger".into(),

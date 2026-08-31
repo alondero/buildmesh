@@ -155,7 +155,10 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   // Content-addressed topology so highlight recomputes on real edits
   // only — keying this memo on the raw arrays would loop with the
   // highlight-sync effect below.
-  const topologyJson = useMemo(() => stableGraphJson(toGraph(nodes, edges)), [nodes, edges]);
+  const topologyJson = useMemo(
+    () => stableGraphJson(toGraph(nodes, edges, initial.blueprint)),
+    [nodes, edges, initial.blueprint]
+  );
   // Stable graph object for the InspectorPanel's reachability useMemo.
   // Derive from `topologyJson` (a string), not `[nodes, edges]`, so
   // the inspector's `useMemo` only re-walks the BFS when the topology
@@ -378,7 +381,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   );
 
   const autoLayout = (direction: 'LR' | 'TB') => {
-    const positions = layoutPositions(toGraph(nodes, edges), direction);
+    const positions = layoutPositions(toGraph(nodes, edges, initial.blueprint), direction);
     setNodes((ns) => ns.map((n) => ({ ...n, position: positions.get(n.id) ?? n.position })));
   };
 
@@ -405,8 +408,8 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
     [circuit.graph_json]
   );
   const dirty = useMemo(
-    () => stableGraphJson(toGraph(nodes, edges)) !== savedJson,
-    [nodes, edges, savedJson]
+    () => stableGraphJson(toGraph(nodes, edges, initial.blueprint)) !== savedJson,
+    [nodes, edges, initial.blueprint, savedJson]
   );
 
   // -- dirty guard (issue #1244) ---------------------------------------------
@@ -467,7 +470,10 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
     setSaving(true);
     setEditorError(null);
     try {
-      await updateCircuitGraph(circuit.id, JSON.stringify(toGraph(nodes, edges)));
+      await updateCircuitGraph(
+        circuit.id,
+        JSON.stringify(toGraph(nodes, edges, initial.blueprint))
+      );
       onSaved?.();
     } catch (err) {
       console.error('Failed to save circuit graph:', err);

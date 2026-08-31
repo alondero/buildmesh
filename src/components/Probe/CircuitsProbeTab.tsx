@@ -26,6 +26,7 @@ import {
   resumeCircuitRun,
   setCircuitEnabled,
   triggerCircuitNow,
+  type CircuitBlueprintKind,
   type CircuitTriggerKind,
   type CircuitWithRuns,
 } from '../../lib/tauri';
@@ -63,10 +64,16 @@ export function CircuitsProbeTab() {
   const [busy, setBusy] = useState(false);
   // New-Circuit row: name + trigger shape, then straight into the editor.
   const [newName, setNewName] = useState('');
+  const [blueprint, setBlueprint] = useState<CircuitBlueprintKind>('walking_skeleton');
   const [triggerKind, setTriggerKind] = useState<CircuitTriggerKind>('manual');
   const [triggerLabel, setTriggerLabel] = useState('');
   const [intervalSeconds, setIntervalSeconds] = useState(300);
-  const needsLabel = triggerKind === 'github_issue_label' || triggerKind === 'github_pr_label';
+  const isReviewBlueprint = blueprint === 'issue_driven_autopilot_review';
+  const effectiveTriggerKind: CircuitTriggerKind = isReviewBlueprint
+    ? 'github_issue_label'
+    : triggerKind;
+  const needsLabel =
+    effectiveTriggerKind === 'github_issue_label' || effectiveTriggerKind === 'github_pr_label';
 
   const load = useCallback(async () => {
     if (activeMeshId === null) {
@@ -124,14 +131,16 @@ export function CircuitsProbeTab() {
         activeMeshId!,
         name,
         '',
-        1,
+        isReviewBlueprint ? 2 : 1,
         '', // the prompt is authored in the canvas editor's inspector now
-        triggerKind,
-        triggerKind === 'manual' ? undefined : triggerLabel.trim(),
-        triggerKind === 'interval' ? intervalSeconds : undefined
+        effectiveTriggerKind,
+        effectiveTriggerKind === 'manual' ? undefined : triggerLabel.trim(),
+        effectiveTriggerKind === 'interval' ? intervalSeconds : undefined,
+        blueprint
       );
       setNewName('');
       setTriggerLabel('');
+      setBlueprint('walking_skeleton');
       openCircuitEditor(circuit.id);
     });
 
@@ -172,10 +181,27 @@ export function CircuitsProbeTab() {
         </div>
         <div className="flex items-center gap-1">
           <select
-            value={triggerKind}
+            value={blueprint}
+            onChange={(e) => {
+              const next = e.target.value as CircuitBlueprintKind;
+              setBlueprint(next);
+              if (next === 'issue_driven_autopilot_review') {
+                setTriggerKind('github_issue_label');
+              }
+            }}
+            aria-label="Circuit blueprint"
+            data-testid="circuit-blueprint-select"
+            className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+          >
+            <option value="walking_skeleton">Walking skeleton</option>
+            <option value="issue_driven_autopilot_review">Issue-driven Autopilot + PR review</option>
+          </select>
+          <select
+            value={effectiveTriggerKind}
             onChange={(e) => setTriggerKind(e.target.value as CircuitTriggerKind)}
             aria-label="Circuit trigger"
             data-testid="circuit-trigger-select"
+            disabled={isReviewBlueprint}
             className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
           >
             <option value="manual">Manual</option>
@@ -183,6 +209,11 @@ export function CircuitsProbeTab() {
             <option value="github_issue_label">Issue label</option>
             <option value="github_pr_label">PR label</option>
           </select>
+          {isReviewBlueprint && (
+            <span className="text-xs text-text-muted" title="This blueprint is triggered by labelled GitHub issues.">
+              GitHub issue trigger
+            </span>
+          )}
           {needsLabel && (
             <input
               value={triggerLabel}

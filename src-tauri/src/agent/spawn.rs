@@ -12,14 +12,13 @@ mod command;
 mod process;
 pub(crate) use intent::{
     ExplicitSpawnOverrides, GitHubWorkContext, ResumeCause, SpawnIntent, SpawnOutcome,
-    SpawnRequest, TerminalSize,
+    SpawnRequest, TerminalSize, WorktreePolicy, format_issue_prefill_with_url,
 };
 mod orchestrator;
 mod provision;
 mod reader;
 mod wire;
 
-pub use orchestrator::SpawnOptions;
 pub(crate) use orchestrator::{
     spawn_with_intent,
 };

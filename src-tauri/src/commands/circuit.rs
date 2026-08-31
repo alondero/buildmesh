@@ -10,6 +10,7 @@
 use tauri::command;
 
 use crate::autopilot::circuit::model::CircuitGraph;
+pub use crate::autopilot::circuit::model::CircuitBlueprintKind;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
 /// The trigger vocabulary of [`create_circuit`] (issue #1208). Generated
@@ -104,6 +105,7 @@ pub fn create_circuit(
     trigger_kind: Option<CircuitTriggerKind>,
     trigger_label: Option<String>,
     interval_seconds: Option<i64>,
+    blueprint: Option<CircuitBlueprintKind>,
 ) -> Result<AutopilotCircuit, String> {
     use crate::autopilot::circuit::model::CircuitNodeKind;
 
@@ -111,8 +113,34 @@ pub fn create_circuit(
     if name.is_empty() {
         return Err("circuit name must not be empty".to_string());
     }
-    let limit = concurrency_limit.clamp(1, 16);
-    let kind = match trigger_kind.unwrap_or(CircuitTriggerKind::Manual) {
+    let selected_trigger = trigger_kind.unwrap_or(CircuitTriggerKind::Manual);
+    let blueprint = blueprint.unwrap_or(CircuitBlueprintKind::WalkingSkeleton);
+    if matches!(blueprint, CircuitBlueprintKind::IssueDrivenAutopilotReview)
+        && selected_trigger != CircuitTriggerKind::GithubIssueLabel
+    {
+        return Err(
+            "the issue-driven Autopilot review blueprint requires an issue-label trigger"
+                .to_string(),
+        );
+    }
+    if matches!(blueprint, CircuitBlueprintKind::IssueDrivenAutopilotReview)
+        && crate::services::autopilot::configured_action_on_success(mesh_id) == "none"
+    {
+        return Err(
+            "the issue-driven Autopilot review blueprint requires a pull-request wrap-up policy"
+                .to_string(),
+        );
+    }
+
+    let limit = if matches!(blueprint, CircuitBlueprintKind::IssueDrivenAutopilotReview) {
+        // The implementation and reviewer are intentionally concurrent
+        // agent nodes. A single-slot circuit would deadlock the reviewer
+        // behind the implementation node's still-live process.
+        concurrency_limit.clamp(2, 16)
+    } else {
+        concurrency_limit.clamp(1, 16)
+    };
+    let kind = match selected_trigger {
         CircuitTriggerKind::Manual => CircuitNodeKind::Manual,
         CircuitTriggerKind::Interval => {
             let secs = interval_seconds.unwrap_or(300).clamp(60, 7 * 24 * 3_600);
@@ -124,14 +152,30 @@ pub fn create_circuit(
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
                 .ok_or_else(|| "GitHub triggers require a non-empty trigger label".to_string())?;
-            if trigger_kind == Some(CircuitTriggerKind::GithubPrLabel) {
+            if selected_trigger == CircuitTriggerKind::GithubPrLabel {
                 CircuitNodeKind::GithubPullRequestLabel { label: label.to_string() }
             } else {
                 CircuitNodeKind::GithubIssueLabel { label: label.to_string() }
             }
         }
     };
-    let graph = CircuitGraph::triggered_skeleton(&initial_prompt, kind.clone());
+    let graph = match blueprint {
+        CircuitBlueprintKind::WalkingSkeleton => {
+            CircuitGraph::triggered_skeleton(&initial_prompt, kind.clone())
+        }
+        CircuitBlueprintKind::IssueDrivenAutopilotReview => {
+            let CircuitNodeKind::GithubIssueLabel { label } = &kind else {
+                // Guarded above; retain a defensive error if this function
+                // is changed without updating the blueprint contract.
+                return Err(
+                    "the issue-driven Autopilot review blueprint requires an issue-label trigger"
+                        .to_string(),
+                );
+            };
+            CircuitGraph::issue_driven_autopilot_review(label)
+        }
+    };
+    graph.validate()?;
     let graph_json = graph.to_json()?;
     let circuit =
         crate::db::create_autopilot_circuit(mesh_id, name, &description, limit, &graph_json)
@@ -162,7 +206,10 @@ pub fn set_circuit_enabled(circuit_id: i64, enabled: bool) -> Result<(), String>
 pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), String> {
     let graph = CircuitGraph::from_json(&graph_json)?;
     graph.validate()?;
-    crate::db::update_autopilot_circuit_graph(circuit_id, &graph_json).map_err(|e| {
+    // Persist the parsed/canonical form so legacy review graphs upgraded by
+    // `from_json` retain their explicit blueprint marker after an editor save.
+    let canonical_graph_json = graph.to_json()?;
+    crate::db::update_autopilot_circuit_graph(circuit_id, &canonical_graph_json).map_err(|e| {
         if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
             format!("circuit {} does not exist", circuit_id)
         } else {
@@ -194,6 +241,13 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     let circuit = crate::db::get_autopilot_circuit(circuit_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
+    let graph = CircuitGraph::from_json(&circuit.graph_json)?;
+    if graph.is_issue_driven_autopilot_review() {
+        return Err(
+            "issue-driven Autopilot review circuits are triggered by labelled GitHub issues; Trigger Now requires issue context"
+                .to_string(),
+        );
+    }
     // Draft-first (issue #1356): Trigger Now is the dry-run seam and
     // must work while the circuit is still disabled. Background
     // pollers (`list_enabled_circuits`) stay gated on `enabled`.
@@ -206,6 +260,8 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     );
     let mut context = crate::autopilot::circuit::context::CircuitContext::new();
     context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
+    let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
+    context.with_autopilot_finish_prompt(None, Some(action.as_str()));
     let run_id = crate::db::create_circuit_run(
         circuit.id,
         circuit.mesh_id,

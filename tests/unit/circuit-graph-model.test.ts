@@ -47,6 +47,7 @@ const ALL_DISCRIMINATORS = [
   'inject_pty',
   'github_action',
   'set_node_status',
+  'close_agent_node',
   'notify',
   'llm_turn_classifier',
   'deterministic_verification',
@@ -75,6 +76,7 @@ describe('node catalogue', () => {
     expect(specFor('notify').category).toBe('action');
     expect(specFor('github_action').category).toBe('action');
     expect(specFor('set_node_status').category).toBe('action');
+    expect(specFor('close_agent_node').category).toBe('action');
     expect(specFor('llm_turn_classifier').category).toBe('gate');
     expect(specFor('deterministic_verification').category).toBe('gate');
     expect(specFor('collaborator_check').category).toBe('gate');
@@ -102,6 +104,10 @@ describe('node catalogue', () => {
     expect(defaultKind('set_node_status')).toEqual({
       type: 'set_node_status',
       status: 'completed',
+      target_node_id: null,
+    });
+    expect(defaultKind('close_agent_node')).toEqual({
+      type: 'close_agent_node',
       target_node_id: null,
     });
     expect(defaultKind('collaborator_check')).toEqual({
@@ -165,6 +171,46 @@ describe('parseGraph', () => {
     expect(g.edges[0].condition).toBe('always');
     expect(g.version).toBe(CIRCUIT_GRAPH_VERSION);
     expect(() => parseGraph('not json at all')).toThrow();
+  });
+
+  it('keeps the review blueprint marker when the author edits its prompt', () => {
+    const g = parseGraph(
+      JSON.stringify({
+        version: 2,
+        blueprint: 'issue_driven_autopilot_review',
+        nodes: [
+          { id: 'trigger', type: { type: 'github_issue_label', label: 'buildmesh:run' } },
+          { id: 'reviewer', type: { type: 'spawn_agent_node', prompt: 'review' } },
+          { id: 'review_prompt', type: { type: 'inject_pty', prompt: 'custom', target_node_id: 'reviewer' } },
+          { id: 'close_reviewer', type: { type: 'close_agent_node', target_node_id: 'reviewer' } },
+        ],
+        edges: [],
+      })
+    );
+    expect(g.blueprint).toBe('issue_driven_autopilot_review');
+
+    const edited = toGraph(
+      g.nodes.map((circuitNode) => ({ data: { circuitNode } })),
+      [],
+      g.blueprint
+    );
+    expect(edited.blueprint).toBe('issue_driven_autopilot_review');
+  });
+
+  it('infers the marker for a legacy review graph without reading prompt text', () => {
+    const g = parseGraph(
+      JSON.stringify({
+        version: 2,
+        nodes: [
+          { id: 'trigger', type: { type: 'github_issue_label', label: 'buildmesh:run' } },
+          { id: 'reviewer', type: { type: 'spawn_agent_node', prompt: 'custom reviewer setup' } },
+          { id: 'review_prompt', type: { type: 'inject_pty', prompt: 'author changed this', target_node_id: 'reviewer' } },
+          { id: 'close_reviewer', type: { type: 'close_agent_node', target_node_id: 'reviewer' } },
+        ],
+        edges: [],
+      })
+    );
+    expect(g.blueprint).toBe('issue_driven_autopilot_review');
   });
 
   it('upgrades a v1 spawn/inject/status payload with the v2 optional fields', () => {
@@ -514,7 +560,7 @@ describe('upstream reachability (issue #1359)', () => {
         { id: 't', type: { type: 'manual' as const } },
         { id: 'v', type: { type: 'deterministic_verification' as const, command: 'x' } },
         { id: 'r', type: { type: 'retry_limit' as const, max_retries: 3 } },
-        { id: 'l', type: { type: 'llm_turn_classifier' as const } },
+        { id: 'l', type: { type: 'llm_turn_classifier' as const, target_node_id: null } },
         { id: 'c', type: { type: 'collaborator_check' as const, require_approval: true } },
         { id: 'n', type: { type: 'notify' as const, message: '' } },
       ],
@@ -625,7 +671,7 @@ describe('sampleValueForPath', () => {
 
 describe('gate outcome ports', () => {
   it('exposes named outcome handles only on gates that route by outcome', () => {
-    expect(sourceOutcomes({ type: 'llm_turn_classifier' })).toEqual([
+    expect(sourceOutcomes({ type: 'llm_turn_classifier', target_node_id: null })).toEqual([
       'completed',
       'blocked',
       'working',

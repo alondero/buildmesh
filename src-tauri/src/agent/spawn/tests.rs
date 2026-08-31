@@ -373,6 +373,7 @@ fn spawn_options_carries_explicit_slots() {
         // through mesh / app defaults and `default_prepare` only
         // forwards the string when `supports_extra_args = true`.
         explicit_extra_args: None,
+        worktree_policy: WorktreePolicy::RespectMesh,
     };
     assert_eq!(opts.explicit_model.as_deref(), Some("sonnet-4"));
     assert_eq!(opts.explicit_effort.as_deref(), Some("low"));
@@ -394,6 +395,7 @@ fn spawn_request_carries_explicit_overrides() {
             effort: Some("high".into()),
             extra_args: None,
         },
+        worktree_policy: WorktreePolicy::RespectMesh,
     };
     assert_eq!(req.explicit.model.as_deref(), Some("opus-4-1"));
     assert_eq!(req.explicit.effort.as_deref(), Some("high"));

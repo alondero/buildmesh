@@ -43,6 +43,7 @@ export const NODE_SPECS: readonly NodeKindSpec[] = [
   { discriminator: 'inject_pty', label: 'Inject PTY', category: 'action' },
   { discriminator: 'github_action', label: 'GitHub Action', category: 'action' },
   { discriminator: 'set_node_status', label: 'Set Node Status', category: 'action' },
+  { discriminator: 'close_agent_node', label: 'Close Agent Node', category: 'action' },
   { discriminator: 'notify', label: 'Notify', category: 'action' },
   { discriminator: 'llm_turn_classifier', label: 'LLM Turn Classifier', category: 'gate' },
   {
@@ -113,10 +114,12 @@ export function defaultKind(discriminator: string): CircuitNodeKind {
       return { type: 'github_action', action: 'add_label', label: null, comment: null };
     case 'set_node_status':
       return { type: 'set_node_status', status: 'completed', target_node_id: null };
+    case 'close_agent_node':
+      return { type: 'close_agent_node', target_node_id: null };
     case 'notify':
       return { type: 'notify', message: '' };
     case 'llm_turn_classifier':
-      return { type: 'llm_turn_classifier' };
+      return { type: 'llm_turn_classifier', target_node_id: null };
     case 'deterministic_verification':
       return { type: 'deterministic_verification', command: '' };
     case 'collaborator_check':
@@ -172,6 +175,8 @@ export function configSummary(kind: CircuitNodeKind): string {
       return truncate(kind.message, 48) || '(no message)';
     case 'llm_turn_classifier':
       return 'classify each turn';
+    case 'close_agent_node':
+      return kind.target_node_id ? `close ${kind.target_node_id}` : 'close nearest agent';
     case 'deterministic_verification':
       return truncate(kind.command, 48) || '(no command)';
     case 'collaborator_check':
@@ -183,6 +188,27 @@ export function configSummary(kind: CircuitNodeKind): string {
     case 'any_completed':
       return 'continue when any done';
   }
+}
+
+/**
+ * Compatibility marker for review blueprints written before the Rust AST
+ * gained an explicit `blueprint` field. This deliberately checks only the
+ * stable structural contract and never an author-editable prompt.
+ */
+function isLegacyIssueReviewGraph(graph: Pick<CircuitGraph, 'nodes'>): boolean {
+  const kind = (id: string) => graph.nodes.find((node) => node.id === id)?.type;
+  const trigger = kind('trigger');
+  const reviewer = kind('reviewer');
+  const reviewPrompt = kind('review_prompt');
+  const closeReviewer = kind('close_reviewer');
+  return (
+    trigger?.type === 'github_issue_label' &&
+    reviewer?.type === 'spawn_agent_node' &&
+    reviewPrompt?.type === 'inject_pty' &&
+    reviewPrompt.target_node_id === 'reviewer' &&
+    closeReviewer?.type === 'close_agent_node' &&
+    closeReviewer.target_node_id === 'reviewer'
+  );
 }
 
 export function parseGraph(json: string): CircuitGraph {
@@ -205,9 +231,13 @@ export function parseGraph(json: string): CircuitGraph {
     typeof graph.version === 'number' && graph.version >= CIRCUIT_GRAPH_VERSION
       ? graph.version
       : CIRCUIT_GRAPH_VERSION;
+  const blueprint =
+    graph.blueprint ??
+    (isLegacyIssueReviewGraph(graph) ? 'issue_driven_autopilot_review' : null);
   return {
     ...graph,
     version,
+    blueprint,
     nodes: graph.nodes.map((n) => ({ ...n, type: normalizeKind(n.type) })),
     edges: graph.edges.map((e) => ({ ...e, condition: e.condition ?? 'always' })),
   };
@@ -238,6 +268,16 @@ function normalizeKind(kind: CircuitNodeKind): CircuitNodeKind {
         status: kind.status,
         target_node_id: kind.target_node_id ?? null,
       };
+    case 'close_agent_node':
+      return {
+        type: 'close_agent_node',
+        target_node_id: kind.target_node_id ?? null,
+      };
+    case 'llm_turn_classifier':
+      return {
+        type: 'llm_turn_classifier',
+        target_node_id: kind.target_node_id ?? null,
+      };
     default:
       return kind;
   }
@@ -251,6 +291,7 @@ function normalizeKind(kind: CircuitNodeKind): CircuitNodeKind {
 export function stableGraphJson(graph: CircuitGraph): string {
   return JSON.stringify({
     version: graph.version,
+    blueprint: graph.blueprint ?? null,
     nodes: [...graph.nodes].sort((a, b) => a.id.localeCompare(b.id)),
     edges: [...graph.edges].sort((a, b) => edgeKey(a).localeCompare(edgeKey(b))),
   });
@@ -312,6 +353,9 @@ export const MUSTACHE_PATHS: readonly string[] = [
   'issue.author',
   'issue.url',
   'issue.labels',
+  'issue.prefill',
+  'autopilot.finish_prompt',
+  'autopilot.wrapup_correction',
   'pr.number',
   'pr.title',
   'pr.body',
@@ -343,6 +387,7 @@ export const MUSTACHE_GROUPS: readonly MustacheGroupSpec[] = [
   { namespace: 'node', label: 'Current Node', description: 'Identifier of the node whose template is being resolved.' },
   { namespace: 'issue', label: 'Issue Context', description: 'GitHub issue that fired the trigger (issue-label runs).' },
   { namespace: 'pr', label: 'Pull Request', description: 'PR payload — populated when a github_action opens or a PR-label trigger fires.' },
+  { namespace: 'autopilot', label: 'Autopilot', description: 'Rendered wrap-up prompt and mesh-level Autopilot policy.' },
   { namespace: 'verification', label: 'Verification', description: 'Last verification gate outcome (Green/Red) and command.' },
   { namespace: 'retry', label: 'Retries', description: 'Current retry attempt and the configured cap.' },
   { namespace: 'spawn_output', label: 'Node Outputs', description: 'Terminal output of upstream agent nodes (one chip per reachable spawn).' },
@@ -633,6 +678,8 @@ export function isReachablePath(
       return reachable.triggers.issue;
     case 'pr':
       return reachable.pullRequest;
+    case 'autopilot':
+      return true;
     case 'verification':
       return reachable.gates.verification;
     case 'retry':
@@ -676,6 +723,8 @@ export function sampleValueForPath(path: string): string {
       return 'https://github.com/alondero/buildmesh/issues/1208';
     case 'issue.labels':
       return 'bug, ready-for-agent';
+    case 'issue.prefill':
+      return 'Please work on GitHub issue #1208 — React to the world';
     case 'pr.number':
       return '1213';
     case 'pr.title':
@@ -690,6 +739,10 @@ export function sampleValueForPath(path: string): string {
       return 'feat/circuits';
     case 'pr.labels':
       return 'buildmesh:run';
+    case 'autopilot.finish_prompt':
+      return '<rendered finish prompt>';
+    case 'autopilot.wrapup_correction':
+      return '<rendered wrap-up correction prompt>';
     case 'verification.outcome':
       return 'green';
     case 'verification.command':
@@ -841,10 +894,12 @@ export function traversedEdgeKeys(
  */
 export function toGraph(
   nodes: Array<{ data: { circuitNode: CircuitNode } }>,
-  edges: Array<{ source: string; target: string; data?: { condition?: EdgeCondition } }>
+  edges: Array<{ source: string; target: string; data?: { condition?: EdgeCondition } }>,
+  blueprint: CircuitGraph['blueprint'] = null
 ): CircuitGraph {
   return {
     version: CIRCUIT_GRAPH_VERSION,
+    blueprint: blueprint ?? null,
     nodes: nodes.map((n) => n.data.circuitNode),
     edges: edges.map((e) => ({
       from: e.source,

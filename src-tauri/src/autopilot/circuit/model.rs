@@ -29,6 +29,20 @@ use serde::{Deserialize, Serialize};
 /// version so a save upgrades the stored blueprint.
 pub const CIRCUIT_GRAPH_VERSION: i32 = 2;
 
+/// Server-owned circuit blueprints. Keeping the discriminator in the graph
+/// AST means runtime policy does not have to infer a blueprint from an
+/// author-editable prompt or node topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitBlueprintKind.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitBlueprintKind {
+    /// The small authorable trigger -> spawn -> inject -> notify graph.
+    WalkingSkeleton,
+    /// Issue-driven Autopilot with an independent PR reviewer and feedback
+    /// turn on the implementation agent.
+    IssueDrivenAutopilotReview,
+}
+
 /// The full blueprint AST for one circuit.
 ///
 // Milestone 4 (#1209): the canvas editor is the first TypeScript
@@ -39,6 +53,8 @@ pub const CIRCUIT_GRAPH_VERSION: i32 = 2;
 #[ts(export, export_to = "CircuitGraph.ts")]
 pub struct CircuitGraph {
     pub version: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blueprint: Option<CircuitBlueprintKind>,
     pub nodes: Vec<CircuitNode>,
     pub edges: Vec<CircuitEdge>,
 }
@@ -121,12 +137,24 @@ pub enum CircuitNodeKind {
         #[serde(default)]
         target_node_id: Option<String>,
     },
+    /// Close an agent node and queue its worktree for cleanup. This is
+    /// deliberately separate from `SetNodeStatus(Completed)`: completing a
+    /// circuit step must not leave a reviewer process and its worktree alive.
+    CloseAgentNode {
+        #[serde(default)]
+        target_node_id: Option<String>,
+    },
     /// Surface a message to the user (toast / notification event).
     Notify { message: String },
 
     // ---- Gates ----
-    /// LLM turn classification (Completed | Blocked | Working). Not yet executed.
-    LlmTurnClassifier,
+    /// LLM turn classification (Completed | Blocked | Working). The target
+    /// is explicit for fan-out graphs; `None` preserves the nearest upstream
+    /// spawn behaviour of older blueprints.
+    LlmTurnClassifier {
+        #[serde(default)]
+        target_node_id: Option<String>,
+    },
     /// Deterministic verification command (Green | Red). Not yet executed.
     DeterministicVerification { command: String },
     /// Collaborator approval gate. Not yet executed.
@@ -283,8 +311,9 @@ pub fn is_executable(kind: &CircuitNodeKind) -> bool {
             | CircuitNodeKind::InjectPty { .. }
             | CircuitNodeKind::GithubAction { .. }
             | CircuitNodeKind::SetNodeStatus { .. }
+            | CircuitNodeKind::CloseAgentNode { .. }
             | CircuitNodeKind::Notify { .. }
-            | CircuitNodeKind::LlmTurnClassifier
+            | CircuitNodeKind::LlmTurnClassifier { .. }
             | CircuitNodeKind::DeterministicVerification { .. }
             | CircuitNodeKind::CollaboratorCheck { .. }
             | CircuitNodeKind::RetryLimit { .. }
@@ -298,7 +327,17 @@ impl CircuitGraph {
     /// are a hard error at the read boundary (the writer always writes
     /// what this build understands) rather than a silent skip.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json).map_err(|e| format!("invalid circuit graph_json: {}", e))
+        let mut graph: Self =
+            serde_json::from_str(json).map_err(|e| format!("invalid circuit graph_json: {}", e))?;
+
+        // Graphs created by the first review-blueprint implementation have
+        // no discriminator yet. Upgrade only that known legacy shape at the
+        // storage boundary; runtime identity below is marker-only and never
+        // inspects an author-editable prompt.
+        if graph.blueprint.is_none() && graph.has_legacy_issue_review_shape() {
+            graph.blueprint = Some(CircuitBlueprintKind::IssueDrivenAutopilotReview);
+        }
+        Ok(graph)
     }
 
     /// Serialise to the `graph_json` column form (compact, sorted field
@@ -434,6 +473,34 @@ impl CircuitGraph {
         self.nodes.iter().find(|n| n.id == node_id)
     }
 
+    /// Whether this graph is the issue-driven review blueprint. The marker is
+    /// deliberately independent of prompts and topology because both are
+    /// editable in the canvas.
+    pub fn is_issue_driven_autopilot_review(&self) -> bool {
+        self.blueprint == Some(CircuitBlueprintKind::IssueDrivenAutopilotReview)
+    }
+
+    /// Recognize graph_json written before `blueprint` was added. This is a
+    /// one-time compatibility migration, not the runtime blueprint policy;
+    /// notably it does not compare any prompt text.
+    fn has_legacy_issue_review_shape(&self) -> bool {
+        matches!(
+            self.node("trigger").map(|n| &n.kind),
+            Some(CircuitNodeKind::GithubIssueLabel { .. })
+        ) && matches!(
+            self.node("review_prompt").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { target_node_id, .. })
+                if target_node_id.as_deref() == Some("reviewer")
+        ) && matches!(
+            self.node("close_reviewer").map(|n| &n.kind),
+            Some(CircuitNodeKind::CloseAgentNode { target_node_id })
+                if target_node_id.as_deref() == Some("reviewer")
+        ) && matches!(
+            self.node("reviewer").map(|n| &n.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { .. })
+        )
+    }
+
     /// The canonical walking-skeleton blueprint (issue #1206): Manual
     /// trigger → SpawnAgentNode (fresh, no prefill) → InjectPty (the
     /// configured prompt, over PTY once the process is live) → Notify.
@@ -463,6 +530,7 @@ impl CircuitGraph {
         ));
         Self {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: Some(CircuitBlueprintKind::WalkingSkeleton),
             nodes: vec![
                 CircuitNode { id: "trigger".to_string(), kind: trigger },
                 CircuitNode {
@@ -494,6 +562,185 @@ impl CircuitGraph {
                 CircuitEdge { from: "trigger".to_string(), to: "spawn".to_string(), condition: EdgeCondition::Always },
                 CircuitEdge { from: "spawn".to_string(), to: "inject".to_string(), condition: EdgeCondition::Always },
                 CircuitEdge { from: "inject".to_string(), to: "notify".to_string(), condition: EdgeCondition::Always },
+            ],
+        }
+    }
+
+    /// Exact reviewer instruction used by the issue-driven review blueprint.
+    /// Keep this text stable: it is both the user-requested contract and the
+    /// prompt that a reviewer sees after its PTY becomes ready.
+    pub const PR_REVIEW_PROMPT: &'static str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment";
+
+    /// Build the issue-driven Autopilot blueprint with a post-PR review loop.
+    ///
+    /// The implementation agent is finished through the same customizable
+    /// `finish.md` prompt used by legacy Autopilot. The review blueprint
+    /// requires that the agent already raised its PR; the worker discovers
+    /// that PR by branch and populates `pr.*`, then spawns the reviewer.
+    ///
+    /// The reviewer and implementation agent are separate agent nodes. The
+    /// implementation node is idle after its wrap-up turn while the reviewer
+    /// works, so the two processes can coexist without sharing a worktree.
+    pub fn issue_driven_autopilot_review(trigger_label: &str) -> Self {
+        use EdgeCondition::{Always, OnOutcome};
+        use StepOutcome::Completed;
+
+        fn node(id: &str, kind: CircuitNodeKind) -> CircuitNode {
+            CircuitNode { id: id.to_string(), kind }
+        }
+        fn edge(from: &str, to: &str) -> CircuitEdge {
+            CircuitEdge { from: from.to_string(), to: to.to_string(), condition: Always }
+        }
+        fn outcome(from: &str, to: &str, value: StepOutcome) -> CircuitEdge {
+            CircuitEdge {
+                from: from.to_string(),
+                to: to.to_string(),
+                condition: OnOutcome(value),
+            }
+        }
+
+        let review_prompt = Self::PR_REVIEW_PROMPT.to_string();
+        Self {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: Some(CircuitBlueprintKind::IssueDrivenAutopilotReview),
+            nodes: vec![
+                node(
+                    "trigger",
+                    CircuitNodeKind::GithubIssueLabel { label: trigger_label.trim().to_string() },
+                ),
+                node(
+                    "collaborator_gate",
+                    CircuitNodeKind::CollaboratorCheck { require_approval: true },
+                ),
+                node(
+                    "implementer",
+                    CircuitNodeKind::SpawnAgentNode {
+                        prompt: String::new(),
+                        name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
+                    },
+                ),
+                node(
+                    "implementation_prompt",
+                    CircuitNodeKind::InjectPty {
+                        prompt: "{{issue.prefill}}".to_string(),
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node(
+                    "implementation_classifier",
+                    CircuitNodeKind::LlmTurnClassifier {
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node(
+                    "finish",
+                    CircuitNodeKind::InjectPty {
+                        prompt: "{{autopilot.finish_prompt}}".to_string(),
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node("finish_round", CircuitNodeKind::AnyCompleted),
+                node(
+                    "finish_classifier",
+                    CircuitNodeKind::LlmTurnClassifier {
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node(
+                    "open_pr",
+                    CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::OpenPr,
+                        label: None,
+                        comment: Some("Closes #{{issue.number}}".to_string()),
+                    },
+                ),
+                node(
+                    "wrapup_retry",
+                    CircuitNodeKind::RetryLimit { max_retries: 3 },
+                ),
+                node(
+                    "wrapup_correction",
+                    CircuitNodeKind::InjectPty {
+                        prompt: "{{autopilot.wrapup_correction}}".to_string(),
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node(
+                    "reviewer",
+                    CircuitNodeKind::SpawnAgentNode {
+                        prompt: "The pull request URL is {{pr.url}}. Use it as additional review context.".to_string(),
+                        name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
+                    },
+                ),
+                node(
+                    "review_prompt",
+                    CircuitNodeKind::InjectPty {
+                        prompt: review_prompt,
+                        target_node_id: Some("reviewer".to_string()),
+                    },
+                ),
+                node(
+                    "review_classifier",
+                    CircuitNodeKind::LlmTurnClassifier {
+                        target_node_id: Some("reviewer".to_string()),
+                    },
+                ),
+                node(
+                    "follow_feedback",
+                    CircuitNodeKind::InjectPty {
+                        prompt: "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.".to_string(),
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node(
+                    "close_reviewer",
+                    CircuitNodeKind::CloseAgentNode {
+                        target_node_id: Some("reviewer".to_string()),
+                    },
+                ),
+                node(
+                    "feedback_classifier",
+                    CircuitNodeKind::LlmTurnClassifier {
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node("review_retry", CircuitNodeKind::RetryLimit { max_retries: 3 }),
+                node(
+                    "complete",
+                    CircuitNodeKind::Notify {
+                        message: "PR review feedback was sent to the implementation agent for PR #{{pr.number}} ({{issue.title}})".to_string(),
+                    },
+                ),
+            ],
+            edges: vec![
+                edge("trigger", "collaborator_gate"),
+                edge("collaborator_gate", "implementer"),
+                edge("implementer", "implementation_prompt"),
+                edge("implementation_prompt", "implementation_classifier"),
+                outcome("implementation_classifier", "finish", Completed),
+                edge("finish", "finish_round"),
+                outcome("finish_classifier", "open_pr", Completed),
+                outcome("open_pr", "wrapup_retry", StepOutcome::Failed),
+                edge("wrapup_retry", "wrapup_correction"),
+                edge("wrapup_correction", "finish_round"),
+                edge("finish_round", "finish_classifier"),
+                outcome("open_pr", "reviewer", Completed),
+                edge("reviewer", "review_prompt"),
+                edge("review_prompt", "review_classifier"),
+                outcome("review_classifier", "follow_feedback", Completed),
+                edge("follow_feedback", "close_reviewer"),
+                edge("close_reviewer", "feedback_classifier"),
+                outcome("feedback_classifier", "review_retry", Completed),
+                outcome("review_retry", "finish", Completed),
+                outcome("review_retry", "complete", StepOutcome::Failed),
             ],
         }
     }
@@ -558,7 +805,7 @@ mod tests {
             CircuitNodeKind::GithubAction { action: GithubActionKind::AddLabel, label: Some("done".into()), comment: None },
             set_status_kind(SessionStatusKind::Completed),
             CircuitNodeKind::Notify { message: "hi".into() },
-            CircuitNodeKind::LlmTurnClassifier,
+            CircuitNodeKind::LlmTurnClassifier { target_node_id: None },
             CircuitNodeKind::DeterministicVerification { command: "cargo test".into() },
             CircuitNodeKind::CollaboratorCheck { require_approval: true },
             CircuitNodeKind::RetryLimit { max_retries: 3 },
@@ -606,6 +853,7 @@ mod tests {
     fn sample_graph() -> CircuitGraph {
         CircuitGraph {
             version: 1,
+            blueprint: None,
             nodes: vec![
                 CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
                 CircuitNode { id: "a".into(), kind: CircuitNodeKind::Notify { message: "x".into() } },
@@ -641,6 +889,7 @@ mod tests {
     fn parallel_edges_to_one_child_dedupe_in_children() {
         let g = CircuitGraph {
             version: 1,
+            blueprint: None,
             nodes: vec![
                 CircuitNode { id: "a".into(), kind: CircuitNodeKind::Manual },
                 CircuitNode { id: "b".into(), kind: CircuitNodeKind::Notify { message: "m".into() } },
@@ -671,7 +920,7 @@ mod tests {
         assert!(is_executable(&inject_kind("p")));
         assert!(is_executable(&CircuitNodeKind::Notify { message: "n".into() }));
         // Milestone 2 (#1207): gates execute.
-        assert!(is_executable(&CircuitNodeKind::LlmTurnClassifier));
+        assert!(is_executable(&CircuitNodeKind::LlmTurnClassifier { target_node_id: None }));
         assert!(is_executable(&CircuitNodeKind::DeterministicVerification { command: "cargo test".into() }));
         assert!(is_executable(&CircuitNodeKind::CollaboratorCheck { require_approval: true }));
         assert!(is_executable(&CircuitNodeKind::RetryLimit { max_retries: 3 }));
@@ -730,6 +979,7 @@ mod tests {
     fn validate_rejects_duplicate_node_ids() {
         let g = CircuitGraph {
             version: 1,
+            blueprint: None,
             nodes: vec![node("t", CircuitNodeKind::Manual), node("t", CircuitNodeKind::Manual)],
             edges: vec![],
         };
@@ -740,6 +990,7 @@ mod tests {
     fn validate_rejects_edges_pointing_at_unknown_nodes() {
         let g = CircuitGraph {
             version: 1,
+            blueprint: None,
             nodes: vec![node("t", CircuitNodeKind::Manual)],
             edges: vec![CircuitEdge {
                 from: "t".into(),
@@ -754,6 +1005,7 @@ mod tests {
     fn validate_rejects_self_loops() {
         let g = CircuitGraph {
             version: 1,
+            blueprint: None,
             nodes: vec![node("t", CircuitNodeKind::Manual)],
             edges: vec![CircuitEdge {
                 from: "t".into(),
@@ -768,6 +1020,7 @@ mod tests {
     fn validate_accepts_a_linear_graph() {
         let g = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![
                 node("a", CircuitNodeKind::Manual),
                 node("b", CircuitNodeKind::Notify { message: String::new() }),
@@ -783,6 +1036,7 @@ mod tests {
         // Diamond (valid): a -> b -> d, a -> c -> d.
         let diamond = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![
                 node("a", CircuitNodeKind::Manual),
                 node("b", CircuitNodeKind::Notify { message: String::new() }),
@@ -804,6 +1058,7 @@ mod tests {
         // implement -> review -> retry -> implement
         let g = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![
                 node("implement", spawn_kind("write it", Some("implementer"))),
                 node("review", spawn_kind("review it", Some("reviewer"))),
@@ -822,6 +1077,7 @@ mod tests {
     fn validate_accepts_a_cycle_bounded_by_collaborator_check() {
         let g = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![
                 node("work", spawn_kind("p", None)),
                 node("gate", CircuitNodeKind::CollaboratorCheck { require_approval: true }),
@@ -835,6 +1091,7 @@ mod tests {
     fn validate_rejects_unbounded_cycles_with_actionable_message() {
         let cyclic = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![
                 node("a", CircuitNodeKind::Manual),
                 node("b", CircuitNodeKind::Notify { message: String::new() }),
@@ -856,6 +1113,7 @@ mod tests {
         // require_approval: false is not a bound — the gate auto-completes.
         let g = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![
                 node("work", spawn_kind("p", None)),
                 node("gate", CircuitNodeKind::CollaboratorCheck { require_approval: false }),
@@ -871,6 +1129,7 @@ mod tests {
         // A bounded loop must not launder a sibling unbounded loop.
         let g = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![
                 node("a", spawn_kind("p", None)),
                 node("retry", CircuitNodeKind::RetryLimit { max_retries: 2 }),
@@ -896,6 +1155,7 @@ mod tests {
     fn validate_rejects_self_loop_even_on_a_retry_limit() {
         let g = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![node("retry", CircuitNodeKind::RetryLimit { max_retries: 3 })],
             edges: vec![always("retry", "retry")],
         };
@@ -954,6 +1214,7 @@ mod tests {
     fn v2_targeted_and_harness_fields_round_trip() {
         let graph = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
             nodes: vec![
                 node(
                     "spawn",
@@ -1053,5 +1314,95 @@ mod tests {
             let parsed = CircuitGraph::from_json(&g.to_json().unwrap()).unwrap();
             assert_eq!(parsed, g);
         }
+    }
+
+    #[test]
+    fn issue_driven_autopilot_review_is_a_valid_two_agent_blueprint() {
+        let g = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        g.validate().expect("review blueprint must pass graph validation");
+        assert!(g.is_issue_driven_autopilot_review());
+        assert_eq!(
+            g.blueprint,
+            Some(CircuitBlueprintKind::IssueDrivenAutopilotReview)
+        );
+
+        assert!(matches!(
+            g.node("trigger").map(|n| &n.kind),
+            Some(CircuitNodeKind::GithubIssueLabel { label }) if label == "buildmesh:run"
+        ));
+        assert!(matches!(
+            g.node("reviewer").map(|n| &n.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
+                if prompt.contains("{{pr.url}}")
+        ));
+        assert!(matches!(
+            g.node("collaborator_gate").map(|n| &n.kind),
+            Some(CircuitNodeKind::CollaboratorCheck { require_approval: true })
+        ));
+        assert!(matches!(
+            g.node("review_prompt").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, target_node_id })
+                if prompt == CircuitGraph::PR_REVIEW_PROMPT
+                    && target_node_id.as_deref() == Some("reviewer")
+        ));
+        assert!(matches!(
+            g.node("close_reviewer").map(|n| &n.kind),
+            Some(CircuitNodeKind::CloseAgentNode { target_node_id })
+                if target_node_id.as_deref() == Some("reviewer")
+        ));
+        assert!(matches!(
+            g.node("review_retry").map(|n| &n.kind),
+            Some(CircuitNodeKind::RetryLimit { max_retries }) if *max_retries == 3
+        ));
+        assert!(matches!(
+            g.node("complete").map(|n| &n.kind),
+            Some(CircuitNodeKind::Notify { message })
+                if message.contains("{{pr.number}}") && message.contains("{{issue.title}}")
+        ));
+        assert!(
+            g.edges.iter().any(|edge| {
+                edge.from == "review_retry"
+                    && edge.to == "finish"
+                    && edge.condition == EdgeCondition::OnOutcome(StepOutcome::Completed)
+            }),
+            "review retry must re-enter the implementation wrap-up"
+        );
+
+        let parsed = CircuitGraph::from_json(&g.to_json().unwrap()).unwrap();
+        assert_eq!(parsed, g);
+    }
+
+    #[test]
+    fn editing_the_review_prompt_does_not_change_blueprint_identity() {
+        let mut g = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let node = g
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "review_prompt")
+            .expect("review prompt exists");
+        node.kind = CircuitNodeKind::InjectPty {
+            prompt: "custom review".into(),
+            target_node_id: Some("reviewer".into()),
+        };
+        assert!(g.is_issue_driven_autopilot_review());
+    }
+
+    #[test]
+    fn legacy_review_graphs_get_a_marker_without_inspecting_prompt_text() {
+        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        graph.nodes.iter_mut().find(|node| node.id == "review_prompt").unwrap().kind =
+            CircuitNodeKind::InjectPty {
+                prompt: "author-customized review instruction".into(),
+                target_node_id: Some("reviewer".into()),
+            };
+        let mut raw: serde_json::Value = serde_json::from_str(&graph.to_json().unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("blueprint");
+
+        let parsed = CircuitGraph::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+        assert_eq!(
+            parsed.blueprint,
+            Some(CircuitBlueprintKind::IssueDrivenAutopilotReview)
+        );
+        assert!(parsed.is_issue_driven_autopilot_review());
     }
 }
