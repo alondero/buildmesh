@@ -95,7 +95,7 @@ impl AgentProvider for CommandCodeAdapter {
     }
 
     fn produces_readable_transcript(&self) -> bool {
-        false
+        true
     }
 
     fn supports_model_override(&self) -> bool {
@@ -299,7 +299,7 @@ mod tests {
         assert!(COMMANDCODE.supports_extra_args());
         assert!(COMMANDCODE.supports_prefill());
         assert!(!COMMANDCODE.requires_attention_hook());
-        assert!(!COMMANDCODE.produces_readable_transcript());
+        assert!(COMMANDCODE.produces_readable_transcript());
     }
 
     #[test]
@@ -313,7 +313,7 @@ mod tests {
         assert!(caps.supports_extra_args);
         assert!(caps.supports_prefill);
         assert!(!caps.requires_attention_hook);
-        assert!(!caps.produces_readable_transcript);
+        assert!(caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(
             caps.effort_control,

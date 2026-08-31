@@ -585,7 +585,7 @@ mod tests {
         assert!(commandcode.supports_resume);
         assert!(commandcode.auto_resume_on_startup);
         assert!(!commandcode.requires_attention_hook);
-        assert!(!commandcode.produces_readable_transcript);
+        assert!(commandcode.produces_readable_transcript);
         assert!(commandcode.supports_model_override);
         assert!(commandcode.supports_effort_override);
         assert!(commandcode.supports_extra_args);

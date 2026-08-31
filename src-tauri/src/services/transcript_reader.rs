@@ -5,13 +5,15 @@
 //! [`Unavailable`] reason when the provider has no readable transcript or the
 //! file fails to parse.
 //!
-//! Three harness formats are supported, selected by [`TranscriptFormat`]:
+//! Six harness formats are supported, selected by [`TranscriptFormat`]:
 //! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, Cursor's
 //! `~/.cursor/projects/<workspace>/agent-transcripts/<session>/<session>.jsonl`,
 //! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
-//! #885), and Grok Code's `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl,
-//! updates.jsonl}` (issue #1281). All map onto the same [`Turn`]/[`ToolCall`]
-//! wire shape, so the Coordinator never learns which harness wrote the file.
+//! #885), Antigravity's per-conversation JSONL, Grok Code's
+//! `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl, updates.jsonl}`
+//! (issue #1281), and Command Code's `~/.commandcode/sessions/<session>.jsonl`
+//! (issue #1407). All map onto the same [`Turn`]/[`ToolCall`] wire shape, so
+//! the Coordinator never learns which harness wrote the file.
 //!
 //! **All transcript-format brittleness is quarantined here.** Both this reader
 //! and `services::session_discovery` share the Claude-Code JSONL primitives
@@ -28,8 +30,11 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+
 use serde::Serialize;
+
 use crate::env;
+use crate::models::EnvType;
 /// Per-turn text cap. Generous (this is the deep drill-in, not the scan) but
 /// bounded so a single huge assistant message can't dominate the payload.
 const MAX_TURN_TEXT: usize = 4000;
@@ -57,6 +62,9 @@ pub enum TranscriptFormat {
     ClaudeCode,
     Cursor,
     Codex,
+    /// Command Code writes one structured message event per JSONL line under
+    /// `~/.commandcode/sessions/<session-id>.jsonl`.
+    CommandCode,
     /// Antigravity CLI (issue #1283). Persisted at
     /// `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
     /// logs/transcript.jsonl` (with `transcript_full.jsonl` as the untruncated
@@ -77,13 +85,15 @@ impl TranscriptFormat {
     /// Code format. Cursor has the same message shape but a workspace-scoped
     /// path, while Codex writes its own rollout format. Antigravity's
     /// per-conversation JSONL is parsed via `TranscriptFormat::Agy`
-    /// (issue #1283); Grok writes its own flat per-role JSONL (issue #1281).
+    /// (issue #1283); Grok writes its own flat per-role JSONL (issue #1281);
+    /// Command Code writes structured message events (issue #1407).
     /// Kimi Code (wayfinder #918) writes standard JSONL
     /// (`~/.kimi/sessions/wire.jsonl`) but the path resolver isn't wired yet
     /// — tracked as a follow-up.
     pub fn for_harness(harness_id: &str) -> Self {
         match harness_id {
             "codex" => TranscriptFormat::Codex,
+            "commandcode" => TranscriptFormat::CommandCode,
             "cursor" => TranscriptFormat::Cursor,
             "agy" => TranscriptFormat::Agy,
             "grok" => TranscriptFormat::Grok,
@@ -300,6 +310,7 @@ fn locate_transcript(
         TranscriptFormat::Codex => find_codex_rollout(session_id),
         TranscriptFormat::Agy => find_agy_transcript(session_id),
         TranscriptFormat::Grok => find_grok_transcript(session_id, node_path),
+        TranscriptFormat::CommandCode => find_commandcode_transcript(session_id, node_path),
     }
 }
 
@@ -332,6 +343,26 @@ fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<PathBuf> {
         return Some(full);
     }
     None
+}
+
+/// Find the flat Command Code session transcript for the node's runtime
+/// environment. Command Code stores one file per session under
+/// `<commandcode-home>/sessions/<session-id>.jsonl`; WSL homes are converted to
+/// host-readable paths by the shared environment path module.
+fn find_commandcode_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
+    let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
+    let sessions_dir = env::commandcode_sessions_dir(env_type, node_path)?;
+    let path = commandcode_transcript_path_in(&sessions_dir, session_id);
+    path.exists().then_some(path)
+}
+
+/// Pure Command Code locator used by the contract test and kept separate from
+/// process-global home/environment discovery.
+pub(crate) fn commandcode_transcript_path_in(
+    sessions_root: &Path,
+    session_id: &str,
+) -> PathBuf {
+    sessions_root.join(format!("{session_id}.jsonl"))
 }
 /// Build the expected on-disk path of a Claude Code session transcript:
 /// `<claude_dir>/projects/<encoded node_path>/<session_id>.jsonl`.
@@ -468,6 +499,7 @@ fn parse_transcript(
         TranscriptFormat::Codex => parse_codex_turns(lines, keep),
         TranscriptFormat::Agy => parse_agy_turns(lines, keep),
         TranscriptFormat::Grok => parse_grok_turns(lines, keep),
+        TranscriptFormat::CommandCode => parse_commandcode_turns(lines, keep),
     }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
@@ -960,6 +992,360 @@ fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed
         last_assistant_message,
         saw_malformed,
     }
+}
+
+// --- Command Code transcript parser (issue #1407) ---
+//
+// Command Code emits an event stream in which session/model metadata is mixed
+// with message records. The current message shape is:
+//
+//   {"type":"message", "id":"...", "message": {
+//       "role":"user"|"assistant", "content":[...]}}
+//
+// Thinking blocks are retained in the normalized turn text because `Turn` has
+// no separate reasoning field. The digest tracks only user-visible text, so
+// internal reasoning and diff output do not replace the Coordinator's latest
+// assistant response. Ordinary tool results remain suppressed.
+
+#[derive(Default)]
+struct CommandCodeContent {
+    text: String,
+    visible_text: String,
+}
+
+fn visible_commandcode_content(text: String) -> CommandCodeContent {
+    CommandCodeContent {
+        visible_text: text.clone(),
+        text,
+    }
+}
+
+fn hidden_commandcode_content(text: String) -> CommandCodeContent {
+    CommandCodeContent {
+        text,
+        visible_text: String::new(),
+    }
+}
+
+fn join_commandcode_content(parts: impl IntoIterator<Item = CommandCodeContent>) -> CommandCodeContent {
+    let parts: Vec<CommandCodeContent> = parts
+        .into_iter()
+        .filter(|part| !part.text.trim().is_empty())
+        .collect();
+    CommandCodeContent {
+        text: parts
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        visible_text: parts
+            .iter()
+            .filter(|part| !part.visible_text.trim().is_empty())
+            .map(|part| part.visible_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// Convert a Command Code content block into the text that belongs in a
+/// normalized turn. Tool-result prose is intentionally omitted, but an
+/// explicit diff nested in a result is useful session history and is
+/// surfaced as text.
+fn parse_commandcode_content_block(block: &serde_json::Value) -> Option<CommandCodeContent> {
+    let kind = block.get("type").and_then(|value| value.as_str())?;
+    match kind {
+        "text" => block
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(|text| visible_commandcode_content(text.to_string())),
+        "thinking" => block
+            .get("thinking")
+            .and_then(|value| value.as_str())
+            .map(|text| hidden_commandcode_content(text.to_string())),
+        "reasoning" => ["reasoning", "text"]
+            .iter()
+            .find_map(|key| parse_commandcode_content_value(block.get(*key)))
+            .map(|content| hidden_commandcode_content(content.text)),
+        "diff" => ["diff", "text", "content"]
+            .iter()
+            .find_map(|key| parse_commandcode_content_value(block.get(*key)))
+            .map(|content| hidden_commandcode_content(content.text)),
+        "tool_result" => commandcode_diff_text(block.get("content"))
+            .map(hidden_commandcode_content),
+        _ => None,
+    }
+}
+
+/// Read text from a Command Code value that is either a block, a block array,
+/// or a scalar text value. Unknown block types contribute no text but do not
+/// make the complete message unreadable; this keeps metadata additions
+/// forward-compatible.
+fn parse_commandcode_content_value(
+    value: Option<&serde_json::Value>,
+) -> Option<CommandCodeContent> {
+    match value {
+        Some(serde_json::Value::String(text)) => Some(visible_commandcode_content(text.clone())),
+        Some(serde_json::Value::Array(blocks)) => Some(join_commandcode_content(
+            blocks.iter().filter_map(parse_commandcode_content_block),
+        )),
+        Some(value @ serde_json::Value::Object(object)) if object.contains_key("type") => {
+            Some(parse_commandcode_content_block(value).unwrap_or_default())
+        }
+        Some(serde_json::Value::Null) => Some(CommandCodeContent::default()),
+        _ => None,
+    }
+}
+
+/// Extract only explicit diff blocks from a tool result. Ordinary tool
+/// output is an echo of the command and is intentionally not a conversation
+/// turn, matching the other transcript readers.
+fn commandcode_diff_text(value: Option<&serde_json::Value>) -> Option<String> {
+    match value {
+        Some(serde_json::Value::String(text)) if looks_like_commandcode_diff(text) => {
+            Some(text.clone())
+        }
+        Some(serde_json::Value::Array(blocks)) => {
+            let text = blocks
+                .iter()
+                .filter_map(commandcode_diff_block_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(text)
+        }
+        Some(value @ serde_json::Value::Object(object)) => {
+            if matches!(
+                object.get("type").and_then(|value| value.as_str()),
+                Some("diff")
+            ) {
+                return commandcode_diff_payload_text(value);
+            }
+            if object.get("type").and_then(|value| value.as_str()) == Some("text") {
+                return object
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .filter(|text| looks_like_commandcode_diff(text))
+                    .map(str::to_string);
+            }
+            ["diff"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(|value| value.as_str()))
+                .map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+fn commandcode_diff_block_text(block: &serde_json::Value) -> Option<String> {
+    match block.get("type").and_then(|value| value.as_str()) {
+        Some("diff") => commandcode_diff_payload_text(block),
+        Some("text") => block
+            .get("text")
+            .and_then(|value| value.as_str())
+            .filter(|text| looks_like_commandcode_diff(text))
+            .map(str::to_string),
+        Some("tool_result") => commandcode_diff_text(block.get("content")),
+        _ => None,
+    }
+}
+
+fn commandcode_diff_payload_text(block: &serde_json::Value) -> Option<String> {
+    ["diff", "text", "content"]
+        .iter()
+        .find_map(|key| match block.get(*key) {
+            Some(serde_json::Value::String(text)) => Some(text.clone()),
+            Some(value @ serde_json::Value::Array(_))
+            | Some(value @ serde_json::Value::Object(_)) => {
+                parse_commandcode_content_value(Some(value)).map(|content| content.text)
+            }
+            _ => None,
+        })
+}
+
+fn looks_like_commandcode_diff(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.starts_with("diff --git ")
+            || line.starts_with("@@ ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+    })
+}
+
+/// Parse Command Code JSONL lines into normalized turns. The rolling buffer,
+/// assistant digest, malformed-shape signal, and assistant-id coalescing all
+/// follow the shared transcript-reader contract used by Claude Code/Cursor.
+fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    let keep = keep.max(1);
+    let mut turns: VecDeque<Turn> = VecDeque::new();
+    let mut last_assistant_message: Option<String> = None;
+    let mut saw_malformed = false;
+    let mut open_assistant_id: Option<String> = None;
+    let mut open_assistant_visible_text: Option<String> = None;
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+
+        // Metadata and future event kinds are deliberately ignored. A
+        // recognized message envelope with a broken payload is different: it
+        // should degrade to ShapeChanged when no usable turns remain.
+        if value.get("type").and_then(|kind| kind.as_str()) != Some("message") {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            saw_malformed = true;
+            continue;
+        };
+
+        let Some(role) = message.get("role").and_then(|role| role.as_str()) else {
+            saw_malformed = true;
+            continue;
+        };
+        if role != "user" && role != "assistant" {
+            saw_malformed = true;
+            continue;
+        }
+        let Some(raw_content) = message.get("content") else {
+            saw_malformed = true;
+            continue;
+        };
+        let Some(content) = parse_commandcode_content_value(Some(raw_content)) else {
+            saw_malformed = true;
+            continue;
+        };
+        let CommandCodeContent {
+            mut text,
+            visible_text,
+        } = content;
+        let mut tool_calls = extract_tool_calls(Some(raw_content));
+        let has_tool_result = commandcode_has_tool_result(raw_content);
+        let diff_text = commandcode_diff_text(Some(raw_content));
+
+        if role == "user" {
+            let diff_merged = diff_text.as_deref().is_some_and(|diff| {
+                merge_commandcode_tool_result_diff(
+                    &mut turns,
+                    value.get("parentId").and_then(|id| id.as_str()),
+                    open_assistant_id.as_deref(),
+                    diff,
+                )
+            });
+            if diff_merged {
+                // A tool_result is transport output, not a new user prompt.
+                // Keep only any genuine user-visible text in this envelope.
+                text = visible_text.clone();
+            }
+            if has_tool_result && text.trim().is_empty() && (diff_merged || diff_text.is_none()) {
+                // Preserve the open assistant id across tool-result envelopes
+                // so a later assistant continuation can still coalesce.
+                continue;
+            }
+            open_assistant_id = None;
+            open_assistant_visible_text = None;
+            if is_synthetic_message(&text) || text.trim().is_empty() {
+                continue;
+            }
+            push_bounded(
+                &mut turns,
+                Turn {
+                    role: "user".to_string(),
+                    text: truncate(&text, MAX_TURN_TEXT),
+                    tool_calls: Vec::new(),
+                },
+                keep,
+            );
+            continue;
+        }
+
+        // A message that only reports an ordinary tool result has no
+        // user-facing normalized content. Keep the open id so a split
+        // assistant message can still merge a following continuation.
+        if text.trim().is_empty() && tool_calls.is_empty() {
+            continue;
+        }
+
+        let id = value
+            .get("id")
+            .or_else(|| message.get("id"))
+            .and_then(|id| id.as_str())
+            .map(str::to_string);
+        if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
+            if id == open {
+                if let Some(last) = turns.back_mut() {
+                    merge_into(last, &text, tool_calls);
+                    if !visible_text.trim().is_empty() {
+                        let combined = if let Some(previous) = &open_assistant_visible_text {
+                            format!("{}\n{}", previous, visible_text)
+                        } else {
+                            visible_text.clone()
+                        };
+                        open_assistant_visible_text = Some(truncate(&combined, MAX_TURN_TEXT));
+                    }
+                    if let Some(visible) = &open_assistant_visible_text {
+                        last_assistant_message = Some(visible.clone());
+                    }
+                    continue;
+                }
+            }
+        }
+
+        open_assistant_id = id;
+        let visible_text = truncate(&visible_text, MAX_TURN_TEXT);
+        open_assistant_visible_text = (!visible_text.trim().is_empty()).then_some(visible_text.clone());
+        cap_tool_calls(&mut tool_calls);
+        let turn = Turn {
+            role: "assistant".to_string(),
+            text: truncate(&text, MAX_TURN_TEXT),
+            tool_calls,
+        };
+        if !visible_text.is_empty() {
+            last_assistant_message = Some(visible_text);
+        }
+        push_bounded(&mut turns, turn, keep);
+    }
+
+    Parsed {
+        turns: turns.into(),
+        last_assistant_message,
+        saw_malformed,
+    }
+}
+
+fn commandcode_has_tool_result(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values.iter().any(commandcode_has_tool_result),
+        serde_json::Value::Object(object) => {
+            object.get("type").and_then(|kind| kind.as_str()) == Some("tool_result")
+                || object
+                    .get("content")
+                    .is_some_and(commandcode_has_tool_result)
+        }
+        _ => false,
+    }
+}
+
+fn merge_commandcode_tool_result_diff(
+    turns: &mut VecDeque<Turn>,
+    parent_id: Option<&str>,
+    open_assistant_id: Option<&str>,
+    diff: &str,
+) -> bool {
+    if let Some(parent_id) = parent_id {
+        if open_assistant_id != Some(parent_id) {
+            return false;
+        }
+    }
+    let Some(last) = turns.back_mut() else {
+        return false;
+    };
+    if last.role != "assistant" {
+        return false;
+    }
+    merge_into(last, diff, Vec::new());
+    true
 }
 
 // --- Antigravity transcript parser (issue #1283) ---
@@ -2031,12 +2417,113 @@ mod tests {
     #[test]
     fn transcript_format_for_harness_routes_each_format() {
         assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
+        assert_eq!(
+            TranscriptFormat::for_harness("commandcode"),
+            TranscriptFormat::CommandCode
+        );
         assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
         assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
         assert_eq!(TranscriptFormat::for_harness("grok"), TranscriptFormat::Grok);
         for id in ["anthropic", "claude", "opencode", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
         }
+    }
+
+    #[test]
+    fn commandcode_transcript_path_uses_session_id_under_sessions_root() {
+        let path = commandcode_transcript_path_in(
+            Path::new(r"C:\Users\adam\.commandcode\sessions"),
+            "sess-commandcode-123",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(r"C:\Users\adam\.commandcode\sessions\sess-commandcode-123.jsonl")
+        );
+    }
+
+    #[test]
+    fn commandcode_contract_parses_nested_messages_and_preserves_reasoning_and_tools() {
+        let tail = read_tail_from_file(
+            &fixture("commandcode_transcript.jsonl"),
+            10,
+            TranscriptFormat::CommandCode,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("Command Code fixture should parse to an available tail, got {tail:?}");
+        };
+
+        let roles: Vec<&str> = turns.iter().map(|turn| turn.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "assistant", "user", "assistant"],
+            "ordinary tool_result echoes and non-message events should be skipped; turns: {turns:#?}"
+        );
+        assert_eq!(
+            turns[0].text,
+            "Inspect src/login.ts for the redirect bug."
+        );
+        assert_eq!(
+            turns[1].text,
+            "I should inspect the redirect path before changing anything.\nI'll inspect the file first."
+        );
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "read_file");
+        assert_eq!(turns[1].tool_calls[0].input["file_path"], "src/login.ts");
+        assert_eq!(
+            turns[2].text,
+            "The query string is dropped while building the redirect URL.\nI have prepared the redirect fix.\n@@ -1 +1 @@\n-const redirect = nextUrl;\n+const redirect = new URL(nextUrl, window.location.origin);"
+        );
+        assert_eq!(
+            turns[2].tool_calls[0].input["diff"],
+            "@@ -1 +1 @@\n-const redirect = nextUrl;\n+const redirect = new URL(nextUrl, window.location.origin);"
+        );
+        assert_eq!(
+            turns[4].text,
+            "The requested change is now applied.\nThe redirect now preserves the query string."
+        );
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("The redirect now preserves the query string.")
+        );
+    }
+
+    #[test]
+    fn commandcode_cheap_digest_reader_matches_full_reader() {
+        let digest = read_last_assistant_message_from_file(
+            &fixture("commandcode_transcript.jsonl"),
+            TranscriptFormat::CommandCode,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = digest
+        else {
+            panic!("expected Command Code digest to be available");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("The redirect now preserves the query string.")
+        );
+    }
+
+    #[test]
+    fn commandcode_thinking_only_turn_is_visible_but_not_digest_text() {
+        let lines = [
+            r#"{"type":"message","id":"user-1","message":{"role":"user","content":"Inspect the redirect."}}"#,
+            r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"I am still inspecting the redirect."}]}}"#,
+        ];
+        let parsed = parse_commandcode_turns(
+            lines.into_iter().map(str::to_string),
+            10,
+        );
+        assert_eq!(parsed.turns.len(), 2);
+        assert_eq!(parsed.turns[1].text, "I am still inspecting the redirect.");
+        assert_eq!(parsed.last_assistant_message, None);
     }
 
     #[test]
