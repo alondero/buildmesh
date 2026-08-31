@@ -259,7 +259,7 @@ export function TitleBar() {
           <button
             type="button"
             onClick={() => setAppSettingsOpen(true)}
-            className="p-1 rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors"
+            className="p-1 rounded-md text-text-muted hover:text-text-primary hover:bg-bg-card transition-colors"
             title="Settings"
             aria-label="Open settings"
           >
@@ -268,7 +268,7 @@ export function TitleBar() {
           <button
             type="button"
             onClick={() => setRemoteAccessOpen(true)}
-            className="p-1 rounded-md text-accent-cyan hover:text-accent-blue hover:bg-bg-card transition-colors"
+            className="p-1 rounded-md text-text-muted hover:text-text-primary hover:bg-bg-card transition-colors"
             title="Remote access"
             aria-label="Open remote access"
           >

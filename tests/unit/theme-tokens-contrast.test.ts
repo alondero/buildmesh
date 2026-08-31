@@ -68,11 +68,13 @@ function readToken(name: string): string {
 
 // Pin the token values themselves so a future "let's soften the muted"
 // revert is caught at the test boundary — not just by visual review.
+// Surfaces retuned to neutral zinc in issue #1376; ratios re-measured
+// against --color-text-muted #7a8492 (5.22 / 4.97 / 4.80 / 4.75).
 const EXPECTED_TEXT_MUTED = '#7a8492';
-const BG_BASE = '#09090f';
-const BG_SURFACE = '#0d0d16';
-const BG_OVERLAY = '#13131e';
-const BG_CARD = '#18182a';
+const BG_BASE = '#0a0a0e';
+const BG_SURFACE = '#111116';
+const BG_OVERLAY = '#15151c';
+const BG_CARD = '#16161d';
 const AA_BODY_THRESHOLD = 4.5;
 
 // ---------- Tests ----------------------------------------------------------
@@ -98,18 +100,31 @@ describe('theme text-token contrast (#732)', () => {
 
   it('--color-text-muted clears WCAG AA (4.5:1) on bg-overlay', () => {
     // bg-overlay is used for elevated panels (e.g. the diff header strip).
-    // The margin here is thin (4.86:1) — a future darkening of bg-overlay
-    // would push it below AA. Pin the contract.
+    // The current ratio is 4.80:1 (4.86:1 before the #1376 surface
+    // retune) — a future darkening of bg-overlay would push it below AA.
+    // Pin the contract.
     const ratio = contrastRatio(EXPECTED_TEXT_MUTED, BG_OVERLAY);
     expect(ratio).toBeGreaterThanOrEqual(AA_BODY_THRESHOLD);
   });
 
   it('--color-text-muted clears WCAG AA (4.5:1) on bg-card', () => {
     // bg-card is the card surface used throughout the probe tabs and
-    // mesh panels. The current ratio is 4.61:1 — JUST clears AA by
-    // 0.11. A future darken of bg-card to match a redesigned bg-surface
-    // would fail this guard. Pin the contract.
+    // mesh panels. The current ratio is 4.75:1 (4.61:1 before the
+    // #1376 surface retune — the darker zinc card actually widened the
+    // margin). A future lighten of bg-card would fail this guard.
+    // Pin the contract.
     const ratio = contrastRatio(EXPECTED_TEXT_MUTED, BG_CARD);
+    expect(ratio).toBeGreaterThanOrEqual(AA_BODY_THRESHOLD);
+  });
+
+  it('--color-text-muted clears WCAG AA (4.5:1) on bg-card-hover', () => {
+    // Hovered cards still render their text — muted copy must stay AA
+    // on the hover surface too. #1376 originally proposed #1c1c24, which
+    // measures 4.47:1 — under AA — so the token ships as #1b1b23
+    // (4.52:1). Pin both sides: the value AND the AA margin, so a future
+    // revert to the spec's original hex fails here, not at visual review.
+    expect(readToken('bg-card-hover')).toBe('#1b1b23');
+    const ratio = contrastRatio(EXPECTED_TEXT_MUTED, '#1b1b23');
     expect(ratio).toBeGreaterThanOrEqual(AA_BODY_THRESHOLD);
   });
 
