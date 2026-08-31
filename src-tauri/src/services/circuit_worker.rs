@@ -88,7 +88,7 @@ static APPROVALS: Lazy<Mutex<Vec<(i64, String)>>> = Lazy::new(|| Mutex::new(Vec:
 /// on `PoisonError` permanently bricks the worker: the next pass would
 /// panic the spawned thread, `wake_circuit_worker()` would silently fail
 /// to wake anyone, and the entire circuit poller would stall. The recover
-/// shape matches `db::lock_db()` and `services::autopilot::lock_planner_set`.
+/// shape matches `db::write_conn()` and `services::autopilot::lock_planner_set`.
 fn lock_circuit_worker_static<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
     match mutex.lock() {
         Ok(guard) => guard,

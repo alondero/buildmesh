@@ -3,14 +3,54 @@
 //! Tests that verify create_mesh handles duplicate paths gracefully,
 //! returning the existing mesh instead of crashing with UNIQUE constraint.
 //!
-//! Run with: cargo test --package buildmesh --lib db::mesh_tests -- --test-threads=1
+//! Each test acquires [`MESH_TESTS_LOCK`] at the top of its body to
+//! serialise against the other tests in this module. The process-wide
+//! `db::DB` is a `OnceCell<Mutex<Connection>>` — once any test in the
+//! binary calls `db::init`, every later `init` silently no-ops and
+//! writes go to the winner's connection (issue #1334). Tests outside
+//! this module are unaffected.
 
 #[cfg(test)]
 mod tests {
+    fn assert_global_active_contribution(node_id: i64, expected: i64) {
+        // Keep the writer locked across both snapshots so another test cannot
+        // change the shared database between them. Other active nodes may
+        // exist, but this node's exact contribution must still be observable.
+        let db = crate::db::write_conn();
+        let total = crate::db::count_active_autopilot_nodes_total_inner(&db).unwrap();
+        let others: i64 = db
+            .query_row(
+                &format!(
+                    "{} AND r.node_id != ?1",
+                    crate::db::COUNT_ACTIVE_AUTOPILOT_SQL
+                ),
+                rusqlite::params![node_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(total - others, expected);
+    }
+
+    /// Module-scope serialisation lock for [`db::mesh_tests`]. Every test
+    /// in this module calls [`serial`] at the top of its body — module-wide
+    /// (not just the autopilot-counting tests) because all of them call
+    /// `db::init` and therefore contend on the same shared connection.
+    /// Poison recovery mirrors [`db::write_conn`](crate::db::write_conn) (issue #1224).
+    static MESH_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire [`MESH_TESTS_LOCK`], recovering from a poisoned mutex
+    /// instead of propagating the poison as a panic (issue #1224).
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        MESH_TESTS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Test: creating a project with a duplicate path should NOT crash.
     /// Expected behavior: return the existing project (idempotent upsert).
     #[test]
     fn test_create_project_with_duplicate_path_returns_existing() {
+        let _serial = serial();
         // Use a unique temp file per test so each test is fully isolated
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -29,7 +69,7 @@ mod tests {
         let second_result = crate::db::create_mesh("Second Project", "/tmp/dup-test");
 
         // Cleanup
-        drop(crate::db::lock_db());
+        drop(crate::db::write_conn());
         std::fs::remove_file(&temp_path).ok();
 
         // Assert: should return Ok(existing_mesh), NOT Err(UNIQUE constraint)
@@ -49,6 +89,7 @@ mod tests {
     /// returns to the palette-fallback (`None`).
     #[test]
     fn test_mesh_color_round_trips() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -79,6 +120,7 @@ mod tests {
     /// strings with `None` returns them to `None` (poller defaults apply).
     #[test]
     fn test_mesh_autopilot_policy_round_trips() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -134,6 +176,7 @@ mod tests {
     /// command layer can surface "mesh not found".
     #[test]
     fn test_set_mesh_autopilot_enabled_is_narrow() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -202,6 +245,7 @@ mod tests {
     /// round-trip pattern just above.
     #[test]
     fn test_mesh_loop_config_round_trips() {
+        let _serial = serial();
         use crate::db::AutopilotMode;
 
         let test_id = std::time::SystemTime::now()
@@ -248,7 +292,7 @@ mod tests {
         // as SessionStatus::from_db_str. Defensive: the poller refuses to
         // crash on a malformed row.
         {
-            let db = crate::db::lock_db();
+            let db = crate::db::write_conn();
             db.execute(
                 "UPDATE meshes SET autopilot_mode = 'tomorrow' WHERE id = ?1",
                 rusqlite::params![mesh.id],
@@ -288,6 +332,7 @@ mod tests {
     /// state transitions, dedupe list, and slot release on completion.
     #[test]
     fn test_autopilot_runs_ledger_counts_and_dedupes() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -365,6 +410,7 @@ mod tests {
     /// stale window; fresh activity and state advances take it back off.
     #[test]
     fn test_stalled_finishing_runs_listing() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -406,7 +452,7 @@ mod tests {
 
         // Backdate the row as if no pipeline activity happened for 10 minutes.
         {
-            let db = crate::db::lock_db();
+            let db = crate::db::write_conn();
             db.execute(
                 "UPDATE autopilot_runs SET updated_at = datetime('now', '-10 minutes') \
                  WHERE node_id = ?1",
@@ -435,6 +481,7 @@ mod tests {
     /// and archiving the node removes it from both.
     #[test]
     fn test_autopilot_run_pr_recording_and_sweep_listing() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -512,6 +559,7 @@ mod tests {
     /// future change removes BOTH the cascade AND the explicit delete.
     #[test]
     fn test_delete_mesh_removes_autopilot_runs_rows() {
+        let _serial = serial();
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -578,6 +626,11 @@ mod tests {
     /// that suffix turn reaches `Completed`.
     #[test]
     fn test_loop_suffix_pending_preserves_context_and_capacity() {
+        // This test is the one that actually asserts the exact global
+        // total — a parallel autopilot row write would shift `total_after`
+        // from `total_before + 1` to `total_before + 2` (issue #1334).
+        let _serial = serial();
+
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -588,7 +641,6 @@ mod tests {
 
         let path = format!("/tmp/loop-suffix-{}", test_id);
         let mesh = crate::db::create_mesh("Loop Suffix Mesh", &path).unwrap();
-        let total_before = crate::db::count_active_autopilot_nodes_total().unwrap();
         let node = crate::db::create_agent_node(
             mesh.id,
             "loop-iter-4",
@@ -622,10 +674,7 @@ mod tests {
         assert_eq!(iteration, Some(4));
         assert_eq!(pr_url.as_deref(), Some("https://github.com/x/y/pull/993"));
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 1);
-        assert_eq!(
-            crate::db::count_active_autopilot_nodes_total().unwrap(),
-            total_before + 1
-        );
+        assert_global_active_contribution(node.id, 1);
         assert!(crate::db::list_active_autopilot_node_ids()
             .unwrap()
             .contains(&node.id));
@@ -633,7 +682,7 @@ mod tests {
         // `suffix_pending` is active but is not another stale wrap-up
         // verification candidate, even when its timestamp is old.
         {
-            let db = crate::db::lock_db();
+            let db = crate::db::write_conn();
             db.execute(
                 "UPDATE autopilot_runs SET updated_at = datetime('now', '-10 minutes') \
                  WHERE node_id = ?1",
@@ -647,10 +696,7 @@ mod tests {
 
         crate::db::set_autopilot_run_state(node.id, S::Completed, None).unwrap();
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 0);
-        assert_eq!(
-            crate::db::count_active_autopilot_nodes_total().unwrap(),
-            total_before
-        );
+        assert_global_active_contribution(node.id, 0);
         let rows = crate::db::list_loop_iterations(mesh.id).unwrap();
         assert!(rows.iter().any(|(iteration, state, _)| {
             *iteration == 4 && *state == S::Completed

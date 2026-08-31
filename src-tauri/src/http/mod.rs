@@ -2349,7 +2349,7 @@ mod tests {
             None,
         )
         .unwrap_or_else(|_| {
-            let conn = crate::db::lock_db();
+            let conn = crate::db::write_conn();
             let id: i64 = conn
                 .query_row(
                     "SELECT id FROM agent_nodes WHERE name = 'happy-node'",
@@ -2360,7 +2360,7 @@ mod tests {
             crate::db::get_agent_node_by_id(id).unwrap()
         });
 
-        let conn = crate::db::lock_db();
+        let conn = crate::db::write_conn();
         conn.execute(
             "UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2",
             rusqlite::params![session_id, node.id],

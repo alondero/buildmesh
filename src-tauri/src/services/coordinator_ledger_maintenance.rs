@@ -228,7 +228,7 @@ mod tests {
     /// The headline AC for item 3: rows older than the retention window are
     /// deleted, newer rows survive. `prune_once` uses the DB helper, which
     /// honours the `LEDGER_RETENTION_DAYS` constant — we hand-call the DB
-    /// helper here so the test doesn't need to set up the global DB mutex.
+    /// helper here so the test doesn't need to set up the global DB writer.
     #[test]
     fn prune_keeps_newer_and_drops_older_rows() {
         let conn = db();

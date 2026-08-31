@@ -164,7 +164,7 @@ impl ChunkCapture {
         // `try_extract_session_id` returns `Option<&str>` borrowed from
         // `decoded` (and thus `self.pending`); the borrow checker needs
         // the owned form to release the immutable borrow before the
-        // `mem::replace` below.
+        // `mem::take` below.
         if let Some(uuid) = try_extract_session_id(&decoded).map(str::to_string) {
             // Latch fires. Drain the carry-over and return the full
             // decoded text — it includes the held-back tail bytes that
@@ -173,7 +173,7 @@ impl ChunkCapture {
             // discard any pending bytes after this chunk because we no
             // longer care).
             self.captured = true;
-            let text = std::mem::replace(&mut self.pending, Vec::new());
+            let text = std::mem::take(&mut self.pending);
             // The bytes we are about to return may end mid-UTF-8, which
             // would round-trip through from_utf8_lossy as U+FFFD — but
             // the latch has fired so the downstream consumers no longer

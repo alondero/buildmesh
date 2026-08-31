@@ -457,7 +457,7 @@ pub async fn drive_node_with_key_async(
 ///
 /// The drive path is fully synchronous and can park its thread for up to
 /// [`IN_PROGRESS_WAIT_TIMEOUT`] in the `InProgress` wait loop, on top of the
-/// synchronous SQLite it runs under the process-global DB mutex. Calling it
+/// synchronous SQLite it runs under the dedicated DB writer. Calling it
 /// straight from an `async fn` pins a bounded tokio worker for the whole wait,
 /// so a handful of colliding same-key retries can starve the accept/dispatch
 /// workers that every other HTTP route, WS handshake and mobile terminal

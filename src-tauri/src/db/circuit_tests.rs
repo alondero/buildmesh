@@ -82,7 +82,7 @@ fn create_autopilot_circuit_is_draft_first_disabled() {
 
     // Fresh-DB column default matches the INSERT (issue #1356).
     let dflt: Option<String> = {
-        let db = lock_db();
+        let db = write_conn();
         db.query_row(
             "SELECT dflt_value FROM pragma_table_info('autopilot_circuits') WHERE name = 'enabled'",
             [],
@@ -170,7 +170,7 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     set_autopilot_circuit_enabled(created.id, true).unwrap();
 
     {
-        let conn = lock_db();
+        let conn = write_conn();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 
@@ -337,7 +337,7 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
     // The shared process-global DB holds other tests' rows too — count
     // only this circuit's descendants.
     let remaining_runs: i64 = {
-        let conn = lock_db();
+        let conn = write_conn();
         conn.query_row(
             "SELECT COUNT(*) FROM autopilot_circuit_runs WHERE circuit_id = ?1",
             params![circuit.id],
@@ -346,7 +346,7 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
         .unwrap()
     };
     let remaining_steps: i64 = {
-        let conn = lock_db();
+        let conn = write_conn();
         conn.query_row(
             "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
              JOIN autopilot_circuit_runs r ON r.id = s.run_id \
@@ -391,7 +391,7 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
 
     assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty());
     let remaining_runs: i64 = {
-        let conn = lock_db();
+        let conn = write_conn();
         conn.query_row(
             "SELECT COUNT(*) FROM autopilot_circuit_runs WHERE mesh_id = ?1",
             params![mesh.id],
