@@ -1436,7 +1436,8 @@ mod tests {
 
     /// The "produces a readable transcript" capability (#317) — the
     /// Claude-backed `anthropic` adapter (which also runs custom
-    /// MiniMax/DeepSeek profiles), Codex, Cursor, Antigravity, and Grok write
+    /// MiniMax/DeepSeek profiles), Codex, Cursor, Antigravity, Grok, and
+    /// Command Code write
     /// transcripts the coordinator read API can drill into. Kimi Code's
     /// `wire.jsonl` is standard JSONL (#911 research), but the reader's path
     /// resolver isn't wired for `~/.kimi/` yet. Everything else degrades to

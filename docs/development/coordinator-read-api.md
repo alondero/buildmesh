@@ -48,8 +48,9 @@ deliberately separate capability.
 ### `GET /nodes` — cheap scan, every node across every Mesh
 
 Returns a JSON array of **Node Digests**, layered: an always-available spine
-plus a transcript-derived rich layer for the Claude Code family only. Designed
-to be polled on the order of seconds.
+plus a transcript-derived rich layer for providers with a wired reader
+(Claude Code family, Codex, Cursor, AGY, Grok, and Command Code). Designed to
+be polled on the order of seconds.
 
 ```bash
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:1992/nodes
@@ -74,14 +75,15 @@ Response shape (one element, abridged):
 }
 ```
 
-A digest whose provider has no readable transcript (OpenCode, Codex, etc.):
+A digest whose provider has no readable transcript (OpenCode, Kimi, Terminal,
+etc.):
 
 ```json
 {
   "id": 43,
   "name": "docs-pass",
   "mesh": "core",
-  "provider": "codex",
+  "provider": "opencode",
   "status": "running",
   "needs_feedback": false,
   "waiting_since": null,
@@ -188,11 +190,11 @@ field is `reason`, which is one of:
 
 | Reason | Meaning | Coordinator action |
 |---|---|---|
-| `unsupported` | The provider does not produce a readable transcript (OpenCode, Codex, Agy, Terminal). | Use the spine only. This is permanent. |
+| `unsupported` | The provider does not produce a readable transcript (OpenCode, Kimi, Terminal). | Use the spine only. This is permanent. |
 | `no_session` | The provider supports transcripts but Buildmesh has not captured a CLI session id for this node yet (e.g. just spawned). | Retry on the next poll. |
 | `no_transcript` | A session id exists but no JSONL file was found on disk where Buildmesh looked. | Retry on the next poll. |
 | `unreadable` | The file exists but the I/O failed. | Retry, then page if persistent. |
-| `shape_changed` | The file was read but the Claude Code JSONL shape has changed (renamed/missing fields). | **Page** — this is a real format break, not a quiet node. |
+| `shape_changed` | The file was read but the provider's JSONL shape has changed (renamed/missing fields). | **Page** — this is a real format break, not a quiet node. |
 
 > **A sixth reason is queued** ([#339](https://github.com/alondero/buildmesh/issues/339)):
 > a cold-start cwrap node's first-seconds digest can currently read as
@@ -277,10 +279,10 @@ Out of scope for this PRD, deferred by design (see ADR-0008):
   a thin MCP server is the fast-follow once the read model is proven.
 - **Parsing the rendered terminal/TUI.** The transcript is the read source;
   the terminal is for humans.
-- **Non-Claude-Code transcript enrichment.** OpenCode, Codex, Agy, and
-  Terminal all degrade to a spine-only digest flagged `unsupported`. A
-  bespoke reader for any of them is future work — the capability flag
-  exists to make that a one-place change.
+- **Transcript enrichment for providers without a reader.** OpenCode, Kimi,
+  and Terminal degrade to a spine-only digest flagged `unsupported`. A
+  bespoke reader for any of them is future work — the capability flag exists
+  to make that a one-place change.
 - **Pre-summarising transcripts** for the Coordinator. Summarisation stays
   in the human UI.
 - **Buildmesh opening its own internet-facing port / TLS.** The user owns

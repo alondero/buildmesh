@@ -212,7 +212,7 @@ const COMMANDCODE_CAPS: HarnessCapabilities = {
   supports_resume: true,
   auto_resume_on_startup: true,
   requires_attention_hook: false,
-  produces_readable_transcript: false,
+  produces_readable_transcript: true,
   supports_model_override: true,
   supports_effort_override: true,
   supports_extra_args: true,

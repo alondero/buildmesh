@@ -161,6 +161,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.supports_effort_override).toBe(true);
     expect(c.supports_extra_args).toBe(true);
     expect(c.supports_prefill).toBe(true);
+    expect(c.produces_readable_transcript).toBe(true);
     expect(c.effort_control.kind).toBe('closed');
     expect(effortAllowedFor(c)).toEqual(['low', 'medium', 'high']);
   });

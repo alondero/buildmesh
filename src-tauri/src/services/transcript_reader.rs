@@ -5,13 +5,15 @@
 //! [`Unavailable`] reason when the provider has no readable transcript or the
 //! file fails to parse.
 //!
-//! Three harness formats are supported, selected by [`TranscriptFormat`]:
+//! Six harness formats are supported, selected by [`TranscriptFormat`]:
 //! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, Cursor's
 //! `~/.cursor/projects/<workspace>/agent-transcripts/<session>/<session>.jsonl`,
 //! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
-//! #885), and Grok Code's `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl,
-//! updates.jsonl}` (issue #1281). All map onto the same [`Turn`]/[`ToolCall`]
-//! wire shape, so the Coordinator never learns which harness wrote the file.
+//! #885), Antigravity's per-conversation JSONL, Grok Code's
+//! `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl, updates.jsonl}`
+//! (issue #1281), and Command Code's `~/.commandcode/sessions/<session>.jsonl`
+//! (issue #1407). All map onto the same [`Turn`]/[`ToolCall`] wire shape, so
+//! the Coordinator never learns which harness wrote the file.
 //!
 //! **All transcript-format brittleness is quarantined here.** Both this reader
 //! and `services::session_discovery` share the Claude-Code JSONL primitives
@@ -28,8 +30,11 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+
 use serde::Serialize;
+
 use crate::env;
+use crate::models::EnvType;
 /// Per-turn text cap. Generous (this is the deep drill-in, not the scan) but
 /// bounded so a single huge assistant message can't dominate the payload.
 const MAX_TURN_TEXT: usize = 4000;
@@ -57,6 +62,9 @@ pub enum TranscriptFormat {
     ClaudeCode,
     Cursor,
     Codex,
+    /// Command Code writes one structured message event per JSONL line under
+    /// `~/.commandcode/sessions/<session-id>.jsonl`.
+    CommandCode,
     /// Antigravity CLI (issue #1283). Persisted at
     /// `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
     /// logs/transcript.jsonl` (with `transcript_full.jsonl` as the untruncated
@@ -77,13 +85,15 @@ impl TranscriptFormat {
     /// Code format. Cursor has the same message shape but a workspace-scoped
     /// path, while Codex writes its own rollout format. Antigravity's
     /// per-conversation JSONL is parsed via `TranscriptFormat::Agy`
-    /// (issue #1283); Grok writes its own flat per-role JSONL (issue #1281).
+    /// (issue #1283); Grok writes its own flat per-role JSONL (issue #1281);
+    /// Command Code writes structured message events (issue #1407).
     /// Kimi Code (wayfinder #918) writes standard JSONL
     /// (`~/.kimi/sessions/wire.jsonl`) but the path resolver isn't wired yet
     /// — tracked as a follow-up.
     pub fn for_harness(harness_id: &str) -> Self {
         match harness_id {
             "codex" => TranscriptFormat::Codex,
+            "commandcode" => TranscriptFormat::CommandCode,
             "cursor" => TranscriptFormat::Cursor,
             "agy" => TranscriptFormat::Agy,
             "grok" => TranscriptFormat::Grok,
@@ -300,6 +310,7 @@ fn locate_transcript(
         TranscriptFormat::Codex => find_codex_rollout(session_id),
         TranscriptFormat::Agy => find_agy_transcript(session_id),
         TranscriptFormat::Grok => find_grok_transcript(session_id, node_path),
+        TranscriptFormat::CommandCode => find_commandcode_transcript(session_id, node_path),
     }
 }
 
@@ -332,6 +343,26 @@ fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<PathBuf> {
         return Some(full);
     }
     None
+}
+
+/// Find the flat Command Code session transcript for the node's runtime
+/// environment. Command Code stores one file per session under
+/// `<commandcode-home>/sessions/<session-id>.jsonl`; WSL homes are converted to
+/// host-readable paths by the shared environment path module.
+fn find_commandcode_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
+    let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
+    let sessions_dir = env::commandcode_sessions_dir(env_type, node_path)?;
+    let path = commandcode_transcript_path_in(&sessions_dir, session_id);
+    path.exists().then_some(path)
+}
+
+/// Pure Command Code locator used by the contract test and kept separate from
+/// process-global home/environment discovery.
+pub(crate) fn commandcode_transcript_path_in(
+    sessions_root: &Path,
+    session_id: &str,
+) -> PathBuf {
+    sessions_root.join(format!("{session_id}.jsonl"))
 }
 /// Build the expected on-disk path of a Claude Code session transcript:
 /// `<claude_dir>/projects/<encoded node_path>/<session_id>.jsonl`.
@@ -468,6 +499,7 @@ fn parse_transcript(
         TranscriptFormat::Codex => parse_codex_turns(lines, keep),
         TranscriptFormat::Agy => parse_agy_turns(lines, keep),
         TranscriptFormat::Grok => parse_grok_turns(lines, keep),
+        TranscriptFormat::CommandCode => parse_commandcode_turns(lines, keep),
     }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
@@ -955,6 +987,130 @@ fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed
             _ => {}
         }
     }
+    Parsed {
+        turns: turns.into(),
+        last_assistant_message,
+        saw_malformed,
+    }
+}
+
+// --- Command Code transcript parser (issue #1407) ---
+//
+// Command Code emits an event stream in which session/model metadata is mixed
+// with message records. The current message shape is:
+//
+//   {"type":"message", "id":"...", "message": {
+//       "role":"user"|"assistant", "content":[...]}}
+//
+// Thinking, reasoning, and tool-result blocks are transport details rather
+// than Coordinator dialogue. They are deliberately omitted from `Turn.text`;
+// tool invocations remain available through the shared `ToolCall` shape.
+
+/// Parse Command Code JSONL lines into normalized turns. The rolling buffer,
+/// assistant digest, malformed-shape signal, and assistant-id coalescing all
+/// follow the shared transcript-reader contract used by Claude Code/Cursor.
+fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    let keep = keep.max(1);
+    let mut turns: VecDeque<Turn> = VecDeque::new();
+    let mut last_assistant_message: Option<String> = None;
+    let mut saw_malformed = false;
+    let mut open_assistant_id: Option<String> = None;
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+
+        // Metadata and future event kinds are deliberately ignored. A
+        // recognized message envelope with a broken payload is different: it
+        // should degrade to ShapeChanged when no usable turns remain.
+        if value.get("type").and_then(|kind| kind.as_str()) != Some("message") {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            saw_malformed = true;
+            continue;
+        };
+
+        let Some(role) = message.get("role").and_then(|role| role.as_str()) else {
+            saw_malformed = true;
+            continue;
+        };
+        if role != "user" && role != "assistant" {
+            saw_malformed = true;
+            continue;
+        }
+        let Some(raw_content) = message.get("content") else {
+            saw_malformed = true;
+            continue;
+        };
+        if !matches!(
+            raw_content,
+            serde_json::Value::String(_) | serde_json::Value::Array(_) | serde_json::Value::Null
+        ) {
+            saw_malformed = true;
+            continue;
+        }
+        let text = concat_text_blocks(Some(raw_content));
+        let mut tool_calls = extract_tool_calls(Some(raw_content));
+
+        if role == "user" {
+            open_assistant_id = None;
+            if is_synthetic_message(&text) || text.trim().is_empty() {
+                continue;
+            }
+            push_bounded(
+                &mut turns,
+                Turn {
+                    role: "user".to_string(),
+                    text: truncate(&text, MAX_TURN_TEXT),
+                    tool_calls: Vec::new(),
+                },
+                keep,
+            );
+            continue;
+        }
+
+        // An assistant message containing only internal blocks has no
+        // user-facing normalized content. Keep the open id so a split
+        // assistant message can still merge a following continuation.
+        if text.trim().is_empty() && tool_calls.is_empty() {
+            continue;
+        }
+
+        let id = value
+            .get("id")
+            .or_else(|| message.get("id"))
+            .and_then(|id| id.as_str())
+            .map(str::to_string);
+        if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
+            if id == open {
+                if let Some(last) = turns.back_mut() {
+                    merge_into(last, &text, tool_calls);
+                    if !last.text.trim().is_empty() {
+                        last_assistant_message = Some(last.text.clone());
+                    }
+                    continue;
+                }
+            }
+        }
+
+        open_assistant_id = id;
+        cap_tool_calls(&mut tool_calls);
+        let turn = Turn {
+            role: "assistant".to_string(),
+            text: truncate(&text, MAX_TURN_TEXT),
+            tool_calls,
+        };
+        if !turn.text.trim().is_empty() {
+            last_assistant_message = Some(turn.text.clone());
+        }
+        push_bounded(&mut turns, turn, keep);
+    }
+
     Parsed {
         turns: turns.into(),
         last_assistant_message,
@@ -2031,12 +2187,210 @@ mod tests {
     #[test]
     fn transcript_format_for_harness_routes_each_format() {
         assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
+        assert_eq!(
+            TranscriptFormat::for_harness("commandcode"),
+            TranscriptFormat::CommandCode
+        );
         assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
         assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
         assert_eq!(TranscriptFormat::for_harness("grok"), TranscriptFormat::Grok);
         for id in ["anthropic", "claude", "opencode", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
         }
+    }
+
+    #[test]
+    fn commandcode_transcript_path_uses_session_id_under_sessions_root() {
+        let path = commandcode_transcript_path_in(
+            Path::new(r"C:\Users\adam\.commandcode\sessions"),
+            "sess-commandcode-123",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(r"C:\Users\adam\.commandcode\sessions\sess-commandcode-123.jsonl")
+        );
+    }
+
+    #[test]
+    fn commandcode_contract_parses_nested_messages_and_drops_internal_blocks_and_tool_results() {
+        let tail = read_tail_from_file(
+            &fixture("commandcode_transcript.jsonl"),
+            10,
+            TranscriptFormat::CommandCode,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("Command Code fixture should parse to an available tail, got {tail:?}");
+        };
+
+        let roles: Vec<&str> = turns.iter().map(|turn| turn.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "assistant", "user", "assistant"],
+            "ordinary tool_result echoes and non-message events should be skipped; turns: {turns:#?}"
+        );
+        assert_eq!(turns[0].text, "Inspect src/login.ts for the redirect bug.");
+        assert_eq!(turns[1].text, "I'll inspect the file first.");
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "read_file");
+        assert_eq!(turns[1].tool_calls[0].input["file_path"], "src/login.ts");
+        assert_eq!(turns[2].text, "I have prepared the redirect fix.");
+        assert_eq!(
+            turns[2].tool_calls[0].input["diff"],
+            "@@ -1 +1 @@\n-const redirect = nextUrl;\n+const redirect = new URL(nextUrl, window.location.origin);"
+        );
+        assert_eq!(
+            turns[4].text,
+            "The redirect now preserves the query string."
+        );
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("The redirect now preserves the query string.")
+        );
+    }
+
+    #[test]
+    fn commandcode_cheap_digest_reader_matches_full_reader() {
+        let digest = read_last_assistant_message_from_file(
+            &fixture("commandcode_transcript.jsonl"),
+            TranscriptFormat::CommandCode,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = digest
+        else {
+            panic!("expected Command Code digest to be available");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("The redirect now preserves the query string.")
+        );
+    }
+
+    #[test]
+    fn commandcode_thinking_only_turn_is_skipped() {
+        let lines = [
+            r#"{"type":"message","id":"user-1","message":{"role":"user","content":"Inspect the redirect."}}"#,
+            r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"I am still inspecting the redirect."}]}}"#,
+        ];
+        let parsed = parse_commandcode_turns(lines.into_iter().map(str::to_string), 10);
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].text, "Inspect the redirect.");
+        assert_eq!(parsed.last_assistant_message, None);
+    }
+
+    #[test]
+    fn commandcode_renamed_fields_degrade_to_shape_changed() {
+        let cases = [
+            r#"{"type":"message","id":"assistant-1","message":{"author":"assistant","content":[{"type":"text","text":"renamed"}]}}"#,
+            r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","blocks":[{"type":"text","text":"renamed"}]}}"#,
+        ];
+
+        for line in cases {
+            let parsed = parse_commandcode_turns(std::iter::once(line.to_string()), 10);
+            assert!(
+                parsed.turns.is_empty(),
+                "renamed shape should not produce turns"
+            );
+            assert!(
+                parsed.saw_malformed,
+                "renamed fields must be marked malformed"
+            );
+            assert_eq!(
+                empty_or_shape_changed(parsed.saw_malformed),
+                UnavailableReason::ShapeChanged
+            );
+        }
+    }
+
+    #[test]
+    fn commandcode_non_message_stream_degrades_to_empty() {
+        let path = write_fixture(
+            "commandcode_empty",
+            r#"{"type":"session","id":"sess-commandcode-empty"}
+{"type":"model_change","model":"commandcode-default"}
+{"type":"telemetry","event":"heartbeat"}
+"#,
+        );
+        let tail = read_tail_from_file(&path, 10, TranscriptFormat::CommandCode);
+        std::fs::remove_file(path).ok();
+
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::Empty),
+            "metadata-only streams are quiet, not malformed"
+        );
+    }
+
+    #[test]
+    fn commandcode_rolling_buffer_evicts_old_turns_but_keeps_digest() {
+        let mut lines = Vec::new();
+        for i in 0..50 {
+            lines.push(format!(
+                r#"{{"type":"message","id":"user-{i}","message":{{"role":"user","content":"prompt {i}"}}}}"#
+            ));
+            lines.push(format!(
+                r#"{{"type":"message","id":"assistant-{i}","message":{{"role":"assistant","content":[{{"type":"text","text":"reply {i}"}}]}}}}"#
+            ));
+        }
+
+        let parsed = parse_commandcode_turns(lines.into_iter(), 3);
+        assert_eq!(parsed.turns.len(), 3, "the rolling buffer must honor keep");
+        assert_eq!(
+            parsed.turns.last().map(|turn| turn.text.as_str()),
+            Some("reply 49")
+        );
+        assert_eq!(parsed.last_assistant_message.as_deref(), Some("reply 49"));
+    }
+
+    #[test]
+    fn commandcode_tool_call_input_truncates_large_string_leaves() {
+        let big = "x".repeat(100 * 1024);
+        let line = serde_json::json!({
+            "type": "message",
+            "id": "assistant-big-input",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "name": "write_file",
+                    "input": {"path": "src/main.rs", "content": big}
+                }]
+            }
+        })
+        .to_string();
+
+        let parsed = parse_commandcode_turns(std::iter::once(line), 10);
+        let content = parsed.turns[0].tool_calls[0].input["content"]
+            .as_str()
+            .expect("tool input content should remain a string");
+        assert!(content.ends_with('…'));
+        assert!(content.chars().count() <= MAX_TOOL_STRING + 1);
+    }
+
+    #[test]
+    fn commandcode_whitespace_tool_turn_does_not_update_digest() {
+        let line = serde_json::json!({
+            "type": "message",
+            "id": "assistant-whitespace",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "   "},
+                    {"type": "tool_use", "name": "Read", "input": {}}
+                ]
+            }
+        })
+        .to_string();
+
+        let parsed = parse_commandcode_turns(std::iter::once(line), 10);
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.last_assistant_message, None);
     }
 
     #[test]
