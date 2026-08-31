@@ -11,8 +11,21 @@
 //! (issue #132) — this module is now a thin routing layer that builds an
 //! `AppSessionLifecycleSink` and adds the autoclear arm on top.
 //!
-//! All commands are sync `pub fn` — single SQLite read/write or
-//! in-memory state mutation. Issue #1380 review point 4.
+//! ## Threading (issue #1389, review feedback)
+//!
+//! All commands are sync `#[command] fn`. In Tauri 2, sync commands run on
+//! Tauri's IPC thread pool, NOT on Tokio's async worker pool — so the SQLite
+//! write + Tauri emit inside [`mark_attention`] / [`clear_attention`] never
+//! park a Tokio worker. The first PR-#1429 draft converted these to `async
+//! fn` + `run_blocking`, adding a Tokio scheduler hop and a `spawn_blocking`
+//! hop to work that was already off the Tokio pool; the only justification
+//! was to expose the hidden DB write to the #1380 pattern guard. Review
+//! feedback correctly flagged this as degrading the architecture to appease
+//! a linter. The corrected shape keeps the commands sync and extends the
+//! guard (see `tests/unit/async-command-blocking.test.ts`) to flag direct
+//! `session_lifecycle::on_attention[_cleared]` calls in **both** sync and
+//! async `#[command]` bodies — the helpers in this module are the public
+//! surface; the sink writes are an internal detail.
 
 use crate::agent::session_lifecycle::AppSessionLifecycleSink;
 use crate::db;
@@ -27,6 +40,13 @@ use tauri::{command, AppHandle};
 /// Mark a node as awaiting user input and notify the frontend. One of the two
 /// independent reactions to a Node Turn; see [`crate::node_turn::publish`].
 /// Idempotent — re-marking an already-awaiting node is a no-op write + re-emit.
+///
+/// **Public surface** — every caller (Tauri commands, mobile HTTP routes,
+/// autoclear safety net) routes through here rather than calling
+/// `session_lifecycle::on_attention` directly. The pattern guard enforces
+/// this: direct sink calls inside a `#[command]` body fail CI. Callers
+/// running on the Tokio worker pool must wrap this in
+/// `crate::commands::run_blocking` (see `http/routes/attention.rs`).
 pub fn mark_attention(node_id: i64, app: &AppHandle) {
     let sink = AppSessionLifecycleSink { app };
     let _ = crate::agent::session_lifecycle::on_attention(&sink, node_id);
@@ -36,8 +56,23 @@ pub fn mark_attention(node_id: i64, app: &AppHandle) {
     crate::attention_autoclear::on_marked(node_id);
 }
 
+/// Clear the attention state for a node — called when the user resumes it.
+/// Symmetric counterpart to [`mark_attention`]: same threading contract,
+/// same guard rule (direct `session_lifecycle::on_attention_cleared` calls
+/// in `#[command]` bodies fail CI).
+pub fn clear_attention(node_id: i64, app: &AppHandle) {
+    crate::attention_autoclear::disarm(node_id);
+    let sink = AppSessionLifecycleSink { app };
+    let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
+}
+
 /// Register that a node is awaiting user input. Publishes a Node Turn so both
 /// attention-marking and session naming react.
+///
+/// Sync `#[command] fn` — runs on Tauri's IPC thread pool, NOT Tokio.
+/// `node_turn::publish` does a SQLite write plus the session-naming and
+/// autopilot-pipeline fan-outs — all blocking, but none of it parks a
+/// Tokio worker. See module docstring for the threading rationale.
 #[command]
 pub fn register_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
     crate::node_turn::publish(node_id, &app);
@@ -45,11 +80,11 @@ pub fn register_attention_node(app: AppHandle, node_id: i64) -> Result<(), Strin
 }
 
 /// Clear the attention state for a node — called when the user resumes it.
+/// Sync for the same reason as [`register_attention_node`].
 #[command]
 pub fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
-    crate::attention_autoclear::disarm(node_id);
-    let sink = AppSessionLifecycleSink { app: &app };
-    crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id)
+    clear_attention(node_id, &app);
+    Ok(())
 }
 
 /// Whether a node is currently awaiting user input. Derived from the lifecycle
@@ -58,10 +93,9 @@ pub fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> 
 /// restart (so a persisted `awaiting_input` row read as "not pending"), and a
 /// silently-dropped status write left the set and the column disagreeing.
 ///
-/// Pure sync — single SQLite read. Was `pub async fn` returning
-/// `bool` with an `Ok(...).unwrap_or(false)` false-error-channel
-/// wrapper; the conversion to `pub fn` is idiomatic because Tauri
-/// supports `bool` returns from sync commands.
+/// Pure sync — single SQLite read. Sync commands are allowed to call
+/// `db::*` directly (they're already off the Tokio pool), so this stays
+/// `#[command] fn`.
 #[command]
 pub fn is_attention_pending(session_id: i64) -> bool {
     db::get_agent_node_by_id(session_id)

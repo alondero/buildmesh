@@ -954,7 +954,8 @@ async fn dispatch_route(
     let id1 = ids.1.unwrap_or(0);
     match handler {
         Handler::AdminDevices => {
-            let _ = request::write_json(lines, "200 OK", &routes::admin::list_devices_json()).await;
+            let body = routes::admin::list_devices_json().await;
+            let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Handler::AdminRevoke => routes::admin::revoke(lines, id0).await,
         Handler::CoordinatorNodes => {
