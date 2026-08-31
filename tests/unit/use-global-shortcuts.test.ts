@@ -22,6 +22,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
+import type { ShortcutEvent } from '@tauri-apps/plugin-global-shortcut';
 
 // `vi.hoisted` runs before the mock factories (which `vi.mock` hoists
 // above the imports) so the factories can close over the shared state.
@@ -44,13 +45,17 @@ const mockState = vi.hoisted(() => {
     isRegisteredCalls: [] as Array<{ key: string }>,
     registeredHandlers: new Map<
       string,
-      (event: { state: 'Pressed' | 'Released' }) => void
+      (event: ShortcutEvent) => void
     >(),
 
     // Focus-listener bookkeeping — every `onFocusChanged` call adds an
     // entry; calling the entry's `unlisten` marks it torn down. The
     // assertions compare `registered - unregistered`.
-    focusListeners: [] as Array<{ unlisten: () => void; tornDown: boolean }>,
+    focusListeners: [] as Array<{
+      unlisten: () => void;
+      tornDown: boolean;
+      handler: (event: { payload: boolean }) => void;
+    }>,
 
     // Drains every tracked promise. Safe to call when empty.
     resolveAll(): void {
@@ -69,7 +74,7 @@ const mockState = vi.hoisted(() => {
 vi.mock('@tauri-apps/plugin-global-shortcut', () => ({
   register: vi.fn(async (
     key: string,
-    handler: (event: { state: 'Pressed' | 'Released' }) => void,
+    handler: (event: ShortcutEvent) => void,
   ) => {
     mockState.registerCalls.push({ key });
     mockState.registeredHandlers.set(key, handler);
@@ -93,11 +98,11 @@ vi.mock('@tauri-apps/api/window', () => ({
       await mockState.trackablePromise();
       return true;
     }),
-    onFocusChanged: vi.fn(async () => {
+    onFocusChanged: vi.fn(async (handler: (event: { payload: boolean }) => void) => {
       const unlisten = () => {
         entry.tornDown = true;
       };
-      const entry = { unlisten, tornDown: false };
+      const entry = { unlisten, tornDown: false, handler };
       mockState.focusListeners.push(entry);
       await mockState.trackablePromise();
       return unlisten;
@@ -195,6 +200,37 @@ describe('useGlobalShortcuts (issue #1249)', () => {
     handler!({ state: 'Pressed' });
     handler!({ state: 'Released' });
 
+    expect(onTrigger).toHaveBeenCalledTimes(1);
+    expect(onTrigger).toHaveBeenCalledWith(TEST_BINDINGS[0].action);
+
+    unmount();
+    await quiesce();
+  });
+
+  it('focus-driven re-registration also gates actions on Pressed events', async () => {
+    const onTrigger = vi.fn();
+    const { unmount } = renderHook(() =>
+      useGlobalShortcuts({ bindings: TEST_BINDINGS, onTrigger }),
+    );
+    await quiesce();
+
+    // Discard the initial handlers so the assertion targets the handlers
+    // installed by the focus-gain path below.
+    mockState.registeredHandlers.clear();
+    const focusListener = mockState.focusListeners[0];
+    expect(focusListener).toBeDefined();
+
+    focusListener.handler({ payload: false });
+    await quiesce();
+    focusListener.handler({ payload: true });
+    await quiesce();
+
+    const handler = mockState.registeredHandlers.get(TEST_BINDINGS[0].key);
+    expect(handler).toBeDefined();
+
+    handler!({ id: 1, shortcut: TEST_BINDINGS[0].key, state: 'Released' });
+    expect(onTrigger).not.toHaveBeenCalled();
+    handler!({ id: 1, shortcut: TEST_BINDINGS[0].key, state: 'Pressed' });
     expect(onTrigger).toHaveBeenCalledTimes(1);
     expect(onTrigger).toHaveBeenCalledWith(TEST_BINDINGS[0].action);
 
