@@ -947,15 +947,54 @@ mod tests {
 
     #[test]
     fn reject_traversal_blocks_dotdot_and_absolute_paths() {
-        // Tested indirectly through the public blocking functions, which
-        // call reject_traversal before any filesystem access.
-        assert!(stage_file_blocking("/tmp/repo", "../outside.txt").is_err());
-        assert!(stage_file_blocking("/tmp/repo", "/etc/passwd").is_err());
-        assert!(revert_file_blocking("/tmp/repo", "src/../../../etc/passwd").is_err());
-        // `..bar` is a valid POSIX filename but escapes the worktree when
-        // joined onto the host root; the gate must catch it too.
-        assert!(stage_file_blocking("/tmp/repo", "src/..bar").is_err());
-        assert!(revert_file_blocking("/tmp/repo", "..bar").is_err());
+        // Each case here exercises a separate bypass class — see the
+        // doc on `reject_traversal` in commands/git.rs for the threat
+        // model (Windows drive prefixes and `Path::join` hijack in
+        // particular). The "should be allowed" cases at the end need a
+        // real on-disk repo to exercise the full blocking function;
+        // the "should be rejected" cases can use a fake path because
+        // reject_traversal fires before any git2 call.
+        let _repo = TempGitRepo::new();
+        init_git_repo(_repo.path());
+        let path = _repo.path().to_str().unwrap();
+
+        // Class A: `..` segments. The OLD string-split gate caught these;
+        // the NEW `Path::components()` gate catches them via
+        // `Component::ParentDir`.
+        assert!(stage_file_blocking(path, "../outside.txt").is_err());
+        assert!(stage_file_blocking(path, "src/../../../etc/passwd").is_err());
+        assert!(revert_file_blocking(path, "src/../../../etc/passwd").is_err());
+
+        // Class B: absolute Unix paths. `Component::RootDir`.
+        assert!(stage_file_blocking(path, "/etc/passwd").is_err());
+        assert!(stage_file_blocking(path, "/").is_err());
+
+        // Class C: bare Windows backslash (root marker on Windows).
+        assert!(stage_file_blocking(path, "\\").is_err());
+
+        // Class D: Windows drive prefix. Splits to `["D:", "secret.txt"]`
+        // — neither matches `..`, so the old string-split gate let it
+        // through and `Path::join("F:\repo", "D:\secret.txt")` resolved
+        // to `D:\secret.txt` (an absolute right-hand argument REPLACES
+        // the base). `revert_file`'s else branch then called
+        // `std::fs::remove_file("D:\secret.txt")`. The new gate
+        // catches it at `Component::Prefix`.
+        assert!(stage_file_blocking(path, "D:\\secret.txt").is_err());
+        assert!(stage_file_blocking(path, "C:\\Users\\foo\\bar").is_err());
+        assert!(revert_file_blocking(path, "D:\\secret.txt").is_err());
+
+        // Class E: UNC path. `Component::Prefix(UNC)`.
+        assert!(stage_file_blocking(path, "\\\\server\\share\\file").is_err());
+
+        // `..bar` is a VALID POSIX filename — joining `repo + ..bar`
+        // gives `repo/..bar` which stays inside the worktree. The gate
+        // must allow it (the prior version's doc comment claimed it
+        // escaped; that was wrong). We exercise the full blocking
+        // function so the "allowed" path is end-to-end exercised.
+        fs::write(_repo.path().join("..bar"), "valid").unwrap();
+        assert!(stage_file_blocking(path, "..bar").is_ok());
+        assert!(stage_file_blocking(path, "src/..bar").is_ok());
+        assert!(revert_file_blocking(path, "..bar").is_ok());
     }
 
     #[test]

@@ -54,11 +54,13 @@ import {
 import { useUIStore, type DiffContext } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useToastStore } from '../../stores/toastStore';
 import { useGitPathInvalidation } from '../../hooks/useGitPathInvalidation';
 import { Diff } from '../Diff/Diff';
 import { PrDiffView } from './PrDiffView';
 import { DiffOverlayShell } from './DiffOverlayShell';
 import { DiffFileNavDrawer } from './DiffFileNavDrawer';
+import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { LoadingState } from '../shared/Spinner';
 
 interface CenterDiffOverlayProps {
@@ -167,6 +169,15 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   // the user opens it to hop between files without leaving the overlay.
   const [drawerOpen, setDrawerOpen] = useState(false);
   const openDiff = useUIStore((s) => s.openDiff);
+  // Issue #1374 — destructive Revert needs an explicit confirmation
+  // (Revert discards uncommitted work for tracked files, outright
+  // deletes untracked files). Stage is non-destructive (the file's
+  // working copy is unchanged) so it does NOT need a confirm gate.
+  const [revertConfirmFilePath, setRevertConfirmFilePath] = useState<string | null>(null);
+  // `version` bumps after a successful stage/revert so the drawer
+  // refetches — the drawer's mount-time fetch is otherwise stale until
+  // the user manually closes + reopens it (issue #1374 review feedback).
+  const [drawerVersion, setDrawerVersion] = useState(0);
 
   // Issue #1181 — per-file diffs also go through `run_blocking`, and rapid
   // file switching in
@@ -245,40 +256,76 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
     minRefetchIntervalMs: 2_000,
   });
 
-  // Issue #1374 — per-file quick actions. All three operate on the diff's
-  // `rootPath` + `filePath`. Errors are swallowed into a console log for now;
-  // a future ticket can surface them as toasts. Copy Diff serializes the
-  // fetched `FileDiff[]` into a GitHub-style unified diff text block.
+  // Issue #1374 — per-file quick actions. Stage and Revert surface
+  // failures via the project's shared toast pipeline (the previous
+  // shape `console.error` left the user with zero visual feedback on
+  // a destructive operation — issue #1374 review feedback). Revert is
+  // destructive (discards uncommitted work / deletes untracked
+  // files), so it opens a `ConfirmDialog` first. Copy Diff serializes
+  // the fetched `FileDiff[]` into a GitHub-style unified diff text
+  // block; its only failure mode is clipboard access denied, which the
+  // OS surfaces natively.
+  const addToast = useToastStore((s) => s.addToast);
   const quickActions = {
     onStageFile: () => {
-      stageFile(diff.rootPath, diff.filePath).catch((e) =>
-        console.error('[CenterDiffOverlay] stage_file failed:', e),
-      );
+      stageFile(diff.rootPath, diff.filePath)
+        .then(() => {
+          setDrawerVersion((v) => v + 1);
+        })
+        .catch((e) => {
+          addToast(
+            'DiffOverlay',
+            `Stage failed for ${diff.filePath}: ${formatError(e)}`,
+            'error',
+          );
+        });
     },
     onRevertFile: () => {
-      revertFile(diff.rootPath, diff.filePath).catch((e) =>
-        console.error('[CenterDiffOverlay] revert_file failed:', e),
-      );
+      // Open the confirm modal; the actual revert happens on confirm.
+      setRevertConfirmFilePath(diff.filePath);
     },
     onCopyDiff: () => {
       const text = buildDiffClipboardText(diff.filePath, files);
-      navigator.clipboard.writeText(text).catch((e) =>
-        console.error('[CenterDiffOverlay] copy diff failed:', e),
-      );
+      navigator.clipboard.writeText(text).catch((e) => {
+        addToast(
+          'DiffOverlay',
+          `Copy failed: ${formatError(e)}`,
+          'error',
+        );
+      });
     },
   };
+
+  const doRevert = useCallback(() => {
+    const path = revertConfirmFilePath;
+    if (!path) return;
+    setRevertConfirmFilePath(null);
+    revertFile(diff.rootPath, path)
+      .then(() => {
+        setDrawerVersion((v) => v + 1);
+      })
+      .catch((e) => {
+        addToast(
+          'DiffOverlay',
+          `Revert failed for ${path}: ${formatError(e)}`,
+          'error',
+        );
+      });
+  }, [revertConfirmFilePath, diff.rootPath, addToast]);
 
   // Issue #1374 — bulk file-list fetch for the Quick File Navigation
   // Drawer. Base diffs use `node_changed_files` (per-node cancel-aware,
   // see `commands/diff.rs`); head diffs use `get_git_status` for the
-  // session's working tree. The drawer re-fetches when this callback's
-  // identity changes (memoised per lens below).
+  // session's working tree. `drawerVersion` is a dep so a successful
+  // Stage/Revert bumps it and forces the drawer to refetch — the
+  // previous shape had the drawer showing stale M/A/D badges until the
+  // user manually closed + reopened it (issue #1374 review feedback).
   const fetchAllFiles = useCallback((): Promise<GitStatus[]> => {
     if (diff.source === 'base' && diff.nodeId !== null) {
       return nodeChangedFiles(diff.nodeId);
     }
     return getGitStatus(diff.rootPath);
-  }, [diff.source, diff.nodeId, diff.rootPath]);
+  }, [diff.source, diff.nodeId, diff.rootPath, drawerVersion]);
 
   // Jump-to-file: update `activeDiffFile` in the UI store so the overlay
   // body re-fetches the new file's diff via the existing `fetchDiff`
@@ -291,16 +338,17 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   );
 
   return (
-    <DiffOverlayShell
-      diff={diff}
-      onClose={closeDiff}
-      quickActions={quickActions}
-      modeLabel={{
-        text: diff.source === 'base' ? 'vs base' : 'vs HEAD',
-        title:
-          diff.source === 'base'
-            ? 'Changes since this agent branched from its base'
-            : 'Uncommitted changes vs HEAD',
+    <>
+      <DiffOverlayShell
+        diff={diff}
+        onClose={closeDiff}
+        quickActions={quickActions}
+        modeLabel={{
+          text: diff.source === 'base' ? 'vs base' : 'vs HEAD',
+          title:
+            diff.source === 'base'
+              ? 'Changes since this agent branched from its base'
+              : 'Uncommitted changes vs HEAD',
       }}
       breadcrumb={
         <>
@@ -346,6 +394,7 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
                 fetchFiles={fetchAllFiles}
                 currentFilePath={diff.filePath}
                 onSelectFile={jumpToFile}
+                refreshKey={drawerVersion}
               />
             )}
             <div className="flex-1 min-w-0 flex flex-col min-h-0">
@@ -390,7 +439,17 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
           </div>
         )
       }
-    </DiffOverlayShell>
+      </DiffOverlayShell>
+      {revertConfirmFilePath && (
+        <ConfirmDialog
+          title="Revert file?"
+          message={`Revert ${revertConfirmFilePath}? This discards any uncommitted edits to tracked files (or deletes the file outright if it's untracked). The change can't be undone.`}
+          confirmLabel="Revert"
+          onConfirm={doRevert}
+          onCancel={() => setRevertConfirmFilePath(null)}
+        />
+      )}
+    </>
   );
 }
 

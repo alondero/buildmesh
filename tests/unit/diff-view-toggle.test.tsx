@@ -14,6 +14,7 @@ import { CenterDiffOverlay } from '../../src/components/AgentNodeView/CenterDiff
 import { DIFF_VIEW_STORAGE_KEY, loadDiffViewMode } from '../../src/components/Diff/Diff';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
+import { useToastStore } from '../../src/stores/toastStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
@@ -125,15 +126,16 @@ describe('Diff view toggle (issue #1374)', () => {
     }
   });
 
-  // Reset the shared UI store + agent node store after each test so a
-  // later test file's test isn't surprised by `activeDiffFile` pointing
-  // at our node, the seed mesh being selected, etc. `useUIStore` and
-  // `useAgentNodeStore` are module-level singletons; without this reset
-  // the diff overlay's `activeDiffFile` set in `beforeEach` would leak
-  // into any subsequent test that gates render on `activeDiffFile ===
-  // null` (a Rules-of-Hooks landmine — conditional rendering after a
-  // store-driven hook count change trips React's "Rendered fewer hooks
-  // than expected" assertion).
+  // Reset the shared UI store + mesh + agent node store after each test
+  // so a later test file's test isn't surprised by `activeDiffFile`
+  // pointing at our node, the seed mesh being selected, or NODE.id
+  // lingering in `nodesById`/`closingNodeIds`. These are module-level
+  // singletons; without this reset the diff overlay's `activeDiffFile`
+  // set in `beforeEach` (and any `closingNodeIds` flip from a
+  // `stageFile` / `revertFile` failure) leaks into any subsequent test
+  // that gates render on those values (a Rules-of-Hooks landmine —
+  // conditional rendering after a store-driven hook count change trips
+  // React's "Rendered fewer hooks than expected" assertion).
   afterEach(() => {
     useUIStore.setState({
       probeOpen: false,
@@ -144,6 +146,15 @@ describe('Diff view toggle (issue #1374)', () => {
       meshes: [],
       meshesById: new Map(),
       selectedMeshId: null,
+    });
+    useAgentNodeStore.setState({
+      nodesById: {},
+      nodeIds: [],
+      activeNodeId: null,
+      closingNodeIds: new Set(),
+      autopilotStates: {},
+      semanticTurns: {},
+      schedules: {},
     });
   });
 
@@ -202,15 +213,60 @@ describe('Diff view toggle (issue #1374)', () => {
     });
   });
 
-  it('revert_file command reverts a tracked file via the backend', async () => {
+  it('revert_file command reverts a tracked file via the backend (after confirm)', async () => {
+    // Issue #1374 review: Revert is destructive (discards uncommitted
+    // work or deletes untracked files), so the button now opens a
+    // ConfirmDialog first. The actual `revert_file` IPC fires only
+    // after the user confirms.
     render(<CenterDiffOverlay diff={BASE_CTX} />);
     await screen.findByTestId('diff-quick-actions');
     fireEvent.click(screen.getByRole('button', { name: 'Revert File' }));
+    // ConfirmDialog appears; the destructive label is "Revert".
+    await screen.findByRole('button', { name: 'Revert', hidden: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Revert', hidden: false }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('revert_file', {
         repoPath: '/repo/worktrees/fix-the-bug',
         filePath: 'src/app.ts',
       });
+    });
+  });
+
+  it('revert_file cancel keeps the file untouched', async () => {
+    // The Cancel button on the destructive confirm MUST NOT fire the
+    // backend — that's the entire point of the gate. Test pins the
+    // invariant.
+    render(<CenterDiffOverlay diff={BASE_CTX} />);
+    await screen.findByTestId('diff-quick-actions');
+    fireEvent.click(screen.getByRole('button', { name: 'Revert File' }));
+    await screen.findByRole('button', { name: 'Cancel', hidden: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel', hidden: false }));
+    // Give any stray fire a chance to settle — Cancel must suppress the IPC.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(invoke).not.toHaveBeenCalledWith('revert_file', expect.anything());
+  });
+
+  it('stage_file failure surfaces as a toast (not silent console.error)', async () => {
+    // Issue #1374 review: the previous shape swallowed errors into a
+    // console.error — destructive failures left the user with no UI
+    // signal. Pin that stage failures now flow through `addToast`.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'stage_file') return Promise.reject('boom: index locked');
+      if (cmd === 'diff_node_file_against_base') return Promise.resolve(DIFF);
+      if (cmd === 'node_changed_files') return Promise.resolve(CHANGED_FILES);
+      return Promise.resolve({});
+    });
+    const toastSpy = vi.fn();
+    useToastStore.setState({ toasts: [], addToast: toastSpy });
+    render(<CenterDiffOverlay diff={BASE_CTX} />);
+    await screen.findByTestId('diff-quick-actions');
+    fireEvent.click(screen.getByRole('button', { name: 'Stage File' }));
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith(
+        'DiffOverlay',
+        expect.stringContaining('Stage failed'),
+        'error',
+      );
     });
   });
 

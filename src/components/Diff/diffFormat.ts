@@ -40,17 +40,27 @@ export interface SplitRow {
  *  remove is followed (immediately or after more removes) by adds, the
  *  i-th remove pairs with the i-th add. Leftover removes pad the right
  *  column with empty cells; leftover adds pad the left. Context lines
- *  pair with themselves. `lines_highlighted` (aligned 1:1 with `lines`
- *  by the backend, see `highlight_group_lines`) is threaded through so
- *  both panes keep the server-side syntect tokens. */
+ *  pair with themselves and force a flush of pending removes first —
+ *  a remove-run followed by context must NOT visually merge the
+ *  removal with the context row, so the pending becomes remove-only
+ *  rows. `lines_highlighted` (aligned 1:1 with `lines` by the
+ *  backend, see `highlight_group_lines`) is threaded through so both
+ *  panes keep the server-side syntect tokens.
+ *
+ *  Multi-block alignment is verified by `align_hunk_rows_handles_*
+ *  _blocks` in `tests/unit/diff-format.test.ts` — the algorithm must
+ *  produce correct rows for `remove, context, remove, add, add`
+ *  (interleaved blocks across a context boundary) and `add, add,
+ *  remove` (leading adds, trailing orphan remove) so a future
+ *  simplification doesn't regress GitHub's contract. */
 export function alignHunkRows(hunk: DiffHunk): SplitRow[] {
   const rows: SplitRow[] = [];
   const removes: { line: DiffLine; html?: string }[] = [];
 
-  const flushRemoves = (upTo: number) => {
+  const flushRemoves = () => {
     // Emit remove-only rows for any removes not yet paired with an add.
-    for (let i = upTo; i < removes.length; i++) {
-      rows.push({ old: removes[i].line, new: null, oldHtml: removes[i].html });
+    for (const r of removes) {
+      rows.push({ old: r.line, new: null, oldHtml: r.html });
     }
     removes.length = 0;
   };
@@ -74,12 +84,12 @@ export function alignHunkRows(hunk: DiffHunk): SplitRow[] {
     // Context (or a no-newline terminator row): flush any unpaired removes
     // first so a remove-run followed by context doesn't visually merge the
     // removal with the context row, then emit the context as a full row.
-    flushRemoves(0);
+    flushRemoves();
     rows.push({ old: line, new: line, oldHtml: html, newHtml: html });
   });
 
   // Trailing removes with no add partner.
-  flushRemoves(0);
+  flushRemoves();
   return rows;
 }
 

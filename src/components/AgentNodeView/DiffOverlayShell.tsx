@@ -30,15 +30,11 @@
  * inherit it.
  */
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { useUIStore, type DiffContext } from '../../stores/uiStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
-import {
-  loadDiffViewMode,
-  persistDiffViewMode,
-  type DiffViewMode,
-} from '../Diff/Diff';
+import { useDiffViewMode, type DiffViewMode } from '../Diff/Diff';
 
 export interface DiffOverlayShellProps {
   diff: DiffContext;
@@ -82,15 +78,12 @@ export function DiffOverlayShell({
   const activeNodeId = useAgentNodeStore((s) => s.activeNodeId);
   const selectedMeshId = useMeshStore((s) => s.selectedMeshId);
 
-  // Issue #1374 — the Unified/Split preference. Booted from localStorage
-  // once per overlay mount; every toggle writes straight back through
-  // `persistDiffViewMode` (single try/catch lives in Diff.tsx — keeps
-  // localStorage keys + error handling in one place).
-  const [viewMode, setViewModeState] = useState<DiffViewMode>(loadDiffViewMode);
-  const setViewMode = (m: DiffViewMode) => {
-    setViewModeState(m);
-    persistDiffViewMode(m);
-  };
+  // Issue #1374 — the Unified/Split preference. Single source of truth
+  // lives in `useDiffViewMode()` (Diff.tsx) — every caller (this shell,
+  // the stacked-review Diff, the inline FileDiffCard toggle) converges
+  // on the same module-level store via `useSyncExternalStore`. No more
+  // triplicated `useState(loadDiffViewMode)` fighting over localStorage.
+  const [viewMode, setViewMode] = useDiffViewMode();
   const toggleViewMode = () => {
     setViewMode(viewMode === 'split' ? 'unified' : 'split');
   };

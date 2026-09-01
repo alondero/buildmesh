@@ -38,18 +38,27 @@ export interface DiffFileNavDrawerProps {
   /** Called when the user clicks a row. The parent updates
    *  `activeDiffFile` in the UI store so the diff body re-fetches. */
   onSelectFile: (path: string) => void;
+  /** Bumped by the parent after a successful Stage/Revert so the
+   *  drawer refetches (a counter the parent increments rather than a
+   *  state setter avoids the re-render churn of passing a callback
+   *  that captures `files`). Issue #1374 review feedback — without
+   *  this, the drawer's M/A/D badges went stale after every
+   *  quick action. */
+  refreshKey: number;
 }
 
 export function DiffFileNavDrawer({
   fetchFiles,
   currentFilePath,
   onSelectFile,
+  refreshKey,
 }: DiffFileNavDrawerProps) {
   const [files, setFiles] = useState<GitStatus[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // One-shot fetch on mount + whenever the parent swaps `fetchFiles`
-  // (i.e. lens changes: base→head, mesh A→mesh B, node X→node Y). The
+  // (i.e. lens changes: base→head, mesh A→mesh B, node X→node Y) OR
+  // bumps `refreshKey` (parent re-staged or reverted a file). The
   // previous request is "cancelled" by the `cancelled` flag — a stale
   // `.then` from an earlier fetch can't overwrite a newer one (same
   // pattern as `CenterHeadBaseDiff.fetchDiff`, see #1181).
@@ -69,7 +78,7 @@ export function DiffFileNavDrawer({
     return () => {
       cancelled = true;
     };
-  }, [fetchFiles]);
+  }, [fetchFiles, refreshKey]);
 
   return (
     <aside

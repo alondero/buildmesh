@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import type { DiffHunk, DiffLine, FileDiff } from '../../lib/tauri';
 import { fileDiffStatusMeta } from '../../lib/status';
 import { splitPath, alignHunkRows, type SplitRow } from './diffFormat';
@@ -28,6 +28,70 @@ export function persistDiffViewMode(mode: DiffViewMode): void {
   } catch {
     // localStorage unavailable — in-memory state still flips.
   }
+}
+
+// ─── Issue #1374 — single source of truth for the Unified/Split mode ──────
+//
+// The earlier shape (one `useState(loadDiffViewMode)` per component, plus a
+// separate one in `DiffOverlayShell`) had three layers fighting over
+// localStorage — every toggle fired two writes (the card's localStorage
+// call AND the shell's), and the inline `FileDiffCard` toggle had to call
+// `onModeChange` AND update its own dead `ownMode`. The fix:
+//
+//   • One module-level `useSyncExternalStore`-backed store (singleton).
+//   • `useDiffViewMode()` is THE hook — every caller reads/writes via it,
+//     so the shell, the stacked-review `Diff`, and the inline `FileDiffCard`
+//     toggle all stay in sync without prop-drilling.
+//   • The `mode`/`onModeChange` props on `Diff`/`FileDiffCard` are
+//     OPTIONAL controlled overrides — when supplied (overlay case), the
+//     shell remains the single source; when omitted (stacked review
+//     case), the card falls back to the hook.
+//
+// `DiffOverlayShell` is now a thin pass-through: `const [mode, setMode] =
+// useDiffViewMode()`, then `<Diff mode={mode} onModeChange={setMode} />`.
+
+type Listener = () => void;
+let listeners: Set<Listener> = new Set();
+let currentMode: DiffViewMode = loadDiffViewMode();
+
+function subscribe(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot(): DiffViewMode {
+  return currentMode;
+}
+
+function getServerSnapshot(): DiffViewMode {
+  // SSR fallback — use the default since we don't have localStorage on
+  // the server. Tests that need a specific value should mock via
+  // `localStorage.setItem` before render.
+  return 'unified';
+}
+
+/** Single hook for the Unified/Split mode. The store is the only
+ *  source of truth — `useSyncExternalStore` ensures every subscriber
+ *  re-renders when the value flips, and the shell/card/stacked-review
+ *  consumers all converge on the same instance. Issue #1374. */
+export function useDiffViewMode(): [DiffViewMode, (m: DiffViewMode) => void] {
+  const mode = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const setMode = (m: DiffViewMode) => {
+    if (m === currentMode) return;
+    currentMode = m;
+    persistDiffViewMode(m);
+    // Copy before iterate — a listener may unsubscribe during dispatch.
+    for (const l of [...listeners]) l();
+  };
+  return [mode, setMode];
+}
+
+/** Test seam — reset the module-level store between tests so the
+ *  `useSyncExternalStore` subscribers in one test don't leak the
+ *  `split` preference into the next test (and back). */
+export function __resetDiffViewModeForTests(): void {
+  currentMode = loadDiffViewMode();
+  listeners = new Set();
 }
 
 /**
@@ -202,7 +266,7 @@ export function FileDiffCard({
   file,
   defaultOpen = true,
   onOpenFile,
-  mode: modeProp,
+  mode,
   onModeChange,
 }: {
   file: FileDiff;
@@ -211,19 +275,21 @@ export function FileDiffCard({
    *  calls this with the file's path (issue #379). Omit it where there's no
    *  spacious surface to open into (e.g. the overlay renders its own diff). */
   onOpenFile?: (path: string) => void;
-  /** Diff view mode — 'unified' (default) or 'split' (issue #1374). */
-  mode?: DiffViewMode;
-  /** Called when the mode changes — the parent persists it. */
-  onModeChange?: (mode: DiffViewMode) => void;
+  /** Diff view mode — REQUIRED (issue #1374). Pass the value from
+   *  `useDiffViewMode()`; the inline per-card toggle calls
+   *  `onModeChange` to propagate. */
+  mode: DiffViewMode;
+  /** Called when the inline per-card toggle flips the mode — the
+   *  parent decides whether to persist (typically via
+   *  `useDiffViewMode()`'s setter, which already writes
+   *  localStorage). */
+  onModeChange: (mode: DiffViewMode) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
-  const [ownMode, setOwnMode] = useState<DiffViewMode>(loadDiffViewMode);
-  const mode = modeProp ?? ownMode;
-  const setMode = (m: DiffViewMode) => {
-    setOwnMode(m);
-    persistDiffViewMode(m);
-    onModeChange?.(m);
-  };
+  // `mode` is fully controlled by the parent — no local state, no
+  // localStorage write here. The inline toggle calls `onModeChange`,
+  // which propagates to whatever store the parent uses
+  // (`useDiffViewMode()` is the canonical sink).
   const meta = fileDiffStatusMeta(file.status);
   const { dir, name } = splitPath(file.path);
 
@@ -266,7 +332,9 @@ export function FileDiffCard({
           </span>
         )}
         {/* Unified/Split toggle (issue #1374) — a sibling of the open-in-
-            overlay button, same invalid-HTML-in-button reasoning. */}
+            overlay button, same invalid-HTML-in-button reasoning. Mode is
+            fully controlled; the click calls `onModeChange` which
+            propagates to the shell/store. */}
         <span
           role="button"
           tabIndex={0}
@@ -274,13 +342,13 @@ export function FileDiffCard({
           title={mode === 'split' ? 'Switch to unified view' : 'Switch to split view'}
           onClick={(e) => {
             e.stopPropagation();
-            setMode(mode === 'split' ? 'unified' : 'split');
+            onModeChange(mode === 'split' ? 'unified' : 'split');
           }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               e.stopPropagation();
-              setMode(mode === 'split' ? 'unified' : 'split');
+              onModeChange(mode === 'split' ? 'unified' : 'split');
             }
           }}
           className="flex-shrink-0 text-text-muted hover:text-accent-cyan transition-colors cursor-pointer font-mono text-2xs px-1"
@@ -387,31 +455,25 @@ export function diffTotals(files: FileDiff[]): DiffTotals {
  *  Issue #1374: `mode` switches between the unified stacked format and a
  *  2-column side-by-side (split) format with synchronized scrolling — the
  *  panes scroll together because each split row is ONE flex row, so row
- *  heights match by construction and the gutters never desynchronize. */
+ *  heights match by construction and the gutters never desynchronize.
+ *  The mode is fully controlled by the caller; pass values from
+ *  `useDiffViewMode()` for the standalone stacked-review case or from
+ *  `DiffOverlayShell`'s render-prop for the overlay case. */
 export function Diff({
   files,
   onOpenFile,
-  mode: modeProp,
+  mode,
   onModeChange,
 }: {
   files: FileDiff[];
   /** Threaded to each card's "open in center overlay" affordance (#379). */
   onOpenFile?: (path: string) => void;
-  /** Diff view mode — 'unified' (default) or 'split' (issue #1374).
-   *  Controlled by the parent (DiffOverlayShell); when omitted, the
-   *  component manages its own persisted preference. */
-  mode?: DiffViewMode;
-  /** Called when the mode changes — the parent persists it. */
-  onModeChange?: (mode: DiffViewMode) => void;
+  /** Diff view mode — REQUIRED (issue #1374). Pass the value from
+   *  `useDiffViewMode()`. */
+  mode: DiffViewMode;
+  /** Called when any card's inline toggle flips the mode. */
+  onModeChange: (mode: DiffViewMode) => void;
 }) {
-  const [ownMode, setOwnMode] = useState<DiffViewMode>(loadDiffViewMode);
-  const mode = modeProp ?? ownMode;
-  const setMode = (m: DiffViewMode) => {
-    setOwnMode(m);
-    persistDiffViewMode(m);
-    onModeChange?.(m);
-  };
-
   if (files.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-text-muted text-xs">
@@ -427,7 +489,7 @@ export function Diff({
           file={file}
           onOpenFile={onOpenFile}
           mode={mode}
-          onModeChange={setMode}
+          onModeChange={onModeChange}
         />
       ))}
     </div>

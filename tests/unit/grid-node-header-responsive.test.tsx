@@ -505,11 +505,31 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
         .find((el) => /^×?\s*Close/i.test((el.textContent ?? '').trim())) as HTMLElement | undefined;
       expect(closeItem).toBeTruthy();
       fireEvent.click(closeItem!);
-      // deleteAgentNode flips the row into `closingNodeIds`; the header
-      // unmounts during the teardown, so the kebab label vanishes.
+      // deleteAgentNode is async across three phases (issue #1001):
+      //   Phase 0 — sync: flips `closingNodeIds` so the row shows a spinner.
+      //   Phase 1 — await getWorktreeCloseSafety + optional user prompt.
+      //   Phase 2 — sync setState drops the row from `nodesById`, then
+      //             awaits the kill + delete IPCs.
+      // The previous shape awaited only Phase 0 — Phase 2's setState landed
+      // AFTER the test returned, re-rendering the leaked GridNodeHeader
+      // fiber with `node = undefined` and tripping React's
+      // "Rendered fewer hooks than expected" assertion (the comment "the
+      // header unmounts during the teardown" assumed Phase 2 finished
+      // in-flight, which it doesn't against mocked IPC). Awaiting the
+      // row removal AND then a couple of macro-task ticks so all the
+      // downstream awaits (`kill_agent`, `delete_agent_node` IPCs) drain
+      // keeps the test fully settled before the next test's setup.
       await waitFor(() => {
         expect(useAgentNodeStore.getState().closingNodeIds.has(NODE.id)).toBe(true);
       });
+      await waitFor(() => {
+        expect(useAgentNodeStore.getState().nodesById[NODE.id]).toBeUndefined();
+      });
+      // Drain any remaining microtasks (the `await killAgent` +
+      // `await api.deleteAgentNode` chain) so no setState lands during
+      // the next test's setup phase.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
     });
 
     it('updates the kebab\'s Maximize label to "Restore grid" in Single mode', () => {

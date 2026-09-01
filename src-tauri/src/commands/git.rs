@@ -1,6 +1,7 @@
 //! Git operations via git2 crate
 
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -862,6 +863,7 @@ pub(crate) fn stage_file_blocking(repo_path: &str, file_path: &str) -> Result<()
         .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
     let rel = std::path::Path::new(file_path);
     let abs = std::path::Path::new(&host).join(rel);
+    assert_inside_repo(std::path::Path::new(&host), rel)?;
 
     let mut index = repo.index().map_err(|e| e.to_string())?;
     if abs.exists() {
@@ -914,6 +916,7 @@ pub(crate) fn revert_file_blocking(repo_path: &str, file_path: &str) -> Result<(
         .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
     let rel = std::path::Path::new(file_path);
     let abs = std::path::Path::new(&host).join(rel);
+    assert_inside_repo(std::path::Path::new(&host), rel)?;
 
     // Is the path tracked in HEAD? (Unborn HEAD → nothing is tracked.)
     let in_head = repo
@@ -954,18 +957,81 @@ pub(crate) fn revert_file_blocking(repo_path: &str, file_path: &str) -> Result<(
     }
 }
 
-/// Reject path-traversal inputs at the command boundary: any `..` segment,
-/// `..`-prefixed segment (catches `..bar` which POSIX allows as a literal
-/// filename but which would still escape the worktree when joined onto
-/// `host`), or empty segment (absolute paths, doubled separators) escapes
-/// the worktree root and must never reach the filesystem calls. Shared
-/// by [`stage_file_blocking`] and [`revert_file_blocking`] (issue #1374).
+/// Reject path-traversal inputs at the command boundary. Defense in depth
+/// — the structural check rejects absolute paths, drive prefixes, and
+/// `..` segments *before* the file ever reaches a syscall, and the
+/// canonicalize-and-prefix check below catches symlinks whose targets
+/// escape the repo even when the link path itself is relative and clean.
+///
+/// Why this matters: a Windows drive prefix like `D:\secret.txt` splits
+/// into `["D:", "secret.txt"]` under a naive string-split-by-`/` check —
+/// neither segment is `..`, so the gate passes it. Then
+/// `Path::join("F:\repo", "D:\secret.txt")` evaluates to `D:\secret.txt`
+/// (an absolute right-hand argument *replaces* the base), and
+/// `revert_file_blocking`'s `std::fs::remove_file` deletes the file
+/// outside the worktree. `Path::components()` parses the structure the
+/// string-split can't see (drive prefix, root marker, parent components)
+/// and is the right primitive for this gate.
+///
+/// Shared by [`stage_file_blocking`] and [`revert_file_blocking`]
+/// (issue #1374). The `diff_against_base` pathspec check in
+/// `commands/diff.rs` has the same vulnerability shape but is followed
+/// by libgit2's own pathspec validation — these two Tauri commands have
+/// no such safety net, so they need their own strict gate.
 fn reject_traversal(file_path: &str) -> Result<(), String> {
-    if file_path
-        .split(['/', '\\'])
-        .any(|seg| seg == ".." || seg.starts_with("..") || seg.is_empty())
-    {
+    let p = Path::new(file_path);
+
+    // Step 1 — structural check via `Path::components()`. Reject anything
+    // that isn't a clean relative path: drive prefixes (`C:`), UNC
+    // prefixes (`\\server`), root markers (`/`, `\`), and parent
+    // components (`..`). Allow `CurDir` (`.`) and `Normal(name)` — the
+    // latter includes literal filenames starting with `..` like `..bar`,
+    // which is a *valid POSIX filename* and stays inside the worktree
+    // when joined (`repo/..bar` ≠ traversal). Reject if no `Normal`
+    // component survives — `.`, `..`, `/`, `` are all empty after
+    // stripping and meaningless as a "file to act on".
+    let mut saw_normal = false;
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err(format!("invalid path: {}", file_path));
+            }
+            Component::CurDir => {}
+            Component::Normal(_) => saw_normal = true,
+        }
+    }
+    if !saw_normal {
         return Err(format!("invalid path: {}", file_path));
+    }
+    Ok(())
+}
+
+/// Belt-and-braces: after `reject_traversal` passes, canonicalize the
+/// joined absolute path (when the file actually exists on disk) and
+/// verify the result lives under the repo's canonicalized root. Catches
+/// the symlink-escape case where a relative clean path like
+/// `src/outside-link` points at a symlink whose target is outside the
+/// worktree. Files that don't exist yet (worktree-deleted tracked files,
+/// staged-add paths) skip this check — their canonicalize would fail and
+/// we don't want a missing-file to break staging. The structural
+/// `reject_traversal` is the load-bearing gate; this is defense in
+/// depth.
+fn assert_inside_repo(repo_root: &Path, file_path: &Path) -> Result<(), String> {
+    let abs: PathBuf = repo_root.join(file_path);
+    let Ok(canon_abs) = abs.canonicalize() else {
+        // File missing or otherwise not canonicalizable — let the caller
+        // produce the user-visible error from the operation that
+        // triggered this check.
+        return Ok(());
+    };
+    let canon_root = repo_root
+        .canonicalize()
+        .map_err(|e| format!("repo root canonicalize: {}", e))?;
+    if !canon_abs.starts_with(&canon_root) {
+        return Err(format!(
+            "path escapes repository: {}",
+            file_path.display()
+        ));
     }
     Ok(())
 }
