@@ -37,6 +37,15 @@ pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     // Command Code owns its `~/.commandcode/auth.json` credential. The same
     // id names its native Agent Harness in the separate harness namespace.
     BuiltInProviderAccount { id: "commandcode", name: "Command Code",         self_auth: true  },
+    // Freebuff is an AI-coding CLI built on Codebuff (issue #1437). Its
+    // CLI-managed credential lives at `~/.config/manicode/credentials.json`
+    // (XDG-style, used on every platform), so the provider self-authenticates
+    // the same way Command Code / Cursor / Kimi Code do. The same `freebuff`
+    // id names its native Agent Harness in the separate harness namespace;
+    // the `Usage follows the credential, not the pairing` invariant from
+    // CONTEXT.md keeps the two registrations aligned. See issue #1438 for
+    // the credential-parser + quota-fetcher wiring.
+    BuiltInProviderAccount { id: "freebuff",   name: "Freebuff",              self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
     BuiltInProviderAccount { id: "cursor",    name: "Cursor",               self_auth: true  },

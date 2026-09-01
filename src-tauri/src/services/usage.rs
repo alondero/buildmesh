@@ -137,7 +137,11 @@ impl std::fmt::Display for UsageError {
     }
 }
 
-fn home_dir() -> PathBuf {
+/// Resolves the user's home directory. Prefers `USERPROFILE` on Windows so
+/// `<home>/.config/...` is identical across the two platforms. `pub(crate)`
+/// so service submodules (e.g. `services::freebuff_usage`) can reuse this
+/// without duplicating the env-var resolution.
+pub(crate) fn home_dir() -> PathBuf {
     env::var("USERPROFILE")
         .or_else(|_| env::var("HOME"))
         .map(PathBuf::from)
@@ -327,7 +331,11 @@ fn read_opencode_token(path: PathBuf) -> Result<String, UsageError> {
     Err(UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
-fn logged_out(provider: &str, error: String) -> ProviderUsage {
+/// Builds a `ProviderUsage` envelope for the "no credential / bad
+/// credential" state — the UI's re-enter affordance reads `error` verbatim.
+/// `pub(crate)` so service submodules can reuse it (`services::freebuff_usage`,
+/// …).
+pub(crate) fn logged_out(provider: &str, error: String) -> ProviderUsage {
     ProviderUsage {
         provider: provider.to_string(),
         logged_in: false,
@@ -344,7 +352,11 @@ fn logged_out(provider: &str, error: String) -> ProviderUsage {
 /// or parse reason. Mirrors the `unavailable` closure that lives inside
 /// [`fetch_usage`] so per-provider fetchers like [`kimi_usage`] can use the
 /// same constructor shape without re-defining it.
-fn unavailable(provider: &str, error: String) -> ProviderUsage {
+/// Builds a `ProviderUsage` for the "logged-in but couldn't fetch" state —
+/// the upstream returned something we can't render (transport failure,
+/// shape mismatch, non-success HTTP status). `pub(crate)` so service
+/// submodules can reuse it (`services::freebuff_usage`, …).
+pub(crate) fn unavailable(provider: &str, error: String) -> ProviderUsage {
     ProviderUsage {
         provider: provider.to_string(),
         logged_in: true,
@@ -3058,6 +3070,18 @@ pub fn cursor_usage_with_sources(
     }
 }
 
+// Freebuff (`freebuff`) implementation lives in `services::freebuff_usage`
+// (issue #1438 review). The Freebuff code sits in its own top-level service
+// module to keep this 6,200-line god-file from growing further; the public
+// fetcher is re-exported below so the existing call site
+// (`commands::usage.rs`, `cached_or_fetch`) does not need to learn the new
+// module path.
+//
+// Detection-gating wiring lives in `commands/usage.rs`
+// (`native_harness_for("freebuff") = Some("freebuff")` + the new
+// `FETCHABLE` arm).
+pub use crate::services::freebuff_usage::freebuff_usage;
+
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
 type Cache = HashMap<String, (Instant, ProviderUsage)>;
@@ -3125,7 +3149,12 @@ pub fn invalidate_provider_cache(provider: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+/// `pub(crate)` (rather than the default private) so sibling service modules
+/// (e.g. `services::freebuff_usage`) can use the `spawn_loopback` HTTP
+/// fixture via the parent-level re-export at the end of this file. The
+/// individual test fns stay private; only the explicit `pub(crate) use
+/// tests::…` re-export surfaces across the module boundary.
+pub(crate) mod tests {
     use super::*;
     use chrono::Timelike;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5021,7 +5050,7 @@ mod tests {
     // (issue #967) — the `tiny_http` crate is already a regular
     // `[dependencies]` entry, so this adds no new crate.
 
-    fn spawn_loopback<F>(max_requests: usize, handler: F) -> u16
+    pub(crate) fn spawn_loopback<F>(max_requests: usize, handler: F) -> u16
     where
         F: Fn(tiny_http::Request) + Send + 'static,
     {
@@ -6200,3 +6229,10 @@ mod tests {
             .is_some_and(|error| error.contains("Failed to parse response")));
     }
 }
+
+/// Re-export the loopback HTTP fixture at the parent module level so
+/// `services::freebuff_usage::tests` (a sibling test mod) can share it
+/// instead of duplicating the implementation. `#[cfg(test)]` matches the
+/// `mod tests { … }` it re-exports from.
+#[cfg(test)]
+pub(crate) use tests::spawn_loopback;
