@@ -10,31 +10,127 @@ import { cleanup } from '@testing-library/react';
 // The full vitest suite fires that warning ~74× and the issue body listed
 // "Vitest suite has zero console warnings" as the acceptance criterion.
 //
-// A minimal `CanvasRenderingContext2D`-shaped stub — every method is a no-op
-// — is enough to keep `getContext(...)` from crashing test renders. We
-// deliberately do NOT depend on the `canvas` npm package: it ships a native
-// binary that breaks on Buildmesh's CI Linux/musl runners (issue #1386
-// follow-up). Anything that actually wants bitmap assertions in a test can
-// override `HTMLCanvasElement.prototype.getContext` locally — the global
-// stub is only here to silence the noise, not to be a pixel-perfect mock.
+// PR review catch (grumpy-senior): a naïve `() => undefined` for every
+// method crashes any consumer that expects a returned object —
+// `ctx.measureText('x').width` would TypeError. The Proxy here returns
+// minimal stub objects for the chained-return methods consumers depend on:
+//
+//   measureText(...)           -> TextMetrics shape (width: 0, ...)
+//   createLinearGradient(...)  -> { addColorStop: () => undefined } (proxy)
+//   createRadialGradient(...)  -> { addColorStop: () => undefined } (proxy)
+//   createPattern(...)         -> { setTransform: () => undefined } (proxy)
+//   getImageData/putImageData  -> ImageData shape (data: Uint8ClampedArray)
+//   createImageData(...)       -> ImageData shape
+//
+// Everything else is a void-returning no-op (`fillRect`, `drawImage`,
+// `beginPath`, etc). We deliberately do NOT depend on the `canvas` npm
+// package: it ships a native binary that breaks on Buildmesh's CI
+// Linux/musl runners. Anything that actually wants bitmap assertions in a
+// test can override `HTMLCanvasElement.prototype.getContext` locally.
+type CanvasContext = Record<string | symbol, unknown>;
+
+/**
+ * A `CanvasGradient`-shaped proxy: factory methods like `createLinearGradient`
+ * return objects whose only common method is `addColorStop(0, 'red')`. The
+ * proxy returns `undefined` for property reads (e.g. `gradient.addColorStop`)
+ * via the same no-op-fn fallback used by the context, so further chained calls
+ * stay inert.
+ */
+function noopCanvasGradient(): CanvasContext {
+  return new Proxy(
+    {},
+    {
+      get() {
+        return () => undefined;
+      },
+      set() {
+        return true;
+      },
+    },
+  );
+}
+
+/**
+ * A `CanvasPattern`-shaped proxy. Same shape as a gradient from a consumer's
+ * standpoint — `setTransform` is the documented method, the rest is inert.
+ */
+function noopCanvasPattern(): CanvasContext {
+  return noopCanvasGradient();
+}
+
+/** `TextMetrics` minimum: `width` is the only field most consumers read. */
+function noopTextMetrics(): TextMetrics {
+  return {
+    width: 0,
+    actualBoundingBoxLeft: 0,
+    actualBoundingBoxRight: 0,
+    actualBoundingBoxAscent: 0,
+    actualBoundingBoxDescent: 0,
+    alphabeticBaseline: 0,
+    emHeightAscent: 0,
+    emHeightDescent: 0,
+    fontBoundingBoxAscent: 0,
+    fontBoundingBoxDescent: 0,
+    hangingBaseline: 0,
+    ideographicBaseline: 0,
+  } as TextMetrics;
+}
+
+/** `ImageData` minimum: consumers usually read `.data` and `.width`. */
+function noopImageData(width = 0, height = 0): ImageData {
+  return {
+    data: new Uint8ClampedArray(width * height * 4),
+    width,
+    height,
+    colorSpace: 'srgb',
+  } as ImageData;
+}
+
+/**
+ * The main `CanvasRenderingContext2D` stub. Property reads return sensible
+ * defaults; method calls return either `undefined` (for void methods like
+ * `fillRect`) or a minimal stub object (for factory methods whose return
+ * value is consumed downstream). The closure over the four stub factories
+ * means `getImageData(...)`, `createLinearGradient(...)`, etc. all produce
+ * fresh objects per call — no shared state between consumers.
+ */
 const noopCanvasContext = new Proxy(
-  {},
+  {} as CanvasContext,
   {
     get(_target, prop) {
-      // Properties we want callers to read sensibly. Anything not listed
-      // here falls through to the function-no-op fallback below, so a
-      // future `ellipse()` / `arcTo()` / `transform()` call never crashes —
-      // it just doesn't draw.
+      // Read-only-ish properties.
       if (prop === 'canvas') return null;
       if (prop === 'font') return '10px sans-serif';
       if (prop === 'fillStyle' || prop === 'strokeStyle') return '#000';
       if (prop === 'globalAlpha' || prop === 'globalCompositeOperation') return 1;
       if (prop === 'lineWidth' || prop === 'lineDashOffset') return 1;
-      // Everything else — whether it's a known method
-      // (`fillRect`/`drawImage`/`measureText`) or one we haven't enumerated
-      // (`arcTo`/`ellipse`/`transform`) — becomes a callable no-op that
-      // returns `undefined`. The catch is broad on purpose: a missing
-      // method should be inert, never a TypeError.
+
+      // Chained-return methods — return the right *shape* so consumers that
+      // read properties or call further methods don't TypeError.
+      if (prop === 'measureText') return () => noopTextMetrics();
+      if (prop === 'createLinearGradient' || prop === 'createRadialGradient') {
+        return () => noopCanvasGradient();
+      }
+      if (prop === 'createPattern') return () => noopCanvasPattern();
+      if (prop === 'getImageData') {
+        // CanvasRenderingContext2D.getImageData(sx, sy, sw, sh) — width
+        // and height are the 3rd and 4th positional args, not the 1st/2nd.
+        return (_sx: number, _sy: number, sw?: number, sh?: number) =>
+          noopImageData(sw ?? 0, sh ?? 0);
+      }
+      if (prop === 'createImageData') {
+        // CanvasRenderingContext2D.createImageData(width, height) — width
+        // and height are the 1st and 2nd positional args.
+        return (sw?: number, sh?: number) => noopImageData(sw ?? 0, sh ?? 0);
+      }
+      if (prop === 'putImageData') return () => undefined;
+      if (prop === 'getLineDash') return () => [];
+      if (prop === 'getTransform') return () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+
+      // Everything else — known methods (`fillRect`, `drawImage`, `arcTo`,
+      // `ellipse`, ...) and properties we haven't enumerated — becomes a
+      // callable no-op that returns `undefined`. A missing method should be
+      // inert, never a TypeError.
       return () => undefined;
     },
     // Writes (`ctx.fillStyle = 'red'`) succeed silently — the stub doesn't
