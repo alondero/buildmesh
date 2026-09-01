@@ -29,6 +29,7 @@ import { attachAgentNodeListeners } from './agentNodeListeners';
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
 import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
+import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwnership';
 import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 import type { SpawnAgentIntent } from '../types/generated/SpawnAgentIntent';
 export type { AgentNode };
@@ -219,6 +220,9 @@ interface AgentNodeState {
   // autopilot node. Drives the header's Autopilot pill; refreshed with the
   // node list and nudged by the `autopilot-*` lifecycle events.
   autopilotStates: Record<number, AutopilotRunState>;
+  // Circuit ownership comes from the run-step satellite ledger. Every Agent
+  // Node spawned by one run resolves to the same run id shown in its header.
+  circuitOwnerships: Record<number, CircuitAgentOwnership>;
   semanticTurns: Record<number, SemanticTurnPayload>;
   activeNodeId: number | null;
   loading: boolean;
@@ -377,6 +381,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   nodesById: {},
   nodeIds: [],
   autopilotStates: {},
+  circuitOwnerships: {},
   semanticTurns: {},
   activeNodeId: null,
   loading: false,
@@ -405,9 +410,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     try {
       // Autopilot states ride along with every node refresh, but their
       // failure must never blank the node list — degrade to "no pills".
-      const [agentNodes, autopilotRuns, semanticTurns] = await Promise.all([
+      const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
         api.listAgentNodes(),
         api.listAutopilotRuns().catch(() => []),
+        api.listCircuitAgentOwnerships().catch(() => []),
         api.listSemanticTurns().catch(() => []),
       ]);
       const autopilotStates = Object.fromEntries(
@@ -460,6 +466,12 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         nodesById: newById,
         nodeIds: newIds,
         autopilotStates,
+        circuitOwnerships: Object.fromEntries(
+          (Array.isArray(circuitOwnerships) ? circuitOwnerships : []).map((ownership) => [
+            ownership.node_id,
+            ownership,
+          ]),
+        ),
         semanticTurns: Object.fromEntries((Array.isArray(semanticTurns) ? semanticTurns : []).map((turn) => [turn.node_id, turn])),
         loading: false,
         ...(schedulesChanged && { schedules: keptSchedules }),

@@ -90,6 +90,8 @@ describe('useAgentNodeStore', () => {
       nodesById: {},
       nodeIds: [],
       activeNodeId: null,
+      autopilotStates: {},
+      circuitOwnerships: {},
       loading: false,
       error: null,
       closingNodeIds: new Set(),
@@ -113,6 +115,33 @@ describe('useAgentNodeStore', () => {
   });
 
   describe('fetchAgentNodes', () => {
+    it('hydrates circuit ownership alongside the node list', async () => {
+      const node = makeNode({ id: 7 });
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_agent_nodes') return Promise.resolve([node]);
+        if (command === 'list_circuit_agent_ownerships') {
+          return Promise.resolve([
+            {
+              node_id: 7,
+              run_id: 2,
+              circuit_id: 9,
+              circuit_name: 'Issue-driven review',
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      });
+
+      await useAgentNodeStore.getState().fetchAgentNodes();
+
+      expect(useAgentNodeStore.getState().circuitOwnerships[7]).toEqual({
+        node_id: 7,
+        run_id: 2,
+        circuit_id: 9,
+        circuit_name: 'Issue-driven review',
+      });
+    });
+
     it('populates agent nodes on success', async () => {
       const nodes = [makeNode()];
       mockInvoke.mockResolvedValueOnce(nodes);

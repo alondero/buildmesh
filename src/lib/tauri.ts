@@ -1386,12 +1386,14 @@ export function __resetProviderCachesForTests(): void {
 
 // ── Autopilot Circuits (spec #1205 / walking skeleton #1206) ─────────────
 import type { AutopilotCircuit } from '../types/generated/AutopilotCircuit';
+import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwnership';
 import type { CircuitRunDetail } from '../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../types/generated/CircuitWithRuns';
 // Milestone 4 (#1209): the canvas editor consumes the blueprint AST, so
 // the graph wire types ride the same sanctioned surface.
 export type {
   AutopilotCircuit,
+  CircuitAgentOwnership,
   CircuitRunDetail,
   CircuitWithRuns,
 };
@@ -1407,6 +1409,9 @@ export type { SessionStatusKind } from '../types/generated/SessionStatusKind';
 
 export const listCircuits = (meshId: number) =>
   _invoke<AutopilotCircuit[]>('list_circuits', { meshId });
+
+export const listCircuitAgentOwnerships = () =>
+  _invoke<CircuitAgentOwnership[]>('list_circuit_agent_ownerships');
 
 /** One circuit row — the canvas editor overlay's load unit (#1209). */
 export const getCircuit = (circuitId: number) =>

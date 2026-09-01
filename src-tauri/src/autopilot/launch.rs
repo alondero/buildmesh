@@ -45,6 +45,33 @@ pub struct AutopilotSubmittedPayload {
 
 use super::evaluator;
 
+/// Delivery path for an automated node's first turn. A non-empty prompt uses
+/// the harness's startup prefill when available and otherwise falls back to
+/// the same two-phase PTY injection used for later Autopilot turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitialPromptDelivery {
+    Fresh,
+    Prefill,
+    InjectAfterSpawn,
+}
+
+pub(crate) fn initial_prompt_delivery(
+    spawn_option: &str,
+    prompt: &str,
+) -> InitialPromptDelivery {
+    if prompt.trim().is_empty() {
+        return InitialPromptDelivery::Fresh;
+    }
+    let (harness_id, _) = crate::agent::provider::parse_spawn_option_id(spawn_option);
+    if crate::autopilot::compatibility::lookup_capabilities(harness_id)
+        .is_some_and(|capabilities| capabilities.supports_prefill)
+    {
+        InitialPromptDelivery::Prefill
+    } else {
+        InitialPromptDelivery::InjectAfterSpawn
+    }
+}
+
 /// Output must be quiet this long (after the marker appears) before Enter.
 pub(crate) const MIN_QUIET_MS: u128 = 1_500;
 
@@ -163,6 +190,22 @@ pub fn watch_and_submit(
     issue_number: i64,
     prefill: &str,
 ) {
+    watch_and_submit_inner(app, node_id, Some(issue_number), prefill);
+}
+
+/// Watch and submit a circuit-owned first turn without emitting the legacy
+/// `autopilot-submitted` issue toast. Circuit runs may be manual, interval,
+/// or PR-driven and therefore have no meaningful issue number to report.
+pub(crate) fn watch_and_submit_for_circuit(app: AppHandle, node_id: i64, prefill: &str) {
+    watch_and_submit_inner(app, node_id, None, prefill);
+}
+
+fn watch_and_submit_inner(
+    app: AppHandle,
+    node_id: i64,
+    issue_number: Option<i64>,
+    prefill: &str,
+) {
     // Owned copy for the spawned thread (`'static`); the prefill is a
     // small string (<= a few KB even for verbose loop prompts) but the
     // thread must outlive any stack frame, so a borrow is not enough.
@@ -205,20 +248,29 @@ pub fn watch_and_submit(
             // Enter stalls a prefilled launch exactly like an injection (#874).
             match crate::autopilot::pipeline::press_enter_until_output(node_id) {
                 Ok(attempt) => {
-                    tracing::info!(
-                        "autopilot launch({}): harness ready — submitted prefilled prompt \
-                         for issue #{} (Enter attempt {})",
-                        node_id,
-                        issue_number,
-                        attempt
-                    );
-                    let _ = app.emit(
-                        "autopilot-submitted",
-                        AutopilotSubmittedPayload {
+                    if let Some(issue_number) = issue_number {
+                        tracing::info!(
+                            "autopilot launch({}): harness ready — submitted prefilled prompt \
+                             for issue #{} (Enter attempt {})",
                             node_id,
-                            issue: issue_number,
-                        },
-                    );
+                            issue_number,
+                            attempt
+                        );
+                        let _ = app.emit(
+                            "autopilot-submitted",
+                            AutopilotSubmittedPayload {
+                                node_id,
+                                issue: issue_number,
+                            },
+                        );
+                    } else {
+                        tracing::info!(
+                            "circuit launch({}): harness ready — submitted prefilled prompt \
+                             (Enter attempt {})",
+                            node_id,
+                            attempt
+                        );
+                    }
                 }
                 Err(e) => tracing::warn!(
                     "autopilot launch({}): prefilled prompt was never submitted: {}",

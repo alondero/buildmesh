@@ -219,6 +219,9 @@ pub(crate) enum AlwaysStep {
     /// the inline CREATE in `init()`; this safety net covers any DB that
     /// reached v34+ without them. Idempotent via `IF NOT EXISTS`.
     EnsureAutopilotCircuitsTables,
+    /// Upgrade the original Issue Driven Autopilot graph shape once its
+    /// persisted first-turn injections are no longer needed.
+    UpgradeIssueReviewFirstTurns,
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +512,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::DropCheckpoints,
     AlwaysStep::EnsureWarmWorktreesTable,
     AlwaysStep::EnsureAutopilotCircuitsTables,
+    AlwaysStep::UpgradeIssueReviewFirstTurns,
     AlwaysStep::RewriteAgentNodeProviderId,
     AlwaysStep::HashCoordinatorTokens,
 ];
@@ -848,6 +852,67 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
                 ",
+            )?;
+        }
+        AlwaysStep::UpgradeIssueReviewFirstTurns => {
+            const FLAG: &str = "issue_review_first_turn_upgrade_v1";
+            let already_done: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM app_settings WHERE key = ?1",
+                    params![FLAG],
+                    |row| row.get::<_, i64>(0).map(|count| count > 0),
+                )
+                .unwrap_or(false);
+            if already_done {
+                return Ok(());
+            }
+
+            let circuits: Vec<(i64, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, graph_json FROM autopilot_circuits ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            for (id, graph_json) in circuits {
+                let mut graph = match crate::autopilot::circuit::model::CircuitGraph::from_json(
+                    &graph_json,
+                ) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!(
+                            "evolve_to: cannot inspect circuit {} for first-turn upgrade: {}",
+                            id,
+                            error
+                        );
+                        continue;
+                    }
+                };
+                let legacy_shape = graph.has_legacy_issue_review_shape();
+                let changed = graph.upgrade_legacy_issue_review_first_turns();
+                let retained_legacy_prompt = graph.node("implementation_prompt").is_some()
+                    || graph.node("review_prompt").is_some();
+                if legacy_shape && retained_legacy_prompt {
+                    tracing::warn!(
+                        "evolve_to: circuit {} retains a customized legacy review prompt topology",
+                        id
+                    );
+                }
+                if changed {
+                    let upgraded_json = graph.to_json().map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+                        ))
+                    })?;
+                    conn.execute(
+                        "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+                        params![id, upgraded_json],
+                    )?;
+                }
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+                params![FLAG],
             )?;
         }
     }

@@ -682,10 +682,33 @@ describe('GridNodeHeader reveal-in-explorer action', () => {
  */
 describe('GridNodeHeader autopilot pill', () => {
   beforeEach(() => {
-    useAgentNodeStore.setState({ nodesById: { [NODE.id]: NODE }, nodeIds: [NODE.id], activeNodeId: NODE.id, autopilotStates: {} });
+    useAgentNodeStore.setState({ nodesById: { [NODE.id]: NODE }, nodeIds: [NODE.id], activeNodeId: NODE.id, autopilotStates: {}, circuitOwnerships: {} });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     summaryMock.mockReturnValue(null);
     prMock.mockReturnValue(null);
+  });
+
+  it('shows the circuit icon and shared run number for circuit-owned nodes', () => {
+    useAgentNodeStore.setState({
+      autopilotStates: {},
+      circuitOwnerships: {
+        [NODE.id]: {
+          node_id: NODE.id,
+          run_id: 2,
+          circuit_id: 9,
+          circuit_name: 'Issue-driven Autopilot + PR review',
+        },
+      },
+    });
+
+    const { getByTestId, queryByTestId } = render(
+      <GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />,
+    );
+
+    const pill = getByTestId('circuit-run-pill');
+    expect(pill.textContent).toBe('#2');
+    expect(pill.getAttribute('title')).toContain('Issue-driven Autopilot + PR review');
+    expect(queryByTestId('autopilot-pill')).toBeNull();
   });
 
   it('is absent for a hand-spawned node (no autopilot run)', () => {

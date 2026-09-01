@@ -18,6 +18,7 @@ import { FolderOpenIcon } from '../shared/FolderOpenIcon';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
+import { CircuitsIcon } from '../Probe/probeIcons';
 
 interface GridNodeHeaderProps {
   /// Issue #1384 — pass the id only; the header subscribes to
@@ -163,6 +164,7 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   // the same value to keep the highlight and the body in sync.
   const isReviewingThisNode = useAgentNodeStore((s) => s.activeNodeId === nodeId);
   const autopilotState = useAgentNodeStore((s) => s.autopilotStates[nodeId]);
+  const circuitOwnership = useAgentNodeStore((s) => s.circuitOwnerships[nodeId]);
   const meshesById = useMeshStore(state => state.meshesById);
 
   // Issue #736 — measure the rendered header width and bucket it into a tier
@@ -185,6 +187,11 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   const gitPath = node ? getNodeGitPath(node) : null;
   const { summary } = useGitSummary(gitPath);
   const { pr: openPr } = useOpenPr(nodeId, gitPath);
+  const meshLabel = useMemo(() => {
+    if (!node) return '';
+    const mesh = meshesById.get(node.mesh_id);
+    return mesh ? `[${mesh.name} #${node.id}]` : `[#${node.id}]`;
+  }, [meshesById, node]);
 
   const meshLabel = useMemo(() => {
     if (!node) return '';
@@ -328,7 +335,18 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
             in the pipeline. Gated one tier looser than the worktree pill
             (visible down to `slim`): "is this node on autopilot?" outranks
             "worktree vs root" when horizontal space runs out. */}
-        {showMeshLabel && autopilotState && (
+        {showMeshLabel && circuitOwnership && (
+          <span
+            data-testid="circuit-run-pill"
+            title={`${circuitOwnership.circuit_name} · circuit run #${circuitOwnership.run_id}`}
+            aria-label={`Circuit run #${circuitOwnership.run_id}`}
+            className="text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-semibold select-none whitespace-nowrap drop-shadow-sm flex-shrink-0 ring-1 ring-inset bg-accent-violet/15 text-accent-violet ring-accent-violet/40 inline-flex items-center gap-1"
+          >
+            <CircuitsIcon className="h-3 w-3" />
+            <span>#{circuitOwnership.run_id}</span>
+          </span>
+        )}
+        {showMeshLabel && !circuitOwnership && autopilotState && (
           <span
             data-testid="autopilot-pill"
             title={AUTOPILOT_PILL_STYLES[autopilotState].title}

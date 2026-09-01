@@ -38,6 +38,37 @@ pub struct CircuitRunDetail {
     pub steps: Vec<AutopilotCircuitRunStep>,
 }
 
+/// Identifies the circuit run currently or historically owning a visible
+/// Agent Node. Generated for the node store; the run id is the number shown
+/// in the header pill.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitAgentOwnership.ts")]
+pub struct CircuitAgentOwnership {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "i32")]
+    pub run_id: i64,
+    #[ts(as = "i32")]
+    pub circuit_id: i64,
+    pub circuit_name: String,
+}
+
+#[command]
+pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, String> {
+    crate::db::list_circuit_agent_ownerships()
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(node_id, run_id, circuit_id, circuit_name)| CircuitAgentOwnership {
+                    node_id,
+                    run_id,
+                    circuit_id,
+                    circuit_name,
+                })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
 #[command]
 pub fn list_circuits(mesh_id: i64) -> Result<Vec<AutopilotCircuit>, String> {
     crate::db::list_autopilot_circuits(mesh_id).map_err(|e| e.to_string())
@@ -204,10 +235,11 @@ pub fn set_circuit_enabled(circuit_id: i64, enabled: bool) -> Result<(), String>
 /// wakes so trigger passes see the new topology immediately.
 #[command]
 pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), String> {
-    let graph = CircuitGraph::from_json(&graph_json)?;
+    let mut graph = CircuitGraph::from_json(&graph_json)?;
+    graph.upgrade_legacy_issue_review_first_turns();
     graph.validate()?;
-    // Persist the parsed/canonical form so legacy review graphs upgraded by
-    // `from_json` retain their explicit blueprint marker after an editor save.
+    // Persist the parsed/canonical form so an explicit legacy graph upgrade
+    // is durable after an editor save.
     let canonical_graph_json = graph.to_json()?;
     crate::db::update_autopilot_circuit_graph(circuit_id, &canonical_graph_json).map_err(|e| {
         if matches!(e, rusqlite::Error::QueryReturnedNoRows) {

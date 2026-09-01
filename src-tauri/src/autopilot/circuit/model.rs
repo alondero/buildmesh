@@ -327,16 +327,9 @@ impl CircuitGraph {
     /// are a hard error at the read boundary (the writer always writes
     /// what this build understands) rather than a silent skip.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let mut graph: Self =
+        let graph: Self =
             serde_json::from_str(json).map_err(|e| format!("invalid circuit graph_json: {}", e))?;
 
-        // Graphs created by the first review-blueprint implementation have
-        // no discriminator yet. Upgrade only that known legacy shape at the
-        // storage boundary; runtime identity below is marker-only and never
-        // inspects an author-editable prompt.
-        if graph.blueprint.is_none() && graph.has_legacy_issue_review_shape() {
-            graph.blueprint = Some(CircuitBlueprintKind::IssueDrivenAutopilotReview);
-        }
         Ok(graph)
     }
 
@@ -483,7 +476,7 @@ impl CircuitGraph {
     /// Recognize graph_json written before `blueprint` was added. This is a
     /// one-time compatibility migration, not the runtime blueprint policy;
     /// notably it does not compare any prompt text.
-    fn has_legacy_issue_review_shape(&self) -> bool {
+    pub(crate) fn has_legacy_issue_review_shape(&self) -> bool {
         matches!(
             self.node("trigger").map(|n| &n.kind),
             Some(CircuitNodeKind::GithubIssueLabel { .. })
@@ -499,6 +492,100 @@ impl CircuitGraph {
             self.node("reviewer").map(|n| &n.kind),
             Some(CircuitNodeKind::SpawnAgentNode { .. })
         )
+    }
+
+    /// Normalize the original issue-review blueprint so already-saved circuits
+    /// use their real task as the spawned agent's first turn. Match the exact
+    /// server-authored prompts and two-edge intermediary shape: prompts and
+    /// topology are editable, so a customized graph must not be rewritten.
+    pub(crate) fn upgrade_legacy_issue_review_first_turns(&mut self) -> bool {
+        let marker_changed = self.blueprint.is_none() && self.has_legacy_issue_review_shape();
+        if marker_changed {
+            self.blueprint = Some(CircuitBlueprintKind::IssueDrivenAutopilotReview);
+        }
+        if !self.is_issue_driven_autopilot_review() {
+            return false;
+        }
+
+        let implementer_changed = self.replace_legacy_injected_first_turn(
+            "implementer",
+            "implementation_prompt",
+            "implementation_classifier",
+            "",
+            "{{issue.prefill}}",
+            "{{issue.prefill}}",
+        );
+        let reviewer_changed = self.replace_legacy_injected_first_turn(
+            "reviewer",
+            "review_prompt",
+            "review_classifier",
+            "The pull request URL is {{pr.url}}. Use it as additional review context.",
+            Self::PR_REVIEW_PROMPT,
+            &format!(
+                "{}. The pull request URL is {{{{pr.url}}}}.",
+                Self::PR_REVIEW_PROMPT
+            ),
+        );
+        marker_changed || implementer_changed || reviewer_changed
+    }
+
+    fn replace_legacy_injected_first_turn(
+        &mut self,
+        spawn_id: &str,
+        prompt_id: &str,
+        next_id: &str,
+        expected_spawn_prompt: &str,
+        expected_injected_prompt: &str,
+        replacement_prompt: &str,
+    ) -> bool {
+        let spawn_matches = matches!(
+            self.node(spawn_id).map(|node| &node.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
+                if prompt == expected_spawn_prompt
+        );
+        let prompt_matches = matches!(
+            self.node(prompt_id).map(|node| &node.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, target_node_id })
+                if prompt == expected_injected_prompt
+                    && target_node_id.as_deref() == Some(spawn_id)
+        );
+        let incident_edges: Vec<&CircuitEdge> = self
+            .edges
+            .iter()
+            .filter(|edge| edge.from == prompt_id || edge.to == prompt_id)
+            .collect();
+        let topology_matches = incident_edges.len() == 2
+            && incident_edges.iter().any(|edge| {
+                edge.from == spawn_id
+                    && edge.to == prompt_id
+                    && edge.condition == EdgeCondition::Always
+            })
+            && incident_edges.iter().any(|edge| {
+                edge.from == prompt_id
+                    && edge.to == next_id
+                    && edge.condition == EdgeCondition::Always
+            });
+
+        if !(spawn_matches && prompt_matches && topology_matches) {
+            return false;
+        }
+
+        if let Some(CircuitNode {
+            kind: CircuitNodeKind::SpawnAgentNode { prompt, .. },
+            ..
+        }) = self.nodes.iter_mut().find(|node| node.id == spawn_id)
+        {
+            *prompt = replacement_prompt.to_string();
+        }
+        self.nodes.retain(|node| node.id != prompt_id);
+        for edge in &mut self.edges {
+            if edge.from == spawn_id && edge.to == prompt_id {
+                edge.to = next_id.to_string();
+            }
+        }
+        self.edges
+            .retain(|edge| !(edge.from == prompt_id && edge.to == next_id));
+        true
     }
 
     /// The canonical walking-skeleton blueprint (issue #1206): Manual
@@ -599,7 +686,6 @@ impl CircuitGraph {
             }
         }
 
-        let review_prompt = Self::PR_REVIEW_PROMPT.to_string();
         Self {
             version: CIRCUIT_GRAPH_VERSION,
             blueprint: Some(CircuitBlueprintKind::IssueDrivenAutopilotReview),
@@ -615,19 +701,12 @@ impl CircuitGraph {
                 node(
                     "implementer",
                     CircuitNodeKind::SpawnAgentNode {
-                        prompt: String::new(),
+                        prompt: "{{issue.prefill}}".to_string(),
                         name: None,
                         provider: None,
                         model: None,
                         effort: None,
                         extra_args: None,
-                    },
-                ),
-                node(
-                    "implementation_prompt",
-                    CircuitNodeKind::InjectPty {
-                        prompt: "{{issue.prefill}}".to_string(),
-                        target_node_id: Some("implementer".to_string()),
                     },
                 ),
                 node(
@@ -672,19 +751,15 @@ impl CircuitGraph {
                 node(
                     "reviewer",
                     CircuitNodeKind::SpawnAgentNode {
-                        prompt: "The pull request URL is {{pr.url}}. Use it as additional review context.".to_string(),
+                        prompt: format!(
+                            "{}. The pull request URL is {{{{pr.url}}}}.",
+                            Self::PR_REVIEW_PROMPT
+                        ),
                         name: None,
                         provider: None,
                         model: None,
                         effort: None,
                         extra_args: None,
-                    },
-                ),
-                node(
-                    "review_prompt",
-                    CircuitNodeKind::InjectPty {
-                        prompt: review_prompt,
-                        target_node_id: Some("reviewer".to_string()),
                     },
                 ),
                 node(
@@ -723,8 +798,7 @@ impl CircuitGraph {
             edges: vec![
                 edge("trigger", "collaborator_gate"),
                 edge("collaborator_gate", "implementer"),
-                edge("implementer", "implementation_prompt"),
-                edge("implementation_prompt", "implementation_classifier"),
+                edge("implementer", "implementation_classifier"),
                 outcome("implementation_classifier", "finish", Completed),
                 edge("finish", "finish_round"),
                 outcome("finish_classifier", "open_pr", Completed),
@@ -733,8 +807,7 @@ impl CircuitGraph {
                 edge("wrapup_correction", "finish_round"),
                 edge("finish_round", "finish_classifier"),
                 outcome("open_pr", "reviewer", Completed),
-                edge("reviewer", "review_prompt"),
-                edge("review_prompt", "review_classifier"),
+                edge("reviewer", "review_classifier"),
                 outcome("review_classifier", "follow_feedback", Completed),
                 edge("follow_feedback", "close_reviewer"),
                 edge("close_reviewer", "feedback_classifier"),
@@ -1331,20 +1404,28 @@ mod tests {
             Some(CircuitNodeKind::GithubIssueLabel { label }) if label == "buildmesh:run"
         ));
         assert!(matches!(
+            g.node("implementer").map(|n| &n.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
+                if prompt == "{{issue.prefill}}"
+        ));
+        assert!(
+            g.node("implementation_prompt").is_none(),
+            "the issue task must be the implementer's spawn-time first turn"
+        );
+        assert!(matches!(
             g.node("reviewer").map(|n| &n.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
                 if prompt.contains("{{pr.url}}")
+                    && prompt.contains(CircuitGraph::PR_REVIEW_PROMPT)
         ));
         assert!(matches!(
             g.node("collaborator_gate").map(|n| &n.kind),
             Some(CircuitNodeKind::CollaboratorCheck { require_approval: true })
         ));
-        assert!(matches!(
-            g.node("review_prompt").map(|n| &n.kind),
-            Some(CircuitNodeKind::InjectPty { prompt, target_node_id })
-                if prompt == CircuitGraph::PR_REVIEW_PROMPT
-                    && target_node_id.as_deref() == Some("reviewer")
-        ));
+        assert!(
+            g.node("review_prompt").is_none(),
+            "the review instruction must be the reviewer's spawn-time first turn"
+        );
         assert!(matches!(
             g.node("close_reviewer").map(|n| &n.kind),
             Some(CircuitNodeKind::CloseAgentNode { target_node_id })
@@ -1373,16 +1454,98 @@ mod tests {
     }
 
     #[test]
+    fn stored_issue_review_blueprint_upgrades_injected_first_turns_to_spawn_prompts() {
+        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+
+        let implementer = graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "implementer")
+            .unwrap();
+        if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut implementer.kind {
+            prompt.clear();
+        }
+        graph.nodes.push(CircuitNode {
+            id: "implementation_prompt".into(),
+            kind: CircuitNodeKind::InjectPty {
+                prompt: "{{issue.prefill}}".into(),
+                target_node_id: Some("implementer".into()),
+            },
+        });
+        let implementer_edge = graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == "implementer" && edge.to == "implementation_classifier")
+            .unwrap();
+        implementer_edge.to = "implementation_prompt".into();
+        graph.edges.push(CircuitEdge {
+            from: "implementation_prompt".into(),
+            to: "implementation_classifier".into(),
+            condition: EdgeCondition::Always,
+        });
+
+        let reviewer = graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "reviewer")
+            .unwrap();
+        if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut reviewer.kind {
+            *prompt = "The pull request URL is {{pr.url}}. Use it as additional review context."
+                .into();
+        }
+        graph.nodes.push(CircuitNode {
+            id: "review_prompt".into(),
+            kind: CircuitNodeKind::InjectPty {
+                prompt: CircuitGraph::PR_REVIEW_PROMPT.into(),
+                target_node_id: Some("reviewer".into()),
+            },
+        });
+        let reviewer_edge = graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == "reviewer" && edge.to == "review_classifier")
+            .unwrap();
+        reviewer_edge.to = "review_prompt".into();
+        graph.edges.push(CircuitEdge {
+            from: "review_prompt".into(),
+            to: "review_classifier".into(),
+            condition: EdgeCondition::Always,
+        });
+
+        let mut parsed = CircuitGraph::from_json(&graph.to_json().unwrap()).unwrap();
+        assert!(parsed.upgrade_legacy_issue_review_first_turns());
+
+        assert!(parsed.node("implementation_prompt").is_none());
+        assert!(parsed.node("review_prompt").is_none());
+        assert!(matches!(
+            parsed.node("implementer").map(|node| &node.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
+                if prompt == "{{issue.prefill}}"
+        ));
+        assert!(matches!(
+            parsed.node("reviewer").map(|node| &node.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
+                if prompt.contains(CircuitGraph::PR_REVIEW_PROMPT)
+                    && prompt.contains("{{pr.url}}")
+        ));
+        parsed.validate().unwrap();
+    }
+
+    #[test]
     fn editing_the_review_prompt_does_not_change_blueprint_identity() {
         let mut g = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         let node = g
             .nodes
             .iter_mut()
-            .find(|node| node.id == "review_prompt")
-            .expect("review prompt exists");
-        node.kind = CircuitNodeKind::InjectPty {
+            .find(|node| node.id == "reviewer")
+            .expect("reviewer exists");
+        node.kind = CircuitNodeKind::SpawnAgentNode {
             prompt: "custom review".into(),
-            target_node_id: Some("reviewer".into()),
+            name: None,
+            provider: None,
+            model: None,
+            effort: None,
+            extra_args: None,
         };
         assert!(g.is_issue_driven_autopilot_review());
     }
@@ -1390,15 +1553,18 @@ mod tests {
     #[test]
     fn legacy_review_graphs_get_a_marker_without_inspecting_prompt_text() {
         let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-        graph.nodes.iter_mut().find(|node| node.id == "review_prompt").unwrap().kind =
-            CircuitNodeKind::InjectPty {
+        graph.nodes.push(CircuitNode {
+            id: "review_prompt".into(),
+            kind: CircuitNodeKind::InjectPty {
                 prompt: "author-customized review instruction".into(),
                 target_node_id: Some("reviewer".into()),
-            };
+            },
+        });
         let mut raw: serde_json::Value = serde_json::from_str(&graph.to_json().unwrap()).unwrap();
         raw.as_object_mut().unwrap().remove("blueprint");
 
-        let parsed = CircuitGraph::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+        let mut parsed = CircuitGraph::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+        assert!(parsed.upgrade_legacy_issue_review_first_turns());
         assert_eq!(
             parsed.blueprint,
             Some(CircuitBlueprintKind::IssueDrivenAutopilotReview)

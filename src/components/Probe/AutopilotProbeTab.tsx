@@ -192,11 +192,6 @@ export function compatibilityReasonCopy(
         headline: 'Terminal is a plain shell, not an Agent Harness.',
         remedy: 'Pick a real Agent Harness (Claude Code, Codex, Agy, …).',
       };
-    case 'missing_prefill':
-      return {
-        headline: `${reason.harness_id} cannot accept a startup prompt.`,
-        remedy: 'Pick an Agent Harness that accepts prompts on launch.',
-      };
     case 'missing_attention_hook':
       return {
         headline: `${reason.harness_id} does not install an attention hook.`,

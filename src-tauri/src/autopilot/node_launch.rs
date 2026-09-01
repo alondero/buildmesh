@@ -214,11 +214,19 @@ pub(crate) fn launch_autopilot_node(
         }
     }
 
-    // Step 6 — clone the intent because `tauri::async_runtime::spawn`
-    // requires `'static` captures and the plan is moved into the watch
-    // at step 7.
+    // Step 6 — choose the startup delivery before moving the intent into
+    // the background spawn. Supporting harnesses stage a prefill; other
+    // harnesses start fresh and receive the prompt over the live PTY.
+    let prefill = plan
+        .intent
+        .initial_prompt()
+        .map(|p| p.into_string())
+        .unwrap_or_default();
+    let prompt_delivery =
+        crate::autopilot::launch::initial_prompt_delivery(&plan.provider, &prefill);
     let app_for_spawn = app.clone();
     let intent_for_spawn = plan.intent.clone();
+    let fallback_prompt = prefill.clone();
     let node_id_for_spawn = node.id;
     tauri::async_runtime::spawn(async move {
         if let Err(error) = crate::agent::spawn::spawn_with_intent(
@@ -232,26 +240,43 @@ pub(crate) fn launch_autopilot_node(
                 node_id_for_spawn,
                 error
             );
+            return;
+        }
+        if prompt_delivery == crate::autopilot::launch::InitialPromptDelivery::InjectAfterSpawn {
+            if let Err(error) = crate::autopilot::pipeline::write_prompt_to_pty(
+                node_id_for_spawn,
+                &fallback_prompt,
+                &app_for_spawn,
+            ) {
+                tracing::error!(
+                    "autopilot: fallback prompt injection for node {} failed: {}",
+                    node_id_for_spawn,
+                    error
+                );
+                let _ = crate::agent::session_lifecycle::on_error(
+                    &crate::agent::session_lifecycle::AppSessionLifecycleSink {
+                        app: &app_for_spawn,
+                    },
+                    node_id_for_spawn,
+                );
+            }
         }
     });
 
-    // Step 7 — `watch_and_submit` derives its readiness marker from the
-    // prefill (wayfinder #1027); passing the same `intent.initial_prompt()`
-    // text means loop-mode prefills (which carry no issue number) still
+    // Step 7 — for a staged prefill, `watch_and_submit` derives its
+    // readiness marker from the prefill (wayfinder #1027); passing the
+    // same `intent.initial_prompt()` text means loop-mode prefills still
     // match against the staged prefill instead of timing out. Failures
     // here are rare — the prefill only stages the prompt, the watcher
     // waits for harness readiness and presses Enter.
-    let prefill = plan
-        .intent
-        .initial_prompt()
-        .map(|p| p.into_string())
-        .unwrap_or_default();
-    crate::autopilot::launch::watch_and_submit(
-        app.clone(),
-        node.id,
-        plan.watcher_issue_number,
-        &prefill,
-    );
+    if prompt_delivery == crate::autopilot::launch::InitialPromptDelivery::Prefill {
+        crate::autopilot::launch::watch_and_submit(
+            app.clone(),
+            node.id,
+            plan.watcher_issue_number,
+            &prefill,
+        );
+    }
 
     Ok(())
 }

@@ -14,4 +14,4 @@
  * `ts-rs` reads the same attribute so the generated TS discriminated union
  * matches by `kind`.
  */
-export type AutopilotCompatibilityReason = { "kind": "no_resolved_harness" } | { "kind": "unknown_harness", harness_id: string, } | { "kind": "plain_terminal" } | { "kind": "missing_prefill", harness_id: string, } | { "kind": "missing_attention_hook", harness_id: string, } | { "kind": "worktree_disabled" };
+export type AutopilotCompatibilityReason = { "kind": "no_resolved_harness" } | { "kind": "unknown_harness", harness_id: string, } | { "kind": "plain_terminal" } | { "kind": "missing_attention_hook", harness_id: string, } | { "kind": "worktree_disabled" };

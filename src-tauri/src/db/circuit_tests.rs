@@ -276,6 +276,59 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
 }
 
 #[test]
+fn circuit_agent_ownership_comes_from_the_step_ledger() {
+    let path = init_temp_db("agent_ownership");
+    let mesh = create_mesh("circuit-owner-mesh", "/tmp/circuit-owner").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "issue autopilot", "", 2, &sample_graph_json())
+            .unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "issue:42:run", "{}").unwrap();
+    commit_circuit_advance(
+        run_id,
+        Some("running"),
+        None,
+        &[CircuitStepOp {
+            node_id: "spawn".into(),
+            status: "running".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+    let agent = create_agent_node(
+        mesh.id,
+        "implementer",
+        "/tmp/circuit-owner-node",
+        "main",
+        EnvType::Windows,
+        "claude",
+        None,
+        Some(42),
+        None,
+        None,
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    set_circuit_step_agent_node(run_id, "spawn", agent.id).unwrap();
+
+    assert_eq!(
+        list_circuit_agent_ownerships().unwrap(),
+        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string())]
+    );
+
+    clear_circuit_step_agent_node(run_id, "spawn").unwrap();
+    assert!(list_circuit_agent_ownerships().unwrap().is_empty());
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn step_upsert_never_duplicates_a_node_row() {
     let path = init_temp_db("upsert");
     let mesh = create_mesh("circuit-upsert-mesh", "/tmp/circuit-upsert").unwrap();

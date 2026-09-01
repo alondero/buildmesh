@@ -32,18 +32,17 @@
 //!
 //! ## Requirements evaluated
 //!
-//! Three autopilot-pipeline requirements, each with a stable reason code so
+//! Two autopilot-pipeline requirements, each with a stable reason code so
 //! the UI can render a specific corrective action:
 //!
-//! 1. **Prompt/prefill delivery** — `HarnessCapabilities::supports_prefill`.
-//!    Autopilot stages a prefill prompt (the issue body / loop prompt) via
-//!    `AgentDriver::send_prompt`; a harness without prefill would receive
-//!    nothing.
-//! 2. **Execution / attention hook** — `HarnessCapabilities::requires_attention_hook`.
+//! Startup prompt delivery is capability-aware but is not a compatibility
+//! gate: harnesses with prefill use it, while the rest receive a two-phase
+//! PTY injection after launch.
+//! 1. **Execution / attention hook** — `HarnessCapabilities::requires_attention_hook`.
 //!    Autopilot drives turn evaluation off the attention webhook (`on_turn`
 //!    in `autopilot::pipeline`); a harness that doesn't install the hook
 //!    would never trigger the state machine.
-//! 3. **Worktree operation** — `HarnessCapabilities::is_plain_terminal` is the
+//! 2. **Worktree operation** — `HarnessCapabilities::is_plain_terminal` is the
 //!    only "can't run inside a worktree" indicator today (Terminal isn't an
 //!    Agent Harness), and the mesh's `use_worktree = false` flag is a
 //!    separate config-level conflict that surfaces as its own reason.
@@ -107,13 +106,6 @@ pub enum AutopilotCompatibilityReason {
     /// The harness is a plain shell (Terminal) — there is no LLM agent
     /// loop, so the entire Autopilot pipeline has nothing to drive.
     PlainTerminal,
-
-    /// The harness's CLI does not accept a startup prefill prompt. Without
-    /// prefill, Autopilot cannot deliver the issue body / loop prompt to
-    /// the agent.
-    MissingPrefill {
-        harness_id: String,
-    },
 
     /// The harness does not install an attention hook, so the turn-driven
     /// Autopilot pipeline (`autopilot::pipeline::on_turn`) never fires for
@@ -311,18 +303,13 @@ pub fn evaluate(input: AutopilotCompatibilityInput<'_>) -> AutopilotCompatibilit
         }),
         Some(caps) => {
             // Plain Terminal is the "no agent loop" sentinel. We surface it
-            // as its own reason (not as `MissingPrefill` + `MissingAttentionHook`)
+            // as its own reason rather than combining multiple low-level gaps
             // because the user's corrective action is "pick an Agent Harness",
             // not "make Terminal accept prompts". The harness id is intentionally
             // omitted from the variant — `PlainTerminal` is itself the harness
             // classification the user needs to see.
             if caps.is_plain_terminal {
                 reasons.push(AutopilotCompatibilityReason::PlainTerminal);
-            }
-            if !caps.supports_prefill {
-                reasons.push(AutopilotCompatibilityReason::MissingPrefill {
-                    harness_id: input.resolved_harness_id.to_string(),
-                });
             }
             if !caps.requires_attention_hook {
                 reasons.push(AutopilotCompatibilityReason::MissingAttentionHook {
@@ -544,7 +531,7 @@ mod tests {
     /// *not* carried in the `PlainTerminal` variant — it's the
     /// classification itself that the user needs to see, not a label.
     /// The evaluator emits `PlainTerminal` alongside the per-capability
-    /// reasons (Terminal is also missing prefill + attention); the UI
+    /// reasons (Terminal also lacks an attention hook); the UI
     /// chooses whether to render the umbrella reason alone or all of them.
     #[test]
     fn evaluate_terminal_emits_plain_terminal_reason() {
@@ -583,7 +570,6 @@ mod tests {
             .reasons
             .iter()
             .map(|r| match r {
-                AutopilotCompatibilityReason::MissingPrefill { .. } => "prefill",
                 AutopilotCompatibilityReason::MissingAttentionHook { .. } => "attention",
                 _ => "other",
             })
@@ -616,7 +602,6 @@ mod tests {
             .reasons
             .iter()
             .map(|r| match r {
-                AutopilotCompatibilityReason::MissingPrefill { .. } => "prefill",
                 AutopilotCompatibilityReason::MissingAttentionHook { .. } => "attention",
                 _ => "other",
             })
@@ -629,12 +614,10 @@ mod tests {
         assert!(kinds.contains(&"attention"), "got reasons: {:?}", result.reasons);
     }
 
-    /// Hypothetical harness descriptor with only prefill missing (custom
-    /// or future harness). Pin the per-reason emission independently — a
-    /// harness that can signal attention but not accept a startup prompt
-    /// still gets the prefill reason alone.
+    /// A custom or future harness with only prefill missing remains eligible:
+    /// the launch path injects its first prompt after the process is live.
     #[test]
-    fn evaluate_emits_individual_missing_prefill_reason() {
+    fn evaluate_allows_missing_prefill_when_attention_is_available() {
         let caps = HarnessCapabilities {
             harness_id: "futuristic".into(),
             supports_extra_args: true,
@@ -656,12 +639,12 @@ mod tests {
             mesh_use_worktree: true,
             explicit_autopilot_provider: true,
         });
-        assert!(!result.allowed);
-        assert_eq!(result.reasons.len(), 1);
-        assert!(matches!(
-            &result.reasons[0],
-            AutopilotCompatibilityReason::MissingPrefill { harness_id } if harness_id == "futuristic"
-        ));
+        assert!(
+            result.allowed,
+            "PTY fallback should allow this harness: {:?}",
+            result.reasons
+        );
+        assert!(result.reasons.is_empty());
     }
 
     /// Unknown harness id: the evaluator emits `UnknownHarness` and skips
