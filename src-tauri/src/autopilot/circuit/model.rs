@@ -43,6 +43,61 @@ pub enum CircuitBlueprintKind {
     IssueDrivenAutopilotReview,
 }
 
+impl CircuitBlueprintKind {
+    /// The trigger vocabulary this blueprint accepts. The IPC boundary
+    /// (`commands::circuit::create_circuit`) consults this; the domain
+    /// model owns the truth so internal services, the background worker,
+    /// and a future CLI all share the same restriction.
+    pub const fn allowed_triggers(self) -> &'static [crate::commands::circuit::CircuitTriggerKind] {
+        use crate::commands::circuit::CircuitTriggerKind as T;
+        match self {
+            // Spec #1205's "Issue-Driven PR Flow" and "Continuous Looping
+            // Pacer" presets share this skeleton under different trigger
+            // roots. The shipped walking skeleton is the minimal
+            // foundation both build on.
+            Self::WalkingSkeleton => &[
+                T::Manual,
+                T::Interval,
+                T::GithubIssueLabel,
+                T::GithubPrLabel,
+            ],
+            // Review blueprint is labelled-issue-driven — its `trigger.*`
+            // context is the implementation agent's `{{issue.prefill}}`
+            // first turn.
+            Self::IssueDrivenAutopilotReview => &[T::GithubIssueLabel],
+        }
+    }
+
+    /// Concurrency floor. The review blueprint MUST be ≥2 because the
+    /// implementation and reviewer agent nodes share the same circuit's
+    /// concurrency pool — a 1-slot circuit deadlocks the reviewer behind
+    /// the implementation node's still-live process.
+    pub const fn min_concurrency_limit(self) -> i64 {
+        match self {
+            Self::WalkingSkeleton => 1,
+            Self::IssueDrivenAutopilotReview => 2,
+        }
+    }
+
+    /// Default concurrency the Probe UI ships with.
+    pub const fn default_concurrency_limit(self) -> i64 {
+        match self {
+            Self::WalkingSkeleton => 1,
+            Self::IssueDrivenAutopilotReview => 2,
+        }
+    }
+
+    /// Whether Trigger Now (`trigger_circuit_now`) is permitted on this
+    /// blueprint. The review blueprint is labelled-issue-driven — a
+    /// manual fire would mint a run with no `issue.*` context.
+    pub const fn allows_manual_trigger_now(self) -> bool {
+        match self {
+            Self::WalkingSkeleton => true,
+            Self::IssueDrivenAutopilotReview => false,
+        }
+    }
+}
+
 /// The full blueprint AST for one circuit.
 ///
 // Milestone 4 (#1209): the canvas editor is the first TypeScript
@@ -816,6 +871,109 @@ impl CircuitGraph {
                 outcome("review_retry", "complete", StepOutcome::Failed),
             ],
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Domain validation — pure, side-effect-free, owned by the model so the
+// IPC boundary (Tauri command) stays a dumb router. Internal services,
+// the background worker, and a future CLI all reach for the same
+// `validate_circuit_request` helper; the Tauri command's job is just to
+// parse arguments and persist.
+// ---------------------------------------------------------------------------
+
+/// Pure validation for a circuit creation request. Returns the
+/// normalised [`CircuitTriggerKind`], the trimmed trigger label (if any),
+/// the validated interval seconds (if any), and the clamped concurrency
+/// limit. The caller builds the [`CircuitGraph`] from the returned
+/// trigger kind and writes the row to the DB.
+///
+/// Keeping this in the domain model — rather than inside the Tauri
+/// command — means internal callers, the background worker, and any
+/// future CLI all share the same restrictions. A review blueprint
+/// cannot be constructed with a Manual trigger or a 1-slot concurrency
+/// pool; the model refuses here so the runtime can never deadlock it.
+pub fn validate_circuit_request(
+    blueprint: CircuitBlueprintKind,
+    trigger_kind: Option<crate::commands::circuit::CircuitTriggerKind>,
+    trigger_label: Option<&str>,
+    interval_seconds: Option<i64>,
+    concurrency_limit: i64,
+) -> Result<ValidatedCircuitRequest, String> {
+    use crate::commands::circuit::CircuitTriggerKind as T;
+
+    let selected_trigger = trigger_kind.unwrap_or(T::Manual);
+    if !blueprint.allowed_triggers().contains(&selected_trigger) {
+        return Err(format!(
+            "blueprint {:?} requires one of {:?}, got {:?}",
+            blueprint,
+            blueprint.allowed_triggers(),
+            selected_trigger
+        ));
+    }
+
+    // GitHub triggers require a non-empty label (after trim). The IPC
+    // layer never has to remember this — the model is the single
+    // source of truth.
+    let needs_label = matches!(
+        selected_trigger,
+        T::GithubIssueLabel | T::GithubPrLabel
+    );
+    let trigger_label = trigger_label
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned);
+    if needs_label && trigger_label.is_none() {
+        return Err("GitHub triggers require a non-empty trigger label".to_string());
+    }
+
+    let interval_seconds = match selected_trigger {
+        T::Interval => Some(interval_seconds.unwrap_or(300).clamp(60, 7 * 24 * 3_600)),
+        _ => None,
+    };
+
+    let concurrency_limit = concurrency_limit.clamp(blueprint.min_concurrency_limit(), 16);
+
+    Ok(ValidatedCircuitRequest {
+        trigger_kind: selected_trigger,
+        trigger_label,
+        interval_seconds,
+        concurrency_limit,
+    })
+}
+
+/// Pure result of [`validate_circuit_request`]. Carries every normalised
+/// field the IPC + DB write need, decoupled from the original inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedCircuitRequest {
+    pub trigger_kind: crate::commands::circuit::CircuitTriggerKind,
+    pub trigger_label: Option<String>,
+    pub interval_seconds: Option<i64>,
+    pub concurrency_limit: i64,
+}
+
+/// Convert a validated [`crate::commands::circuit::CircuitTriggerKind`]
+/// into the [`CircuitNodeKind`] the graph builder expects. The model
+/// has already enforced label-required-for-github inside
+/// [`validate_circuit_request`], so this is infallible for the GitHub
+/// variants — `unreachable!` documents the invariant.
+pub fn trigger_kind_to_node_kind(req: &ValidatedCircuitRequest) -> CircuitNodeKind {
+    use crate::commands::circuit::CircuitTriggerKind as T;
+    match req.trigger_kind {
+        T::Manual => CircuitNodeKind::Manual,
+        T::Interval => CircuitNodeKind::Interval {
+            interval_seconds: req.interval_seconds.unwrap_or(300),
+        },
+        T::GithubIssueLabel => CircuitNodeKind::GithubIssueLabel {
+            label: req.trigger_label.clone().expect(
+                "validate_circuit_request guarantees a non-empty label for GitHub triggers",
+            ),
+        },
+        T::GithubPrLabel => CircuitNodeKind::GithubPullRequestLabel {
+            label: req.trigger_label.clone().expect(
+                "validate_circuit_request guarantees a non-empty label for GitHub triggers",
+            ),
+        },
     }
 }
 

@@ -11,6 +11,8 @@ pub mod provider_conf;
 use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Runtime facts resolved by provider preflight and shared with the adapter's
 /// provisioning seams. An empty context means the adapter should resolve its
@@ -341,6 +343,12 @@ pub trait AgentProvider: Send + Sync {
         crate::agent::capabilities::AttentionCapability::None
     }
 
+    /// Whether this harness supplies turn lifecycle signals through a passive
+    /// transcript watcher rather than a native attention hook.
+    fn supports_passive_turn_watcher(&self) -> bool {
+        false
+    }
+
     /// Ensure the workspace is trusted for this harness before its process is
     /// created. Trust is a launch prerequisite, independent of attention-hook
     /// installation. Providers with vendor-specific trust stores opt in by
@@ -448,7 +456,37 @@ pub trait AgentProvider: Send + Sync {
     /// SQLite store for the `ses_…` id the TUI just minted. Adapters own
     /// the capture implementation — spawn must not hard-code a provider
     /// service behind a boolean flag.
-    fn after_fresh_spawn(&self, _node_id: i64, _spawn_path: &str, _env_type: EnvType) {}
+    fn after_fresh_spawn(
+        &self,
+        _node_id: i64,
+        _spawn_path: &str,
+        _env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
+    }
+
+    /// Hook immediately before an existing CLI session is resumed. A harness
+    /// can snapshot transcript state and attach session-scoped services here,
+    /// before the child gets a chance to write its first resumed turn.
+    fn before_resume_spawn<'a>(
+        &'a self,
+        _node_id: i64,
+        _session_id: &str,
+        _spawn_path: &str,
+        _env_type: EnvType,
+        _app: &'a tauri::AppHandle,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
+    /// Called after the generic lifecycle sink has persisted the initial
+    /// `Spawning` state. Providers with passive lifecycle services use this to
+    /// release any pre-spawn gate; unrelated providers remain no-ops.
+    fn on_spawn_activated(&self, _node_id: i64) {}
+
+    /// Called whenever generic runtime teardown cancels or observes the
+    /// process. Providers use this to release session-scoped lifecycle state.
+    fn on_process_terminated(&self, _node_id: i64) {}
 
     /// Alternative recipe for resume (subcommand-style providers like Codex).
     /// If Some, `default_prepare` uses this instead of `spawn_recipe()` + `resume_args()`.
@@ -603,6 +641,7 @@ pub trait AgentProvider: Send + Sync {
             auto_resume_on_startup: self.auto_resume_on_startup(),
             requires_attention_hook: self.requires_attention_hook(),
             attention_capability: self.attention_capability(),
+            supports_passive_turn_watcher: self.supports_passive_turn_watcher(),
             produces_readable_transcript: self.produces_readable_transcript(),
             supports_model_override: self.supports_model_override(),
             supports_effort_override: !matches!(effort_control, EffortControlKind::None),
@@ -641,6 +680,18 @@ pub trait AgentProvider: Send + Sync {
     {
         crate::agent::launch::default_prepare(self, input)
     }
+}
+
+/// Route generic process teardown through the provider seam. Runtime modules
+/// do not need to know which provider owns a node or which session-scoped
+/// lifecycle service it installed.
+pub(crate) fn notify_process_terminated(node_id: i64) {
+    let Ok(node) = crate::db::get_agent_node_by_id(node_id) else {
+        return;
+    };
+    crate::preferences::resolve_harness_provider(&node.provider)
+        .adapter()
+        .on_process_terminated(node_id);
 }
 
 #[cfg(test)]

@@ -8,7 +8,8 @@
  */
 
 import type { CircuitRunDetail } from '../../lib/tauri';
-import { statusTextClass, stepDurationMs } from './circuitGraphModel';
+import { formatDurationMs, statusTextClass, stepDurationMs } from './circuitGraphModel';
+import { runStateLabel, stepStatusLabel } from './runDiagnostics';
 
 interface RunHistoryDrawerProps {
   runs: CircuitRunDetail[];
@@ -44,7 +45,7 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun }: RunHistor
               <span
                 className={`${statusTextClass(run.state)} ${run.state === 'running' ? 'animate-pulse' : ''}`}
               >
-                {run.state}
+                {runStateLabel(run.state)}
               </span>
               <span className="ml-1 text-2xs text-text-muted">{run.created_at}</span>
             </button>
@@ -62,6 +63,7 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun }: RunHistor
               <div
                 key={s.node_id}
                 data-testid={`run-step-${selected.run.id}-${s.node_id}`}
+                data-step-status={s.status}
                 className="mb-1 rounded-sm border border-border-subtle bg-bg-card p-1.5 text-2xs"
               >
                 <div className="flex items-center justify-between gap-1">
@@ -69,12 +71,12 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun }: RunHistor
                   <span
                     className={`${statusTextClass(s.status)} ${s.status === 'running' ? 'animate-pulse' : ''}`}
                   >
-                    {s.status}
+                    {stepStatusLabel(s.status)}
                     {s.outcome ? ` · ${s.outcome}` : ''}
                   </span>
                 </div>
                 {duration !== null && (
-                  <div className="text-text-muted mt-0.5">duration {(duration / 1000).toFixed(1)}s</div>
+                  <div className="text-text-muted mt-0.5">duration {formatDurationMs(duration)}</div>
                 )}
                 {s.agent_node_id !== null && (
                   <div className="text-text-muted mt-0.5">agent node #{s.agent_node_id}</div>

@@ -105,7 +105,19 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// v35 — Agent node hook/attention signal health (issue #1364): adds the
 /// nullable `agent_nodes.signal_health` TEXT column (`ok` / `degraded` /
 /// `unavailable`, NULL before first provisioning outcome or callback).
-pub(crate) const SCHEMA_VERSION: u32 = 35;
+///
+/// v36 — Circuit-run capacity contract (issue #1467): add the
+/// `meshes.circuit_run_capacity INTEGER NOT NULL DEFAULT 2` column — the
+/// mesh-level cap on concurrent *admitted circuit runs*, distinct from
+/// the legacy `autopilot_concurrency_limit` (which remains the
+/// agent-node backstop). One slot per admitted run regardless of how
+/// many agent nodes the blueprint fans out to; default 2 unlocks the
+/// two-overlap PR-review acceptance criterion out of the box. Range
+/// `1..=8` is enforced at the IPC boundary (`update_mesh_circuit_run_capacity`),
+/// mirroring `autopilot_concurrency_limit`. No backfill — pre-v36 rows
+/// read back as 2 via the `COALESCE(col, 2)` in
+/// `mesh_columns_projection`.
+pub(crate) const SCHEMA_VERSION: u32 = 36;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -206,6 +218,25 @@ pub(crate) enum AlwaysStep {
     /// DROP TABLE IF EXISTS checkpoints (v12). The checkpoint feature
     /// was removed; the table is dead and must not linger.
     DropCheckpoints,
+    /// Enforce the `meshes.circuit_run_capacity` 1..=8 invariant (issue
+    /// #1467, ADR-0028). The IPC layer (`update_mesh_circuit_run_capacity`)
+    /// clamps at `1..=8`, but a direct DB write (future service call,
+    /// a hand-edited row, a buggy migration) could land an out-of-range
+    /// value — SQLite can't retro-add a CHECK constraint via
+    /// `ALTER TABLE ADD COLUMN`, so we model the invariant as a
+    /// trigger on INSERT/UPDATE. **Idempotent via `DROP TRIGGER IF
+    /// EXISTS` + `CREATE TRIGGER`**: rebuilds every pass so a partial
+    /// install (drop succeeds but create fails) self-heals next
+    /// launch. The trigger `RAISE(ABORT, …)` is what enforces the
+    /// range — the same shape used by the `agent_node_provider_id`
+    /// rewriter migration for forward-compatible rollouts.
+    ///
+    /// Pre-v36 DBs (no `meshes.circuit_run_capacity` column) skip the
+    /// trigger install on first run; the column-walk runs once and the
+    /// next pass adds the trigger. The trigger references the column
+    /// by name (`NEW.circuit_run_capacity`), so the install after the
+    /// column walk is the safe sequence.
+    EnforceCircuitRunCapacityRange,
     /// Rehash pre-hashing cleartext coordinator tokens (issue #495).
     /// Idempotent: a SHA-256 hex is 64 chars, a raw token is 32, so
     /// the length distinguishes the two.
@@ -325,6 +356,18 @@ const SPECS: &[ColumnSpec] = &[
     // `effort` columns remain physically present for positional row
     // integrity but are no longer read by the spawn resolver.
     ColumnSpec { version: 33, table: "meshes", column: "harness_overrides", type_with_default: "TEXT NOT NULL DEFAULT '{}'", read_default: ReadDefault::CoalesceText("{}") },
+
+    // v36 — Circuit-run capacity contract (issue #1467). Distinct from
+    // `autopilot_concurrency_limit` (legacy agent-node backstop, line 296).
+    // One unit = one admitted circuit run, regardless of how many agent
+    // nodes that blueprint's run fans out to. Range `1..=8` validated at
+    // the IPC boundary (`commands::mesh_properties::update_mesh_circuit_run_capacity`).
+    // NOT NULL + default 2 keeps pre-v36 rows readable via
+    // COALESCE(col, 2) (the `read_default` below) so the worker never sees
+    // NULL when reading this column. The migration runner's column-walk
+    // adds the column safely for upgrade paths; fresh-DB inlines inherit
+    // the same DEFAULT through this registry entry.
+    ColumnSpec { version: 36, table: "meshes", column: "circuit_run_capacity", type_with_default: "INTEGER NOT NULL DEFAULT 2", read_default: ReadDefault::CoalesceInt(2) },
 
     // ============================================================
     // agent_nodes
@@ -525,6 +568,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::UpgradeIssueReviewFirstTurns,
     AlwaysStep::RewriteAgentNodeProviderId,
     AlwaysStep::HashCoordinatorTokens,
+    AlwaysStep::EnforceCircuitRunCapacityRange,
 ];
 
 // ---------------------------------------------------------------------------
@@ -864,6 +908,60 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 ",
             )?;
         }
+        AlwaysStep::EnforceCircuitRunCapacityRange => {
+            // v36 — Defense-in-depth bound check on `meshes.circuit_run_capacity`.
+            // The IPC layer (`commands::mesh_properties::update_mesh_circuit_run_capacity`)
+            // clamps at `1..=8`, but a direct DB write (future service, hand
+            // edit, a buggy migration) could land an out-of-range value.
+            // SQLite cannot retro-add a CHECK constraint via
+            // `ALTER TABLE ADD COLUMN`, so we install a trigger instead.
+            // Idempotent via `DROP TRIGGER IF EXISTS` + `CREATE TRIGGER` —
+            // rebuilds every launch so a partial install self-heals.
+            //
+            // Skip if the column doesn't exist yet (pre-v36 DBs whose
+            // schema_version hasn't been bumped past 36 — the trigger
+            // would error on the column reference and would be a no-op
+            // for that DB until the next column-walk adds it).
+            let column_present: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') \
+                     WHERE name = 'circuit_run_capacity'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !column_present {
+                // The column walk runs before this AlwaysStep on first
+                // launch; on second pass the column is present and the
+                // trigger installs. Both passes are idempotent.
+                return Ok(());
+            }
+            conn.execute("DROP TRIGGER IF EXISTS meshes_circuit_run_capacity_range", [])?;
+            conn.execute(
+                "CREATE TRIGGER meshes_circuit_run_capacity_range \
+                 BEFORE INSERT ON meshes \
+                 FOR EACH ROW \
+                 WHEN NEW.circuit_run_capacity IS NOT NULL \
+                    AND (NEW.circuit_run_capacity < 1 OR NEW.circuit_run_capacity > 8) \
+                 BEGIN \
+                     SELECT RAISE(ABORT, 'meshes.circuit_run_capacity must be in 1..=8'); \
+                 END;",
+                [],
+            )?;
+            conn.execute("DROP TRIGGER IF EXISTS meshes_circuit_run_capacity_range_update", [])?;
+            conn.execute(
+                "CREATE TRIGGER meshes_circuit_run_capacity_range_update \
+                 BEFORE UPDATE ON meshes \
+                 FOR EACH ROW \
+                 WHEN NEW.circuit_run_capacity IS NOT NULL \
+                    AND NEW.circuit_run_capacity != OLD.circuit_run_capacity \
+                    AND (NEW.circuit_run_capacity < 1 OR NEW.circuit_run_capacity > 8) \
+                 BEGIN \
+                     SELECT RAISE(ABORT, 'meshes.circuit_run_capacity must be in 1..=8'); \
+                 END;",
+                [],
+            )?;
+        }
         AlwaysStep::UpgradeIssueReviewFirstTurns => {
             const FLAG: &str = "issue_review_first_turn_upgrade_v1";
             let already_done: bool = conn
@@ -1143,5 +1241,94 @@ mod tests {
                 col.column
             );
         }
+    }
+
+    /// v36 — Defense-in-depth range constraint on `meshes.circuit_run_capacity`.
+    /// Module-scope serial mutex (#1224 pattern) so concurrent DB tests
+    /// don't race on the process-global writer connection. The test uses
+    /// a unique mesh name (`p_unique`) to avoid collisions with other
+    /// tests' rows; the trigger fires on raw INSERT/UPDATE so the test
+    /// doesn't need any production DB calls.
+    #[test]
+    fn circuit_run_capacity_trigger_blocks_out_of_range_writes() {
+        use std::sync::Mutex;
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let path = std::env::temp_dir().join(format!(
+            "buildmesh_circuit_run_capacity_trigger_{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::db::init(&path).unwrap();
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let ok_name = format!("ok-{unique}");
+        let bad_zero = format!("bad-zero-{unique}");
+        let bad_over = format!("bad-over-{unique}");
+
+        let conn = crate::db::write_conn();
+        // In-range INSERT must succeed.
+        conn.execute(
+            "INSERT INTO meshes (name, path, circuit_run_capacity) VALUES (?1, ?2, ?3)",
+            rusqlite::params![&ok_name, format!("/tmp/{ok_name}"), 4i32],
+        )
+        .expect("in-range insert must succeed");
+        let stored: i32 = conn
+            .query_row(
+                "SELECT circuit_run_capacity FROM meshes WHERE name = ?1",
+                [&ok_name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 4);
+
+        // Out-of-range INSERT must fail with the trigger's message.
+        let err = conn
+            .execute(
+                "INSERT INTO meshes (name, path, circuit_run_capacity) VALUES (?1, ?2, ?3)",
+                rusqlite::params![&bad_zero, format!("/tmp/{bad_zero}"), 0i32],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("circuit_run_capacity must be in 1..=8"),
+            "unexpected trigger error: {err}"
+        );
+
+        let err = conn
+            .execute(
+                "INSERT INTO meshes (name, path, circuit_run_capacity) VALUES (?1, ?2, ?3)",
+                rusqlite::params![&bad_over, format!("/tmp/{bad_over}"), 9i32],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("circuit_run_capacity must be in 1..=8"),
+            "unexpected trigger error: {err}"
+        );
+
+        // UPDATE outside the range must also fail.
+        let err = conn
+            .execute(
+                "UPDATE meshes SET circuit_run_capacity = ?2 WHERE name = ?1",
+                rusqlite::params![&ok_name, -1i32],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("circuit_run_capacity must be in 1..=8"),
+            "update trigger must fire; got: {err}"
+        );
+
+        // In-range UPDATE must succeed.
+        conn.execute(
+            "UPDATE meshes SET circuit_run_capacity = ?2 WHERE name = ?1",
+            rusqlite::params![&ok_name, 8i32],
+        )
+        .expect("in-range update must succeed");
+
+        std::fs::remove_file(&path).ok();
     }
 }

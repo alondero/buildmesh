@@ -109,7 +109,13 @@ impl AgentProvider for OpenCodeAdapter {
         false
     }
 
-    fn after_fresh_spawn(&self, node_id: i64, spawn_path: &str, env_type: EnvType) {
+    fn after_fresh_spawn(
+        &self,
+        node_id: i64,
+        spawn_path: &str,
+        env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
         crate::services::opencode_session::start_capture_poller(
             node_id,
             spawn_path.to_string(),

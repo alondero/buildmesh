@@ -1175,7 +1175,13 @@ impl AgentProvider for CodexAdapter {
     /// PTY. Its rollout's `session_meta` record is the durable fallback, so
     /// capture it shortly after every fresh spawn rather than leaving a node
     /// impossible to resume after a Buildmesh restart.
-    fn after_fresh_spawn(&self, node_id: i64, spawn_path: &str, env_type: EnvType) {
+    fn after_fresh_spawn(
+        &self,
+        node_id: i64,
+        spawn_path: &str,
+        env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
         crate::services::codex_session::start_capture_poller(
             node_id,
             spawn_path.to_string(),

@@ -499,6 +499,37 @@ pub fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(), Str
     Ok(())
 }
 
+/// Set ONLY the `circuit_run_capacity` for a mesh (issue #1467) — the
+/// per-mesh cap on concurrent admitted circuit runs. Deliberately a
+/// narrow single-column write (sibling to
+/// [`set_mesh_autopilot_enabled`]) so the new "Max concurrent circuit
+/// runs" form control in the Autopilot Probe tab can't clobber the
+/// user's legacy autopilot policy when adjusting the run cap, and so
+/// the `update_mesh_autopilot` five-column atomic write stays intact.
+/// Range-clamped to `1..=8` (matches `autopilot_concurrency_limit`),
+/// error string is the canonical "mesh not found" zero-rows contract.
+///
+/// On a write, the circuit worker is woken so the next pass
+/// re-evaluates any `pending` runs against the new cap (a lowered
+/// value can immediately unblock a deferred run; a raised value can
+/// immediately admit a previously-deferred run).
+#[tauri::command]
+pub fn update_mesh_circuit_run_capacity(mesh_id: i64, capacity: i32) -> Result<(), String> {
+    if !(1..=8).contains(&capacity) {
+        return Err(format!(
+            "invalid circuit run capacity {}: must be 1..=8",
+            capacity
+        ));
+    }
+    let rows = db::set_mesh_circuit_run_capacity(mesh_id, capacity)
+        .map_err(|e| format!("failed to update circuit_run_capacity: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    crate::services::circuit_worker::wake_circuit_worker();
+    Ok(())
+}
+
 /// Runtime status of a mesh's Looping Autopilot for the Probe tab's status
 /// badge (ticket #994). Reads the mesh's `autopilot_enabled` flag +
 /// the loop-iteration ledger (`db::list_loop_iterations`) and returns the

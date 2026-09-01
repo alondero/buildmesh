@@ -169,6 +169,9 @@ pub struct HarnessCapabilities {
     /// the existing autopilot gate; `attention_capability` is the
     /// authoritative descriptor.
     pub attention_capability: AttentionCapability,
+    /// Whether the harness has a passive transcript watcher that supplies
+    /// standard turn lifecycle signals when no native attention hook exists.
+    pub supports_passive_turn_watcher: bool,
     /// Whether the harness writes a transcript the coordinator read API
     /// can parse into a Node Digest's rich layer (ADR-0008).
     pub produces_readable_transcript: bool,
@@ -676,6 +679,7 @@ mod tests {
         assert!(commandcode.supports_resume);
         assert!(commandcode.auto_resume_on_startup);
         assert!(!commandcode.requires_attention_hook);
+        assert!(commandcode.supports_passive_turn_watcher);
         assert!(commandcode.produces_readable_transcript);
         assert!(commandcode.supports_model_override);
         assert!(commandcode.supports_effort_override);

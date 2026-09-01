@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -159,11 +159,13 @@ describe('CircuitsProbeTab', () => {
     await openCircuitsTab();
 
     expect(await screen.findByText('nightly-sweep')).toBeTruthy();
-    // Both runs render with their ledger vocabulary.
-    expect(await screen.findByTestId('run-state-11').then((el) => el.textContent)).toBe('completed');
-    expect(screen.getByTestId('run-state-12').textContent).toBe('running');
-    // Step chain renders as node:status pairs.
-    expect(screen.getByText(/trigger:completed/)).toBeTruthy();
+    // Run state renders in the humanised vocabulary (#1468); the raw DB
+    // string stays available on `data-run-state` for machine assertions.
+    expect(await screen.findByTestId('run-state-11').then((el) => el.textContent)).toBe('Completed');
+    expect(screen.getByTestId('run-state-12').textContent).toBe('Running');
+    expect(screen.getByTestId('run-card-11').getAttribute('data-run-state')).toBe('completed');
+    // Steps are a vertical timeline, not a joined one-line string (#1468).
+    expect(screen.queryByText(/trigger:completed/)).toBeNull();
     // The load pass is ONE batched IPC with camelCase args.
     expect(invoke).toHaveBeenCalledWith('list_circuits_with_runs', { meshId: 42, limit: 10 });
   });
@@ -366,6 +368,357 @@ describe('CircuitsProbeTab', () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('resume_circuit_run', { runId: 16 });
     });
+  });
+});
+
+/**
+ * Readable run diagnostics (issue #1468).
+ *
+ * The tab used to compress a run into one truncated
+ * `node:status -> node:status -> ...` span. These tests pin the
+ * replacement's contract: a vertical timeline that survives long chains,
+ * plain-English queue reasons, wrapping (never clipping) for unbounded
+ * text, and exactly one scroll owner for the body.
+ */
+describe('CircuitsProbeTab run diagnostics (#1468)', () => {
+  /** A realistic long chain — the issue's own example, plus the tail. */
+  const LONG_CHAIN_NODES = [
+    'trigger',
+    'implementer',
+    'implementation_classifier',
+    'open_pull_request',
+    'reviewer',
+    'review_classifier',
+    'address_feedback',
+    'address_feedback_classifier',
+    'rerun_review',
+    'merge_gate',
+    'merge',
+    'close_agents',
+  ];
+
+  function step(
+    over: Partial<CircuitRunDetail['steps'][number]> & { node_id: string; status: string }
+  ): CircuitRunDetail['steps'][number] {
+    return {
+      id: 0,
+      run_id: 0,
+      agent_node_id: null,
+      attempt: 1,
+      outcome: null,
+      error_message: null,
+      started_at: null,
+      completed_at: null,
+      ...over,
+    };
+  }
+
+  it('renders a long step chain as a vertical timeline, every node readable', async () => {
+    const RUN_LONG: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 20, state: 'running' },
+      steps: LONG_CHAIN_NODES.map((node_id, i) =>
+        step({
+          node_id,
+          status: i < 10 ? 'completed' : i === 10 ? 'running' : 'pending_slot',
+          outcome: i < 10 ? 'completed' : null,
+        })
+      ),
+    };
+    mockBackend({ runs: [RUN_LONG] });
+    await openCircuitsTab();
+
+    // A live run opens by default — the diagnostic you came for is visible.
+    const timeline = await screen.findByTestId('run-steps-20');
+    expect(timeline.tagName).toBe('OL');
+
+    // Every node id is present in full. The old one-liner clipped the
+    // tail, which is exactly where the active step lives.
+    for (const node of LONG_CHAIN_NODES) {
+      const row = screen.getByTestId(`run-step-20-${node}`);
+      expect(row.textContent).toContain(node);
+      // Wrap, never clip: `truncate` would hide the node id at 240px.
+      expect(row.querySelector('.truncate')).toBeNull();
+    }
+
+    // Timeline rows stack vertically, so length costs height (which the
+    // body scrolls) not width (which it must not).
+    expect(timeline.className).toContain('flex-col');
+    // The headline still summarises without needing the timeline.
+    expect(screen.getByTestId('run-activity-20').textContent).toContain('Running');
+    expect(screen.getByTestId('run-activity-20').textContent).toContain('merge');
+    expect(screen.getByTestId('run-progress-20').textContent).toBe('10/12 steps');
+  });
+
+  it('explains a queued step instead of showing raw pending_slot', async () => {
+    const RUN_QUEUED: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 21, state: 'running' },
+      steps: [
+        step({ node_id: 'trigger', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'reviewer', status: 'pending_slot' }),
+      ],
+    };
+    // concurrency_limit 1 with a running step elsewhere on the circuit =>
+    // the circuit's own step budget is what's holding the reviewer back.
+    const RUN_HOGGING: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 22, state: 'running' },
+      steps: [step({ node_id: 'implementer', status: 'running' })],
+    };
+    mockBackend({
+      circuits: [{ ...CIRCUIT, concurrency_limit: 1 }],
+      runs: [RUN_QUEUED, RUN_HOGGING],
+    });
+    await openCircuitsTab();
+
+    const activity = await screen.findByTestId('run-activity-21');
+    expect(activity.textContent).toContain('Queued');
+    expect(activity.textContent).toContain('reviewer');
+    // The raw scheduler token never reaches the user.
+    expect(activity.textContent).not.toContain('pending_slot');
+    expect(screen.getByTestId('run-reason-21').textContent).toBe(
+      'Waiting for a slot — this circuit runs one step at a time, and that slot is busy.'
+    );
+  });
+
+  it('attributes a queued step to the mesh agent budget when circuit slots are free', async () => {
+    const RUN_QUEUED: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 23, state: 'running' },
+      steps: [step({ node_id: 'implementer', status: 'pending_slot' })],
+    };
+    mockBackend({ circuits: [{ ...CIRCUIT, concurrency_limit: 2 }], runs: [RUN_QUEUED] });
+    await openCircuitsTab();
+
+    expect((await screen.findByTestId('run-reason-23')).textContent).toContain(
+      'waiting on a mesh agent slot'
+    );
+  });
+
+  it('names the reviewer gate a run is parked on and keeps Approve working', async () => {
+    const RUN_BLOCKED: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 24, state: 'running' },
+      steps: [
+        step({ node_id: 'implementer', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'review_gate', status: 'blocked' }),
+        // A parallel branch is still moving: the approval must still win
+        // the headline, because it is the only state needing the user.
+        step({ node_id: 'watchdog', status: 'running' }),
+      ],
+    };
+    mockBackend({ runs: [RUN_BLOCKED] });
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    const activity = await screen.findByTestId('run-activity-24');
+    expect(activity.textContent).toContain('Waiting for approval');
+    expect(activity.textContent).toContain('review_gate');
+    expect(screen.getByTestId('run-reason-24').textContent).toContain('approve');
+
+    await user.click(screen.getByTestId('approve-24-review_gate'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('approve_circuit_step', {
+        runId: 24,
+        nodeId: 'review_gate',
+      });
+    });
+  });
+
+  it('wraps long trigger identities and error text rather than clipping them', async () => {
+    const LONG_TRIGGER =
+      'issue:1468:buildmesh:automation:circuits:probe:readable-diagnostics:long-label';
+    const LONG_ERROR =
+      'classifier verdict could not be parsed: expected one of green|red|working but the ' +
+      'harness emitted a 4096-byte transcript with no verdict banner, so the step failed closed';
+    const RUN_FAILED: CircuitRunDetail = {
+      run: {
+        ...RUN_DONE.run,
+        id: 25,
+        state: 'failed',
+        trigger_identity: LONG_TRIGGER,
+      },
+      steps: [
+        step({
+          node_id: 'implementation_classifier',
+          status: 'failed',
+          outcome: 'failed',
+          error_message: LONG_ERROR,
+        }),
+      ],
+    };
+    mockBackend({ runs: [RUN_FAILED] });
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    // Terminal runs collapse by default, but a failure is never hidden.
+    const collapsedError = await screen.findByTestId('run-error-25');
+    expect(collapsedError.textContent).toContain('classifier verdict could not be parsed');
+    expect(collapsedError.className).toContain('break-words');
+    expect(collapsedError.className).not.toContain('truncate');
+
+    await user.click(screen.getByTestId('run-toggle-25'));
+
+    // Trigger identity is unspaced, so it needs `break-all` — a
+    // word-boundary break has nowhere to land and would overflow.
+    const trigger = screen.getByTestId('run-trigger-25');
+    expect(trigger.textContent).toBe(LONG_TRIGGER);
+    expect(trigger.className).toContain('break-all');
+    expect(trigger.getAttribute('title')).toBe(LONG_TRIGGER);
+
+    // The full error text is a wrapping pre block, not a clipped span.
+    const pre = screen
+      .getByTestId('run-step-25-implementation_classifier')
+      .querySelector('pre');
+    expect(pre?.textContent).toBe(LONG_ERROR);
+    expect(pre?.className).toContain('whitespace-pre-wrap');
+    expect(pre?.className).toContain('break-words');
+  });
+
+  it('surfaces outcome, attempt and duration per step', async () => {
+    const RUN_RETRIED: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 26, state: 'running' },
+      steps: [
+        step({
+          node_id: 'review_classifier',
+          status: 'completed',
+          // Gate steps finish `completed` but carry the real verdict —
+          // that's the branch the run actually took.
+          outcome: 'red',
+          attempt: 3,
+          started_at: '2026-08-22 10:05:00',
+          completed_at: '2026-08-22 10:06:30',
+        }),
+      ],
+    };
+    mockBackend({ runs: [RUN_RETRIED] });
+    await openCircuitsTab();
+
+    const row = await screen.findByTestId('run-step-26-review_classifier');
+    expect(row.getAttribute('data-step-status')).toBe('completed');
+    expect(row.textContent).toContain('Done');
+    expect(row.textContent).toContain('red');
+    expect(row.textContent).toContain('attempt 3');
+    // 90s reads as "1m 30s", not "90.0s".
+    expect(row.textContent).toContain('1m 30s');
+    expect(screen.getByTestId('run-retries-26').textContent).toContain('retried');
+  });
+
+  it('opens live runs, collapses terminal ones, and honours a manual toggle', async () => {
+    mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
+    const user = userEvent.setup();
+    await openCircuitsTab();
+
+    // Run 12 is running → open. Run 11 completed → collapsed.
+    await waitFor(() => {
+      expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
+    });
+    expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByTestId('run-steps-11')).toBeNull();
+
+    // One click opens the completed run's ledger…
+    await user.click(screen.getByTestId('run-toggle-11'));
+    expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId('run-steps-11')).toBeTruthy();
+
+    // …and one click closes the live run's, without needing two.
+    await user.click(screen.getByTestId('run-toggle-12'));
+    expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps the disclosure control accessible', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    await openCircuitsTab();
+
+    const toggle = await screen.findByTestId('run-toggle-11');
+    expect(toggle.tagName).toBe('BUTTON');
+    expect(toggle.getAttribute('aria-controls')).toBe('run-detail-11');
+    // Controls live outside the disclosure button — a button nested in a
+    // button is invalid HTML and breaks keyboard semantics.
+    expect(toggle.querySelector('button')).toBeNull();
+  });
+
+  it('advances a live run duration without waiting for a ledger event', async () => {
+    // A step can churn for minutes without a state transition, so no
+    // `circuit-run-updated` arrives. Baselining the clock on fetch left the
+    // elapsed time frozen, which made a stalled run look freshly started.
+    //
+    // `advanceTimersByTimeAsync` rather than RTL's `findBy*`: the awaited
+    // queries drive their own timers, which fights an explicit fake clock.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-01T12:00:10Z'));
+      const RUN_LIVE: CircuitRunDetail = {
+        run: {
+          ...RUN_DONE.run,
+          id: 30,
+          state: 'running',
+          created_at: '2026-09-01 12:00:00',
+          updated_at: '2026-09-01 12:00:00',
+        },
+        steps: [step({ node_id: 'implementer', status: 'running' })],
+      };
+      mockBackend({ runs: [RUN_LIVE] });
+      render(<ProbePanel />);
+      fireEvent.click(screen.getByRole('button', { name: 'Circuits' }));
+      // Flush the load IPC without letting wall-clock time move.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(screen.getByTestId('run-card-30').textContent).toContain('10.0s');
+      expect(vi.getTimerCount(), 'the 1s tick must be registered').toBeGreaterThan(0);
+
+      // Five seconds of wall clock, zero backend events. `advanceTimersByTime`
+      // moves the mocked `Date` too, so setting the system time again here
+      // would double-count the gap.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(screen.getByTestId('run-card-30').textContent).toContain('15.0s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not tick when every visible run is terminal', async () => {
+    // The interval is gated on there being a live run, so a tab showing
+    // finished work re-renders never.
+    vi.useFakeTimers();
+    try {
+      mockBackend({ runs: [RUN_DONE] });
+      render(<ProbePanel />);
+      fireEvent.click(screen.getByRole('button', { name: 'Circuits' }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByTestId('run-card-11')).toBeTruthy();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives the body exactly one scroll owner and no sideways escape', async () => {
+    mockBackend();
+    await openCircuitsTab();
+
+    const root = await screen.findByTestId('circuits-probe-tab');
+    const body = screen.getByTestId('circuits-probe-body');
+
+    // The root is layout-only; the body owns the scroll. Two stacked
+    // scrollers is the nested-scrolling defect #1468 names.
+    expect(root.className).not.toMatch(/overflow-(y-)?auto/);
+    expect(root.className).toContain('min-h-0');
+    expect(body.className).toContain('overflow-y-auto');
+    // `overflow-y-auto` alone computes `overflow-x: auto`, which is how a
+    // long diagnostic used to scroll the whole tab sideways.
+    expect(body.className).toContain('overflow-x-hidden');
+
+    // Nothing between the root and the body re-introduces a scroller.
+    const nested = root.querySelectorAll('[class*="overflow-y-auto"], [class*="overflow-auto"]');
+    expect(nested.length).toBe(1);
+    expect(nested[0]).toBe(body);
+
+    // The New Circuit toolbar stays outside the scroller, so it does not
+    // scroll away from the ledger.
+    expect(body.contains(screen.getByTestId('circuit-name-input'))).toBe(false);
   });
 });
 

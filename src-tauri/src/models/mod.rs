@@ -499,6 +499,22 @@ pub struct Mesh {
     /// configuration; the v33 one-shot migration copies non-empty
     /// legacy values into a `claude` override entry.
     pub harness_overrides: HashMap<String, HarnessConfigValue>,
+    /// Per-mesh cap on **concurrent admitted circuit runs** (issue #1467).
+    /// One slot per admitted run regardless of how many agent nodes the
+    /// run's blueprint fans out to — fixes the two-run overlap
+    /// PR-review deadlock where the legacy `autopilot_concurrency_limit`
+    /// (which counts distinct piloted agent nodes) saturates on the
+    /// implementation agent and parks the reviewer step in
+    /// `pending_slot`. Default 2 unlocks the two-overlap acceptance
+    /// criterion out of the box. Validated to `1..=8` at the IPC
+    /// boundary (`commands::mesh_properties::update_mesh_circuit_run_capacity`),
+    /// mirroring the legacy column. Persisted as
+    /// `meshes.circuit_run_capacity INTEGER NOT NULL DEFAULT 2` (schema
+    /// v36); pre-v36 rows read back as 2 via the `COALESCE(col, 2)` in
+    /// `migrations::mesh_columns_projection`. Stored as `i32` to match
+    /// the legacy column's wire shape (`number` in TS, not `bigint`).
+    #[ts(as = "i32")]
+    pub circuit_run_capacity: i32,
 }
 
 /// Fallback for [`Mesh::autopilot_trigger_label`] when the user enables
@@ -927,6 +943,13 @@ pub struct MeshRow {
     /// fields stay here so a pre-v33 reading client doesn't crash, but
     /// the new UI ignores them.
     pub harness_overrides: HashMap<String, HarnessConfigValue>,
+    /// Per-mesh cap on **concurrent admitted circuit runs** (issue #1467)
+    /// — see the matching [`Mesh`] field. Surface for the dedicated
+    /// Autopilot Probe tab so the legacy `autopilot_concurrency_limit`
+    /// (kept here for back-compat with the `update_mesh_autopilot`
+    /// atomic write) and the new circuit-run gate appear side-by-side.
+    #[ts(as = "i32")]
+    pub circuit_run_capacity: i32,
 }
 
 impl From<&Mesh> for MeshRow {
@@ -957,6 +980,7 @@ impl From<&Mesh> for MeshRow {
             loop_interval_seconds: mesh.loop_interval_seconds,
             loop_consecutive_failures: mesh.loop_consecutive_failures,
             harness_overrides: mesh.harness_overrides.clone(),
+            circuit_run_capacity: mesh.circuit_run_capacity,
         }
     }
 }

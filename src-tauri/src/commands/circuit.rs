@@ -9,7 +9,9 @@
 
 use tauri::command;
 
-use crate::autopilot::circuit::model::CircuitGraph;
+use crate::autopilot::circuit::model::{
+    trigger_kind_to_node_kind, validate_circuit_request, CircuitGraph,
+};
 pub use crate::autopilot::circuit::model::CircuitBlueprintKind;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
@@ -114,15 +116,15 @@ pub fn list_circuits_with_runs(
         .map_err(|e| e.to_string())
 }
 
-/// Create a circuit with the canonical blueprint:
-/// `<trigger>` → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify.
+/// Create a circuit with the canonical blueprint.
 ///
 /// Milestone 3 (issue #1208) added the trigger vocabulary: `trigger_kind`
-/// selects the root node (see [`CircuitTriggerKind`]). GitHub triggers
-/// require a non-empty `trigger_label`; interval circuits take
-/// `interval_seconds` (clamped to 60s–7d so a typo can't become a hot
-/// loop). A GitHub-labelled circuit requests an immediate poll so its
-/// first run can start without waiting out the 120s cadence.
+/// selects the root node (see [`CircuitTriggerKind`]). All domain
+/// restrictions — the review blueprint's GitHub-issue-label trigger
+/// requirement, concurrency floors, interval clamp, label trim — live in
+/// [`crate::autopilot::circuit::model::validate_circuit_request`].
+/// This Tauri command is a dumb router: parse → call the model →
+/// persist → wake the GitHub poll for labelled circuits.
 // Tauri IPC commands carry every primitive as a separate wire parameter;
 // collapsing into a struct would change the wire shape.
 #[allow(clippy::too_many_arguments)]
@@ -138,22 +140,16 @@ pub fn create_circuit(
     interval_seconds: Option<i64>,
     blueprint: Option<CircuitBlueprintKind>,
 ) -> Result<AutopilotCircuit, String> {
-    use crate::autopilot::circuit::model::CircuitNodeKind;
-
     let name = name.trim();
     if name.is_empty() {
         return Err("circuit name must not be empty".to_string());
     }
-    let selected_trigger = trigger_kind.unwrap_or(CircuitTriggerKind::Manual);
     let blueprint = blueprint.unwrap_or(CircuitBlueprintKind::WalkingSkeleton);
-    if matches!(blueprint, CircuitBlueprintKind::IssueDrivenAutopilotReview)
-        && selected_trigger != CircuitTriggerKind::GithubIssueLabel
-    {
-        return Err(
-            "the issue-driven Autopilot review blueprint requires an issue-label trigger"
-                .to_string(),
-        );
-    }
+
+    // Mesh policy gate: the review blueprint's wrap-up path opens a PR;
+    // a mesh configured with `action_on_success = "none"` has no PR
+    // pipeline to feed. Lives outside the domain model because it's
+    // mesh-level configuration, not a blueprint property.
     if matches!(blueprint, CircuitBlueprintKind::IssueDrivenAutopilotReview)
         && crate::services::autopilot::configured_action_on_success(mesh_id) == "none"
     {
@@ -163,41 +159,26 @@ pub fn create_circuit(
         );
     }
 
-    let limit = if matches!(blueprint, CircuitBlueprintKind::IssueDrivenAutopilotReview) {
-        // The implementation and reviewer are intentionally concurrent
-        // agent nodes. A single-slot circuit would deadlock the reviewer
-        // behind the implementation node's still-live process.
-        concurrency_limit.clamp(2, 16)
-    } else {
-        concurrency_limit.clamp(1, 16)
-    };
-    let kind = match selected_trigger {
-        CircuitTriggerKind::Manual => CircuitNodeKind::Manual,
-        CircuitTriggerKind::Interval => {
-            let secs = interval_seconds.unwrap_or(300).clamp(60, 7 * 24 * 3_600);
-            CircuitNodeKind::Interval { interval_seconds: secs }
-        }
-        CircuitTriggerKind::GithubIssueLabel | CircuitTriggerKind::GithubPrLabel => {
-            let label = trigger_label
-                .as_deref()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .ok_or_else(|| "GitHub triggers require a non-empty trigger label".to_string())?;
-            if selected_trigger == CircuitTriggerKind::GithubPrLabel {
-                CircuitNodeKind::GithubPullRequestLabel { label: label.to_string() }
-            } else {
-                CircuitNodeKind::GithubIssueLabel { label: label.to_string() }
-            }
-        }
-    };
+    let validated = validate_circuit_request(
+        blueprint,
+        trigger_kind,
+        trigger_label.as_deref(),
+        interval_seconds,
+        concurrency_limit,
+    )?;
+    let kind = trigger_kind_to_node_kind(&validated);
+
     let graph = match blueprint {
         CircuitBlueprintKind::WalkingSkeleton => {
             CircuitGraph::triggered_skeleton(&initial_prompt, kind.clone())
         }
         CircuitBlueprintKind::IssueDrivenAutopilotReview => {
-            let CircuitNodeKind::GithubIssueLabel { label } = &kind else {
-                // Guarded above; retain a defensive error if this function
-                // is changed without updating the blueprint contract.
+            // Guarded above: the model rejected every other trigger;
+            // we still defensively unwrap the label here.
+            let crate::autopilot::circuit::model::CircuitNodeKind::GithubIssueLabel {
+                label,
+            } = &kind
+            else {
                 return Err(
                     "the issue-driven Autopilot review blueprint requires an issue-label trigger"
                         .to_string(),
@@ -208,15 +189,21 @@ pub fn create_circuit(
     };
     graph.validate()?;
     let graph_json = graph.to_json()?;
-    let circuit =
-        crate::db::create_autopilot_circuit(mesh_id, name, &description, limit, &graph_json)
-            .map_err(|e| e.to_string())?;
+    let circuit = crate::db::create_autopilot_circuit(
+        mesh_id,
+        name,
+        &description,
+        validated.concurrency_limit,
+        &graph_json,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // On-demand poll capability: a freshly created labelled circuit
+    // ingests on the very next worker tick.
     if matches!(
-        kind,
-        CircuitNodeKind::GithubIssueLabel { .. } | CircuitNodeKind::GithubPullRequestLabel { .. }
+        validated.trigger_kind,
+        CircuitTriggerKind::GithubIssueLabel | CircuitTriggerKind::GithubPrLabel
     ) {
-        // On-demand poll capability: a freshly created labelled circuit
-        // ingests on the very next worker tick.
         crate::services::circuit_triggers::request_github_poll();
     }
     Ok(circuit)

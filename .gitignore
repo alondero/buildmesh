@@ -136,3 +136,7 @@ coverage/
 
 # diagnostic scratch files dropped by ad-hoc Bash commands
 full_diff.txt
+
+# Scratch file used to upload the PR body via `gh pr create --body-file`.
+# Committed by accident in 3924814b — should not be in the tree.
+.pr-body.md

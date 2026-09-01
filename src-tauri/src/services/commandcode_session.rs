@@ -163,7 +163,12 @@ pub fn find_fresh_id_for_directory_in(
 
 /// Background poller: read Command Code's session directory until a fresh session
 /// created in this node's spawn window appears, then save `cli_session_id`.
-pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: EnvType) {
+pub fn start_capture_poller(
+    node_id: i64,
+    spawn_directory: String,
+    env_type: EnvType,
+    app: tauri::AppHandle,
+) {
     let spawn_epoch_ms = chrono::Utc::now().timestamp_millis();
     tauri::async_runtime::spawn(async move {
         let not_before = spawn_epoch_ms.saturating_sub(CAPTURE_SKEW_MS);
@@ -173,7 +178,7 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
         };
         for (attempt, delay) in RETRY_DELAYS_MS.iter().enumerate() {
             tokio::time::sleep(Duration::from_millis(*delay)).await;
-            if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
+            if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
                 tracing::debug!("commandcode session capture: node {node_id} gone, stop");
                 return;
             }
@@ -190,14 +195,37 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             .flatten();
 
             if let Some(id) = captured {
-                if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
+                if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
                     return;
                 }
                 match crate::db::set_cli_session_id_if_missing(node_id, &id) {
-                    Ok(true) => tracing::info!(
-                        "commandcode session capture: stored {id} for node {node_id} (attempt {})",
-                        attempt + 1
-                    ),
+                    Ok(true) => {
+                        tracing::info!(
+                            "commandcode session capture: stored {id} for node {node_id} (attempt {})",
+                            attempt + 1
+                        );
+                        let watcher_id = id.clone();
+                        let watcher_directory = spawn_directory.clone();
+                        let watcher_app = app.clone();
+                        let watcher_result = crate::blocking::run_blocking(
+                            "commandcode watcher start",
+                            move || {
+                                crate::services::commandcode_watcher::start_for_session(
+                                    node_id,
+                                    &watcher_id,
+                                    &watcher_directory,
+                                    env_type,
+                                    &watcher_app,
+                                )
+                            },
+                        )
+                        .await;
+                        if let Err(error) = watcher_result {
+                            tracing::warn!(
+                                "commandcode watcher: could not start for node {node_id}: {error}"
+                            );
+                        }
+                    }
                     Ok(false) => {}
                     Err(e) => tracing::warn!(
                         "commandcode session capture: db write failed for node {node_id}: {e}"

@@ -95,6 +95,18 @@ impl AgentProvider for CommandCodeAdapter {
         false
     }
 
+    fn supports_passive_turn_watcher(&self) -> bool {
+        true
+    }
+
+    fn on_spawn_activated(&self, node_id: i64) {
+        crate::services::commandcode_watcher::activate(node_id);
+    }
+
+    fn on_process_terminated(&self, node_id: i64) {
+        crate::services::commandcode_watcher::stop(node_id);
+    }
+
     fn produces_readable_transcript(&self) -> bool {
         true
     }
@@ -132,12 +144,45 @@ impl AgentProvider for CommandCodeAdapter {
         false
     }
 
-    fn after_fresh_spawn(&self, node_id: i64, spawn_path: &str, env_type: EnvType) {
+    fn after_fresh_spawn(
+        &self,
+        node_id: i64,
+        spawn_path: &str,
+        env_type: EnvType,
+        app: &tauri::AppHandle,
+    ) {
         crate::services::commandcode_session::start_capture_poller(
             node_id,
             spawn_path.to_string(),
             env_type,
+            app.clone(),
         );
+    }
+
+    fn before_resume_spawn<'a>(
+        &'a self,
+        node_id: i64,
+        session_id: &str,
+        spawn_path: &str,
+        env_type: EnvType,
+        app: &'a tauri::AppHandle,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        let session_id = session_id.to_string();
+        let spawn_path = spawn_path.to_string();
+        let app = app.clone();
+        Box::pin(async move {
+            if let Err(error) = crate::services::commandcode_watcher::start_for_resumed_session_async(
+                node_id,
+                &session_id,
+                &spawn_path,
+                env_type,
+                app,
+            )
+            .await
+            {
+                tracing::warn!("commandcode watcher: could not resume watch for node {node_id}: {error}");
+            }
+        })
     }
 
     fn resume_args(&self, id: &str) -> Vec<String> {

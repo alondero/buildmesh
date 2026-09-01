@@ -212,6 +212,61 @@ fn should_drive_circuit_run(enabled: bool, trigger_identity: &str) -> bool {
     enabled || trigger_identity.starts_with("manual:")
 }
 
+/// Issue #1467 admission gate. Returns `true` if a fresh `pending` run
+/// on this mesh should fire its `Triggered` event this pass.
+///
+/// Semantics:
+///   * The mesh-level cap (`meshes.circuit_run_capacity`, default 2)
+///     counts **admitted** runs (`running`/`paused`). Deliberately
+///     excludes `pending` — counting pending would self-deadlock (every
+///     pending run's count read would see itself + peers, so
+///     `count < cap` is always false and no run ever admits). See
+///     `db::count_active_circuit_runs`'s doc for the full rationale.
+///     Every admitted run holds one slot regardless of how many agent
+///     nodes its blueprint fans out to.
+///   * A `running` or `paused` run always passes the gate (it's already
+///     been admitted; the legacy `set_circuit_run_state` flow doesn't
+///     reject its target here).
+///   * A `pending` run is admitted if the mesh's slot count is below
+///     the cap; otherwise it stays `pending` in the DB and is re-
+///     evaluated on the next pass (every 2s fast tick, plus the wake
+///     condvar that fires when a terminal transition releases a slot).
+///
+/// **Read failure fails CLOSED** (admit = false) so a transient
+/// DB hiccup never lets a run escalate past the gate without a count
+/// proof — silence is preferable to over-admitting into a saturated
+/// mesh. The error is logged loudly; on the next 2s tick the read is
+/// retried.
+fn may_admit_run(
+    active: &db::ActiveCircuitRun,
+    mesh: &crate::models::Mesh,
+) -> bool {
+    if active.run.state != "pending" {
+        return true; // already admitted or never-needs-admission
+    }
+    let active_runs = match db::count_active_circuit_runs(active.run.mesh_id) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(
+                "circuits: per-mesh active-run count failed for gate, failing closed: {}",
+                e
+            );
+            return false;
+        }
+    };
+    if active_runs < i64::from(mesh.circuit_run_capacity) {
+        return true;
+    }
+    tracing::info!(
+        "circuits: mesh {} held — {} active run(s) >= {} capacity, run {} stays pending",
+        active.run.mesh_id,
+        active_runs,
+        mesh.circuit_run_capacity,
+        active.run.id,
+    );
+    false
+}
+
 /// One full pass over every active circuit run. Per-run failures are
 /// logged and isolated — one broken run must not starve the others.
 fn run_pass(app: &AppHandle) {
@@ -227,7 +282,38 @@ fn run_pass(app: &AppHandle) {
     // Borrows the already-loaded active-run slice so the sweep costs
     // zero heap on the hot 2-second tick.
     sweep_stale_approvals(&runs);
+
+    // Issue #1467: cache the mesh row per unique mesh id so a mesh with
+    // N pending runs but only 1 row read is the common case in the
+    // deadlock scenario. `entry().or_insert_with()` makes the cache
+    // transparent — the first pending run on each mesh reads, every
+    // later one hits the cache. A `None` cache entry (mesh row missing
+    // — likely deleted between run-mint and this pass) is logged once
+    // per missing mesh id; the run stays pending until the orphan-
+    // admission sweep clears it.
+    use std::collections::HashMap;
+    let mut mesh_cache: HashMap<i64, Option<crate::models::Mesh>> = HashMap::new();
     for active in runs {
+        // Pending runs that the gate deferred re-appear next pass;
+        // running/paused runs always proceed (they already hold a slot).
+        if active.run.state == "pending" {
+            let mesh = mesh_cache
+                .entry(active.run.mesh_id)
+                .or_insert_with(|| db::get_mesh_by_id(active.run.mesh_id).ok());
+            match mesh {
+                Some(m) if !may_admit_run(&active, m) => continue,
+                None => {
+                    tracing::warn!(
+                        "circuits: pending run {} on mesh_id={} cannot be gate-evaluated: \
+                         mesh row missing (deleted between mint and this pass?); run stays pending",
+                        active.run.id,
+                        active.run.mesh_id,
+                    );
+                    continue;
+                }
+                Some(_) => {} // admitted by may_admit_run — fall through to drive
+            }
+        }
         if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
             continue; // disabled mid-flight: park auto runs until re-enabled
         }
@@ -1860,6 +1946,197 @@ mod tests {
         assert!(!should_drive_circuit_run(false, "issue:42:buildmesh:run"));
     }
 
+    // ------------------------------------------------------------------
+    // Circuit-run admission gate (issue #1467).
+    //
+    // These tests pin the pure gate helper [`may_admit_run`] in three
+    // shapes — empty mesh / under-cap mesh / full mesh — using the
+    // process-global DB with the same `--test-threads=1` discipline as
+    // the rest of `db::circuit_tests`. The DB-layer contracts
+    // (`count_active_circuit_runs` / `release_circuit_run`) are pinned
+    // separately in `db/circuit_tests.rs`; here we verify the gate
+    // composes correctly with state transitions on real rows.
+    // ------------------------------------------------------------------
+
+    /// `running` and `paused` runs always pass the gate — they already
+    /// hold a slot from their `pending` admission.
+    #[test]
+    fn may_admit_run_running_and_paused_unconditional_pass() {
+        let mesh = crate::models::Mesh {
+            id: 9_999_001,
+            circuit_run_capacity: 1,
+            ..zero_test_mesh()
+        };
+        let running = active_row_with_state(9_999_001, 9_999_010, "running");
+        assert!(may_admit_run(&running, &mesh));
+        let paused = active_row_with_state(9_999_001, 9_999_011, "paused");
+        assert!(may_admit_run(&paused, &mesh));
+    }
+
+    /// The defer path: a `pending` run on a mesh whose admitted-run
+    /// count equals the configured `circuit_run_capacity` returns
+    /// `false`. Initialized against a real temp DB so the test
+    /// exercises the production read path through
+    /// `db::count_active_circuit_runs` (no shadow helpers).
+    #[test]
+    fn may_admit_run_pending_saturated_mesh_defers() {
+        let path = init_temp_db_at("may_admit_defer");
+        let mesh = crate::db::create_mesh("may-admit-defer", "/tmp/may-admit-defer").unwrap();
+        // Tighten cap to 1 so a single admitted run saturates the mesh
+        // — without this the default cap=2 would admit the second
+        // pending run alongside the first, defeating the test.
+        crate::db::set_mesh_circuit_run_capacity(mesh.id, 1).unwrap();
+        let c1 = crate::db::create_autopilot_circuit(mesh.id, "c1", "", 4, "{}").unwrap();
+        let c2 = crate::db::create_autopilot_circuit(mesh.id, "c2", "", 4, "{}").unwrap();
+
+        let mesh_row = crate::db::get_mesh_by_id(mesh.id).unwrap();
+
+        // Mesh starts with cap=1 and zero admitted runs — admits.
+        let pending_run = crate::db::create_circuit_run(c1.id, mesh.id, "", "{}").unwrap();
+        let pending_row = crate::db::list_active_circuit_runs().unwrap().into_iter()
+            .find(|r| r.run.id == pending_run)
+            .expect("pending run should be in list_active_circuit_runs");
+        assert!(
+            may_admit_run(&pending_row, &mesh_row),
+            "below cap — must admit",
+        );
+
+        // Saturate the mesh: flip the first run to `running` (it
+        // now holds the only slot), then mint a second run that
+        // stays `pending` — the gate must defer it.
+        crate::db::set_circuit_run_state(pending_run, "running").unwrap();
+        let pending_run_2 = crate::db::create_circuit_run(c2.id, mesh.id, "", "{}").unwrap();
+        let pending_row_2 = crate::db::list_active_circuit_runs().unwrap().into_iter()
+            .find(|r| r.run.id == pending_run_2)
+            .expect("second pending run must be in the active list");
+
+        assert_eq!(
+            crate::db::count_active_circuit_runs(mesh.id).unwrap(),
+            1,
+            "sanity: the running run counts; the second pending does not (gate input shape)"
+        );
+        assert_eq!(
+            mesh_row.circuit_run_capacity, 1,
+            "sanity: cap is 1, so 1 admitted run fills it"
+        );
+        assert!(
+            !may_admit_run(&pending_row_2, &mesh_row),
+            "at cap — must defer to next pass (FIFO)",
+        );
+
+        // Terminal the running run via `commit_circuit_advance`'s
+        // idempotent terminal-state branch — the second pending
+        // now admits on the next observation pass.
+        crate::db::commit_circuit_advance(pending_run, Some("completed"), None, &[]).unwrap();
+        assert_eq!(
+            crate::db::count_active_circuit_runs(mesh.id).unwrap(),
+            0,
+            "terminal commit frees the only admitted run"
+        );
+        assert!(
+            may_admit_run(&pending_row_2, &mesh_row),
+            "after terminal — second pending must admit (FIFO promotion)",
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Temp-dir DB init, used by the run-admission integration tests
+    /// in this module. Mirrors the pattern in `db::circuit_tests`
+    /// (process-global DB, `--test-threads=1`).
+    fn init_temp_db_at(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "buildmesh_circuit_worker_test_{}_{}.db",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::db::init(&path).unwrap();
+        path
+    }
+
+    /// The structural pin: `may_admit_run` short-circuits for `running`
+    /// and `paused` without touching the DB, so a no-DB-init unit test
+    /// can still verify the helper's contract for those branches.
+    /// (The `pending` branch reads the count; the integration path
+    /// through `run_pass` is what init's the DB, tested separately by
+    /// the `db::circuit_tests::count_active_circuit_runs_*` suite.)
+    #[test]
+    fn may_admit_run_signature_compiles_for_running_state() {
+        let run = active_row_with_state(1, 2, "running");
+        let mesh = zero_test_mesh();
+        assert!(may_admit_run(&run, &mesh));
+    }
+
+    /// Test helper: an `ActiveCircuitRun` with only `mesh_id`, `id`,
+    /// and `state` populated — `may_admit_run` reads only those three
+    /// fields on the `pending`-vs-other branch, so the rest can stay
+    /// empty for the structural pin above.
+    fn active_row_with_state(mesh_id: i64, run_id: i64, state: &'static str) -> db::ActiveCircuitRun {
+        db::ActiveCircuitRun {
+            run: crate::models::AutopilotCircuitRun {
+                id: run_id,
+                circuit_id: 1,
+                mesh_id,
+                trigger_identity: String::new(),
+                state: state.to_string(),
+                context_json: "{}".to_string(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            circuit_enabled: true,
+            circuit_concurrency_limit: 1,
+            circuit_graph_json: "{}".to_string(),
+            circuit_name: String::new(),
+        }
+    }
+
+    /// Test helper: a `Mesh` with empty placeholders for every field
+    /// except the one the test exercises. `may_admit_run` reads
+    /// `mesh_id` for log output and `circuit_run_capacity` for the
+    /// (caller-resolved) cap — the helper itself only receives the
+    /// mesh as a reference for the cache invalidation contract and the
+    /// future extension to read more fields.
+    fn zero_test_mesh() -> crate::models::Mesh {
+        crate::models::Mesh {
+            id: 0,
+            name: String::new(),
+            path: String::new(),
+            layout: "grid".into(),
+            position: 0,
+            created_at: chrono::Utc::now(),
+            build_command: None,
+            run_command: None,
+            model: None,
+            effort: None,
+            use_worktree: true,
+            worktree_mode: None,
+            default_provider: None,
+            base_ref: "origin/main".into(),
+            scratchpad: String::new(),
+            sandbox: false,
+            pre_spawn_pool_size: 0,
+            color: None,
+            autopilot_enabled: false,
+            autopilot_trigger_label: None,
+            autopilot_concurrency_limit: 2,
+            autopilot_provider: None,
+            autopilot_action_on_success: None,
+            root_build_command: None,
+            root_run_command: None,
+            autopilot_mode: crate::models::AutopilotMode::IssueDriven,
+            loop_initial_prompt: None,
+            loop_suffix_prompt: None,
+            loop_max_iterations: None,
+            loop_interval_seconds: 0,
+            loop_consecutive_failures: 0,
+            harness_overrides: std::collections::HashMap::new(),
+            circuit_run_capacity: 2,
+        }
+    }
+
     #[test]
     fn close_agent_retry_is_not_observed_after_close_clears_spawn_association() {
         let mut view = RunView {
@@ -2139,6 +2416,168 @@ mod tests {
         // live; the `circuit_worker_smoke` integration test exercises
         // the full wait/notify handshake end-to-end.
         drop(guard);
+    }
+
+    // -- blueprint contract: per-blueprint worker seam (#1469) -----------
+    //
+    // The blueprint contract matrix (`autopilot::circuit::blueprint_contract`)
+    // pins the walking skeleton as the canonical minimal preset. The
+    // worker-seam helpers below are the impure-side equivalents: the
+    // seam observes per-blueprint state and turns it into pure events.
+    // These tests pin that the seam treats the walking skeleton
+    // correctly — no gates/retries/closes to mishandle — and that the
+    // review blueprint's close_retry observer stops firing once its
+    // target's association clears (the otherwise-loop-forever trap).
+
+    #[test]
+    fn walking_skeleton_close_retry_observer_emits_nothing() {
+        // The walking skeleton has no CloseAgentNode —
+        // `observe_close_agent_retries` must scan all steps and find
+        // zero Completed close steps. Pins the negative contract: a
+        // refactor that accidentally treats every Completed step as a
+        // close retry would otherwise emit spurious retries for the
+        // walking skeleton.
+        let mut view = RunView {
+            run_id: 42,
+            graph: CircuitGraph::walking_skeleton("do the thing"),
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView {
+                    node_id: "spawn".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: Some(900),
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "inject".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "notify".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+            ],
+        };
+        let mut events = Vec::new();
+        observe_close_agent_retries(&view, &mut events);
+        assert!(
+            events.is_empty(),
+            "walking skeleton has no CloseAgentNode; observer must emit nothing: {events:?}"
+        );
+
+        // Sanity: even a stray CloseAgentNode with no resolvable target
+        // agent stays silent. The observer requires `resolve_target_agent`
+        // to be Some, and the walking skeleton's spawn has no agent
+        // lineage for a stray close to target.
+        view.steps.push(StepView {
+            node_id: "ghost_close".into(),
+            status: StepStatus::Completed,
+            outcome: Some(GraphStepOutcome::Completed),
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+        });
+        observe_close_agent_retries(&view, &mut events);
+        assert!(
+            events.is_empty(),
+            "a close with no resolvable target agent must NOT emit a retry"
+        );
+    }
+
+    #[test]
+    fn walking_skeleton_spawn_recovery_treats_missing_agent_as_never_attached() {
+        // The contract pins walking skeleton's only spawned node as a
+        // single-slot spawn. On startup recovery, an unattached Running
+        // spawn step is the commit-crash gap — the worker seam fails
+        // it loudly (the only state observation nothing can repair).
+        assert_eq!(
+            reconcile_spawn_step(None, None),
+            SpawnReconciliation::NeverAttached
+        );
+        // Even if the worktree is healthy-looking, an unattached spawn
+        // step is still NeverAttached — there is no row to resume into.
+        assert_eq!(
+            reconcile_spawn_step(
+                None,
+                Some(ReconcileNodeState {
+                    archived: false,
+                    worktree_dir_exists: Some(true),
+                })
+            ),
+            SpawnReconciliation::NeverAttached
+        );
+    }
+
+    #[test]
+    fn review_blueprint_close_retry_observer_stops_after_target_clears() {
+        // Companion to `walking_skeleton_close_retry_observer_emits_nothing`:
+        // the review blueprint DOES have a `close_reviewer` step, and the
+        // contract pins that the observer only re-emits the retry while
+        // the spawn's agent_node_id is still attached. After the seam's
+        // DB half clears the association, the observer MUST stop firing
+        // (otherwise it would loop forever closing an already-closed
+        // node).
+        let mut view = RunView {
+            run_id: 42,
+            graph: CircuitGraph::issue_driven_autopilot_review("buildmesh:run"),
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView {
+                    node_id: "reviewer".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: Some(701),
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "close_reviewer".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+            ],
+        };
+        let mut events = Vec::new();
+        observe_close_agent_retries(&view, &mut events);
+        assert_eq!(
+            events.len(),
+            1,
+            "review blueprint's close_reviewer MUST emit one retry while its target agent is attached"
+        );
+        assert!(
+            matches!(&events[0], CircuitEvent::CloseAgentRetry { node_id } if node_id == "close_reviewer"),
+            "emitted retry must be for close_reviewer: got {:?}",
+            events[0]
+        );
+
+        // Simulate the DB-half clearing the reviewer step's agent association
+        // (the worker's real CloseAgentNode effect path).
+        for step in &mut view.steps {
+            if step.node_id == "reviewer" {
+                step.agent_node_id = None;
+            }
+        }
+        events.clear();
+        observe_close_agent_retries(&view, &mut events);
+        assert!(
+            events.is_empty(),
+            "after the reviewer association clears, close_retry must NOT re-emit (would loop forever)"
+        );
     }
 
     // -- worker panic isolation (issue #1235) -----------------------------
