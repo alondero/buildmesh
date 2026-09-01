@@ -74,7 +74,8 @@ mod tests {
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
-                source_pr_pinned_sha TEXT
+                source_pr_pinned_sha TEXT,
+                signal_health TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (mesh_id, name, path, provider, status, position)
@@ -293,6 +294,7 @@ mod tests {
             -- exercises the pre-v16 path (column added by safety-net rather
             -- than the CREATE TABLE), so a separate ALTER mirrors that.
             ALTER TABLE agent_nodes ADD COLUMN source_pr_pinned_sha TEXT;
+            ALTER TABLE agent_nodes ADD COLUMN signal_health TEXT;
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             -- Inserted omitting status_changed_at → stored NULL.
             INSERT INTO agent_nodes (mesh_id, name, path, status, position)

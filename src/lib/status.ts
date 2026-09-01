@@ -74,6 +74,17 @@ export const STATUS_CONFIG = {
     label: 'PR opened',
     hex: '#22c55e',
   },
+  // Issue #1364 — an ordinary turn finished cleanly and the agent is at its
+  // prompt, ready for another prompt. The user is NOT needed (unlike
+  // awaiting_input) and this is NOT Autopilot's PR-opened terminal state
+  // (completed). Green ✓ but distinct copy: "Ready", never "PR opened".
+  ready: {
+    color: 'text-accent-green',
+    bgColor: 'bg-accent-green',
+    dot: '✓',
+    label: 'Ready',
+    hex: '#10b981',
+  },
   // Issue #788 — an archived node is historical, not actionable work.
   // Muted grey keeps it distinct from live idle/running nodes in the
   // desktop sidebar; the Archive probe tab remains the home for these rows.

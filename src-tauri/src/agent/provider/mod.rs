@@ -311,6 +311,15 @@ pub trait AgentProvider: Send + Sync {
     /// [`provision_attention_hooks`]: AgentProvider::provision_attention_hooks
     fn requires_attention_hook(&self) -> bool;
 
+    /// The structured attention-hook capability (issue #1364 §3): which
+    /// normalized lifecycle events the hook delivers, its launch mode, and
+    /// its trust/version requirements. The default `None` keeps every harness
+    /// without an attention hook outside the contract; `capabilities()`
+    /// derives `requires_attention_hook` from this so the two can't drift.
+    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
+        crate::agent::capabilities::AttentionCapability::None
+    }
+
     /// Ensure the workspace is trusted for this harness before its process is
     /// created. Trust is a launch prerequisite, independent of attention-hook
     /// installation. Providers with vendor-specific trust stores opt in by
@@ -561,6 +570,7 @@ pub trait AgentProvider: Send + Sync {
             supports_resume: self.supports_resume(),
             auto_resume_on_startup: self.auto_resume_on_startup(),
             requires_attention_hook: self.requires_attention_hook(),
+            attention_capability: self.attention_capability(),
             produces_readable_transcript: self.produces_readable_transcript(),
             supports_model_override: self.supports_model_override(),
             supports_effort_override: !matches!(effort_control, EffortControlKind::None),

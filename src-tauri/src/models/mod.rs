@@ -236,6 +236,12 @@ pub enum SessionStatus {
     /// (the node stays viewable but Autopilot no longer counts it against
     /// the mesh's concurrency limit).
     Completed,
+    /// Issue #1364 — an ordinary turn finished and the agent is at its
+    /// prompt, ready for another prompt. The process is alive; the user is
+    /// NOT needed (unlike `AwaitingInput`) and this is NOT Autopilot's
+    /// PR-opened terminal state (`Completed`). Written by
+    /// `session_lifecycle::on_turn_completed`.
+    Ready,
 }
 
 /// Parse a session status from a DB string column
@@ -250,6 +256,7 @@ impl SessionStatus {
             "pending" => SessionStatus::Pending,
             "spawning" => SessionStatus::Spawning,
             "completed" => SessionStatus::Completed,
+            "ready" => SessionStatus::Ready,
             _ => SessionStatus::Idle,
         }
     }
@@ -265,6 +272,7 @@ impl SessionStatus {
             SessionStatus::Pending => "pending",
             SessionStatus::Spawning => "spawning",
             SessionStatus::Completed => "completed",
+            SessionStatus::Ready => "ready",
         }
     }
 }
@@ -633,6 +641,15 @@ pub struct AgentNode {
     /// failing — same fail-open semantics as the `pr_head_unfetchable`
     /// fallback introduced in #420.
     pub source_pr_pinned_sha: Option<String>,
+    /// Hook/attention signal health (issue #1364 §3). Layered on top of
+    /// `status`, never a status itself: `Some(Ok)` once provisioning
+    /// succeeded or the first hook callback arrived, `Some(Degraded)` for
+    /// an unparseable/unknown payload, `Some(Unavailable)` when the
+    /// attention hook could not be installed/trusted/reached, and `None`
+    /// before the first provisioning outcome or callback. Lets the UI
+    /// distinguish "the harness has not produced an event yet" from "the
+    /// hook is broken".
+    pub signal_health: Option<crate::agent::session_lifecycle::SignalHealth>,
     #[ts(as = "i32")]
     pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,

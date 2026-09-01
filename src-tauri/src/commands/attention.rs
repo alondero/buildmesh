@@ -49,16 +49,20 @@ use tauri::{command, AppHandle};
 /// running on the Tokio worker pool must wrap this in
 /// `crate::commands::run_blocking` (see `http/routes/attention.rs`).
 pub fn mark_attention(node_id: i64, app: &AppHandle) {
-    mark_attention_with_detail(node_id, app, None);
+    mark_attention_with_signal(node_id, app, None, &crate::agent::session_lifecycle::HookSignalDetail::default());
 }
 
-pub fn mark_attention_with_detail(
+/// [`mark_attention`] with a full provider envelope (issue #1364). One call
+/// performs the single transition: status write, `attention-needed` (legacy)
+/// and `agent-lifecycle` (both transports), plus the autoclear arm.
+pub fn mark_attention_with_signal(
     node_id: i64,
     app: &AppHandle,
     semantic_turn: Option<crate::agent::session_lifecycle::SemanticTurnPayload>,
+    detail: &crate::agent::session_lifecycle::HookSignalDetail,
 ) {
     let sink = AppSessionLifecycleSink { app };
-    let _ = crate::agent::session_lifecycle::on_attention_with_detail(&sink, node_id, semantic_turn);
+    let _ = crate::agent::session_lifecycle::on_attention_with_signal(&sink, node_id, semantic_turn, detail);
     // Arm the resume-detection safety net (issue #878): if the agent starts
     // producing output again without user input, the mark was stale and gets
     // auto-cleared.
@@ -167,6 +171,7 @@ mod tests {
         }
         fn emit_attention_cleared(&self, _node_id: i64) {}
         fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
+        fn emit_lifecycle_changed(&self, _payload: crate::agent::session_lifecycle::LifecycleChangedPayload) {}
     }
 
     /// The decoupling payoff: attention marking is now exercisable on its own,
@@ -221,7 +226,8 @@ mod tests {
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
-                source_pr_pinned_sha TEXT
+                source_pr_pinned_sha TEXT,
+                signal_health TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (id, mesh_id, name, path, status)

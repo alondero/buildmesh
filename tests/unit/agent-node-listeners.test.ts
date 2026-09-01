@@ -83,8 +83,8 @@ describe('attachAgentNodeListeners', () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     const eventNames = mockListen.mock.calls.map(([name]) => name);
     expect(eventNames).toEqual(expect.arrayContaining([
-      'attention-needed',
       'attention-cleared',
+      'agent-lifecycle',
       'node-renamed',
       'node-created',
       'node-activated',
@@ -95,6 +95,10 @@ describe('attachAgentNodeListeners', () => {
       'autopilot-finish-failed',
       'autopilot-node-closed',
     ]));
+    // No `attention-needed` store listener: the backend emits
+    // `agent-lifecycle` on every mark transition (issue #1364), so a
+    // second listener would duplicate the state mutations.
+    expect(eventNames).not.toContain('attention-needed');
     expect(eventNames).toHaveLength(11);
   });
 
@@ -125,27 +129,10 @@ describe('attachAgentNodeListeners', () => {
   // store via the surface, not via some other path. We test this by
   // calling the handler we registered (the second arg to listen) and
   // asserting only the expected surface methods were called.
-  it('attention-needed dispatches patchAgentNode with status awaiting_input', async () => {
-    const mockListen = listen as ReturnType<typeof vi.fn>;
-    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
-    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
-      if (eventName === 'attention-needed') {
-        capturedHandler = handler;
-      }
-      return Promise.resolve(() => {});
-    });
-
-    const surface = makeSurface();
-    await attachAgentNodeListeners(surface);
-
-    expect(capturedHandler).toBeDefined();
-    capturedHandler!({ payload: { session_id: 42, semantic_turn: null } });
-
-    expect(surface.__calls).toEqual([
-      { method: 'setSemanticTurn', args: [42, null] },
-      { method: 'patchAgentNode', args: [42, { status: 'awaiting_input' }] },
-    ]);
-  });
+  // The attention-needed store listener was removed (issue #1364): the
+  // backend emits `agent-lifecycle` on every mark transition, and a second
+  // listener would duplicate the state mutations. Marks are asserted via
+  // the agent-lifecycle handler below.
 
   it('attention-cleared dispatches patchAgentNode with status running', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
@@ -166,6 +153,88 @@ describe('attachAgentNodeListeners', () => {
       { method: 'setSemanticTurn', args: [7, null] },
       { method: 'patchAgentNode', args: [7, { status: 'running' }] },
     ]);
+  });
+
+  it('agent-lifecycle dispatches the resulting status + signal health (issue #1364)', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'agent-lifecycle') {
+        capturedHandler = handler;
+      }
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({
+      payload: {
+        session_id: 42,
+        kind: 'turn_completed',
+        status: 'ready',
+        message: 'turn finished',
+        provider_event: 'Stop',
+        provider_session_id: null,
+        completion_reason: 'end_turn',
+        transcript_path: null,
+        timestamp: '2026-08-31T00:00:00+00:00',
+        signal_health: 'ok',
+        semantic_turn: null,
+      },
+    });
+
+    // One batched patch per event (issue #1364 review) — never two
+    // back-to-back patchAgentNode calls.
+    expect(surface.__calls).toEqual([
+      { method: 'patchAgentNode', args: [42, { status: 'ready', signal_health: 'ok' }] },
+      { method: 'setSemanticTurn', args: [42, null] },
+    ]);
+  });
+
+  it('agent-lifecycle with a semantic turn patches it through (issue #1364)', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'agent-lifecycle') {
+        capturedHandler = handler;
+      }
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({
+      payload: {
+        session_id: 42,
+        kind: 'permission_requested',
+        status: 'awaiting_input',
+        message: null,
+        provider_event: 'PermissionRequest',
+        provider_session_id: null,
+        completion_reason: null,
+        transcript_path: null,
+        timestamp: '2026-08-31T00:00:00+00:00',
+        signal_health: 'ok',
+        semantic_turn: {
+          node_id: 42,
+          kind: 'permission_request',
+          description: 'Allow edit: src/lib/auth.ts',
+        },
+      },
+    });
+
+    const calls = surface.__calls;
+    expect(calls[0]).toEqual({
+      method: 'patchAgentNode',
+      args: [42, { status: 'awaiting_input', signal_health: 'ok' }],
+    });
+    // The semantic turn flows to the banner; it is NOT cleared.
+    expect(calls[1]).toEqual({
+      method: 'setSemanticTurn',
+      args: [42, { node_id: 42, kind: 'permission_request', description: 'Allow edit: src/lib/auth.ts' }],
+    });
   });
 
   it('node-renamed dispatches patchAgentNode with the new name', async () => {

@@ -497,8 +497,8 @@ export async function eventsWsUrl(): Promise<string> {
   return `${proto}//${host}/ws/events?ticket=${encodeURIComponent(ticket)}`;
 }
 
-export type EventMsg =
-  | { type: "attention-needed"; session_id: number; semantic_turn: import("../types/generated/SemanticTurnPayload").SemanticTurnPayload | null }
-  | { type: "attention-cleared"; session_id: number };
+// The wire shape is generated from the Rust `http::events::EventMsg` enum
+// (ts-rs) — never hand-declare it (CLAUDE.md shared-types rule).
+export type EventMsg = import("../types/generated/EventMsg").EventMsg;
 
 export { ApiError };

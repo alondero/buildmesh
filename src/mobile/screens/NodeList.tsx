@@ -95,17 +95,32 @@ export default function NodeList({
   // 30-line timer dance that used to live inline here.
   useVisibilityPolling(refresh, 5000);
 
-  // Live attention events via /ws/events. On any event, refetch so the
-  // list reflects the new status immediately rather than waiting for the
-  // 5-second poll. WS drop falls back to polling silently.
+  // Live attention + lifecycle events via /ws/events. An `agent-lifecycle`
+  // event patches the affected node optimistically from the event body
+  // (issue #1364) — instant status flip without waiting on the network —
+  // and every event still triggers a refetch so the list reconciles with
+  // /api/nodes (the source of truth after a reconnect or a lagged
+  // broadcast). WS drop falls back to polling silently.
   //
-  // `useWsEvents` invokes its callback with NO arguments — WS events
-  // are inherently "latest" (they ARE the most recent server state),
-  // so we wrap `refresh` to feed it an `isLatest` that always returns
-  // true. The polling hook's sequence-token check still applies to
+  // WS events are inherently "latest" (they ARE the most recent server
+  // state), so we wrap `refresh` to feed it an `isLatest` that always
+  // returns true. The polling hook's sequence-token check still applies to
   // its own ticks; this wrapper just keeps the WS path from passing
   // `undefined` as `isLatest`.
-  useWsEvents(() => { void refresh(() => true); }, onAuthFailed);
+  useWsEvents((msg) => {
+    if (msg.type === "agent-lifecycle" && mountedRef.current) {
+      setNodes((prev) =>
+        prev
+          ? prev.map((n) =>
+              n.id === msg.session_id
+                ? { ...n, status: msg.status, signal_health: msg.signal_health }
+                : n,
+            )
+          : prev,
+      );
+    }
+    void refresh(() => true);
+  }, onAuthFailed);
 
   // Lazy-load the provider list; fallback gives the user something to tap
   // even if the request 401s or the server hasn't woken up yet.

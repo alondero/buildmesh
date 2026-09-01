@@ -38,8 +38,8 @@
  * keeps the listeners testable.
  */
 import { listen } from '@tauri-apps/api/event';
-import type { AttentionNeededPayload } from '../types/generated/AttentionNeededPayload';
 import type { AttentionClearedPayload } from '../types/generated/AttentionClearedPayload';
+import type { LifecycleChangedPayload } from '../types/generated/LifecycleChangedPayload';
 import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 import type { NodeRenamedPayload } from '../types/generated/NodeRenamedPayload';
 import type { NodeCreatedPayload } from '../types/generated/NodeCreatedPayload';
@@ -110,19 +110,43 @@ export async function attachAgentNodeListeners(
   const unlistens: Array<() => void> = [];
 
   unlistens.push(
-    await listen<AttentionNeededPayload>('attention-needed', (event) => {
-      const nodeId = event.payload[SESSION_ID_KEY];
-      const semantic = event.payload.semantic_turn;
-      surface.setSemanticTurn(nodeId, semantic ? { ...semantic, node_id: nodeId } : null);
-      surface.patchAgentNode(nodeId, { status: 'awaiting_input' });
-    }),
-  );
-
-  unlistens.push(
     await listen<AttentionClearedPayload>('attention-cleared', (event) => {
       const nodeId = event.payload[SESSION_ID_KEY];
       surface.setSemanticTurn(nodeId, null);
       surface.patchAgentNode(nodeId, { status: 'running' });
+    }),
+  );
+
+  // `agent-lifecycle` (issue #1364) is the normalized lifecycle event —
+  // the wire carries the resulting status, the normalized kind, and the
+  // full provider envelope. Both transports (this desktop bus and the
+  // mobile /ws/events broadcast) share the one shape, so both clients
+  // patch the affected node identically. The backend emits this event on
+  // EVERY mark transition (alongside the legacy desktop `attention-needed`
+  // event, which external hook consumers may still observe) — so this
+  // handler is the ONLY store-side listener for marks; there is no
+  // attention-needed store listener to duplicate its state mutations.
+  // The status + health patches are batched into one `patchAgentNode` so
+  // the store updates once per event.
+  unlistens.push(
+    await listen<LifecycleChangedPayload>('agent-lifecycle', (event) => {
+      const nodeId = event.payload.session_id;
+      const { signal_health } = event.payload;
+      surface.patchAgentNode(nodeId, {
+        status: event.payload.status,
+        ...(signal_health ? { signal_health } : {}),
+      });
+      if (event.payload.semantic_turn) {
+        surface.setSemanticTurn(nodeId, event.payload.semantic_turn);
+      } else if (
+        event.payload.kind === 'turn_completed' ||
+        event.payload.kind === 'autopilot_completed' ||
+        event.payload.kind === 'input_required' ||
+        event.payload.kind === 'permission_requested' ||
+        event.payload.kind === 'question_requested'
+      ) {
+        surface.setSemanticTurn(nodeId, null);
+      }
     }),
   );
 

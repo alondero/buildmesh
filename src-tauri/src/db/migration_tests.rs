@@ -628,6 +628,7 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 head_repo_clone_url TEXT,
                 source_pr_pinned_sha TEXT,
                 status_changed_at TEXT,
+                signal_health TEXT,
                 pr_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/m');
@@ -799,7 +800,8 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 source_pr INTEGER,
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
-                source_pr_pinned_sha TEXT
+                source_pr_pinned_sha TEXT,
+                signal_health TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -859,7 +861,8 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 source_pr INTEGER,
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
-                source_pr_pinned_sha TEXT
+                source_pr_pinned_sha TEXT,
+                signal_health TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -885,5 +888,91 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         // an error string rather than fabricating a flip.
         let after_unknown = crate::db::toggle_agent_node_pinned_inner(&conn, 99999).unwrap();
         assert_eq!(after_unknown, None, "unknown id must return None, not Some(false)");
+    }
+
+    /// v35 — `agent_nodes.signal_health` (issue #1364 §3): a v34-shaped DB
+    /// gains the nullable TEXT column via `evolve_to`, existing rows read
+    /// back as `None`, and the column writer round-trips through
+    /// `get_agent_node_by_id_inner`.
+    #[test]
+    fn evolve_to_adds_v35_signal_health_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                env TEXT NOT NULL DEFAULT 'windows',
+                provider TEXT NOT NULL DEFAULT 'anthropic',
+                status TEXT NOT NULL DEFAULT 'idle',
+                cli_session_id TEXT,
+                worktree_name TEXT,
+                use_worktree INTEGER NOT NULL DEFAULT 1,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                source_issue INTEGER,
+                source_pr INTEGER,
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT,
+                source_pr_pinned_sha TEXT
+            );
+            INSERT INTO agent_nodes (mesh_id, name, path, created_at)
+                VALUES (1, 'pre-v35', '/p', '2020-01-01T00:00:00Z');
+            ",
+        )
+        .unwrap();
+
+        // Precondition: column does not exist yet.
+        let has_before: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'signal_health'",
+            [], |row| row.get(0),
+        )
+        .unwrap();
+        assert!(!has_before, "PRECONDITION: signal_health must not exist in v34 schema");
+
+        // Act — the always-run column walk adds it.
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+        let has_after: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'signal_health'",
+            [], |row| row.get(0),
+        )
+        .unwrap();
+        assert!(has_after, "signal_health must exist after evolve_to");
+
+        // A pre-v35 row reads back as None (no provisioning outcome yet).
+        let node = crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap();
+        assert_eq!(node.signal_health, None, "pre-v35 row must read as None health");
+
+        // The writer round-trips ok/degraded/unavailable and clears to None.
+        use crate::agent::session_lifecycle::SignalHealth;
+        crate::db::update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Ok)).unwrap();
+        assert_eq!(
+            crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            Some(SignalHealth::Ok)
+        );
+        crate::db::update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Degraded)).unwrap();
+        assert_eq!(
+            crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            Some(SignalHealth::Degraded)
+        );
+        crate::db::update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Unavailable)).unwrap();
+        assert_eq!(
+            crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            Some(SignalHealth::Unavailable)
+        );
+        crate::db::update_agent_node_signal_health_inner(&conn, 1, None).unwrap();
+        assert_eq!(
+            crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            None,
+            "clearing to None must round-trip"
+        );
+
+        // Idempotent: a second evolve_to call must not error.
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 }

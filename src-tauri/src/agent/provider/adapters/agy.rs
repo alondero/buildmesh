@@ -139,6 +139,17 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
+    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
+        use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+        use crate::agent::session_lifecycle::LifecycleKind;
+        AttentionCapability::Hook {
+            events: vec![LifecycleKind::TurnCompleted, LifecycleKind::BackgroundRunning],
+            launch_mode: AttentionLaunchMode::SkipPermissions,
+            trust: Some("workspace trust".into()),
+            min_version: Some("1.0.0".into()),
+        }
+    }
+
     fn ensure_workspace_trusted(
         &self,
         resolved: &ResolvedPath,

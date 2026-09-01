@@ -430,6 +430,17 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
       >
         {config.dot}
       </span>
+      {/* Issue #1364 §3 — node-level hook-health warning (see GridNodeHeader). */}
+      {node.signal_health === 'unavailable' && (
+        <span
+          role="img"
+          aria-label="Attention signal unavailable"
+          title="Attention signal unavailable — the agent's lifecycle hook could not be installed or reached; watch the terminal directly."
+          className="text-status-warning text-xs leading-none shrink-0"
+        >
+          ⚠
+        </span>
+      )}
       <ProviderIcon providerId={node.provider} className="h-3 w-3 opacity-90" />
       <InlineEditableText
         // `id` anchors the menu's `aria-labelledby` to a name-only

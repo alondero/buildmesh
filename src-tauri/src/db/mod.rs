@@ -448,7 +448,8 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             source_pr INTEGER,
             head_repo_owner TEXT,
             head_repo_clone_url TEXT,
-            source_pr_pinned_sha TEXT
+            source_pr_pinned_sha TEXT,
+            signal_health TEXT
         );
 
         CREATE TABLE IF NOT EXISTS pending_worktree_removals (
@@ -1830,7 +1831,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -1869,6 +1870,12 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         // reads back as `None`, and the drift-check path treats `None` as
         // "skip the comparison" rather than failing.
         source_pr_pinned_sha: row.get(18)?,
+        // signal_health is at index 19 (issue #1364). Nullable TEXT — NULL
+        // means "no provisioning outcome / no callback yet"; the typed read
+        // maps unknown strings to `None` so a stale value never panics.
+        signal_health: row
+            .get::<_, Option<String>>(19)?
+            .and_then(|s| crate::agent::session_lifecycle::SignalHealth::from_db_str(&s)),
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -1920,19 +1927,20 @@ pub fn list_coordinator_node_rows_inner(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        // map_agent_node_row reads positional indices 0..18, which match the
+        // map_agent_node_row reads positional indices 0..19, which match the
         // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 19 and 20 (v16 added head_repo_owner +
+        // status_changed_at follow at 20 and 21 (v16 added head_repo_owner +
         // head_repo_clone_url at 16/17, source_pr_pinned_sha at 18, v29
-        // added is_pinned at 13 — see AGENT_NODE_COLUMNS).
+        // added is_pinned at 13, v35 added signal_health at 19 — see
+        // AGENT_NODE_COLUMNS).
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(19)?;
+        let mesh_name: String = row.get(20)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(20)?;
+        let status_changed_at: Option<String> = row.get(21)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -3059,6 +3067,29 @@ pub fn archive_agent_node(id: i64) -> SqlResult<()> {
     update_agent_node_status(id, SessionStatus::Archived)
 }
 
+/// Update the persisted hook/attention signal health for an agent node
+/// (issue #1364 §3). `None` clears the column (back to "no provisioning
+/// outcome / no callback yet").
+pub fn update_agent_node_signal_health(
+    id: i64,
+    health: Option<crate::agent::session_lifecycle::SignalHealth>,
+) -> SqlResult<()> {
+    let db = write_conn();
+    update_agent_node_signal_health_inner(&db, id, health)
+}
+
+pub(crate) fn update_agent_node_signal_health_inner(
+    conn: &Connection,
+    id: i64,
+    health: Option<crate::agent::session_lifecycle::SignalHealth>,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_nodes SET signal_health = ?1 WHERE id = ?2",
+        params![health.map(|h| h.to_db_str()), id],
+    )?;
+    Ok(())
+}
+
 /// Update the persisted CLI session id for an agent node. For the fill-only
 /// variant used by attention-hook fallback, see `set_cli_session_id_if_missing`.
 pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
@@ -3122,7 +3153,7 @@ pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
     // and the 3s Running promotion leaves a recoverable `suspended` row.
     let count = db.execute(
         "UPDATE agent_nodes SET status = 'suspended' \
-         WHERE status IN ('running', 'awaiting_input', 'pending', 'spawning')",
+         WHERE status IN ('running', 'awaiting_input', 'pending', 'spawning', 'ready')",
         [],
     )?;
     Ok(count)

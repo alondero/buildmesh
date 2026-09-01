@@ -185,6 +185,22 @@ impl AgentProvider for GrokAdapter {
         true
     }
 
+    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
+        use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+        use crate::agent::session_lifecycle::LifecycleKind;
+        AttentionCapability::Hook {
+            events: vec![
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::InputRequired,
+                LifecycleKind::PermissionRequested,
+                LifecycleKind::QuestionRequested,
+            ],
+            launch_mode: AttentionLaunchMode::PermissionAsk,
+            trust: Some("global hook dir".into()),
+            min_version: None,
+        }
+    }
+
     /// Provision Buildmesh attention hooks into Grok's always-trusted
     /// global hooks directory (issue #1282). The file lives in the
     /// user's `~/.grok/hooks/`, NOT under the project cwd: project-local

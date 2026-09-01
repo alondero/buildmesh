@@ -37,6 +37,21 @@ impl AgentProvider for AnthropicAdapter {
         true
     }
 
+    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
+        use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+        use crate::agent::session_lifecycle::LifecycleKind;
+        AttentionCapability::Hook {
+            events: vec![
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::InputRequired,
+                LifecycleKind::BackgroundRunning,
+            ],
+            launch_mode: AttentionLaunchMode::SkipPermissions,
+            trust: Some("workspace trust".into()),
+            min_version: None,
+        }
+    }
+
     fn ensure_workspace_trusted(
         &self,
         resolved: &ResolvedPath,

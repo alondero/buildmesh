@@ -5,6 +5,8 @@ import { useAsyncEffect } from "../hooks/useAsyncEffect";
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000];
 
 /// Open a /ws/events WebSocket and call `onEvent` for every relevant message.
+/// The parsed `EventMsg` is passed through so the consumer can patch the
+/// affected node from the event body (issue #1364) before reconciling.
 ///
 /// Auto-reconnects with simple backoff (1/2/4/8s, capped — losing the events
 /// stream falls back to the 5-second list poll in `NodeList`, so an outage
@@ -14,7 +16,7 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000];
 /// reset the attempt counter and reconnect immediately instead of waiting
 /// out the next backoff slot — mobile backgrounding is the normal case and
 /// the OS will silently exhaust the ladder on a long absence.
-export function useWsEvents(onEvent: () => void, onAuthError: () => void): void {
+export function useWsEvents(onEvent: (msg: EventMsg) => void, onAuthError: () => void): void {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
   const onAuthErrorRef = useRef(onAuthError);
@@ -101,8 +103,12 @@ export function useWsEvents(onEvent: () => void, onAuthError: () => void): void 
         if (ws !== liveWs) return; // stale: don't fire onEvent for a dead socket
         try {
           const msg = JSON.parse(typeof e.data === "string" ? e.data : "") as EventMsg;
-          if (msg && (msg.type === "attention-needed" || msg.type === "attention-cleared")) {
-            onEventRef.current();
+          // Issue #1364: the typed `agent-lifecycle` event joined the legacy
+          // `attention-cleared` pair. Every event still just triggers a
+          // /api/nodes refetch (NodeList reconciles from the server, which
+          // is the source of truth after a reconnect/lag).
+          if (msg && (msg.type === "attention-cleared" || msg.type === "agent-lifecycle")) {
+            onEventRef.current(msg);
           }
         } catch {
           // Ignore non-JSON frames silently.

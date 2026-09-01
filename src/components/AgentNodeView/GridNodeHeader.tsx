@@ -311,6 +311,20 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
           </span>
         )}
         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${getStatusConfig(node.status).bgColor}`} />
+        {/* Issue #1364 §3 — node-level hook-health warning. Layered on top
+            of the status, never a status: the node may be running fine while
+            its attention hook is broken, and the user must be able to tell
+            "no event yet" from "the hook can't reach us". */}
+        {node.signal_health === 'unavailable' && (
+          <span
+            role="img"
+            aria-label="Attention signal unavailable"
+            title="Attention signal unavailable — the agent's lifecycle hook could not be installed or reached; watch the terminal directly."
+            className="text-status-warning text-xs leading-none flex-shrink-0"
+          >
+            ⚠
+          </span>
+        )}
         <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 drop-shadow-sm flex-shrink-0" />
         <span
           onPointerDown={(e) => e.stopPropagation()}

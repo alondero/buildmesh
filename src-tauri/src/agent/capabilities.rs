@@ -79,6 +79,56 @@ pub fn platform_name(platform: Platform) -> &'static str {
     }
 }
 
+/// How a harness's attention hook interacts with tool-approval gating
+/// (issue #1364 §3). Drives what a node can be told about: under
+/// `SkipPermissions` the harness never raises a permission prompt, so a
+/// `PermissionRequested` signal is impossible by construction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "AttentionLaunchMode.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionLaunchMode {
+    /// Launch args skip permission prompts (`--dangerously-skip-permissions`
+    /// and friends) — the harness never blocks on a tool approval.
+    #[default]
+    SkipPermissions,
+    /// The harness runs with permission prompts enabled and raises a
+    /// permission/question signal when a tool needs approval.
+    PermissionAsk,
+    /// Plain shell — no agent lifecycle at all, outside the attention
+    /// contract.
+    PlainShell,
+}
+
+/// Structured attention-hook capability for a harness (issue #1364 §3).
+/// Replaces the bare `requires_attention_hook: bool` with a description of
+/// what the hook can actually deliver: which lifecycle events it supplies,
+/// how it launches, and its trust/config requirements. `None` means the
+/// harness has no attention hook wired yet (per-harness hook work lives in
+/// the linked issues).
+///
+/// Generated to `src/types/generated/AttentionCapability.ts`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "AttentionCapability.ts")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum AttentionCapability {
+    /// No attention hook.
+    #[default]
+    None,
+    /// A hook is provisioned into the project/global config and POSTs to the
+    /// attention route.
+    Hook {
+        /// The normalized lifecycle events this harness can signal.
+        events: Vec<crate::agent::session_lifecycle::LifecycleKind>,
+        /// How the harness gates tool approval at launch.
+        launch_mode: AttentionLaunchMode,
+        /// Human description of the config/trust requirement (e.g.
+        /// "workspace trust", "codex project trust").
+        trust: Option<String>,
+        /// Minimum harness version known to deliver these events.
+        min_version: Option<String>,
+    },
+}
+
 /// Backend-owned **Harness Capability Contract** (issue #1149, prefactor for
 /// #1148). One descriptor per Agent Harness — the same descriptor drives:
 ///
@@ -113,6 +163,12 @@ pub struct HarnessCapabilities {
     /// completion/background signal via Stop hook and `fullyIdle`; approval
     /// is unavailable under skip-permissions mode.
     pub requires_attention_hook: bool,
+    /// Structured attention-hook capability (issue #1364 §3) — the events
+    /// the hook can deliver, its launch mode, and trust requirements.
+    /// `requires_attention_hook` is kept as a derived convenience flag for
+    /// the existing autopilot gate; `attention_capability` is the
+    /// authoritative descriptor.
+    pub attention_capability: AttentionCapability,
     /// Whether the harness writes a transcript the coordinator read API
     /// can parse into a Node Digest's rich layer (ADR-0008).
     pub produces_readable_transcript: bool,
@@ -435,6 +491,12 @@ mod tests {
         assert!(anthropic.supports_resume);
         assert!(anthropic.auto_resume_on_startup);
         assert!(anthropic.requires_attention_hook);
+        // Issue #1364 §3 — anthropic's Stop + Notification hooks deliver
+        // completion/input/background signals under skip-permissions.
+        assert!(matches!(
+            anthropic.attention_capability,
+            AttentionCapability::Hook { launch_mode: AttentionLaunchMode::SkipPermissions, .. }
+        ));
         assert!(anthropic.produces_readable_transcript);
         assert!(anthropic.supports_model_override);
         assert!(anthropic.supports_effort_override);
@@ -456,6 +518,12 @@ mod tests {
         assert_eq!(codex.harness_id, "codex");
         assert!(codex.supports_resume);
         assert!(codex.requires_attention_hook);
+        // Issue #1364 §3 — Codex's Stop + PermissionRequest hooks deliver
+        // permission approval signals under permission-ask mode.
+        assert!(matches!(
+            codex.attention_capability,
+            AttentionCapability::Hook { launch_mode: AttentionLaunchMode::PermissionAsk, .. }
+        ));
         assert!(codex.produces_readable_transcript);
         assert!(codex.supports_model_override);
         assert!(codex.supports_effort_override);
@@ -474,6 +542,9 @@ mod tests {
         assert!(cursor.supports_resume);
         assert!(cursor.auto_resume_on_startup);
         assert!(!cursor.requires_attention_hook);
+        // Issue #1364 §3 — Cursor hooks are a per-harness follow-up (#1368);
+        // no attention capability yet.
+        assert_eq!(cursor.attention_capability, AttentionCapability::None);
         assert!(cursor.produces_readable_transcript);
         assert!(cursor.supports_model_override);
         assert!(!cursor.supports_effort_override);
@@ -485,6 +556,12 @@ mod tests {
         assert_eq!(agy.harness_id, "agy");
         assert!(agy.supports_resume);
         assert!(agy.requires_attention_hook);
+        // Issue #1364 §3 — AGY's Stop hook delivers completion/background
+        // signals only (no tool approvals under skip-permissions, #1367).
+        assert!(matches!(
+            agy.attention_capability,
+            AttentionCapability::Hook { launch_mode: AttentionLaunchMode::SkipPermissions, .. }
+        ));
         // Issue #1283: AGY writes per-conversation JSONL, so the
         // transcript reader can hydrate the Node Digest / archive picker.
         assert!(agy.produces_readable_transcript);
@@ -518,6 +595,9 @@ mod tests {
         assert!(terminal.is_plain_terminal);
         assert!(!terminal.supports_resume);
         assert!(!terminal.requires_attention_hook);
+        // Issue #1364 — Terminal is a plain shell, outside the attention
+        // contract entirely.
+        assert_eq!(terminal.attention_capability, AttentionCapability::None);
         assert!(!terminal.supports_model_override);
         assert!(!terminal.supports_effort_override);
         // Issue #1358: Terminal is the plain-shell harness — the
@@ -539,6 +619,12 @@ mod tests {
         let grok = grok_caps();
         assert!(grok.supports_resume);
         assert!(grok.auto_resume_on_startup);
+        // Issue #1364 §3 — Grok's Notification + Stop HTTP hooks deliver
+        // completion/input/permission/question signals under permission-ask.
+        assert!(matches!(
+            grok.attention_capability,
+            AttentionCapability::Hook { launch_mode: AttentionLaunchMode::PermissionAsk, .. }
+        ));
         // Issue #1281: Grok Code writes per-session directories under
         // ~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl,
         // updates.jsonl}. TranscriptFormat::Grok parses both into the shared

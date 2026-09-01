@@ -1162,6 +1162,7 @@ mod tests {
             head_repo_owner: None,
             head_repo_clone_url: None,
             source_pr_pinned_sha: None,
+            signal_health: None,
             position: 0,
             created_at: chrono::Utc::now(),
         }
