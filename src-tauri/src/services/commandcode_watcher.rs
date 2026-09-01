@@ -496,8 +496,10 @@ impl TurnTracker {
                     // Command Code may split one assistant message across
                     // multiple records with the same id (text, then tool_use).
                     // Hold an id-bearing text record until its continuation or
-                    // an explicit terminal envelope arrives. Id-less records
-                    // are standalone responses and complete immediately.
+                    // the protocol's explicit terminal envelope arrives. The
+                    // terminal envelope is the only unambiguous boundary for
+                    // an identified message; id-less records are standalone
+                    // responses and complete immediately.
                     self.deferred_assistant_response = true;
                     None
                 } else {
@@ -752,6 +754,26 @@ mod tests {
             tracker.observe_transcript_line(
                 r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":"Inspection complete."}}"#,
             ),
+            Some(TerminalTransition::TurnCompleted)
+        );
+    }
+
+    #[test]
+    fn identified_direct_response_completes_at_explicit_terminal_boundary() {
+        let mut tracker = TurnTracker::default();
+
+        assert_eq!(
+            tracker.observe_transcript_line(r#"{"type":"user_turn"}"#),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(
+                r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":"Direct answer."}}"#,
+            ),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(r#"{"type":"turn_complete"}"#),
             Some(TerminalTransition::TurnCompleted)
         );
     }
