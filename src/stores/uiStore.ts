@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { useMeshStore } from './meshStore';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
+import type { ProbeContextPin } from '../lib/probeContext';
 
 // The four canvas View Modes (wayfinder #982 — tickets #983 state model,
 // #986 rendering). 'single' solos the active node (it subsumes the old
@@ -295,6 +296,13 @@ interface UIState extends GridControls {
   // card, keyboard shortcut) reads/writes the same source of truth.
   probeOpen: boolean;
   probeTab: ProbeTab;
+  // Destination-local context captures (issue #1456). Host-lens tabs do
+  // not use these. Mesh/Agent tabs follow selection until the user pins the
+  // current stable id; the resolver keeps a missing pin visible instead of
+  // silently falling back to a newly selected subject. Keeping one slot per
+  // destination means pinning a second tab cannot erase the first tab's
+  // protection when the user returns to it.
+  probeContextPins: Partial<Record<ProbeTab, ProbeContextPin>>;
   // The single file currently shown in the Center Workspace Diff Overlay
   // (issue #379), or null when the overlay is closed. Independent of
   // `probeTab` — the overlay floats over the terminal grid and survives Probe
@@ -304,6 +312,8 @@ interface UIState extends GridControls {
   activeDiffFile: DiffContext | null;
   toggleProbe: () => void;
   setProbeTab: (tab: ProbeTab) => void;
+  pinProbeContext: (pin: ProbeContextPin) => void;
+  clearProbeContextPin: () => void;
   // Open the probe on a specific tab, opening the panel if it's collapsed.
   // The "click active tab to collapse" UX is left to ProbePanel's own
   // click handler — this is a pure "make the tab visible" action.
@@ -411,6 +421,7 @@ export const useUIStore = create<UIState>((set, get) => {
   return {
     probeOpen: false,
     probeTab: 'files',
+    probeContextPins: {},
     activeDiffFile: null,
 
     toggleProbe: () => {
@@ -424,6 +435,23 @@ export const useUIStore = create<UIState>((set, get) => {
       // only via `closeDiff` (Esc / "Back to Terminals") or its own auto-close
       // when the focused node or selected mesh changes.
       set({ probeTab: tab });
+    },
+
+    pinProbeContext: (pin) => {
+      set((state) => ({
+        probeContextPins: {
+          ...state.probeContextPins,
+          [pin.tab]: pin,
+        },
+      }));
+    },
+
+    clearProbeContextPin: () => {
+      const tab = get().probeTab;
+      if (get().probeContextPins[tab] === undefined) return;
+      const probeContextPins = { ...get().probeContextPins };
+      delete probeContextPins[tab];
+      set({ probeContextPins });
     },
 
     openDiff: (ctx: DiffContext) => {

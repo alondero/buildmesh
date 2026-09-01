@@ -92,6 +92,28 @@ Tauri 2.11's raw Channel transport has a payload-shape boundary: frames smaller 
 ### Layout: Grid-Only
 Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid. The UI auto-scales 1–6 panes via CSS grid.
 
+### Probe Context Lenses (issue #1456)
+Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the
+complete `PROBE_TAB_DEFINITIONS` record is the source of truth for ownership
+lens,
+baseline, selection-following, pinning, and statefulness. The three lenses are
+`Host` (machine-wide provider/account/runtime state), `Mesh` (one repository,
+its configuration, GitHub feeds, worktrees, automation, and notes), and
+`Agent` (one Agent Node's changes and node-specific history/actions). Usage is
+Host-lens and must never display or infer a Mesh name. Project Files is
+Mesh-owned but may show a focused Agent Node's working tree; Agent Changes is
+Agent-lens and uses the node-base baseline. The `useProbeContext` hook is the
+read seam for the shell and destination tabs: use its subject, resolved IDs,
+paths, and `hasRequiredContext` instead of reconstructing ownership from
+`selectedMeshId` or `activeNodeId`. The Probe header labels the subject and
+whether it is following selection or pinned. Pins are session UI state keyed to
+the destination; a missing pinned subject renders an explicit empty state and
+must not fall back to a newly selected Mesh or Agent Node. See
+[`docs/adr/0028-probe-context-lenses.md`](adr/0028-probe-context-lenses.md)
+for the destination mapping and mixed-ownership decisions. The future grouped
+Probe rail (#1375) may consume the same lens metadata but is not part of this
+contract.
+
 ### Frameless Window & Bespoke TitleBar
 The window runs with `"decorations": false` (`src-tauri/tauri.conf.json`); `src/components/TitleBar/TitleBar.tsx` is the window chrome (wordmark, ViewModeSwitcher, settings/remote icons, min/max/close). Three traps this recipe already burned once:
 - **Drag regions are per-target.** Tauri's injected script checks `e.target.hasAttribute('data-tauri-drag-region')` — put the attribute on the bar/spacer/wordmark, but *never* on buttons or their SVGs, or the click is eaten and the button starts a drag instead. Double-click maximize on a drag region is built into the same script (`internal_toggle_maximize`).

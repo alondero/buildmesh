@@ -1,10 +1,10 @@
 /**
  * AgentChangesTab — issue #376. The Probe Panel's Agent Changes tab body.
  *
- * Shows the focused Agent Node's lightweight base-relative changed-file list.
- * By the time this component mounts, `ProbeTabBody` has already guaranteed
- * `activeNodeId` is non-null (otherwise it would have shown the "no active
- * agent node" empty state), so the assertion below never fires at runtime.
+ * Shows the focused (or pinned) Agent Node's lightweight base-relative
+ * changed-file list. By the time this component mounts, `ProbeTabBody` has
+ * already guaranteed an available Agent subject, so the assertion below is a
+ * type-narrowing guard rather than the user-facing missing-context state.
  *
  * The list uses `node_changed_files`, which returns paths and line counts
  * without constructing or highlighting every hunk. A click hands one path
@@ -25,9 +25,9 @@ export function AgentChangesTab() {
   const openDiff = useUIStore((s) => s.openDiff);
   const activeDiffFile = useUIStore((s) => s.activeDiffFile);
 
-  // ProbeTabBody gates on `activeNodeId !== null` (and a selected mesh) before
-  // mounting this component, so the guard is a type-narrowing convenience
-  // rather than a runtime guard.
+  // ProbeTabBody gates on an available Agent subject before mounting this
+  // component, so the guard is a type-narrowing convenience rather than the
+  // user-facing missing-context state.
   if (activeNodeId === null || activePath === null || activeMeshId === null) return null;
 
   // Clicking a file opens its single-file diff in the spacious overlay. We

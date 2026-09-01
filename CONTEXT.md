@@ -55,6 +55,10 @@ _Avoid_: spawn state, spawn config, resolved spawn params (these miss the tempor
 The runtime classification of an **Agent Node** spawn — how it was triggered. One of three values: `Manual` (user clicked Spawn from the mesh panel — no `source_issue`, no `source_pr`), `Issue` (spawned from the Issues Probe — `source_issue` is set, the node carries a `gh{N}-` branch name), or `PullRequest` (spawned from the PR Probe — `source_pr` is set, the node carries a `pr{N}-` branch name). The Worktree Node provisioner uses Spawn Source to decide between the two Pre-spawn Worktree adoption modes: `Issue` and `PullRequest` move the pool's plain-slug directory to the node's `gh{N}-`/`pr{N}-` name (`git worktree move` + checkout to the resolved base SHA); `Manual` adopts the pool's pre-assigned slug as the node's own name and `git checkout -B` aligns the worktree's mode with the mesh's `worktree_mode`. Distinct from **Spawn Option** (which is a menu entry — what the user *could have* picked) and from **Spawn Context** (which is the resolved state of one attempt).
 _Avoid_: spawn kind, spawn type, spawn trigger (these miss the runtime-vs-menu distinction).
 
+**Probe Context Lens**:
+The ownership perspective of a Probe destination: **Host** for machine-wide provider and account state, **Mesh** for one repository workspace and its configuration, or **Agent** for one Agent Node's changes and history. A lens names what the destination is about; a focused Agent Node may still provide a secondary working-tree view for the Mesh-owned File Explorer Panel.
+_Avoid_: active context, Probe scope (both are too vague about ownership).
+
 
 **Mesh**:
 A project workspace associated with a local Git repository root path.
