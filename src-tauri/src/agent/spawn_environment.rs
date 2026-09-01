@@ -58,7 +58,7 @@ fn format_powershell_command(binary: &str, args: &[String]) -> String {
 }
 
 pub fn wrap(
-    recipe: SpawnRecipe,
+    mut recipe: SpawnRecipe,
     env_type: EnvType,
     wsl_distro: Option<&str>,
     executable_override: Option<&str>,
@@ -66,6 +66,7 @@ pub fn wrap(
     session_id: i64,
     sandbox: bool,
 ) -> CommandBuilder {
+    recipe.base_args.extend(std::mem::take(&mut recipe.trailing_args));
     let executable = executable_override.unwrap_or(recipe.binary);
     let mut cmd = if env_type == EnvType::Wsl {
         tracing::info!("spawn_environment: building WSL command via wsl.exe");

@@ -57,6 +57,7 @@ impl AgentProvider for FreebuffAdapter {
         SpawnRecipe {
             binary: "freebuff",
             base_args: vec![],
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }

@@ -508,7 +508,22 @@ mod tests {
             if index == 0 {
                 assert!(!invocation.contains("resume-session"));
             } else {
-                assert!(invocation.contains("resume\nresume-session"));
+                assert!(
+                    invocation.contains("resume\n") && invocation.contains("\nresume-session"),
+                    "resume subcommand must carry the session id; got {invocation:?}"
+                );
+                let resume_at = invocation.find("resume\n").expect("resume subcommand");
+                let id_at = invocation.find("\nresume-session").expect("session id");
+                let profile_at = invocation.find("--profile").expect("proxy profile");
+                let model_at = invocation.find("--model").expect("proxy model");
+                assert!(
+                    resume_at < id_at,
+                    "session id must follow the resume subcommand; got {invocation:?}"
+                );
+                assert!(
+                    profile_at < id_at && model_at < id_at,
+                    "proxy --profile/--model are options and must precede the resume UUID; got {invocation:?}"
+                );
             }
         }
     }
@@ -877,7 +892,7 @@ mod tests {
         );
     }
 
-    /// Codex provides a dedicated resume recipe (`codex resume <id> ...flags`)
+    /// Codex provides a dedicated resume recipe (`codex resume [OPTIONS] <id>`)
     /// via `spawn_recipe_for_resume`, which `build_spawn_command` must use
     /// instead of the default `spawn_recipe` + `--resume`.
     #[test]
@@ -899,13 +914,13 @@ mod tests {
                 "codex",
                 &[
                     "resume",
-                    "codex-sess",
                     "--ask-for-approval",
                     "never",
                     "--sandbox",
                     "danger-full-access",
                     "--no-alt-screen",
                     "--dangerously-bypass-hook-trust",
+                    "codex-sess",
                 ]
             )
         );

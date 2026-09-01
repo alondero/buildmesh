@@ -665,6 +665,7 @@ mod tests {
             } else {
                 vec!["-c".into(), "exit 0".into()]
             },
+            trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         };
         let cwd = std::env::current_dir().unwrap();
@@ -745,6 +746,7 @@ mod tests {
             } else {
                 vec!["-c".into(), "exit 0".into()]
             },
+            trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         };
         let cwd = std::env::current_dir().unwrap();
@@ -1026,6 +1028,7 @@ pub async fn kill_agent(session_id: i64) -> Result<(), String> {
 /// convention in `commands/mod.rs`.
 pub(crate) fn kill_agent_blocking(session_id: i64) -> Result<(), String> {
     crate::session_naming::reset_buffers(session_id);
+    crate::agent::provider::notify_process_terminated(session_id);
     PROCESS_REGISTRY.kill_session(session_id);
     PROCESS_REGISTRY.remove(&session_id);
     crate::http_server::clear_scrollback(session_id);

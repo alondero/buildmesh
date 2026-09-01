@@ -68,6 +68,7 @@ impl AgentProvider for AnthropicAdapter {
         &self,
         resolved: &ResolvedPath,
         _runtime: &LaunchRuntime,
+        _node_id: i64,
     ) -> Result<(), String> {
         crate::agent::spawn::inject_attention_hook(std::path::Path::new(&resolved.host_path))
     }

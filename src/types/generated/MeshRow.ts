@@ -66,4 +66,12 @@ autopilot_mode: AutopilotMode, loop_initial_prompt: string | null, loop_suffix_p
  * fields stay here so a pre-v33 reading client doesn't crash, but
  * the new UI ignores them.
  */
-harness_overrides: { [key in string]: HarnessConfigValue }, };
+harness_overrides: { [key in string]: HarnessConfigValue }, 
+/**
+ * Per-mesh cap on **concurrent admitted circuit runs** (issue #1467)
+ * — see the matching [`Mesh`] field. Surface for the dedicated
+ * Autopilot Probe tab so the legacy `autopilot_concurrency_limit`
+ * (kept here for back-compat with the `update_mesh_autopilot`
+ * atomic write) and the new circuit-run gate appear side-by-side.
+ */
+circuit_run_capacity: number, };

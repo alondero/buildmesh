@@ -207,6 +207,7 @@ fn unix_sh_echo_through_real_pty() {
     let recipe = SpawnRecipe {
         binary: "/bin/sh",
         base_args: vec!["-c".into(), "echo hello".into()],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
     let (out, exit_ok) = run_recipe_through_pty(-915_4001, recipe, "hello");
@@ -221,6 +222,7 @@ fn windows_direct_echo_through_real_pty() {
     let recipe = SpawnRecipe {
         binary: "cmd.exe",
         base_args: vec!["/c".into(), "echo".into(), "hello".into()],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
     let (out, exit_ok) = run_recipe_through_pty(-915_4002, recipe, "hello");
@@ -237,6 +239,7 @@ fn windows_powershell_encoded_echo_through_real_pty() {
     let recipe = SpawnRecipe {
         binary: "cmd.exe",
         base_args: vec!["/c".into(), "echo".into(), "hello".into()],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::PowerShell,
     };
     let (out, exit_ok) = run_recipe_through_pty(-915_4003, recipe, "hello");
@@ -260,6 +263,7 @@ fn windows_cmd_batch_echo_through_real_pty() {
     let recipe = SpawnRecipe {
         binary,
         base_args: vec![],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Cmd,
     };
     let (out, exit_ok) = run_recipe_through_pty(-915_4004, recipe, "hello");
@@ -287,6 +291,7 @@ fn unix_kill_mid_session_unblocks_reader() {
     let recipe = SpawnRecipe {
         binary: "/bin/sh",
         base_args: vec!["-c".into(), "sleep 60".into()],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
     run_kill_mid_session_test(-915_4101, recipe);
@@ -305,6 +310,7 @@ fn windows_kill_mid_session_unblocks_reader() {
             "-n".into(),
             "60".into(),
         ],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
     run_kill_mid_session_test(-915_4102, recipe);
@@ -416,6 +422,7 @@ fn windows_kill_session_closes_master() {
     let recipe = SpawnRecipe {
         binary: "ping",
         base_args: vec!["127.0.0.1".into(), "-n".into(), "60".into()],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
     let cwd = std::env::current_dir().unwrap();
@@ -544,6 +551,7 @@ fn windows_natural_child_exit_unblocks_reader_via_watcher() {
     let recipe = SpawnRecipe {
         binary: "cmd.exe",
         base_args: vec!["/c".into(), "echo".into(), "hello".into()],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
     let session_id = -915_4105;
@@ -622,6 +630,7 @@ fn windows_pi_interactive_tui() {
             "--no-context-files".into(),
             "--no-session".into(),
         ],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Cmd,
     };
     
@@ -729,6 +738,7 @@ fn wsl_pi_interactive_tui() {
             "--no-context-files".into(),
             "--no-session".into(),
         ],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
     

@@ -49,6 +49,7 @@ impl AgentProvider for KimiAdapter {
         SpawnRecipe {
             binary: "kimi",
             base_args: vec![],
+            trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         }
     }

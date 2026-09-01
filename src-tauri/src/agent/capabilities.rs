@@ -169,6 +169,9 @@ pub struct HarnessCapabilities {
     /// the existing autopilot gate; `attention_capability` is the
     /// authoritative descriptor.
     pub attention_capability: AttentionCapability,
+    /// Whether the harness has a passive transcript watcher that supplies
+    /// standard turn lifecycle signals when no native attention hook exists.
+    pub supports_passive_turn_watcher: bool,
     /// Whether the harness writes a transcript the coordinator read API
     /// can parse into a Node Digest's rich layer (ADR-0008).
     pub produces_readable_transcript: bool,
@@ -517,9 +520,10 @@ mod tests {
         let codex = codex_caps();
         assert_eq!(codex.harness_id, "codex");
         assert!(codex.supports_resume);
+        assert!(codex.auto_resume_on_startup);
         assert!(codex.requires_attention_hook);
-        // Issue #1364 §3 — Codex's Stop + PermissionRequest hooks deliver
-        // permission approval signals under permission-ask mode.
+        // Issue #1364 §3 — Codex Stop + PermissionRequest deliver permission
+        // signals under permission-ask mode. SessionStart is capture-only.
         assert!(matches!(
             codex.attention_capability,
             AttentionCapability::Hook { launch_mode: AttentionLaunchMode::PermissionAsk, .. }
@@ -675,6 +679,7 @@ mod tests {
         assert!(commandcode.supports_resume);
         assert!(commandcode.auto_resume_on_startup);
         assert!(!commandcode.requires_attention_hook);
+        assert!(commandcode.supports_passive_turn_watcher);
         assert!(commandcode.produces_readable_transcript);
         assert!(commandcode.supports_model_override);
         assert!(commandcode.supports_effort_override);

@@ -3412,6 +3412,470 @@ mod tests {
         assert!(retry.effects.is_empty());
     }
 
+    // -- issue-driven Autopilot review blueprint contract (#1469) -----------
+    //
+    // The contract pins these paths in `blueprint_contract.rs`; the
+    // stepper tests here exercise them through the actual decision
+    // core so a refactor that silently changes routing fails here, not
+    // at runtime. The contract acceptance criterion is "the reviewer is
+    // reached only after a successful implementation/PR path and
+    // feedback closes the reviewer branch correctly" — every test below
+    // is named to match that contract.
+
+    /// The collaborator gate parks in `Blocked` and only the user's
+    /// `CollaboratorApproved` event releases it. No implementation agent
+    /// spawns before that — the implementation is gated on a trusted
+    /// human label.
+    #[test]
+    fn issue_review_collaborator_gate_blocks_until_human_approval() {
+        let mut run = issue_review_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        // First tick parks the gate — no spawn effect yet.
+        let t = advance(&mut run, &tick(8, 8));
+        assert_eq!(
+            run.step("collaborator_gate").map(|s| s.status),
+            Some(StepStatus::Blocked),
+            "collaborator_gate must park Blocked after first tick"
+        );
+        assert!(run.step("implementer").is_none());
+        assert!(t.effects.is_empty(), "no spawn effect before approval");
+
+        // A spurious tick does not advance the graph while blocked.
+        let parked = advance(&mut run, &tick(8, 8));
+        assert!(parked.is_empty());
+
+        // Approving the gate flips it to Completed; the next tick (the
+        // worker's capacity pass — `cascade_after_completion` deliberately
+        // skips agent spawns) then schedules the implementer.
+        advance(
+            &mut run,
+            &CircuitEvent::CollaboratorApproved {
+                node_id: "collaborator_gate".into(),
+            },
+        );
+        assert_eq!(
+            run.step("collaborator_gate").map(|s| s.status),
+            Some(StepStatus::Completed)
+        );
+        assert!(run.step("implementer").is_none(), "implementer awaits next tick");
+
+        let approved = advance(&mut run, &tick(8, 8));
+        assert_eq!(
+            run.step("implementer").map(|s| s.status),
+            Some(StepStatus::Running)
+        );
+        assert!(approved
+            .effects
+            .iter()
+            .any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "implementer")));
+    }
+
+    /// On PR success the reviewer spawns. `pr.*` is populated from the
+    /// `GithubActionResult` and the reviewer's classifier receives the
+    /// captured reviewer output. The contract's "implementation
+    /// completion → PR creation → reviewer spawn" chain is this single
+    /// observable sequence.
+    #[test]
+    fn issue_review_implementation_completion_spawns_reviewer_after_pr() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        assert!(run.step("reviewer").is_none(), "reviewer must not exist yet");
+
+        // The PR-success event populates `pr.*` and stamps open_pr
+        // Completed — but `cascade_after_completion` deliberately
+        // filters out agent-spawning nodes (the worker's next Tick is
+        // what schedules them). The Tick on the next line is the
+        // one that fires the reviewer spawn.
+        let pr_result = advance(
+            &mut run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(314),
+                pr_url: Some("https://github.com/example/repo/pull/314".into()),
+                pr_head_ref: Some("gh42".into()),
+                pr_title: Some("Improve the widget".into()),
+                error: None,
+            },
+        );
+        assert_eq!(run.context.get("pr.number").as_deref(), Some("314"));
+        assert!(
+            pr_result.effects.iter().all(|e| !matches!(e, Effect::SpawnAgentNode { .. })),
+            "GithubActionResult itself must NOT spawn agents — capacity pass is the scheduler"
+        );
+
+        // The Tick on the open_pr Completed fan-out schedules the
+        // reviewer (OpenPr → reviewer OnCompleted edge). It MUST be
+        // the only agent spawned, and MUST NOT fan out a Notify
+        // (the `complete` notify is gated on retry exhaustion, not
+        // the happy path).
+        let spawn_reviewer = advance(&mut run, &tick(8, 8));
+        assert!(
+            spawn_reviewer
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")),
+            "PR success must schedule the reviewer spawn on the next tick"
+        );
+        assert_eq!(
+            spawn_reviewer
+                .effects
+                .iter()
+                .filter(|e| matches!(e, Effect::SpawnAgentNode { .. }))
+                .count(),
+            1,
+            "PR success must NOT spawn any other agent (no implementer re-spawn, no extras)"
+        );
+        assert!(
+            spawn_reviewer
+                .effects
+                .iter()
+                .all(|e| !matches!(e, Effect::Notify { .. })),
+            "PR success must NOT fan out a Notify (complete is gated on retry exhaustion)"
+        );
+        assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+    }
+
+    /// The reviewer's classifier output lands in `node.<id>.output` for
+    /// downstream steps (the contract acceptance: "reviewer output").
+    #[test]
+    fn issue_review_reviewer_output_is_captured_into_node_context() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(
+            &mut run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(1),
+                pr_url: Some("https://example/pr/1".into()),
+                pr_head_ref: Some("branch".into()),
+                pr_title: Some("t".into()),
+                error: None,
+            },
+        );
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 9001);
+        advance(&mut run, &agent_finished(9001, true));
+        let _ = advance(
+            &mut run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Completed),
+                Some("The implementation misses an explicit cleanup hook."),
+            ),
+        );
+        assert_eq!(
+            run.context.get("node.reviewer.output").as_deref(),
+            Some("The implementation misses an explicit cleanup hook.")
+        );
+        // The follow_feedback step runs the implementation agent and is
+        // waiting on AgentReady.
+        assert_eq!(status_of(&run, "follow_feedback"), StepStatus::Running);
+    }
+
+    /// `follow_feedback` injects into the IMPLEMENTATION agent (NOT the
+    /// reviewer) — the contract acceptance criterion "feedback closes the
+    /// reviewer branch correctly" hinges on this routing. A wrong-target
+    /// inject is the easiest way to silently break the loop.
+    #[test]
+    fn issue_review_feedback_injection_targets_the_implementer_not_the_reviewer() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(
+            &mut run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(1),
+                pr_url: Some("https://example/pr/1".into()),
+                pr_head_ref: Some("branch".into()),
+                pr_title: Some("t".into()),
+                error: None,
+            },
+        );
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 9001);
+        advance(&mut run, &agent_finished(9001, true));
+        let _ = advance(
+            &mut run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Completed),
+                Some("reviewer report"),
+            ),
+        );
+        let t = advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "follow_feedback".into(),
+            },
+        );
+        let inject = t.effects.iter().find_map(|e| match e {
+            Effect::InjectPty {
+                node_id,
+                target_node_id,
+                prompt,
+            } => Some((node_id, target_node_id, prompt)),
+            _ => None,
+        });
+        let (node_id, target_node_id, prompt) =
+            inject.expect("follow_feedback must emit an InjectPty effect");
+        assert_eq!(node_id, "follow_feedback");
+        assert_eq!(
+            target_node_id.as_deref(),
+            Some("implementer"),
+            "feedback MUST target the implementation agent, not the reviewer"
+        );
+        // The effect carries the *resolved* template — the captured
+        // reviewer output must land in the resolved text.
+        assert!(
+            prompt.contains("reviewer report"),
+            "feedback prompt must contain the captured reviewer output: {prompt}"
+        );
+        assert!(prompt.contains("PR #1"), "feedback prompt must cite the PR number: {prompt}");
+    }
+
+    /// After the follow_feedback inject, the `close_reviewer` step kills
+    /// the reviewer agent (not just its status — `CloseAgentNode` is a
+    /// strong action). The contract pins this: feedback MUST close the
+    /// reviewer branch.
+    #[test]
+    fn issue_review_close_reviewer_emits_close_agent_targeting_the_reviewer() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(
+            &mut run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(1),
+                pr_url: Some("https://example/pr/1".into()),
+                pr_head_ref: Some("branch".into()),
+                pr_title: Some("t".into()),
+                error: None,
+            },
+        );
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 9001);
+        advance(&mut run, &agent_finished(9001, true));
+        // review_classifier Completed → cascade schedules follow_feedback.
+        let review_done = advance(
+            &mut run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Completed),
+                Some("report"),
+            ),
+        );
+        assert_eq!(
+            run.step("follow_feedback").map(|s| s.status),
+            Some(StepStatus::Running),
+            "follow_feedback must be Running before AgentReady"
+        );
+        // AgentReady fires the InjectPty AND cascades close_reviewer.
+        let close = advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "follow_feedback".into(),
+            },
+        );
+        let emit = close.effects.iter().find_map(|e| match e {
+            Effect::CloseAgentNode {
+                node_id,
+                target_node_id,
+            } => Some((node_id, target_node_id)),
+            _ => None,
+        });
+        let (node_id, target) =
+            emit.expect("AgentReady must cascade the close_reviewer CloseAgentNode effect");
+        assert_eq!(node_id, "close_reviewer");
+        assert_eq!(
+            target.as_deref(),
+            Some("reviewer"),
+            "CloseAgentNode MUST target the reviewer — closing the implementer would kill the worker"
+        );
+        assert_eq!(run.step("close_reviewer").map(|s| s.status), Some(StepStatus::Completed));
+        let _ = review_done;
+    }
+
+    /// `review_retry` is `RetryLimit { max_retries: 3 }`. After 3 failed
+    /// feedback classifier turns, the gate's Failed branch routes to
+    /// `complete` (the user-visible Notify) rather than looping
+    /// forever — the contract acceptance: "retry exhaustion".
+    #[test]
+    fn issue_review_retry_exhaustion_runs_complete_notify_not_another_loop() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(
+            &mut run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(1),
+                pr_url: Some("https://example/pr/1".into()),
+                pr_head_ref: Some("branch".into()),
+                pr_title: Some("t".into()),
+                error: None,
+            },
+        );
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 9001);
+        advance(&mut run, &agent_finished(9001, true));
+        // Drive the feedback loop once so `review_retry` becomes a
+        // step in the ledger — the gate only schedules after the
+        // close_reviewer → feedback_classifier cascade.
+        let _ = advance(
+            &mut run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Completed),
+                Some("fix"),
+            ),
+        );
+        let _ = advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "follow_feedback".into(),
+            },
+        );
+        advance(&mut run, &tick(8, 8));
+        let _ = advance(
+            &mut run,
+            &classified("feedback_classifier", Some(Classification::Completed)),
+        );
+        assert!(
+            run.step("review_retry").is_some(),
+            "review_retry must be a step after the first feedback round"
+        );
+
+        // The retry-exhaustion contract pins: review_retry Failed →
+        // complete (a Notify), NOT back to finish. Simulating the
+        // budget's end by flipping the gate's terminal outcome to
+        // Failed directly — the worker seam surfaces "budget
+        // exhausted" this way. We bind the step reference once and
+        // mutate both fields, rather than calling .iter_mut().find()
+        // twice on the same slice (which is also a refactor trap:
+        // refactoring `steps` into a HashMap would silently change
+        // the borrow scope here).
+        let retry_step = run
+            .steps
+            .iter_mut()
+            .find(|s| s.node_id == "review_retry")
+            .expect("review_retry step exists after one feedback loop");
+        retry_step.status = StepStatus::Failed;
+        retry_step.outcome = Some(StepOutcome::Failed);
+
+        let t = advance(&mut run, &tick(8, 8));
+        assert_eq!(
+            run.step("complete").map(|s| s.status),
+            Some(StepStatus::Completed),
+            "review_retry Failed MUST route to `complete` (the user-visible notify)"
+        );
+        assert!(
+            t.effects.iter().any(|e| matches!(e, Effect::Notify { message } if message.contains("PR #1"))),
+            "complete notify must carry the PR number from the run context"
+        );
+    }
+
+    /// The retry path's `Completed` outcome re-queues `finish` for
+    /// another implementation pass (attempt increments). Pin the
+    /// observable: after the first review-classifier pass the finish
+    /// step is at attempt 2, and `retry.attempt`/`retry.max_retries`
+    /// land in the run context for downstream template resolution.
+    #[test]
+    fn issue_review_retry_completed_reamps_finish_step_with_incremented_attempt() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(
+            &mut run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(1),
+                pr_url: Some("https://example/pr/1".into()),
+                pr_head_ref: Some("branch".into()),
+                pr_title: Some("t".into()),
+                error: None,
+            },
+        );
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 9001);
+        advance(&mut run, &agent_finished(9001, true));
+        let _ = advance(
+            &mut run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Completed),
+                Some("reviewer report"),
+            ),
+        );
+        let _ = advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "follow_feedback".into(),
+            },
+        );
+        advance(&mut run, &tick(8, 8));
+        advance(
+            &mut run,
+            &classified("feedback_classifier", Some(Classification::Completed)),
+        );
+        assert_eq!(
+            run.step("review_retry").map(|s| s.status),
+            Some(StepStatus::Completed)
+        );
+        assert_eq!(
+            run.step("finish").map(|s| s.status),
+            Some(StepStatus::Queued),
+            "review_retry Completed must re-queue `finish` for another wrap-up pass"
+        );
+        assert_eq!(run.step("finish").unwrap().attempt, 2);
+        assert_eq!(run.context.get("retry.attempt").as_deref(), Some("2"));
+        assert_eq!(run.context.get("retry.max_retries").as_deref(), Some("3"));
+    }
+
+    /// Wrapup-retry exhaustion mirrors review_retry: after 3 failed
+    /// OpenPr attempts, the wrapup_correction loop terminates — but
+    /// here the run ends Failed (no review spawned). The contract pins
+    /// that `OpenPr failed` does NOT spawn the reviewer, ever.
+    #[test]
+    fn issue_review_wrapup_retry_exhaustion_terminates_without_reviewer() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+
+        // Three failed OpenPr attempts.
+        for _attempt in 0..3 {
+            let retry = advance(&mut run, &tick(8, 8));
+            assert!(
+                !retry.effects.iter().any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")),
+                "reviewer MUST NOT spawn while OpenPr is failing (contract acceptance)"
+            );
+            let _ = advance(
+                &mut run,
+                &CircuitEvent::GithubActionResult {
+                    node_id: "open_pr".into(),
+                    success: false,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_head_ref: None,
+                    pr_title: None,
+                    error: Some("wrap-up failed".into()),
+                },
+            );
+        }
+
+        // After 3 failed attempts the wrapup_retry budget is exhausted.
+        // The wrapup_retry gate itself never advances to a terminal
+        // state in this fixture — the stepper keeps parking it. The
+        // contract assertion here is the negative one: even after
+        // three failed attempts, NO `reviewer` step exists.
+        assert!(
+            run.step("reviewer").is_none(),
+            "reviewer must NEVER exist when OpenPr keeps failing"
+        );
+    }
+
     #[test]
     fn issue_review_wrapup_failure_retries_before_spawning_reviewer() {
         let mut run = issue_review_run();

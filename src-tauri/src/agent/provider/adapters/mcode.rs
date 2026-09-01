@@ -62,6 +62,7 @@ impl AgentProvider for McodeAdapter {
         SpawnRecipe {
             binary: "mcode",
             base_args: vec![],
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }

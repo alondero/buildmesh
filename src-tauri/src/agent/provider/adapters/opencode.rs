@@ -63,6 +63,7 @@ impl AgentProvider for OpenCodeAdapter {
         SpawnRecipe {
             binary: "opencode",
             base_args: vec![],
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }
@@ -108,7 +109,13 @@ impl AgentProvider for OpenCodeAdapter {
         false
     }
 
-    fn after_fresh_spawn(&self, node_id: i64, spawn_path: &str, env_type: EnvType) {
+    fn after_fresh_spawn(
+        &self,
+        node_id: i64,
+        spawn_path: &str,
+        env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
         crate::services::opencode_session::start_capture_poller(
             node_id,
             spawn_path.to_string(),

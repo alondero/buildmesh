@@ -1,4 +1,4 @@
-# 28. Probe context lenses and scope ownership
+# 29. Probe context lenses and scope ownership
 
 ## Status
 

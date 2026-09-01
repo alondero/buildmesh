@@ -14,8 +14,10 @@
 //! shared default implementation [`default_prepare`] composes these by
 //! consulting the existing `*_args` helpers on the trait, so every adapter
 //! that follows the Claude-shaped recipe gets the correct behaviour for
-//! free; adapters that diverge (Codex's subcommand-style resume) override
-//! [`AgentProvider::prepare_launch`] themselves.
+//! free; adapters whose CLI keeps positionals after options (Codex
+//! `resume [OPTIONS] <id>`) put those positionals in
+//! [`crate::agent::provider::SpawnRecipe::trailing_args`] rather than
+//! overriding [`AgentProvider::prepare_launch`].
 //!
 //! The capability contract travels with the recipe so a single test
 //! (`spawn::tests::capability_recipe_coherence`) can prove they agree:
@@ -130,9 +132,9 @@ fn normalize_prefill_newlines(text: &str) -> String {
 
 /// Shared default implementation of [`AgentProvider::prepare_launch`] for
 /// the Claude-shaped recipe (every adapter that follows the base-recipe +
-/// flag-arg pattern). Adapters that diverge (Codex's subcommand-style
-/// resume) override the trait method to call this default and then patch
-/// the resulting `PreparedHarnessLaunch`.
+/// flag-arg pattern). Subcommand-style resume (Codex) returns options in
+/// `base_args` and the session id in `trailing_args`; this helper layers
+/// flags onto `base_args` and never relocates trailing positionals.
 ///
 /// The function is pure: no I/O, no DB, no globals. It consumes the
 /// capability-masked `ResolvedAgentConfig` and the session mode by
@@ -148,6 +150,9 @@ pub fn default_prepare(
     let base_recipe = adapter.spawn_recipe(input.platform, input.runtime);
 
     // The base recipe before session-id / override / prefill args are layered on.
+    // Subcommand resume (Codex) returns options in `base_args` and the session
+    // id in `trailing_args`. Layer flags onto `base_args` only — never pop
+    // from the adapter's argv.
     let mut recipe = match input.session {
         SessionIdModeRef::Resume(id) => {
             if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(input.platform, id) {
@@ -242,7 +247,16 @@ pub fn default_prepare(
     if capabilities.supports_prefill {
         if let Some(text) = input.prefill.filter(|s| !s.is_empty()) {
             let normalized = normalize_prefill_newlines(text);
-            recipe.base_args.extend(adapter.prefill_args(&normalized));
+            let args = adapter.prefill_args(&normalized);
+            // Prefill after a trailing session id is also positional
+            // (`codex resume [OPTIONS] <id> [PROMPT]`). Flag-shaped prefill
+            // (`--prefill text`) stays on `base_args` when there are no
+            // trailing positionals.
+            if recipe.trailing_args.is_empty() {
+                recipe.base_args.extend(args);
+            } else {
+                recipe.trailing_args.extend(args);
+            }
         }
     }
 
@@ -318,9 +332,10 @@ mod tests {
         assert_eq!(prepared.recipe.binary, base.binary);
         assert_eq!(prepared.recipe.windows_shell, base.windows_shell);
         assert!(
-            prepared.recipe.base_args.is_empty(),
-            "terminal harness must not synthesise any args for empty input, got {:?}",
-            prepared.recipe.base_args
+            prepared.recipe.base_args.is_empty() && prepared.recipe.trailing_args.is_empty(),
+            "terminal harness must not synthesise any args for empty input, got {:?} + {:?}",
+            prepared.recipe.base_args,
+            prepared.recipe.trailing_args
         );
         assert!(!prepared.environment.resets_backend_env);
         assert!(prepared.environment.env_remove.is_empty());
@@ -387,18 +402,56 @@ mod tests {
             sandbox: false,
         };
         let prepared = default_prepare(adapter, input);
-        // Codex's resume recipe is `codex resume sess-xyz ...base_flags`
+        // Codex's resume recipe is `codex resume [OPTIONS] sess-xyz`
         // — the "resume" positional is a subcommand the base recipe
-        // would not include.
+        // would not include, and the id stays after options.
         assert!(
             prepared.recipe.base_args.iter().any(|a| a == "resume"),
             "Codex resume must use the subcommand recipe, got {:?}",
             prepared.recipe.base_args
         );
-        assert!(
-            prepared.recipe.base_args.iter().any(|a| a == "sess-xyz"),
-            "Codex resume recipe must carry the session id, got {:?}",
+        let args: Vec<&str> = prepared.recipe.argv().collect();
+        assert_eq!(
+            args.last().copied(),
+            Some("sess-xyz"),
+            "session id must be last among options, got {args:?}"
+        );
+        assert_eq!(
+            prepared.recipe.trailing_args,
+            vec!["sess-xyz".to_string()],
+            "session id belongs in trailing_args, not base_args: {:?}",
             prepared.recipe.base_args
+        );
+    }
+
+    #[test]
+    fn default_prepare_codex_resume_keeps_session_id_after_model() {
+        let adapter = &crate::agent::provider::adapters::CODEX as &dyn AgentProvider;
+        let config = ResolvedAgentConfig {
+            model: Some("gpt-5.4".into()),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume("sess-xyz"),
+            config: &config,
+            prefill: Some("continue"),
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        let args: Vec<&str> = prepared.recipe.argv().collect();
+        let model_at = args.iter().position(|arg| *arg == "--model").expect("model flag");
+        let id_at = args.iter().position(|arg| *arg == "sess-xyz").expect("session id");
+        let prefill_at = args.iter().position(|arg| *arg == "continue").expect("prefill");
+        assert!(
+            model_at < id_at && id_at < prefill_at,
+            "expected resume [OPTIONS] <id> <prompt>, got {args:?}"
+        );
+        assert_eq!(
+            prepared.recipe.trailing_args,
+            vec!["sess-xyz".to_string(), "continue".to_string()],
+            "session id and prompt must stay in trailing_args so later option layers cannot overtake them"
         );
     }
 

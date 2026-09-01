@@ -52,28 +52,28 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot   # scripts/ -> repo root
 $failed = @()
 
-# A non-Git-for-Windows git.exe earlier in PATH (seen: devkitPro's MSYS2 git
-# shadowing it in Buildmesh agent sessions) writes POSIX-style worktree gitdir
-# paths ("/home/<user>/AppData/...") that Windows libgit2 can't resolve — ~20
-# git::worktree / agent::spawn / commands::pr tests fail with
-# "failed to resolve path '/home/<user>/...'". Pin Git for Windows first.
+# Git for Windows must win two PATH races in agent shells:
+#   * git.exe — a non-GfW git (seen: devkitPro MSYS2) writes POSIX worktree
+#     gitdir paths ("/home/<user>/AppData/...") that Windows libgit2 can't
+#     resolve (~20 git::worktree / agent::spawn / commands::pr tests).
+#   * openssl.exe — the same MSYS2 copy dies with "add_item ... failed"
+#     (http::tls cert tests). GfW ships a working openssl in usr\bin.
+# Git\usr\bin also contains an MSYS git.exe, so cmd must stay in front of
+# usr\bin. Construct that order once; do not prepend A, then B, then A again.
 $gitForWindows = 'C:\Program Files\Git\cmd'
-$gitOnPath = (Get-Command git -ErrorAction SilentlyContinue).Source
-if ((Test-Path (Join-Path $gitForWindows 'git.exe')) -and ($gitOnPath -notlike "$gitForWindows*")) {
-  Write-Host "== PATH git is '$gitOnPath' -> pinning $gitForWindows first ==" -ForegroundColor Yellow
-  $env:PATH = "$gitForWindows;$env:PATH"
-}
-
-# Same trap, different binary: the http::tls cert tests shell out to `openssl`,
-# and devkitPro's MSYS2 copy (seen shadowing it in agent PowerShell sessions,
-# independently of which git.exe resolves) dies with "add_item ... failed"
-# before doing any work — false-failing 4 tests. Git for Windows ships a
-# working openssl in usr\bin; pin it first when openssl resolves elsewhere.
 $gitUsrBin = 'C:\Program Files\Git\usr\bin'
+$hasGitCmd = Test-Path (Join-Path $gitForWindows 'git.exe')
+$hasGitUsrBin = Test-Path (Join-Path $gitUsrBin 'openssl.exe')
+$gitOnPath = (Get-Command git -ErrorAction SilentlyContinue).Source
 $openSslOnPath = (Get-Command openssl -ErrorAction SilentlyContinue).Source
-if ((Test-Path (Join-Path $gitUsrBin 'openssl.exe')) -and ($openSslOnPath -notlike 'C:\Program Files\Git\*')) {
-  Write-Host "== PATH openssl is '$openSslOnPath' -> pinning $gitUsrBin first ==" -ForegroundColor Yellow
-  $env:PATH = "$gitUsrBin;$env:PATH"
+$gitWrong = $hasGitCmd -and ($gitOnPath -notlike "$gitForWindows*")
+$opensslWrong = $hasGitUsrBin -and ($openSslOnPath -notlike 'C:\Program Files\Git\*')
+if ($gitWrong -or $opensslWrong) {
+  $pin = @()
+  if ($hasGitCmd) { $pin += $gitForWindows }
+  if ($hasGitUsrBin) { $pin += $gitUsrBin }
+  Write-Host "== PATH git='$gitOnPath' openssl='$openSslOnPath' -> pinning $($pin -join ';') first ==" -ForegroundColor Yellow
+  $env:PATH = "$($pin -join ';');$env:PATH"
 }
 
 function Ensure-MobileBuilt {

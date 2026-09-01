@@ -209,6 +209,11 @@ fn pending_removal_schema() -> rusqlite::Connection {
             node_name TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        -- `delete_agent_node_enqueueing_removal_inner` clears the
+        -- per-node semantic-turn row from `app_settings` in the same
+        -- transaction as the agent_nodes delete; without this table
+        -- the in-memory fixture fails on a `no such table` SQLite
+        -- error before the worktree-removal branch even runs.
         CREATE TABLE app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL

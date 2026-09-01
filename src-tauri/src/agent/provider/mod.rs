@@ -11,12 +11,17 @@ pub mod provider_conf;
 use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Runtime facts resolved by provider preflight and shared with the adapter's
 /// provisioning seams. An empty context means the adapter should resolve its
 /// ordinary native/default runtime. `harness_home` is a harness-specific
 /// configuration root (for example Codex's `CODEX_HOME`), not the operating
 /// system user's home directory.
+///
+/// Domain identity such as the Buildmesh node id is not a runtime fact —
+/// pass it as its own argument (see [`AgentProvider::provision_attention_hooks`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchRuntime {
     /// Harness configuration root selected for the process, when preflight
@@ -101,11 +106,28 @@ pub enum WindowsShell {
 
 /// The provider's spawn recipe for a given host platform.
 /// `spawn_environment::wrap` consumes this plus an `EnvType` to produce a `CommandBuilder`.
+///
+/// `base_args` are options / flags. `trailing_args` are positionals that must
+/// follow every option — Codex resume is `resume [OPTIONS] <session-id> [PROMPT]`.
+/// Later layers (model/effort/sandbox, Codex proxy `--profile`/`--model`)
+/// append to `base_args` only. `wrap` concatenates `base_args` then
+/// `trailing_args` so a UUID never becomes the optional prompt.
 #[derive(Debug, Clone)]
 pub struct SpawnRecipe {
     pub binary: &'static str,
     pub base_args: Vec<String>,
+    pub trailing_args: Vec<String>,
     pub windows_shell: WindowsShell,
+}
+
+impl SpawnRecipe {
+    /// Options then trailing positionals, in the order the child argv must have.
+    pub fn argv(&self) -> impl Iterator<Item = &str> {
+        self.base_args
+            .iter()
+            .map(String::as_str)
+            .chain(self.trailing_args.iter().map(String::as_str))
+    }
 }
 
 /// The direct `claude` / `claude.exe` invocation used by the Claude-backed
@@ -126,6 +148,7 @@ pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
     SpawnRecipe {
         binary,
         base_args: vec!["--dangerously-skip-permissions".into()],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     }
 }
@@ -320,6 +343,12 @@ pub trait AgentProvider: Send + Sync {
         crate::agent::capabilities::AttentionCapability::None
     }
 
+    /// Whether this harness supplies turn lifecycle signals through a passive
+    /// transcript watcher rather than a native attention hook.
+    fn supports_passive_turn_watcher(&self) -> bool {
+        false
+    }
+
     /// Ensure the workspace is trusted for this harness before its process is
     /// created. Trust is a launch prerequisite, independent of attention-hook
     /// installation. Providers with vendor-specific trust stores opt in by
@@ -345,11 +374,16 @@ pub trait AgentProvider: Send + Sync {
     ///
     /// Provision attention hooks for one resolved runtime before its process
     /// starts. The resolved path and runtime context let adapters choose the
-    /// correct host or guest configuration location.
+    /// correct host or guest configuration location. `node_id` is the
+    /// Buildmesh node that should receive the callback — required for
+    /// harnesses that bake the URL because their hook runner strips
+    /// `BUILDMESH_*` (Codex). Adapters that expand env at hook-run time
+    /// ignore it.
     fn provision_attention_hooks(
         &self,
         resolved: &ResolvedPath,
         _runtime: &LaunchRuntime,
+        _node_id: i64,
     ) -> Result<(), String> {
         let _ = resolved;
         Ok(())
@@ -422,10 +456,46 @@ pub trait AgentProvider: Send + Sync {
     /// SQLite store for the `ses_…` id the TUI just minted. Adapters own
     /// the capture implementation — spawn must not hard-code a provider
     /// service behind a boolean flag.
-    fn after_fresh_spawn(&self, _node_id: i64, _spawn_path: &str, _env_type: EnvType) {}
+    fn after_fresh_spawn(
+        &self,
+        _node_id: i64,
+        _spawn_path: &str,
+        _env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
+    }
+
+    /// Hook immediately before an existing CLI session is resumed. A harness
+    /// can snapshot transcript state and attach session-scoped services here,
+    /// before the child gets a chance to write its first resumed turn.
+    fn before_resume_spawn<'a>(
+        &'a self,
+        _node_id: i64,
+        _session_id: &str,
+        _spawn_path: &str,
+        _env_type: EnvType,
+        _app: &'a tauri::AppHandle,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
+    /// Called after the generic lifecycle sink has persisted the initial
+    /// `Spawning` state. Providers with passive lifecycle services use this to
+    /// release any pre-spawn gate; unrelated providers remain no-ops.
+    fn on_spawn_activated(&self, _node_id: i64) {}
+
+    /// Called whenever generic runtime teardown cancels or observes the
+    /// process. Providers use this to release session-scoped lifecycle state.
+    fn on_process_terminated(&self, _node_id: i64) {}
 
     /// Alternative recipe for resume (subcommand-style providers like Codex).
-    /// If Some, `build_spawn_command()` uses this instead of `spawn_recipe()` + `resume_args()`.
+    /// If Some, `default_prepare` uses this instead of `spawn_recipe()` + `resume_args()`.
+    ///
+    /// Put options in [`SpawnRecipe::base_args`] and the session id in
+    /// [`SpawnRecipe::trailing_args`]. `default_prepare` layers model /
+    /// effort / extra / sandbox onto `base_args` and never inspects or
+    /// relocates trailing positionals — so a future adapter that adds a
+    /// trailing flag cannot have that flag amputated by a blind `.pop()`.
     fn spawn_recipe_for_resume(&self, _platform: Platform, _session_id: &str) -> Option<SpawnRecipe> {
         None
     }
@@ -571,6 +641,7 @@ pub trait AgentProvider: Send + Sync {
             auto_resume_on_startup: self.auto_resume_on_startup(),
             requires_attention_hook: self.requires_attention_hook(),
             attention_capability: self.attention_capability(),
+            supports_passive_turn_watcher: self.supports_passive_turn_watcher(),
             produces_readable_transcript: self.produces_readable_transcript(),
             supports_model_override: self.supports_model_override(),
             supports_effort_override: !matches!(effort_control, EffortControlKind::None),
@@ -590,9 +661,9 @@ pub trait AgentProvider: Send + Sync {
     /// [`crate::agent::launch::PreparedHarnessLaunch`] — recipe +
     /// capability contract + env policy — so `build_spawn_command_prepared`
     /// no longer has to reassemble per-adapter semantics from many
-    /// independent trait methods. Adapters that diverge (e.g. Codex's
-    /// subcommand-style resume) can override; nothing in the current
-    /// set needs to.
+    /// independent trait methods. Subcommand-style resume (Codex) is
+    /// expressed as `trailing_args` on the recipe, not a `prepare_launch`
+    /// override; nothing in the current set needs to override this.
     ///
     /// `where Self: Sized` because the default coerces `&Self` to a
     /// `&dyn AgentProvider` to call the shared helper. Object-safe
@@ -609,6 +680,18 @@ pub trait AgentProvider: Send + Sync {
     {
         crate::agent::launch::default_prepare(self, input)
     }
+}
+
+/// Route generic process teardown through the provider seam. Runtime modules
+/// do not need to know which provider owns a node or which session-scoped
+/// lifecycle service it installed.
+pub(crate) fn notify_process_terminated(node_id: i64) {
+    let Ok(node) = crate::db::get_agent_node_by_id(node_id) else {
+        return;
+    };
+    crate::preferences::resolve_harness_provider(&node.provider)
+        .adapter()
+        .on_process_terminated(node_id);
 }
 
 #[cfg(test)]

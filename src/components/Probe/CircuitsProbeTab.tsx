@@ -12,6 +12,23 @@
  * Live updates ride the backend's `circuit-run-updated` event so a run
  * visibly lands as Completed without a manual refresh; every user
  * action refetches anyway.
+ *
+ * Scroll ownership (issue #1468)
+ * ------------------------------
+ * ONE scroll owner: the `[data-testid=circuits-probe-body]` div. The tab
+ * root is layout-only (`flex flex-col h-full min-h-0`), which keeps
+ * `ProbePanel`'s outer `flex-1 overflow-y-auto` inert — its content is
+ * exactly its own height, so it never gains a scrollbar of its own. The
+ * New Circuit toolbar sits OUTSIDE the scroller as a `shrink-0` sibling,
+ * so it stays put while the ledger scrolls. This is the same shape the
+ * shared `<ProbeTabBody>` primitive gives every other tab; Circuits
+ * predates it and previously put `overflow-y-auto` on its own root,
+ * stacking a second scroller inside the panel's.
+ *
+ * `overflow-x-hidden` is explicit, not decorative: `overflow-y-auto`
+ * alone computes `overflow-x: auto` (CSS forbids one axis being `visible`
+ * while the other scrolls), which is how a long diagnostic used to be
+ * able to scroll the whole tab sideways.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -30,30 +47,12 @@ import {
   type CircuitTriggerKind,
   type CircuitWithRuns,
 } from '../../lib/tauri';
+import { isTerminalRunState } from '../Circuits/circuitGraphModel';
+import { countRunningSteps } from '../Circuits/runDiagnostics';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
 import { EmptyState } from '../shared/Spinner';
-
-/** Tailwind token classes for the ledger's run/step status vocabulary. */
-function statusClass(status: string): string {
-  switch (status) {
-    case 'completed':
-      return 'text-status-success';
-    case 'running':
-      return 'text-accent-cyan animate-pulse';
-    case 'paused':
-    case 'blocked':
-      return 'text-status-warning';
-    case 'pending':
-    case 'pending_slot':
-      return 'text-text-muted';
-    case 'failed':
-    case 'cancelled':
-      return 'text-status-error';
-    default:
-      return 'text-text-muted';
-  }
-}
+import { CircuitRunCard } from './CircuitRunCard';
 
 export function CircuitsProbeTab() {
   const { activeMeshId } = useProbeContext();
@@ -62,6 +61,24 @@ export function CircuitsProbeTab() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * Explicit run-card disclosure overrides, keyed by run id. Absent means
+   * "use the default" (live runs open, terminal runs closed) — storing
+   * only deliberate toggles is what lets the `circuit-run-updated`
+   * refetch land without snapping a card the user just opened shut.
+   */
+  const [runExpandOverrides, setRunExpandOverrides] = useState<Record<number, boolean>>({});
+  /**
+   * Clock the duration labels measure a live run against.
+   *
+   * This has to tick on its own. Baselining it on fetch was wrong: a run's
+   * `updated_at` only moves on a *state transition*, so a step that churns
+   * for ten minutes emits no `circuit-run-updated` and the elapsed time
+   * would sit frozen at whatever it read when the tab last loaded — which
+   * is worse than showing nothing, because a stalled run would look fresh.
+   * `UsageTab` sets the precedent for a 1s tick on a relative-time label.
+   */
+  const [now, setNow] = useState(() => new Date());
   // New-Circuit row: name + trigger shape, then straight into the editor.
   const [newName, setNewName] = useState('');
   const [blueprint, setBlueprint] = useState<CircuitBlueprintKind>('walking_skeleton');
@@ -109,6 +126,18 @@ export function CircuitsProbeTab() {
     };
   }, [activeMeshId, load]);
 
+  // Advance the duration clock while any visible run is still open. Gated
+  // on `hasLiveRun` so a tab showing only finished runs — whose durations
+  // are fixed by their own `updated_at` — re-renders never.
+  const hasLiveRun = rows.some(({ runs }) =>
+    runs.some(({ run }) => !isTerminalRunState(run.state))
+  );
+  useEffect(() => {
+    if (!hasLiveRun) return;
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, [hasLiveRun]);
+
   const runAction = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setActionError(null);
@@ -121,6 +150,20 @@ export function CircuitsProbeTab() {
     } finally {
       setBusy(false);
     }
+  };
+
+  /**
+   * Flip one run card's disclosure. The override is recorded against the
+   * *current* default so a card that is open only because the run is live
+   * still closes on the first click (and vice-versa) — deriving the next
+   * value from `!override[id]` alone would need two clicks whenever the
+   * default disagreed with `false`.
+   */
+  const toggleRunExpanded = (runId: number, runState: string) => {
+    setRunExpandOverrides((prev) => {
+      const current = prev[runId] ?? !isTerminalRunState(runState);
+      return { ...prev, [runId]: !current };
+    });
   };
 
   const handleCreate = () =>
@@ -153,8 +196,10 @@ export function CircuitsProbeTab() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto text-sm" data-testid="circuits-probe-tab">
-      {/* New Circuit row — authoring itself happens in the canvas editor. */}
+    // Layout only — see the "Scroll ownership" note in the file header.
+    <div className="flex flex-col h-full min-h-0 text-sm" data-testid="circuits-probe-tab">
+      {/* New Circuit row — authoring itself happens in the canvas editor.
+          Outside the scroller, so it stays put while the ledger scrolls. */}
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
         <div className="flex items-center gap-1 mb-1">
           <input
@@ -243,146 +288,113 @@ export function CircuitsProbeTab() {
       </div>
 
       {(loadError !== null || actionError !== null) && (
-        <div className="px-3 py-1 text-xs text-status-error" role="alert">
+        <div className="px-3 py-1 text-xs text-status-error shrink-0" role="alert">
           {actionError ?? loadError}
         </div>
       )}
 
-      {rows.length === 0 ? (
-        <div className="p-4">
-          <EmptyState
-            label="No circuits yet"
-            hint="Create one above — it opens straight in the flow editor."
-          />
-        </div>
-      ) : (
-        <ul className="flex flex-col gap-1 p-2">
-          {rows.map(({ circuit, runs }) => (
-            <li key={circuit.id} className="rounded-md border border-border-subtle p-2" data-testid="circuit-row">
-              <div className="flex items-center justify-between gap-2">
-                <label className="flex items-center gap-1.5 min-w-0">
-                  <input
-                    type="checkbox"
-                    checked={circuit.enabled}
-                    onChange={() =>
-                      runAction(() => setCircuitEnabled(circuit.id, !circuit.enabled))
-                    }
-                    aria-label={`Enable ${circuit.name}`}
-                    data-testid={`circuit-enabled-${circuit.id}`}
-                  />
-                  <span className="truncate text-text-primary">{circuit.name}</span>
-                </label>
-                <span className="flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => openCircuitEditor(circuit.id)}
-                    data-testid={`circuit-edit-flow-${circuit.id}`}
-                    className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet hover:bg-accent-violet/25"
-                  >
-                    Edit Flow
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => runAction(() => triggerCircuitNow(circuit.id))}
-                    disabled={busy}
-                    data-testid={`circuit-trigger-${circuit.id}`}
-                    className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
-                  >
-                    Trigger Now
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => runAction(() => deleteCircuit(circuit.id))}
-                    disabled={busy}
-                    aria-label={`Delete ${circuit.name}`}
-                    data-testid={`circuit-delete-${circuit.id}`}
-                    className="px-1.5 py-0.5 rounded-md text-text-muted hover:text-status-error"
-                  >
-                    ✕
-                  </button>
-                </span>
-              </div>
+      {/* THE scroll owner for this tab. `overflow-x-hidden` is load-bearing
+          — see the file header. */}
+      <div
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
+        data-testid="circuits-probe-body"
+      >
+        {rows.length === 0 ? (
+          <div className="p-4">
+            <EmptyState
+              label="No circuits yet"
+              hint="Create one above — it opens straight in the flow editor."
+            />
+          </div>
+        ) : (
+          <ul className="flex flex-col gap-1 p-2">
+            {rows.map(({ circuit, runs }) => {
+              // One capacity snapshot per circuit, shared by its run cards
+              // — `countRunningSteps` walks every run, so computing it
+              // inside the run loop would be quadratic for nothing.
+              const capacity = {
+                concurrencyLimit: circuit.concurrency_limit,
+                runningSteps: countRunningSteps(runs),
+              };
+              return (
+              <li key={circuit.id} className="rounded-md border border-border-subtle p-2" data-testid="circuit-row">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 min-w-0">
+                    <input
+                      type="checkbox"
+                      checked={circuit.enabled}
+                      onChange={() =>
+                        runAction(() => setCircuitEnabled(circuit.id, !circuit.enabled))
+                      }
+                      aria-label={`Enable ${circuit.name}`}
+                      data-testid={`circuit-enabled-${circuit.id}`}
+                    />
+                    <span className="truncate text-text-primary" title={circuit.name}>
+                      {circuit.name}
+                    </span>
+                  </label>
+                  <span className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => openCircuitEditor(circuit.id)}
+                      data-testid={`circuit-edit-flow-${circuit.id}`}
+                      className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet hover:bg-accent-violet/25"
+                    >
+                      Edit Flow
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runAction(() => triggerCircuitNow(circuit.id))}
+                      disabled={busy}
+                      data-testid={`circuit-trigger-${circuit.id}`}
+                      className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
+                    >
+                      Trigger Now
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runAction(() => deleteCircuit(circuit.id))}
+                      disabled={busy}
+                      aria-label={`Delete ${circuit.name}`}
+                      data-testid={`circuit-delete-${circuit.id}`}
+                      className="px-1.5 py-0.5 rounded-md text-text-muted hover:text-status-error"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                </div>
 
-              {/* Run list */}
-              {runs.length > 0 && (
-                <ul className="mt-1 ml-5 text-xs" data-testid={`circuit-runs-${circuit.id}`}>
-                  {runs.map(({ run, steps }) => (
-                    <li key={run.id} className="flex items-baseline gap-2 py-0.5 flex-wrap">
-                      <span className="text-text-muted">#{run.id}</span>
-                      <span className={statusClass(run.state)} data-testid={`run-state-${run.id}`}>
-                        {run.state}
-                      </span>
-                      {/* Graceful pause/resume (#1207). */}
-                      {run.state === 'running' && (
-                        <button
-                          type="button"
-                          onClick={() => runAction(() => pauseCircuitRun(run.id))}
-                          disabled={busy}
-                          data-testid={`run-pause-${run.id}`}
-                          className="px-1.5 rounded-md bg-text-muted/10 text-text-muted hover:text-text-primary"
-                        >
-                          Pause
-                        </button>
-                      )}
-                      {run.state === 'paused' && (
-                        <button
-                          type="button"
-                          onClick={() => runAction(() => resumeCircuitRun(run.id))}
-                          disabled={busy}
-                          data-testid={`run-resume-${run.id}`}
-                          className="px-1.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25"
-                        >
-                          Resume
-                        </button>
-                      )}
-                      <span className="truncate text-text-muted" title={run.trigger_identity}>
-                        {steps.length > 0
-                          ? steps.map((s) => `${s.node_id}:${s.status}`).join(' → ')
-                          : 'no steps'}
-                      </span>
-                      {/* Blocked collaborator gates (#1207): amber badge + Approve. */}
-                      {steps
-                        .filter((s) => s.status === 'blocked')
-                        .map((s) => (
-                          <span
-                            key={s.node_id}
-                            className="inline-flex items-center gap-1 px-1.5 rounded-md bg-status-warning/15 text-status-warning"
-                            data-testid={`blocked-badge-${run.id}-${s.node_id}`}
-                          >
-                            ⏸ waiting for approval: {s.node_id}
-                            <button
-                              type="button"
-                              onClick={() => runAction(() => approveCircuitStep(run.id, s.node_id))}
-                              disabled={busy}
-                              aria-label={`Approve ${s.node_id} on run ${run.id}`}
-                              data-testid={`approve-${run.id}-${s.node_id}`}
-                              className="px-1 rounded-md bg-status-warning/25 hover:bg-status-warning/40 font-semibold"
-                            >
-                              Approve
-                            </button>
-                          </span>
-                        ))}
-                      {/* Failure detail — first errored step surfaces its message. */}
-                      {(() => {
-                        const failed = steps.find((s) => s.error_message);
-                        return failed ? (
-                          <span
-                            className="text-status-error truncate"
-                            data-testid={`run-error-${run.id}`}
-                            title={failed.error_message ?? ''}
-                          >
-                            ⚠ {failed.error_message}
-                          </span>
-                        ) : null;
-                      })()}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+                {/* Run ledger — one expandable diagnostic card per run
+                    (#1468), replacing the old truncated one-line chain. */}
+                {runs.length > 0 && (
+                  <ul className="mt-1.5 flex flex-col gap-1" data-testid={`circuit-runs-${circuit.id}`}>
+                    {runs.map((detail) => (
+                      <CircuitRunCard
+                        key={detail.run.id}
+                        detail={detail}
+                        capacity={capacity}
+                        expanded={
+                          runExpandOverrides[detail.run.id] ??
+                          !isTerminalRunState(detail.run.state)
+                        }
+                        onToggleExpanded={() => toggleRunExpanded(detail.run.id, detail.run.state)}
+                        now={now}
+                        busy={busy}
+                        onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
+                        onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}
+                        onApprove={(nodeId) =>
+                          runAction(() => approveCircuitStep(detail.run.id, nodeId))
+                        }
+                      />
+                    ))}
+                  </ul>
+                )}
+              </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

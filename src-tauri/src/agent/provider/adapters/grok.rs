@@ -159,6 +159,7 @@ impl AgentProvider for GrokAdapter {
         SpawnRecipe {
             binary: "grok",
             base_args: vec![],
+            trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         }
     }
@@ -217,6 +218,7 @@ impl AgentProvider for GrokAdapter {
         &self,
         _resolved: &ResolvedPath,
         _runtime: &LaunchRuntime,
+        _node_id: i64,
     ) -> Result<(), String> {
         let dir = grok_home()?;
         std::fs::create_dir_all(&dir)
@@ -285,7 +287,7 @@ mod tests {
             env_type: EnvType::Windows,
         };
         GROK
-            .provision_attention_hooks(&resolved, &LaunchRuntime::default())
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
             .unwrap();
     }
 
