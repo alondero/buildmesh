@@ -514,9 +514,15 @@ mod tests {
                 );
                 let resume_at = invocation.find("resume\n").expect("resume subcommand");
                 let id_at = invocation.find("\nresume-session").expect("session id");
+                let profile_at = invocation.find("--profile").expect("proxy profile");
+                let model_at = invocation.find("--model").expect("proxy model");
                 assert!(
                     resume_at < id_at,
                     "session id must follow the resume subcommand; got {invocation:?}"
+                );
+                assert!(
+                    profile_at < id_at && model_at < id_at,
+                    "proxy --profile/--model are options and must precede the resume UUID; got {invocation:?}"
                 );
             }
         }

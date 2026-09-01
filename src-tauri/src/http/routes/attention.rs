@@ -318,30 +318,25 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
         message: payload.message.clone(),
         ..Default::default()
     };
-    if payload
+    let event = payload
         .hook_event_name
         .as_deref()
-        .is_some_and(|name| name.eq_ignore_ascii_case("SessionStart"))
-    {
+        .map(str::to_ascii_lowercase);
+    let event = event.as_deref();
+    if event == Some("sessionstart") {
         return Classified {
             decision: Decision::Ignore,
             detail,
         };
     }
-    if matches!(
-        payload.hook_event_name.as_deref().map(str::to_ascii_lowercase).as_deref(),
-        Some("permissionrequest") | Some("pretooluse")
-    ) {
+    if matches!(event, Some("permissionrequest") | Some("pretooluse")) {
         return Classified::mark_input(detail);
     }
     // Grok posts `hookEventName: "notification"` (lowercase); Claude posts
     // `"Notification"`. Match case-insensitively so the structured
     // `notificationType` handling below applies to both.
-    if payload
-        .hook_event_name
-        .as_deref()
-        .is_some_and(|n| n.eq_ignore_ascii_case("Notification"))
-    {
+    if event == Some("notification") {
+
         // Claude Code's documented Notification envelope is "… needs your
         // permission to use X" — anchored to the verb phrase, not a bare
         // "permission" substring, so prose like "Permission was already
@@ -386,8 +381,8 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
     // explicitly "Stop" or omitted from stdin JSON. When `fullyIdle: false`
     // arrives on a Stop event or an AGY payload (with session_id / conversationId
     // or terminationReason), suppress attention without scanning transcripts.
-    if (payload.hook_event_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("Stop"))
-        || (payload.hook_event_name.is_none()
+    if (event == Some("stop")
+        || (event.is_none()
             && (payload.termination_reason.is_some() || payload.session_id.is_some())))
         && payload.fully_idle == Some(false)
     {

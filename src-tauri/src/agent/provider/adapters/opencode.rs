@@ -63,6 +63,7 @@ impl AgentProvider for OpenCodeAdapter {
         SpawnRecipe {
             binary: "opencode",
             base_args: vec![],
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }

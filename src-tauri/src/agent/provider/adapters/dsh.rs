@@ -48,6 +48,7 @@ impl AgentProvider for DshAdapter {
         SpawnRecipe {
             binary: "dsh",
             base_args: vec![],
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }

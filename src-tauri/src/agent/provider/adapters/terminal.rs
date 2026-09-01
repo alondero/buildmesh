@@ -110,6 +110,7 @@ fn terminal_recipe(
         return SpawnRecipe {
             binary: "powershell.exe",
             base_args: vec![],
+            trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         };
     }
@@ -123,6 +124,7 @@ fn terminal_recipe(
     SpawnRecipe {
         binary,
         base_args: vec![],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     }
 }

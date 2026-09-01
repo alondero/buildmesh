@@ -17,6 +17,9 @@ use crate::models::EnvType;
 /// ordinary native/default runtime. `harness_home` is a harness-specific
 /// configuration root (for example Codex's `CODEX_HOME`), not the operating
 /// system user's home directory.
+///
+/// Domain identity such as the Buildmesh node id is not a runtime fact —
+/// pass it as its own argument (see [`AgentProvider::provision_attention_hooks`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchRuntime {
     /// Harness configuration root selected for the process, when preflight
@@ -24,9 +27,6 @@ pub struct LaunchRuntime {
     pub harness_home: Option<String>,
     /// WSL distribution selected for the process, when applicable.
     pub wsl_distro: Option<String>,
-    /// Buildmesh node id used to bake Codex attention callback URLs. Codex
-    /// hook processes do not inherit `BUILDMESH_*` from the agent PTY.
-    pub node_id: Option<i64>,
 }
 
 /// Built-in **Harness Profile** ids that detection populates (`claude`,
@@ -104,11 +104,28 @@ pub enum WindowsShell {
 
 /// The provider's spawn recipe for a given host platform.
 /// `spawn_environment::wrap` consumes this plus an `EnvType` to produce a `CommandBuilder`.
+///
+/// `base_args` are options / flags. `trailing_args` are positionals that must
+/// follow every option — Codex resume is `resume [OPTIONS] <session-id> [PROMPT]`.
+/// Later layers (model/effort/sandbox, Codex proxy `--profile`/`--model`)
+/// append to `base_args` only. `wrap` concatenates `base_args` then
+/// `trailing_args` so a UUID never becomes the optional prompt.
 #[derive(Debug, Clone)]
 pub struct SpawnRecipe {
     pub binary: &'static str,
     pub base_args: Vec<String>,
+    pub trailing_args: Vec<String>,
     pub windows_shell: WindowsShell,
+}
+
+impl SpawnRecipe {
+    /// Options then trailing positionals, in the order the child argv must have.
+    pub fn argv(&self) -> impl Iterator<Item = &str> {
+        self.base_args
+            .iter()
+            .map(String::as_str)
+            .chain(self.trailing_args.iter().map(String::as_str))
+    }
 }
 
 /// The direct `claude` / `claude.exe` invocation used by the Claude-backed
@@ -129,6 +146,7 @@ pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
     SpawnRecipe {
         binary,
         base_args: vec!["--dangerously-skip-permissions".into()],
+        trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     }
 }
@@ -348,11 +366,16 @@ pub trait AgentProvider: Send + Sync {
     ///
     /// Provision attention hooks for one resolved runtime before its process
     /// starts. The resolved path and runtime context let adapters choose the
-    /// correct host or guest configuration location.
+    /// correct host or guest configuration location. `node_id` is the
+    /// Buildmesh node that should receive the callback — required for
+    /// harnesses that bake the URL because their hook runner strips
+    /// `BUILDMESH_*` (Codex). Adapters that expand env at hook-run time
+    /// ignore it.
     fn provision_attention_hooks(
         &self,
         resolved: &ResolvedPath,
         _runtime: &LaunchRuntime,
+        _node_id: i64,
     ) -> Result<(), String> {
         let _ = resolved;
         Ok(())
@@ -428,7 +451,13 @@ pub trait AgentProvider: Send + Sync {
     fn after_fresh_spawn(&self, _node_id: i64, _spawn_path: &str, _env_type: EnvType) {}
 
     /// Alternative recipe for resume (subcommand-style providers like Codex).
-    /// If Some, `build_spawn_command()` uses this instead of `spawn_recipe()` + `resume_args()`.
+    /// If Some, `default_prepare` uses this instead of `spawn_recipe()` + `resume_args()`.
+    ///
+    /// Put options in [`SpawnRecipe::base_args`] and the session id in
+    /// [`SpawnRecipe::trailing_args`]. `default_prepare` layers model /
+    /// effort / extra / sandbox onto `base_args` and never inspects or
+    /// relocates trailing positionals — so a future adapter that adds a
+    /// trailing flag cannot have that flag amputated by a blind `.pop()`.
     fn spawn_recipe_for_resume(&self, _platform: Platform, _session_id: &str) -> Option<SpawnRecipe> {
         None
     }
@@ -593,9 +622,9 @@ pub trait AgentProvider: Send + Sync {
     /// [`crate::agent::launch::PreparedHarnessLaunch`] — recipe +
     /// capability contract + env policy — so `build_spawn_command_prepared`
     /// no longer has to reassemble per-adapter semantics from many
-    /// independent trait methods. Adapters that diverge (e.g. Codex's
-    /// subcommand-style resume) can override; nothing in the current
-    /// set needs to.
+    /// independent trait methods. Subcommand-style resume (Codex) is
+    /// expressed as `trailing_args` on the recipe, not a `prepare_launch`
+    /// override; nothing in the current set needs to override this.
     ///
     /// `where Self: Sized` because the default coerces `&Self` to a
     /// `&dyn AgentProvider` to call the shared helper. Object-safe

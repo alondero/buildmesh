@@ -1009,6 +1009,7 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 fn ensure_codex_project_files(
     resolved: &ResolvedPath,
     runtime: &LaunchRuntime,
+    node_id: i64,
 ) -> Result<(), String> {
     let _guard = ATTENTION_CONFIG_WRITE_LOCK
         .lock()
@@ -1024,6 +1025,12 @@ fn ensure_codex_project_files(
             .map_err(|e| format!("failed to create .codex dir: {e}"))?;
     }
 
+    // Last-writer-wins: hooks.json bakes this node_id into the callback URL
+    // because Codex's hook runner env_clear()s BUILDMESH_*. Two Codex nodes
+    // sharing one worktree directory will redirect Node A's subsequent
+    // attention webhooks to whoever spawned last. Buildmesh worktrees are
+    // 1:1 with nodes today; do not relax that without a per-node hook path.
+    //
     // Read and validate both files before writing either one. A malformed
     // hooks.json must not leave a half-applied project configuration behind.
     let config_path = project_dir.join("config.toml");
@@ -1032,9 +1039,6 @@ fn ensure_codex_project_files(
     let config_existing = &existing[0];
     let config_updated = ensure_hooks_feature_content(config_existing)?;
     let hooks_existing = &existing[1];
-    let node_id = runtime.node_id.ok_or_else(|| {
-        "Codex attention hooks require the Buildmesh node id to bake the callback URL".to_string()
-    })?;
     let hooks_updated = ensure_hooks_json_content(hooks_existing, &attention_hook_handler(node_id))?;
 
     let mut writes: Vec<(&Path, &str)> = Vec::new();
@@ -1064,6 +1068,7 @@ impl AgentProvider for CodexAdapter {
         SpawnRecipe {
             binary: "codex",
             base_args: base_flags(),
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }
@@ -1075,12 +1080,14 @@ impl AgentProvider for CodexAdapter {
     ) -> Option<SpawnRecipe> {
         // `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`. Options after the
         // UUID are the prompt, so a restart would "resume" into a garbage turn.
+        // Keep the id in trailing_args; default_prepare and Codex proxy
+        // `--profile`/`--model` append options to base_args only.
         let mut args = vec!["resume".into()];
         args.extend(base_flags());
-        args.push(session_id.into());
         Some(SpawnRecipe {
             binary: "codex",
             base_args: args,
+            trailing_args: vec![session_id.into()],
             windows_shell: shell_for(platform),
         })
     }
@@ -1128,8 +1135,9 @@ impl AgentProvider for CodexAdapter {
         &self,
         resolved: &ResolvedPath,
         runtime: &LaunchRuntime,
+        node_id: i64,
     ) -> Result<(), String> {
-        ensure_codex_project_files(resolved, runtime)
+        ensure_codex_project_files(resolved, runtime, node_id)
     }
 
     fn wsl_passthrough_env(&self) -> &'static [&'static str] {
@@ -1624,13 +1632,7 @@ mod tests {
             env_type: EnvType::Windows,
         };
         CODEX
-            .provision_attention_hooks(
-                &resolved,
-                &LaunchRuntime {
-                    node_id: Some(42),
-                    ..Default::default()
-                },
-            )
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 42)
             .unwrap();
     }
 
@@ -1996,25 +1998,27 @@ web_search = true
         let resume = CODEX
             .spawn_recipe_for_resume(Platform::Windows, "sid-123")
             .expect("codex has a resume recipe");
+        assert_eq!(resume.trailing_args, vec!["sid-123".to_string()]);
+        assert!(
+            !resume.base_args.iter().any(|arg| arg == "sid-123"),
+            "session id must not live in base_args: {:?}",
+            resume.base_args
+        );
         let resume_at = resume
             .base_args
             .iter()
             .position(|arg| arg == "resume")
             .expect("resume subcommand");
-        let id_at = resume
-            .base_args
-            .iter()
-            .position(|arg| arg == "sid-123")
-            .expect("session id");
         let flag_at = resume
             .base_args
             .iter()
             .position(|arg| arg == "--ask-for-approval")
             .expect("approval flag");
         assert!(
-            resume_at < flag_at && flag_at < id_at,
-            "expected `codex resume [OPTIONS] <id>`, got {:?}",
-            resume.base_args
+            resume_at < flag_at,
+            "expected `codex resume [OPTIONS]` then trailing id, got {:?} + {:?}",
+            resume.base_args,
+            resume.trailing_args
         );
     }
 

@@ -665,6 +665,7 @@ mod tests {
             } else {
                 vec!["-c".into(), "exit 0".into()]
             },
+            trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         };
         let cwd = std::env::current_dir().unwrap();
@@ -745,6 +746,7 @@ mod tests {
             } else {
                 vec!["-c".into(), "exit 0".into()]
             },
+            trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         };
         let cwd = std::env::current_dir().unwrap();

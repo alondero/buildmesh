@@ -110,6 +110,7 @@ impl AgentProvider for AgyAdapter {
         SpawnRecipe {
             binary: "agy",
             base_args: vec!["--dangerously-skip-permissions".into()],
+            trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         }
     }
@@ -167,6 +168,7 @@ impl AgentProvider for AgyAdapter {
         &self,
         resolved: &ResolvedPath,
         _runtime: &LaunchRuntime,
+        _node_id: i64,
     ) -> Result<(), String> {
         let agents_dir = Path::new(&resolved.host_path).join(".agents");
         std::fs::create_dir_all(&agents_dir)
@@ -259,7 +261,7 @@ mod tests {
             env_type: EnvType::Windows,
         };
         AGY
-            .provision_attention_hooks(&resolved, &LaunchRuntime::default())
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
             .unwrap();
     }
 
