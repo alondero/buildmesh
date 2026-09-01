@@ -184,7 +184,14 @@ fn test_evolve_to_adds_v18_sandbox_column_idempotently() {
 
 // --- Pending worktree removal queue ---
 
-/// In-memory schema with just the two tables the close path touches.
+/// In-memory schema with just the tables the close path touches.
+/// `delete_agent_node_enqueueing_removal_inner` reads `app_settings` to clear
+/// the per-node semantic-turn key (`SEMANTIC_TURN_KEY_PREFIX`) introduced by
+/// the semantic-attention lifecycle PR — the table must exist or the
+/// `DELETE FROM app_settings ...` line panics with "no such table". Every
+/// other DB test fixture in this crate (e.g. `agent_node_tests.rs`,
+/// `circuit_tests.rs`) creates the same `(key TEXT PRIMARY KEY, value TEXT
+/// NOT NULL)` shape; this fixture was the lone holdout.
 fn pending_removal_schema() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -209,11 +216,6 @@ fn pending_removal_schema() -> rusqlite::Connection {
             node_name TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        -- `delete_agent_node_enqueueing_removal_inner` clears the
-        -- per-node semantic-turn row from `app_settings` in the same
-        -- transaction as the agent_nodes delete; without this table
-        -- the in-memory fixture fails on a `no such table` SQLite
-        -- error before the worktree-removal branch even runs.
         CREATE TABLE app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
