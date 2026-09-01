@@ -184,7 +184,7 @@ fn test_evolve_to_adds_v18_sandbox_column_idempotently() {
 
 // --- Pending worktree removal queue ---
 
-/// In-memory schema with just the two tables the close path touches.
+/// In-memory schema with just the tables the close path touches.
 fn pending_removal_schema() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -209,7 +209,20 @@ fn pending_removal_schema() -> rusqlite::Connection {
             node_name TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        -- The close path also drops the node's `semantic_turn:<id>` row, so the
+        -- fixture needs this table even though the worktree queue doesn't use
+        -- it. Mirrors the real DDL in db::mod (key TEXT PRIMARY KEY, value TEXT
+        -- NOT NULL). Omitting it made both close tests fail with 'no such table:
+        -- app_settings' once the cleanup landed.
+        CREATE TABLE app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (42, 1, 'bold-keen-brook', '/repo');
+        -- Node 42's semantic-turn marker, plus a sibling that must survive: the
+        -- DELETE is keyed, not a wildcard, and a prefix bug would take both.
+        INSERT INTO app_settings (key, value) VALUES ('semantic_turn:42', 'awaiting_input');
+        INSERT INTO app_settings (key, value) VALUES ('semantic_turn:43', 'working');
         ",
     )
     .unwrap();
@@ -239,6 +252,21 @@ fn close_deletes_row_and_enqueues_removal() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].worktree_path, "/repo/.claude/worktrees/bold-keen-brook");
     assert_eq!(pending[0].node_name, "bold-keen-brook");
+
+    // The node's semantic-turn marker goes with it — a stale key would make a
+    // future node reusing id 42 inherit this one's attention state (6c007262).
+    let keys: Vec<String> = conn
+        .prepare("SELECT key FROM app_settings ORDER BY key")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["semantic_turn:43".to_string()],
+        "only node 42's marker may be deleted"
+    );
 }
 
 /// An in-place node (no worktree) closes without queueing any cleanup.
