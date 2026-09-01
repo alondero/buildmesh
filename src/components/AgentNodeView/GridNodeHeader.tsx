@@ -189,12 +189,6 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   const { pr: openPr } = useOpenPr(nodeId, gitPath);
   const meshLabel = useMemo(() => {
     if (!node) return '';
-    const mesh = meshesById.get(node.mesh_id);
-    return mesh ? `[${mesh.name} #${node.id}]` : `[#${node.id}]`;
-  }, [meshesById, node]);
-
-  const meshLabel = useMemo(() => {
-    if (!node) return '';
     const m = meshesById.get(node.mesh_id);
     return m ? `[${m.name} #${node.id}]` : `[#${node.id}]`;
   }, [meshesById, node?.mesh_id, node?.id]);
