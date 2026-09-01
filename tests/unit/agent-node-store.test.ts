@@ -233,12 +233,33 @@ describe('useAgentNodeStore', () => {
     // initAttentionListeners uses a closure guard (listenersAttached) that only
     // registers once per process. We test all scenarios in one test to keep
     // listeners alive across the mockListeners.clear() boundary.
-    it('handles attention-needed, attention-cleared, and session-renamed events', async () => {
+    //
+    // Issue #1364/#1449 normalised lifecycle signals onto `agent-lifecycle`
+    // (see the comment at `agentNodeListeners.ts` lines 121-130: the
+    // store only listens to `agent-lifecycle` for mark transitions;
+    // the legacy `attention-needed` event is still emitted by the
+    // backend for external hook consumers but is NOT routed through
+    // the store). `attention-cleared` and `node-renamed` keep their
+    // dedicated listeners.
+    it('handles agent-lifecycle, attention-cleared, and node-renamed events', async () => {
       const node = makeNode({ id: 10, name: 'test-node', status: 'running' });
       seedAgentNodes([node]);
       await useAgentNodeStore.getState().initAttentionListeners();
 
-      await mockEmit('attention-needed', { session_id: 10 });
+      await mockEmit('agent-lifecycle', {
+        session_id: 10,
+        provider: null,
+        kind: 'input_required',
+        status: 'awaiting_input',
+        message: null,
+        provider_event: null,
+        provider_session_id: null,
+        completion_reason: null,
+        transcript_path: null,
+        timestamp: '2026-09-01T00:00:00Z',
+        signal_health: 'ok',
+        semantic_turn: null,
+      });
       expect(useAgentNodeStore.getState().nodesById[10]?.status).toBe('awaiting_input');
 
       await mockEmit('attention-cleared', { session_id: 10 });
@@ -261,7 +282,20 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().nodesById[99]).toBeDefined();
 
       seedAgentNodes([makeNode({ id: 10, status: 'running' })]);
-      await mockEmit('attention-needed', { session_id: 999 });
+      await mockEmit('agent-lifecycle', {
+        session_id: 999,
+        provider: null,
+        kind: 'input_required',
+        status: 'awaiting_input',
+        message: null,
+        provider_event: null,
+        provider_session_id: null,
+        completion_reason: null,
+        transcript_path: null,
+        timestamp: '2026-09-01T00:00:00Z',
+        signal_health: 'ok',
+        semantic_turn: null,
+      });
       expect(useAgentNodeStore.getState().nodesById[10]?.status).toBe('running');
     });
   });
