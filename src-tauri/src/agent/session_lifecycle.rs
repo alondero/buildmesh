@@ -191,6 +191,11 @@ pub enum LifecycleKind {
     /// another prompt. The node lands in `Ready` — NOT the Autopilot-only
     /// `Completed` (issue #1364).
     TurnCompleted,
+    /// Autopilot's wrap-up verified a clean worktree and opened a PR — the
+    /// `Completed` terminal state (issue #485). Distinct from
+    /// `TurnCompleted` so consumers never have to inspect `status` to tell
+    /// "agent ready for another prompt" from "terminal PR-opened".
+    AutopilotCompleted,
     /// The agent yielded and the user is needed, but the hook did not
     /// distinguish a permission from a question. Node lands in
     /// `AwaitingInput`.
@@ -479,8 +484,10 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
         // Mobile: the same wire shape fanned into the /ws/events broadcast.
         // `http::events` already depends on `session_lifecycle` types; the
         // reverse reference is a legal Rust module cycle (the two modules
-        // form one event-transport seam).
-        crate::http::events::emit(crate::http::events::EventMsg::LifecycleChanged(payload));
+        // form one event-transport seam). Boxed variant — see EventMsg.
+        crate::http::events::emit(crate::http::events::EventMsg::LifecycleChanged(Box::new(
+            payload,
+        )));
     }
 }
 
@@ -739,12 +746,14 @@ pub fn on_error_with_detail(
 }
 
 /// Autopilot finish verified — mark `Completed`. Replaces
-/// `autopilot/pipeline.rs:646`.
+/// `autopilot/pipeline.rs:646`. Emits kind `AutopilotCompleted` — a distinct
+/// normalized kind, so "terminal PR-opened" is never confused with an
+/// ordinary `TurnCompleted` (issue #1364 review).
 pub fn on_completed(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(), String> {
     sink.write_status(node_id, SessionStatus::Completed)?;
     sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
         node_id,
-        LifecycleKind::TurnCompleted,
+        LifecycleKind::AutopilotCompleted,
         SessionStatus::Completed,
         &HookSignalDetail::default(),
         "Autopilot wrap-up verified and PR opened",
@@ -1017,13 +1026,16 @@ mod tests {
     }
 
     #[test]
-    fn on_completed_emits_turn_completed_with_completed_status() {
+    fn on_completed_emits_autopilot_completed_with_completed_status() {
         let sink = FakeSink::default();
         on_completed(&sink, 7).unwrap();
         let events = sink.lifecycle_changed.borrow();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, LifecycleKind::TurnCompleted);
+        // A distinct kind: "terminal PR-opened" must never be confused with
+        // an ordinary TurnCompleted (issue #1364 review).
+        assert_eq!(events[0].kind, LifecycleKind::AutopilotCompleted);
         assert_eq!(events[0].status, SessionStatus::Completed);
+        assert_ne!(events[0].kind, LifecycleKind::TurnCompleted);
     }
 
     #[test]

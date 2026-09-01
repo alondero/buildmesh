@@ -25,19 +25,6 @@ use crate::http::request;
 /// buffer.
 const MAX_HOOK_BODY: usize = 64 * 1024;
 
-/// The fields of Claude Code's hook stdin JSON this route cares about. Unknown
-/// fields are ignored; every field is optional so an empty or legacy body
-/// (`{}` or nothing at all) degrades to the pre-#878 behaviour of always
-/// marking attention.
-///
-/// Grok Code's HTTP hook (`~/.grok/docs/user-guide/10-hooks.md`, issue
-/// #1282) POSTs the same envelope shape but with camelCase top-level
-/// keys (`sessionId`, `hookEventName`) — and adds a separate
-/// `notificationType` field on `Notification` events (`idle_prompt`,
-/// `permission_prompt`, `task_complete`, …). The `#[serde(alias)]`
-/// attributes accept either casing so the same parser handles Claude
-/// and Grok payloads.
-///
 /// The fields of agent harness hook stdin JSON this route cares about. Unknown
 /// fields are ignored; every field is optional so an empty or legacy body
 /// (`{}` or nothing at all) degrades to the pre-#878 behaviour of always
@@ -341,11 +328,14 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
         .as_deref()
         .is_some_and(|n| n.eq_ignore_ascii_case("Notification"))
     {
-        // Claude Code: human-readable message contains "permission".
+        // Claude Code's documented Notification envelope is "… needs your
+        // permission to use X" — anchored to the verb phrase, not a bare
+        // "permission" substring, so prose like "Permission was already
+        // granted for Bash" cannot false-positive.
         if payload
             .message
             .as_deref()
-            .is_some_and(|m| m.to_ascii_lowercase().contains("permission"))
+            .is_some_and(|m| m.to_ascii_lowercase().contains("needs your permission"))
         {
             return Classified::mark_input(detail);
         }
@@ -360,19 +350,18 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
                 // finished, no user input needed (issue #1364).
                 return Classified::ready(detail);
             }
+            // Question-shaped structured types (no current harness emits
+            // these yet; reserved so a provider that adds one — Grok
+            // advertises QuestionRequested — lands on the normalized kind
+            // without prose guessing). Unstructured messages are NEVER
+            // classified as questions from free text.
+            Some("question") | Some("question_prompt") | Some("ask_user") => {
+                let mut question = detail;
+                question.kind =
+                    Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested);
+                return Classified::mark_input(question);
+            }
             _ => {}
-        }
-        // A question-shaped notification is the user being asked something
-        // that is not a tool approval — the normalized `QuestionRequested`
-        // kind (issue #1364 §1). Tool-approval detection above wins first.
-        if payload
-            .message
-            .as_deref()
-            .is_some_and(|m| m.to_ascii_lowercase().contains("question"))
-        {
-            let mut question = detail;
-            question.kind = Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested);
-            return Classified::mark_input(question);
         }
     }
     // AGY `Stop` with `fullyIdle: false` is a direct false-yield signal
@@ -438,66 +427,15 @@ pub async fn handle_post(
         return;
     };
 
-    // Codex self-assigns its thread id. PTY capture remains the earliest
-    // source, while the hook payload is the exact structured fallback after
-    // the first turn. The conditional DB update prevents a delayed callback
-    // from an old process overwriting the active session (issue #1089).
-    //
-    // Issue #1364 §1 — ordering token: one blocking read returns the node's
-    // stored session id AND its harness/provider id (for the lifecycle
-    // envelope). A hook whose provider session id is a valid UUID that
-    // differs from the stored one belongs to a previous process generation —
-    // it must never overwrite the newer state, so the POST is answered 200
-    // (the harness's fail-open contract) and dropped.
+    // Cheap, CPU-only classification happens on the async worker: parse,
+    // debug-log, extract the semantic turn, and classify (the transcript
+    // scan is file I/O, not SQLite). Everything that touches SQLite — the
+    // fill-only session capture, the stale-callback check, the signal-
+    // health confirmation, the semantic-turn persist, and the status write
+    // — then runs in ONE `run_blocking` dispatch below, so a single webhook
+    // POST costs one blocking hop and one DB lock acquisition instead of a
+    // Tokio↔SQLite ping-pong (issue #1364 review).
     let hook_uuid = hook_session_id(&body);
-    if let Some(cli_session_id) = hook_uuid.clone() {
-        // Issue #1389 — `set_cli_session_id_if_missing` is a sync SQLite
-        // write; offload it so the tokio worker that just received this
-        // hook POST can go straight back to polling WebSocket/PTY streams
-        // instead of holding a `Mutex<Connection>` lock.
-        let cli_session_id_for_closure = cli_session_id.clone();
-        let capture_result = crate::commands::run_blocking(
-            "http_attention_capture_session_id",
-            move || {
-                crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id_for_closure)
-                    .map_err(|e| e.to_string())
-            },
-        )
-        .await;
-        match capture_result {
-            Ok(true) => tracing::info!(
-                "attention webhook captured session ID {} for node {}",
-                cli_session_id,
-                session_id
-            ),
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                "attention webhook could not persist session ID for node {}: {}",
-                session_id,
-                error
-            ),
-        }
-    }
-    let node_context = crate::commands::run_blocking("http_attention_node_context", move || {
-        Ok(crate::db::get_agent_node_by_id(session_id).ok().map(|n| (n.cli_session_id, n.provider)))
-    })
-    .await
-    .ok()
-    .flatten();
-    let (stored_cli_session_id, node_provider) = node_context
-        .map(|(id, provider)| (id, Some(provider)))
-        .unwrap_or((None, None));
-    if let (Some(hook), Some(current)) = (hook_uuid.as_deref(), stored_cli_session_id.as_deref()) {
-        if !current.is_empty() && hook != current {
-            tracing::info!(
-                "attention webhook for node {}: stale callback from a previous process \
-                 (hook session {hook} != active {current}) — dropped (issue #1364 ordering token)",
-                session_id
-            );
-            let _ = request::write_status_only(lines, "200 OK").await;
-            return;
-        }
-    }
 
     // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
     // `"tool_execution_limit_reached"`) so a future debugging session can
@@ -533,107 +471,131 @@ pub async fn handle_post(
     let semantic = payload_parsed.as_ref().ok().and_then(semantic_turn);
 
     let classified = classify(&body, crate::services::transcript_reader::count_pending_background_tasks);
-    let detail = {
-        let mut detail = classified.detail;
-        // The semantic turn always wins over the raw message for the
-        // human-facing description; keep the health the classifier set.
-        detail.semantic_turn = semantic.map(|turn| SemanticTurnPayload {
-            node_id: session_id,
-            kind: turn.kind,
-            description: turn.description,
-        });
-        detail.provider = node_provider;
-        detail
-    };
+    let mut detail = classified.detail;
+    // The semantic turn always wins over the raw message for the
+    // human-facing description; keep the health the classifier set.
+    detail.semantic_turn = semantic.map(|turn| SemanticTurnPayload {
+        node_id: session_id,
+        kind: turn.kind,
+        description: turn.description,
+    });
 
-    // A real, high-confidence callback proves hook delivery — persist the
-    // node's signal health as Ok so a provisioning failure earlier in the
-    // spawn doesn't linger. A degraded (unparseable/fieldless) callback
-    // does NOT clear a failure: its event says Degraded and the persisted
-    // health must agree (issue #1364 §3). Issue #1389 pattern: the SQLite
-    // write is offloaded off the Tokio worker.
-    if detail.signal_health == crate::agent::session_lifecycle::SignalHealth::Ok {
-        let _ = crate::commands::run_blocking("http_attention_mark_delivered", move || {
-            crate::db::update_agent_node_signal_health(
-                session_id,
-                Some(crate::agent::session_lifecycle::SignalHealth::Ok),
-            )
-            .map_err(|e| e.to_string())
-        })
-        .await;
-    }
+    // Issue #1389 — every step below is blocking SQLite; one `spawn_blocking`
+    // hop for the whole sequence. `app` is `&'static AppHandle` (returned by
+    // `crate::http::app_handle()`), which is what lets `move ||` capture it.
+    let decision = classified.decision;
+    let _ = crate::commands::run_blocking(
+        "http_attention_apply",
+        move || -> Result<Applied, String> {
+            // Codex self-assigns its thread id. PTY capture remains the
+            // earliest source, while the hook payload is the exact
+            // structured fallback after the first turn (issue #1089).
+            if let Some(cli_session_id) = hook_uuid.clone() {
+                match crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id) {
+                    Ok(true) => tracing::info!(
+                        "attention webhook captured session ID {} for node {}",
+                        cli_session_id,
+                        session_id
+                    ),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        "attention webhook could not persist session ID for node {}: {}",
+                        session_id,
+                        error
+                    ),
+                }
+            }
 
-    match classified.decision {
-        Decision::MarkInput => {
-            // Issue #1389 — `node_turn::publish_with_signal` writes SQLite
-            // through `session_lifecycle::on_attention_with_signal` (one
-            // status write + one `attention-needed` + one `agent-lifecycle`
-            // on BOTH transports), arms the autoclear mutex, and fans out to
-            // the session-naming + autopilot-pipeline workers. Every step is
-            // blocking; offload the whole fan-out so the tokio worker that
-            // handled the webhook POST goes back to polling the WebSocket /
-            // PTY streams immediately.
-            //
-            // `app` is `&'static AppHandle` (returned by
-            // `crate::http::app_handle()`, which reads from a process-
-            // global `OnceLock<AppHandle>`). The `'static` lifetime is
-            // what lets `move ||` capture it — `spawn_blocking` requires
-            // `F: 'static`, and a non-`'static` borrow would be dropped
-            // the moment the async function returns. No clone is needed
-            // because the reference is already cheap to share.
-            let semantic_payload = detail.semantic_turn.clone();
-            let mark_detail = detail.clone();
-            let _ = crate::commands::run_blocking(
-                "http_attention_publish_mark",
-                move || -> Result<(), String> {
-                    let encoded = semantic_payload.as_ref().map(|v| serde_json::to_string(v).map_err(|e| e.to_string())).transpose()?;
-                    crate::db::persist_semantic_turn(session_id, encoded.as_deref()).map_err(|e| e.to_string())?;
-                    crate::node_turn::publish_with_signal(session_id, app, semantic_payload, mark_detail);
-                    Ok(())
-                },
-            )
-            .await;
-        }
-        Decision::Ready => {
-            tracing::info!(
-                "attention webhook for node {}: clean turn completion — \
-                 node lands in Ready (issue #1364)",
-                session_id
-            );
-            // Issue #1389 — same offload for the ready path. Naming and the
-            // autopilot pipeline still see the turn (`publish_passive`), then
-            // the lifecycle writes `Ready` and emits `agent-lifecycle` on both
-            // transports. No `attention-needed`, no autoclear arm.
-            let ready_detail = detail.clone();
-            let _ = crate::commands::run_blocking(
-                "http_attention_publish_ready",
-                move || -> Result<(), String> {
-                    crate::node_turn::publish_ready(session_id, app, ready_detail);
-                    Ok(())
-                },
-            )
-            .await;
-        }
-        Decision::SuppressPendingBackground => {
-            tracing::info!(
-                "attention webhook for node {}: background tasks still pending — \
-                 turn published without attention marking (issue #878)",
-                session_id
-            );
-            // Issue #1389 — same offload for the background-yield path.
-            let bg_detail = detail.clone();
-            let _ = crate::commands::run_blocking(
-                "http_attention_publish_suppress",
-                move || -> Result<(), String> {
-                    crate::node_turn::publish_background(session_id, app, bg_detail);
-                    Ok(())
-                },
-            )
-            .await;
-        }
-    }
+            // Issue #1364 §1 — ordering token: a hook whose provider session
+            // id is a valid UUID that differs from the node's stored one
+            // belongs to a previous process generation. It must never
+            // overwrite the newer state — the POST is answered 200 (the
+            // harness's fail-open contract) and dropped.
+            let node = crate::db::get_agent_node_by_id(session_id).ok();
+            let (stored_cli_session_id, node_provider) = node
+                .map(|n| (n.cli_session_id, Some(n.provider)))
+                .unwrap_or((None, None));
+            if let (Some(hook), Some(current)) =
+                (hook_uuid.as_deref(), stored_cli_session_id.as_deref())
+            {
+                if !current.is_empty() && hook != current {
+                    tracing::info!(
+                        "attention webhook for node {}: stale callback from a previous \
+                         process (hook session {hook} != active {current}) — dropped \
+                         (issue #1364 ordering token)",
+                        session_id
+                    );
+                    return Ok(Applied::StaleDropped);
+                }
+            }
+            detail.provider = node_provider;
 
+            // A real, high-confidence callback proves hook delivery — persist
+            // the node's signal health as Ok so a provisioning failure earlier
+            // in the spawn doesn't linger. A degraded (unparseable/fieldless)
+            // callback does NOT clear a failure: its event says Degraded and
+            // the persisted health must agree (issue #1364 §3).
+            if detail.signal_health == crate::agent::session_lifecycle::SignalHealth::Ok {
+                let _ = crate::db::update_agent_node_signal_health(
+                    session_id,
+                    Some(crate::agent::session_lifecycle::SignalHealth::Ok),
+                );
+            }
+
+            match decision {
+                Decision::MarkInput => {
+                    let encoded = detail
+                        .semantic_turn
+                        .as_ref()
+                        .map(|v| serde_json::to_string(v).map_err(|e| e.to_string()))
+                        .transpose()?;
+                    crate::db::persist_semantic_turn(session_id, encoded.as_deref())
+                        .map_err(|e| e.to_string())?;
+                    crate::node_turn::publish_with_signal(
+                        session_id,
+                        app,
+                        detail.semantic_turn.clone(),
+                        detail,
+                    );
+                }
+                Decision::Ready => {
+                    tracing::info!(
+                        "attention webhook for node {}: clean turn completion — \
+                         node lands in Ready (issue #1364)",
+                        session_id
+                    );
+                    // Naming and the autopilot pipeline still see the turn
+                    // (`publish_passive`), then the lifecycle writes `Ready`
+                    // and emits `agent-lifecycle` on both transports. No
+                    // `attention-needed`, no autoclear arm.
+                    crate::node_turn::publish_ready(session_id, app, detail);
+                }
+                Decision::SuppressPendingBackground => {
+                    tracing::info!(
+                        "attention webhook for node {}: background tasks still pending — \
+                         turn published without attention marking (issue #878)",
+                        session_id
+                    );
+                    crate::node_turn::publish_background(session_id, app, detail);
+                }
+            }
+            Ok(Applied::Applied)
+        },
+    )
+    .await;
+
+    // Both outcomes answer 200 OK — the harnesses' fail-open contract (an
+    // applied callback and a stale-dropped one are indistinguishable to the
+    // poster; a stale drop simply changed nothing).
     let _ = request::write_status_only(lines, "200 OK").await;
+}
+
+/// Outcome of the single blocking apply pass (issue #1364 review): the
+/// webhook was applied, or dropped as a stale callback from a previous
+/// process generation.
+enum Applied {
+    Applied,
+    StaleDropped,
 }
 
 #[cfg(test)]
@@ -1231,16 +1193,16 @@ mod tests {
         );
     }
 
-    /// A question-shaped Notification is the user being asked something
-    /// that is not a tool approval — the normalized `QuestionRequested`
-    /// kind, still a MarkInput decision (issue #1364 §1).
+    /// A structured question notification type maps to the normalized
+    /// `QuestionRequested` kind, still a MarkInput decision (issue #1364
+    /// §1). Unstructured prose is NEVER classified as a question.
     #[test]
-    fn question_shaped_notification_classifies_as_question_requested() {
+    fn structured_question_notification_classifies_as_question_requested() {
         let body = serde_json::json!({
             "hookEventName": "notification",
             "sessionId": "550e8400-e29b-41d4-a716-446655440000",
-            "notificationType": "idle_prompt",
-            "message": "The agent asks a question: which database should I use?",
+            "notificationType": "question",
+            "message": "Which database should I use?",
         })
         .to_string()
         .into_bytes();
@@ -1249,6 +1211,46 @@ mod tests {
         assert_eq!(
             classified.detail.kind,
             Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
+        );
+    }
+
+    /// Unstructured prose mentioning "question" must NOT become a
+    /// QuestionRequested (issue #1364 review — no free-text guessing);
+    /// it falls through the normal classification.
+    #[test]
+    fn prose_mentioning_question_is_not_question_requested() {
+        let body = serde_json::json!({
+            "hookEventName": "notification",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "notificationType": "idle_prompt",
+            "message": "I answered your question about the database",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(0));
+        assert_ne!(
+            classified.detail.kind,
+            Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
+        );
+    }
+
+    /// "Permission was already granted for Bash" must not read as a
+    /// permission request — the heuristic anchors to the documented
+    /// "needs your permission" verb envelope (issue #1364 review).
+    #[test]
+    fn permission_already_granted_prose_is_not_permission_requested() {
+        let body = serde_json::json!({
+            "hookEventName": "Notification",
+            "transcript_path": "/tmp/session.jsonl",
+            "message": "Permission was already granted for Bash",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(0));
+        assert_eq!(classified.decision, Decision::Ready);
+        assert_ne!(
+            classified.detail.kind,
+            Some(crate::agent::session_lifecycle::LifecycleKind::PermissionRequested)
         );
     }
 

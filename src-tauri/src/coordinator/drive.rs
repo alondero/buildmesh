@@ -155,12 +155,13 @@ pub trait AgentDriver {
     fn send_prompt(&self, node_id: i64, prompt: &str) -> Result<SessionStatus, DriveError>;
 
     /// Map the pre-write status to an honest verdict. Pure: a node that was
-    /// `awaiting_input` is now cleared ([`Verdict::Delivered`]); any other live
-    /// state queued the prompt with no observable transition
+    /// `awaiting_input` — or `ready`, its not-blocked sibling (issue #1364)
+    /// — is now cleared ([`Verdict::Delivered`]); any other live state
+    /// queued the prompt with no observable transition
     /// ([`Verdict::Unverified`]).
     fn verify_delivery(&self, prior_status: SessionStatus) -> Verdict {
         match prior_status {
-            SessionStatus::AwaitingInput => Verdict::Delivered,
+            SessionStatus::AwaitingInput | SessionStatus::Ready => Verdict::Delivered,
             _ => Verdict::Unverified,
         }
     }

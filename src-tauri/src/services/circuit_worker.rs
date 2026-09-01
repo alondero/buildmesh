@@ -458,14 +458,15 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
                     });
                 }
                 // Milestone-1 completion heuristic: the turn detector's
-                // `awaiting_input` write (or an explicit `completed`)
-                // means the piloted agent finished its work. Keystrokes
-                // never write these statuses, so manual PTY interaction
-                // cannot produce a false completion. Known limitation: an
-                // author-authored SetNodeStatus(completed) effect on the
-                // piloted node would also read as completion here — the
-                // milestone-2 LLM classifier gate replaces this heuristic.
-                SessionStatus::AwaitingInput | SessionStatus::Completed => {
+                // `awaiting_input`/`ready` write (issue #1364) or an explicit
+                // `completed` means the piloted agent finished its work.
+                // Keystrokes never write these statuses, so manual PTY
+                // interaction cannot produce a false completion. Known
+                // limitation: an author-authored SetNodeStatus(completed)
+                // effect on the piloted node would also read as completion
+                // here — the milestone-2 LLM classifier gate replaces this
+                // heuristic.
+                SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed => {
                     let tail = crate::autopilot::evaluator::cleaned_turn_tail(agent_node_id);
                     events.push(CircuitEvent::AgentFinished {
                         agent_node_id,
@@ -724,7 +725,9 @@ fn classify_step_turn(
     }
     let yielded = matches!(
         db::get_agent_node_by_id(agent_node_id).map(|n| n.status),
-        Ok(SessionStatus::AwaitingInput) | Ok(SessionStatus::Completed)
+        Ok(SessionStatus::AwaitingInput)
+            | Ok(SessionStatus::Ready)
+            | Ok(SessionStatus::Completed)
     );
     if !yielded {
         return None;

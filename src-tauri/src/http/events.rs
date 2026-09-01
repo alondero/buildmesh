@@ -22,9 +22,11 @@ pub enum EventMsg {
     },
     /// Normalized lifecycle event (issue #1364) — the same wire shape the
     /// desktop receives as the `agent-lifecycle` Tauri event, so both clients
-    /// patch the affected node identically.
+    /// patch the affected node identically. Boxed: the full envelope dwarfs
+    /// the 8-byte `attention-cleared` variant (clippy::large_enum_variant)
+    /// and the wire shape is unchanged.
     #[serde(rename = "agent-lifecycle")]
-    LifecycleChanged(crate::agent::session_lifecycle::LifecycleChangedPayload),
+    LifecycleChanged(Box<crate::agent::session_lifecycle::LifecycleChangedPayload>),
 }
 
 static EVENTS_CHANNEL: OnceLock<broadcast::Sender<EventMsg>> = OnceLock::new();
@@ -90,7 +92,7 @@ mod tests {
             signal_health: crate::agent::session_lifecycle::SignalHealth::Ok,
             semantic_turn: None,
         };
-        let json = serde_json::to_string(&EventMsg::LifecycleChanged(payload)).unwrap();
+        let json = serde_json::to_string(&EventMsg::LifecycleChanged(Box::new(payload))).unwrap();
         assert!(json.contains(r#""type":"agent-lifecycle""#));
         assert!(json.contains(r#""kind":"turn_completed""#));
         assert!(json.contains(r#""status":"ready""#));
@@ -114,7 +116,7 @@ mod tests {
             signal_health: crate::agent::session_lifecycle::SignalHealth::Ok,
             semantic_turn: None,
         };
-        emit(EventMsg::LifecycleChanged(payload));
+        emit(EventMsg::LifecycleChanged(Box::new(payload)));
         let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
             .expect("timed out")

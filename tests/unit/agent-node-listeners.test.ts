@@ -83,7 +83,6 @@ describe('attachAgentNodeListeners', () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     const eventNames = mockListen.mock.calls.map(([name]) => name);
     expect(eventNames).toEqual(expect.arrayContaining([
-      'attention-needed',
       'attention-cleared',
       'agent-lifecycle',
       'node-renamed',
@@ -96,7 +95,11 @@ describe('attachAgentNodeListeners', () => {
       'autopilot-finish-failed',
       'autopilot-node-closed',
     ]));
-    expect(eventNames).toHaveLength(12);
+    // No `attention-needed` store listener: the backend emits
+    // `agent-lifecycle` on every mark transition (issue #1364), so a
+    // second listener would duplicate the state mutations.
+    expect(eventNames).not.toContain('attention-needed');
+    expect(eventNames).toHaveLength(11);
   });
 
   it('returns a single unlisten handle that detaches every registered handler', async () => {
@@ -114,39 +117,22 @@ describe('attachAgentNodeListeners', () => {
     const unlisten = await attachAgentNodeListeners(surface);
 
     expect(typeof unlisten).toBe('function');
-    // 12 events → 12 unlisten registrations.
-    expect(mockListen).toHaveBeenCalledTimes(12);
+    // 11 events → 11 unlisten registrations.
+    expect(mockListen).toHaveBeenCalledTimes(11);
     expect(unlistenFns).toHaveLength(0);
 
     unlisten();
-    expect(unlistenFns).toHaveLength(12);
+    expect(unlistenFns).toHaveLength(11);
   });
 
   // The narrow surface contract: every handler must dispatch to the
   // store via the surface, not via some other path. We test this by
   // calling the handler we registered (the second arg to listen) and
   // asserting only the expected surface methods were called.
-  it('attention-needed dispatches patchAgentNode with status awaiting_input', async () => {
-    const mockListen = listen as ReturnType<typeof vi.fn>;
-    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
-    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
-      if (eventName === 'attention-needed') {
-        capturedHandler = handler;
-      }
-      return Promise.resolve(() => {});
-    });
-
-    const surface = makeSurface();
-    await attachAgentNodeListeners(surface);
-
-    expect(capturedHandler).toBeDefined();
-    capturedHandler!({ payload: { session_id: 42, semantic_turn: null } });
-
-    expect(surface.__calls).toEqual([
-      { method: 'setSemanticTurn', args: [42, null] },
-      { method: 'patchAgentNode', args: [42, { status: 'awaiting_input' }] },
-    ]);
-  });
+  // The attention-needed store listener was removed (issue #1364): the
+  // backend emits `agent-lifecycle` on every mark transition, and a second
+  // listener would duplicate the state mutations. Marks are asserted via
+  // the agent-lifecycle handler below.
 
   it('attention-cleared dispatches patchAgentNode with status running', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
@@ -198,9 +184,10 @@ describe('attachAgentNodeListeners', () => {
       },
     });
 
+    // One batched patch per event (issue #1364 review) — never two
+    // back-to-back patchAgentNode calls.
     expect(surface.__calls).toEqual([
-      { method: 'patchAgentNode', args: [42, { status: 'ready' }] },
-      { method: 'patchAgentNode', args: [42, { signal_health: 'ok' }] },
+      { method: 'patchAgentNode', args: [42, { status: 'ready', signal_health: 'ok' }] },
       { method: 'setSemanticTurn', args: [42, null] },
     ]);
   });
@@ -239,10 +226,12 @@ describe('attachAgentNodeListeners', () => {
     });
 
     const calls = surface.__calls;
-    expect(calls[0]).toEqual({ method: 'patchAgentNode', args: [42, { status: 'awaiting_input' }] });
-    expect(calls[1]).toEqual({ method: 'patchAgentNode', args: [42, { signal_health: 'ok' }] });
+    expect(calls[0]).toEqual({
+      method: 'patchAgentNode',
+      args: [42, { status: 'awaiting_input', signal_health: 'ok' }],
+    });
     // The semantic turn flows to the banner; it is NOT cleared.
-    expect(calls[2]).toEqual({
+    expect(calls[1]).toEqual({
       method: 'setSemanticTurn',
       args: [42, { node_id: 42, kind: 'permission_request', description: 'Allow edit: src/lib/auth.ts' }],
     });
