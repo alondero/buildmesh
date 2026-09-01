@@ -1006,6 +1006,50 @@ fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed
 // than Coordinator dialogue. They are deliberately omitted from `Turn.text`;
 // tool invocations remain available through the shared `ToolCall` shape.
 
+/// The meaningful activity in one Command Code `message` envelope.
+///
+/// This narrow classifier is shared with the passive lifecycle watcher so its
+/// definition of a real user/assistant turn cannot drift from the transcript
+/// reader's. In particular, thinking/reasoning-only and tool-result records
+/// are deliberately absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandCodeMessageActivity {
+    UserTurn,
+    ToolUse,
+    ToolResult,
+    AssistantResponse,
+}
+
+/// Classify a Command Code message payload using the canonical text and tool
+/// extraction rules. Empty, synthetic, tool-result, thinking, and reasoning
+/// records are classified separately so the watcher can clear pending tool
+/// calls, while the digest parser still omits them from normalized turns.
+pub(crate) fn commandcode_message_activity(
+    message: &serde_json::Value,
+) -> Option<CommandCodeMessageActivity> {
+    let role = message.get("role")?.as_str()?;
+    let content = message.get("content")?;
+    let text = concat_text_blocks(Some(content));
+    let tool_calls = extract_tool_calls(Some(content));
+
+    match role {
+        "user" if contains_tool_result(content) => Some(CommandCodeMessageActivity::ToolResult),
+        "user" if is_synthetic_message(&text) || text.trim().is_empty() => None,
+        "user" => Some(CommandCodeMessageActivity::UserTurn),
+        "assistant" if !tool_calls.is_empty() => Some(CommandCodeMessageActivity::ToolUse),
+        "assistant" if !text.trim().is_empty() => Some(CommandCodeMessageActivity::AssistantResponse),
+        _ => None,
+    }
+}
+
+fn contains_tool_result(content: &serde_json::Value) -> bool {
+    content.as_array().is_some_and(|blocks| {
+        blocks
+            .iter()
+            .any(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("tool_result"))
+    })
+}
+
 /// Parse Command Code JSONL lines into normalized turns. The rolling buffer,
 /// assistant digest, malformed-shape signal, and assistant-id coalescing all
 /// follow the shared transcript-reader contract used by Claude Code/Cursor.
