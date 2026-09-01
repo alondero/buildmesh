@@ -258,10 +258,10 @@ pub fn lookup_capabilities(harness_id: &str) -> Option<HarnessCapabilities> {
         .map(|p| capabilities_for(p.adapter()))
 }
 
-/// Whether this capability descriptor has a backend-owned passive watcher
-/// that publishes standard Node Turns. Keep this at the compatibility seam:
-/// the adapter owns watcher startup, while this evaluator owns the question
-/// of whether that signal is sufficient for Autopilot.
+// Whether this capability descriptor has a backend-owned passive watcher
+// that publishes standard Node Turns. Keep this at the compatibility seam:
+// the adapter owns watcher startup, while this evaluator owns the question
+// of whether that signal is sufficient for Autopilot.
 // ---------------------------------------------------------------------------
 // Evaluator
 // ---------------------------------------------------------------------------

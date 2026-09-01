@@ -134,6 +134,8 @@ enum TranscriptActivity {
 pub struct TurnTracker {
     state: Option<TranscriptActivity>,
     pending_tool_calls: bool,
+    open_assistant_id: Option<String>,
+    deferred_assistant_response: bool,
 }
 
 /// Incremental reader for an append-only Command Code JSONL transcript.
@@ -461,17 +463,49 @@ fn emit_transitions(
 impl TurnTracker {
     pub fn observe_transcript_line(&mut self, line: &str) -> Option<TerminalTransition> {
         let activity = transcript_activity(line)?;
+        let message_id = activity.message_id;
+        let activity = activity.activity;
         if activity == TranscriptActivity::UserTurn {
+            let completed_previous = self.deferred_assistant_response;
             self.pending_tool_calls = false;
+            self.open_assistant_id = None;
+            self.deferred_assistant_response = false;
+            self.state = Some(activity);
+            return completed_previous.then_some(TerminalTransition::TurnCompleted);
         }
         if activity == TranscriptActivity::ToolUse {
             self.pending_tool_calls = true;
+            self.deferred_assistant_response = false;
+            if message_id.is_some() {
+                self.open_assistant_id = message_id.clone();
+            }
         }
         if activity == TranscriptActivity::ToolResult {
             self.pending_tool_calls = false;
         }
         let transition = match activity {
-            TranscriptActivity::AssistantResponse if !self.pending_tool_calls => {
+            TranscriptActivity::AssistantResponse if self.pending_tool_calls => None,
+            TranscriptActivity::AssistantResponse => {
+                let same_open_message =
+                    message_id.is_some() && message_id == self.open_assistant_id;
+                self.open_assistant_id = message_id;
+                if same_open_message {
+                    self.deferred_assistant_response = false;
+                    Some(TerminalTransition::TurnCompleted)
+                } else if self.open_assistant_id.is_some() {
+                    // Command Code may split one assistant message across
+                    // multiple records with the same id (text, then tool_use).
+                    // Hold an id-bearing text record until its continuation or
+                    // an explicit terminal envelope arrives. Id-less records
+                    // are standalone responses and complete immediately.
+                    self.deferred_assistant_response = true;
+                    None
+                } else {
+                    Some(TerminalTransition::TurnCompleted)
+                }
+            }
+            TranscriptActivity::TurnCompleted if self.deferred_assistant_response => {
+                self.deferred_assistant_response = false;
                 Some(TerminalTransition::TurnCompleted)
             }
             TranscriptActivity::TurnCompleted
@@ -485,6 +519,7 @@ impl TurnTracker {
             TranscriptActivity::AwaitingInput
                 if self.state != Some(TranscriptActivity::AwaitingInput) =>
             {
+                self.deferred_assistant_response = false;
                 Some(TerminalTransition::AwaitingInput)
             }
             _ => None,
@@ -497,7 +532,12 @@ impl TurnTracker {
     }
 }
 
-fn transcript_activity(line: &str) -> Option<TranscriptActivity> {
+struct TranscriptActivityInfo {
+    activity: TranscriptActivity,
+    message_id: Option<String>,
+}
+
+fn transcript_activity(line: &str) -> Option<TranscriptActivityInfo> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     let kind = value
         .get("type")
@@ -506,13 +546,38 @@ fn transcript_activity(line: &str) -> Option<TranscriptActivity> {
         .and_then(serde_json::Value::as_str)?;
 
     match kind {
-        "turn_complete" | "turn_completed" => Some(TranscriptActivity::TurnCompleted),
+        "turn_complete" | "turn_completed" => Some(TranscriptActivityInfo {
+            activity: TranscriptActivity::TurnCompleted,
+            message_id: None,
+        }),
         "awaiting_input" | "input_required" | "permission_requested" | "question_requested" => {
-            Some(TranscriptActivity::AwaitingInput)
+            Some(TranscriptActivityInfo {
+                activity: TranscriptActivity::AwaitingInput,
+                message_id: None,
+            })
         }
-        "user_turn" | "user_input" => Some(TranscriptActivity::UserTurn),
-        "tool_use" | "tool_call" => Some(TranscriptActivity::ToolUse),
-        "message" => message_activity(value.get("message")?),
+        "user_turn" | "user_input" => Some(TranscriptActivityInfo {
+            activity: TranscriptActivity::UserTurn,
+            message_id: None,
+        }),
+        "tool_use" | "tool_call" => Some(TranscriptActivityInfo {
+            activity: TranscriptActivity::ToolUse,
+            message_id: value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        }),
+        "message" => {
+            let message = value.get("message")?;
+            Some(TranscriptActivityInfo {
+                activity: message_activity(message)?,
+                message_id: value
+                    .get("id")
+                    .or_else(|| message.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            })
+        }
         _ => None,
     }
 }
@@ -650,6 +715,42 @@ mod tests {
         assert_eq!(
             tracker.observe_transcript_line(
                 r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":"The inspection is complete."}}"#,
+            ),
+            Some(TerminalTransition::TurnCompleted)
+        );
+    }
+
+    #[test]
+    fn split_assistant_message_does_not_complete_before_same_id_tool_use() {
+        let mut tracker = TurnTracker::default();
+
+        assert_eq!(
+            tracker.observe_transcript_line(
+                r#"{"type":"message","id":"assistant-1","message":{"role":"user","content":"Inspect the code."}}"#,
+            ),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(
+                r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":"I will inspect this first."}}"#,
+            ),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(
+                r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"tool_use","name":"read_file"}]}}"#,
+            ),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(
+                r#"{"type":"message","id":"tool-result-1","message":{"role":"user","content":[{"type":"tool_result","content":"source"}]}}"#,
+            ),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(
+                r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":"Inspection complete."}}"#,
             ),
             Some(TerminalTransition::TurnCompleted)
         );
