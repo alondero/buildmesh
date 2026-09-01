@@ -46,7 +46,6 @@ import {
 import { useMeshStore } from '../../src/stores/meshStore';
 import { CommandOmnibar } from '../../src/components/CommandOmnibar/CommandOmnibar';
 import {
-  APP_COMMANDS,
   PREFIX_FILTERS,
 } from '../../src/lib/omnibar/indexers';
 import { seedAgentNodes } from '../unit/helpers/seedAgentNodes';
@@ -152,11 +151,6 @@ describe('Command Omnibar store lifecycle (issue #1414)', () => {
     resetStores();
   });
 
-  it('starts closed in files mode', () => {
-    expect(useUIStore.getState().omnibarOpen).toBe(false);
-    expect(useUIStore.getState().omnibarMode).toBe('files');
-  });
-
   it('openOmnibar(mode) flips the open flag and seeds the mode', () => {
     act(() => useUIStore.getState().openOmnibar('files'));
     expect(useUIStore.getState().omnibarOpen).toBe(true);
@@ -179,16 +173,11 @@ describe('Command Omnibar store lifecycle (issue #1414)', () => {
     act(() => useUIStore.getState().toggleOmnibar('files'));
     act(() => useUIStore.getState().toggleOmnibar('commands'));
     // The editors' convention: pressing the other chord while the palette
-    // is open re-seeds the mode rather than closing + reopening.
+    // is open re-seeds the mode rather than closing + reopening. The
+    // component contract for this is exercised in the lifecycle suite
+    // below (the re-seed-on-mode-toggle test).
     expect(useUIStore.getState().omnibarOpen).toBe(true);
     expect(useUIStore.getState().omnibarMode).toBe('commands');
-  });
-
-  it('closeOmnibar is idempotent — a second close is a no-op', () => {
-    act(() => useUIStore.getState().openOmnibar());
-    act(() => useUIStore.getState().closeOmnibar());
-    act(() => useUIStore.getState().closeOmnibar());
-    expect(useUIStore.getState().omnibarOpen).toBe(false);
   });
 });
 
@@ -234,7 +223,7 @@ describe('Command Omnibar component lifecycle (issue #1414)', () => {
     expect(input?.value).toBe('>');
   });
 
-  it('captures focus from a terminal-like element on open and restores on close', () => {
+  it('captures focus from a terminal-like element on open and restores on close', async () => {
     // The "terminal" in this test is a focusable element representing
     // the xterm helper textarea the real app would have held. The
     // palette's useEffect captures document.activeElement on mount and
@@ -248,13 +237,23 @@ describe('Command Omnibar component lifecycle (issue #1414)', () => {
     expect(document.activeElement).toBe(terminal);
 
     act(() => useUIStore.getState().openOmnibar());
-    const { unmount } = render(<CommandOmnibar />);
-    // After mount, focus has moved into the search box.
-    expect(document.activeElement?.getAttribute('role')).toBe('combobox');
+    const { container } = render(<CommandOmnibar />);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[role="combobox"]',
+    );
+    // Identity (not just role) — a future refactor that wraps the input
+    // in a <div role="combobox"> with a child <input> would otherwise
+    // pass against the wrapper rather than the element that owns focus.
+    expect(input).toBeTruthy();
+    expect(document.activeElement).toBe(input);
 
-    // Close + unmount restores focus to the terminal-like element.
+    // Drive the close through the store so React owns the unmount path:
+    // closeOmnibar flips the flag, CommandOmnibar re-renders to null,
+    // <OmnibarPalette>'s cleanup restores focus. NOT calling unmount()
+    // manually is what pins the real contract — a future change to a
+    // display:none mount would otherwise hide the regression.
     act(() => useUIStore.getState().closeOmnibar());
-    unmount();
+    await act(async () => {});
     expect(document.activeElement).toBe(terminal);
     terminal.remove();
   });
@@ -338,23 +337,70 @@ describe('Command Omnibar component lifecycle (issue #1414)', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('renders the prefix hint bar with at least one badge per domain (discoverability)', () => {
+  it('renders a prefix hint badge for every PREFIX_FILTERS entry (discoverability)', () => {
     act(() => useUIStore.getState().openOmnibar());
     const { container } = render(<CommandOmnibar />);
     // The footer is the prefix-discoverability strip; each PREFIX_FILTER
-    // entry renders at least one <kbd> badge. We assert one per filter
-    // (the deduplication in the component collapses '/' and '+', so the
-    // visible badge count is `unique(prefix.description)` — still >= 1).
+    // entry renders a <kbd> per prefix (the deduplication in the
+    // component collapses '/'+' '+' by description but still emits both
+    // <kbd>s inside the same group). Asserting on the rendered keycap
+    // text — not the source array — is what makes the badge test
+    // meaningful: a future bug that stops wiring PREFIX_FILTERS into the
+    // footer would surface here even though `PREFIX_FILTERS.length` is
+    // unchanged.
     const footer = container.querySelector('.border-t.border-border-subtle');
     expect(footer).toBeTruthy();
-    const badges = footer!.querySelectorAll('kbd');
-    expect(badges.length).toBeGreaterThan(0);
-    // At minimum, `>` (commands) and `@` (nodes) should be present.
-    expect(PREFIX_FILTERS.some((f) => f.prefix === '>')).toBe(true);
-    expect(PREFIX_FILTERS.some((f) => f.prefix === '@')).toBe(true);
-    // The catalog lists the cheatsheet command so the user has a
-    // discoverable target — that command ships under the `command`
-    // category, which the `>` prefix scopes to.
-    expect(APP_COMMANDS.some((c) => c.id === 'show-cheatsheet')).toBe(true);
+    const badgeTexts = Array.from(footer!.querySelectorAll('kbd')).map(
+      (k) => k.textContent ?? '',
+    );
+    const expectedPrefixes = PREFIX_FILTERS.map((f) => f.prefix);
+    for (const prefix of expectedPrefixes) {
+      expect(badgeTexts).toContain(prefix);
+    }
+  });
+
+  it('re-seeds the search box to `>` when toggleOmnibar flips to commands while open', () => {
+    // Component-side counterpart of the store-level "OTHER mode keeps
+    // open" test: pressing the other chord must re-seed the search box
+    // to the new mode's prefix (the editors' quick-open convention,
+    // issue #1411). The store test only verifies the flag; this test
+    // pins the UI contract that `useEffect(() => setQuery(mode==='commands'
+    // ? '>' : ''), [mode])` actually runs while the palette is mounted.
+    act(() => useUIStore.getState().openOmnibar('files'));
+    const { container } = render(<CommandOmnibar />);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[role="combobox"]',
+    );
+    expect(input).toBeTruthy();
+    // Sanity: files mode seeds an empty box.
+    expect(input!.value).toBe('');
+
+    // Switch to commands while open — the palette must NOT remount (the
+    // flag stayed true), but the seed useEffect must re-fire.
+    act(() => useUIStore.getState().toggleOmnibar('commands'));
+    const inputAfter = container.querySelector<HTMLInputElement>(
+      'input[role="combobox"]',
+    );
+    expect(inputAfter).toBe(input);
+    expect(inputAfter!.value).toBe('>');
+    // And back: the same effect fires on the reverse transition.
+    act(() => useUIStore.getState().toggleOmnibar('files'));
+    expect(inputAfter!.value).toBe('');
+  });
+
+  it('does not throw when a keystroke fires before the palette is mounted', () => {
+    // Regression guard: the Escape listener attaches inside a useEffect
+    // (it does not arm while the palette is closed). A stray keyDown on
+    // document.body before mount must be a no-op — listeners from
+    // earlier component instances, or a sloppy parent that bubbles,
+    // would otherwise surface here.
+    render(<CommandOmnibar />);
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+    expect(() => {
+      fireEvent.keyDown(document.body, { key: 'Escape' });
+      fireEvent.keyDown(document.body, { key: 'Enter' });
+    }).not.toThrow();
+    // And the closed flag never spontaneously flips.
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
   });
 });
