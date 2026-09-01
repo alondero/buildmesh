@@ -81,7 +81,12 @@ describe('ProbePanel', () => {
     // this to exercise the empty-state branches.
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     seedAgentNodes([NODE], NODE.id);
-    useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
+    useUIStore.setState({
+      probeOpen: false,
+      probeTab: 'files',
+      activeDiffFile: null,
+      probeContextPins: {},
+    });
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_git_status') return Promise.resolve(FILES);
       if (cmd === 'list_directory') return Promise.resolve(TREE);
@@ -143,17 +148,46 @@ describe('ProbePanel', () => {
     expect(header.textContent).toContain('Archive');
   });
 
-  it('shows the active mesh name as a subheading in the header', () => {
-    // The shared dock header carries both the active tab label (title)
-    // and the active mesh name (subheading) so the user always knows
-    // which project the dock is anchored to without needing the
-    // directory path strip that the Issues / PRs tabs used to render.
+  it('shows the active lens and Mesh subject in the header', () => {
+    // The shared dock header names the explicit ownership lens and subject,
+    // then makes live selection visible as a separate mode line.
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
     const header = screen.getByRole('region', { name: 'Probe panel' });
-    // MESH.name is 'demo' (see fixture at the top of the file).
+    expect(screen.getByTestId('probe-context-subject').textContent).toContain('Mesh: demo');
+    expect(screen.getByTestId('probe-context-mode').textContent).toBe('Following selection');
     expect(header.textContent).toContain('demo');
+  });
+
+  it('keeps Usage Host-lens instead of inheriting the selected Mesh name', () => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'usage' });
+    render(<ProbePanel />);
+
+    expect(screen.getByTestId('probe-context-subject').textContent).toBe('Host');
+    expect(screen.getByTestId('probe-context-mode').textContent).toBe('Host-wide');
+    expect(screen.getByRole('region', { name: 'Probe panel' }).textContent).not.toContain('demo');
+  });
+
+  it('pins the current Mesh subject and exposes the pinned mode', () => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'properties' });
+    render(<ProbePanel />);
+
+    const pinButton = screen.getByRole('button', { name: 'Pin context' });
+    fireEvent.click(pinButton);
+
+    expect(useUIStore.getState().probeContextPins.properties).toEqual({
+      tab: 'properties',
+      lens: 'mesh',
+      meshId: MESH.id,
+      nodeId: null,
+    });
+    expect(screen.getByTestId('probe-context-mode').textContent).toBe('Pinned context');
+    expect(screen.getByRole('button', { name: 'Unpin context' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unpin context' }));
+    expect(useUIStore.getState().probeContextPins.properties).toBeUndefined();
+    expect(screen.getByTestId('probe-context-mode').textContent).toBe('Following selection');
   });
 
   it('omits the mesh-name subheading when no project is active', () => {
@@ -176,6 +210,8 @@ describe('ProbePanel', () => {
     render(<ProbePanel />);
 
     expect(screen.getByText('No project selected')).toBeTruthy();
+    expect(screen.getByTestId('probe-context-subject').textContent).toBe('Mesh');
+    expect(screen.getByTestId('probe-context-empty').textContent).toContain('Mesh lens');
   });
 
   it('renders a node-specific empty state on the review tab when no node is focused', () => {
@@ -186,6 +222,9 @@ describe('ProbePanel', () => {
     render(<ProbePanel />);
 
     expect(screen.getByText('No active agent node')).toBeTruthy();
+    expect(screen.getByTestId('probe-context-subject').textContent).toContain('Agent');
+    expect(screen.getByTestId('probe-context-subject').textContent).toContain('Mesh: demo');
+    expect(screen.getByTestId('probe-context-empty').textContent).toContain('Agent lens');
   });
 
   it('renders the Project Files tab body (Changed Files + File Tree) when the ðŸ“ tab is active', async () => {
@@ -271,6 +310,7 @@ describe('useUIStore.openProbeTab (issue #375, the next 5 tabs rely on this)', (
       probeOpen: false,
       probeTab: 'files',
       activeDiffFile: null,
+      probeContextPins: {},
     });
   });
 

@@ -92,6 +92,28 @@ Tauri 2.11's raw Channel transport has a payload-shape boundary: frames smaller 
 ### Layout: Grid-Only
 Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid. The UI auto-scales 1–6 panes via CSS grid.
 
+### Probe Context Lenses (issue #1456)
+Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the
+complete `PROBE_TAB_DEFINITIONS` record is the source of truth for ownership
+lens,
+baseline, selection-following, pinning, and statefulness. The three lenses are
+`Host` (machine-wide provider/account/runtime state), `Mesh` (one repository,
+its configuration, GitHub feeds, worktrees, automation, and notes), and
+`Agent` (one Agent Node's changes and node-specific history/actions). Usage is
+Host-lens and must never display or infer a Mesh name. Project Files is
+Mesh-owned but may show a focused Agent Node's working tree; Agent Changes is
+Agent-lens and uses the node-base baseline. The `useProbeContext` hook is the
+read seam for the shell and destination tabs: use its subject, resolved IDs,
+paths, and `hasRequiredContext` instead of reconstructing ownership from
+`selectedMeshId` or `activeNodeId`. The Probe header labels the subject and
+whether it is following selection or pinned. Pins are session UI state keyed to
+the destination; a missing pinned subject renders an explicit empty state and
+must not fall back to a newly selected Mesh or Agent Node. See
+[`docs/adr/0029-probe-context-lenses.md`](adr/0029-probe-context-lenses.md)
+for the destination mapping and mixed-ownership decisions. The future grouped
+Probe rail (#1375) may consume the same lens metadata but is not part of this
+contract.
+
 ### Probe Panel shell (scroll ownership + narrow width)
 `ProbePanel.tsx` wraps every tab in `flex-1 overflow-y-auto` (`:282`) around an `h-full flex flex-col` keyed div (`:283`). A tab root must therefore be **layout-only** (`flex flex-col h-full min-h-0`) with **one** inner `flex-1 min-h-0 overflow-y-auto overflow-x-hidden` body — the shared `<ProbeTabBody>` primitive exists to provide exactly that. Because the root is `h-full`, the panel's outer scroller has content precisely its own height and stays inert, so the inner body is the single *effective* scroll owner; adding `overflow-y-auto` to the root as well stacks two scrollers (the #1468 defect in `CircuitsProbeTab`). Two further traps: `overflow-y-auto` **alone computes `overflow-x: auto`** (CSS forbids one axis being `visible` while the other scrolls), so wide content can scroll the tab sideways unless you state `overflow-x-hidden`; and the dock's **240px minimum** (`PROBE_PANEL_BOUNDS`) means unbounded text (errors, identifiers, node ids) must wrap — `truncate` there hides the tail that carries the diagnosis, and `truncate` combined with `flex-wrap` on one row is self-contradictory. Note `ProbePanel.tsx` also declares a *local* `function ProbeTabBody` that is only the tab router — same name as the shared primitive, different component. Full checklist: `docs/development/probe-ui-checklist.md` (umbrella issue #1464).
 

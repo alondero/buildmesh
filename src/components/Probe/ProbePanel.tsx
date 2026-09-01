@@ -26,17 +26,23 @@
  * platform-dependent artwork clashed with the design tokens.
  *
  * The header pins the active tab's icon in a tinted chip next to its label,
- * with the active mesh name as a subheading so each tab body stays free of
- * redundant path/name chrome. Body content fades in on tab switch (keyed
- * remount), and the whole body slides in from the right when the dock
- * opens — both animations run through the design-token keyframes in
- * `App.css` and respect `prefers-reduced-motion` via the global media
- * query.
+ * with the explicit lens/subject and following-or-pinned mode visible so each
+ * tab body stays free of redundant context chrome. Body content fades in on
+ * tab switch (keyed remount), and the whole body slides in from the right
+ * when the dock opens — both animations run through the design-token
+ * keyframes in `App.css` and respect `prefers-reduced-motion` via the global
+ * media query.
  */
 
 import { useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import {
+  PROBE_TAB_DEFINITIONS,
+  PROBE_TAB_ORDER,
+  type ProbeContext,
+  type ProbeTabDefinition,
+} from '../../lib/probeContext';
 import { useProbeResize, PROBE_PANEL_BOUNDS } from './useProbeResize';
 import { EmptyState } from '../shared/Spinner';
 import { ProjectFilesTab } from './ProjectFilesTab';
@@ -67,51 +73,56 @@ import {
   type ProbeIcon,
 } from './probeIcons';
 
-interface ProbeTabDef {
-  tab: ProbeTab;
-  icon: ProbeIcon;
-  /** Full descriptive name — used for the header title, fallback tooltip,
-   *  and the button's accessible name (aria-label). */
-  label: string;
-  /** Optional longer tooltip for the activity-rail button. Falls back to
-   *  `label` when omitted. */
-  tooltip?: string;
-}
+type ProbeTabDef = ProbeTabDefinition & { tab: ProbeTab; icon: ProbeIcon };
 
-// Display order follows the PRD's activity-rail order (issue #374), which is
-// deliberately different from the `ProbeTab` union's declaration order.
-// Issue #601 — `usage` is the dedicated glanceable surface for Usage Meters
-// (subscription quota + cash balance). Placed early so the always-visible
-// activity rail makes it a one-click glance: the rail stays visible even
-// when the panel body is collapsed, so the user can always reopen the Usage
-// tab.
-const PROBE_TABS: ProbeTabDef[] = [
-  { tab: 'files', icon: FilesIcon, label: 'Project Files' },
-  { tab: 'review', icon: ReviewIcon, label: 'Agent Changes' },
-  { tab: 'usage', icon: UsageIcon, label: 'Usage', tooltip: 'Provider usage meters' },
-  { tab: 'worktrees', icon: WorktreesIcon, label: 'Worktree Manager' },
-  { tab: 'properties', icon: PropertiesIcon, label: 'Mesh Properties' },
-  // Issue-driven and looping autopilot policy + status (wayfinder #990,
-  // ticket #994). Sits next to Mesh Properties so the two config tabs
-  // cluster visually — issue-driven policy still lives in Mesh Properties
-  // today, this tab is the dedicated surface for the mode toggle and the
-  // looping config.
-  { tab: 'autopilot', icon: AutopilotIcon, label: 'Autopilot' },
-  // Autopilot Circuits (spec #1205 / walking skeleton #1206) — the
-  // composable trigger-action graphs. Sits next to the legacy Autopilot
-  // tab so the two automation surfaces cluster.
-  { tab: 'circuits', icon: CircuitsIcon, label: 'Circuits' },
-  { tab: 'issues', icon: IssuesIcon, label: 'Git Issues' },
-  { tab: 'pulls', icon: PullsIcon, label: 'Pull Requests' },
-  { tab: 'sessions', icon: ArchiveIcon, label: 'Archive', tooltip: 'Archived Nodes' },
-  { tab: 'scratchpad', icon: NotesIcon, label: 'Scratch Pad' },
-];
+// Presentation owns icons; order and labels come from the explicit Probe
+// contract so a destination cannot enter the rail without an ownership entry.
+const PROBE_TAB_ICONS: Record<ProbeTab, ProbeIcon> = {
+  files: FilesIcon,
+  review: ReviewIcon,
+  usage: UsageIcon,
+  worktrees: WorktreesIcon,
+  properties: PropertiesIcon,
+  autopilot: AutopilotIcon,
+  circuits: CircuitsIcon,
+  issues: IssuesIcon,
+  pulls: PullsIcon,
+  sessions: ArchiveIcon,
+  scratchpad: NotesIcon,
+};
+
+export const PROBE_TABS: readonly ProbeTabDef[] = PROBE_TAB_ORDER.map((tab) => ({
+  tab,
+  icon: PROBE_TAB_ICONS[tab],
+  ...PROBE_TAB_DEFINITIONS[tab],
+}));
+
+function ContextPinIcon({ className = 'w-3.5 h-3.5' }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m12 17 5-5" />
+      <path d="M9 3h6l1 5-4 4v5l-2 2v-7L6 8l1-5Z" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
 
 export function ProbePanel() {
   const probeOpen = useUIStore((s) => s.probeOpen);
   const probeTab = useUIStore((s) => s.probeTab);
   const setProbeTab = useUIStore((s) => s.setProbeTab);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
+  const pinProbeContext = useUIStore((s) => s.pinProbeContext);
+  const clearProbeContextPin = useUIStore((s) => s.clearProbeContextPin);
   // Issue #724 — the panel is now horizontally resizable (default 360px,
   // clamped 240–720). The shared `useResizable` hook's valueRef pattern
   // (issue #301) prevents the second-drag stale-closure jump; the wrapper
@@ -128,11 +139,11 @@ export function ProbePanel() {
   // expansion into a single +8 step per render.
   const bodyWidthRef = useRef(bodyWidth);
   bodyWidthRef.current = bodyWidth;
-  // The dock header surfaces the active mesh name as a subheading on every
-  // tab, so each tab body stays free of redundant path/name chrome. The
-  // hook degrades to `null` in the empty state; we render nothing in that
-  // branch rather than blank-pad the row.
-  const { activeMeshName } = useProbeContext();
+  // The dock header surfaces the destination's explicit lens and subject.
+  // Unlike the old mesh-only subheading, this keeps Host usage from inheriting
+  // a misleading mesh name and makes selection-following/pinned behavior
+  // visible before a stateful action is taken.
+  const context = useProbeContext();
 
   // The "click active tab to collapse, click any tab to open" rule composes the
   // store's two orthogonal primitives. Kept in the component so the store stays
@@ -149,6 +160,20 @@ export function ProbePanel() {
 
   const activeDef = PROBE_TABS.find((t) => t.tab === probeTab) ?? PROBE_TABS[0];
   const ActiveIcon = activeDef.icon;
+  const contextModeLabel = context.mode === 'pinned'
+    ? 'Pinned context'
+    : context.lens === 'host'
+      ? 'Host-wide'
+      : context.followsSelection
+        ? 'Following selection'
+        : 'Fixed context';
+  const handlePinToggle = () => {
+    if (context.mode === 'pinned') {
+      clearProbeContextPin();
+    } else if (context.pinCandidate !== null) {
+      pinProbeContext(context.pinCandidate);
+    }
+  };
 
   return (
     <div className="flex h-full shrink-0 bg-bg-surface">
@@ -219,11 +244,11 @@ export function ProbePanel() {
             aria-label="Probe panel"
             className="flex flex-col h-full w-full overflow-hidden border-l border-border-subtle"
           >
-          {/* Header — active tab icon chip + label (title) + active mesh
-              name (subheading) + collapse button. The subheading replaces
-              the directory-path strip the Issues / PRs tabs used to render
-              individually, so the same context appears uniformly across
-              every probe tab. */}
+          {/* Header — active tab icon chip + label (title) + explicit lens /
+              subject + following/pinned mode + collapse button. The subject
+              line replaces the directory-path strip the Issues / PRs tabs
+              used to render individually, so every destination makes its
+              ownership visible in the same place. */}
           <div
             className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
           >
@@ -238,16 +263,43 @@ export function ProbePanel() {
                 <span className="text-sm text-text-primary font-medium truncate">
                   {activeDef.label}
                 </span>
-                {activeMeshName && (
-                  <span
-                    className="text-xs text-text-secondary truncate min-w-0"
-                    title={activeMeshName}
-                  >
-                    {activeMeshName}
-                  </span>
-                )}
+                <div
+                  data-testid="probe-context-subject"
+                  className="flex items-center gap-1 min-w-0 text-xs text-text-secondary"
+                  title={context.subjectLabel}
+                >
+                  <span className="truncate min-w-0">{context.subjectLabel}</span>
+                  {context.detailLabel && (
+                    <span className="truncate min-w-0 text-text-muted">
+                      · {context.detailLabel}
+                    </span>
+                  )}
+                </div>
+                <span
+                  data-testid="probe-context-mode"
+                  className="text-2xs text-text-muted/80 truncate"
+                >
+                  {contextModeLabel}
+                </span>
               </div>
             </div>
+            {context.canPin && (
+              <button
+                type="button"
+                onClick={handlePinToggle}
+                data-testid="probe-context-pin"
+                aria-pressed={context.mode === 'pinned'}
+                className={`p-1.5 rounded-md transition-colors shrink-0 ${
+                  context.mode === 'pinned'
+                    ? 'text-accent-cyan bg-accent-cyan/10'
+                    : 'text-text-muted hover:text-text-primary hover:bg-bg-card'
+                }`}
+                title={context.mode === 'pinned' ? 'Unpin context' : 'Pin context'}
+                aria-label={context.mode === 'pinned' ? 'Unpin context' : 'Pin context'}
+              >
+                <ContextPinIcon />
+              </button>
+            )}
             <button
               type="button"
               onClick={toggleProbe}
@@ -333,45 +385,30 @@ export function ProbePanel() {
  * state when the derived context can't support the tab.
  */
 function ProbeTabBody({ tab }: { tab: ProbeTab }) {
-  const { activeMeshId, activeNodeId } = useProbeContext();
+  const context = useProbeContext();
+  const definition = PROBE_TAB_DEFINITIONS[tab];
 
-  // Host-scoped tabs render without a mesh selection. Today that's only
+  // Host-lens tabs render without a mesh selection. Today that's only
   // the Usage tab (issue #601) — it shows every detected harness and
   // keyed provider regardless of which mesh (if any) is focused. Adding
-  // a new host-scoped tab means a new branch here.
-  if (tab === 'usage') return <UsageTab />;
-
-  if (activeMeshId === null) {
-    return (
-      <EmptyState
-        icon={<CompassIcon className="w-5 h-5" />}
-        label="No project selected"
-        hint="Select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here."
-        fill
-      />
-    );
+  // a new host-lens tab means a new branch here.
+  if (definition.lens === 'host') {
+    if (tab === 'usage') return <UsageTab />;
+    return <ProbeTabPlaceholder tab={tab} />;
   }
+
+  if (!context.hasRequiredContext) return <ProbeContextEmptyState context={context} />;
 
   // "Agent Changes" lists a specific node's edits — with no focused node
   // there's nothing to inspect, even though a mesh is selected.
-  if (tab === 'review' && activeNodeId === null) {
-    return (
-      <EmptyState
-        icon={<SearchIcon className="w-5 h-5" />}
-        label="No active agent node"
-        hint="Focus an agent terminal to review the changes it has made."
-        fill
-      />
-    );
-  }
+  // The Agent lens reports a missing node through the same contract as a
+  // missing Mesh; its empty state names the lens and whether a pin is stale.
 
-  // Real content for the tabs whose issues have landed. Routed before
-  // the placeholder so the empty-state guards above (no mesh selected,
-  // no node focused) still apply uniformly. The Issues, PRs and Archive
-  // tabs are mesh-scoped but don't require an active node, so they fall
-  // through to the "no project selected" guard only. The Usage tab is
-  // host-scoped and is short-circuited above so it renders even with
-  // no mesh selected.
+  // Real content for the tabs whose issues have landed. Routed after the
+  // explicit context guard so each destination gets the same missing-subject
+  // behavior. Mesh-lens Issues, PRs, and Archive do not require an active
+  // node; the Agent Changes destination does. Usage is Host-lens and is
+  // short-circuited above so it renders even with no Mesh selected.
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
   if (tab === 'properties') return <MeshPropertiesTab />;
@@ -384,6 +421,38 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'scratchpad') return <ScratchpadTab />;
 
   return <ProbeTabPlaceholder tab={tab} />;
+}
+
+function ProbeContextEmptyState({ context }: { context: ProbeContext }) {
+  if (context.lens === 'agent') {
+    return (
+      <EmptyState
+        icon={<SearchIcon className="w-5 h-5" />}
+        label={context.mode === 'pinned' ? 'Pinned agent unavailable' : 'No active agent node'}
+        hint={context.mode === 'pinned'
+          ? 'Agent lens is pinned to a node that is no longer available. Unpin the context to follow the current selection.'
+          : 'Agent lens: focus an agent terminal to review the changes it has made.'}
+        fill
+        testId="probe-context-empty"
+      />
+    );
+  }
+
+  return (
+    <EmptyState
+      icon={<CompassIcon className="w-5 h-5" />}
+      label={context.mode === 'pinned'
+        ? context.subject.available ? 'Pinned file context unavailable' : 'Pinned mesh unavailable'
+        : 'No project selected'}
+      hint={context.mode === 'pinned'
+        ? context.subject.available
+          ? 'The pinned working tree is no longer available. Unpin the context to follow the current selection.'
+          : 'Mesh lens is pinned to a mesh that is no longer available. Unpin the context to follow the current selection.'
+        : 'Mesh lens: select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here.'}
+      fill
+      testId="probe-context-empty"
+    />
+  );
 }
 
 /**

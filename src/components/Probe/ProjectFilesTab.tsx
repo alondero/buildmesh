@@ -3,9 +3,9 @@
  *
  * Mirrors the non-agent branch of the legacy `FileExplorerPanel`: a
  * `ChangedFilesSection` on top, a collapsible `FileTree` underneath. The
- * tab is mesh-scoped — the active path comes from `useProbeContext()`, which
- * prefers the focused node's path (worktree dir) when a node is active and
- * falls back to the mesh root otherwise.
+ * tab is Mesh-scoped — the active path comes from `useProbeContext()`, which
+ * uses the focused/pinned Agent Node's working tree only when it belongs to
+ * the destination Mesh and falls back to the Mesh root otherwise.
  *
  * Click semantics
  * ---------------
@@ -66,15 +66,15 @@ export function ProjectFilesTab() {
   const [fileTreeExpanded, setFileTreeExpanded] = useState(true);
 
   // ProbeTabBody guarantees `activePath` and `activeMeshId` are non-null by the
-  // time this component renders (it shows the "no project selected" empty state
+  // time this component renders (it shows the explicit missing-Mesh empty state
   // otherwise). The guard keeps the context's types narrow without a runtime
-  // check that would never fire.
+  // check that would normally fire.
   if (!activePath || activeMeshId === null) return null;
 
   // A changed-file click opens the Center Workspace Diff Overlay (#379). The
   // diff is `'head'`-source (uncommitted vs HEAD) because that's what the
   // Changed Files list shows; `rootPath` is the probe's active path (the
-  // focused node's worktree, or the mesh root with no node focused), so the
+    // focused/pinned node's worktree, or the mesh root with no matching node), so the
   // path joins correctly for `diff_file_against_head`. We capture the focused
   // node/mesh as the lens so the overlay auto-closes if it later changes. The
   // `string | null` signature is dictated by `FileTree.onFileSelect`'s "clear
