@@ -2141,6 +2141,168 @@ mod tests {
         drop(guard);
     }
 
+    // -- blueprint contract: per-blueprint worker seam (#1469) -----------
+    //
+    // The blueprint contract matrix (`autopilot::circuit::blueprint_contract`)
+    // pins the walking skeleton as the canonical minimal preset. The
+    // worker-seam helpers below are the impure-side equivalents: the
+    // seam observes per-blueprint state and turns it into pure events.
+    // These tests pin that the seam treats the walking skeleton
+    // correctly — no gates/retries/closes to mishandle — and that the
+    // review blueprint's close_retry observer stops firing once its
+    // target's association clears (the otherwise-loop-forever trap).
+
+    #[test]
+    fn walking_skeleton_close_retry_observer_emits_nothing() {
+        // The walking skeleton has no CloseAgentNode —
+        // `observe_close_agent_retries` must scan all steps and find
+        // zero Completed close steps. Pins the negative contract: a
+        // refactor that accidentally treats every Completed step as a
+        // close retry would otherwise emit spurious retries for the
+        // walking skeleton.
+        let mut view = RunView {
+            run_id: 42,
+            graph: CircuitGraph::walking_skeleton("do the thing"),
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView {
+                    node_id: "spawn".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: Some(900),
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "inject".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "notify".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+            ],
+        };
+        let mut events = Vec::new();
+        observe_close_agent_retries(&view, &mut events);
+        assert!(
+            events.is_empty(),
+            "walking skeleton has no CloseAgentNode; observer must emit nothing: {events:?}"
+        );
+
+        // Sanity: even a stray CloseAgentNode with no resolvable target
+        // agent stays silent. The observer requires `resolve_target_agent`
+        // to be Some, and the walking skeleton's spawn has no agent
+        // lineage for a stray close to target.
+        view.steps.push(StepView {
+            node_id: "ghost_close".into(),
+            status: StepStatus::Completed,
+            outcome: Some(GraphStepOutcome::Completed),
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+        });
+        observe_close_agent_retries(&view, &mut events);
+        assert!(
+            events.is_empty(),
+            "a close with no resolvable target agent must NOT emit a retry"
+        );
+    }
+
+    #[test]
+    fn walking_skeleton_spawn_recovery_treats_missing_agent_as_never_attached() {
+        // The contract pins walking skeleton's only spawned node as a
+        // single-slot spawn. On startup recovery, an unattached Running
+        // spawn step is the commit-crash gap — the worker seam fails
+        // it loudly (the only state observation nothing can repair).
+        assert_eq!(
+            reconcile_spawn_step(None, None),
+            SpawnReconciliation::NeverAttached
+        );
+        // Even if the worktree is healthy-looking, an unattached spawn
+        // step is still NeverAttached — there is no row to resume into.
+        assert_eq!(
+            reconcile_spawn_step(
+                None,
+                Some(ReconcileNodeState {
+                    archived: false,
+                    worktree_dir_exists: Some(true),
+                })
+            ),
+            SpawnReconciliation::NeverAttached
+        );
+    }
+
+    #[test]
+    fn review_blueprint_close_retry_observer_stops_after_target_clears() {
+        // Companion to `walking_skeleton_close_retry_observer_emits_nothing`:
+        // the review blueprint DOES have a `close_reviewer` step, and the
+        // contract pins that the observer only re-emits the retry while
+        // the spawn's agent_node_id is still attached. After the seam's
+        // DB half clears the association, the observer MUST stop firing
+        // (otherwise it would loop forever closing an already-closed
+        // node).
+        let mut view = RunView {
+            run_id: 42,
+            graph: CircuitGraph::issue_driven_autopilot_review("buildmesh:run"),
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView {
+                    node_id: "reviewer".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: Some(701),
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "close_reviewer".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+            ],
+        };
+        let mut events = Vec::new();
+        observe_close_agent_retries(&view, &mut events);
+        assert_eq!(
+            events.len(),
+            1,
+            "review blueprint's close_reviewer MUST emit one retry while its target agent is attached"
+        );
+        assert!(
+            matches!(&events[0], CircuitEvent::CloseAgentRetry { node_id } if node_id == "close_reviewer"),
+            "emitted retry must be for close_reviewer: got {:?}",
+            events[0]
+        );
+
+        // Simulate the DB-half clearing the reviewer step's agent association
+        // (the worker's real CloseAgentNode effect path).
+        for step in &mut view.steps {
+            if step.node_id == "reviewer" {
+                step.agent_node_id = None;
+            }
+        }
+        events.clear();
+        observe_close_agent_retries(&view, &mut events);
+        assert!(
+            events.is_empty(),
+            "after the reviewer association clears, close_retry must NOT re-emit (would loop forever)"
+        );
+    }
+
     // -- worker panic isolation (issue #1235) -----------------------------
     //
     // Headline regression for the circuits worker: a single panic inside

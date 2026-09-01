@@ -15,3 +15,6 @@
 pub mod context;
 pub mod model;
 pub mod stepper;
+
+#[cfg(test)]
+mod blueprint_contract;
