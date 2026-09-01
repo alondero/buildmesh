@@ -1134,7 +1134,13 @@ pub(crate) async fn spawn_agent_inner(
     let provisioning = crate::commands::run_blocking("provider_provisioning", move || {
         Ok(run_provider_provisioning(
             || adapter.ensure_workspace_trusted(&provisioning_resolved, &provisioning_runtime),
-            || adapter.provision_attention_hooks(&provisioning_resolved, &provisioning_runtime),
+            || {
+                adapter.provision_attention_hooks(
+                    &provisioning_resolved,
+                    &provisioning_runtime,
+                    session_id,
+                )
+            },
             needs_attention_hook,
         ))
     })

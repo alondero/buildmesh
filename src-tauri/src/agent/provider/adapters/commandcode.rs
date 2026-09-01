@@ -78,6 +78,7 @@ impl AgentProvider for CommandCodeAdapter {
         SpawnRecipe {
             binary: binary_for(platform, env_type),
             base_args: vec!["--yolo".into()],
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }

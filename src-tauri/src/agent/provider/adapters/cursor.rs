@@ -44,6 +44,7 @@ impl AgentProvider for CursorAdapter {
             // Cursor documents `--force` as allowing commands unless denied.
             // `--trust` is a print-mode option, not an interactive-TUI flag.
             base_args: vec!["--force".into()],
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }

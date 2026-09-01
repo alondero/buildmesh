@@ -43,27 +43,25 @@ fn base_flags() -> Vec<String> {
     ]
 }
 
-/// The callback command Codex hooks run. Codex pipes the hook's stdin JSON
-/// (`{hook_event_name, session_id, transcript_path, …}` — issue #884) into the
-/// command; `--data-binary @-` forwards it as the POST body so
-/// `http/routes/attention.rs` can classify the event. The port/session env
-/// vars are set per-agent by `spawn_environment` and inherited by the hook
-/// process; Codex executes the command string itself (no implicit login
-/// shell), so each platform wraps in the shell that expands its own env-var
-/// syntax. A short connect/total timeout keeps a broken local server from
-/// hanging the agent, while `-S` and the non-zero exit status expose curl,
-/// HTTP, and shell failures to Codex.
-fn hook_command(platform: Platform) -> String {
-    match platform {
-        Platform::Windows => {
-            "cmd.exe /c \"curl -fsS --connect-timeout 2 --max-time 10 -X POST --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID%\""
-                .to_string()
-        }
-        _ => {
-            "sh -c \"curl -fsS --connect-timeout 2 --max-time 10 -X POST --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID\""
-                .to_string()
-        }
-    }
+/// Codex already launches hook commands through `cmd.exe /C` (Windows) or
+/// `$SHELL -lc` (Unix), then `env_clear()`s down to a Core inherit snapshot.
+/// Nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never expands and never
+/// sees stdin. Bake the loopback callback URL and let Codex's own shell run
+/// curl. `-o` discards the empty 200 body: Codex Stop treats non-JSON stdout
+/// as a hook failure.
+fn attention_hook_handler(node_id: i64) -> serde_json::Value {
+    let port = crate::http_server::current_http_port();
+    let url = format!("http://localhost:{port}/api/attention/{node_id}");
+    serde_json::json!({
+        "type": "command",
+        "command": format!(
+            "curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}"
+        ),
+        "commandWindows": format!(
+            "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}"
+        ),
+        "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
+    })
 }
 
 const BUILDMESH_HOOK_STATUS_MESSAGE: &str = "Buildmesh attention callback";
@@ -932,7 +930,7 @@ fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
 /// read/write so WSL can batch guest file operations.
 fn ensure_hooks_json_content(
     existing: &str,
-    command: &str,
+    hook: &serde_json::Value,
 ) -> Result<Option<String>, String> {
     let mut settings: serde_json::Value = if existing.is_empty() {
         serde_json::json!({})
@@ -949,13 +947,8 @@ fn ensure_hooks_json_content(
         return Err("hooks.json 'hooks' value must be an object".to_string());
     };
 
-    let hook = serde_json::json!({
-        "type": "command",
-        "command": command,
-        "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
-    });
     let mut changed = false;
-    for event in ["Stop", "PermissionRequest"] {
+    for event in ["SessionStart", "Stop", "PermissionRequest"] {
         let groups = events
             .entry(event)
             .or_insert_with(|| serde_json::json!([]));
@@ -969,7 +962,7 @@ fn ensure_hooks_json_content(
                 continue;
             };
             if let Some(index) = handlers.iter().position(is_buildmesh_hook_handler) {
-                if handlers[index] != hook {
+                if handlers[index] != *hook {
                     handlers[index] = hook.clone();
                     changed = true;
                 }
@@ -1016,6 +1009,7 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 fn ensure_codex_project_files(
     resolved: &ResolvedPath,
     runtime: &LaunchRuntime,
+    node_id: i64,
 ) -> Result<(), String> {
     let _guard = ATTENTION_CONFIG_WRITE_LOCK
         .lock()
@@ -1031,6 +1025,12 @@ fn ensure_codex_project_files(
             .map_err(|e| format!("failed to create .codex dir: {e}"))?;
     }
 
+    // Last-writer-wins: hooks.json bakes this node_id into the callback URL
+    // because Codex's hook runner env_clear()s BUILDMESH_*. Two Codex nodes
+    // sharing one worktree directory will redirect Node A's subsequent
+    // attention webhooks to whoever spawned last. Buildmesh worktrees are
+    // 1:1 with nodes today; do not relax that without a per-node hook path.
+    //
     // Read and validate both files before writing either one. A malformed
     // hooks.json must not leave a half-applied project configuration behind.
     let config_path = project_dir.join("config.toml");
@@ -1039,12 +1039,7 @@ fn ensure_codex_project_files(
     let config_existing = &existing[0];
     let config_updated = ensure_hooks_feature_content(config_existing)?;
     let hooks_existing = &existing[1];
-    let platform = if resolved.env_type == EnvType::Wsl {
-        Platform::Linux
-    } else {
-        Platform::current()
-    };
-    let hooks_updated = ensure_hooks_json_content(hooks_existing, &hook_command(platform))?;
+    let hooks_updated = ensure_hooks_json_content(hooks_existing, &attention_hook_handler(node_id))?;
 
     let mut writes: Vec<(&Path, &str)> = Vec::new();
     if config_updated != *config_existing {
@@ -1073,6 +1068,7 @@ impl AgentProvider for CodexAdapter {
         SpawnRecipe {
             binary: "codex",
             base_args: base_flags(),
+            trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
     }
@@ -1082,11 +1078,16 @@ impl AgentProvider for CodexAdapter {
         platform: Platform,
         session_id: &str,
     ) -> Option<SpawnRecipe> {
-        let mut args = vec!["resume".into(), session_id.into()];
+        // `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`. Options after the
+        // UUID are the prompt, so a restart would "resume" into a garbage turn.
+        // Keep the id in trailing_args; default_prepare and Codex proxy
+        // `--profile`/`--model` append options to base_args only.
+        let mut args = vec!["resume".into()];
         args.extend(base_flags());
         Some(SpawnRecipe {
             binary: "codex",
             base_args: args,
+            trailing_args: vec![session_id.into()],
             windows_shell: shell_for(platform),
         })
     }
@@ -1134,8 +1135,9 @@ impl AgentProvider for CodexAdapter {
         &self,
         resolved: &ResolvedPath,
         runtime: &LaunchRuntime,
+        node_id: i64,
     ) -> Result<(), String> {
-        ensure_codex_project_files(resolved, runtime)
+        ensure_codex_project_files(resolved, runtime, node_id)
     }
 
     fn wsl_passthrough_env(&self) -> &'static [&'static str] {
@@ -1636,13 +1638,13 @@ mod tests {
             env_type: EnvType::Windows,
         };
         CODEX
-            .provision_attention_hooks(&resolved, &LaunchRuntime::default())
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 42)
             .unwrap();
     }
 
-    /// Injection writes both files: the feature flag and the two webhooks in
-    /// Codex's nested matcher/event schema, POSTing the hook's stdin to the
-    /// attention endpoint.
+    /// Injection writes both files: the feature flag and the SessionStart +
+    /// Stop + PermissionRequest webhooks in Codex's nested matcher/event
+    /// schema, POSTing the hook's stdin to the attention endpoint.
     #[test]
     fn inject_writes_config_and_hooks() {
         let temp = TempDir::new().unwrap();
@@ -1654,7 +1656,7 @@ mod tests {
         assert!(config.contains("hooks = true"), "config: {config}");
 
         let hooks = read_hooks_json(temp.path());
-        for event in ["Stop", "PermissionRequest"] {
+        for event in ["SessionStart", "Stop", "PermissionRequest"] {
             let command = hooks["hooks"][event][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{event} hook missing: {hooks:#}"));
@@ -1791,7 +1793,7 @@ mod tests {
 
         let error = ensure_hooks_json_content(
             &std::fs::read_to_string(&path).unwrap(),
-            &hook_command(Platform::Windows),
+            &attention_hook_handler(42),
         )
         .unwrap_err();
         assert!(error.contains("parse hooks.json"));
@@ -1946,25 +1948,84 @@ web_search = true
         assert_eq!(trust_project_path(&resolved), "/home/alice/repo");
     }
 
-    /// The Windows hook command must expand env vars with cmd syntax (`%VAR%`)
-    /// under an explicit `cmd.exe /c`, and the Unix one with sh syntax —
-    /// Codex executes the command string without a login shell of its own.
+    /// Codex already wraps hook commands in `cmd.exe /C` (Windows) or
+    /// `$SHELL -lc` (Unix) and then `env_clear()`s down to a Core inherit
+    /// snapshot. A nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never
+    /// expands, never sees stdin, and never POSTs — which leaves
+    /// `cli_session_id` empty so restart resume is skipped.
     #[test]
-    fn hook_command_uses_platform_env_syntax() {
-        let win = hook_command(Platform::Windows);
-        assert!(win.starts_with("cmd.exe /c"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_SESSION_ID%"), "win: {win}");
-        assert!(win.contains("--connect-timeout 2 --max-time 10"), "win: {win}");
-        assert!(!win.contains("|| true"), "win: {win}");
-        for platform in [Platform::Macos, Platform::Linux] {
-            let unix = hook_command(platform);
-            assert!(unix.starts_with("sh -c"), "unix: {unix}");
-            assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
-            assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
-            assert!(unix.contains("--connect-timeout 2 --max-time 10"), "unix: {unix}");
-            assert!(!unix.contains("|| true"), "unix: {unix}");
+    fn windows_hook_is_not_double_wrapped_and_does_not_rely_on_process_env() {
+        let temp = TempDir::new().unwrap();
+        provision_codex(temp.path());
+        let hooks = read_hooks_json(temp.path());
+        for event in ["Stop", "PermissionRequest", "SessionStart"] {
+            let handler = &hooks["hooks"][event][0]["hooks"][0];
+            let command = handler["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} unix command missing: {hooks:#}"));
+            let windows = handler["commandWindows"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} commandWindows missing: {hooks:#}"));
+            assert!(
+                !command.contains("cmd.exe") && !command.contains("sh -c"),
+                "{event} unix command must not nest a shell Codex already launches: {command}"
+            );
+            assert!(
+                !windows.contains("cmd.exe"),
+                "{event} commandWindows must not nest cmd.exe; Codex already runs cmd /C: {windows}"
+            );
+            assert!(
+                !command.contains("BUILDMESH_PORT")
+                    && !command.contains("BUILDMESH_SESSION_ID")
+                    && !windows.contains("BUILDMESH_PORT")
+                    && !windows.contains("BUILDMESH_SESSION_ID"),
+                "{event} must bake the callback URL; Codex hook env is a Core snapshot that drops BUILDMESH_*: {command} / {windows}"
+            );
+            assert!(
+                command.contains("/api/attention/42") && windows.contains("/api/attention/42"),
+                "{event} must bake the node id into the callback URL: {command} / {windows}"
+            );
+            assert!(
+                command.contains("http://localhost:") && windows.contains("http://localhost:"),
+                "{event} must use localhost (WSL loopback relay), not 127.0.0.1: {command} / {windows}"
+            );
+            assert!(
+                command.contains("-o /dev/null") && windows.contains("-o NUL"),
+                "{event} must discard HTTP body; Codex Stop treats non-JSON stdout as failure: {command} / {windows}"
+            );
         }
+    }
+
+    /// `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`. Flags after the UUID
+    /// become the optional prompt, so a restarted node "resumes" into a
+    /// garbage turn instead of restoring the conversation.
+    #[test]
+    fn resume_recipe_puts_options_before_session_id() {
+        let resume = CODEX
+            .spawn_recipe_for_resume(Platform::Windows, "sid-123")
+            .expect("codex has a resume recipe");
+        assert_eq!(resume.trailing_args, vec!["sid-123".to_string()]);
+        assert!(
+            !resume.base_args.iter().any(|arg| arg == "sid-123"),
+            "session id must not live in base_args: {:?}",
+            resume.base_args
+        );
+        let resume_at = resume
+            .base_args
+            .iter()
+            .position(|arg| arg == "resume")
+            .expect("resume subcommand");
+        let flag_at = resume
+            .base_args
+            .iter()
+            .position(|arg| arg == "--ask-for-approval")
+            .expect("approval flag");
+        assert!(
+            resume_at < flag_at,
+            "expected `codex resume [OPTIONS]` then trailing id, got {:?} + {:?}",
+            resume.base_args,
+            resume.trailing_args
+        );
     }
 
 }

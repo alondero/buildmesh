@@ -31,6 +31,8 @@ struct RolloutMetadata {
     session_id: Option<String>,
     timestamp: Option<String>,
     cwd: Option<String>,
+    #[serde(default)]
+    thread_source: Option<String>,
 }
 
 #[derive(Debug)]
@@ -170,6 +172,14 @@ fn read_session_meta(path: &Path, spawn_directory: &str) -> Option<Candidate> {
     reader.read_line(&mut line).ok()?;
     let record = serde_json::from_str::<RolloutRecord>(&line).ok()?;
     if record.kind != "session_meta" {
+        return None;
+    }
+    if record
+        .payload
+        .thread_source
+        .as_deref()
+        .is_some_and(|source| source != "user")
+    {
         return None;
     }
     let id = uuid::Uuid::parse_str(record.payload.session_id.as_deref()?)
@@ -436,5 +446,55 @@ mod tests {
             "/home/alond/src/buildmesh/.claude/worktrees/node",
             "/home/alond/src/buildmesh/.claude/worktrees/node/"
         ));
+    }
+
+    fn write_rollout_with_source(
+        root: &Path,
+        name: &str,
+        id: &str,
+        cwd: &str,
+        timestamp: &str,
+        thread_source: &str,
+    ) {
+        let day = root.join("2026").join("08").join("27");
+        fs::create_dir_all(&day).unwrap();
+        let record = serde_json::json!({
+            "type": "session_meta",
+            "payload": {
+                "session_id": id,
+                "cwd": cwd,
+                "timestamp": timestamp,
+                "thread_source": thread_source
+            }
+        });
+        fs::write(day.join(name), record.to_string()).unwrap();
+    }
+
+    #[test]
+    fn fresh_capture_ignores_subagent_rollouts_in_the_same_worktree() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = "F:/src/buildmesh/.claude/worktrees/rumpled-covert-typhoon";
+        let parent = "01a042fe-e7e2-79a2-96bd-a15140478a58";
+        write_rollout_with_source(
+            temp.path(),
+            "rollout-parent.jsonl",
+            parent,
+            directory,
+            "2026-08-27T11:33:19.986Z",
+            "user",
+        );
+        write_rollout_with_source(
+            temp.path(),
+            "rollout-subagent.jsonl",
+            "01a04330-f9a2-7c62-9474-347cd72a5e20",
+            directory,
+            "2026-08-27T11:34:19.986Z",
+            "subagent",
+        );
+
+        assert_eq!(
+            find_fresh_id_for_directory_in(temp.path(), directory, 1_787_830_399_000),
+            Some(parent.to_string())
+        );
     }
 }

@@ -1126,12 +1126,13 @@ fn codex_resume_recipe_uses_subcommand_shape() {
         None,
     );
     let prepared = crate::agent::launch::default_prepare(adapter, input);
-    let args = &prepared.recipe.base_args;
-    assert!(args.contains(&"resume".to_string()));
-    assert!(args.contains(&"sess-xyz".to_string()));
+    let args: Vec<&str> = prepared.recipe.argv().collect();
+    assert!(args.contains(&"resume"));
+    assert!(args.contains(&"sess-xyz"));
+    assert_eq!(prepared.recipe.trailing_args, vec!["sess-xyz".to_string()]);
     // Codex resume recipe is the subcommand form; no `--resume <id>`
     // flag is appended.
-    assert!(!args.contains(&"--resume".to_string()));
+    assert!(!args.contains(&"--resume"));
 }
 
 /// Issue #1179 follow-up pin: `mcode` no longer advertises

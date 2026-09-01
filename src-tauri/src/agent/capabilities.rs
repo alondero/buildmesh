@@ -520,9 +520,10 @@ mod tests {
         let codex = codex_caps();
         assert_eq!(codex.harness_id, "codex");
         assert!(codex.supports_resume);
+        assert!(codex.auto_resume_on_startup);
         assert!(codex.requires_attention_hook);
-        // Issue #1364 §3 — Codex's Stop + PermissionRequest hooks deliver
-        // permission approval signals under permission-ask mode.
+        // Issue #1364 §3 — Codex Stop + PermissionRequest deliver permission
+        // signals under permission-ask mode. SessionStart is capture-only.
         assert!(matches!(
             codex.attention_capability,
             AttentionCapability::Hook { launch_mode: AttentionLaunchMode::PermissionAsk, .. }
