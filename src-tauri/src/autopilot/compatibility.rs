@@ -38,9 +38,9 @@
 //! Startup prompt delivery is capability-aware but is not a compatibility
 //! gate: harnesses with prefill use it, while the rest receive a two-phase
 //! PTY injection after launch.
-//! 1. **Execution / attention hook** — `HarnessCapabilities::requires_attention_hook`.
-//!    Autopilot drives turn evaluation off the attention webhook (`on_turn`
-//!    in `autopilot::pipeline`); a harness that doesn't install the hook
+//! 1. **Execution / turn signal** — `HarnessCapabilities::requires_attention_hook`
+//!    or a supported passive transcript watcher. Autopilot drives turn
+//!    evaluation from `node_turn::publish_*`; a harness without either signal
 //!    would never trigger the state machine.
 //! 2. **Worktree operation** — `HarnessCapabilities::is_plain_terminal` is the
 //!    only "can't run inside a worktree" indicator today (Terminal isn't an
@@ -107,9 +107,9 @@ pub enum AutopilotCompatibilityReason {
     /// loop, so the entire Autopilot pipeline has nothing to drive.
     PlainTerminal,
 
-    /// The harness does not install an attention hook, so the turn-driven
-    /// Autopilot pipeline (`autopilot::pipeline::on_turn`) never fires for
-    /// its nodes. The agent runs but Autopilot stays blind to its progress.
+    /// The harness has neither an attention hook nor a supported passive
+    /// transcript watcher, so the turn-driven Autopilot pipeline
+    /// (`autopilot::pipeline::on_turn`) never fires for its nodes.
     MissingAttentionHook {
         harness_id: String,
     },
@@ -258,6 +258,14 @@ pub fn lookup_capabilities(harness_id: &str) -> Option<HarnessCapabilities> {
         .map(|p| capabilities_for(p.adapter()))
 }
 
+/// Whether this capability descriptor has a backend-owned passive watcher
+/// that publishes standard Node Turns. Keep this at the compatibility seam:
+/// the adapter owns watcher startup, while this evaluator owns the question
+/// of whether that signal is sufficient for Autopilot.
+fn has_passive_turn_watcher(capabilities: &HarnessCapabilities) -> bool {
+    capabilities.harness_id == "commandcode"
+}
+
 // ---------------------------------------------------------------------------
 // Evaluator
 // ---------------------------------------------------------------------------
@@ -311,7 +319,7 @@ pub fn evaluate(input: AutopilotCompatibilityInput<'_>) -> AutopilotCompatibilit
             if caps.is_plain_terminal {
                 reasons.push(AutopilotCompatibilityReason::PlainTerminal);
             }
-            if !caps.requires_attention_hook {
+            if !caps.requires_attention_hook && !has_passive_turn_watcher(caps) {
                 reasons.push(AutopilotCompatibilityReason::MissingAttentionHook {
                     harness_id: input.resolved_harness_id.to_string(),
                 });
@@ -582,10 +590,11 @@ mod tests {
         assert!(kinds.contains(&"attention"), "got reasons: {:?}", result.reasons);
     }
 
-    /// Command Code accepts positional queries (prefill) but has no
-    /// attention hook, so Autopilot stays blocked on missing attention only.
+    /// Command Code's transcript watcher supplies the same terminal turn
+    /// signal that hook-backed harnesses provide, so no native hook script is
+    /// required for an Autopilot loop.
     #[test]
-    fn evaluate_commandcode_emits_attention_reason_only() {
+    fn evaluate_commandcode_with_passive_watcher_is_allowed() {
         let caps = lookup_capabilities("commandcode").expect("commandcode known");
         assert!(caps.supports_prefill);
         assert!(!caps.requires_attention_hook);
@@ -597,21 +606,8 @@ mod tests {
             mesh_use_worktree: true,
             explicit_autopilot_provider: false,
         });
-        assert!(!result.allowed);
-        let kinds: Vec<&str> = result
-            .reasons
-            .iter()
-            .map(|r| match r {
-                AutopilotCompatibilityReason::MissingAttentionHook { .. } => "attention",
-                _ => "other",
-            })
-            .collect();
-        assert!(
-            !kinds.contains(&"prefill"),
-            "Command Code advertises prefill; prefill must not block Autopilot. got {:?}",
-            result.reasons
-        );
-        assert!(kinds.contains(&"attention"), "got reasons: {:?}", result.reasons);
+        assert!(result.allowed, "Command Code watcher should allow Autopilot: {:?}", result.reasons);
+        assert!(result.reasons.is_empty());
     }
 
     /// A custom or future harness with only prefill missing remains eligible:
@@ -795,6 +791,20 @@ mod tests {
         assert_eq!(result.resolved_harness_id.as_deref(), Some("codex"));
         assert_eq!(result.resolved_spawn_option.as_deref(), Some("codex"));
         assert!(result.explicit_autopilot_provider);
+    }
+
+    /// Command Code has no native hook, but its backend-owned transcript
+    /// watcher emits the same terminal turn signals. The Tauri-command seam
+    /// must therefore allow it for an Autopilot Mesh.
+    #[test]
+    fn compute_for_mesh_allows_commandcode_via_passive_watcher() {
+        let result = compute_for_mesh(Some("commandcode"), None, None, true);
+        assert!(
+            result.allowed,
+            "Command Code watcher should allow Autopilot: {:?}",
+            result.reasons
+        );
+        assert_eq!(result.resolved_harness_id.as_deref(), Some("commandcode"));
     }
 
     /// `compute_for_mesh` falls through to mesh default when explicit is

@@ -1258,6 +1258,22 @@ pub(crate) async fn spawn_agent_inner(
         sandbox,
     );
 
+    // A resumed Command Code process can append its first turn immediately.
+    // Give the adapter a pre-spawn seam to snapshot the old transcript and
+    // install its watcher before the child receives CPU time.
+    let start_resume_services = || async {
+        if let SessionIdMode::Resume(cli_session_id) = &session_id_mode {
+            adapter.before_resume_spawn(
+                session_id,
+                cli_session_id,
+                &resolved.spawn_path,
+                resolved.env_type,
+                app,
+            )
+            .await;
+        }
+    };
+
     let (child, master): (
         Box<dyn portable_pty::Child + Send + Sync>,
         Box<dyn portable_pty::MasterPty + Send>,
@@ -1266,11 +1282,26 @@ pub(crate) async fn spawn_agent_inner(
             "spawn_agent_inner: spawning session {} inside AppContainer sandbox",
             session_id
         );
-        sandbox_spawn(&cmd, session_id, &resolved.host_path, rows, cols)
-            .inspect_err(|e| emit_provider_error(e))?
+        start_resume_services().await;
+        match sandbox_spawn(&cmd, session_id, &resolved.host_path, rows, cols) {
+            Ok(process) => process,
+            Err(error) => {
+                crate::services::commandcode_watcher::stop(session_id);
+                emit_provider_error(&error);
+                return Err(error);
+            }
+        }
     } else {
         let pair = open_pty_pair(rows, cols)?;
-        let child = spawn_child(&pair, cmd).inspect_err(|e| emit_provider_error(e))?;
+        start_resume_services().await;
+        let child = match spawn_child(&pair, cmd) {
+            Ok(child) => child,
+            Err(error) => {
+                crate::services::commandcode_watcher::stop(session_id);
+                emit_provider_error(&error);
+                return Err(error);
+            }
+        };
         (child, pair.master)
     };
 
@@ -1293,8 +1324,20 @@ pub(crate) async fn spawn_agent_inner(
     }
 
     // 10. Setup IO
-    let reader = master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = master.take_writer().map_err(|e| e.to_string())?;
+    let reader = match master.try_clone_reader() {
+        Ok(reader) => reader,
+        Err(error) => {
+            crate::services::commandcode_watcher::stop(session_id);
+            return Err(error.to_string());
+        }
+    };
+    let writer = match master.take_writer() {
+        Ok(writer) => writer,
+        Err(error) => {
+            crate::services::commandcode_watcher::stop(session_id);
+            return Err(error.to_string());
+        }
+    };
     let reader_alive = Arc::new(AtomicBool::new(true));
 
     // 11. Register BEFORE starting the reader thread. The pre-#300 order
@@ -1393,7 +1436,7 @@ pub(crate) async fn spawn_agent_inner(
     }
 
     if matches!(session_id_mode, SessionIdMode::None) {
-        adapter.after_fresh_spawn(session_id, &resolved.spawn_path, resolved.env_type);
+        adapter.after_fresh_spawn(session_id, &resolved.spawn_path, resolved.env_type, app);
     }
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
@@ -1405,7 +1448,11 @@ pub(crate) async fn spawn_agent_inner(
     // through SessionLifecycle (issue #132) so the `unless_in` predicate
     // lives in one place.
     let sink = session_lifecycle::AppSessionLifecycleSink { app };
-    session_lifecycle::on_spawn_started(&sink, session_id).map_err(|e| e.to_string())?;
+    if let Err(error) = session_lifecycle::on_spawn_started(&sink, session_id) {
+        crate::services::commandcode_watcher::stop(session_id);
+        return Err(error.to_string());
+    }
+    crate::services::commandcode_watcher::activate(session_id);
     let app_for_promotion = app.clone();
     std::thread::spawn(move || {
         // Promote to Running iff the reader hasn't already written Error.

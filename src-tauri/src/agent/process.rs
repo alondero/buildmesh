@@ -1026,6 +1026,7 @@ pub async fn kill_agent(session_id: i64) -> Result<(), String> {
 /// convention in `commands/mod.rs`.
 pub(crate) fn kill_agent_blocking(session_id: i64) -> Result<(), String> {
     crate::session_naming::reset_buffers(session_id);
+    crate::services::commandcode_watcher::stop(session_id);
     PROCESS_REGISTRY.kill_session(session_id);
     PROCESS_REGISTRY.remove(&session_id);
     crate::http_server::clear_scrollback(session_id);

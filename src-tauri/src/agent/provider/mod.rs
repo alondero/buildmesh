@@ -11,6 +11,8 @@ pub mod provider_conf;
 use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Runtime facts resolved by provider preflight and shared with the adapter's
 /// provisioning seams. An empty context means the adapter should resolve its
@@ -422,7 +424,28 @@ pub trait AgentProvider: Send + Sync {
     /// SQLite store for the `ses_…` id the TUI just minted. Adapters own
     /// the capture implementation — spawn must not hard-code a provider
     /// service behind a boolean flag.
-    fn after_fresh_spawn(&self, _node_id: i64, _spawn_path: &str, _env_type: EnvType) {}
+    fn after_fresh_spawn(
+        &self,
+        _node_id: i64,
+        _spawn_path: &str,
+        _env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
+    }
+
+    /// Hook immediately before an existing CLI session is resumed. A harness
+    /// can snapshot transcript state and attach session-scoped services here,
+    /// before the child gets a chance to write its first resumed turn.
+    fn before_resume_spawn<'a>(
+        &'a self,
+        _node_id: i64,
+        _session_id: &str,
+        _spawn_path: &str,
+        _env_type: EnvType,
+        _app: &'a tauri::AppHandle,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
 
     /// Alternative recipe for resume (subcommand-style providers like Codex).
     /// If Some, `build_spawn_command()` uses this instead of `spawn_recipe()` + `resume_args()`.
