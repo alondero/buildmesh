@@ -76,6 +76,7 @@ import {
   listProviders,
   setMeshAutopilotEnabled,
   updateMeshAutopilot,
+  updateMeshCircuitRunCapacity,
   updateMeshLoopConfig,
   updateMeshUseWorktree,
   type ProviderInfo,
@@ -269,6 +270,17 @@ const blankIssueDrivenForm: IssueDrivenForm = {
   actionOnSuccess: 'draft_pr',
 };
 
+/** Per-mesh cap on concurrent *admitted* circuit runs (issue #1467).
+ *  Distinct from `IssueDrivenForm.concurrencyLimit` (legacy agent-slot
+ *  count) and persisted through its OWN narrow single-column IPC
+ *  (`update_mesh_circuit_run_capacity` mirrors `set_mesh_autopilot_enabled`).
+ *  The two field shapes stay separate: the legacy 5-column atomic
+ *  `update_mesh_autopilot` write never sees `circuitRunCapacity`, so
+ *  toggling the run cap can't clobber the user's autopilot policy.
+ *  Default 2 unlocks the two-overlap PR-review acceptance criterion
+ *  out of the box. */
+const DEFAULT_CIRCUIT_RUN_CAPACITY = 2;
+
 interface CoerceOk {
   mode: AutopilotMode;
   initialPrompt: string | null;
@@ -362,6 +374,14 @@ export function AutopilotProbeTab() {
   // write); the loop form's concerns stay separate.
   const [issueDrivenForm, setIssueDrivenForm] = useState<IssueDrivenForm>(
     blankIssueDrivenForm
+  );
+  // Circuit-run capacity (issue #1467) — its OWN state slot and its
+  // OWN persist handler. Distinct from `issueDrivenForm` because the
+  // legacy 5-column `update_mesh_autopilot` write must never carry the
+  // circuit-run cap (the narrow IPC `update_mesh_circuit_run_capacity`
+  // mirrors `set_mesh_autopilot_enabled`'s sibling shape).
+  const [circuitRunCapacity, setCircuitRunCapacity] = useState<number>(
+    DEFAULT_CIRCUIT_RUN_CAPACITY
   );
   // Provider catalogue for the Issue-driven "Autopilot provider" select.
   // Fetched once on mount; the `provider-list-changed` event keeps it
@@ -478,6 +498,9 @@ export function AutopilotProbeTab() {
           provider: row.autopilot_provider ?? '',
           actionOnSuccess: row.autopilot_action_on_success ?? 'draft_pr',
         });
+        // Circuit-run capacity lives on its own state slice so the
+        // legacy Issue-driven form never carries it (issue #1467).
+        setCircuitRunCapacity(row.circuit_run_capacity || DEFAULT_CIRCUIT_RUN_CAPACITY);
         setLoading(false);
       })
       .catch(() => {
@@ -606,11 +629,29 @@ export function AutopilotProbeTab() {
   /** Optimistic patch helper for the issue-driven controls (master
    *  enable + 4 fields). Sets the next form, then funnels it through
    *  `saveIssueDriven` so the five columns land atomically. Mirrors the
-   *  loop-section `patchLoopConfig` shape verbatim. */
+   *  loop-section `patchLoopConfig` shape verbatim. The form is
+   *  intentionally narrow — `circuitRunCapacity` lives on a separate
+   *  state slice with its own patch handler (`patchCircuitRunCapacity`)
+   *  so this 5-column atomic write can never accidentally carry it. */
   const patchIssueDriven = async (patch: Partial<IssueDrivenForm>) => {
     const next = { ...issueDrivenForm, ...patch };
     setIssueDrivenForm(next);
     await saveIssueDriven(next);
+  };
+
+  /** Optimistic patch for the circuit-run capacity (issue #1467). Lives
+   *  on its OWN state slice (`circuitRunCapacity`) and writes through
+   *  its OWN narrow IPC — never touches the legacy 5-column
+   *  `update_mesh_autopilot` atomic write, so adjusting the run cap
+   *  can't clobber the user's autopilot policy. The optimistic
+   *  `setCircuitRunCapacity(capacity)` runs BEFORE the IPC so the UI
+   *  updates immediately; `wrappedSave` shows the save indicator on
+   *  rejection so the user sees the row flip back. */
+  const patchCircuitRunCapacity = async (capacity: number) => {
+    setCircuitRunCapacity(capacity);
+    const meshId = activeMeshIdRef.current;
+    if (meshId === null) return;
+    await wrappedSave(() => updateMeshCircuitRunCapacity(meshId, capacity));
   };
 
   /** Fetch the live loop status and map it onto the badge union. Mesh-switch
@@ -725,6 +766,8 @@ export function AutopilotProbeTab() {
               providers={providers}
               compatibility={compatibility}
               mountedRef={mountedRef}
+              circuitRunCapacity={circuitRunCapacity}
+              onPatchCircuitRunCapacity={patchCircuitRunCapacity}
             />
           )}
         </>
@@ -1104,6 +1147,13 @@ interface IssueDrivenSectionProps {
    *  blocks enablement (issue #1152 AC #5). */
   compatibility: AutopilotCompatibility | null;
   mountedRef: React.MutableRefObject<boolean>;
+  /** Circuit-run capacity (issue #1467) — its OWN state slice and
+   *  patch handler, decoupled from `IssueDrivenForm` so the legacy
+   *  5-column atomic `update_mesh_autopilot` write can never carry
+   *  the run cap (the field persists through the narrow
+   *  `update_mesh_circuit_run_capacity` IPC instead). */
+  circuitRunCapacity: number;
+  onPatchCircuitRunCapacity: (capacity: number) => Promise<void>;
 }
 
 function IssueDrivenSection({
@@ -1114,6 +1164,8 @@ function IssueDrivenSection({
   providers,
   compatibility,
   mountedRef,
+  circuitRunCapacity,
+  onPatchCircuitRunCapacity,
 }: IssueDrivenSectionProps) {
   // Issue #1152: gating rules.
   // - `enableBlocked`: when the verdict says incompatible, the master
@@ -1224,6 +1276,27 @@ function IssueDrivenSection({
                 await onPatchIssueDriven({
                   concurrencyLimit: Number(e.target.value),
                 });
+              }}
+              className={CONTROL_CLASS}
+            >
+              {AUTOPILOT_CONCURRENCY_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field
+            label="Max concurrent circuit runs"
+            htmlFor="ap-policy-circuit-run-capacity"
+            hint="Per-mesh cap on admitted circuit runs (issue #1467). One slot per run, regardless of fan-out agent count. Default 2 lets two PR-review loops overlap without starving either reviewer."
+          >
+            <select
+              id="ap-policy-circuit-run-capacity"
+              value={circuitRunCapacity}
+              onChange={async (e) => {
+                await onPatchCircuitRunCapacity(Number(e.target.value));
               }}
               className={CONTROL_CLASS}
             >

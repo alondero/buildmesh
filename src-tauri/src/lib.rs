@@ -574,6 +574,11 @@ pub fn run() {
             commands::mesh_properties::get_autopilot_compatibility,
             commands::mesh_properties::update_mesh_pool_size,
             commands::mesh_properties::get_mesh_pool_count,
+            // Circuit-run capacity (issue #1467) — narrow single-column
+            // write for the new `meshes.circuit_run_capacity` column.
+            // Sibling to `set_mesh_autopilot_enabled` so adjusting the run
+            // cap can't clobber the legacy autopilot policy atomic write.
+            commands::mesh_properties::update_mesh_circuit_run_capacity,
             // Per-Mesh harness overrides (issue #1151 / slice 2 of #1148).
             // The sparse harness-override map is the layer that sits
             // between explicit Agent Node spawn arguments and the

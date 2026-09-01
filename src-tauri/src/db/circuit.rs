@@ -375,6 +375,15 @@ pub fn set_circuit_run_state(run_id: i64, state: &str) -> SqlResult<()> {
     Ok(())
 }
 
+/// Is this DB string a terminal run state? The three terminal values
+/// (`completed` / `failed` / `cancelled`) each release one
+/// circuit-run-admission slot exactly once. `paused` is deliberately
+/// NOT terminal: paused runs retain their slot (the user-chosen
+/// semantics in #1467 planning).
+pub fn is_terminal_run_state(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "cancelled")
+}
+
 /// One run row by id, or `None` when the id is unknown.
 pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
     let db = super::read_conn();
@@ -451,6 +460,29 @@ pub struct CircuitStepOp {
 /// insert stamps `started_at`, terminal statuses stamp `completed_at`,
 /// and a `fresh_attempt` op clears the previous round's outcome/error
 /// and restamps `started_at` for the retried execution.
+///
+/// **Terminal-state single-release idempotency (issue #1467, ADR-0028).**
+/// When `run_state` is `Some(completed|failed|cancelled)` (per
+/// [`is_terminal_run_state`]), the run-state UPDATE uses an extra
+/// `WHERE state IN ('pending', 'running', 'paused')` clause. A row
+/// already in a terminal state matches zero rows, so the update is a
+/// no-op and **no** capacity is double-decremented. Three failure modes
+/// this guards against:
+///
+/// 1. **Concurrent terminal writes** — the stepper's
+///    `finish_run_if_done` flushing `completed` racing an effect-
+///    failure path to `failed`. The first commit wins (terminal row
+///    matches zero rows for the second, so no overwrite).
+/// 2. **Crash after commit, before wake** — the next worker pass
+///    retries the wake and re-evaluates pending runs cleanly.
+/// 3. **Retry path** — a `RetryLimit` reseting a failed step keeps the
+///    run's terminal state untouched (the WHERE filter blocks the
+///    reschedule from clobbering it to `running`).
+///
+/// On a successful terminal-state commit (`rows_updated > 0`), this
+/// function wakes the circuit worker so the next pass promotes the
+/// next FIFO pending run into the freed slot. Wakes are idempotent
+/// (condvar-only).
 pub fn commit_circuit_advance(
     run_id: i64,
     run_state: Option<&str>,
@@ -459,14 +491,30 @@ pub fn commit_circuit_advance(
 ) -> SqlResult<()> {
     let mut db = super::write_conn();
     let tx = db.transaction()?;
+    let mut terminal_woke = false;
     match (run_state, context_json) {
         (Some(state), ctx) => {
-            tx.execute(
-                "UPDATE autopilot_circuit_runs \
-                 SET state = ?2, context_json = COALESCE(?3, context_json), updated_at = datetime('now') \
-                 WHERE id = ?1",
-                params![run_id, state, ctx],
-            )?;
+            let rows_updated = if is_terminal_run_state(state) {
+                tx.execute(
+                    "UPDATE autopilot_circuit_runs \
+                     SET state = ?2, context_json = COALESCE(?3, context_json), updated_at = datetime('now') \
+                     WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
+                    params![run_id, state, ctx],
+                )?
+            } else {
+                tx.execute(
+                    "UPDATE autopilot_circuit_runs \
+                     SET state = ?2, context_json = COALESCE(?3, context_json), updated_at = datetime('now') \
+                     WHERE id = ?1",
+                    params![run_id, state, ctx],
+                )?
+            };
+            // Terminal committed AT LEAST ONCE this round — wake so the
+            // next pass can re-evaluate pending runs against the freed
+            // slot (FIFO promotion). The wake is recorded here; the
+            // actual call happens after tx.commit() so a crash mid-tx
+            // doesn't wake the worker spuriously.
+            terminal_woke = is_terminal_run_state(state) && rows_updated > 0;
         }
         (None, Some(ctx)) => {
             tx.execute(
@@ -516,6 +564,9 @@ pub fn commit_circuit_advance(
         )?;
     }
     tx.commit()?;
+    if terminal_woke {
+        crate::services::circuit_worker::wake_circuit_worker();
+    }
     Ok(())
 }
 
@@ -621,6 +672,52 @@ pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
          WHERE r.state IN ('running', 'paused') \
            AND s.agent_node_id IS NOT NULL",
         [],
+        |row| row.get(0),
+    )
+}
+
+/// **Admitted** circuit runs on this mesh (issue #1467) — the input to
+/// the run-admission gate. Counts runs in `running` or `paused` only.
+/// Deliberately excludes `pending`: a pending run has NOT yet claimed
+/// a circuit-run slot, and the gate exists precisely to decide whether
+/// a pending run gets to claim one.
+///
+/// Why exclude `pending` — counting pending runs toward the cap would
+/// self-deadlock: on a mesh with 3 pending runs and cap=2, every
+/// pending run's count read sees itself + peers, so 3 < 2 = false and
+/// no run ever admits. The fix is the FIFO-faithful shape here: only
+/// **admitted** (i.e. `running` or `paused`) runs consume a slot at
+/// admission time, and iteration order (`ORDER BY r.id` in the worker's
+/// `list_active_circuit_runs`) provides the FIFO promotion — the next
+/// un-admitted pending run is admitted the moment the count drops
+/// below the cap, with no orphaned admits at the boundary.
+///
+/// State semantics:
+///   * `running` holds capacity (an admitted run's steps may fan out to
+///     many agents; the run keeps its one slot regardless of fan-out).
+///   * `paused` holds capacity (matches the existing
+///     `paused_runs_stay_active_and_counters_count_them` invariant —
+///     pause preserves the in-flight agents so resume continues
+///     cleanly; the user-chosen semantics in #1467 planning explicitly
+///     retain the slot on pause).
+///   * `pending` does NOT count (not yet admitted; the gate is the
+///     admission decision).
+///   * Terminal runs (`completed`/`failed`) do NOT count: a release
+///     via [`release_circuit_run`] transitions the row out of this set
+///     in a single `UPDATE`, and a second release is a no-op (so we
+///     never double-decrement capacity).
+///
+/// One unit = one admitted run regardless of how many agent nodes the
+/// blueprint fans out to. This is the seam that fixes the two-overlap
+/// PR-review deadlock (issue #1355 / runs 3+4 of circuit 5) where the
+/// agent-node count saturated on the implementation agent and parked
+/// the reviewer step in `pending_slot` indefinitely.
+pub fn count_active_circuit_runs(mesh_id: i64) -> SqlResult<i64> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT COUNT(*) FROM autopilot_circuit_runs \
+         WHERE mesh_id = ?1 AND state IN ('running', 'paused')",
+        params![mesh_id],
         |row| row.get(0),
     )
 }

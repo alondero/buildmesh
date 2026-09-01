@@ -183,4 +183,21 @@ loop_consecutive_failures: number,
  * configuration; the v33 one-shot migration copies non-empty
  * legacy values into a `claude` override entry.
  */
-harness_overrides: { [key in string]: HarnessConfigValue }, };
+harness_overrides: { [key in string]: HarnessConfigValue }, 
+/**
+ * Per-mesh cap on **concurrent admitted circuit runs** (issue #1467).
+ * One slot per admitted run regardless of how many agent nodes the
+ * run's blueprint fans out to — fixes the two-run overlap
+ * PR-review deadlock where the legacy `autopilot_concurrency_limit`
+ * (which counts distinct piloted agent nodes) saturates on the
+ * implementation agent and parks the reviewer step in
+ * `pending_slot`. Default 2 unlocks the two-overlap acceptance
+ * criterion out of the box. Validated to `1..=8` at the IPC
+ * boundary (`commands::mesh_properties::update_mesh_circuit_run_capacity`),
+ * mirroring the legacy column. Persisted as
+ * `meshes.circuit_run_capacity INTEGER NOT NULL DEFAULT 2` (schema
+ * v36); pre-v36 rows read back as 2 via the `COALESCE(col, 2)` in
+ * `migrations::mesh_columns_projection`. Stored as `i32` to match
+ * the legacy column's wire shape (`number` in TS, not `bigint`).
+ */
+circuit_run_capacity: number, };
