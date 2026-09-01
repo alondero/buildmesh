@@ -202,6 +202,20 @@ export function compatibilityReasonCopy(
         headline: 'Worktrees are disabled on this mesh.',
         remedy: 'Enable worktrees in Mesh Properties → Worktrees.',
       };
+    // Defensive default: the wire-side Rust enum is the source of truth
+    // for `AutopilotCompatibilityReason`, but the formatter lives in the
+    // frontend and can drift if a new variant is added without a
+    // matching case here. Without a default, a future drift would crash
+    // the banner render with `Cannot read properties of undefined
+    // (reading 'headline')` and silently blank every reason row. The
+    // fallback renders the variant name verbatim so the user still sees
+    // a reason (the testid on the `<li>` keys off `reason.kind`, so the
+    // per-reason DOM marker survives too).
+    default:
+      return {
+        headline: `Reason "${(reason as { kind: string }).kind}" is not supported by this Agent Harness.`,
+        remedy: null,
+      };
   }
 }
 
