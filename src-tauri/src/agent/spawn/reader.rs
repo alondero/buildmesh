@@ -363,7 +363,7 @@ pub(super) fn start_reader(
             session_id
         );
         reader_alive_clone.store(false, Ordering::SeqCst);
-        crate::services::commandcode_watcher::stop(session_id);
+        crate::agent::provider::notify_process_terminated(session_id);
 
         // `spawned_at` is process-creation time, NOT `spawn_start`: the
         // early-exit heuristic answers "did the process die almost

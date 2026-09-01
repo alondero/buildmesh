@@ -53,6 +53,11 @@ requires_attention_hook: boolean,
  */
 attention_capability: AttentionCapability, 
 /**
+ * Whether the harness has a passive transcript watcher that supplies
+ * standard turn lifecycle signals when no native attention hook exists.
+ */
+supports_passive_turn_watcher: boolean, 
+/**
  * Whether the harness writes a transcript the coordinator read API
  * can parse into a Node Digest's rich layer (ADR-0008).
  */

@@ -1016,12 +1016,14 @@ fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed
 pub(crate) enum CommandCodeMessageActivity {
     UserTurn,
     ToolUse,
+    ToolResult,
     AssistantResponse,
 }
 
 /// Classify a Command Code message payload using the canonical text and tool
 /// extraction rules. Empty, synthetic, tool-result, thinking, and reasoning
-/// records are not lifecycle activity.
+/// records are classified separately so the watcher can clear pending tool
+/// calls, while the digest parser still omits them from normalized turns.
 pub(crate) fn commandcode_message_activity(
     message: &serde_json::Value,
 ) -> Option<CommandCodeMessageActivity> {
@@ -1031,7 +1033,7 @@ pub(crate) fn commandcode_message_activity(
     let tool_calls = extract_tool_calls(Some(content));
 
     match role {
-        "user" if contains_tool_result(content) => None,
+        "user" if contains_tool_result(content) => Some(CommandCodeMessageActivity::ToolResult),
         "user" if is_synthetic_message(&text) || text.trim().is_empty() => None,
         "user" => Some(CommandCodeMessageActivity::UserTurn),
         "assistant" if !tool_calls.is_empty() => Some(CommandCodeMessageActivity::ToolUse),

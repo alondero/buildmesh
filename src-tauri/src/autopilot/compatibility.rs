@@ -262,10 +262,6 @@ pub fn lookup_capabilities(harness_id: &str) -> Option<HarnessCapabilities> {
 /// that publishes standard Node Turns. Keep this at the compatibility seam:
 /// the adapter owns watcher startup, while this evaluator owns the question
 /// of whether that signal is sufficient for Autopilot.
-fn has_passive_turn_watcher(capabilities: &HarnessCapabilities) -> bool {
-    capabilities.harness_id == "commandcode"
-}
-
 // ---------------------------------------------------------------------------
 // Evaluator
 // ---------------------------------------------------------------------------
@@ -319,7 +315,7 @@ pub fn evaluate(input: AutopilotCompatibilityInput<'_>) -> AutopilotCompatibilit
             if caps.is_plain_terminal {
                 reasons.push(AutopilotCompatibilityReason::PlainTerminal);
             }
-            if !caps.requires_attention_hook && !has_passive_turn_watcher(caps) {
+            if !caps.requires_attention_hook && !caps.supports_passive_turn_watcher {
                 reasons.push(AutopilotCompatibilityReason::MissingAttentionHook {
                     harness_id: input.resolved_harness_id.to_string(),
                 });
@@ -621,6 +617,7 @@ mod tests {
             auto_resume_on_startup: true,
             requires_attention_hook: true,
             attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            supports_passive_turn_watcher: false,
             produces_readable_transcript: true,
             supports_model_override: true,
             supports_effort_override: false,

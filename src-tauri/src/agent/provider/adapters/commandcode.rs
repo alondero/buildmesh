@@ -94,6 +94,18 @@ impl AgentProvider for CommandCodeAdapter {
         false
     }
 
+    fn supports_passive_turn_watcher(&self) -> bool {
+        true
+    }
+
+    fn on_spawn_activated(&self, node_id: i64) {
+        crate::services::commandcode_watcher::activate(node_id);
+    }
+
+    fn on_process_terminated(&self, node_id: i64) {
+        crate::services::commandcode_watcher::stop(node_id);
+    }
+
     fn produces_readable_transcript(&self) -> bool {
         true
     }

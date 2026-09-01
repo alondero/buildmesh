@@ -4,10 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc, Arc, Mutex,
-};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::AppHandle;
@@ -17,11 +14,89 @@ use crate::models::EnvType;
 struct ActiveWatcher {
     /// Keeps notify's backend and callback alive for this node.
     _watcher: RecommendedWatcher,
-    /// Lets `stop` cancel a worker even if it races watcher registration.
-    active: Arc<AtomicBool>,
-    /// Resume watchers arm before the child starts, but must not publish until
-    /// the orchestrator has persisted its `Spawning` lifecycle transition.
-    activated: Arc<AtomicBool>,
+    /// Coordinates activation and teardown without polling from the worker.
+    signal: Arc<WorkerSignal>,
+}
+
+struct WorkerState {
+    active: bool,
+    activated: bool,
+}
+
+struct WorkerSignal {
+    state: Mutex<WorkerState>,
+    wake: Condvar,
+}
+
+struct ActivationGuard {
+    node_id: i64,
+    armed: bool,
+}
+
+impl ActivationGuard {
+    fn new(node_id: i64) -> Self {
+        Self {
+            node_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ActivationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            clear_activation(self.node_id);
+        }
+    }
+}
+
+impl WorkerSignal {
+    fn new(activated: bool) -> Self {
+        Self {
+            state: Mutex::new(WorkerState {
+                active: true,
+                activated,
+            }),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.active = false;
+            self.wake.notify_all();
+        }
+    }
+
+    fn activate(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.activated = true;
+            self.wake.notify_all();
+        }
+    }
+
+    fn wait_until_ready(&self, node_id: i64) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        while state.active
+            && (!state.activated || !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id))
+        {
+            state = match self.wake.wait(state) {
+                Ok(state) => state,
+                Err(_) => return false,
+            };
+        }
+        state.active
+    }
+
+    fn is_active(&self) -> bool {
+        self.state.lock().map(|state| state.active).unwrap_or(false)
+    }
 }
 
 static WATCHERS: once_cell::sync::Lazy<Mutex<HashMap<i64, ActiveWatcher>>> =
@@ -44,6 +119,7 @@ pub enum TerminalTransition {
 enum TranscriptActivity {
     UserTurn,
     ToolUse,
+    ToolResult,
     AssistantResponse,
     TurnCompleted,
     AwaitingInput,
@@ -57,7 +133,7 @@ enum TranscriptActivity {
 #[derive(Default)]
 pub struct TurnTracker {
     state: Option<TranscriptActivity>,
-    tool_use_seen: bool,
+    pending_tool_calls: bool,
 }
 
 /// Incremental reader for an append-only Command Code JSONL transcript.
@@ -174,6 +250,7 @@ fn start(
     app: &AppHandle,
     initial_offset: Option<u64>,
 ) -> Result<(), String> {
+    let mut activation_guard = ActivationGuard::new(node_id);
     if !transcript_path.is_file() {
         return Err(format!(
             "Command Code transcript does not exist: {}",
@@ -188,12 +265,12 @@ fn start(
         return Err(format!("Command Code node {node_id} is no longer running"));
     }
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(1);
     let path_for_callback = transcript_path.clone();
     let mut watcher = RecommendedWatcher::new(
         move |result| match result {
             Ok(_) => {
-                let _ = tx.send(());
+                let _ = tx.try_send(());
             }
             Err(error) => tracing::warn!(
                 "commandcode watcher: notify error for {}: {error}",
@@ -207,14 +284,13 @@ fn start(
         .watch(&transcript_path, RecursiveMode::NonRecursive)
         .map_err(|e| format!("watch {}: {e}", transcript_path.display()))?;
 
-    let active = Arc::new(AtomicBool::new(true));
     // Lock ordering matches `activate`/`stop`, so an activation that races
     // fresh-session discovery is either remembered before we insert or opens
     // this exact gate afterwards — never lost between the two maps.
     let activated_nodes = ACTIVATED_NODES
         .lock()
         .map_err(|_| "Command Code activation registry lock poisoned".to_string())?;
-    let activated = Arc::new(AtomicBool::new(activated_nodes.contains(&node_id)));
+    let signal = Arc::new(WorkerSignal::new(activated_nodes.contains(&node_id)));
     WATCHERS
         .lock()
         .map_err(|_| "Command Code watcher registry lock poisoned".to_string())?
@@ -222,8 +298,7 @@ fn start(
             node_id,
             ActiveWatcher {
                 _watcher: watcher,
-                active: active.clone(),
-                activated: activated.clone(),
+                signal: signal.clone(),
             },
         );
     drop(activated_nodes);
@@ -232,15 +307,14 @@ fn start(
     // the first liveness check and map insertion, cancel this exact watcher
     // before its worker can replay the terminal transcript.
     if initial_offset.is_none() && !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
-        stop_if_current(node_id, &active);
+        stop_if_current(node_id, &signal);
         return Err(format!("Command Code node {node_id} is no longer running"));
     }
 
     let app = app.clone();
     let path_for_worker = transcript_path.clone();
     let session_id = session_id.to_string();
-    let worker_active = active.clone();
-    let worker_activated = activated.clone();
+    let worker_signal = signal.clone();
     if let Err(error) = std::thread::Builder::new()
         .name(format!("commandcode-watcher-{node_id}"))
         .spawn(move || {
@@ -248,13 +322,7 @@ fn start(
             // so wait until the process is registered before consuming its
             // post-baseline records. Otherwise a fast first turn could be
             // consumed while the lifecycle sink is not yet available.
-            while worker_active.load(Ordering::SeqCst)
-                && (!worker_activated.load(Ordering::SeqCst)
-                    || !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id))
-            {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            if !worker_active.load(Ordering::SeqCst) {
+            if !worker_signal.wait_until_ready(node_id) {
                 return;
             }
 
@@ -270,12 +338,13 @@ fn start(
                 &session_id,
                 &path_for_worker,
                 &app,
-                &worker_active,
+                &worker_signal,
                 tail.read_transitions(&path_for_worker),
             );
 
             while rx.recv().is_ok() {
-                if !worker_active.load(Ordering::SeqCst) {
+                while rx.try_recv().is_ok() {}
+                if !worker_signal.is_active() {
                     return;
                 }
                 emit_transitions(
@@ -283,15 +352,16 @@ fn start(
                     &session_id,
                     &path_for_worker,
                     &app,
-                    &worker_active,
+                    &worker_signal,
                     tail.read_transitions(&path_for_worker),
                 );
             }
         })
     {
-        stop_if_current(node_id, &active);
+        stop_if_current(node_id, &signal);
         return Err(format!("start Command Code watcher worker: {error}"));
     }
+    activation_guard.disarm();
     Ok(())
 }
 
@@ -302,9 +372,15 @@ pub fn stop(node_id: i64) {
         activated_nodes.remove(&node_id);
         if let Ok(mut watchers) = WATCHERS.lock() {
             if let Some(watcher) = watchers.remove(&node_id) {
-                watcher.active.store(false, Ordering::SeqCst);
+                watcher.signal.cancel();
             }
         }
+    }
+}
+
+fn clear_activation(node_id: i64) {
+    if let Ok(mut activated_nodes) = ACTIVATED_NODES.lock() {
+        activated_nodes.remove(&node_id);
     }
 }
 
@@ -316,20 +392,23 @@ pub fn activate(node_id: i64) {
         activated_nodes.insert(node_id);
         if let Ok(watchers) = WATCHERS.lock() {
             if let Some(watcher) = watchers.get(&node_id) {
-                watcher.activated.store(true, Ordering::SeqCst);
+                watcher.signal.activate();
             }
         }
     }
 }
 
-fn stop_if_current(node_id: i64, active: &Arc<AtomicBool>) {
-    if let Ok(mut watchers) = WATCHERS.lock() {
-        let is_current = watchers
-            .get(&node_id)
-            .is_some_and(|watcher| Arc::ptr_eq(&watcher.active, active));
-        if is_current {
-            if let Some(watcher) = watchers.remove(&node_id) {
-                watcher.active.store(false, Ordering::SeqCst);
+fn stop_if_current(node_id: i64, signal: &Arc<WorkerSignal>) {
+    if let Ok(mut activated_nodes) = ACTIVATED_NODES.lock() {
+        if let Ok(mut watchers) = WATCHERS.lock() {
+            let is_current = watchers
+                .get(&node_id)
+                .is_some_and(|watcher| Arc::ptr_eq(&watcher.signal, signal));
+            if is_current {
+                activated_nodes.remove(&node_id);
+                if let Some(watcher) = watchers.remove(&node_id) {
+                    watcher.signal.cancel();
+                }
             }
         }
     }
@@ -340,7 +419,7 @@ fn emit_transitions(
     session_id: &str,
     transcript_path: &Path,
     app: &AppHandle,
-    active: &AtomicBool,
+    signal: &WorkerSignal,
     transitions: Result<Vec<TerminalTransition>, String>,
 ) {
     let transitions = match transitions {
@@ -351,9 +430,7 @@ fn emit_transitions(
         }
     };
     for transition in transitions {
-        if !active.load(Ordering::SeqCst)
-            || !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id)
-        {
+        if !signal.is_active() || !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
             return;
         }
         let detail = crate::agent::session_lifecycle::HookSignalDetail {
@@ -385,17 +462,23 @@ impl TurnTracker {
     pub fn observe_transcript_line(&mut self, line: &str) -> Option<TerminalTransition> {
         let activity = transcript_activity(line)?;
         if activity == TranscriptActivity::UserTurn {
-            self.tool_use_seen = false;
+            self.pending_tool_calls = false;
         }
         if activity == TranscriptActivity::ToolUse {
-            self.tool_use_seen = true;
+            self.pending_tool_calls = true;
+        }
+        if activity == TranscriptActivity::ToolResult {
+            self.pending_tool_calls = false;
         }
         let transition = match activity {
-            TranscriptActivity::AssistantResponse if self.tool_use_seen => {
+            TranscriptActivity::AssistantResponse if !self.pending_tool_calls => {
                 Some(TerminalTransition::TurnCompleted)
             }
             TranscriptActivity::TurnCompleted
-                if self.state != Some(TranscriptActivity::TurnCompleted) =>
+                if !matches!(
+                    self.state,
+                    Some(TranscriptActivity::TurnCompleted | TranscriptActivity::AssistantResponse)
+                ) =>
             {
                 Some(TerminalTransition::TurnCompleted)
             }
@@ -408,7 +491,7 @@ impl TurnTracker {
         };
         self.state = Some(activity);
         if transition.is_some() {
-            self.tool_use_seen = false;
+            self.pending_tool_calls = false;
         }
         transition
     }
@@ -441,6 +524,9 @@ fn message_activity(message: &serde_json::Value) -> Option<TranscriptActivity> {
         }
         crate::services::transcript_reader::CommandCodeMessageActivity::ToolUse => {
             Some(TranscriptActivity::ToolUse)
+        }
+        crate::services::transcript_reader::CommandCodeMessageActivity::ToolResult => {
+            Some(TranscriptActivity::ToolResult)
         }
         crate::services::transcript_reader::CommandCodeMessageActivity::AssistantResponse => {
             Some(TranscriptActivity::AssistantResponse)
@@ -484,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_without_tool_use_does_not_complete_a_turn() {
+    fn transcript_without_tool_use_completes_a_turn() {
         let mut tracker = TurnTracker::default();
 
         assert_eq!(
@@ -503,12 +589,44 @@ mod tests {
             tracker.observe_transcript_line(
                 r#"{"type":"message","message":{"role":"assistant","content":"Inspection complete."}}"#,
             ),
-            None
+            Some(TerminalTransition::TurnCompleted)
         );
     }
 
     #[test]
-    fn split_assistant_message_waits_for_tool_use_before_completion() {
+    fn a_new_direct_turn_does_not_inherit_pending_tool_state() {
+        let mut tracker = TurnTracker::default();
+
+        assert_eq!(
+            tracker.observe_transcript_line(r#"{"type":"user_turn"}"#),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(r#"{"type":"tool_use"}"#),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(r#"{"type":"tool_result"}"#),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(r#"{"type":"turn_complete"}"#),
+            Some(TerminalTransition::TurnCompleted)
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(r#"{"type":"user_turn"}"#),
+            None
+        );
+        assert_eq!(
+            tracker.observe_transcript_line(
+                r#"{"type":"message","message":{"role":"assistant","content":"Direct answer."}}"#,
+            ),
+            Some(TerminalTransition::TurnCompleted)
+        );
+    }
+
+    #[test]
+    fn assistant_message_with_tool_use_waits_for_tool_result_before_completion() {
         let mut tracker = TurnTracker::default();
 
         assert_eq!(
@@ -519,13 +637,13 @@ mod tests {
         );
         assert_eq!(
             tracker.observe_transcript_line(
-                r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"I will inspect the code first."}]}}"#,
+                r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"I will inspect the code first."},{"type":"tool_use","name":"read_file"}]}}"#,
             ),
             None
         );
         assert_eq!(
             tracker.observe_transcript_line(
-                r#"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"tool_use","name":"read_file"}]}}"#,
+                r#"{"type":"message","id":"assistant-1","message":{"role":"user","content":[{"type":"tool_result","content":"source"}]}}"#,
             ),
             None
         );

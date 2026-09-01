@@ -1286,7 +1286,7 @@ pub(crate) async fn spawn_agent_inner(
         match sandbox_spawn(&cmd, session_id, &resolved.host_path, rows, cols) {
             Ok(process) => process,
             Err(error) => {
-                crate::services::commandcode_watcher::stop(session_id);
+                adapter.on_process_terminated(session_id);
                 emit_provider_error(&error);
                 return Err(error);
             }
@@ -1297,7 +1297,7 @@ pub(crate) async fn spawn_agent_inner(
         let child = match spawn_child(&pair, cmd) {
             Ok(child) => child,
             Err(error) => {
-                crate::services::commandcode_watcher::stop(session_id);
+                adapter.on_process_terminated(session_id);
                 emit_provider_error(&error);
                 return Err(error);
             }
@@ -1327,14 +1327,14 @@ pub(crate) async fn spawn_agent_inner(
     let reader = match master.try_clone_reader() {
         Ok(reader) => reader,
         Err(error) => {
-            crate::services::commandcode_watcher::stop(session_id);
+            adapter.on_process_terminated(session_id);
             return Err(error.to_string());
         }
     };
     let writer = match master.take_writer() {
         Ok(writer) => writer,
         Err(error) => {
-            crate::services::commandcode_watcher::stop(session_id);
+            adapter.on_process_terminated(session_id);
             return Err(error.to_string());
         }
     };
@@ -1449,10 +1449,10 @@ pub(crate) async fn spawn_agent_inner(
     // lives in one place.
     let sink = session_lifecycle::AppSessionLifecycleSink { app };
     if let Err(error) = session_lifecycle::on_spawn_started(&sink, session_id) {
-        crate::services::commandcode_watcher::stop(session_id);
+        adapter.on_process_terminated(session_id);
         return Err(error.to_string());
     }
-    crate::services::commandcode_watcher::activate(session_id);
+    adapter.on_spawn_activated(session_id);
     let app_for_promotion = app.clone();
     std::thread::spawn(move || {
         // Promote to Running iff the reader hasn't already written Error.
