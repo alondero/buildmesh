@@ -561,6 +561,146 @@ let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
 }
 
 // ---------------------------------------------------------------------------
+// Run-level admission gate (issue #1467).
+// ---------------------------------------------------------------------------
+
+/// `running`/`paused` runs count as admitted; `pending` runs do NOT
+/// (the gate's job is exactly to decide whether a pending run gets to
+/// become running — if it counted, every pending run would see itself
+/// + peers and the gate would deadlock). This is the contract that
+/// lets the worker treat admission as a per-run counter, distinct
+/// from the per-agent-node counter.
+#[test]
+fn count_active_circuit_runs_includes_running_paused_only() {
+    let path = init_temp_db("run-count-active");
+    let mesh = create_mesh("circuit-run-count", "/tmp/circuit-run-count").unwrap();
+    let c1 = create_autopilot_circuit(mesh.id, "c1", "", 4, "{}").unwrap();
+    let c2 = create_autopilot_circuit(mesh.id, "c2", "", 4, "{}").unwrap();
+    let c3 = create_autopilot_circuit(mesh.id, "c3", "", 4, "{}").unwrap();
+
+    // One pending, one running, one paused — only the latter two count.
+    let r_pending = create_circuit_run(c1.id, mesh.id, "", "{}").unwrap();
+    let r_running = create_circuit_run(c2.id, mesh.id, "", "{}").unwrap();
+    let r_paused = create_circuit_run(c3.id, mesh.id, "", "{}").unwrap();
+    set_circuit_run_state(r_running, "running").unwrap();
+    set_circuit_run_state(r_paused, "running").unwrap();
+    set_circuit_run_state(r_paused, "paused").unwrap();
+    // r_pending stays at default "pending" — must NOT count.
+
+    assert_eq!(
+        count_active_circuit_runs(mesh.id).unwrap(),
+        2,
+        "admitted runs = running + paused; pending does not count toward the gate's input"
+    );
+
+    // Sanity: the pending run still exists in the run ledger
+    // (gated, not deleted — the next pass re-evaluates it).
+    let still_there = get_circuit_run(r_pending).unwrap().unwrap();
+    assert_eq!(still_there.state, "pending");
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+/// Terminal runs (`completed`, `failed`) do NOT count toward the
+/// run-admission gate. Mirrors the per-step `paused_runs_stay_active_and_counters_count_them`
+/// test for the new run-level seam. Note: `pending` runs are also
+/// excluded (see `count_active_circuit_runs_includes_running_paused_only`
+/// for why — counting `pending` would self-deadlock at admission time).
+#[test]
+fn count_active_circuit_runs_excludes_terminal_states() {
+    let path = init_temp_db("run-count-terminal");
+    let mesh = create_mesh("circuit-run-count-terminal", "/tmp/circuit-run-count-terminal")
+        .unwrap();
+    let c1 = create_autopilot_circuit(mesh.id, "c1", "", 4, "{}").unwrap();
+    let c2 = create_autopilot_circuit(mesh.id, "c2", "", 4, "{}").unwrap();
+    let c3 = create_autopilot_circuit(mesh.id, "c3", "", 4, "{}").unwrap();
+
+    let r_done = create_circuit_run(c1.id, mesh.id, "", "{}").unwrap();
+    commit_circuit_advance(r_done, Some("completed"), None, &[]).unwrap();
+    let r_dead = create_circuit_run(c2.id, mesh.id, "", "{}").unwrap();
+    commit_circuit_advance(r_dead, Some("failed"), None, &[]).unwrap();
+    // r_pending stays non-terminal; per the FIFO gate shape, pending
+    // does NOT count toward admission input either.
+    let r_pending = create_circuit_run(c3.id, mesh.id, "", "{}").unwrap();
+
+    assert_eq!(
+        count_active_circuit_runs(mesh.id).unwrap(),
+        0,
+        "only running/paused count; pending and terminal both excluded"
+    );
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+
+    // Sanity: the terminal commits didn't wipe rows. r_pending is
+    // still there pending (will be re-evaluated next worker pass);
+    // r_done and r_dead are terminal in DB.
+    assert_eq!(get_circuit_run(r_done).unwrap().unwrap().state, "completed");
+    assert_eq!(get_circuit_run(r_dead).unwrap().unwrap().state, "failed");
+    assert_eq!(get_circuit_run(r_pending).unwrap().unwrap().state, "pending");
+}
+
+/// Single-release idempotency lives inside `commit_circuit_advance`'s
+/// terminal-state branch (issue #1467, ADR-0028). A second commit
+/// against an already-terminal row is a no-op (the `WHERE state IN
+/// ('pending','running','paused')` filter matches zero rows), so the
+/// capacity count is never double-decremented.
+#[test]
+fn commit_circuit_advance_terminal_state_is_idempotent_under_double_signal() {
+    let path = init_temp_db("commit-term-idem");
+    let mesh = create_mesh("circuit-commit-term-idem", "/tmp/circuit-commit-term-idem").unwrap();
+    let c1 = create_autopilot_circuit(mesh.id, "c1", "", 4, "{}").unwrap();
+    let r1 = create_circuit_run(c1.id, mesh.id, "", "{}").unwrap();
+    set_circuit_run_state(r1, "running").unwrap();
+
+    // First terminal commit: 1 → 0 admitted runs on the mesh.
+    commit_circuit_advance(r1, Some("completed"), None, &[]).unwrap();
+    assert_eq!(count_active_circuit_runs(mesh.id).unwrap(), 0);
+    let row = get_circuit_run(r1).unwrap().unwrap();
+    assert_eq!(row.state, "completed");
+
+    // Second terminal commit (a different terminal value): the WHERE
+    // filter excludes the already-terminal row, so the state stays at
+    // "completed" — the first commit's outcome wins.
+    commit_circuit_advance(r1, Some("failed"), None, &[]).unwrap();
+    assert_eq!(count_active_circuit_runs(mesh.id).unwrap(), 0);
+    let row = get_circuit_run(r1).unwrap().unwrap();
+    assert_eq!(
+        row.state, "completed",
+        "second terminal commit must not overwrite the first"
+    );
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+/// A commit against a row that's already in a terminal state (e.g.
+/// crash-recovery picked it up as `failed` already) must not flip the
+/// state — same idempotency key as the previous test, pinned
+/// separately so the test failure message points at the right case.
+#[test]
+fn commit_circuit_advance_terminal_state_skips_already_terminal_runs() {
+    let path = init_temp_db("commit-term-skip");
+    let mesh = create_mesh("circuit-commit-term-skip", "/tmp/circuit-commit-term-skip").unwrap();
+    let c1 = create_autopilot_circuit(mesh.id, "c1", "", 4, "{}").unwrap();
+    let r1 = create_circuit_run(c1.id, mesh.id, "", "{}").unwrap();
+    set_circuit_run_state(r1, "failed").unwrap();
+
+    // Attempt to commit `completed` against an already-failed row:
+    // the WHERE filter blocks the row, no write happens.
+    commit_circuit_advance(r1, Some("completed"), None, &[]).unwrap();
+    let row = get_circuit_run(r1).unwrap().unwrap();
+    assert_eq!(
+        row.state, "failed",
+        "must not overwrite an existing terminal state"
+    );
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
 // Active-run listing (the worker pass's input).
 // ---------------------------------------------------------------------------
 

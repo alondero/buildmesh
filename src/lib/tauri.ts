@@ -276,6 +276,16 @@ export const updateMeshAutopilot = (
     actionOnSuccess,
   });
 
+/** Persist a mesh's circuit-run capacity in one write (issue #1467).
+ *  Narrow single-column write for `meshes.circuit_run_capacity` —
+ *  sibling to `setMeshAutopilotEnabled`, deliberately split from the
+ *  five-column `updateMeshAutopilot` atomic write so toggling the run
+ *  cap can't clobber the user's autopilot policy. The backend
+ *  range-checks `capacity` to `1..=8` and surfaces a "mesh not found"
+ *  error when zero rows are updated. */
+export const updateMeshCircuitRunCapacity = (meshId: number, capacity: number) =>
+  _invoke<void>('update_mesh_circuit_run_capacity', { meshId, capacity });
+
 /** Persist a mesh's Looping Autopilot config in one write (wayfinder #990,
  *  ticket #991 backend / #994 UI). Dedicated typed command like
  *  `updateMeshAutopilot` — the backend trims blank prompts to NULL and

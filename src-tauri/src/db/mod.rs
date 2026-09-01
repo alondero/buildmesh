@@ -1796,6 +1796,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         loop_interval_seconds: row.get::<_, i32>(29)?,
         loop_consecutive_failures: row.get::<_, i32>(30)?,
         harness_overrides: parse_harness_overrides(&row.get::<_, String>(31)?),
+        circuit_run_capacity: row.get::<_, i32>(32)?,
     })
 }
 
@@ -2053,6 +2054,26 @@ pub fn set_mesh_autopilot_enabled(id: i64, enabled: bool) -> SqlResult<usize> {
     db.execute(
         "UPDATE meshes SET autopilot_enabled = ?1 WHERE id = ?2",
         params![if enabled { 1 } else { 0 }, id],
+    )
+}
+
+/// Persist ONLY the `circuit_run_capacity` for a mesh (issue #1467) — the
+/// narrow single-column writer for the per-mesh run-admission gate.
+/// Deliberately separated from [`set_mesh_autopilot`] (which rewrites the
+/// five legacy Autopilot policy columns atomically) so the new
+/// "Max concurrent circuit runs" form-control in the Autopilot Probe tab
+/// can't clobber the user's autopilot policy when toggling the run cap,
+/// and so the legacy atomic-write regression tests are unaffected by the
+/// new column. Range validation lives at the IPC boundary
+/// (`commands::mesh_properties::update_mesh_circuit_run_capacity` —
+/// clamped `1..=8`, same shape as `autopilot_concurrency_limit`). Returns
+/// the rows updated so the command layer can surface "mesh not found"
+/// (zero-rows contract, matches `set_mesh_autopilot_enabled`).
+pub fn set_mesh_circuit_run_capacity(id: i64, capacity: i32) -> SqlResult<usize> {
+    let db = write_conn();
+    db.execute(
+        "UPDATE meshes SET circuit_run_capacity = ?1 WHERE id = ?2",
+        params![capacity, id],
     )
 }
 
