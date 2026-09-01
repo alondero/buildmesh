@@ -812,7 +812,11 @@ export function conditionFromHandle(
 
 /**
  * Tailwind text class for one ledger status — the single status→colour
- * vocabulary shared by node cards and the run-history drawer.
+ * vocabulary shared by node cards, the run-history drawer and the Probe's
+ * run cards. The two "waiting" tokens are listed explicitly rather than left
+ * to the default: they are the statuses a reader is most likely to look for,
+ * and an implicit fall-through reads as an oversight (the per-tab copy this
+ * replaced named them outright).
  */
 export function statusTextClass(status: string): string {
   switch (status) {
@@ -826,6 +830,11 @@ export function statusTextClass(status: string): string {
     case 'failed':
     case 'cancelled':
       return 'text-status-error';
+    // Queued work is deliberately subordinate — it is distinguished by its
+    // label and reason line, never by colour alone (WCAG 1.4.1).
+    case 'pending':
+    case 'pending_slot':
+      return 'text-text-muted';
     default:
       return 'text-text-muted';
   }
@@ -845,21 +854,98 @@ export interface StepLike {
   completed_at: string | null;
 }
 
-/** Wall-clock step duration from the ledger timestamps, ms or null.
- *  Tolerates both SQLite's "YYYY-MM-DD HH:MM:SS" (treated as UTC) and
- *  plain ISO-8601 — appending "Z" unconditionally would corrupt an
- *  already-ISO timestamp into a silent NaN. */
+/** Epoch-ms for one ledger timestamp, or `NaN`.
+ *
+ *  SQLite writes `CURRENT_TIMESTAMP` as UTC but WITHOUT a zone designator
+ *  ("2026-08-22 10:05:00"). V8's `Date.parse` happily accepts that shape
+ *  and reads it as *local* time, so a naive parse is silently wrong by the
+ *  host's UTC offset. That cancels out when you subtract two ledger
+ *  timestamps (both skew the same way) — which is why `stepDurationMs`
+ *  never noticed — but NOT when you compare one against `Date.now()`, as
+ *  `runDurationMs` must for a still-running run. So force the zone on any
+ *  zoneless timestamp, and leave an explicitly-zoned ISO-8601 string to
+ *  `Date.parse` (appending "Z" to it would yield "…ZZ" → NaN). */
+const ZONELESS_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+
+function ledgerTimestampMs(s: string): number {
+  if (ZONELESS_TIMESTAMP.test(s)) return Date.parse(s.replace(' ', 'T') + 'Z');
+  return Date.parse(s);
+}
+
+/** Wall-clock step duration from the ledger timestamps, ms or null. */
 export function stepDurationMs(step: Pick<StepLike, 'started_at' | 'completed_at'>): number | null {
   if (step.started_at === null || step.completed_at === null) return null;
-  const toMs = (s: string): number => {
-    const direct = Date.parse(s);
-    if (!Number.isNaN(direct)) return direct;
-    return Date.parse(s.replace(' ', 'T') + 'Z');
-  };
-  const start = toMs(step.started_at);
-  const end = toMs(step.completed_at);
+  const start = ledgerTimestampMs(step.started_at);
+  const end = ledgerTimestampMs(step.completed_at);
   if (Number.isNaN(start) || Number.isNaN(end)) return null;
   return end - start;
+}
+
+/**
+ * Wall-clock run duration. The run row carries no `started_at` /
+ * `finished_at` pair — `created_at` is when the trigger minted it and
+ * `updated_at` is stamped on every state transition, so for a terminal
+ * run the gap between them IS the run's lifetime. A still-moving run
+ * measures against `now` instead, since `updated_at` only tells you when
+ * it last changed, not how long it has been going.
+ */
+export function runDurationMs(
+  run: { state: string; created_at: string; updated_at: string },
+  now: Date
+): number | null {
+  const start = ledgerTimestampMs(run.created_at);
+  if (Number.isNaN(start)) return null;
+  const end = isTerminalRunState(run.state) ? ledgerTimestampMs(run.updated_at) : now.getTime();
+  if (Number.isNaN(end)) return null;
+  return Math.max(0, end - start);
+}
+
+/**
+ * Human duration for the run ledger. `RunHistoryDrawer` and the Probe's
+ * run cards share it so a 20-minute run doesn't read as "1200.0s".
+ * Tiers: sub-second → "0.4s", under a minute → "12.4s", under an hour →
+ * "4m 12s", beyond → "1h 6m". Minutes/hours drop the fractional part —
+ * a tenth of a second is noise at that scale.
+ *
+ * Two traps this shape avoids:
+ *
+ * - **The tier is chosen in the unit it prints.** Comparing raw `ms`
+ *   against 60_000 while printing `toFixed(1)` lets the two disagree:
+ *   59_999ms is under the threshold but *renders* as "60.0s", so the
+ *   sequence read "…59.8s, 60.0s, 1m 0s". Rounding to deciseconds first
+ *   and testing that makes the straddle unrepresentable.
+ * - **`Math.max(0, NaN)` is NaN**, not 0 — the clamp does not sanitise.
+ *   Without the finite guard a corrupt timestamp reaching this function
+ *   falls through every comparison and formats as "NaNh NaNm". The
+ *   duration helpers above return `null` rather than NaN, so this is
+ *   defence for future callers, not a live path.
+ */
+export function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms)) return '0.0s';
+  const safe = Math.max(0, ms);
+  // Deciseconds: the smallest unit this function ever prints.
+  const tenths = Math.round(safe / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)}s`;
+  const totalSeconds = Math.round(safe / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+// ---------------------------------------------------------------------------
+// Run diagnostics — the plain-English reading of a run's ledger (#1468).
+//
+// The Probe's Circuits tab used to compress a whole run into
+// `trigger:completed -> implementer:running -> ...` inside a truncated
+// span, so the one fact a stuck run needs to tell you (WHY it is waiting)
+// was the first thing clipped. These helpers turn the raw ledger
+// vocabulary into the labels the card renders. They are pure so the
+// wording is unit-testable without mounting the Probe.
+// ---------------------------------------------------------------------------
+
+/** Run states the worker never moves out of (`stepper::RunState`). */
+export function isTerminalRunState(state: string): boolean {
+  return state === 'completed' || state === 'failed';
 }
 
 /**
