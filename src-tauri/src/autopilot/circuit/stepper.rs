@@ -3750,20 +3750,21 @@ mod tests {
         );
 
         // The retry-exhaustion contract pins: review_retry Failed →
-        // complete (a Notify), NOT back to finish. Simulate the
+        // complete (a Notify), NOT back to finish. Simulating the
         // budget's end by flipping the gate's terminal outcome to
         // Failed directly — the worker seam surfaces "budget
-        // exhausted" this way.
-        run.steps
+        // exhausted" this way. We bind the step reference once and
+        // mutate both fields, rather than calling .iter_mut().find()
+        // twice on the same slice (which is also a refactor trap:
+        // refactoring `steps` into a HashMap would silently change
+        // the borrow scope here).
+        let retry_step = run
+            .steps
             .iter_mut()
             .find(|s| s.node_id == "review_retry")
-            .unwrap()
-            .status = StepStatus::Failed;
-        run.steps
-            .iter_mut()
-            .find(|s| s.node_id == "review_retry")
-            .unwrap()
-            .outcome = Some(StepOutcome::Failed);
+            .expect("review_retry step exists after one feedback loop");
+        retry_step.status = StepStatus::Failed;
+        retry_step.outcome = Some(StepOutcome::Failed);
 
         let t = advance(&mut run, &tick(8, 8));
         assert_eq!(

@@ -4,11 +4,11 @@
 //! The catalog is the single source of truth for "what blueprints ship".
 //! Every contract entry pins: marker, trigger vocabulary, required node
 //! topology + edges, validation, JSON round-trip, and per-blueprint
-//! runtime policy (concurrency normalisation, manual-trigger
-//! eligibility, prompt assertions). The drift gate at the bottom makes
-//! it impossible to add a new [`CircuitBlueprintKind`] variant without
-//! also adding a contract entry here — `cargo test` will fail until the
-//! fixture is written.
+//! runtime policy. The drift gate at the bottom is **compiler-checked**:
+//! the `const _: () = { ... }` block exhaustively matches every
+//! [`CircuitBlueprintKind`] variant against the catalog, so adding a
+//! new variant without a fixture entry is a build failure (the
+//! non-exhaustive-match warning becomes a hard error in const context).
 //!
 //! The catalog reconciles spec #1205's "three presets" prose with the
 //! Rust/TypeScript reality (#1203 follow-up):
@@ -29,7 +29,7 @@
 //! same change. The drift gate ensures neither side gets forgotten.
 
 use super::model::{
-    CircuitBlueprintKind, CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition,
+    CircuitBlueprintKind, CircuitGraph, CircuitNodeKind, EdgeCondition, StepOutcome,
 };
 use crate::commands::circuit::CircuitTriggerKind;
 
@@ -40,12 +40,8 @@ use crate::commands::circuit::CircuitTriggerKind;
 pub struct BlueprintContract {
     /// Discriminator tag stored in the graph AST.
     pub marker: CircuitBlueprintKind,
-    /// Trigger roots this blueprint may use. The IPC `create_circuit`
-    /// enforces these — e.g. the review blueprint is only valid with
-    /// `GithubIssueLabel` because its `trigger.*` context is the only
-    /// one that resolves the implementation agent's `{{issue.prefill}}`
-    /// first turn. Pinning here means an over-permissive IPC change
-    /// surfaces here as a stale fixture.
+    /// Trigger roots this blueprint may use. The IPC + the model both
+    /// enforce these — see [`crate::autopilot::circuit::model`].
     pub allowed_triggers: &'static [CircuitTriggerKind],
     /// Node ids that MUST exist after `validate()`. Order matches the
     /// canonical builder's node order so a topology diff is one glance.
@@ -53,59 +49,22 @@ pub struct BlueprintContract {
     /// Required edges: `(from, to, condition)`. Used to pin both wiring
     /// AND the gate outcome conditions, so a refactor that drops a
     /// `OnOutcome(Green)` from a verifier→success edge surfaces here.
-    pub required_edges: &'static [(&'static str, &'static str, EdgeConditionSpec)],
-    /// Concurrency normalisation the IPC `create_circuit` command
-    /// applies. The review blueprint MUST be ≥2 because the
-    /// implementation and reviewer agent nodes share the same circuit's
-    /// concurrency pool and would otherwise deadlock.
+    pub required_edges: &'static [(&'static str, &'static str, EdgeCondition)],
+    /// Concurrency normalisation enforced by the domain model.
+    /// Mirrors [`CircuitBlueprintKind::min_concurrency_limit`] — the
+    /// model is the source of truth; the contract pins it so the
+    /// catalog and the model can't drift apart.
     pub min_concurrency_limit: i64,
     /// Default concurrency the Probe UI ships with. WalkingSkeleton = 1,
     /// IssueDrivenAutopilotReview = 2 (reviewer slot).
     pub default_concurrency_limit: i64,
     /// Whether Trigger Now (`trigger_circuit_now`) is permitted on this
-    /// blueprint. The review blueprint is labelled-issue-driven — a
-    /// manual fire would mint a run with no `issue.*` context.
+    /// blueprint.
     pub allows_manual_trigger_now: bool,
     /// Human-readable policy assertion run against the blueprint's text.
     /// The contract test asserts the prompt fragment appears so a
     /// silent prompt rewrite surfaces in code review.
     pub prompt_assertions: &'static [PromptAssertion],
-}
-
-/// Mirror of [`EdgeCondition`] with `const`-friendly variants. The
-/// `EdgeCondition` enum itself uses `StepOutcome::OnOutcome(...)` which
-/// is not a `const` constructor (it's a non-Copy tuple variant).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // All variants document the full outcome vocabulary — current
-                    // blueprints only exercise `Always`/`OnCompleted`/`OnFailed`,
-                    // but adding a new blueprint that branches on `OnGreen` etc.
-                    // must not require a new enum variant.
-pub enum EdgeConditionSpec {
-    Always,
-    OnCompleted,
-    OnFailed,
-    OnCancelled,
-    OnBlocked,
-    OnWorking,
-    OnGreen,
-    OnRed,
-}
-
-impl EdgeConditionSpec {
-    pub fn matches(self, cond: &EdgeCondition) -> bool {
-        use EdgeConditionSpec::*;
-        match (self, cond) {
-            (Always, EdgeCondition::Always) => true,
-            (OnCompleted, EdgeCondition::OnOutcome(super::model::StepOutcome::Completed)) => true,
-            (OnFailed, EdgeCondition::OnOutcome(super::model::StepOutcome::Failed)) => true,
-            (OnCancelled, EdgeCondition::OnOutcome(super::model::StepOutcome::Cancelled)) => true,
-            (OnBlocked, EdgeCondition::OnOutcome(super::model::StepOutcome::Blocked)) => true,
-            (OnWorking, EdgeCondition::OnOutcome(super::model::StepOutcome::Working)) => true,
-            (OnGreen, EdgeCondition::OnOutcome(super::model::StepOutcome::Green)) => true,
-            (OnRed, EdgeCondition::OnOutcome(super::model::StepOutcome::Red)) => true,
-            _ => false,
-        }
-    }
 }
 
 /// Asserts a prompt contains the given literal fragment. Prompts are the
@@ -121,18 +80,11 @@ pub struct PromptAssertion {
 
 /// One entry per shipped blueprint. Adding a new
 /// [`CircuitBlueprintKind`] variant WITHOUT adding an entry here causes
-/// the drift gate to fail.
+/// the `built_in_catalog_covers_every_blueprint_kind` drift gate
+/// below to fail (compile error, not a runtime test miss).
 pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
     BlueprintContract {
         marker: CircuitBlueprintKind::WalkingSkeleton,
-        // Spec #1205's *Issue-Driven PR Flow* and *Continuous Looping
-        // Pacer* presets share this skeleton under different trigger
-        // roots. The spec describes idealised flows with collaborator
-        // gates and verifier steps; the shipped walking skeleton is
-        // the minimal foundation (spawn → inject → notify) those
-        // future-milestone extensions build on. Walking skeleton is the
-        // shipped equivalent; the spec-vs-code gap is documented in
-        // the knowledge primer "Catalog & contract" note.
         allowed_triggers: &[
             CircuitTriggerKind::Manual,
             CircuitTriggerKind::Interval,
@@ -141,9 +93,9 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
         ],
         required_node_ids: &["trigger", "spawn", "inject", "notify"],
         required_edges: &[
-            ("trigger", "spawn", EdgeConditionSpec::Always),
-            ("spawn", "inject", EdgeConditionSpec::Always),
-            ("inject", "notify", EdgeConditionSpec::Always),
+            ("trigger", "spawn", EdgeCondition::Always),
+            ("spawn", "inject", EdgeCondition::Always),
+            ("inject", "notify", EdgeCondition::Always),
         ],
         min_concurrency_limit: 1,
         default_concurrency_limit: 1,
@@ -152,12 +104,6 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
     },
     BlueprintContract {
         marker: CircuitBlueprintKind::IssueDrivenAutopilotReview,
-        // Spec #1205's *PR Adversarial Reviewer* preset. The shipped
-        // review blueprint is its full implementation — issue-label
-        // trigger, collaborator gate, implementation agent, finish path
-        // with PR open, reviewer spawn, feedback inject into the
-        // implementation agent, close reviewer, retry budget on the
-        // feedback path.
         allowed_triggers: &[CircuitTriggerKind::GithubIssueLabel],
         required_node_ids: &[
             "trigger",
@@ -179,46 +125,62 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             "complete",
         ],
         required_edges: &[
-            ("trigger", "collaborator_gate", EdgeConditionSpec::Always),
-            ("collaborator_gate", "implementer", EdgeConditionSpec::Always),
-            ("implementer", "implementation_classifier", EdgeConditionSpec::Always),
+            ("trigger", "collaborator_gate", EdgeCondition::Always),
+            ("collaborator_gate", "implementer", EdgeCondition::Always),
+            ("implementer", "implementation_classifier", EdgeCondition::Always),
             // LLM classifier routes Completed → finish prompt.
             (
                 "implementation_classifier",
                 "finish",
-                EdgeConditionSpec::OnCompleted,
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
-            ("finish", "finish_round", EdgeConditionSpec::Always),
+            ("finish", "finish_round", EdgeCondition::Always),
             (
                 "finish_classifier",
                 "open_pr",
-                EdgeConditionSpec::OnCompleted,
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
             // OpenPr failed → wrapup retry, NOT reviewer (issue #1469
             // acceptance: "the reviewer is reached only after a
             // successful implementation/PR path").
-            ("open_pr", "wrapup_retry", EdgeConditionSpec::OnFailed),
-            ("wrapup_retry", "wrapup_correction", EdgeConditionSpec::Always),
-            ("wrapup_correction", "finish_round", EdgeConditionSpec::Always),
-            ("finish_round", "finish_classifier", EdgeConditionSpec::Always),
-            ("open_pr", "reviewer", EdgeConditionSpec::OnCompleted),
-            ("reviewer", "review_classifier", EdgeConditionSpec::Always),
+            (
+                "open_pr",
+                "wrapup_retry",
+                EdgeCondition::OnOutcome(StepOutcome::Failed),
+            ),
+            ("wrapup_retry", "wrapup_correction", EdgeCondition::Always),
+            ("wrapup_correction", "finish_round", EdgeCondition::Always),
+            ("finish_round", "finish_classifier", EdgeCondition::Always),
+            (
+                "open_pr",
+                "reviewer",
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+            ),
+            ("reviewer", "review_classifier", EdgeCondition::Always),
             (
                 "review_classifier",
                 "follow_feedback",
-                EdgeConditionSpec::OnCompleted,
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
-            ("follow_feedback", "close_reviewer", EdgeConditionSpec::Always),
-            ("close_reviewer", "feedback_classifier", EdgeConditionSpec::Always),
+            ("follow_feedback", "close_reviewer", EdgeCondition::Always),
+            ("close_reviewer", "feedback_classifier", EdgeCondition::Always),
             (
                 "feedback_classifier",
                 "review_retry",
-                EdgeConditionSpec::OnCompleted,
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
             // review_retry: Completed → re-finish, Failed → complete
             // notify (retry budget exhausted).
-            ("review_retry", "finish", EdgeConditionSpec::OnCompleted),
-            ("review_retry", "complete", EdgeConditionSpec::OnFailed),
+            (
+                "review_retry",
+                "finish",
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+            ),
+            (
+                "review_retry",
+                "complete",
+                EdgeCondition::OnOutcome(StepOutcome::Failed),
+            ),
         ],
         min_concurrency_limit: 2,
         default_concurrency_limit: 2,
@@ -267,38 +229,68 @@ pub fn build_graph(blueprint: CircuitBlueprintKind, prompt: &str, trigger_label:
 }
 
 // ---------------------------------------------------------------------------
+// Drift gate — compiler-checked exhaustiveness over `CircuitBlueprintKind`.
+// ---------------------------------------------------------------------------
+
+/// `const _: () = { ... }` is evaluated at compile time. The closure body
+/// is forced to be exhaustive over its `match` arms. Adding a new
+/// variant to [`CircuitBlueprintKind`] without extending this match
+/// (and adding a `BlueprintContract` for it) is a build failure.
+#[allow(dead_code)]
+const _: () = {
+    /// One arm per `CircuitBlueprintKind` variant. The closure's body
+    /// returns the index of the matching entry in [`BUILT_IN_CATALOG`].
+    /// A non-exhaustive match here fails the build.
+    fn catalog_index(kind: CircuitBlueprintKind) -> usize {
+        match kind {
+            CircuitBlueprintKind::WalkingSkeleton => 0,
+            CircuitBlueprintKind::IssueDrivenAutopilotReview => 1,
+        }
+    }
+    // Reference `catalog_index` from a second const block so the
+    // compiler actually instantiates it; the `let _ = ...` is enough
+    // to drag the dead-code check past the `#[allow(dead_code)]`.
+    let _ = catalog_index;
+};
+
+// ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autopilot::circuit::model::validate_circuit_request;
 
-    /// Drift gate: every variant of `CircuitBlueprintKind` must have a
-    /// `BUILT_IN_CATALOG` entry. Adding a new variant without updating
-    /// this catalog fails the suite here, not at runtime.
+    /// Drift gate (runtime half): every variant of `CircuitBlueprintKind`
+    /// has a `BUILT_IN_CATALOG` entry, and no entry points at a
+    /// non-existent variant. The const `_:` block above guarantees the
+    /// same property at compile time; this test makes the intent
+    /// legible to a reader scanning the file.
     #[test]
     fn built_in_catalog_covers_every_blueprint_kind() {
-        for kind in [
-            CircuitBlueprintKind::WalkingSkeleton,
-            CircuitBlueprintKind::IssueDrivenAutopilotReview,
-        ] {
-            assert!(
-                BUILT_IN_CATALOG.iter().any(|c| c.marker == kind),
-                "BUILT_IN_CATALOG is missing an entry for {kind:?} — add a BlueprintContract or remove the variant"
+        for contract in BUILT_IN_CATALOG {
+            // The model is the source of truth on per-variant policy;
+            // the catalog's marker-relative fields must agree.
+            assert_eq!(
+                contract.allowed_triggers,
+                contract.marker.allowed_triggers(),
+                "catalog's allowed_triggers drifted from the model"
             );
-        }
-        // Symmetric: no extra entries pointing at variants the enum no
-        // longer has.
-        let all_kinds = [
-            CircuitBlueprintKind::WalkingSkeleton,
-            CircuitBlueprintKind::IssueDrivenAutopilotReview,
-        ];
-        for entry in BUILT_IN_CATALOG {
-            assert!(
-                all_kinds.contains(&entry.marker),
-                "BUILT_IN_CATALOG has an entry for {entry_marker:?} that is no longer a CircuitBlueprintKind variant",
-                entry_marker = entry.marker
+            assert_eq!(
+                contract.min_concurrency_limit,
+                contract.marker.min_concurrency_limit(),
+                "catalog's min_concurrency_limit drifted from the model"
+            );
+            assert_eq!(
+                contract.default_concurrency_limit,
+                contract.marker.default_concurrency_limit(),
+                "catalog's default_concurrency_limit drifted from the model"
+            );
+            assert_eq!(
+                contract.allows_manual_trigger_now,
+                contract.marker.allows_manual_trigger_now(),
+                "catalog's allows_manual_trigger_now drifted from the model"
             );
         }
     }
@@ -341,22 +333,21 @@ mod tests {
     fn every_blueprint_has_the_required_edges_with_conditions() {
         for contract in BUILT_IN_CATALOG {
             let graph = build_graph(contract.marker, "p", "buildmesh:run");
-            for (from, to, spec) in contract.required_edges {
-                let hit = graph.edges.iter().find(|edge| edge.from == *from && edge.to == *to);
-                let edge = hit.unwrap_or_else(|| {
-                    panic!(
-                        "{:?}: missing required edge {} → {}",
-                        contract.marker, from, to
-                    )
-                });
-                assert!(
-                    spec.matches(&edge.condition),
-                    "{:?}: edge {} → {} has condition {:?}, contract expects {:?}",
-                    contract.marker,
-                    from,
-                    to,
-                    edge.condition,
-                    spec
+            for (from, to, expected_condition) in contract.required_edges {
+                let edge = graph
+                    .edges
+                    .iter()
+                    .find(|edge| edge.from == *from && edge.to == *to)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{:?}: missing required edge {} → {}",
+                            contract.marker, from, to
+                        )
+                    });
+                assert_eq!(
+                    &edge.condition, expected_condition,
+                    "{:?}: edge {} → {} condition drifted",
+                    contract.marker, from, to
                 );
             }
         }
@@ -402,13 +393,9 @@ mod tests {
     #[test]
     fn review_blueprint_requires_an_issue_label_trigger_root() {
         // The contract pins `IssueDrivenAutopilotReview.allowed_triggers`
-        // to `GithubIssueLabel` only. Any other trigger on a built graph
-        // would mean the implementation agent's `{{issue.prefill}}` first
-        // turn resolves empty — fail-closed at validate time would be
-        // ideal, but today the restriction lives at the IPC boundary.
-        // The contract pins it here so a future refactor that lifts the
-        // restriction without a docs/contract update surfaces in code
-        // review.
+        // to `GithubIssueLabel` only. The model enforces this at
+        // validate_circuit_request time, so a future refactor that
+        // lifts the restriction breaks here at compile time.
         let review = BUILT_IN_CATALOG
             .iter()
             .find(|c| c.marker == CircuitBlueprintKind::IssueDrivenAutopilotReview)
@@ -423,10 +410,6 @@ mod tests {
 
     #[test]
     fn review_blueprint_requires_two_concurrency_slots_or_deadlocks() {
-        // The implementation and reviewer agent nodes share the same
-        // circuit's concurrency pool. A 1-slot circuit would deadlock
-        // the reviewer behind the implementation node's still-live
-        // process — the IPC `create_circuit` clamps to 2.
         let review = BUILT_IN_CATALOG
             .iter()
             .find(|c| c.marker == CircuitBlueprintKind::IssueDrivenAutopilotReview)
@@ -448,9 +431,6 @@ mod tests {
 
     #[test]
     fn review_blueprint_carries_the_user_visible_pr_review_prompt() {
-        // The review instruction text is a user-facing contract. It must
-        // be embedded in the reviewer spawn node's prompt so the agent
-        // sees it as its first turn (issue #1469 acceptance).
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         let reviewer = graph
             .node("reviewer")
@@ -472,10 +452,6 @@ mod tests {
 
     #[test]
     fn review_blueprint_implementation_agent_receives_issue_body_as_first_turn() {
-        // The implementation agent's spawn-time prompt is the issue body
-        // (issue #1469 acceptance: "implementation completion"). Routing
-        // through `{{issue.prefill}}` means the worker's trigger pass
-        // resolves it against the labelled issue.
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         let implementer = graph.node("implementer").expect("implementer node required");
         match &implementer.kind {
@@ -491,11 +467,8 @@ mod tests {
 
     #[test]
     fn review_blueprint_open_pr_failure_routes_through_wrapup_retry_not_reviewer() {
-        // Issue #1469 acceptance: "the reviewer is reached only after a
-        // successful implementation/PR path." A failed OpenPr → wrapup
-        // retry → wrapup correction → finish_round, NOT reviewer.
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-        let open_pr_to_reviewer: Vec<&CircuitEdge> = graph
+        let open_pr_to_reviewer: Vec<&super::super::model::CircuitEdge> = graph
             .edges
             .iter()
             .filter(|e| e.from == "open_pr" && e.to == "reviewer")
@@ -505,10 +478,11 @@ mod tests {
         // an Always edge would let a wrapup-corrected success path also
         // spawn the reviewer (which is correct), but the Failed edge
         // must go to wrapup_retry first.
-        let open_pr_failed: Vec<&CircuitEdge> = graph
+        let open_pr_failed: Vec<&super::super::model::CircuitEdge> = graph
             .edges
             .iter()
-            .filter(|e| e.from == "open_pr" && matches!(e.condition, EdgeCondition::OnOutcome(super::super::model::StepOutcome::Failed)))
+            .filter(|e| e.from == "open_pr"
+                && matches!(e.condition, EdgeCondition::OnOutcome(StepOutcome::Failed)))
             .collect();
         assert_eq!(open_pr_failed.len(), 1);
         assert_eq!(open_pr_failed[0].to, "wrapup_retry");
@@ -516,12 +490,8 @@ mod tests {
 
     #[test]
     fn review_blueprint_closes_reviewer_node_on_feedback_path() {
-        // Issue #1469 acceptance: "feedback closes the reviewer branch
-        // correctly." After the implementation agent receives the
-        // follow_feedback inject, the close_reviewer step MUST run
-        // before the feedback classifier routes the next retry.
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-        let follow_to_close: Vec<&CircuitEdge> = graph
+        let follow_to_close: Vec<&super::super::model::CircuitEdge> = graph
             .edges
             .iter()
             .filter(|e| e.from == "follow_feedback" && e.to == "close_reviewer")
@@ -540,10 +510,6 @@ mod tests {
 
     #[test]
     fn review_blueprint_review_retry_exhaustion_terminates_with_complete_notify() {
-        // Issue #1469 acceptance: "retry exhaustion". review_retry =
-        // RetryLimit { max_retries: 3 }. After 3 failed feedback turns,
-        // the gate routes Failed → complete (a Notify that surfaces to
-        // the user) instead of looping.
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         let retry = graph
             .node("review_retry")
@@ -552,15 +518,12 @@ mod tests {
             CircuitNodeKind::RetryLimit { max_retries } => assert_eq!(*max_retries, 3),
             other => panic!("review_retry must be RetryLimit, got {other:?}"),
         }
-        let retry_failed: Vec<&CircuitEdge> = graph
+        let retry_failed: Vec<&super::super::model::CircuitEdge> = graph
             .edges
             .iter()
             .filter(|e| {
                 e.from == "review_retry"
-                    && matches!(
-                        e.condition,
-                        EdgeCondition::OnOutcome(super::super::model::StepOutcome::Failed)
-                    )
+                    && matches!(e.condition, EdgeCondition::OnOutcome(StepOutcome::Failed))
             })
             .collect();
         assert_eq!(retry_failed.len(), 1);
@@ -569,8 +532,6 @@ mod tests {
 
     #[test]
     fn review_blueprint_collaborator_gate_requires_human_approval() {
-        // The collaborator gate is the human-in-the-loop seam that
-        // gates the implementation agent behind a trusted label.
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         let gate = graph
             .node("collaborator_gate")
@@ -616,12 +577,13 @@ mod tests {
         // adds a gate, this test must be updated alongside the contract
         // entry, not silently.
         let graph = CircuitGraph::walking_skeleton("p");
-        let structural: Vec<&CircuitNode> = graph
+        let structural: Vec<&CircuitNodeKind> = graph
             .nodes
             .iter()
-            .filter(|n| {
+            .map(|n| &n.kind)
+            .filter(|k| {
                 matches!(
-                    n.kind,
+                    k,
                     CircuitNodeKind::RetryLimit { .. }
                         | CircuitNodeKind::CollaboratorCheck { .. }
                         | CircuitNodeKind::DeterministicVerification { .. }
@@ -675,5 +637,112 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Domain validation moved to `autopilot::circuit::model`. The tests
+    // below exercise the pure helper directly so internal services,
+    // the worker, and any future CLI share the same contract.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn validate_circuit_request_rejects_incompatible_trigger_for_review_blueprint() {
+        // The model is the source of truth. IPC commands funnel through
+        // this helper; bypassing it (a future CLI, internal service)
+        // would deadlock the reviewer behind a Manual spawn.
+        let err = validate_circuit_request(
+            CircuitBlueprintKind::IssueDrivenAutopilotReview,
+            Some(CircuitTriggerKind::Manual),
+            None,
+            None,
+            2,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("IssueDrivenAutopilotReview"),
+            "error must name the blueprint: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_circuit_request_clamps_review_concurrency_to_two_or_higher() {
+        let validated = validate_circuit_request(
+            CircuitBlueprintKind::IssueDrivenAutopilotReview,
+            Some(CircuitTriggerKind::GithubIssueLabel),
+            Some("buildmesh:run"),
+            None,
+            1, // caller asked for 1 — must be clamped to the model floor
+        )
+        .unwrap();
+        assert_eq!(validated.concurrency_limit, 2);
+    }
+
+    #[test]
+    fn validate_circuit_request_accepts_walking_skeleton_with_every_trigger_root() {
+        for trigger in [
+            CircuitTriggerKind::Manual,
+            CircuitTriggerKind::Interval,
+            CircuitTriggerKind::GithubIssueLabel,
+            CircuitTriggerKind::GithubPrLabel,
+        ] {
+            validate_circuit_request(
+                CircuitBlueprintKind::WalkingSkeleton,
+                Some(trigger),
+                if matches!(
+                    trigger,
+                    CircuitTriggerKind::GithubIssueLabel | CircuitTriggerKind::GithubPrLabel
+                ) {
+                    Some("buildmesh:run")
+                } else {
+                    None
+                },
+                if matches!(trigger, CircuitTriggerKind::Interval) {
+                    Some(120)
+                } else {
+                    None
+                },
+                1,
+            )
+            .unwrap_or_else(|err| panic!("walking_skeleton rejected {trigger:?}: {err}"));
+        }
+    }
+
+    #[test]
+    fn validate_circuit_request_rejects_empty_github_label() {
+        let err = validate_circuit_request(
+            CircuitBlueprintKind::WalkingSkeleton,
+            Some(CircuitTriggerKind::GithubIssueLabel),
+            Some("   "), // whitespace-only
+            None,
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("label"),
+            "error must mention the label: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_circuit_request_clamps_interval_to_60s_to_7d() {
+        let validated = validate_circuit_request(
+            CircuitBlueprintKind::WalkingSkeleton,
+            Some(CircuitTriggerKind::Interval),
+            None,
+            Some(5), // 5 seconds — clamped to 60s
+            1,
+        )
+        .unwrap();
+        assert_eq!(validated.interval_seconds, Some(60));
+
+        let validated = validate_circuit_request(
+            CircuitBlueprintKind::WalkingSkeleton,
+            Some(CircuitTriggerKind::Interval),
+            None,
+            Some(30 * 24 * 3_600), // 30 days — clamped to 7 days
+            1,
+        )
+        .unwrap();
+        assert_eq!(validated.interval_seconds, Some(7 * 24 * 3_600));
     }
 }

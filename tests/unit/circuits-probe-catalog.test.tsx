@@ -138,25 +138,32 @@ beforeEach(() => {
 });
 
 describe('Circuits Probe catalog contract (#1469)', () => {
-  // Drift gate: every entry in the Probe catalog matches a variant of
-  // the generated `CircuitBlueprintKind` union. If a Rust variant is
-  // added without a Probe entry, or vice versa, this fails here AND
-  // the matching Rust test fails there.
+  // -- Type-level exhaustiveness drift gate (#1469 follow-up) -------
+  //
+  // The previous implementation iterated a hardcoded array of variant
+  // strings; adding a new Rust variant to `CircuitBlueprintKind`
+  // without updating this test was invisible to tsc. The drift gate
+  // below uses `Exclude<>` to derive a "missing variants" set from
+  // the type system: if a Rust variant exists that's not in
+  // `PROBE_CATALOG`, the assertion fails at compile time
+  // (vitest's `expect` evaluates at runtime, but the surrounding
+  // `type _CheckExhaustive` only compiles if every variant is covered).
+  type MissingFromCatalog = Exclude<
+    CircuitBlueprintKind,
+    (typeof PROBE_CATALOG)[number]['kind']
+  >;
+  // Compile-time exhaustiveness: if a new CircuitBlueprintKind variant
+  // ships without a PROBE_CATALOG entry, `MissingFromCatalog` becomes
+  // a non-`never` type and this binding fails to type-check.
+  const _exhaustive: [MissingFromCatalog] extends [never] ? true : false = true;
+  expect(_exhaustive).toBe(true);
+
   it('the Probe catalog covers every generated CircuitBlueprintKind variant', () => {
     const seen = new Set<CircuitBlueprintKind>();
     for (const entry of PROBE_CATALOG) {
       seen.add(entry.kind);
     }
     expect(seen.size).toBe(PROBE_CATALOG.length, 'duplicate kind in PROBE_CATALOG');
-    // The generated type lists every variant literally; assert each
-    // appears in the Probe catalog so a new Rust variant fails here
-    // until its Probe entry is added.
-    for (const variant of ['walking_skeleton', 'issue_driven_autopilot_review'] as const) {
-      expect(
-        seen.has(variant),
-        `PROBE_CATALOG is missing the "${variant}" variant — add an entry or remove the variant`
-      ).toBe(true);
-    }
   });
 
   it.each(PROBE_CATALOG)(
