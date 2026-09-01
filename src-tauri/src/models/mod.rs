@@ -1761,7 +1761,8 @@ mod tests {
         let recipe = resume.unwrap();
         assert_eq!(recipe.binary, "codex");
         assert_eq!(recipe.base_args[0], "resume");
-        assert_eq!(recipe.base_args[1], "abc-123");
+        assert_eq!(recipe.base_args.last().map(String::as_str), Some("abc-123"));
+        assert!(recipe.base_args.contains(&"--ask-for-approval".into()));
     }
 
     #[test]

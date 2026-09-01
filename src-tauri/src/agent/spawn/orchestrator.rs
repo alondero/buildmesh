@@ -1127,7 +1127,8 @@ pub(crate) async fn spawn_agent_inner(
     // launches so trust and child execution use one WSL distro/home. Both
     // trust and hook provisioning are blocking filesystem/process work, so
     // keep their ordering while moving them off the Tokio worker thread.
-    let launch_runtime = routing.launch_runtime();
+    let mut launch_runtime = routing.launch_runtime();
+    launch_runtime.node_id = Some(session_id);
     let provisioning_resolved = resolved.clone();
     let provisioning_runtime = launch_runtime.clone();
     let needs_attention_hook = adapter.requires_attention_hook();

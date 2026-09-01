@@ -24,6 +24,9 @@ pub struct LaunchRuntime {
     pub harness_home: Option<String>,
     /// WSL distribution selected for the process, when applicable.
     pub wsl_distro: Option<String>,
+    /// Buildmesh node id used to bake Codex attention callback URLs. Codex
+    /// hook processes do not inherit `BUILDMESH_*` from the agent PTY.
+    pub node_id: Option<i64>,
 }
 
 /// Built-in **Harness Profile** ids that detection populates (`claude`,

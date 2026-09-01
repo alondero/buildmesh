@@ -148,9 +148,13 @@ pub fn default_prepare(
     let base_recipe = adapter.spawn_recipe(input.platform, input.runtime);
 
     // The base recipe before session-id / override / prefill args are layered on.
+    // Codex's resume recipe is `resume [OPTIONS] <id>`; keep `<id>` off until
+    // after model/effort/extra/sandbox so those flags cannot become the prompt.
+    let mut trailing_resume_id: Option<String> = None;
     let mut recipe = match input.session {
         SessionIdModeRef::Resume(id) => {
-            if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(input.platform, id) {
+            if let Some(mut resume_recipe) = adapter.spawn_recipe_for_resume(input.platform, id) {
+                trailing_resume_id = resume_recipe.base_args.pop();
                 resume_recipe
             } else {
                 let mut r = base_recipe;
@@ -237,6 +241,10 @@ pub fn default_prepare(
         if !sandbox.is_empty() {
             recipe.base_args.extend(sandbox);
         }
+    }
+
+    if let Some(id) = trailing_resume_id {
+        recipe.base_args.push(id);
     }
 
     if capabilities.supports_prefill {
@@ -387,18 +395,54 @@ mod tests {
             sandbox: false,
         };
         let prepared = default_prepare(adapter, input);
-        // Codex's resume recipe is `codex resume sess-xyz ...base_flags`
+        // Codex's resume recipe is `codex resume [OPTIONS] sess-xyz`
         // — the "resume" positional is a subcommand the base recipe
-        // would not include.
+        // would not include, and the id stays after options.
         assert!(
             prepared.recipe.base_args.iter().any(|a| a == "resume"),
             "Codex resume must use the subcommand recipe, got {:?}",
             prepared.recipe.base_args
         );
-        assert!(
-            prepared.recipe.base_args.iter().any(|a| a == "sess-xyz"),
-            "Codex resume recipe must carry the session id, got {:?}",
+        assert_eq!(
+            prepared.recipe.base_args.last().map(String::as_str),
+            Some("sess-xyz"),
+            "session id must be last among options, got {:?}",
             prepared.recipe.base_args
+        );
+    }
+
+    #[test]
+    fn default_prepare_codex_resume_keeps_session_id_after_model() {
+        let adapter = &crate::agent::provider::adapters::CODEX as &dyn AgentProvider;
+        let config = ResolvedAgentConfig {
+            model: Some("gpt-5.4".into()),
+            ..Default::default()
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Macos,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume("sess-xyz"),
+            config: &config,
+            prefill: Some("continue"),
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        let args = &prepared.recipe.base_args;
+        let model_at = args
+            .iter()
+            .position(|arg| arg == "--model")
+            .expect("model flag");
+        let id_at = args
+            .iter()
+            .position(|arg| arg == "sess-xyz")
+            .expect("session id");
+        let prefill_at = args
+            .iter()
+            .position(|arg| arg == "continue")
+            .expect("prefill");
+        assert!(
+            model_at < id_at && id_at < prefill_at,
+            "expected resume [OPTIONS] <id> <prompt>, got {args:?}"
         );
     }
 

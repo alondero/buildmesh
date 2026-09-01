@@ -1,7 +1,8 @@
 //! `POST /api/attention/{session_id}` — webhook for a Node Turn (see CONTEXT.md
 //! and `crate::node_turn`). Both Claude Code hooks point here — the Stop hook
 //! (turn finished) and the catch-all Notification hook (idle or permission
-//! prompt) — as do Codex's Stop and PermissionRequest hooks (issue #884).
+//! prompt) — as do Codex's SessionStart, Stop, and PermissionRequest hooks
+//! (issue #884). SessionStart is capture-only (no Ready/AwaitingInput).
 //! The hook command forwards the hook's stdin JSON as the POST body
 //! (issue #878), which is what lets this handler tell a genuine yield from a
 //! turn that only ended because the harness is waiting on background tasks and
@@ -233,6 +234,9 @@ enum Decision {
     /// because background tasks are still running and the harness will
     /// re-invoke itself when they finish (issue #878).
     SuppressPendingBackground,
+    /// Capture any structured session id, then stop. SessionStart (and similar
+    /// boot events) must not look like a turn completion.
+    Ignore,
 }
 
 /// The result of classifying a hook POST body: the [`Decision`] plus the
@@ -314,6 +318,16 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
         message: payload.message.clone(),
         ..Default::default()
     };
+    if payload
+        .hook_event_name
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case("SessionStart"))
+    {
+        return Classified {
+            decision: Decision::Ignore,
+            detail,
+        };
+    }
     if matches!(
         payload.hook_event_name.as_deref().map(str::to_ascii_lowercase).as_deref(),
         Some("permissionrequest") | Some("pretooluse")
@@ -488,8 +502,9 @@ pub async fn handle_post(
         "http_attention_apply",
         move || -> Result<Applied, String> {
             // Codex self-assigns its thread id. PTY capture remains the
-            // earliest source, while the hook payload is the exact
-            // structured fallback after the first turn (issue #1089).
+            // earliest source; SessionStart is the structured capture at
+            // boot, and Stop/PermissionRequest remain the later fallback
+            // (issue #1089).
             if let Some(cli_session_id) = hook_uuid.clone() {
                 match crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id) {
                     Ok(true) => tracing::info!(
@@ -577,6 +592,12 @@ pub async fn handle_post(
                         session_id
                     );
                     crate::node_turn::publish_background(session_id, app, detail);
+                }
+                Decision::Ignore => {
+                    tracing::debug!(
+                        "attention webhook for node {}: lifecycle-neutral hook, session capture only",
+                        session_id
+                    );
                 }
             }
             Ok(Applied::Applied)
@@ -856,6 +877,27 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(classify_decision(&body, |_| Some(2)), Decision::Ready);
+    }
+
+    /// Codex SessionStart fires as soon as the TUI boots, carrying the
+    /// conversation UUID. That is the structured capture we want. It is
+    /// not a turn completion — treating it as Ready would fire naming and
+    /// Autopilot on an empty session.
+    #[test]
+    fn codex_session_start_is_lifecycle_neutral() {
+        let body = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "550e8400-e29b-41d4-a716-446655440000",
+            "cwd": r"F:\src\buildmesh\.claude\worktrees\node",
+            "source": "startup",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ignore);
+        assert_eq!(
+            hook_session_id(&body).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
     }
 
     /// Grok's `Stop` event is a clean turn completion → Ready. The runner

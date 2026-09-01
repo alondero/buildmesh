@@ -84,7 +84,7 @@ const ANTHROPIC_CAPS: HarnessCapabilities = {
 const CODEX_CAPS: HarnessCapabilities = {
   harness_id: 'codex',
   supports_resume: true,
-  auto_resume_on_startup: false,
+  auto_resume_on_startup: true,
   requires_attention_hook: true,
   attention_capability: {
     kind: 'hook',

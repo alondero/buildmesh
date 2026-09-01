@@ -76,6 +76,17 @@ if ((Test-Path (Join-Path $gitUsrBin 'openssl.exe')) -and ($openSslOnPath -notli
   $env:PATH = "$gitUsrBin;$env:PATH"
 }
 
+# Git\usr\bin contains an MSYS git.exe. If it sits in front of Git\cmd,
+# fetch/worktree tests resolve the POSIX git and fail the same way as a
+# devkitPro shadow. Keep Git\cmd first whenever both are present.
+if (Test-Path (Join-Path $gitForWindows 'git.exe')) {
+  $gitOnPath = (Get-Command git -ErrorAction SilentlyContinue).Source
+  if ($gitOnPath -notlike "$gitForWindows*") {
+    Write-Host "== PATH git is '$gitOnPath' after openssl pin -> restoring $gitForWindows first ==" -ForegroundColor Yellow
+    $env:PATH = "$gitForWindows;$env:PATH"
+  }
+}
+
 function Ensure-MobileBuilt {
   # Rebuild when index.html is missing OR empty — an interrupted prior build (Ctrl-C /
   # Defender lock) can leave a zero-byte/truncated index.html that a Test-Path-only gate
