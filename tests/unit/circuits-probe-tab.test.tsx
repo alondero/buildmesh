@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -632,6 +632,67 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     // Controls live outside the disclosure button — a button nested in a
     // button is invalid HTML and breaks keyboard semantics.
     expect(toggle.querySelector('button')).toBeNull();
+  });
+
+  it('advances a live run duration without waiting for a ledger event', async () => {
+    // A step can churn for minutes without a state transition, so no
+    // `circuit-run-updated` arrives. Baselining the clock on fetch left the
+    // elapsed time frozen, which made a stalled run look freshly started.
+    //
+    // `advanceTimersByTimeAsync` rather than RTL's `findBy*`: the awaited
+    // queries drive their own timers, which fights an explicit fake clock.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-01T12:00:10Z'));
+      const RUN_LIVE: CircuitRunDetail = {
+        run: {
+          ...RUN_DONE.run,
+          id: 30,
+          state: 'running',
+          created_at: '2026-09-01 12:00:00',
+          updated_at: '2026-09-01 12:00:00',
+        },
+        steps: [step({ node_id: 'implementer', status: 'running' })],
+      };
+      mockBackend({ runs: [RUN_LIVE] });
+      render(<ProbePanel />);
+      fireEvent.click(screen.getByRole('button', { name: 'Circuits' }));
+      // Flush the load IPC without letting wall-clock time move.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(screen.getByTestId('run-card-30').textContent).toContain('10.0s');
+      expect(vi.getTimerCount(), 'the 1s tick must be registered').toBeGreaterThan(0);
+
+      // Five seconds of wall clock, zero backend events. `advanceTimersByTime`
+      // moves the mocked `Date` too, so setting the system time again here
+      // would double-count the gap.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(screen.getByTestId('run-card-30').textContent).toContain('15.0s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not tick when every visible run is terminal', async () => {
+    // The interval is gated on there being a live run, so a tab showing
+    // finished work re-renders never.
+    vi.useFakeTimers();
+    try {
+      mockBackend({ runs: [RUN_DONE] });
+      render(<ProbePanel />);
+      fireEvent.click(screen.getByRole('button', { name: 'Circuits' }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByTestId('run-card-11')).toBeTruthy();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('gives the body exactly one scroll owner and no sideways escape', async () => {

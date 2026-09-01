@@ -28,7 +28,8 @@ import { isTerminalRunState } from '../../src/components/Circuits/circuitGraphMo
  * the copy is testable without mounting the panel.
  */
 describe('run diagnostics', () => {
-  const st = (node_id: string, status: string) => ({ node_id, status });
+  const st = (node_id: string, status: string) => ({ node_id, status, error_message: null });
+
 
   describe('formatDurationMs', () => {
     it('scales from tenths of a second up to hours', () => {
@@ -48,8 +49,24 @@ describe('run diagnostics', () => {
     });
 
     it('does not straddle the minute boundary', () => {
-      expect(formatDurationMs(59_999)).toBe('60.0s');
+      // Regression: the tier used to be chosen on raw ms (`safe < 60_000`)
+      // while the label printed `toFixed(1)`, so 59_999ms passed the test
+      // but rendered "60.0s" — the sequence read "59.8s, 60.0s, 1m 0s".
+      // The boundary is now decided in deciseconds, the unit it prints, so
+      // a value that would render as 60.0s is already in the minute tier.
+      expect(formatDurationMs(59_940)).toBe('59.9s');
+      expect(formatDurationMs(59_999)).toBe('1m 0s');
       expect(formatDurationMs(60_000)).toBe('1m 0s');
+    });
+
+    it('never formats a non-finite input as "NaNh NaNm"', () => {
+      // `Math.max(0, NaN)` is NaN, not 0 — the clamp does not sanitise, and
+      // NaN fails every `<` comparison, so it fell through to the hours
+      // branch and printed "NaNh NaNm". The duration helpers return null
+      // rather than NaN, so this guards future callers.
+      expect(formatDurationMs(NaN)).toBe('0.0s');
+      expect(formatDurationMs(Infinity)).toBe('0.0s');
+      expect(formatDurationMs(-Infinity)).toBe('0.0s');
     });
   });
 
@@ -162,10 +179,41 @@ describe('run diagnostics', () => {
     it('names the failed step on a failed run', () => {
       const activity = runActivity(
         { state: 'failed' },
-        [st('trigger', 'completed'), st('classifier', 'failed')],
+        [
+          st('trigger', 'completed'),
+          { node_id: 'classifier', status: 'failed', error_message: 'boom' },
+        ],
         FREE
       );
       expect(activity).toMatchObject({ kind: 'terminal', label: 'Failed', nodeId: 'classifier' });
+      // The card renders the message itself, so the detail line stays quiet
+      // rather than repeating "look at the error" above it.
+      expect(activity.detail).toBeNull();
+    });
+
+    it('still says something when a failed run has no error text anywhere', () => {
+      // The run row has no error column of its own, so a failure that never
+      // reached a step (or a step that died without recording a message)
+      // used to render "Failed" and nothing else.
+      const noMessage = runActivity(
+        { state: 'failed' },
+        [{ node_id: 'implementer', status: 'failed', error_message: null }],
+        FREE
+      );
+      expect(noMessage.detail).toContain('recorded no error message');
+
+      const noSteps = runActivity({ state: 'failed' }, [], FREE);
+      expect(noSteps.nodeId).toBeNull();
+      expect(noSteps.detail).toContain('before any step was recorded');
+
+      // Failed run, steps present, but none of them is the failure — the
+      // worker failed the run itself.
+      const workerFailed = runActivity(
+        { state: 'failed' },
+        [{ node_id: 'trigger', status: 'completed', error_message: null }],
+        FREE
+      );
+      expect(workerFailed.detail).toContain('No step recorded a failure');
     });
 
     it('reports paused with the step it was parked on, and how to continue', () => {

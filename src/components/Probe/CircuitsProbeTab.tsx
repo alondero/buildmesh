@@ -68,8 +68,17 @@ export function CircuitsProbeTab() {
    * refetch land without snapping a card the user just opened shut.
    */
   const [runExpandOverrides, setRunExpandOverrides] = useState<Record<number, boolean>>({});
-  /** Clock the duration labels measure against; re-baselined on every load. */
-  const [loadedAt, setLoadedAt] = useState(() => new Date());
+  /**
+   * Clock the duration labels measure a live run against.
+   *
+   * This has to tick on its own. Baselining it on fetch was wrong: a run's
+   * `updated_at` only moves on a *state transition*, so a step that churns
+   * for ten minutes emits no `circuit-run-updated` and the elapsed time
+   * would sit frozen at whatever it read when the tab last loaded — which
+   * is worse than showing nothing, because a stalled run would look fresh.
+   * `UsageTab` sets the precedent for a 1s tick on a relative-time label.
+   */
+  const [now, setNow] = useState(() => new Date());
   // New-Circuit row: name + trigger shape, then straight into the editor.
   const [newName, setNewName] = useState('');
   const [blueprint, setBlueprint] = useState<CircuitBlueprintKind>('walking_skeleton');
@@ -92,11 +101,6 @@ export function CircuitsProbeTab() {
       // One batched IPC: circuits with their recent run ledgers.
       const rows = await listCircuitsWithRuns(activeMeshId, 10);
       setRows(rows);
-      // Re-baseline the clock the duration labels measure a live run
-      // against. The worker emits `circuit-run-updated` on every state
-      // change, so an in-flight run's elapsed time advances with the
-      // ledger instead of needing a timer of its own.
-      setLoadedAt(new Date());
       setLoadError(null);
     } catch (err) {
       console.error('Failed to load circuits:', err);
@@ -121,6 +125,18 @@ export function CircuitsProbeTab() {
       void unlisten.then((fn) => fn());
     };
   }, [activeMeshId, load]);
+
+  // Advance the duration clock while any visible run is still open. Gated
+  // on `hasLiveRun` so a tab showing only finished runs — whose durations
+  // are fixed by their own `updated_at` — re-renders never.
+  const hasLiveRun = rows.some(({ runs }) =>
+    runs.some(({ run }) => !isTerminalRunState(run.state))
+  );
+  useEffect(() => {
+    if (!hasLiveRun) return;
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, [hasLiveRun]);
 
   const runAction = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -362,7 +378,7 @@ export function CircuitsProbeTab() {
                           !isTerminalRunState(detail.run.state)
                         }
                         onToggleExpanded={() => toggleRunExpanded(detail.run.id, detail.run.state)}
-                        now={loadedAt}
+                        now={now}
                         busy={busy}
                         onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
                         onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}

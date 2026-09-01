@@ -65,7 +65,7 @@ export function stepStatusLabel(status: string): string {
 }
 
 /**
- * What the scheduler can currently tell us about why a step is parked.
+ * What we can observe about why a step is parked.
  *
  * `schedule_ready` (src-tauri/src/autopilot/circuit/stepper.rs) parks a
  * step as `pending_slot` for exactly two reasons: the circuit's own
@@ -74,16 +74,32 @@ export function stepStatusLabel(status: string): string {
  * step row, so we derive which one is binding from the numbers the wire
  * DOES carry. Issue #1467 replaces this inference with a real
  * circuit-run capacity contract the ledger can state outright.
+ *
+ * **This is observation through a paginated window, and the window can
+ * skew it.** `runningSteps` is counted from the runs the Probe fetched —
+ * `listCircuitsWithRuns(meshId, 10)`, the ten most recent. The worker
+ * counts across *all* of them (`db::count_running_circuit_steps`). An
+ * in-flight run that has fallen outside the ten-run window therefore
+ * makes `runningSteps` under-count, and an under-count reads as "this
+ * circuit has spare step slots" — flipping the diagnosis to the mesh
+ * agent budget when the circuit budget was in fact binding. That needs
+ * eleven concurrent-ish runs on one circuit to happen, and the hedged
+ * wording in `queuedReason` keeps it from becoming a false statement,
+ * but it is a real limit of inferring scheduler state client-side and is
+ * the reason #1467 should replace this rather than extend it.
  */
 export interface CircuitCapacity {
   /** `autopilot_circuits.concurrency_limit` — steps this circuit may run at once. */
   concurrencyLimit: number;
-  /** Steps currently `running` across every visible run of this circuit. */
+  /** Steps currently `running` across every *visible* run of this circuit
+   *  (see the window caveat above — this is a lower bound, not a total). */
   runningSteps: number;
 }
 
 /** Count the `running` steps across a circuit's visible runs — the
- *  frontend's stand-in for the worker's `count_running_circuit_steps`. */
+ *  frontend's stand-in for the worker's `count_running_circuit_steps`.
+ *  A LOWER BOUND, not a total: it only sees the fetched window. See
+ *  `CircuitCapacity` for what that costs the diagnosis. */
 export function countRunningSteps(runs: Array<{ steps: Array<Pick<StepLike, 'status'>> }>): number {
   return runs.reduce(
     (total, { steps }) => total + steps.filter((s) => s.status === 'running').length,
@@ -120,7 +136,7 @@ export interface RunActivity {
  */
 export function runActivity(
   run: { state: string },
-  steps: Array<Pick<StepLike, 'node_id' | 'status'>>,
+  steps: Array<Pick<StepLike, 'node_id' | 'status' | 'error_message'>>,
   capacity: CircuitCapacity
 ): RunActivity {
   const firstWith = (status: string) => steps.find((s) => s.status === status) ?? null;
@@ -137,7 +153,17 @@ export function runActivity(
     };
   }
   if (run.state === 'failed') {
-    return { kind: 'terminal', label: 'Failed', nodeId: firstWith('failed')?.node_id ?? null, detail: null };
+    const failed = firstWith('failed');
+    return {
+      kind: 'terminal',
+      label: 'Failed',
+      nodeId: failed?.node_id ?? null,
+      // A failed run whose ledger carries no error text would otherwise
+      // render "Failed" and nothing else — the run row has no error column
+      // of its own, so if no step recorded a message there is nothing for
+      // the card to show. Say where to look instead of leaving it blank.
+      detail: failedWithoutMessageDetail(steps, failed !== null),
+    };
   }
   if (run.state === 'completed') {
     return { kind: 'terminal', label: 'Completed', nodeId: null, detail: null };
@@ -162,6 +188,27 @@ export function runActivity(
     };
   }
   return { kind: 'idle', label: 'Waiting to start', nodeId: null, detail: null };
+}
+
+/**
+ * Fallback copy for a failed run with no error text anywhere in its ledger
+ * — an agent process that died mid-flight, or a failure raised before any
+ * step existed. Returns `null` when a message IS present, because the card
+ * renders that message itself and repeating "look at the error" above it
+ * would be noise.
+ */
+function failedWithoutMessageDetail(
+  steps: Array<Pick<StepLike, 'status' | 'error_message'>>,
+  hasFailedStep: boolean
+): string | null {
+  const hasMessage = steps.some((s) => s.error_message !== null && s.error_message !== '');
+  if (hasMessage) return null;
+  if (hasFailedStep) {
+    return 'The failed step recorded no error message — check its agent node, or the app log.';
+  }
+  return steps.length === 0
+    ? 'The run failed before any step was recorded — check the app log.'
+    : 'No step recorded a failure — the run was failed by the worker; check the app log.';
 }
 
 /**

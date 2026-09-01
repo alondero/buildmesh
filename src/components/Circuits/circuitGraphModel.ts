@@ -906,10 +906,26 @@ export function runDurationMs(
  * Tiers: sub-second → "0.4s", under a minute → "12.4s", under an hour →
  * "4m 12s", beyond → "1h 6m". Minutes/hours drop the fractional part —
  * a tenth of a second is noise at that scale.
+ *
+ * Two traps this shape avoids:
+ *
+ * - **The tier is chosen in the unit it prints.** Comparing raw `ms`
+ *   against 60_000 while printing `toFixed(1)` lets the two disagree:
+ *   59_999ms is under the threshold but *renders* as "60.0s", so the
+ *   sequence read "…59.8s, 60.0s, 1m 0s". Rounding to deciseconds first
+ *   and testing that makes the straddle unrepresentable.
+ * - **`Math.max(0, NaN)` is NaN**, not 0 — the clamp does not sanitise.
+ *   Without the finite guard a corrupt timestamp reaching this function
+ *   falls through every comparison and formats as "NaNh NaNm". The
+ *   duration helpers above return `null` rather than NaN, so this is
+ *   defence for future callers, not a live path.
  */
 export function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms)) return '0.0s';
   const safe = Math.max(0, ms);
-  if (safe < 60_000) return `${(safe / 1000).toFixed(1)}s`;
+  // Deciseconds: the smallest unit this function ever prints.
+  const tenths = Math.round(safe / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)}s`;
   const totalSeconds = Math.round(safe / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
