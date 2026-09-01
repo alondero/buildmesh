@@ -522,6 +522,14 @@ export type { GitSummary };
 export const getGitSummary = (path: string) =>
   _invoke<GitSummary>('get_git_summary', { path });
 
+// Issue #1374 — per-file quick actions for the center diff overlay's
+// header. Both are repo-relative-path operations on the diff's `rootPath`.
+export const stageFile = (repoPath: string, filePath: string) =>
+  _invoke<void>('stage_file', { repoPath, filePath });
+
+export const revertFile = (repoPath: string, filePath: string) =>
+  _invoke<void>('revert_file', { repoPath, filePath });
+
 export const getDefaultBranch = (path: string) =>
   _invoke<string>('get_default_branch', { path });
 

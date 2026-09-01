@@ -1,7 +1,98 @@
-import { useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import type { DiffHunk, DiffLine, FileDiff } from '../../lib/tauri';
 import { fileDiffStatusMeta } from '../../lib/status';
-import { splitPath } from './diffFormat';
+import { splitPath, alignHunkRows, type SplitRow } from './diffFormat';
+
+/** Where the Unified/Split preference is saved (issue #1374). */
+export const DIFF_VIEW_STORAGE_KEY = 'buildmesh.diff-view';
+export type DiffViewMode = 'unified' | 'split';
+
+/** Boot the Unified/Split preference from localStorage, try/catch-wrapped
+ *  like `loadViewMode` in `uiStore` (storage unavailable in tests / private
+ *  mode). Anything but 'split' falls back to 'unified'. */
+export function loadDiffViewMode(): DiffViewMode {
+  try {
+    const stored = localStorage.getItem(DIFF_VIEW_STORAGE_KEY);
+    if (stored === 'split') return 'split';
+  } catch {
+    // localStorage unavailable — default to unified.
+  }
+  return 'unified';
+}
+
+/** Write-on-change persistence, try/catch-wrapped like `persistViewMode` —
+ *  a storage failure must never block the toggle itself. */
+export function persistDiffViewMode(mode: DiffViewMode): void {
+  try {
+    localStorage.setItem(DIFF_VIEW_STORAGE_KEY, mode);
+  } catch {
+    // localStorage unavailable — in-memory state still flips.
+  }
+}
+
+// ─── Issue #1374 — single source of truth for the Unified/Split mode ──────
+//
+// The earlier shape (one `useState(loadDiffViewMode)` per component, plus a
+// separate one in `DiffOverlayShell`) had three layers fighting over
+// localStorage — every toggle fired two writes (the card's localStorage
+// call AND the shell's), and the inline `FileDiffCard` toggle had to call
+// `onModeChange` AND update its own dead `ownMode`. The fix:
+//
+//   • One module-level `useSyncExternalStore`-backed store (singleton).
+//   • `useDiffViewMode()` is THE hook — every caller reads/writes via it,
+//     so the shell, the stacked-review `Diff`, and the inline `FileDiffCard`
+//     toggle all stay in sync without prop-drilling.
+//   • The `mode`/`onModeChange` props on `Diff`/`FileDiffCard` are
+//     OPTIONAL controlled overrides — when supplied (overlay case), the
+//     shell remains the single source; when omitted (stacked review
+//     case), the card falls back to the hook.
+//
+// `DiffOverlayShell` is now a thin pass-through: `const [mode, setMode] =
+// useDiffViewMode()`, then `<Diff mode={mode} onModeChange={setMode} />`.
+
+type Listener = () => void;
+let listeners: Set<Listener> = new Set();
+let currentMode: DiffViewMode = loadDiffViewMode();
+
+function subscribe(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot(): DiffViewMode {
+  return currentMode;
+}
+
+function getServerSnapshot(): DiffViewMode {
+  // SSR fallback — use the default since we don't have localStorage on
+  // the server. Tests that need a specific value should mock via
+  // `localStorage.setItem` before render.
+  return 'unified';
+}
+
+/** Single hook for the Unified/Split mode. The store is the only
+ *  source of truth — `useSyncExternalStore` ensures every subscriber
+ *  re-renders when the value flips, and the shell/card/stacked-review
+ *  consumers all converge on the same instance. Issue #1374. */
+export function useDiffViewMode(): [DiffViewMode, (m: DiffViewMode) => void] {
+  const mode = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const setMode = (m: DiffViewMode) => {
+    if (m === currentMode) return;
+    currentMode = m;
+    persistDiffViewMode(m);
+    // Copy before iterate — a listener may unsubscribe during dispatch.
+    for (const l of [...listeners]) l();
+  };
+  return [mode, setMode];
+}
+
+/** Test seam — reset the module-level store between tests so the
+ *  `useSyncExternalStore` subscribers in one test don't leak the
+ *  `split` preference into the next test (and back). */
+export function __resetDiffViewModeForTests(): void {
+  currentMode = loadDiffViewMode();
+  listeners = new Set();
+}
 
 /**
  * Shared diff renderer: a GitHub-style stacked, unified, syntax-highlighted
@@ -102,10 +193,81 @@ export function HunkBlock({ hunk, last }: { hunk: DiffHunk; last: boolean }) {
   );
 }
 
+/** One cell of a split row: gutter (its own side's line number) + content.
+ *  `html` is the preserved syntect server-side token HTML (issue #1374). */
+function SplitCell({
+  line,
+  html,
+  side,
+}: {
+  line: DiffLine | null;
+  html?: string;
+  side: 'old' | 'new';
+}) {
+  const type = line?.line_type;
+  const bg =
+    type === 'add' && side === 'new'
+      ? DIFF_LINE_BG.add
+      : type === 'remove' && side === 'old'
+        ? DIFF_LINE_BG.remove
+        : '';
+  return (
+    <div className={`flex flex-1 min-w-0 ${bg}`}>
+      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted/50 select-none flex-shrink-0`}>
+        {/* Left pane shows the old file's line numbers, right pane the
+            new file's — matching GitHub's split view (#1374). */}
+        {side === 'old' ? line?.old_num ?? '' : line?.new_num ?? ''}
+      </span>
+      <span className={`w-4 text-center select-none flex-shrink-0 ${markerColor(type ?? 'context')}`}>
+        {line ? marker(line.line_type) : ''}
+      </span>
+      {line && html ? (
+        // Highlighted HTML is generated server-side by syntect (trusted,
+        // not user-controlled markup), one span run per line.
+        <span
+          className="whitespace-pre flex-1 min-w-0 overflow-x-auto"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      ) : (
+        <span className="whitespace-pre flex-1 min-w-0">{line?.content ?? ''}</span>
+      )}
+    </div>
+  );
+}
+
+/** One row of a side-by-side diff: left (old) cell + right (new) cell. */
+function SplitRowView({ row }: { row: SplitRow }) {
+  return (
+    <div className="flex">
+      <SplitCell line={row.old} html={row.oldHtml} side="old" />
+      <div className="w-px bg-border-subtle flex-shrink-0" />
+      <SplitCell line={row.new} html={row.newHtml} side="new" />
+    </div>
+  );
+}
+
+/** A hunk rendered side-by-side: `@@ … @@` header + aligned rows. Rows are
+ *  paired by `alignHunkRows` (issue #1374) — a remove+add run shares one
+ *  row, so left and right panes stay in sync without line desynchronization. */
+export function SplitHunkBlock({ hunk, last }: { hunk: DiffHunk; last: boolean }) {
+  return (
+    <div className={last ? '' : 'border-b border-border-subtle'}>
+      <div className="px-2 py-0.5 bg-bg-overlay/60 text-text-muted select-none">
+        @@ -{hunk.old_start},{hunk.old_lines} +{hunk.new_start},{hunk.new_lines} @@
+      </div>
+      {alignHunkRows(hunk).map((row, i) => (
+        <SplitRowView key={i} row={row} />
+      ))}
+    </div>
+  );
+}
+
 export function FileDiffCard({
   file,
   defaultOpen = true,
   onOpenFile,
+  mode,
+  onModeChange,
 }: {
   file: FileDiff;
   defaultOpen?: boolean;
@@ -113,8 +275,21 @@ export function FileDiffCard({
    *  calls this with the file's path (issue #379). Omit it where there's no
    *  spacious surface to open into (e.g. the overlay renders its own diff). */
   onOpenFile?: (path: string) => void;
+  /** Diff view mode — REQUIRED (issue #1374). Pass the value from
+   *  `useDiffViewMode()`; the inline per-card toggle calls
+   *  `onModeChange` to propagate. */
+  mode: DiffViewMode;
+  /** Called when the inline per-card toggle flips the mode — the
+   *  parent decides whether to persist (typically via
+   *  `useDiffViewMode()`'s setter, which already writes
+   *  localStorage). */
+  onModeChange: (mode: DiffViewMode) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  // `mode` is fully controlled by the parent — no local state, no
+  // localStorage write here. The inline toggle calls `onModeChange`,
+  // which propagates to whatever store the parent uses
+  // (`useDiffViewMode()` is the canonical sink).
   const meta = fileDiffStatusMeta(file.status);
   const { dir, name } = splitPath(file.path);
 
@@ -156,6 +331,30 @@ export function FileDiffCard({
             -{file.deletions}
           </span>
         )}
+        {/* Unified/Split toggle (issue #1374) — a sibling of the open-in-
+            overlay button, same invalid-HTML-in-button reasoning. Mode is
+            fully controlled; the click calls `onModeChange` which
+            propagates to the shell/store. */}
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label={`Toggle ${mode === 'split' ? 'unified' : 'split'} diff view`}
+          title={mode === 'split' ? 'Switch to unified view' : 'Switch to split view'}
+          onClick={(e) => {
+            e.stopPropagation();
+            onModeChange(mode === 'split' ? 'unified' : 'split');
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              onModeChange(mode === 'split' ? 'unified' : 'split');
+            }
+          }}
+          className="flex-shrink-0 text-text-muted hover:text-accent-cyan transition-colors cursor-pointer font-mono text-2xs px-1"
+        >
+          {mode === 'split' ? '⬛⬛' : '⬛'}
+        </span>
         {onOpenFile && (
           // Rendered as a sibling — nesting a <button> inside the header
           // button is invalid HTML and breaks click handling. `stopPropagation`
@@ -212,6 +411,14 @@ export function FileDiffCard({
             </div>
           ) : file.hunks.length === 0 ? (
             <div className="px-3 py-2 text-text-muted italic">No changes</div>
+          ) : mode === 'split' ? (
+            file.hunks.map((hunk, i) => (
+              <SplitHunkBlock
+                key={i}
+                hunk={hunk}
+                last={i === file.hunks.length - 1}
+              />
+            ))
           ) : (
             file.hunks.map((hunk, i) => (
               <HunkBlock
@@ -244,14 +451,28 @@ export function diffTotals(files: FileDiff[]): DiffTotals {
   );
 }
 
-/** Stacked review surface: every changed file's diff in one scroll column. */
+/** Stacked review surface: every changed file's diff in one scroll column.
+ *  Issue #1374: `mode` switches between the unified stacked format and a
+ *  2-column side-by-side (split) format with synchronized scrolling — the
+ *  panes scroll together because each split row is ONE flex row, so row
+ *  heights match by construction and the gutters never desynchronize.
+ *  The mode is fully controlled by the caller; pass values from
+ *  `useDiffViewMode()` for the standalone stacked-review case or from
+ *  `DiffOverlayShell`'s render-prop for the overlay case. */
 export function Diff({
   files,
   onOpenFile,
+  mode,
+  onModeChange,
 }: {
   files: FileDiff[];
   /** Threaded to each card's "open in center overlay" affordance (#379). */
   onOpenFile?: (path: string) => void;
+  /** Diff view mode — REQUIRED (issue #1374). Pass the value from
+   *  `useDiffViewMode()`. */
+  mode: DiffViewMode;
+  /** Called when any card's inline toggle flips the mode. */
+  onModeChange: (mode: DiffViewMode) => void;
 }) {
   if (files.length === 0) {
     return (
@@ -263,7 +484,13 @@ export function Diff({
   return (
     <div>
       {files.map((file) => (
-        <FileDiffCard key={file.path} file={file} onOpenFile={onOpenFile} />
+        <FileDiffCard
+          key={file.path}
+          file={file}
+          onOpenFile={onOpenFile}
+          mode={mode}
+          onModeChange={onModeChange}
+        />
       ))}
     </div>
   );

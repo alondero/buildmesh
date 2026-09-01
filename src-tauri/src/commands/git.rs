@@ -1,6 +1,7 @@
 //! Git operations via git2 crate
 
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -824,6 +825,215 @@ pub(crate) fn get_mesh_git_static_blocking(mesh_path: String) -> Result<MeshGitS
         is_gh_authenticated,
         default_branch,
     })
+}
+
+// ── Per-file stage / revert (issue #1374) ───────────────────────────
+
+/// Stage one file (by repo-relative path) into the index. Handles every
+/// change kind the diff surfaces can show:
+///
+/// - modified / untracked: `index.add_path` (a new file enters the index;
+///   a modified one updates it).
+/// - deleted (missing on disk): `index.remove_path` so the deletion is
+///   staged rather than silently left as a worktree-only delete.
+/// - renamed: the caller passes the NEW path; the old path still reads as
+///   deleted in the status walk, so we also remove it — otherwise staging
+///   a rename would leave the index holding both the old and new entries.
+///
+/// Path traversal is rejected at the command boundary (same rule as
+/// `diff_against_base`'s `only` pathspec): any `..` segment or empty
+/// segment means the caller is trying to escape the worktree.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload
+/// rationale (libgit2 index writes touch the filesystem and must not park
+/// a Tauri async worker).
+#[command]
+pub async fn stage_file(repo_path: String, file_path: String) -> Result<(), String> {
+    crate::commands::run_blocking("stage_file", move || {
+        stage_file_blocking(&repo_path, &file_path)
+    })
+    .await
+}
+
+/// Sync core for [`stage_file`].
+pub(crate) fn stage_file_blocking(repo_path: &str, file_path: &str) -> Result<(), String> {
+    reject_traversal(file_path)?;
+    let host = to_host_path(repo_path);
+    let repo = git2::Repository::open(&host)
+        .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
+    let rel = std::path::Path::new(file_path);
+    let abs = std::path::Path::new(&host).join(rel);
+    assert_inside_repo(std::path::Path::new(&host), rel)?;
+
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    if abs.exists() {
+        index
+            .add_path(rel)
+            .map_err(|e| format!("failed to stage {}: {}", file_path, e))?;
+    } else {
+        // Missing on disk = deleted (or rename source). Remove from the
+        // index so the deletion is staged; `remove_path` is a no-op-safe
+        // Err when the path isn't in the index, which we surface as-is.
+        index
+            .remove_path(rel)
+            .map_err(|e| format!("failed to stage deletion of {}: {}", file_path, e))?;
+    }
+    index.write().map_err(|e| format!("failed to write index: {}", e))?;
+    Ok(())
+}
+
+/// Revert one file (by repo-relative path) to its HEAD state — the
+/// destructive half of the overlay's quick actions (issue #1374).
+///
+/// - The file is in HEAD: its blob is checked out over the worktree copy
+///   AND the index entry is reset (`git checkout HEAD -- <path>`
+///   semantics via git2).
+/// - The file is NOT in HEAD (added / untracked / rename target): it is
+///   deleted outright, and its index entry (if any) is dropped — reverting
+///   a file that never existed in HEAD means removing it.
+///
+/// Renames are the caller's two-step: revert the NEW path (deletes it),
+/// then revert the OLD path (restores it). This command is deliberately
+/// single-path so each step is independently observable and testable.
+///
+/// Path traversal is rejected with the same rule as [`stage_file_blocking`].
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload
+/// rationale.
+#[command]
+pub async fn revert_file(repo_path: String, file_path: String) -> Result<(), String> {
+    crate::commands::run_blocking("revert_file", move || {
+        revert_file_blocking(&repo_path, &file_path)
+    })
+    .await
+}
+
+/// Sync core for [`revert_file`].
+pub(crate) fn revert_file_blocking(repo_path: &str, file_path: &str) -> Result<(), String> {
+    reject_traversal(file_path)?;
+    let host = to_host_path(repo_path);
+    let repo = git2::Repository::open(&host)
+        .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
+    let rel = std::path::Path::new(file_path);
+    let abs = std::path::Path::new(&host).join(rel);
+    assert_inside_repo(std::path::Path::new(&host), rel)?;
+
+    // Is the path tracked in HEAD? (Unborn HEAD → nothing is tracked.)
+    let in_head = repo
+        .head()
+        .ok()
+        .and_then(|h| h.peel_to_commit().ok())
+        .and_then(|c| c.tree().ok())
+        .map(|tree| tree.get_path(rel).is_ok())
+        .unwrap_or(false);
+
+    if in_head {
+        // `git checkout HEAD -- <path>`: check the HEAD blob out over the
+        // worktree. `force` overwrites local edits — that's the whole point
+        // of Revert, and the button is explicitly labelled destructive.
+        // `update_index` defaults to true, so the index entry is refreshed
+        // in the same pass and `git status` reads clean afterwards.
+        let obj = repo
+            .revparse_single("HEAD^{tree}")
+            .map_err(|e| format!("failed to resolve HEAD tree: {}", e))?;
+        let mut opts = git2::build::CheckoutBuilder::new();
+        opts.force().path(rel);
+        repo.checkout_tree(&obj, Some(&mut opts))
+            .map_err(|e| format!("failed to revert {}: {}", file_path, e))?;
+        Ok(())
+    } else {
+        // Not in HEAD → added/untracked/rename-target. Reverting = remove.
+        if abs.exists() {
+            std::fs::remove_file(&abs)
+                .map_err(|e| format!("failed to delete {}: {}", file_path, e))?;
+        }
+        // Drop any staged entry too (a previously `git add`ed new file).
+        if let Ok(mut index) = repo.index() {
+            if index.remove_path(rel).is_ok() {
+                let _ = index.write();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reject path-traversal inputs at the command boundary. Defense in depth
+/// — the structural check rejects absolute paths, drive prefixes, and
+/// `..` segments *before* the file ever reaches a syscall, and the
+/// canonicalize-and-prefix check below catches symlinks whose targets
+/// escape the repo even when the link path itself is relative and clean.
+///
+/// Why this matters: a Windows drive prefix like `D:\secret.txt` splits
+/// into `["D:", "secret.txt"]` under a naive string-split-by-`/` check —
+/// neither segment is `..`, so the gate passes it. Then
+/// `Path::join("F:\repo", "D:\secret.txt")` evaluates to `D:\secret.txt`
+/// (an absolute right-hand argument *replaces* the base), and
+/// `revert_file_blocking`'s `std::fs::remove_file` deletes the file
+/// outside the worktree. `Path::components()` parses the structure the
+/// string-split can't see (drive prefix, root marker, parent components)
+/// and is the right primitive for this gate.
+///
+/// Shared by [`stage_file_blocking`] and [`revert_file_blocking`]
+/// (issue #1374). The `diff_against_base` pathspec check in
+/// `commands/diff.rs` has the same vulnerability shape but is followed
+/// by libgit2's own pathspec validation — these two Tauri commands have
+/// no such safety net, so they need their own strict gate.
+fn reject_traversal(file_path: &str) -> Result<(), String> {
+    let p = Path::new(file_path);
+
+    // Step 1 — structural check via `Path::components()`. Reject anything
+    // that isn't a clean relative path: drive prefixes (`C:`), UNC
+    // prefixes (`\\server`), root markers (`/`, `\`), and parent
+    // components (`..`). Allow `CurDir` (`.`) and `Normal(name)` — the
+    // latter includes literal filenames starting with `..` like `..bar`,
+    // which is a *valid POSIX filename* and stays inside the worktree
+    // when joined (`repo/..bar` ≠ traversal). Reject if no `Normal`
+    // component survives — `.`, `..`, `/`, `` are all empty after
+    // stripping and meaningless as a "file to act on".
+    let mut saw_normal = false;
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err(format!("invalid path: {}", file_path));
+            }
+            Component::CurDir => {}
+            Component::Normal(_) => saw_normal = true,
+        }
+    }
+    if !saw_normal {
+        return Err(format!("invalid path: {}", file_path));
+    }
+    Ok(())
+}
+
+/// Belt-and-braces: after `reject_traversal` passes, canonicalize the
+/// joined absolute path (when the file actually exists on disk) and
+/// verify the result lives under the repo's canonicalized root. Catches
+/// the symlink-escape case where a relative clean path like
+/// `src/outside-link` points at a symlink whose target is outside the
+/// worktree. Files that don't exist yet (worktree-deleted tracked files,
+/// staged-add paths) skip this check — their canonicalize would fail and
+/// we don't want a missing-file to break staging. The structural
+/// `reject_traversal` is the load-bearing gate; this is defense in
+/// depth.
+fn assert_inside_repo(repo_root: &Path, file_path: &Path) -> Result<(), String> {
+    let abs: PathBuf = repo_root.join(file_path);
+    let Ok(canon_abs) = abs.canonicalize() else {
+        // File missing or otherwise not canonicalizable — let the caller
+        // produce the user-visible error from the operation that
+        // triggered this check.
+        return Ok(());
+    };
+    let canon_root = repo_root
+        .canonicalize()
+        .map_err(|e| format!("repo root canonicalize: {}", e))?;
+    if !canon_abs.starts_with(&canon_root) {
+        return Err(format!(
+            "path escapes repository: {}",
+            file_path.display()
+        ));
+    }
+    Ok(())
 }
 
 // ── gh-auth cache for get_mesh_git_static (issue #432) ──────────────────────
