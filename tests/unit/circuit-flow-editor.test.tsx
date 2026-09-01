@@ -724,7 +724,13 @@ describe('CircuitFlowEditor', () => {
     const steps = screen.getByTestId('run-steps-11');
     expect(steps.textContent).toContain('trigger');
     expect(steps.textContent).toContain('completed');
-    expect(steps.textContent).toContain('blocked');
+    // The drawer speaks the same humanised status vocabulary as the Probe's
+    // run cards (#1468): 'blocked' renders as "Needs approval", and the raw
+    // token stays on the data attribute for machine assertions.
+    expect(steps.textContent).toContain('Needs approval');
+    expect(
+      screen.getByTestId('run-step-11-gate').getAttribute('data-step-status')
+    ).toBe('blocked');
 
     // The traversed edge trigger→spawn glows; spawn→gate routes on
     // outcomes the ledger hasn't produced, so it stays dim.
