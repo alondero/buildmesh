@@ -3335,7 +3335,6 @@ mod tests {
         advance(run, &tick(8, 8));
         run.attach_agent_node("implementer", 700);
         advance(run, &agent_finished(700, true));
-        advance(run, &CircuitEvent::AgentReady { node_id: "implementation_prompt".into() });
         advance(run, &classified("implementation_classifier", Some(Classification::Completed)));
         advance(run, &CircuitEvent::AgentReady { node_id: "finish".into() });
         advance(run, &tick(8, 8));
@@ -3368,12 +3367,7 @@ mod tests {
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
         run.attach_agent_node("reviewer", 701);
         advance(&mut run, &agent_finished(701, true));
-        let review_ready = advance(&mut run, &CircuitEvent::AgentReady { node_id: "review_prompt".into() });
-        assert!(review_ready.effects.iter().any(|effect| matches!(
-            effect,
-            Effect::InjectPty { prompt, target_node_id: Some(target), .. }
-                if target == "reviewer" && prompt.contains("review PR 314")
-        )));
+        assert_eq!(status_of(&run, "review_classifier"), StepStatus::Running);
         let review_done = advance(
             &mut run,
             &classified_with_output(

@@ -38,6 +38,37 @@ pub struct CircuitRunDetail {
     pub steps: Vec<AutopilotCircuitRunStep>,
 }
 
+/// Identifies the circuit run currently or historically owning a visible
+/// Agent Node. Generated for the node store; the run id is the number shown
+/// in the header pill.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitAgentOwnership.ts")]
+pub struct CircuitAgentOwnership {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "i32")]
+    pub run_id: i64,
+    #[ts(as = "i32")]
+    pub circuit_id: i64,
+    pub circuit_name: String,
+}
+
+#[command]
+pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, String> {
+    crate::db::list_circuit_agent_ownerships()
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(node_id, run_id, circuit_id, circuit_name)| CircuitAgentOwnership {
+                    node_id,
+                    run_id,
+                    circuit_id,
+                    circuit_name,
+                })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
 #[command]
 pub fn list_circuits(mesh_id: i64) -> Result<Vec<AutopilotCircuit>, String> {
     crate::db::list_autopilot_circuits(mesh_id).map_err(|e| e.to_string())

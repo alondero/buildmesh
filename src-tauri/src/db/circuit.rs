@@ -548,6 +548,27 @@ pub fn clear_circuit_step_agent_node(run_id: i64, node_id: &str) -> SqlResult<()
     Ok(())
 }
 
+/// Circuit ownership metadata for Agent Nodes that still exist. The
+/// association lives in the circuit step ledger (not on `agent_nodes`), so
+/// the header can identify automated nodes without weakening the satellite-
+/// table invariant used by legacy Autopilot.
+pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String)>> {
+    let db = super::read_conn();
+    let mut stmt = db.prepare(
+        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name \
+         FROM autopilot_circuit_run_steps s \
+         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+         JOIN autopilot_circuits c ON c.id = r.circuit_id \
+         JOIN agent_nodes a ON a.id = s.agent_node_id \
+         WHERE s.agent_node_id IS NOT NULL AND a.status != 'archived' \
+         ORDER BY s.agent_node_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?;
+    rows.collect()
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency counters — the inputs to the stepper's capacity snapshot.
 // ---------------------------------------------------------------------------

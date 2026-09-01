@@ -45,6 +45,33 @@ pub struct AutopilotSubmittedPayload {
 
 use super::evaluator;
 
+/// Delivery path for an automated node's first turn. A non-empty prompt uses
+/// the harness's startup prefill when available and otherwise falls back to
+/// the same two-phase PTY injection used for later Autopilot turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitialPromptDelivery {
+    Fresh,
+    Prefill,
+    InjectAfterSpawn,
+}
+
+pub(crate) fn initial_prompt_delivery(
+    spawn_option: &str,
+    prompt: &str,
+) -> InitialPromptDelivery {
+    if prompt.trim().is_empty() {
+        return InitialPromptDelivery::Fresh;
+    }
+    let (harness_id, _) = crate::agent::provider::parse_spawn_option_id(spawn_option);
+    if crate::autopilot::compatibility::lookup_capabilities(harness_id)
+        .is_some_and(|capabilities| capabilities.supports_prefill)
+    {
+        InitialPromptDelivery::Prefill
+    } else {
+        InitialPromptDelivery::InjectAfterSpawn
+    }
+}
+
 /// Output must be quiet this long (after the marker appears) before Enter.
 pub(crate) const MIN_QUIET_MS: u128 = 1_500;
 
