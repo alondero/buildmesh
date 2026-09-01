@@ -1,11 +1,13 @@
 //! Shared test fixtures for the `preferences` submodules.
 //!
-//! Tests in this module share `APP_DATA_DIR` and `CACHE` global state, so
-//! they must run serially. The shared [`TEST_LOCK`] lives in
-//! [`super::storage`] alongside the state it guards; [`with_temp_dir`]
-//! takes it for the duration of a test fixture.
+//! Issue #1386: each `cargo test` worker thread owns its own `APP_DATA_DIR`
+//! and `CACHE` (per-thread `RefCell` under `cfg(test)`), so concurrent tests
+//! never collide on the same static. No `TEST_LOCK` is needed — every test
+//! pointing [`with_temp_dir`] at a unique [`test_dir()`] is fully isolated
+//! from its siblings, including prefs-touching tests in other modules (e.g.
+//! `services::provider_verification`).
 
-use super::storage::{init_for_tests, reset_for_tests, TEST_LOCK};
+use super::storage::{init_for_tests, reset_for_tests};
 use std::path::PathBuf;
 
 // Per-feature test files. Each tests a single concern; the cross-module
@@ -32,7 +34,9 @@ pub(crate) fn test_dir() -> PathBuf {
 }
 
 pub(crate) fn with_temp_dir<F: FnOnce(&PathBuf)>(f: F) -> PathBuf {
-    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // No TEST_LOCK: per-thread `APP_DATA_DIR` (issue #1386). Two parallel
+    // tests run on different threads and each write to its own
+    // `test_dir()`-derived path, so the thread-local statics stay clean.
     let tmp = test_dir();
     std::fs::create_dir_all(&tmp).unwrap();
 
@@ -43,8 +47,4 @@ pub(crate) fn with_temp_dir<F: FnOnce(&PathBuf)>(f: F) -> PathBuf {
     reset_for_tests();
     let _ = std::fs::remove_dir_all(&tmp);
     tmp
-}
-
-pub(crate) fn lock_test_state() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }

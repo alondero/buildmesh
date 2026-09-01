@@ -783,9 +783,17 @@ mod tests {
     /// want a fresh value.
     #[test]
     fn get_mesh_git_static_caches_gh_auth_across_calls() {
-        // Force a known starting state: miss counter = 0, cache backdated
-        // so the next read is a miss.
+        // Issue #1386: the gh-auth miss counter (`GH_AUTH_CACHE_MISSES`) is
+        // process-global, so an absolute assertion (`== 1`) races against any
+        // other test that drives `check_gh_auth_cached` in parallel. Switch
+        // to a snapshot-delta: pin a baseline immediately after the reset,
+        // make our 5 calls, and assert THIS test contributed exactly 1 miss
+        // (i.e. our reset+these 5 calls produced 1 round-trip in this
+        // window — tolerating concurrent sibling tests that drove their own
+        // miss around the same time and showed up in `misses_before`).
         crate::commands::git::__reset_gh_auth_cache_for_tests();
+        let misses_before =
+            crate::commands::git::__gh_auth_cache_misses();
 
         // Non-existent paths are fine — we just want to exercise the cache
         // path. `is_git_repo` will be `false` for all of them, but the
@@ -812,11 +820,22 @@ mod tests {
         assert_eq!(r3.is_gh_authenticated, r4.is_gh_authenticated);
         assert_eq!(r4.is_gh_authenticated, r5.is_gh_authenticated);
 
-        // The headline assertion: 5 snapshot calls = 1 gh round-trip.
+        // Snapshot the counter for THIS test's delta. The 5 calls above
+        // exercise a TTL-window sequence: the first MUST refresh (we
+        // backdated the timestamp via `__reset_gh_auth_cache_for_tests`),
+        // and the remaining four MUST hit cache — so `misses_after -
+        // misses_before` is exactly 1 in the uncontended case. A
+        // concurrent sibling test that drove its own miss contributes to
+        // `misses_before`, not the delta; the test still proves "5 calls
+        // in the TTL window = 1 round-trip for this caller."
+        let misses_after =
+            crate::commands::git::__gh_auth_cache_misses();
         assert_eq!(
-            crate::commands::git::__gh_auth_cache_misses(),
+            misses_after - misses_before,
             1,
-            "5 get_mesh_git_static calls within the TTL window should result in exactly 1 gh round-trip"
+            "5 get_mesh_git_static calls within the TTL window should result in exactly 1 gh round-trip for this caller (before={}, after={})",
+            misses_before,
+            misses_after,
         );
     }
 

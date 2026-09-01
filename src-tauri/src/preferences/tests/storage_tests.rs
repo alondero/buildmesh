@@ -32,7 +32,8 @@ fn load_returns_default_when_file_missing() {
 
 #[test]
 fn failed_update_does_not_publish_candidate_to_cache() {
-    let _guard = super::lock_test_state();
+    // Issue #1386: per-thread storage means no `lock_test_state` needed —
+    // this test owns its own `APP_DATA_DIR` slot for its duration.
     let app_data_file = test_dir();
     std::fs::write(&app_data_file, "not a directory").unwrap();
     init_for_tests(app_data_file.clone());

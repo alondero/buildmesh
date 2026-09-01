@@ -2,6 +2,60 @@ import { vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
 
 // ============================================================
+// jsdom canvas shim (issue #1386)
+// ============================================================
+
+// jsdom does not implement `HTMLCanvasElement.getContext`; without a stub it
+// prints `Not implemented: HTMLCanvasElement's getContext()` once per call.
+// The full vitest suite fires that warning ~74× and the issue body listed
+// "Vitest suite has zero console warnings" as the acceptance criterion.
+//
+// A minimal `CanvasRenderingContext2D`-shaped stub — every method is a no-op
+// — is enough to keep `getContext(...)` from crashing test renders. We
+// deliberately do NOT depend on the `canvas` npm package: it ships a native
+// binary that breaks on Buildmesh's CI Linux/musl runners (issue #1386
+// follow-up). Anything that actually wants bitmap assertions in a test can
+// override `HTMLCanvasElement.prototype.getContext` locally — the global
+// stub is only here to silence the noise, not to be a pixel-perfect mock.
+const noopCanvasContext = new Proxy(
+  {},
+  {
+    get(_target, prop) {
+      // Properties we want callers to read sensibly. Anything not listed
+      // here falls through to the function-no-op fallback below, so a
+      // future `ellipse()` / `arcTo()` / `transform()` call never crashes —
+      // it just doesn't draw.
+      if (prop === 'canvas') return null;
+      if (prop === 'font') return '10px sans-serif';
+      if (prop === 'fillStyle' || prop === 'strokeStyle') return '#000';
+      if (prop === 'globalAlpha' || prop === 'globalCompositeOperation') return 1;
+      if (prop === 'lineWidth' || prop === 'lineDashOffset') return 1;
+      // Everything else — whether it's a known method
+      // (`fillRect`/`drawImage`/`measureText`) or one we haven't enumerated
+      // (`arcTo`/`ellipse`/`transform`) — becomes a callable no-op that
+      // returns `undefined`. The catch is broad on purpose: a missing
+      // method should be inert, never a TypeError.
+      return () => undefined;
+    },
+    // Writes (`ctx.fillStyle = 'red'`) succeed silently — the stub doesn't
+    // persist anything but accepting the assignment keeps consumer code
+    // from seeing "Cannot set properties of undefined".
+    set() {
+      return true;
+    },
+  },
+);
+
+if (typeof HTMLCanvasElement !== 'undefined') {
+  // jsdom's typings lie about where `getContext` lives — installing on the
+  // prototype is the path every test render hits. Tests that need a richer
+  // mock can override per-instance.
+  (HTMLCanvasElement.prototype as { getContext: unknown }).getContext = function () {
+    return noopCanvasContext;
+  };
+}
+
+// ============================================================
 // Tauri API Mocks
 // ============================================================
 

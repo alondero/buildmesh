@@ -48,7 +48,7 @@ pub use storage::{
     update,
 };
 #[cfg(test)]
-pub(crate) use storage::{init_for_tests, reset_for_tests, test_state_guard};
+pub(crate) use storage::{init_for_tests, reset_for_tests};
 #[allow(unused_imports)]
 pub(crate) use storage::ensure_default_provider_normalized;
 
