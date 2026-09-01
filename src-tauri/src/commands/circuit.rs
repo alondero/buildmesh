@@ -235,10 +235,11 @@ pub fn set_circuit_enabled(circuit_id: i64, enabled: bool) -> Result<(), String>
 /// wakes so trigger passes see the new topology immediately.
 #[command]
 pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), String> {
-    let graph = CircuitGraph::from_json(&graph_json)?;
+    let mut graph = CircuitGraph::from_json(&graph_json)?;
+    graph.upgrade_legacy_issue_review_first_turns();
     graph.validate()?;
-    // Persist the parsed/canonical form so legacy review graphs upgraded by
-    // `from_json` retain their explicit blueprint marker after an editor save.
+    // Persist the parsed/canonical form so an explicit legacy graph upgrade
+    // is durable after an editor save.
     let canonical_graph_json = graph.to_json()?;
     crate::db::update_autopilot_circuit_graph(circuit_id, &canonical_graph_json).map_err(|e| {
         if matches!(e, rusqlite::Error::QueryReturnedNoRows) {

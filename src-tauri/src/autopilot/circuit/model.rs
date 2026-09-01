@@ -327,17 +327,9 @@ impl CircuitGraph {
     /// are a hard error at the read boundary (the writer always writes
     /// what this build understands) rather than a silent skip.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let mut graph: Self =
+        let graph: Self =
             serde_json::from_str(json).map_err(|e| format!("invalid circuit graph_json: {}", e))?;
 
-        // Graphs created by the first review-blueprint implementation have
-        // no discriminator yet. Upgrade only that known legacy shape at the
-        // storage boundary; runtime identity below is marker-only and never
-        // inspects an author-editable prompt.
-        if graph.blueprint.is_none() && graph.has_legacy_issue_review_shape() {
-            graph.blueprint = Some(CircuitBlueprintKind::IssueDrivenAutopilotReview);
-        }
-        graph.upgrade_legacy_issue_review_first_turns();
         Ok(graph)
     }
 
@@ -484,7 +476,7 @@ impl CircuitGraph {
     /// Recognize graph_json written before `blueprint` was added. This is a
     /// one-time compatibility migration, not the runtime blueprint policy;
     /// notably it does not compare any prompt text.
-    fn has_legacy_issue_review_shape(&self) -> bool {
+    pub(crate) fn has_legacy_issue_review_shape(&self) -> bool {
         matches!(
             self.node("trigger").map(|n| &n.kind),
             Some(CircuitNodeKind::GithubIssueLabel { .. })
@@ -506,12 +498,16 @@ impl CircuitGraph {
     /// use their real task as the spawned agent's first turn. Match the exact
     /// server-authored prompts and two-edge intermediary shape: prompts and
     /// topology are editable, so a customized graph must not be rewritten.
-    fn upgrade_legacy_issue_review_first_turns(&mut self) {
+    pub(crate) fn upgrade_legacy_issue_review_first_turns(&mut self) -> bool {
+        let marker_changed = self.blueprint.is_none() && self.has_legacy_issue_review_shape();
+        if marker_changed {
+            self.blueprint = Some(CircuitBlueprintKind::IssueDrivenAutopilotReview);
+        }
         if !self.is_issue_driven_autopilot_review() {
-            return;
+            return false;
         }
 
-        self.replace_legacy_injected_first_turn(
+        let implementer_changed = self.replace_legacy_injected_first_turn(
             "implementer",
             "implementation_prompt",
             "implementation_classifier",
@@ -519,7 +515,7 @@ impl CircuitGraph {
             "{{issue.prefill}}",
             "{{issue.prefill}}",
         );
-        self.replace_legacy_injected_first_turn(
+        let reviewer_changed = self.replace_legacy_injected_first_turn(
             "reviewer",
             "review_prompt",
             "review_classifier",
@@ -530,6 +526,7 @@ impl CircuitGraph {
                 Self::PR_REVIEW_PROMPT
             ),
         );
+        marker_changed || implementer_changed || reviewer_changed
     }
 
     fn replace_legacy_injected_first_turn(
@@ -540,7 +537,7 @@ impl CircuitGraph {
         expected_spawn_prompt: &str,
         expected_injected_prompt: &str,
         replacement_prompt: &str,
-    ) {
+    ) -> bool {
         let spawn_matches = matches!(
             self.node(spawn_id).map(|node| &node.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
@@ -570,7 +567,7 @@ impl CircuitGraph {
             });
 
         if !(spawn_matches && prompt_matches && topology_matches) {
-            return;
+            return false;
         }
 
         if let Some(CircuitNode {
@@ -588,6 +585,7 @@ impl CircuitGraph {
         }
         self.edges
             .retain(|edge| !(edge.from == prompt_id && edge.to == next_id));
+        true
     }
 
     /// The canonical walking-skeleton blueprint (issue #1206): Manual
@@ -1514,7 +1512,8 @@ mod tests {
             condition: EdgeCondition::Always,
         });
 
-        let parsed = CircuitGraph::from_json(&graph.to_json().unwrap()).unwrap();
+        let mut parsed = CircuitGraph::from_json(&graph.to_json().unwrap()).unwrap();
+        assert!(parsed.upgrade_legacy_issue_review_first_turns());
 
         assert!(parsed.node("implementation_prompt").is_none());
         assert!(parsed.node("review_prompt").is_none());
@@ -1564,7 +1563,8 @@ mod tests {
         let mut raw: serde_json::Value = serde_json::from_str(&graph.to_json().unwrap()).unwrap();
         raw.as_object_mut().unwrap().remove("blueprint");
 
-        let parsed = CircuitGraph::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+        let mut parsed = CircuitGraph::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+        assert!(parsed.upgrade_legacy_issue_review_first_turns());
         assert_eq!(
             parsed.blueprint,
             Some(CircuitBlueprintKind::IssueDrivenAutopilotReview)

@@ -441,12 +441,6 @@ fn format_reasons(reasons: &[crate::autopilot::compatibility::AutopilotCompatibi
             AutopilotCompatibilityReason::PlainTerminal => {
                 "Terminal is a plain shell, not an Agent Harness".to_string()
             }
-            AutopilotCompatibilityReason::MissingPrefill { harness_id } => {
-                format!(
-                    "Agent Harness '{}' does not accept a startup prompt",
-                    harness_id
-                )
-            }
             AutopilotCompatibilityReason::MissingAttentionHook { harness_id } => {
                 format!(
                     "Agent Harness '{}' does not install an attention hook",

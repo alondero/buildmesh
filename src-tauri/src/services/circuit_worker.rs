@@ -1326,22 +1326,13 @@ fn circuit_spawn_intent(
 fn deliver_circuit_initial_prompt(
     app: &AppHandle,
     node_id: i64,
-    source_issue: Option<i64>,
     prompt: &str,
     delivery: crate::autopilot::launch::InitialPromptDelivery,
 ) {
     use crate::autopilot::launch::InitialPromptDelivery;
 
     let result = match delivery {
-        InitialPromptDelivery::Prefill => {
-            crate::autopilot::launch::watch_and_submit(
-                app.clone(),
-                node_id,
-                source_issue.unwrap_or(0),
-                prompt,
-            );
-            Ok(())
-        }
+        InitialPromptDelivery::Prefill => Ok(()),
         InitialPromptDelivery::InjectAfterSpawn => {
             crate::autopilot::pipeline::write_prompt_to_pty(node_id, prompt, app)
         }
@@ -1361,6 +1352,43 @@ fn deliver_circuit_initial_prompt(
     }
 }
 
+fn schedule_circuit_initial_prompt(
+    app: &AppHandle,
+    node_id: i64,
+    prompt: &str,
+    delivery: crate::autopilot::launch::InitialPromptDelivery,
+) {
+    if delivery == crate::autopilot::launch::InitialPromptDelivery::Prefill {
+        crate::autopilot::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt);
+    }
+}
+
+fn spawn_circuit_agent_in_background(
+    app: &AppHandle,
+    node_id: i64,
+    explicit: ExplicitSpawnOverrides,
+    worktree_policy: crate::agent::spawn::WorktreePolicy,
+    prompt: String,
+    delivery: crate::autopilot::launch::InitialPromptDelivery,
+) {
+    let app_for_spawn = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let intent = circuit_spawn_intent(delivery, &prompt);
+        if let Err(error) = crate::agent::spawn::spawn_with_intent(
+            &app_for_spawn,
+            crate::agent::spawn::SpawnRequest::new(node_id, intent, Default::default())
+                .with_explicit(explicit)
+                .with_worktree_policy(worktree_policy),
+        )
+        .await
+        {
+            tracing::error!("circuits: agent node {} failed: {}", node_id, error);
+            return;
+        }
+        deliver_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
+    });
+}
+
 fn spawn_step_agent(
     app: &AppHandle,
     run_id: i64,
@@ -1368,7 +1396,7 @@ fn spawn_step_agent(
     view: &mut RunView,
     node_id: &str,
 ) -> Result<(), String> {
-    use crate::agent::spawn::{SpawnRequest, WorktreePolicy};
+    use crate::agent::spawn::WorktreePolicy;
     let kind = view
         .graph
         .node(node_id)
@@ -1476,29 +1504,15 @@ fn spawn_step_agent(
                 "node-created",
                 crate::commands::agent::NodeCreatedPayload { id: new_node.id },
             );
-
-            let app_for_spawn = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let intent = circuit_spawn_intent(prompt_delivery, &resolved_prompt);
-                if let Err(error) = crate::agent::spawn::spawn_with_intent(
-                    &app_for_spawn,
-                    SpawnRequest::new(new_node.id, intent, Default::default())
-                        .with_explicit(explicit.clone())
-                        .with_worktree_policy(worktree_policy),
-                )
-                .await
-                {
-                    tracing::error!("circuits: agent node {} failed: {}", new_node.id, error);
-                    return;
-                }
-                deliver_circuit_initial_prompt(
-                    &app_for_spawn,
-                    new_node.id,
-                    source_issue,
-                    &resolved_prompt,
-                    prompt_delivery,
-                );
-            });
+            schedule_circuit_initial_prompt(app, new_node.id, &resolved_prompt, prompt_delivery);
+            spawn_circuit_agent_in_background(
+                app,
+                new_node.id,
+                explicit,
+                worktree_policy,
+                resolved_prompt,
+                prompt_delivery,
+            );
             return Ok(());
         }
     }
@@ -1544,36 +1558,21 @@ fn spawn_step_agent(
         node_id
     );
 
+    schedule_circuit_initial_prompt(app, node.id, &resolved_prompt, prompt_delivery);
+
     // Stage-2 in the background — same two-stage contract as every
     // other spawn path. An empty prompt starts fresh; a non-empty prompt
     // uses prefill when supported and otherwise is injected after spawn.
-    let app_for_spawn = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let intent = circuit_spawn_intent(prompt_delivery, &resolved_prompt);
-        if let Err(error) = crate::agent::spawn::spawn_with_intent(
-            &app_for_spawn,
-            // Issue #1358: per-step model / effort / extra_args ride the
-            // explicit layer through to `spawn_with_intent`, where
-            // `resolve_spawn_config` capability-masks them against
-            // `HarnessCapabilities.supports_extra_args` (Terminal drops;
-            // every interactive harness keeps).
-            SpawnRequest::new(node.id, intent, Default::default())
-                .with_explicit(explicit.clone())
-                .with_worktree_policy(worktree_policy),
-        )
-        .await
-        {
-            tracing::error!("circuits: agent node {} failed: {}", node.id, error);
-            return;
-        }
-        deliver_circuit_initial_prompt(
-            &app_for_spawn,
-            node.id,
-            source_issue,
-            &resolved_prompt,
-            prompt_delivery,
-        );
-    });
+    // Issue #1358: per-step model / effort / extra_args ride the explicit
+    // layer through to `spawn_with_intent`, where capability masking occurs.
+    spawn_circuit_agent_in_background(
+        app,
+        node.id,
+        explicit,
+        worktree_policy,
+        resolved_prompt,
+        prompt_delivery,
+    );
 
     Ok(())
 }

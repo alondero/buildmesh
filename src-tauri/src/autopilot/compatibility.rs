@@ -107,13 +107,6 @@ pub enum AutopilotCompatibilityReason {
     /// loop, so the entire Autopilot pipeline has nothing to drive.
     PlainTerminal,
 
-    /// The harness's CLI does not accept a startup prefill prompt. Without
-    /// prefill, Autopilot cannot deliver the issue body / loop prompt to
-    /// the agent.
-    MissingPrefill {
-        harness_id: String,
-    },
-
     /// The harness does not install an attention hook, so the turn-driven
     /// Autopilot pipeline (`autopilot::pipeline::on_turn`) never fires for
     /// its nodes. The agent runs but Autopilot stays blind to its progress.
@@ -310,7 +303,7 @@ pub fn evaluate(input: AutopilotCompatibilityInput<'_>) -> AutopilotCompatibilit
         }),
         Some(caps) => {
             // Plain Terminal is the "no agent loop" sentinel. We surface it
-            // as its own reason (not as `MissingPrefill` + `MissingAttentionHook`)
+            // as its own reason rather than combining multiple low-level gaps
             // because the user's corrective action is "pick an Agent Harness",
             // not "make Terminal accept prompts". The harness id is intentionally
             // omitted from the variant — `PlainTerminal` is itself the harness
@@ -538,7 +531,7 @@ mod tests {
     /// *not* carried in the `PlainTerminal` variant — it's the
     /// classification itself that the user needs to see, not a label.
     /// The evaluator emits `PlainTerminal` alongside the per-capability
-    /// reasons (Terminal is also missing prefill + attention); the UI
+    /// reasons (Terminal also lacks an attention hook); the UI
     /// chooses whether to render the umbrella reason alone or all of them.
     #[test]
     fn evaluate_terminal_emits_plain_terminal_reason() {
@@ -577,7 +570,6 @@ mod tests {
             .reasons
             .iter()
             .map(|r| match r {
-                AutopilotCompatibilityReason::MissingPrefill { .. } => "prefill",
                 AutopilotCompatibilityReason::MissingAttentionHook { .. } => "attention",
                 _ => "other",
             })
@@ -610,7 +602,6 @@ mod tests {
             .reasons
             .iter()
             .map(|r| match r {
-                AutopilotCompatibilityReason::MissingPrefill { .. } => "prefill",
                 AutopilotCompatibilityReason::MissingAttentionHook { .. } => "attention",
                 _ => "other",
             })

@@ -190,6 +190,22 @@ pub fn watch_and_submit(
     issue_number: i64,
     prefill: &str,
 ) {
+    watch_and_submit_inner(app, node_id, Some(issue_number), prefill);
+}
+
+/// Watch and submit a circuit-owned first turn without emitting the legacy
+/// `autopilot-submitted` issue toast. Circuit runs may be manual, interval,
+/// or PR-driven and therefore have no meaningful issue number to report.
+pub(crate) fn watch_and_submit_for_circuit(app: AppHandle, node_id: i64, prefill: &str) {
+    watch_and_submit_inner(app, node_id, None, prefill);
+}
+
+fn watch_and_submit_inner(
+    app: AppHandle,
+    node_id: i64,
+    issue_number: Option<i64>,
+    prefill: &str,
+) {
     // Owned copy for the spawned thread (`'static`); the prefill is a
     // small string (<= a few KB even for verbose loop prompts) but the
     // thread must outlive any stack frame, so a borrow is not enough.
@@ -232,20 +248,29 @@ pub fn watch_and_submit(
             // Enter stalls a prefilled launch exactly like an injection (#874).
             match crate::autopilot::pipeline::press_enter_until_output(node_id) {
                 Ok(attempt) => {
-                    tracing::info!(
-                        "autopilot launch({}): harness ready — submitted prefilled prompt \
-                         for issue #{} (Enter attempt {})",
-                        node_id,
-                        issue_number,
-                        attempt
-                    );
-                    let _ = app.emit(
-                        "autopilot-submitted",
-                        AutopilotSubmittedPayload {
+                    if let Some(issue_number) = issue_number {
+                        tracing::info!(
+                            "autopilot launch({}): harness ready — submitted prefilled prompt \
+                             for issue #{} (Enter attempt {})",
                             node_id,
-                            issue: issue_number,
-                        },
-                    );
+                            issue_number,
+                            attempt
+                        );
+                        let _ = app.emit(
+                            "autopilot-submitted",
+                            AutopilotSubmittedPayload {
+                                node_id,
+                                issue: issue_number,
+                            },
+                        );
+                    } else {
+                        tracing::info!(
+                            "circuit launch({}): harness ready — submitted prefilled prompt \
+                             (Enter attempt {})",
+                            node_id,
+                            attempt
+                        );
+                    }
                 }
                 Err(e) => tracing::warn!(
                     "autopilot launch({}): prefilled prompt was never submitted: {}",

@@ -561,6 +561,10 @@ pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String)>
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          JOIN agent_nodes a ON a.id = s.agent_node_id \
          WHERE s.agent_node_id IS NOT NULL AND a.status != 'archived' \
+           AND r.id = (SELECT MAX(r2.id) \
+                       FROM autopilot_circuit_run_steps s2 \
+                       JOIN autopilot_circuit_runs r2 ON r2.id = s2.run_id \
+                       WHERE s2.agent_node_id = s.agent_node_id) \
          ORDER BY s.agent_node_id",
     )?;
     let rows = stmt.query_map([], |row| {
