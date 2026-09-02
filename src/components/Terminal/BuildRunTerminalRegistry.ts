@@ -6,6 +6,7 @@ import { createTerminalOptions } from './terminalConfig';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { terminalWebglPool } from './WebglRendererPool';
 import { TerminalWriter } from './TerminalWriter';
+import { TerminalResizeScheduler } from './TerminalResizeScheduler';
 import { decodeBase64Bytes } from '../../lib/base64';
 import type { BuildRunOutputPayload } from '../../types/generated/BuildRunOutputPayload';
 import type { BuildRunExitedPayload } from '../../types/generated/BuildRunExitedPayload';
@@ -78,7 +79,7 @@ export interface BuildRunInstance {
   writer: TerminalWriter;
   opened: boolean;
   attachedContainer: HTMLElement | null;
-  resizeObserver: ResizeObserver | null;
+  resizeScheduler: TerminalResizeScheduler;
   /** True when the Rust PTY is alive for this session. Set after `api.buildRun`
    *  resolves (NOT before — see attachToDOM), cleared by `dispose` or by the
    *  `build-run-exited-{sessionId}` sentinel when the shell exits naturally. */
@@ -223,17 +224,8 @@ export class BuildRunTerminalRegistry {
 
     inst.attachedContainer = container;
 
-    if (inst.resizeObserver) {
-      inst.resizeObserver.disconnect();
-      inst.resizeObserver = null;
-    }
-    inst.resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => {
-        if (!inst.attachedContainer) return;
-        measureAndFit(inst);
-      });
-    });
-    inst.resizeObserver.observe(container);
+    inst.resizeScheduler.attach(container);
+    inst.resizeScheduler.fitNextFrame();
 
     if (wasFreshOpen) {
       // First open only — write the banner and spawn the PTY. On re-attach
@@ -256,7 +248,7 @@ export class BuildRunTerminalRegistry {
     }
 
     requestAnimationFrame(() => {
-      measureAndFit(inst);
+      if (inst.attachedContainer !== container) return;
       // Only auto-scroll-to-tail on the first open. On re-attach the user
       // may have scrolled back to read history; forcing the tail here would
       // silently destroy that position (and flash the jump-to-latest pill).
@@ -281,10 +273,7 @@ export class BuildRunTerminalRegistry {
     const inst = this.instances.get(key);
     if (!inst) return;
 
-    if (inst.resizeObserver) {
-      inst.resizeObserver.disconnect();
-      inst.resizeObserver = null;
-    }
+    inst.resizeScheduler.detach();
     inst.term.element?.remove();
     inst.attachedContainer = null;
     terminalWebglPool.release(`buildRun:${key}`);
@@ -300,10 +289,7 @@ export class BuildRunTerminalRegistry {
     const inst = this.instances.get(key);
     if (!inst) return;
 
-    if (inst.resizeObserver) {
-      inst.resizeObserver.disconnect();
-      inst.resizeObserver = null;
-    }
+    inst.resizeScheduler.dispose();
     terminalWebglPool.release(`buildRun:${key}`);
     if (inst.outputUnlisten) inst.outputUnlisten();
     if (inst.exitUnlisten) inst.exitUnlisten();
@@ -394,7 +380,8 @@ export class BuildRunTerminalRegistry {
       const generation = (this.sessionGenerations.get(sessionId) ?? 0) + 1;
       this.sessionGenerations.set(sessionId, generation);
 
-      const inst: BuildRunInstance = {
+      let inst: BuildRunInstance;
+      inst = {
         sessionId,
         mode,
         useWorktree,
@@ -406,7 +393,7 @@ export class BuildRunTerminalRegistry {
         writer,
         opened: false,
         attachedContainer: null,
-        resizeObserver: null,
+        resizeScheduler: new TerminalResizeScheduler(() => measureAndFit(inst)),
         ptyAlive: false,
       };
 

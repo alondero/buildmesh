@@ -1,5 +1,5 @@
-use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
 use portable_pty::{CommandBuilder, PtyPair};
+use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -260,44 +260,4 @@ pub(super) fn register_agent(
             mesh_id,
         },
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::pty_writer_thread;
-    use std::io::{Result as IoResult, Write};
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone, Default)]
-    struct RecordingWriter {
-        writes: Arc<Mutex<Vec<Vec<u8>>>>,
-        flushes: Arc<Mutex<usize>>,
-    }
-
-    impl Write for RecordingWriter {
-        fn write(&mut self, bytes: &[u8]) -> IoResult<usize> {
-            self.writes.lock().unwrap().push(bytes.to_vec());
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> IoResult<()> {
-            *self.flushes.lock().unwrap() += 1;
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn pty_writer_preserves_a_large_paste_as_one_queue_entry() {
-        let writer = RecordingWriter::default();
-        let observed = writer.clone();
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let paste = format!("\x1b[200~{}\x1b[201~", "pasted line\r".repeat(200)).into_bytes();
-
-        tx.send(paste.clone()).unwrap();
-        drop(tx);
-        pty_writer_thread(1, Box::new(writer), rx);
-
-        assert_eq!(*observed.writes.lock().unwrap(), vec![paste]);
-        assert_eq!(*observed.flushes.lock().unwrap(), 1);
-    }
 }

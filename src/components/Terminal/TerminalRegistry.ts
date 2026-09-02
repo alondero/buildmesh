@@ -21,6 +21,7 @@ import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { terminalWebglPool } from './WebglRendererPool';
 import { decodeBase64Bytes } from '../../lib/base64';
 import { setTheme, type ThemeName } from '../../lib/theme';
+import { TerminalResizeScheduler } from './TerminalResizeScheduler';
 
 export interface TerminalInstance {
   term: Terminal;
@@ -29,33 +30,9 @@ export interface TerminalInstance {
   searchAddon: SearchAddon;
   unlisten: UnlistenFn;
   opened: boolean;
-  resizeObserver: ResizeObserver | null;
-  resizeTimer: ReturnType<typeof setTimeout> | null;
+  resizeScheduler: TerminalResizeScheduler;
   attachedContainer: HTMLElement | null;
   onFindRequest: (() => void) | null;
-}
-
-// A width change reflows xterm's full normal-buffer scrollback, and the
-// resulting PTY resize makes full-screen agent TUIs repaint. During a pane
-// drag ResizeObserver can fire once per frame, multiplying both costs by
-// ~60/second. Wait for a short quiet period so one drag produces one reflow
-// and one SIGWINCH while keeping the terminal responsive at drag end.
-const RESIZE_QUIET_MS = 50;
-
-function cancelScheduledFit(inst: TerminalInstance): void {
-  if (inst.resizeTimer !== null) {
-    clearTimeout(inst.resizeTimer);
-    inst.resizeTimer = null;
-  }
-}
-
-function scheduleFit(inst: TerminalInstance): void {
-  cancelScheduledFit(inst);
-  inst.resizeTimer = setTimeout(() => {
-    inst.resizeTimer = null;
-    if (!inst.attachedContainer) return;
-    measureAndFit(inst);
-  }, RESIZE_QUIET_MS);
 }
 
 function terminalDataFromPayload(payload: AgentOutputPayload): TerminalWriteData | null {
@@ -185,15 +162,11 @@ export class TerminalRegistry {
 
     inst.attachedContainer = container;
 
-    if (inst.resizeObserver) {
-      inst.resizeObserver.disconnect();
-    }
-    cancelScheduledFit(inst);
-    inst.resizeObserver = new ResizeObserver(() => scheduleFit(inst));
-    inst.resizeObserver.observe(container);
+    inst.resizeScheduler.attach(container);
+    inst.resizeScheduler.fitNextFrame();
 
     requestAnimationFrame(() => {
-      measureAndFit(inst);
+      if (inst.attachedContainer !== container) return;
       // Only auto-scroll-to-tail on the first open. On re-attach the user
       // may have scrolled back to read history; forcing the tail here would
       // silently destroy that position (and flash the jump-to-latest pill).
@@ -230,11 +203,7 @@ export class TerminalRegistry {
     const inst = this.instances.get(nodeId);
     if (!inst) return;
 
-    if (inst.resizeObserver) {
-      inst.resizeObserver.disconnect();
-      inst.resizeObserver = null;
-    }
-    cancelScheduledFit(inst);
+    inst.resizeScheduler.detach();
     inst.term.element?.remove();
     inst.attachedContainer = null;
     terminalWebglPool.release(`agent:${nodeId}`);
@@ -289,10 +258,7 @@ export class TerminalRegistry {
   dispose(nodeId: number): void {
     const instance = this.instances.get(nodeId);
     if (instance) {
-      if (instance.resizeObserver) {
-        instance.resizeObserver.disconnect();
-      }
-      cancelScheduledFit(instance);
+      instance.resizeScheduler.dispose();
       instance.unlisten();
       api.unsubscribeAgentOutput(nodeId).catch(() => {});
       terminalWebglPool.release(`agent:${nodeId}`);
@@ -372,15 +338,15 @@ export class TerminalRegistry {
       // attached terminals; everything else uses xterm's DOM renderer —
       // see WebglRendererPool.ts and loadWebglRenderer.ts.
 
-      const instance: TerminalInstance = {
+      let instance: TerminalInstance;
+      instance = {
         term,
         fitAddon,
         serializeAddon,
         searchAddon,
         unlisten: () => {},
         opened: false,
-        resizeObserver: null,
-        resizeTimer: null,
+        resizeScheduler: new TerminalResizeScheduler(() => measureAndFit(instance)),
         attachedContainer: null,
         onFindRequest: null,
       };
