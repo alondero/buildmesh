@@ -1,9 +1,9 @@
+use super::reader::SessionIdMode;
 use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
 use crate::agent::spawn_environment;
-use crate::models::{EnvType, Provider};
 use crate::env;
-use super::reader::SessionIdMode;
+use crate::models::{EnvType, Provider};
 use portable_pty::CommandBuilder;
 
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
@@ -197,4 +197,100 @@ pub(super) fn apply_codex_proxy_credential(
     cmd.env_remove("OPENAI_BASE_URL");
     cmd.env(credential_reference, credential);
     Some(key)
+}
+
+/// Build the per-field cascade inputs the spawn pipeline hands to
+/// [`crate::agent::capabilities::resolve_agent_config`] (issue #1155).
+///
+/// Pure helper so the wiring is testable independent of the resolver —
+/// the resolver already has unit tests for its cascade order
+/// (`resolver_cascade_prefers_explicit_over_mesh_over_application`), but
+/// that test never proves the spawn pipeline *populates* the explicit
+/// slot from `SpawnOptions`. This helper is the seam every future spawn
+/// site writes to if it wants layer-1 precedence, and the unit tests pin
+/// both the field-by-field wiring AND the cascade precedence when fed
+/// through the resolver.
+///
+/// Whitespace-only / empty strings on the explicit slot collapse to
+/// `None` here (closer to the transport — mobile HTTP / autopilot / UI
+/// — than the resolver) so the cascade falls through to the next layer
+/// regardless of whether the caller or the resolver did the trimming.
+/// Mirrors `resolve_field`'s `normalize_non_empty` (issue #1148 AC #32,
+/// #1155 AC #3).
+///
+/// `mesh_*` and the `application` slot borrow from the mesh row /
+/// preferences cache and pass straight through; the resolver normalises
+/// those layers at its seam.
+pub(crate) fn cascade_inputs_for<'a>(
+    explicit_model: Option<&'a str>,
+    explicit_effort: Option<&'a str>,
+    mesh_model: Option<&'a str>,
+    mesh_effort: Option<&'a str>,
+    app_default: Option<&'a crate::preferences::HarnessConfigValue>,
+    mesh_override: Option<&'a crate::preferences::HarnessConfigValue>,
+) -> crate::agent::capabilities::AgentConfigInputs<'a> {
+    /// Trim; collapse empty / whitespace-only to `None`. Mirrors
+    /// `capabilities::normalize_non_empty` at the spawn seam (issue
+    /// #1148 AC #32 + #1155 AC #3). Inline closure hoisted here so the
+    /// model + effort legs share the same shape.
+    fn non_empty_trim(s: &str) -> Option<&str> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+    crate::agent::capabilities::AgentConfigInputs {
+        model: crate::agent::capabilities::FieldInputs {
+            explicit: explicit_model.and_then(non_empty_trim),
+            mesh_override: mesh_override.and_then(|v| v.model.as_deref()),
+            mesh: mesh_model,
+            application: app_default.and_then(|v| v.model.as_deref()),
+        },
+        effort: crate::agent::capabilities::FieldInputs {
+            explicit: explicit_effort.and_then(non_empty_trim),
+            mesh_override: mesh_override.and_then(|v| v.effort.as_deref()),
+            mesh: mesh_effort,
+            application: app_default.and_then(|v| v.effort.as_deref()),
+        },
+    }
+}
+
+/// Pure seam for the spawn orchestrator's resolver call (issue #1157).
+/// Composes `capabilities_for(provider.adapter())` +
+/// `cascade_inputs_for` + `resolve_agent_config` into a single pure
+/// function so the integration test for issue #1155 AC #4 ("Regression
+/// tests must verify layer-1 behavior at a real spawn site, not just
+/// resolver unit tests") can drive the full `SpawnRequest → resolver`
+/// path through the same call shape `spawn_agent_inner` uses — without
+/// standing up a Tauri runtime, a preferences cache, or a DB.
+///
+/// `app_default` is the ALREADY-LOOKED-UP value for the harness
+/// profile. The launch phase parses the composite harness id
+/// (`"<harness>:<provider>"` for Proxied rows) and resolves the harness
+/// default at its seam so this helper stays free of
+/// `preferences::load()` (which would force the test to populate the
+/// in-process preferences cache).
+pub(crate) fn resolve_spawn_config(
+    provider: Provider,
+    explicit_model: Option<&str>,
+    explicit_effort: Option<&str>,
+    explicit_extra_args: Option<&str>,
+    app_default: Option<&crate::preferences::HarnessConfigValue>,
+    mesh_override: Option<&crate::preferences::HarnessConfigValue>,
+) -> crate::agent::capabilities::ResolvedAgentConfig {
+    let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
+    crate::agent::capabilities::resolve_agent_config(
+        &capabilities,
+        cascade_inputs_for(
+            explicit_model,
+            explicit_effort,
+            None,
+            None,
+            app_default,
+            mesh_override,
+        ),
+        explicit_extra_args,
+    )
 }

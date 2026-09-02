@@ -1,4 +1,5 @@
 use serde::Serialize;
+use tauri::Emitter;
 use ts_rs::TS;
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,22 @@ pub struct ProviderErrorPayload {
     pub session_id: i64,
     pub provider: crate::models::Provider,
     pub message: String,
+}
+
+pub(super) fn emit_provider_error(
+    app: &tauri::AppHandle,
+    session_id: i64,
+    provider: crate::models::Provider,
+    message: &str,
+) {
+    let _ = app.emit(
+        "provider-error",
+        ProviderErrorPayload {
+            session_id,
+            provider,
+            message: message.to_string(),
+        },
+    );
 }
 
 /// Payload of the `mesh-sync-warning` Tauri event. Emitted for any non-fatal

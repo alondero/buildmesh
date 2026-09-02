@@ -203,11 +203,7 @@ impl SpawnRequest {
     /// struct literal. The contract — `explicit` is `Default::default()`
     /// on construction — is regression-pinned by
     /// `spawn_request_new_sets_explicit_default` in `spawn::tests`.
-    pub(crate) fn new(
-        node_id: i64,
-        intent: SpawnIntent,
-        terminal_size: TerminalSize,
-    ) -> Self {
+    pub(crate) fn new(node_id: i64, intent: SpawnIntent, terminal_size: TerminalSize) -> Self {
         Self {
             node_id,
             intent,
