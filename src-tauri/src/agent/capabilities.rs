@@ -625,9 +625,18 @@ mod tests {
         assert!(grok.auto_resume_on_startup);
         // Issue #1364 §3 — Grok's Notification + Stop HTTP hooks deliver
         // completion/input/permission/question signals under permission-ask.
+        // Issue #1366 — pin the validated Grok release (1.0.5) so a
+        // refactor that flips `min_version` back to None trips here
+        // (the `..` in earlier pins silently swallowed it). Mirrors
+        // the AGY precedent (`agy` row asserts `min_version:
+        // Some("1.0.0")`).
         assert!(matches!(
             grok.attention_capability,
-            AttentionCapability::Hook { launch_mode: AttentionLaunchMode::PermissionAsk, .. }
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::PermissionAsk,
+                min_version: Some(ref v),
+                ..
+            } if v == crate::agent::provider::adapters::grok::GROK_MIN_HOOK_VERSION
         ));
         // Issue #1281: Grok Code writes per-session directories under
         // ~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl,

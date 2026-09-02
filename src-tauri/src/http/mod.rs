@@ -1362,6 +1362,17 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         .next()
         .unwrap_or(&path_with_query)
         .to_string();
+    // The trailing query string is dropped above for routing but
+    // re-extracted here so routes can validate their own params
+    // (issue #1366: the attention route checks `?token=`
+    // against the runtime-scoped hook token). Borrowed from
+    // `path_with_query` so the per-request path carries zero
+    // allocations — every HTTP request on this server (static
+    // files, WebSocket upgrades, debug logs, /api routes) routes
+    // through this block; allocating a String just to re-borrow
+    // it as `&str` cost ~1 µs and a heap block per request.
+    let query_string: Option<&str> =
+        path_with_query.split_once('?').map(|(_, q)| q);
 
     // POST /__debug/log — diagnostic endpoint. The mobile SPA injects an
     // error-catcher <script> (see assets::serve_spa_shell) that POSTs any
@@ -1714,11 +1725,15 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // Attention webhook: POST /api/attention/{session_id}
     // Called by Claude Code's Stop hook — no token required, so the handler
     // verifies the peer is loopback (issue #496) and rejects external callers
-    // with 403 before publishing the Node Turn.
+    // with 403 before publishing the Node Turn. Issue #1366 — Grok's
+    // global hook URL adds `?token=$BUILDMESH_HOOK_TOKEN`, so the handler
+    // also validates the token against the runtime-scoped `OnceLock` when
+    // one has been minted (a non-Buildmesh Grok session cannot guess it).
     if method == "POST" && path_without_query.starts_with("/api/attention/") {
         routes::attention::handle_post(
             &mut lines,
             &path_without_query,
+            query_string.as_deref(),
             addr,
             content_length(&headers),
         )
@@ -3196,7 +3211,7 @@ ANY / -> Public (SPA shell)";
         tokio::spawn(async move {
             let (stream, _real_peer) = listener.accept().await.unwrap();
             let mut lines = tokio::io::BufStream::new(MaybeTls::Plain(stream));
-            routes::attention::handle_post(&mut lines, &path, peer, 0).await;
+            routes::attention::handle_post(&mut lines, &path, None, peer, 0).await;
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();

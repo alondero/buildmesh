@@ -165,6 +165,20 @@ pub fn wrap(
     cmd.cwd(spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
     cmd.env("BUILDMESH_PORT", crate::http_server::current_http_port().to_string());
+    // Issue #1366 round-2 fix: the runtime hook token is minted
+    // lazily by the Grok adapter's `provision_attention_hooks`
+    // BEFORE `wrap()` runs (the orchestrator orders: provision →
+    // spawn). If the token has been minted AND we are spawning a
+    // descendant of that runtime, propagate it as
+    // `BUILDMESH_HOOK_TOKEN` so the Grok runner can URL-expand
+    // `?token=$BUILDMESH_HOOK_TOKEN` to the right value. Gated on
+    // `Some(token)` so non-Grok agents never see the variable
+    // (preserves the round-1 fix: Claude / Codex / AGY POST URLs
+    // carry no `?token=` and the route's per-provider gate
+    // recognises them as legitimate).
+    if let Some(token) = crate::agent::runtime_hook_token() {
+        cmd.env("BUILDMESH_HOOK_TOKEN", token);
+    }
     pty::strip_git_env_vars(&mut cmd);
 
     cmd
@@ -185,7 +199,17 @@ pub(crate) fn apply_wsl_env(
     let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
     // `wrap` installs these callback values on the outer `wsl.exe` command.
     // They must also be listed in WSLENV or the guest hook process cannot see
-    // the port/session that identifies its attention callback.
+    // the port/session that identifies its attention callback (issue #1366).
+    //
+    // Note: BUILDMESH_HOOK_TOKEN is intentionally NOT bridged here.
+    // The Grok adapter hooks live in `~/.grok/hooks/` under
+    // USERPROFILE (Windows host path) — WSL Grok looks under
+    // /home/<user>/.grok/hooks/, which the host cannot reach. So the
+    // token plumbing into WSL would be misleading: a WSL-resident
+    // agent cannot reach the file it would gate, and a
+    // Windows-resident agent doesn't need a guest-bridged token.
+    // Current scope: native Windows Grok only; project-trust path
+    // (interactive `/hooks-trust`) is the AFK-friendly follow-up.
     for key in ["BUILDMESH_PORT", "BUILDMESH_SESSION_ID"] {
         append_to_wslenv(&mut wslenv, key, "/u");
     }
@@ -241,6 +265,17 @@ mod tests {
         assert!(wslenv
             .split(':')
             .any(|entry| entry.split('/').next() == Some("BUILDMESH_SESSION_ID")));
+        // Issue #1366 (review fix 2.4): BUILDMESH_HOOK_TOKEN is
+        // NOT bridged. WSL Grok can't reach the host's USERPROFILE
+        // hook dir, so token plumbing into WSL was misleading.
+        // Native-Windows Grok is the only supported integration.
+        assert!(
+            !wslenv
+                .split(':')
+                .any(|entry| entry.split('/').next() == Some("BUILDMESH_HOOK_TOKEN")),
+            "BUILDMESH_HOOK_TOKEN must NOT be in WSLENV — host-\
+             side hook file isn't reachable from a WSL guest"
+        );
     }
 
     #[test]
