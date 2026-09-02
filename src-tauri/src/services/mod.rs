@@ -11,6 +11,7 @@ pub mod commandcode_session;
 pub mod coordinator_ledger_maintenance;
 pub mod fetch_freshness;
 pub mod freebuff_usage;
+pub mod gh_auth_cache;
 pub mod github;
 pub mod mesh;
 pub mod opencode_oauth;

@@ -783,60 +783,63 @@ mod tests {
     /// want a fresh value.
     #[test]
     fn get_mesh_git_static_caches_gh_auth_across_calls() {
-        // Issue #1386 round-3 review: `GH_AUTH_CACHE_MISSES` is a process-
-        // global AtomicU64 that any test driving `check_gh_auth_cached` can
-        // bump. PR #1478's first-cut snapshot-delta shape was unsafe — a
-        // concurrent test's `__reset_gh_auth_cache_for_tests()` could
-        // `store(0)` between our reset and our `misses_before` snapshot,
-        // and the subsequent `misses_after - misses_before` would underflow
-        // in debug builds (`attempt to subtract with overflow`) or wrap to
-        // `u64::MAX` in release. Lock against the per-cache test lock —
-        // same idiom as `PR_TEST_LOCK` / `RATE_LIMIT_TEST_LOCK` /
-        // `PREFS_TEST_LOCK` — so we have an exclusive window for reset,
-        // 5 calls, and the assertion.
-        let _guard = crate::commands::git::GH_AUTH_CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-
-        // Force a known starting state: miss counter = 0, cache backdated
-        // so the next read is a miss. The lock above prevents any sibling
-        // test from resetting or refreshing the counter during the window
-        // below, so we can use absolute `==` against the post-reset value.
-        crate::commands::git::__reset_gh_auth_cache_for_tests();
+        // Per-fixture cache — no global contention, no snapshot-delta trick
+        // (issue #1483). The auth checker is stubbed so the test doesn't pay a
+        // 5 s HTTPS round-trip and stays deterministic.
+        let cache = crate::services::gh_auth_cache::GhAuthCache::for_test_with_auth(|| true);
 
         // Non-existent paths are fine — we just want to exercise the cache
         // path. `is_git_repo` will be `false` for all of them, but the
-        // gh-auth branch runs unconditionally (a non-git dir can still have
-        // `gh` configured), which is exactly the path we're caching.
-        // Exercise the sync core directly (the async `#[command]` wrapper
-        // just offloads this onto the blocking pool via `run_blocking`).
-        let r1 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-1".to_string())
-            .expect("first call should succeed");
-        let r2 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-2".to_string())
-            .expect("second call should succeed");
-        let r3 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-3".to_string())
-            .expect("third call should succeed");
-        let r4 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-4".to_string())
-            .expect("fourth call should succeed");
-        let r5 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-5".to_string())
-            .expect("fifth call should succeed");
-
-        // All 5 must agree on the process-wide gh-auth state. The value
-        // itself depends on the env (GITHUB_TOKEN / GH_TOKEN / `gh auth
-        // status`); we don't assert what it is, only that it's stable.
-        assert_eq!(r1.is_gh_authenticated, r2.is_gh_authenticated);
-        assert_eq!(r2.is_gh_authenticated, r3.is_gh_authenticated);
-        assert_eq!(r3.is_gh_authenticated, r4.is_gh_authenticated);
-        assert_eq!(r4.is_gh_authenticated, r5.is_gh_authenticated);
-
-        // The headline assertion: 5 snapshot calls = 1 gh round-trip.
-        // Under `GH_AUTH_CACHE_TEST_LOCK` the counter is exclusively ours;
-        // the post-reset value is 0 and the 5 calls above produce exactly
-        // 1 miss (the first refreshes; the rest hit cache).
+        // gh-auth branch runs unconditionally.
+        let mut snapshots = Vec::new();
+        for i in 1..=5 {
+            let snap = crate::commands::git::get_mesh_git_static_blocking(
+                &cache,
+                format!("/tmp/fake-mesh-{i}"),
+            )
+            .expect("call should succeed");
+            snapshots.push(snap);
+        }
+        for w in snapshots.windows(2) {
+            assert_eq!(w[0].is_gh_authenticated, w[1].is_gh_authenticated);
+        }
+        // 5 sequential calls on a cold cache = exactly 1 miss, which satisfies
+        // the headline "≤ 1 miss in this fixture's window".
         assert_eq!(
-            crate::commands::git::__gh_auth_cache_misses(),
+            cache.misses(),
             1,
-            "5 get_mesh_git_static calls within the TTL window should result in exactly 1 gh round-trip"
+            "5 sequential calls on a cold cache should produce exactly 1 miss"
+        );
+    }
+
+    #[test]
+    fn get_mesh_git_static_caches_gh_auth_concurrently_coalesces() {
+        // Single-flight via Mutex held across auth: 5 concurrent callers on a
+        // cold cache must produce exactly 1 miss, not 5.
+        let cache = crate::services::gh_auth_cache::GhAuthCache::for_test_with_auth(|| {
+            // Simulate GitHub latency so threads overlap.
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            true
+        });
+        let mut handles = Vec::new();
+        for i in 1..=5 {
+            let c = cache.clone();
+            handles.push(std::thread::spawn(move || {
+                crate::commands::git::get_mesh_git_static_blocking(&c, format!("/tmp/fake-mesh-{i}"))
+                    .expect("concurrent call should succeed")
+            }));
+        }
+        let mut results = Vec::new();
+        for h in handles {
+            results.push(h.join().expect("thread panicked"));
+        }
+        for w in results.windows(2) {
+            assert_eq!(w[0].is_gh_authenticated, w[1].is_gh_authenticated);
+        }
+        assert_eq!(
+            cache.misses(),
+            1,
+            "5 concurrent callers on a cold cache must coalesce to 1 miss"
         );
     }
 
@@ -893,22 +896,16 @@ mod tests {
     /// `default_branch` — not open the repo a second time (#431).
     #[test]
     fn get_mesh_git_static_reports_origin_head_branch_for_valid_repo() {
-        // `get_mesh_git_static_blocking` calls `check_gh_auth_cached`,
-        // which bumps `GH_AUTH_CACHE_MISSES`. Take the cache test lock so
-        // we don't race against `get_mesh_git_static_caches_gh_auth_across_calls`
-        // (round-3 review caught this — without the lock here, a
-        // concurrent `__reset_gh_auth_cache_for_tests()` between our
-        // `check_gh_auth_cached()` and the cache-counter assertion on the
-        // other test would silently bump the counter out from under it).
-        let _guard = crate::commands::git::GH_AUTH_CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        // Per-fixture cache with stubbed auth (no network).
+        let cache = crate::services::gh_auth_cache::GhAuthCache::for_test_with_auth(|| false);
         let _repo = TempGitRepo::new();
         let _ = make_repo_with_origin_head(_repo.path(), "develop");
 
-        let snapshot =
-            crate::commands::git::get_mesh_git_static_blocking(_repo.path().to_string_lossy().into_owned())
-                .expect("snapshot should succeed for a valid repo");
+        let snapshot = crate::commands::git::get_mesh_git_static_blocking(
+            &cache,
+            _repo.path().to_string_lossy().into_owned(),
+        )
+        .expect("snapshot should succeed for a valid repo");
 
         assert!(
             snapshot.is_git_repo,
@@ -924,18 +921,15 @@ mod tests {
     /// non-repo contract (`is_git_repo = false`, `default_branch = "main"`).
     #[test]
     fn get_mesh_git_static_reports_main_fallback_for_non_repo() {
-        // Same lock as the sibling above — `get_mesh_git_static_blocking`
-        // drives the gh-auth cache and any reader/writer that doesn't
-        // acquire the lock would race against the cache counter test.
-        let _guard = crate::commands::git::GH_AUTH_CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let cache = crate::services::gh_auth_cache::GhAuthCache::for_test_with_auth(|| false);
         let dir = TempGitRepo::new();
         fs::create_dir_all(dir.path()).unwrap();
 
-        let snapshot =
-            crate::commands::git::get_mesh_git_static_blocking(dir.path().to_string_lossy().into_owned())
-                .expect("non-repo path must not error");
+        let snapshot = crate::commands::git::get_mesh_git_static_blocking(
+            &cache,
+            dir.path().to_string_lossy().into_owned(),
+        )
+        .expect("non-repo path must not error");
 
         assert!(!snapshot.is_git_repo);
         assert_eq!(

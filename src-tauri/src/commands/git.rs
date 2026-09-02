@@ -2,16 +2,14 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use git2::{DiffOptions, Patch, Repository, StatusOptions};
-use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use tauri::command;
 use tauri::Emitter;
 use ts_rs::TS;
+
+use crate::services::gh_auth_cache::GhAuthCache;
 
 use crate::db;
 use crate::env::{active_node_paths, to_host_path};
@@ -800,21 +798,33 @@ pub struct MeshGitStatic {
 /// the hook's prior short-circuit (`if (!repoOk) return;`) and keeps the
 /// UI contract identical.
 #[command]
-pub async fn get_mesh_git_static(mesh_path: String) -> Result<MeshGitStatic, String> {
+pub async fn get_mesh_git_static(
+    path: String,
+    cache: tauri::State<'_, GhAuthCache>,
+) -> Result<MeshGitStatic, String> {
+    let cache = cache.inner().clone();
     crate::commands::run_blocking("get_mesh_git_static", move || {
-        get_mesh_git_static_blocking(mesh_path)
+        get_mesh_git_static_blocking(&cache, path)
     })
     .await
 }
 
 /// Sync core for [`get_mesh_git_static`] — see its doc for the offload
 /// rationale.
-pub(crate) fn get_mesh_git_static_blocking(mesh_path: String) -> Result<MeshGitStatic, String> {
+///
+/// `cache` is the injected [`GhAuthCache`] (Tauri managed state in
+/// production, per-test fixture in tests) via `GhAuthCache::check()`.
+pub(crate) fn get_mesh_git_static_blocking(
+    cache: &GhAuthCache,
+    path: String,
+) -> Result<MeshGitStatic, String> {
     // Open once and reuse the handle for both `is_git_repo` and
     // `default_branch` (#431 — eliminates the pre-refactor double-open).
-    let repo = git2::Repository::open(&mesh_path).ok();
+    // `open_from_host_path` handles WSL `\\wsl$\` translation (hard rule
+    // `env::to_host_path` — every host file-op must go through it).
+    let repo = crate::git::primitives::open_from_host_path(&path).ok();
     let is_git_repo = repo.is_some();
-    let is_gh_authenticated = check_gh_auth_cached();
+    let is_gh_authenticated = cache.check();
     let default_branch = match &repo {
         Some(r) => default_branch_from_repo(r),
         None => "main".to_string(),
@@ -1036,99 +1046,13 @@ fn assert_inside_repo(repo_root: &Path, file_path: &Path) -> Result<(), String> 
     Ok(())
 }
 
-// ── gh-auth cache for get_mesh_git_static (issue #432) ──────────────────────
-
-/// How long a cached `check_gh_auth` result is reused across mesh mounts.
-/// Short enough that a token change (`gh auth login` / `gh auth logout` /
-/// token expiry) shows up promptly; long enough that a user iterating
-/// through the sidebar's N meshes within ~30s pays 1 round-trip, not N.
-const GH_AUTH_CACHE_TTL: Duration = Duration::from_secs(30);
-
-/// Process-global cache: `OnceCell<Mutex<(Instant, bool)>>`. The cell is
-/// initialised once with the Mutex; the Mutex interior holds the
-/// (last-checked-at, result) pair and is mutated on every read.
-static GH_AUTH_CACHE: OnceCell<Mutex<(Instant, bool)>> = OnceCell::new();
-
-/// Counts cache misses (i.e. the number of times the underlying
-/// `check_gh_auth()` was actually invoked). Exposed via
-/// [`__gh_auth_cache_misses`] for TDD — the test asserts that N snapshot
-/// calls within the TTL window produce exactly 1 miss. `Relaxed` is
-/// sufficient: the counter has no happens-before relationship to any
-/// other state (matches the convention in `http/mod.rs::SNAPSHOT_COUNTER`).
-static GH_AUTH_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
-
-/// Cached wrapper around `commands::github::check_gh_auth()`. Returns the
-/// cached value when the TTL hasn't expired; otherwise re-invokes the
-/// underlying command and refreshes the cache.
-///
-/// The cache is process-global, so a user mounting N meshes within
-/// `GH_AUTH_CACHE_TTL` triggers exactly one `check_gh_auth` round-trip
-/// (the first mesh's call). Subsequent calls share that result. After
-/// the TTL elapses, the next call re-checks.
-///
-/// The cell is initialised with an already-expired timestamp so the
-/// first call in the process is always a miss — matching the issue's
-/// intent ("the first-mesh cost is unchanged; only subsequent meshes
-/// within the TTL window benefit"). Without this, the cell's birth
-/// timestamp would make the very first call a no-op miss that returns
-/// the default `false`, which would silently lie about auth state on a
-/// fresh launch.
-fn check_gh_auth_cached() -> bool {
-    let cell = GH_AUTH_CACHE.get_or_init(|| {
-        let expired = Instant::now() - GH_AUTH_CACHE_TTL - Duration::from_secs(1);
-        Mutex::new((expired, false))
-    });
-    let now = Instant::now();
-    let mut guard = cell.lock().expect("gh-auth cache mutex poisoned");
-    if now.duration_since(guard.0) >= GH_AUTH_CACHE_TTL {
-        guard.1 = crate::commands::github::check_gh_auth_blocking();
-        // Stamp post-call, not at entry. The HTTPS GET has a 30 s request
-        // timeout, the same magnitude as the cache TTL — a near-timeout
-        // call would otherwise leave `guard.0` already past the TTL before
-        // the result is even returned, and the very next reader triggers a
-        // second miss (issue #782).
-        guard.0 = Instant::now();
-        GH_AUTH_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-    }
-    guard.1
-}
-
-/// Test seam: number of times the underlying `check_gh_auth()` was
-/// actually invoked. Used by `commands::git_tests` to assert the cache
-/// hit rate; not part of the public surface.
-#[cfg(test)]
-pub(crate) fn __gh_auth_cache_misses() -> u64 {
-    GH_AUTH_CACHE_MISSES.load(Ordering::Relaxed)
-}
-
-/// Test seam: reset the miss counter to 0 and backdate the cached
-/// timestamp so the next read is a miss. Used to put the test in a
-/// known "first call" state regardless of test ordering.
-///
-/// **MUST** be called under [`GH_AUTH_CACHE_TEST_LOCK`] — the atomic counter
-/// is process-global and a sibling test running concurrently could otherwise
-/// `store(0)` between our reset and our snapshot, producing a `u64` underflow
-/// on `misses_after - misses_before` (debug builds panic; release builds wrap
-/// to `u64::MAX`). The lock is the same pattern used by every other
-/// process-global-cache test in the codebase (see `commands::agent::PR_TEST_LOCK`,
-/// `http::rate_limit::TEST_LOCK`).
-#[cfg(test)]
-pub(crate) fn __reset_gh_auth_cache_for_tests() {
-    GH_AUTH_CACHE_MISSES.store(0, Ordering::Relaxed);
-    if let Some(cell) = GH_AUTH_CACHE.get() {
-        let mut guard = cell.lock().expect("gh-auth cache mutex poisoned");
-        // Backdate well past the TTL so the next `check_gh_auth_cached`
-        // call sees an expired entry and refreshes.
-        guard.0 = Instant::now() - GH_AUTH_CACHE_TTL - Duration::from_secs(1);
-    }
-}
-
-/// Serialises every test that mutates the process-global
-/// [`GH_AUTH_CACHE_MISSES`] counter (issue #1386 round-3 review). The atomic
-/// is shared with any test that drives `check_gh_auth_cached`, so we cannot
-/// rely on a per-test snapshot without a global race window. Matches the
-/// per-module lock convention used elsewhere in the crate (PR_TEST_LOCK,
-/// RATE_LIMIT_TEST_LOCK, PREFS_TEST_LOCK, ...).
-#[cfg(test)]
-pub(crate) static GH_AUTH_CACHE_TEST_LOCK: std::sync::Mutex<()> =
-    std::sync::Mutex::new(());
+// ── gh-auth cache accessor (issue #1483) ─────────────────────────────────
+//
+// The cache itself lives in `crate::services::gh_auth_cache::GhAuthCache` as
+// an injectable struct. Production wires `GhAuthCache::new()` via Tauri
+// `manage` and the async command passes it into the blocking core. Tests
+// construct `GhAuthCache::for_test_with_auth()` per `#[test]` with an
+// isolated counter and a controllable clock. No `static` remains here — the
+// old `GH_AUTH_CACHE` / `GH_AUTH_CACHE_MISSES` globals are deleted.
+//
+// No legacy `static` is kept: callers must use per-fixture `GhAuthCache`.
