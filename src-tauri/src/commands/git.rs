@@ -1104,6 +1104,14 @@ pub(crate) fn __gh_auth_cache_misses() -> u64 {
 /// Test seam: reset the miss counter to 0 and backdate the cached
 /// timestamp so the next read is a miss. Used to put the test in a
 /// known "first call" state regardless of test ordering.
+///
+/// **MUST** be called under [`GH_AUTH_CACHE_TEST_LOCK`] — the atomic counter
+/// is process-global and a sibling test running concurrently could otherwise
+/// `store(0)` between our reset and our snapshot, producing a `u64` underflow
+/// on `misses_after - misses_before` (debug builds panic; release builds wrap
+/// to `u64::MAX`). The lock is the same pattern used by every other
+/// process-global-cache test in the codebase (see `commands::agent::PR_TEST_LOCK`,
+/// `http::rate_limit::TEST_LOCK`).
 #[cfg(test)]
 pub(crate) fn __reset_gh_auth_cache_for_tests() {
     GH_AUTH_CACHE_MISSES.store(0, Ordering::Relaxed);
@@ -1114,3 +1122,13 @@ pub(crate) fn __reset_gh_auth_cache_for_tests() {
         guard.0 = Instant::now() - GH_AUTH_CACHE_TTL - Duration::from_secs(1);
     }
 }
+
+/// Serialises every test that mutates the process-global
+/// [`GH_AUTH_CACHE_MISSES`] counter (issue #1386 round-3 review). The atomic
+/// is shared with any test that drives `check_gh_auth_cached`, so we cannot
+/// rely on a per-test snapshot without a global race window. Matches the
+/// per-module lock convention used elsewhere in the crate (PR_TEST_LOCK,
+/// RATE_LIMIT_TEST_LOCK, PREFS_TEST_LOCK, ...).
+#[cfg(test)]
+pub(crate) static GH_AUTH_CACHE_TEST_LOCK: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());

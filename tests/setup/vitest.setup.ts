@@ -2,7 +2,7 @@ import { vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
 
 // ============================================================
-// jsdom canvas shim (issue #1386)
+// jsdom canvas shim (issue #1386, round-3 review)
 // ============================================================
 
 // jsdom does not implement `HTMLCanvasElement.getContext`; without a stub it
@@ -10,31 +10,26 @@ import { cleanup } from '@testing-library/react';
 // The full vitest suite fires that warning ~74× and the issue body listed
 // "Vitest suite has zero console warnings" as the acceptance criterion.
 //
-// PR review catch (grumpy-senior): a naïve `() => undefined` for every
-// method crashes any consumer that expects a returned object —
-// `ctx.measureText('x').width` would TypeError. The Proxy here returns
-// minimal stub objects for the chained-return methods consumers depend on:
+// Round-3 review (grumpy-senior) pinned four spec violations the previous
+// shim silently had. This revision is per-element (each canvas gets its own
+// context), spec-compliant (`canvas` refers to the host element,
+// `getContext` returns `null` for non-2d types the way Chrome does), and
+// defensive (negative dimensions in `getImageData`/`createImageData` are
+// clamped to `0` so a stray `new Uint8ClampedArray(-1)` doesn't throw a
+// `RangeError: Invalid array length` from inside an unrelated component).
 //
-//   measureText(...)           -> TextMetrics shape (width: 0, ...)
-//   createLinearGradient(...)  -> { addColorStop: () => undefined } (proxy)
-//   createRadialGradient(...)  -> { addColorStop: () => undefined } (proxy)
-//   createPattern(...)         -> { setTransform: () => undefined } (proxy)
-//   getImageData/putImageData  -> ImageData shape (data: Uint8ClampedArray)
-//   createImageData(...)       -> ImageData shape
-//
-// Everything else is a void-returning no-op (`fillRect`, `drawImage`,
-// `beginPath`, etc). We deliberately do NOT depend on the `canvas` npm
-// package: it ships a native binary that breaks on Buildmesh's CI
-// Linux/musl runners. Anything that actually wants bitmap assertions in a
-// test can override `HTMLCanvasElement.prototype.getContext` locally.
+// We deliberately do NOT depend on the `canvas` npm package: it ships a
+// native binary that breaks on Buildmesh's CI Linux/musl runners.
+// Anything that actually wants bitmap assertions in a test can override
+// `HTMLCanvasElement.prototype.getContext` per-test.
+
 type CanvasContext = Record<string | symbol, unknown>;
 
 /**
  * A `CanvasGradient`-shaped proxy: factory methods like `createLinearGradient`
- * return objects whose only common method is `addColorStop(0, 'red')`. The
- * proxy returns `undefined` for property reads (e.g. `gradient.addColorStop`)
- * via the same no-op-fn fallback used by the context, so further chained calls
- * stay inert.
+ * return objects whose common method is `addColorStop(offset, color)`. The
+ * proxy makes any further chained call a no-op so `gradient.addColorStop(...)`
+ * succeeds and any `.addColorStop = ...` assignment sticks.
  */
 function noopCanvasGradient(): CanvasContext {
   return new Proxy(
@@ -50,10 +45,7 @@ function noopCanvasGradient(): CanvasContext {
   );
 }
 
-/**
- * A `CanvasPattern`-shaped proxy. Same shape as a gradient from a consumer's
- * standpoint — `setTransform` is the documented method, the rest is inert.
- */
+/** `CanvasPattern`-shaped proxy; same inertness contract as the gradient. */
 function noopCanvasPattern(): CanvasContext {
   return noopCanvasGradient();
 }
@@ -76,78 +68,125 @@ function noopTextMetrics(): TextMetrics {
   } as TextMetrics;
 }
 
-/** `ImageData` minimum: consumers usually read `.data` and `.width`. */
-function noopImageData(width = 0, height = 0): ImageData {
+/**
+ * `ImageData` minimum: consumers usually read `.data` and `.width`. Width
+ * and height are clamped at 0 — a negative value would either allocate a
+ * `Uint8ClampedArray` with `negative * negative * 4` bytes (throwing
+ * `RangeError: Invalid array length` in V8) or produce a garbage-length
+ * buffer downstream. Clamping preserves the spec invariant
+ * ("missing/negative dimensions = empty buffer") without a runtime throw.
+ */
+function clampUint8Length(n: number): number {
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+function noopImageData(width: unknown, height: unknown): ImageData {
+  const w = clampUint8Length(Number(width));
+  const h = clampUint8Length(Number(height));
   return {
-    data: new Uint8ClampedArray(width * height * 4),
-    width,
-    height,
+    data: new Uint8ClampedArray(w * h * 4),
+    width: w,
+    height: h,
     colorSpace: 'srgb',
   } as ImageData;
 }
 
 /**
- * The main `CanvasRenderingContext2D` stub. Property reads return sensible
- * defaults; method calls return either `undefined` (for void methods like
- * `fillRect`) or a minimal stub object (for factory methods whose return
- * value is consumed downstream). The closure over the four stub factories
- * means `getImageData(...)`, `createLinearGradient(...)`, etc. all produce
- * fresh objects per call — no shared state between consumers.
+ * Build a `CanvasRenderingContext2D`-shaped proxy bound to a specific
+ * `canvas` element. The closure captures `hostCanvas` so `ctx.canvas`
+ * returns the right element (round-3 critique A) and `c.getContext('2d')`
+ * gets a fresh proxy per element (critique B — no global singleton).
+ *
+ * Method calls return either `undefined` (for void methods like `fillRect`)
+ * or a minimal stub object (for factory methods whose return value is
+ * consumed downstream). Property writes (`ctx.fillStyle = 'red'`) succeed
+ * silently — the stub doesn't persist the value but accepting the
+ * assignment keeps consumer code from seeing "Cannot set properties of
+ * undefined".
  */
-const noopCanvasContext = new Proxy(
-  {} as CanvasContext,
-  {
-    get(_target, prop) {
-      // Read-only-ish properties.
-      if (prop === 'canvas') return null;
-      if (prop === 'font') return '10px sans-serif';
-      if (prop === 'fillStyle' || prop === 'strokeStyle') return '#000';
-      if (prop === 'globalAlpha' || prop === 'globalCompositeOperation') return 1;
-      if (prop === 'lineWidth' || prop === 'lineDashOffset') return 1;
+function makeNoopCanvasContext(hostCanvas: HTMLCanvasElement): CanvasRenderingContext2D {
+  return new Proxy(
+    {} as CanvasContext,
+    {
+      get(_target, prop) {
+        // Read-only-ish properties.
+        if (prop === 'canvas') return hostCanvas;
+        if (prop === 'font') return '10px sans-serif';
+        if (prop === 'fillStyle' || prop === 'strokeStyle') return '#000';
+        if (prop === 'globalAlpha' || prop === 'globalCompositeOperation') return 1;
+        if (prop === 'lineWidth' || prop === 'lineDashOffset') return 1;
 
-      // Chained-return methods — return the right *shape* so consumers that
-      // read properties or call further methods don't TypeError.
-      if (prop === 'measureText') return () => noopTextMetrics();
-      if (prop === 'createLinearGradient' || prop === 'createRadialGradient') {
-        return () => noopCanvasGradient();
-      }
-      if (prop === 'createPattern') return () => noopCanvasPattern();
-      if (prop === 'getImageData') {
-        // CanvasRenderingContext2D.getImageData(sx, sy, sw, sh) — width
-        // and height are the 3rd and 4th positional args, not the 1st/2nd.
-        return (_sx: number, _sy: number, sw?: number, sh?: number) =>
-          noopImageData(sw ?? 0, sh ?? 0);
-      }
-      if (prop === 'createImageData') {
-        // CanvasRenderingContext2D.createImageData(width, height) — width
-        // and height are the 1st and 2nd positional args.
-        return (sw?: number, sh?: number) => noopImageData(sw ?? 0, sh ?? 0);
-      }
-      if (prop === 'putImageData') return () => undefined;
-      if (prop === 'getLineDash') return () => [];
-      if (prop === 'getTransform') return () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+        // Chained-return methods — return the right *shape* so consumers that
+        // read properties or call further methods don't TypeError.
+        if (prop === 'measureText') return () => noopTextMetrics();
+        if (prop === 'createLinearGradient' || prop === 'createRadialGradient') {
+          return () => noopCanvasGradient();
+        }
+        if (prop === 'createPattern') return () => noopCanvasPattern();
+        if (prop === 'getImageData') {
+          // CanvasRenderingContext2D.getImageData(sx, sy, sw, sh) — width
+          // and height are the 3rd and 4th positional args, not the 1st/2nd.
+          // Clamp negatives so consumers can't trip a `RangeError` deep in
+          // an unrelated component.
+          return (_sx: number, _sy: number, sw?: number, sh?: number) =>
+            noopImageData(sw, sh);
+        }
+        if (prop === 'createImageData') {
+          // CanvasRenderingContext2D.createImageData(width, height) — the
+          // 1st and 2nd positional args. Same negative-clamp shape.
+          return (sw?: number, sh?: number) => noopImageData(sw, sh);
+        }
+        if (prop === 'putImageData') return () => undefined;
+        if (prop === 'getLineDash') return () => [];
+        if (prop === 'getTransform') return () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
 
-      // Everything else — known methods (`fillRect`, `drawImage`, `arcTo`,
-      // `ellipse`, ...) and properties we haven't enumerated — becomes a
-      // callable no-op that returns `undefined`. A missing method should be
-      // inert, never a TypeError.
-      return () => undefined;
+        // Everything else — known methods (`fillRect`, `drawImage`, `arcTo`,
+        // `ellipse`, ...) and properties we haven't enumerated — becomes a
+        // callable no-op that returns `undefined`. A missing method should be
+        // inert, never a TypeError.
+        return () => undefined;
+      },
+      // Writes (`ctx.fillStyle = 'red'`) succeed silently — the stub doesn't
+      // persist anything but accepting the assignment keeps consumer code
+      // from seeing "Cannot set properties of undefined".
+      set() {
+        return true;
+      },
     },
-    // Writes (`ctx.fillStyle = 'red'`) succeed silently — the stub doesn't
-    // persist anything but accepting the assignment keeps consumer code
-    // from seeing "Cannot set properties of undefined".
-    set() {
-      return true;
-    },
-  },
-);
+  ) as unknown as CanvasRenderingContext2D;
+}
+
+// Per-canvas memoization: Chrome caches the same 2d context per
+// HTMLCanvasElement — `canvas.getContext('2d') === canvas.getContext('2d')`
+// for the same element. A WeakMap lets us cache without keeping the canvas
+// alive past its natural GC, and the second call returns the *same* Proxy
+// instance so consumers can rely on object identity. Without this, calling
+// `getContext('2d')` twice on one element would hand out two distinct
+// Proxies and any state set on the first would be invisible to the second
+// (round-3 critique B: state must not leak across canvases OR across
+// repeated calls on one canvas).
+const canvasContextCache: WeakMap<HTMLCanvasElement, CanvasRenderingContext2D> =
+  new WeakMap();
 
 if (typeof HTMLCanvasElement !== 'undefined') {
-  // jsdom's typings lie about where `getContext` lives — installing on the
-  // prototype is the path every test render hits. Tests that need a richer
-  // mock can override per-instance.
-  (HTMLCanvasElement.prototype as { getContext: unknown }).getContext = function () {
-    return noopCanvasContext;
+  // Per round-3 critique C: only intercept `getContext('2d')` and return
+  // `null` for `'webgl'` / `'webgl2'` / `'bitmaprenderer'` / anything else
+  // — that's the real browser behaviour and a 3D library asking for
+  // `'webgl'` should NOT receive a 2D context that silently accepts its
+  // `gl.clearColor(...)` call as an inert no-op (it'd mis-render).
+  (HTMLCanvasElement.prototype as { getContext: unknown }).getContext = function (
+    this: HTMLCanvasElement,
+    contextType?: string,
+    _options?: unknown,
+  ) {
+    if (contextType === '2d' || contextType === undefined) {
+      let ctx = canvasContextCache.get(this);
+      if (!ctx) {
+        ctx = makeNoopCanvasContext(this);
+        canvasContextCache.set(this, ctx);
+      }
+      return ctx;
+    }
+    return null;
   };
 }
 
