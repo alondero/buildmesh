@@ -30,6 +30,7 @@ import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircui
 import type { CircuitBlueprintKind } from '../../src/types/generated/CircuitBlueprintKind';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { openProbeDestination } from './helpers/openProbeDestination';
 
 const MESH: Mesh = {
   id: 42,
@@ -116,13 +117,6 @@ function mockBackend() {
   });
 }
 
-async function openCircuitsTab() {
-  // Open the destination through the store first (#1375: no rail to click),
-  // then render so the panel mounts already open on Circuits.
-  useUIStore.getState().openProbeTab('circuits');
-  render(<ProbePanel />);
-}
-
 beforeEach(() => {
   useMeshStore.setState({
     meshes: [MESH],
@@ -171,7 +165,7 @@ describe('Circuits Probe catalog contract (#1469)', () => {
     'every catalog blueprint is selectable in the Probe blueprint dropdown ($kind)',
     async (entry) => {
       mockBackend();
-      await openCircuitsTab();
+      await openProbeDestination('circuits');
       const select = await screen.findByTestId('circuit-blueprint-select');
       const options = Array.from(select.querySelectorAll('option')).map(
         (opt) => (opt as HTMLOptionElement).value
@@ -192,7 +186,7 @@ describe('Circuits Probe catalog contract (#1469)', () => {
     async (entry) => {
       mockBackend();
       const user = userEvent.setup();
-      await openCircuitsTab();
+      await openProbeDestination('circuits');
 
       // Pick the catalog entry, fill the minimum required fields
       // (name + trigger label for issue-label blueprints, since

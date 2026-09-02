@@ -105,7 +105,9 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   issues: {
-    label: 'Git Issues',
+    // Issue #1375 — the header names the user-facing destination; the palette
+    // entry is "Open GitHub Issues".
+    label: 'GitHub Issues',
     lens: 'mesh',
     followsSelection: true,
     pinnable: true,
@@ -135,7 +137,10 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
       'Mesh-owned Agent Node history index; each listed row is an Agent Node and resume acts on that row.',
   },
   scratchpad: {
-    label: 'Scratch Pad',
+    // Issue #1375 — "Notes" is the user-facing destination name; the body it
+    // opens is the mesh-aware Scratch Pad (the textarea label keeps that name).
+    label: 'Notes',
+    tooltip: 'Scratch Pad',
     lens: 'mesh',
     followsSelection: true,
     pinnable: true,
@@ -164,7 +169,7 @@ export const PROBE_TAB_ORDER: readonly ProbeTab[] = [
 
 /**
  * A pin is intentionally keyed by destination. Pinning Agent Changes must not
- * make Git Issues silently operate on that same mesh after the user changes
+ * make GitHub Issues silently operate on that same mesh after the user changes
  * tabs; each destination gets an independent context decision.
  */
 export interface ProbeContextPin {

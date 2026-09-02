@@ -130,14 +130,14 @@ function renderWithScratchpadOpen() {
 }
 
 describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
-  it('opens with the "Scratch Pad" accessible name via openProbeTab', () => {
+  it('opens with the "Notes" accessible name via openProbeTab', () => {
     // #1375: the rail is gone — the Notes destination opens through the
     // store action driven by the palette / title bar / contextual entries,
     // and the inspector header carries the visible label.
     useUIStore.getState().openProbeTab('scratchpad');
     render(<ProbePanel />);
     const header = screen.getByRole('region', { name: 'Probe panel' });
-    expect(header.textContent).toContain('Scratch Pad');
+    expect(header.textContent).toContain('Notes');
   });
 
   it('loads the active mesh\'s scratch pad into the textarea on mount', async () => {

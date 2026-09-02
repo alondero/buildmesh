@@ -115,9 +115,14 @@ function NavigationControls() {
       >
         <SearchIcon className="h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
-        <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[9px] text-text-muted">
-          {searchShortcut}
-        </kbd>
+        {/* The catalog row is pinned by tests, so this renders on every real
+            launch; the conditional keeps an empty <kbd> chip from appearing
+            if the entry were ever renamed. */}
+        {searchShortcut !== '' && (
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[9px] text-text-muted">
+            {searchShortcut}
+          </kbd>
+        )}
       </button>
       <button
         type="button"

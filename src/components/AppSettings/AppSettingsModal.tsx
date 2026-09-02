@@ -1122,7 +1122,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         <div>
           <h2 id="app-settings-title" className="text-2xl font-semibold text-text-primary mb-1">Settings</h2>
           <p className="text-base text-text-muted">
-            Buildmesh-wide defaults. Per-mesh values in Mesh Properties take precedence.
+            Buildmesh-wide defaults. Per-mesh values in Project Settings take precedence.
           </p>
         </div>
         <ModalCloseButton onClose={onClose} label="Close settings" />
@@ -1249,7 +1249,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           <p className="text-base text-text-muted">
             The most autopilot nodes allowed to run at once across{' '}
             <span className="font-medium">all</span> meshes. Each mesh still
-            respects its own concurrency limit (set in Mesh Properties) — this
+            respects its own concurrency limit (set in Project Settings) — this
             caps the total, so ten meshes with two slots each can't put twenty
             agents on your machine. Leave empty for no global cap; 0 pauses new
             autopilot spawns. Running nodes are never stopped — lowering the cap

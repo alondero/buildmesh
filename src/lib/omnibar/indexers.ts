@@ -230,7 +230,7 @@ export const APP_COMMANDS: readonly AppCommand[] = [
   {
     id: 'probe-sessions',
     label: 'Open Agent History',
-    subtitle: 'Return to previous agent sessions',
+    subtitle: 'Return to previous agent work',
     icon: 'sessions',
     keywords: ['archive', 'resume', 'history', 'completed', 'failed'],
   },

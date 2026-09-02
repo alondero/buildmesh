@@ -21,6 +21,7 @@ import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { openProbeDestination } from './helpers/openProbeDestination';
 // Direct wrapper access for the IPC-contract block below.
 import {
   listCircuitsWithRuns,
@@ -133,13 +134,6 @@ function mockBackend(overrides: {
   });
 }
 
-async function openCircuitsTab() {
-  // Open the destination through the store first (#1375: no rail to click),
-  // then render so the panel mounts already open on Circuits.
-  useUIStore.getState().openProbeTab('circuits');
-  render(<ProbePanel />);
-}
-
 beforeEach(() => {
   useMeshStore.setState({
     meshes: [MESH],
@@ -158,7 +152,7 @@ beforeEach(() => {
 describe('CircuitsProbeTab', () => {
   it('lists circuits with their run ledger', async () => {
     mockBackend();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     expect(await screen.findByText('nightly-sweep')).toBeTruthy();
     // Run state renders in the humanised vocabulary (#1468); the raw DB
@@ -175,7 +169,7 @@ describe('CircuitsProbeTab', () => {
   it('New Circuit creates the skeleton and opens the canvas editor (#1209)', async () => {
     mockBackend();
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     await user.type(await screen.findByTestId('circuit-name-input'), 'review-bot');
     await user.click(screen.getByTestId('circuit-create-button'));
@@ -201,7 +195,7 @@ describe('CircuitsProbeTab', () => {
   it('creates a GitHub-labelled circuit with its trigger label (issue #1208)', async () => {
     mockBackend();
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     await user.type(await screen.findByTestId('circuit-name-input'), 'issue-runner');
     await user.selectOptions(screen.getByTestId('circuit-trigger-select'), 'github_issue_label');
@@ -224,7 +218,7 @@ describe('CircuitsProbeTab', () => {
   it('creates the issue-driven Autopilot review blueprint with two agent slots', async () => {
     mockBackend();
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     await user.type(await screen.findByTestId('circuit-name-input'), 'autopilot-review');
     await user.selectOptions(
@@ -252,7 +246,7 @@ describe('CircuitsProbeTab', () => {
   it('Edit Flow opens the canvas editor for that circuit (#1209)', async () => {
     mockBackend();
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     fireEvent.click(await screen.findByTestId('circuit-edit-flow-7'));
     expect(useUIStore.getState().activeCircuitEditorId).toBe(7);
@@ -261,7 +255,7 @@ describe('CircuitsProbeTab', () => {
   it('Trigger Now mints a manual run', async () => {
     mockBackend();
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     await user.click(await screen.findByTestId('circuit-trigger-7'));
     await waitFor(() => {
@@ -272,7 +266,7 @@ describe('CircuitsProbeTab', () => {
   it('Trigger Now stays available on a disabled draft circuit', async () => {
     mockBackend({ circuits: [{ ...CIRCUIT, enabled: false }] });
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     const trigger = (await screen.findByTestId('circuit-trigger-7')) as HTMLButtonElement;
     expect(trigger.disabled).toBe(false);
@@ -285,7 +279,7 @@ describe('CircuitsProbeTab', () => {
   it('toggling enable writes the flag', async () => {
     mockBackend();
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     const toggle = (await screen.findByTestId('circuit-enabled-7')) as HTMLInputElement;
     expect(toggle.checked).toBe(true);
@@ -301,7 +295,7 @@ describe('CircuitsProbeTab', () => {
   it('deletes a circuit', async () => {
     mockBackend();
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     await user.click(await screen.findByTestId('circuit-delete-7'));
     await waitFor(() => {
@@ -311,7 +305,7 @@ describe('CircuitsProbeTab', () => {
 
   it('shows the empty state when no circuits exist', async () => {
     mockBackend({ circuits: [], runs: [] });
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     expect(await screen.findByText('No circuits yet')).toBeTruthy();
   });
@@ -338,7 +332,7 @@ describe('CircuitsProbeTab', () => {
     };
     mockBackend({ runs: [RUN_BLOCKED] });
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     expect(
       await screen.findByTestId('blocked-badge-15-approval'),
@@ -359,7 +353,7 @@ describe('CircuitsProbeTab', () => {
     };
     mockBackend({ runs: [RUN_RUNNING, RUN_PAUSED] });
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     await user.click(await screen.findByTestId('run-pause-12'));
     await waitFor(() => {
@@ -427,7 +421,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       ),
     };
     mockBackend({ runs: [RUN_LONG] });
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     // A live run opens by default — the diagnostic you came for is visible.
     const timeline = await screen.findByTestId('run-steps-20');
@@ -469,7 +463,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       circuits: [{ ...CIRCUIT, concurrency_limit: 1 }],
       runs: [RUN_QUEUED, RUN_HOGGING],
     });
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     const activity = await screen.findByTestId('run-activity-21');
     expect(activity.textContent).toContain('Queued');
@@ -487,7 +481,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       steps: [step({ node_id: 'implementer', status: 'pending_slot' })],
     };
     mockBackend({ circuits: [{ ...CIRCUIT, concurrency_limit: 2 }], runs: [RUN_QUEUED] });
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     expect((await screen.findByTestId('run-reason-23')).textContent).toContain(
       'waiting on a mesh agent slot'
@@ -507,7 +501,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     };
     mockBackend({ runs: [RUN_BLOCKED] });
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     const activity = await screen.findByTestId('run-activity-24');
     expect(activity.textContent).toContain('Waiting for approval');
@@ -547,7 +541,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     };
     mockBackend({ runs: [RUN_FAILED] });
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     // Terminal runs collapse by default, but a failure is never hidden.
     const collapsedError = await screen.findByTestId('run-error-25');
@@ -590,7 +584,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       ],
     };
     mockBackend({ runs: [RUN_RETRIED] });
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     const row = await screen.findByTestId('run-step-26-review_classifier');
     expect(row.getAttribute('data-step-status')).toBe('completed');
@@ -605,7 +599,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
   it('opens live runs, collapses terminal ones, and honours a manual toggle', async () => {
     mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
     const user = userEvent.setup();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     // Run 12 is running → open. Run 11 completed → collapsed.
     await waitFor(() => {
@@ -626,7 +620,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
   it('keeps the disclosure control accessible', async () => {
     mockBackend({ runs: [RUN_DONE] });
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     const toggle = await screen.findByTestId('run-toggle-11');
     expect(toggle.tagName).toBe('BUTTON');
@@ -699,7 +693,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
   it('gives the body exactly one scroll owner and no sideways escape', async () => {
     mockBackend();
-    await openCircuitsTab();
+    await openProbeDestination('circuits');
 
     const root = await screen.findByTestId('circuits-probe-tab');
     const body = screen.getByTestId('circuits-probe-body');
