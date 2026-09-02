@@ -7,8 +7,9 @@ import { seedAgentNodes } from './helpers/seedAgentNodes';
  * the field surface that must stay, and the surface that must NOT come
  * back when we delete the legacy drawer.
  *
- * Rendering strategy: mount the full `ProbePanel` and click into the
- * properties tab, so the test also covers the routing wiring in
+ * Rendering strategy: mount the full `ProbePanel` with the properties
+ * destination opened via `openProbeTab` (the post-#1375 on-demand entry
+ * point), so the test also covers the routing wiring in
  * `ProbePanel.tsx` (otherwise the routing test in `probe-panel.test.tsx`
  * would have to know the tab's internal structure).
  */
@@ -195,9 +196,10 @@ function mockBackend() {
 }
 
 async function openPropertiesTab() {
-  const user = userEvent.setup();
+  // Open the destination through the store first (#1375: no rail to click),
+  // then render so the panel mounts already open on Properties.
+  useUIStore.getState().openProbeTab('properties');
   render(<ProbePanel />);
-  await user.click(screen.getByRole('button', { name: 'Mesh Properties' }));
 }
 
 beforeEach(() => {
@@ -220,14 +222,18 @@ describe('MeshPropertiesTab (issue #375)', () => {
     // visible label + hint as one accessible name inside `<label>`
     // (e.g. "Model (Claude Code only)"); the open end lets the suffix
     // pass through so a future hint rewrite doesn't break the matcher.
+    // Every lookup is awaited: the #1375 open path no longer goes through
+    // a rail click whose async settle used to cover the form's load, so
+    // each control waits for its own mount (the Model select arrives with
+    // the async provider list).
     expect(await screen.findByLabelText('Name')).toBeTruthy();
-    expect(screen.getByLabelText('Directory')).toBeTruthy();
-    expect(screen.getByLabelText(/^Model\b/)).toBeTruthy();
-    expect(screen.getByLabelText(/^Effort\b/)).toBeTruthy();
-    expect(screen.getByLabelText('Default provider')).toBeTruthy();
-    expect(screen.getByLabelText('Project preset')).toBeTruthy();
-    expect(screen.getByLabelText(/^Build command/)).toBeTruthy();
-    expect(screen.getByLabelText(/^Run command/)).toBeTruthy();
+    expect(await screen.findByLabelText('Directory')).toBeTruthy();
+    expect(await screen.findByLabelText(/^Model\b/)).toBeTruthy();
+    expect(await screen.findByLabelText(/^Effort\b/)).toBeTruthy();
+    expect(await screen.findByLabelText('Default provider')).toBeTruthy();
+    expect(await screen.findByLabelText('Project preset')).toBeTruthy();
+    expect(await screen.findByLabelText(/^Build command/)).toBeTruthy();
+    expect(await screen.findByLabelText(/^Run command/)).toBeTruthy();
   });
 
   it('shows the active tab label in the probe header', async () => {
@@ -235,7 +241,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
     render(<ProbePanel />);
 
     const header = screen.getByRole('region', { name: 'Probe panel' });
-    expect(header.textContent).toContain('Mesh Properties');
+    expect(header.textContent).toContain('Project Settings');
   });
 
   it('excludes the worktree/branch maintenance fields', async () => {
@@ -261,19 +267,20 @@ describe('MeshPropertiesTab (issue #375)', () => {
     const name = (await screen.findByLabelText('Name')) as HTMLInputElement;
     expect(name.value).toBe('demo');
 
-    const model = screen.getByLabelText(/^Model\b/) as HTMLInputElement;
+    // Awaited lookups — see the note in the config-form test above.
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
     expect(model.value).toBe('opus-4');
 
-    const effort = screen.getByLabelText(/^Effort\b/) as HTMLSelectElement;
+    const effort = (await screen.findByLabelText(/^Effort\b/)) as HTMLSelectElement;
     expect(effort.value).toBe('high');
 
-    const build = screen.getByLabelText(/^Build command/) as HTMLInputElement;
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
     expect(build.value).toBe('npm run build');
 
-    const run = screen.getByLabelText(/^Run command/) as HTMLInputElement;
+    const run = (await screen.findByLabelText(/^Run command/)) as HTMLInputElement;
     expect(run.value).toBe('npm run dev');
 
-    const provider = screen.getByLabelText('Default provider') as HTMLSelectElement;
+    const provider = (await screen.findByLabelText('Default provider')) as HTMLSelectElement;
     expect(provider.value).toBe('anthropic');
   });
 

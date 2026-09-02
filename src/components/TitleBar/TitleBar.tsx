@@ -7,6 +7,7 @@ import { GridControls } from './GridControls';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';
+import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 
 /**
  * Bespoke window chrome for the frameless window (`decorations: false`).
@@ -15,6 +16,13 @@ import { useUIStore } from '../../stores/uiStore';
  * the lights are drawn by us. Drag-region placement (per-target, never
  * on buttons or SVGs) is the load-bearing detail; see the recipe in
  * `docs/knowledge-primer.md`.
+ *
+ * Issue #1375 moved navigation title-bar-first: a labelled "Search or
+ * open…" command field opens the Universal Command Omnibar (the palette
+ * is the primary way to reach destinations), and Usage — a high-frequency,
+ * host-global utility — gets its own labelled action instead of living
+ * behind icon-only Probe navigation. Neither shows data in the bar itself;
+ * they are entry points, not readouts.
  */
 
 const appWindow = getCurrentWindow();
@@ -57,6 +65,72 @@ function MobileIcon({ className }: IconProps) {
       <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
       <line x1="12" y1="18" x2="12" y2="18" />
     </Svg>
+  );
+}
+
+/** Lucide `search`. */
+function SearchIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </Svg>
+  );
+}
+
+/** Gauge glyph for the Usage action (semi-dial + needle), drawn locally so
+    the title bar keeps its icons self-contained like Settings/Mobile. */
+function UsageIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M4 19a8 8 0 1 1 16 0" />
+      <path d="M12 11v4" />
+      <path d="M12 19h.01" />
+    </Svg>
+  );
+}
+
+/** Issue #1375 — the title-bar navigation cluster. The labelled "Search or
+    open…" field is the global entry point to the command palette (views,
+    commands, nodes, issues, pull requests), and Usage is a separate labelled
+    action because it is a high-frequency, host-global utility. Both open
+    surfaces rather than displaying data inline: no aggregate Usage number is
+    shown in the bar. The kbd hint is read from the shortcut catalog (the
+    knowledge-primer's single source for display labels) so it can never
+    drift from the cheatsheet row. */
+function NavigationControls() {
+  // The `open-omnibar` catalog row (issue #1409) carries the platform chord
+  // the App.tsx Tauri binding actually registers.
+  const omnibarEntry = SHORTCUT_CATALOG.find((entry) => entry.action === 'open-omnibar');
+  const searchShortcut = omnibarEntry ? shortcutLabel(omnibarEntry) : '';
+  return (
+    <div className="flex items-center gap-1.5 px-2">
+      <button
+        type="button"
+        onClick={() => useUIStore.getState().openOmnibar('files')}
+        data-testid="titlebar-command-search"
+        aria-label="Search or open"
+        title="Search or open… (command palette)"
+        className="flex h-7 w-64 items-center gap-2 rounded-md border border-border-default bg-bg-base px-2.5 text-2xs text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
+      >
+        <SearchIcon className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
+        <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[9px] text-text-muted">
+          {searchShortcut}
+        </kbd>
+      </button>
+      <button
+        type="button"
+        onClick={() => useUIStore.getState().openProbeTab('usage')}
+        data-testid="titlebar-usage"
+        aria-label="Open Usage"
+        title="Open Usage (provider meters and limits)"
+        className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border-default px-2 text-2xs text-text-secondary transition-colors hover:bg-bg-card hover:text-text-primary"
+      >
+        <UsageIcon className="h-3.5 w-3.5 shrink-0" />
+        <span>Usage</span>
+      </button>
+    </div>
   );
 }
 
@@ -256,6 +330,12 @@ export function TitleBar() {
         <div className="flex items-center">
           <ViewModeSwitcher />
         </div>
+
+        {/* Issue #1375 — title-bar-first navigation: the labelled command
+            field and the Usage action. Non-draggable (the header carries
+            `data-tauri-drag-region`, never this cluster) so clicks don't
+            grab the window. */}
+        <NavigationControls />
 
         {/* Drag-region spacer — the "empty" part of the strip the user grabs
             to move the window; grows to push the right-side controls over. */}

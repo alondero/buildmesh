@@ -2,8 +2,9 @@
  * Tests for the Autopilot Probe tab — wayfinder #990, ticket #994.
  *
  * Strategy mirrors `mesh-properties-tab.test.tsx`: mount the full
- * `ProbePanel`, click the new tab's activity-rail button, then assert
- * on the rendered form and on the IPC calls the tab fires. The mesh
+ * `ProbePanel` with the Autopilot destination opened via `openProbeTab`
+ * (the post-#1375 on-demand entry point), then assert on the rendered
+ * form and on the IPC calls the tab fires. The mesh
  * store is seeded directly, the `invoke` mock is wired per-test, and
  * the `MeshRow` fixture carries the full v30 surface (issue-driven
  * columns + the six looping columns) so the tab's load effect sees
@@ -176,10 +177,10 @@ function mockBackend(
 }
 
 async function openAutopilotTab() {
-  const user = userEvent.setup();
+  // Open the destination through the store first (#1375: no rail to click),
+  // then render so the panel mounts already open on Autopilot.
+  useUIStore.getState().openProbeTab('autopilot');
   render(<ProbePanel />);
-  // Activity-rail button — tooltip/label both resolve to "Autopilot".
-  await user.click(screen.getByRole('button', { name: 'Autopilot' }));
 }
 
 beforeEach(() => {
@@ -193,14 +194,13 @@ beforeEach(() => {
 });
 
 describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
-  it('mounts via the activity rail and shows the mode toggle (issue-driven by default)', async () => {
+  it('opens via openProbeTab and shows the mode toggle (issue-driven by default)', async () => {
     mockBackend(meshRow());
     await openAutopilotTab();
 
-    // The segmented control is always visible (both modes exist). The
-    // ticket's label "Autopilot" is on the rail button AND in the
-    // header, so the role lookup for the button is unambiguous.
-    expect(await screen.findByRole('button', { name: 'Autopilot' })).toBeTruthy();
+    // The segmented control is always visible (both modes exist). The old
+    // rail button carried the "Autopilot" name; with the rail gone (#1375)
+    // the header label and the mode-toggle buttons are the naming surface.
     expect(
       (await screen.findByRole('button', { name: 'Looping', pressed: false }))
     ).toBeTruthy();
@@ -527,14 +527,14 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
     expect(await screen.findByText(/Save failed: .*mock/i)).toBeTruthy();
   });
 
-  it('registers its rail button so the activity bar lands it cleanly', () => {
-    // Pure routing smoke test — the rest of the suite opens via the
-    // rail, but pinning "the rail exposes the label" here makes a
-    // future rename that drops a PROBE_TABS entry fail with an
-    // unambiguous error.
+  it('stays a registered inspector destination so openProbeTab lands it cleanly', () => {
+    // Pure routing smoke test — pinning the destination's ownership entry
+    // makes a future rename that drops the PROBE_TAB_DEFINITIONS entry fail
+    // with an unambiguous error.
     mockBackend(meshRow());
+    useUIStore.getState().openProbeTab('autopilot');
     render(<ProbePanel />);
-    expect(screen.getByRole('button', { name: 'Autopilot' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Probe panel' }).textContent).toContain('Autopilot');
   });
 });
 
@@ -720,8 +720,10 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
     // `get_autopilot_compatibility` follow-up call after every save,
     // so we assert via `toHaveBeenCalledWith` (not `Last`) — the
     // exact "last call" is now the compatibility refresh.
+    // The form loads asynchronously; the first control lookup awaits it
+    // (findBy*), after which the form is mounted for the rest of the test.
     await user.selectOptions(
-      screen.getByLabelText('Max concurrent autopilot nodes'),
+      await screen.findByLabelText('Max concurrent autopilot nodes'),
       '5'
     );
     await waitFor(() => {

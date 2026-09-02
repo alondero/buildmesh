@@ -130,20 +130,14 @@ function renderWithScratchpadOpen() {
 }
 
 describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
-  it('appears in the probe activity rail with the "Scratch Pad" accessible name', () => {
-    const user = userEvent.setup();
+  it('opens with the "Scratch Pad" accessible name via openProbeTab', () => {
+    // #1375: the rail is gone — the Notes destination opens through the
+    // store action driven by the palette / title bar / contextual entries,
+    // and the inspector header carries the visible label.
+    useUIStore.getState().openProbeTab('scratchpad');
     render(<ProbePanel />);
-    // The rail is icon-only (post-revamp VS Code idiom): the accessible
-    // name comes from the button's aria-label, and the glyph is an
-    // aria-hidden SVG — there is no visible caption to assert.
-    const button = screen.getByRole('button', { name: 'Scratch Pad' });
-    expect(button).toBeTruthy();
-    expect(button.getAttribute('title')).toBe('Scratch Pad');
-    // Clicking the activity-rail button opens the dock on this tab.
-    return user.click(button).then(() => {
-      const header = screen.getByRole('region', { name: 'Probe panel' });
-      expect(header.textContent).toContain('Scratch Pad');
-    });
+    const header = screen.getByRole('region', { name: 'Probe panel' });
+    expect(header.textContent).toContain('Scratch Pad');
   });
 
   it('loads the active mesh\'s scratch pad into the textarea on mount', async () => {

@@ -46,6 +46,7 @@ vi.mock('../../src/components/RemoteAccess/RemoteAccessModal', () => ({
 }));
 
 import { TitleBar } from '../../src/components/TitleBar/TitleBar';
+import { useUIStore } from '../../src/stores/uiStore';
 
 let resizeHandler: (() => void) | null = null;
 
@@ -64,14 +65,25 @@ beforeEach(() => {
     resizeHandler = cb;
     return Promise.resolve(() => {});
   });
+  useUIStore.setState({
+    omnibarOpen: false,
+    omnibarMode: 'files',
+    probeOpen: false,
+    probeTab: 'files',
+    activeDiffFile: null,
+    probeContextPins: {},
+  });
 });
 
 describe('TitleBar (bespoke window chrome)', () => {
   describe('spec shape', () => {
-    it('renders wordmark, view-mode toolbar, settings/remote icons and the three window controls', async () => {
+    it('renders wordmark, view-mode toolbar, navigation cluster, settings/remote icons and the three window controls', async () => {
       await renderTitleBar();
       expect(screen.getByAltText('Buildmesh')).toBeTruthy();
       expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
+      // Issue #1375 — labelled navigation cluster.
+      expect(screen.getByRole('button', { name: 'Search or open' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Open Usage' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Open settings' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Open remote access' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Minimize window' })).toBeTruthy();
@@ -88,7 +100,7 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(spacer.hasAttribute('data-tauri-drag-region')).toBe(true);
       // Buttons (and their glyphs) must stay the mousedown target — if any
       // carried the attribute, Tauri's drag script would eat the click.
-      for (const label of ['Open settings', 'Open remote access', 'Minimize window', 'Maximize window', 'Close window']) {
+      for (const label of ['Search or open', 'Open Usage', 'Open settings', 'Open remote access', 'Minimize window', 'Maximize window', 'Close window']) {
         const button = screen.getByRole('button', { name: label });
         expect(button.hasAttribute('data-tauri-drag-region')).toBe(false);
         expect(button.querySelector('[data-tauri-drag-region]')).toBeNull();
@@ -143,6 +155,24 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(screen.getByRole('dialog', { name: 'Remote access' })).toBeTruthy();
       fireEvent.click(screen.getByRole('button', { name: 'stub-close-remote' }));
       expect(screen.queryByRole('dialog')).toBeNull();
+    });
+  });
+
+  describe('navigation cluster (issue #1375)', () => {
+    it('the labelled search field opens the command palette in files mode', async () => {
+      await renderTitleBar();
+      expect(useUIStore.getState().omnibarOpen).toBe(false);
+      fireEvent.click(screen.getByRole('button', { name: 'Search or open' }));
+      expect(useUIStore.getState().omnibarOpen).toBe(true);
+      expect(useUIStore.getState().omnibarMode).toBe('files');
+    });
+
+    it('the Usage action opens the inspector on the host-global Usage destination', async () => {
+      await renderTitleBar();
+      expect(useUIStore.getState().probeOpen).toBe(false);
+      fireEvent.click(screen.getByRole('button', { name: 'Open Usage' }));
+      expect(useUIStore.getState().probeOpen).toBe(true);
+      expect(useUIStore.getState().probeTab).toBe('usage');
     });
   });
 });

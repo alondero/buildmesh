@@ -1,37 +1,29 @@
 /**
- * ProbePanel — the unified right-hand dock (issue #374, PRD #372).
+ * ProbePanel — the on-demand right-side inspector (issue #374, PRD #372;
+ * navigation model revised by issue #1375).
  *
- * Layout is two columns: a wide collapsible **body** on the left and a thin,
- * always-visible **activity rail** on the right edge. The rail holds one
- * icon per tab; clicking an icon opens the body to that tab, clicking the
- * already-active icon again collapses it (mirroring VS Code's side-panel
- * behaviour). Because the rail stays visible while collapsed, the panel can
- * always be reopened after the header's close button hides the body.
+ * Issue #1375 replaced the old always-visible activity rail with a
+ * title-bar-first navigation model: destinations are opened through the
+ * command palette ("Search or open…", Ctrl/Cmd+K), the title-bar Usage
+ * action, and contextual entries (sidebar menus, node headers). This
+ * component therefore renders **only while `probeOpen` is true** — when the
+ * inspector is closed, no rail, replacement sidebar, or always-visible Probe
+ * button remains, and the workspace regains the full width.
  *
  * The body width is **horizontally resizable** (issue #724) via a separator
  * handle on the body's left edge. Default 360px, clamped to [240, 720];
  * the chosen width persists across launches via localStorage. The bounds
- * are wider than the sidebar's [192, 480] so the dock can accommodate dense
- * file lists while the center workspace stays useful on common laptop
+ * are wider than the sidebar's [192, 480] so the inspector can accommodate
+ * dense file lists while the center workspace stays useful on common laptop
  * resolutions.
  *
- * Visual language (post-revamp)
- * -----------------------------
- * The rail is the modern icon-only idiom (VS Code / Linear): 48px wide,
- * one 36px glyph button per tab, no caption text — the tooltip + aria-label
- * carry the name. The active tab gets a soft cyan tint plus a 2px accent
- * indicator at the rail's left edge, so the open state reads at a glance
- * without nine stacked labels competing for attention. Tab icons come from
- * `probeIcons.tsx` (Lucide-style stroke SVGs) rather than emoji, whose
- * platform-dependent artwork clashed with the design tokens.
- *
- * The header pins the active tab's icon in a tinted chip next to its label,
- * with the explicit lens/subject and following-or-pinned mode visible so each
- * tab body stays free of redundant context chrome. Body content fades in on
- * tab switch (keyed remount), and the whole body slides in from the right
- * when the dock opens — both animations run through the design-token
- * keyframes in `App.css` and respect `prefers-reduced-motion` via the global
- * media query.
+ * The header pins the active destination's icon in a tinted chip next to its
+ * label, with the explicit lens/subject and following-or-pinned mode visible
+ * so each destination body stays free of redundant context chrome. Body
+ * content fades in on destination switch (keyed remount), and the whole body
+ * slides in from the right when the inspector opens — both animations run
+ * through the design-token keyframes in `App.css` and respect
+ * `prefers-reduced-motion` via the global media query.
  */
 
 import { useRef } from 'react';
@@ -76,7 +68,7 @@ import {
 type ProbeTabDef = ProbeTabDefinition & { tab: ProbeTab; icon: ProbeIcon };
 
 // Presentation owns icons; order and labels come from the explicit Probe
-// contract so a destination cannot enter the rail without an ownership entry.
+// contract so a destination cannot ship without an ownership entry.
 const PROBE_TAB_ICONS: Record<ProbeTab, ProbeIcon> = {
   files: FilesIcon,
   review: ReviewIcon,
@@ -119,7 +111,6 @@ function ContextPinIcon({ className = 'w-3.5 h-3.5' }: { className?: string }) {
 export function ProbePanel() {
   const probeOpen = useUIStore((s) => s.probeOpen);
   const probeTab = useUIStore((s) => s.probeTab);
-  const setProbeTab = useUIStore((s) => s.setProbeTab);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
   const pinProbeContext = useUIStore((s) => s.pinProbeContext);
   const clearProbeContextPin = useUIStore((s) => s.clearProbeContextPin);
@@ -139,24 +130,16 @@ export function ProbePanel() {
   // expansion into a single +8 step per render.
   const bodyWidthRef = useRef(bodyWidth);
   bodyWidthRef.current = bodyWidth;
-  // The dock header surfaces the destination's explicit lens and subject.
+  // The inspector header surfaces the destination's explicit lens and subject.
   // Unlike the old mesh-only subheading, this keeps Host usage from inheriting
   // a misleading mesh name and makes selection-following/pinned behavior
   // visible before a stateful action is taken.
   const context = useProbeContext();
 
-  // The "click active tab to collapse, click any tab to open" rule composes the
-  // store's two orthogonal primitives. Kept in the component so the store stays
-  // a dumb state container that other call sites can reuse without inheriting
-  // this widget's interaction semantics.
-  const handleTabClick = (tab: ProbeTab) => {
-    if (probeOpen && probeTab === tab) {
-      toggleProbe();
-      return;
-    }
-    setProbeTab(tab);
-    if (!probeOpen) toggleProbe();
-  };
+  // Issue #1375 — the inspector is fully on-demand: closed means GONE. There
+  // is no rail or always-visible button to reopen it; the palette, the
+  // title-bar Usage action, and contextual entries own reopening.
+  if (!probeOpen) return null;
 
   const activeDef = PROBE_TABS.find((t) => t.tab === probeTab) ?? PROBE_TABS[0];
   const ActiveIcon = activeDef.icon;
@@ -176,206 +159,168 @@ export function ProbePanel() {
   };
 
   return (
-    <div className="flex h-full shrink-0 bg-bg-surface">
-      {probeOpen && (
-        // Outer wrapper is `relative` but does NOT carry `overflow-hidden` —
-        // the handle's `-left-1` extension must reach into the gap with the
-        // center workspace to deliver the documented 10px hit zone. The
-        // inner section owns the overflow-hidden + the border so the dock's
-        // scroll content doesn't escape. (Same outer/inner split as the
-        // sidebar's resize handle.) The slide-in animation plays once per
-        // open; the rail never unmounts, so only the body animates.
-        <div
-          className="relative shrink-0 animate-slide-in-right"
-          style={{ width: bodyWidth }}
-        >
-          {/* Resize handle — issue #724. Sits on the LEFT edge of the body
-              (which is the inner edge of a right-side dock) and is keyboard-
-              accessible via the WAI-ARIA APG separator pattern (Arrow keys
-              step, Shift = 4× step, PageUp/Down = 10× step, Home/End jump
-              to min/max). The 10px hit zone (`w-2.5`) extends 4px into the
-              gap with the center workspace via `-left-1`; the 2px visible
-              line (`after:w-0.5`) is centred at the panel's actual border
-              so the affordance reads as part of the dock. Reads the latest
-              width through `bodyWidthRef` (not the closed-over state) so
-              auto-repeat keydowns see the post-commit value on the next
-              event — mirrors useResizable's valueRef pattern. */}
-          <div
-            onMouseDown={handleMouseDown}
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize probe panel"
-            aria-valuenow={bodyWidth}
-            aria-valuemin={PROBE_PANEL_BOUNDS.MIN_WIDTH}
-            aria-valuemax={PROBE_PANEL_BOUNDS.MAX_WIDTH}
-            tabIndex={0}
-            onKeyDown={(e) => {
-              // Drag-LEFT grows the panel (handle tracks cursor, panel's
-              // right edge is fixed by the activity rail — see useProbeResize
-              // for the geometry). Read the latest width through the ref
-              // so auto-repeat doesn't collapse rapid presses into one
-              // commit. setWidth clamps internally to PROBE_PANEL_BOUNDS.
-              const current = bodyWidthRef.current;
-              const min = PROBE_PANEL_BOUNDS.MIN_WIDTH;
-              const max = PROBE_PANEL_BOUNDS.MAX_WIDTH;
-              const small = e.shiftKey ? 32 : 8;
-              const large = e.shiftKey ? max - min : 80;
-              let next: number | null = null;
-              switch (e.key) {
-                case 'ArrowLeft':  next = Math.min(max, current + small); break;
-                case 'ArrowRight': next = Math.max(min, current - small); break;
-                case 'PageUp':     next = Math.min(max, current + large); break;
-                case 'PageDown':   next = Math.max(min, current - large); break;
-                case 'Home':       next = max; break;
-                case 'End':        next = min; break;
-              }
-              if (next !== null) {
-                setBodyWidth(next);
-                e.preventDefault();
-              }
-            }}
-            className={`absolute top-0 -left-1 w-2.5 h-full cursor-col-resize z-10 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-cyan after:absolute after:inset-y-0 after:left-1 after:w-0.5 after:transition-colors ${
-              isResizing ? 'after:bg-accent-cyan/60' : 'after:bg-transparent hover:after:bg-accent-cyan/40'
-            }`}
-          />
+    // Outer wrapper is `relative` but does NOT carry `overflow-hidden` —
+    // the handle's `-left-1` extension must reach into the gap with the
+    // center workspace to deliver the documented 10px hit zone. The
+    // inner section owns the overflow-hidden + the border so the dock's
+    // scroll content doesn't escape. (Same outer/inner split as the
+    // sidebar's resize handle.) The slide-in animation plays once per
+    // open; since the whole inspector unmounts on close, nothing else
+    // lingers in the layout.
+    <div
+      className="relative h-full shrink-0 animate-slide-in-right"
+      style={{ width: bodyWidth }}
+    >
+      {/* Resize handle — issue #724. Sits on the LEFT edge of the body
+          (which is the inner edge of a right-side inspector) and is
+          keyboard-accessible via the WAI-ARIA APG separator pattern (Arrow
+          keys step, Shift = 4× step, PageUp/Down = 10× step, Home/End jump
+          to min/max). The 10px hit zone (`w-2.5`) extends 4px into the
+          gap with the center workspace via `-left-1`; the 2px visible
+          line (`after:w-0.5`) is centred at the panel's actual border
+          so the affordance reads as part of the dock. Reads the latest
+          width through `bodyWidthRef` (not the closed-over state) so
+          auto-repeat keydowns see the post-commit value on the next
+          event — mirrors useResizable's valueRef pattern. */}
+      <div
+        onMouseDown={handleMouseDown}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize probe panel"
+        aria-valuenow={bodyWidth}
+        aria-valuemin={PROBE_PANEL_BOUNDS.MIN_WIDTH}
+        aria-valuemax={PROBE_PANEL_BOUNDS.MAX_WIDTH}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          // Drag-LEFT grows the panel (handle tracks cursor; the panel's
+          // right edge is the window edge — see useProbeResize for the
+          // geometry). Read the latest width through the ref so
+          // auto-repeat doesn't collapse rapid presses into one commit.
+          // setWidth clamps internally to PROBE_PANEL_BOUNDS.
+          const current = bodyWidthRef.current;
+          const min = PROBE_PANEL_BOUNDS.MIN_WIDTH;
+          const max = PROBE_PANEL_BOUNDS.MAX_WIDTH;
+          const small = e.shiftKey ? 32 : 8;
+          const large = e.shiftKey ? max - min : 80;
+          let next: number | null = null;
+          switch (e.key) {
+            case 'ArrowLeft':  next = Math.min(max, current + small); break;
+            case 'ArrowRight': next = Math.max(min, current - small); break;
+            case 'PageUp':     next = Math.min(max, current + large); break;
+            case 'PageDown':   next = Math.max(min, current - large); break;
+            case 'Home':       next = max; break;
+            case 'End':        next = min; break;
+          }
+          if (next !== null) {
+            setBodyWidth(next);
+            e.preventDefault();
+          }
+        }}
+        className={`absolute top-0 -left-1 w-2.5 h-full cursor-col-resize z-10 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-cyan after:absolute after:inset-y-0 after:left-1 after:w-0.5 after:transition-colors ${
+          isResizing ? 'after:bg-accent-cyan/60' : 'after:bg-transparent hover:after:bg-accent-cyan/40'
+        }`}
+      />
 
-          <section
-            role="region"
-            aria-label="Probe panel"
-            className="flex flex-col h-full w-full overflow-hidden border-l border-border-subtle"
-          >
-          {/* Header — active tab icon chip + label (title) + explicit lens /
-              subject + following/pinned mode + collapse button. The subject
-              line replaces the directory-path strip the Issues / PRs tabs
-              used to render individually, so every destination makes its
-              ownership visible in the same place. */}
-          <div
-            className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
-          >
-            <div className="flex items-center gap-2.5 min-w-0 flex-1">
-              <span
-                aria-hidden="true"
-                className="flex items-center justify-center w-7 h-7 rounded-md bg-accent-cyan/10 text-accent-cyan shrink-0"
-              >
-                <ActiveIcon className="w-4 h-4" />
+      <section
+        role="region"
+        aria-label="Probe panel"
+        className="flex flex-col h-full w-full overflow-hidden border-l border-border-subtle"
+      >
+        {/* Header — active destination icon chip + label (title) + explicit
+            lens/subject + following/pinned mode + close button. The subject
+            line replaces the directory-path strip the Issues / PRs tabs
+            used to render individually, so every destination makes its
+            ownership visible in the same place. */}
+        <div
+          className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
+        >
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+            <span
+              aria-hidden="true"
+              className="flex items-center justify-center w-7 h-7 rounded-md bg-accent-cyan/10 text-accent-cyan shrink-0"
+            >
+              <ActiveIcon className="w-4 h-4" />
+            </span>
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="text-sm text-text-primary font-medium truncate">
+                {activeDef.label}
               </span>
-              <div className="flex flex-col min-w-0 flex-1">
-                <span className="text-sm text-text-primary font-medium truncate">
-                  {activeDef.label}
-                </span>
-                <div
-                  data-testid="probe-context-subject"
-                  className="flex items-center gap-1 min-w-0 text-xs text-text-secondary"
-                  title={context.subjectLabel}
-                >
-                  <span className="truncate min-w-0">{context.subjectLabel}</span>
-                  {context.detailLabel && (
-                    <span className="truncate min-w-0 text-text-muted">
-                      · {context.detailLabel}
-                    </span>
-                  )}
-                </div>
-                <span
-                  data-testid="probe-context-mode"
-                  className="text-2xs text-text-muted/80 truncate"
-                >
-                  {contextModeLabel}
-                </span>
-              </div>
-            </div>
-            {context.canPin && (
-              <button
-                type="button"
-                onClick={handlePinToggle}
-                data-testid="probe-context-pin"
-                aria-pressed={context.mode === 'pinned'}
-                className={`p-1.5 rounded-md transition-colors shrink-0 ${
-                  context.mode === 'pinned'
-                    ? 'text-accent-cyan bg-accent-cyan/10'
-                    : 'text-text-muted hover:text-text-primary hover:bg-bg-card'
-                }`}
-                title={context.mode === 'pinned' ? 'Unpin context' : 'Pin context'}
-                aria-label={context.mode === 'pinned' ? 'Unpin context' : 'Pin context'}
+              <div
+                data-testid="probe-context-subject"
+                className="flex items-center gap-1 min-w-0 text-xs text-text-secondary"
+                title={context.subjectLabel}
               >
-                <ContextPinIcon />
-              </button>
-            )}
+                <span className="truncate min-w-0">{context.subjectLabel}</span>
+                {context.detailLabel && (
+                  <span className="truncate min-w-0 text-text-muted">
+                    · {context.detailLabel}
+                  </span>
+                )}
+              </div>
+              <span
+                data-testid="probe-context-mode"
+                className="text-2xs text-text-muted/80 truncate"
+              >
+                {contextModeLabel}
+              </span>
+            </div>
+          </div>
+          {context.canPin && (
             <button
               type="button"
-              onClick={toggleProbe}
-              className="p-1.5 rounded-md text-text-muted hover:text-text-primary hover:bg-bg-card transition-colors shrink-0"
-              title="Close panel"
-              aria-label="Close panel"
+              onClick={handlePinToggle}
+              data-testid="probe-context-pin"
+              aria-pressed={context.mode === 'pinned'}
+              className={`p-1.5 rounded-md transition-colors shrink-0 ${
+                context.mode === 'pinned'
+                  ? 'text-accent-cyan bg-accent-cyan/10'
+                  : 'text-text-muted hover:text-text-primary hover:bg-bg-card'
+              }`}
+              title={context.mode === 'pinned' ? 'Unpin context' : 'Pin context'}
+              aria-label={context.mode === 'pinned' ? 'Unpin context' : 'Pin context'}
             >
-              {/* Lucide `panel-right-close` — reads as "collapse the dock"
-                  rather than "dismiss a dialog", matching the reopenable
-                  rail semantics. */}
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <rect width="18" height="18" x="3" y="3" rx="2" />
-                <path d="M15 3v18" />
-                <path d="m10 9-3 3 3 3" />
-              </svg>
+              <ContextPinIcon />
             </button>
-          </div>
-
-          {/* Body — the inner wrapper is keyed by tab so switching tabs
-              remounts the content and replays the fade-in once per tab.
-              The wrapper preserves the h-full/flex chain the tab roots
-              rely on for their internal `flex-1 overflow` regions. */}
-          <div className="flex-1 overflow-y-auto">
-            <div key={probeTab} className="animate-fade-in h-full flex flex-col">
-              <ProbeTabBody tab={probeTab} />
-            </div>
-          </div>
-          </section>
+          )}
+          <button
+            type="button"
+            onClick={toggleProbe}
+            className="p-1.5 rounded-md text-text-muted hover:text-text-primary hover:bg-bg-card transition-colors shrink-0"
+            title="Close panel"
+            aria-label="Close panel"
+          >
+            {/* Lucide `panel-right-close` — reads as "collapse the dock"
+                rather than "dismiss a dialog". With the rail gone the close
+                fully hides the inspector; the palette, the title-bar Usage
+                action, and contextual entries reopen it (issue #1375). */}
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect width="18" height="18" x="3" y="3" rx="2" />
+              <path d="M15 3v18" />
+              <path d="m10 9-3 3 3 3" />
+            </svg>
+          </button>
         </div>
-      )}
 
-      {/* Activity rail — always visible so the dock can be reopened after
-          close. Icon-only (VS Code idiom): the name lives on the tooltip
-          and aria-label, keeping the 48px rail calm. The active tab shows
-          a soft tint + a 2px indicator at the rail's left edge. */}
-      <nav
-        aria-label="Probe tabs"
-        className="flex flex-col w-12 shrink-0 py-2 gap-1 border-l border-border-subtle bg-bg-surface"
-      >
-        {PROBE_TABS.map(({ tab, icon: Icon, label, tooltip }) => {
-          const isActive = probeOpen && probeTab === tab;
-          return (
-            <div key={tab} className="relative flex justify-center">
-              <span
-                aria-hidden="true"
-                className={`absolute left-0 top-1/2 -translate-y-1/2 w-0.5 rounded-r-full bg-accent-cyan transition-all duration-150 ${
-                  isActive ? 'h-5 opacity-100' : 'h-0 opacity-0'
-                }`}
-              />
-              <button
-                type="button"
-                onClick={() => handleTabClick(tab)}
-                aria-label={tooltip ?? label}
-                aria-pressed={isActive}
-                title={tooltip ?? label}
-                className={`flex items-center justify-center w-9 h-9 rounded-lg transition-colors active:scale-95 ${
-                  isActive
-                    ? 'text-accent-cyan bg-accent-cyan/10'
-                    : 'text-text-secondary hover:text-text-primary hover:bg-bg-card'
-                }`}
-              >
-                <Icon className="w-[18px] h-[18px]" />
-              </button>
-            </div>
-          );
-        })}
-      </nav>
+        {/* Body — the inner wrapper is keyed by destination so switching
+            destinations remounts the content and replays the fade-in once
+            per destination. The wrapper preserves the h-full/flex chain the
+            destination roots rely on for their internal `flex-1 overflow`
+            regions. */}
+        <div className="flex-1 overflow-y-auto">
+          <div key={probeTab} className="animate-fade-in h-full flex flex-col">
+            <ProbeTabBody tab={probeTab} />
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

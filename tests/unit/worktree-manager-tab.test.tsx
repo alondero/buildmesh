@@ -7,11 +7,11 @@
  * collapsible header (the probe already provides the surface chrome) and
  * the always-visible one-liner (the probe header shows the tab name).
  *
- * Rendering strategy: mount the full `ProbePanel` and click the 🌳 tab
- * button, the same way the existing `mesh-properties-tab.test.tsx` does
- * for âš™ï¸. This keeps the routing wiring in `ProbePanel.tsx` covered by
- * the same suite — a separate routing test would have to know the tab's
- * internal structure.
+ * Rendering strategy: mount the full `ProbePanel` with the worktrees
+ * destination opened via `openProbeTab`, the same way the existing
+ * `mesh-properties-tab.test.tsx` does. This keeps the routing wiring in
+ * `ProbePanel.tsx` covered by the same suite — a separate routing test
+ * would have to know the tab's internal structure.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -235,9 +235,10 @@ function mockBackend(
 }
 
 async function openWorktreesTab() {
-  const user = userEvent.setup();
+  // Open the destination through the store first (#1375: no rail to click),
+  // then render so the panel mounts already open on Worktrees.
+  useUIStore.getState().openProbeTab('worktrees');
   render(<ProbePanel />);
-  await user.click(screen.getByRole('button', { name: 'Worktree Manager' }));
 }
 
 beforeEach(() => {
@@ -566,11 +567,21 @@ describe('ProbePanel routing for the 🌳 tab (issue #377)', () => {
     expect(screen.queryByText("This tab's content is coming soon.")).toBeNull();
   });
 
-  it('the 🌳 tab in the activity bar opens the panel on the worktrees tab', () => {
+  it('openProbeTab opens the panel on the worktrees destination', () => {
+    // #1375: the rail is gone — destinations open through the store action
+    // driven by the palette, title bar, and contextual entries. Closed first
+    // proves the panel renders nothing; reopened via the store proves the
+    // same mount path the real entry points use.
+    useUIStore.setState({ probeOpen: false, probeTab: 'files' });
+    const closed = render(<ProbePanel />);
+    expect(screen.queryByRole('region', { name: 'Probe panel' })).toBeNull();
+    closed.unmount();
+
+    useUIStore.getState().openProbeTab('worktrees');
     render(<ProbePanel />);
-    fireEvent.click(screen.getByRole('button', { name: 'Worktree Manager' }));
     expect(useUIStore.getState().probeOpen).toBe(true);
     expect(useUIStore.getState().probeTab).toBe('worktrees');
+    expect(screen.getByRole('region', { name: 'Probe panel' })).toBeTruthy();
   });
 });
 

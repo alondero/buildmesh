@@ -3,7 +3,8 @@
  * skeleton #1206).
  *
  * Strategy mirrors `autopilot-probe-tab.test.tsx`: mount the full
- * `ProbePanel`, click the activity-rail button, then assert on rendered
+ * `ProbePanel` with the Circuits destination opened via `openProbeTab`
+ * (the post-#1375 on-demand entry point), then assert on rendered
  * structure and the exact IPC contract the tab fires. Wire shapes come
  * from `src/types/generated/` so drift between the Rust structs and
  * these fixtures is caught at compile time.
@@ -133,9 +134,10 @@ function mockBackend(overrides: {
 }
 
 async function openCircuitsTab() {
-  const user = userEvent.setup();
+  // Open the destination through the store first (#1375: no rail to click),
+  // then render so the panel mounts already open on Circuits.
+  useUIStore.getState().openProbeTab('circuits');
   render(<ProbePanel />);
-  await user.click(screen.getByRole('button', { name: 'Circuits' }));
 }
 
 beforeEach(() => {
@@ -655,8 +657,8 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
         steps: [step({ node_id: 'implementer', status: 'running' })],
       };
       mockBackend({ runs: [RUN_LIVE] });
+      useUIStore.getState().openProbeTab('circuits');
       render(<ProbePanel />);
-      fireEvent.click(screen.getByRole('button', { name: 'Circuits' }));
       // Flush the load IPC without letting wall-clock time move.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
@@ -683,8 +685,8 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     vi.useFakeTimers();
     try {
       mockBackend({ runs: [RUN_DONE] });
+      useUIStore.getState().openProbeTab('circuits');
       render(<ProbePanel />);
-      fireEvent.click(screen.getByRole('button', { name: 'Circuits' }));
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });

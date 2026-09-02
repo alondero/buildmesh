@@ -117,9 +117,10 @@ function mockBackend() {
 }
 
 async function openCircuitsTab() {
-  const user = userEvent.setup();
+  // Open the destination through the store first (#1375: no rail to click),
+  // then render so the panel mounts already open on Circuits.
+  useUIStore.getState().openProbeTab('circuits');
   render(<ProbePanel />);
-  await user.click(screen.getByRole('button', { name: 'Circuits' }));
 }
 
 beforeEach(() => {

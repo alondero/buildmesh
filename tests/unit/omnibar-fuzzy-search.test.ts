@@ -631,7 +631,12 @@ describe('indexCommands (issue #1410 §1)', () => {
 
   it('matches by label and by keyword alias', () => {
     const items = indexCommands(APP_COMMANDS);
-    expect(searchItems(items, 'settings')).toHaveLength(1);
+    // Both "Open Settings" and the "Open Project Settings" destination match
+    // 'settings'; the dedicated command's shorter, exact-domain label wins
+    // the top slot (same precedence rule as the theme case below).
+    const settings = searchItems(items, 'settings');
+    expect(settings.length).toBeGreaterThanOrEqual(1);
+    expect(settings[0].item.id).toBe('command:open-settings');
     expect(searchItems(items, 'preferences')).toHaveLength(1);
     // 'theme' is a gapped subsequence of 'Switch view: Mesh Grid' too, so
     // assert the dedicated command wins the top slot rather than the count.
