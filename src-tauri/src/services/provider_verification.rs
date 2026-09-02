@@ -675,9 +675,15 @@ mod tests {
     /// "routing inputs changed" message that masks the real state.
     #[test]
     fn stale_after_cli_update_reports_the_cli_change_not_routing() {
-        let tmp = std::env::temp_dir().join(format!("buildmesh-pv-test-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        preferences::init_for_tests(tmp.clone());
+        // `tempfile::tempdir()` returns a unique directory per call AND
+        // cleans up on `Drop` — much safer than the previous
+        // `std::env::temp_dir().join(format!("buildmesh-pv-test-{pid}"))`,
+        // which collided across parallel tests running under the same
+        // process ID (round-4 review). The `TempDir` binding must stay
+        // alive until the test ends, so we hold it until the explicit
+        // remove in the cleanup epilogue.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        preferences::init_for_tests(tmp.path().to_path_buf());
 
         let pairing = ProviderPairing {
             harness_id: "codex".into(),
@@ -759,10 +765,11 @@ mod tests {
     fn incompatible_capability_record_keeps_its_reason_instead_of_stale_mask() {
         // Issue #1386: no `PREFS_TEST_LOCK` / `test_state_guard` needed —
         // per-thread storage isolates this test from any concurrent sibling.
-        let tmp =
-            std::env::temp_dir().join(format!("buildmesh-pv-test-2-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        preferences::init_for_tests(tmp.clone());
+        // Round-4 review: switch to `tempfile::tempdir()` (cleanup on
+        // Drop, unique path per call) instead of the hand-rolled path
+        // that collided across parallel tests under the same `pid`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        preferences::init_for_tests(tmp.path().to_path_buf());
 
         let pairing = ProviderPairing {
             harness_id: "codex".into(),
