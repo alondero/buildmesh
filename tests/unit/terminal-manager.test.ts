@@ -104,6 +104,24 @@ describe('TerminalManager', () => {
       });
     });
 
+    it('forwards a bracketed multiline paste as one PTY write', async () => {
+      const invokeSpy = vi.spyOn(await import('@tauri-apps/api/core'), 'invoke');
+      await terminalManager.getOrCreate(1);
+      invokeSpy.mockClear();
+      const instance = terminalManager.getInstance(1)!;
+      const onDataCallback = (instance.term as unknown as {
+        onData: ReturnType<typeof vi.fn>;
+      }).onData.mock.calls[0][0];
+      const paste = `\x1b[200~${'line of pasted content\r'.repeat(200)}\x1b[201~`;
+
+      onDataCallback(paste);
+
+      expect(invokeSpy.mock.calls).toEqual([[
+        'write_to_agent',
+        { sessionId: 1, data: paste },
+      ]]);
+    });
+
     it('sets up onResize handler that calls invoke', async () => {
       const invokeSpy = vi.spyOn(await import('@tauri-apps/api/core'), 'invoke');
       await terminalManager.getOrCreate(1);

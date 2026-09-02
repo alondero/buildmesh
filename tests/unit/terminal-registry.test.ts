@@ -7,9 +7,14 @@ const terminalTestState = vi.hoisted(() => ({
   latestTerminalOptions: undefined as {
     linkHandler?: { activate: (event: MouseEvent, text: string, range: unknown) => void };
   } | undefined,
+  resizeCallback: undefined as ResizeObserverCallback | undefined,
+  terminalResizeCallback: undefined as ((size: { cols: number; rows: number }) => void) | undefined,
 }));
 
 globalThis.ResizeObserver = class {
+  constructor(callback: ResizeObserverCallback) {
+    terminalTestState.resizeCallback = callback;
+  }
   observe() {}
   unobserve() {}
   disconnect() {}
@@ -57,7 +62,9 @@ vi.mock('@xterm/xterm', () => {
     write = vi.fn();
     onData = vi.fn();
     onTitleChange = vi.fn();
-    onResize = vi.fn();
+    onResize = vi.fn((callback: (size: { cols: number; rows: number }) => void) => {
+      terminalTestState.terminalResizeCallback = callback;
+    });
     open = vi.fn();
     dispose = vi.fn();
     focus = vi.fn();
@@ -104,7 +111,11 @@ vi.mock('@xterm/xterm', () => {
 
 vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
-    fit = vi.fn();
+    fit = vi.fn(() => {
+      // Real FitAddon.fit calls Terminal.resize when its proposed dimensions
+      // change, which fires Terminal.onResize and reaches resize_agent.
+      terminalTestState.terminalResizeCallback?.({ cols: 80, rows: 24 });
+    });
     dispose = vi.fn();
     proposeDimensions = vi.fn().mockReturnValue({ cols: 80, rows: 24 });
   }
@@ -161,6 +172,8 @@ describe('TerminalRegistry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     terminalTestState.latestTerminalOptions = undefined;
+    terminalTestState.resizeCallback = undefined;
+    terminalTestState.terminalResizeCallback = undefined;
     registry = new TerminalRegistry();
   });
 
@@ -265,6 +278,50 @@ describe('TerminalRegistry', () => {
 
     it('detach is safe for non-existent node', () => {
       expect(() => registry.detach(999)).not.toThrow();
+    });
+
+    it('coalesces a continuous container-resize burst into one terminal fit', async () => {
+      vi.useFakeTimers();
+      try {
+        const container = document.createElement('div');
+        const inst = await registry.attach(1, container);
+        vi.runOnlyPendingTimers();
+        vi.mocked(inst!.fitAddon.fit).mockClear();
+        vi.mocked(invoke).mockClear();
+
+        for (let i = 0; i < 20; i++) {
+          terminalTestState.resizeCallback!([], inst!.resizeObserver!);
+          // Model a drag that spans many animation frames. Every observation
+          // arrives before the 50 ms quiet window expires.
+          vi.advanceTimersByTime(25);
+        }
+
+        expect(inst!.fitAddon.fit).not.toHaveBeenCalled();
+        vi.runAllTimers();
+        expect(inst!.fitAddon.fit).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'resize_agent'))
+          .toEqual([['resize_agent', { sessionId: 1, rows: 24, cols: 80 }]]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancels a pending resize fit when the terminal detaches', async () => {
+      vi.useFakeTimers();
+      try {
+        const container = document.createElement('div');
+        const inst = await registry.attach(1, container);
+        vi.runOnlyPendingTimers();
+        vi.mocked(inst!.fitAddon.fit).mockClear();
+
+        terminalTestState.resizeCallback!([], inst!.resizeObserver!);
+        registry.detach(1);
+        vi.runAllTimers();
+
+        expect(inst!.fitAddon.fit).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
