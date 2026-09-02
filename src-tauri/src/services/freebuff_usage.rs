@@ -339,46 +339,151 @@ pub(crate) fn freebuff_usage_with(
         .header("User-Agent", FREEBUFF_USER_AGENT)
         .send()
     {
-        Ok(response) if response.status().as_u16() == 401 || response.status().as_u16() == 403 => {
-            // 401 (Unauthorized) AND 403 (Forbidden / revoked session)
-            // both signal "the credential is bad" — surface as
-            // logged-out so the UI can prompt the user to re-login
-            // (`<UsagePanel>` renders the error string verbatim).
-            // Matches `kimi_usage`'s 401/403 branch in `services/usage.rs`.
-            return logged_out(
-                "freebuff",
-                "Freebuff session expired — run 'freebuff login' to log in".to_string(),
-            );
-        }
-        Ok(response) if response.status().as_u16() == 429 => {
-            return unavailable(
-                "freebuff",
-                "Rate limited — usage data temporarily unavailable".to_string(),
-            );
-        }
-        Ok(response) if !response.status().is_success() => {
-            let code = response.status().as_u16();
-            let body = response.text().unwrap_or_default();
-            let detail = clamp_error_body(&body);
-            return unavailable("freebuff", format!("API error {code}: {detail}"));
-        }
         Ok(response) => response,
         Err(error) => return unavailable("freebuff", format!("Request failed: {error}")),
     };
+    let status = response.status().as_u16();
     let body = match response.text() {
         Ok(body) => body,
         Err(error) => return unavailable("freebuff", format!("Failed to read response: {error}")),
     };
-    match parse_freebuff_response(&body) {
-        Ok((windows, balance)) => ProviderUsage {
+
+    // Status classification is split so a WAF / CDN 403 (HTML body,
+    // unparseable envelope) cannot wipe the user's login state -- only a
+    // genuine 401 surfaces as `logged_out` on an unparseable body.
+    match classify_status(status, &body) {
+        StatusOutcome::Logout(msg) => logged_out("freebuff", msg),
+        StatusOutcome::Unavailable(msg) => unavailable("freebuff", msg),
+        StatusOutcome::EmptyCard => ProviderUsage {
             provider: "freebuff".to_string(),
             logged_in: true,
-            windows,
-            balance,
-            detail: None,
+            windows: vec![],
+            balance: None,
+            detail: Some("no active session".to_string()),
             error: None,
         },
-        Err(error) => unavailable("freebuff", format!("Failed to parse response: {error}")),
+        StatusOutcome::Parse => match parse_freebuff_response(&body) {
+            Ok((windows, balance)) => ProviderUsage {
+                provider: "freebuff".to_string(),
+                logged_in: true,
+                windows,
+                balance,
+                detail: None,
+                error: None,
+            },
+            Err(error) => unavailable("freebuff", format!("Failed to parse response: {}", error)),
+        },
+    }
+}
+
+/// Internal classification result for [`freebuff_usage_with`]. Kept
+/// private (not the cross-provider `StatusDecision`) because freebuff
+/// returns `(Vec<UsageWindow>, Option<BillingBalance>)` — its own
+/// shape, not the `(Vec<UsageWindow>, Option<String>)` shape that
+/// the cross-provider driver expects. The fetcher handles each
+/// variant inline.
+enum StatusOutcome {
+    Logout(String),
+    Unavailable(String),
+    /// 404 with the documented "no active session" body -- empty OR
+    /// `{"status":"none"}`. A generic 404 (HTML page, malformed JSON)
+    /// falls through to `Unavailable` so a retired upstream route
+    /// doesn't masquerade as a healthy empty session.
+    EmptyCard,
+    Parse,
+}
+
+/// Borrowed slice of the upstream error envelope. Deserialised in place
+/// (no heap allocation) so [`is_no_active_session`] and the auth-error
+/// classifiers inspect only the `status` field without allocating a
+/// full `serde_json::Value` AST. PR #1443 round-6 review item #2.
+#[derive(Deserialize)]
+struct StatusEnvelope<'a> {
+    #[serde(borrow)]
+    status: Option<&'a str>,
+}
+
+/// Is this 404 body actually a "no active session" reply? The upstream
+/// returns either an empty body or `{"status":"none"}` for the
+/// documented "no active session" state; anything else (HTML page,
+/// generic error JSON) is a routing failure and surfaces as
+/// `Unavailable("API error 404: ...")`. Zero heap allocations --
+/// borrows the `status` slice from `body`.
+fn is_no_active_session(body: &str) -> bool {
+    body.is_empty()
+        || serde_json::from_str::<StatusEnvelope>(body)
+            .is_ok_and(|e| e.status == Some("none"))
+}
+
+/// Classify 401 (Unauthorized). An unparseable body falls through to
+/// the generic "session expired" logout since 401 is genuinely a
+/// credential failure.
+fn classify_401_error(body: &str) -> StatusOutcome {
+    if let Ok(env) = serde_json::from_str::<StatusEnvelope>(body) {
+        if env.status == Some("banned") {
+            return StatusOutcome::Logout("Freebuff account suspended".to_string());
+        }
+    }
+    StatusOutcome::Logout(
+        "Freebuff session expired -- run 'freebuff login' to log in".to_string(),
+    )
+}
+
+/// Classify 403 (Forbidden). An unparseable body (WAF/CDN HTML page,
+/// Cloudflare challenge) surfaces as `Unavailable` rather than
+/// logging the user out -- the upstream hasn't actually informed us
+/// of a credential issue, just that something blocked the request.
+/// A valid JSON body with `{"status":"banned"}` IS a credential
+/// signal (the upstream is explicitly telling us the account is
+/// suspended) and logs the user out the same way a 401 + banned
+/// would. PR #1443 round-6 review item #4 -- align 403 banned with
+/// 401 banned rather than preserving login on a real account
+/// suspension.
+/// Default 403 surface -- WAF/CDN HTML block, malformed envelope, or
+/// envelope without a recognised `status` field. Extracted so the
+/// string lives in one place (PR #1443 round-6 review nitpick).
+fn forbidden_default() -> StatusOutcome {
+    StatusOutcome::Unavailable("Access forbidden (HTTP 403)".to_string())
+}
+
+fn classify_403_error(body: &str) -> StatusOutcome {
+    let Ok(env) = serde_json::from_str::<StatusEnvelope>(body) else {
+        return forbidden_default();
+    };
+    match env.status {
+        Some("banned") => StatusOutcome::Logout("Freebuff account suspended".to_string()),
+        Some("country_blocked") => StatusOutcome::Unavailable(
+            "Freebuff is not available in this region".to_string(),
+        ),
+        // Any other `status` value (recognised or absent) indicates the
+        // upstream actively rejected the request -- surface as
+        // Unavailable so the user can investigate without their login
+        // being wiped.
+        _ => forbidden_default(),
+    }
+}
+
+/// Single source of truth for HTTP status classification. PR #1443
+/// round-6 review item #6: 404 handling is self-contained in one
+/// arm so every status code reads top-to-bottom without mental
+/// back-tracking. `200..=299 => Parse` lives at the top for the
+/// common-path-first convention (round-6 review nitpick).
+fn classify_status(status: u16, body: &str) -> StatusOutcome {
+    match status {
+        200..=299 => StatusOutcome::Parse,
+        401 => classify_401_error(body),
+        403 => classify_403_error(body),
+        404 => {
+            if is_no_active_session(body) {
+                StatusOutcome::EmptyCard
+            } else {
+                StatusOutcome::Unavailable(format!("API error 404: {}", clamp_error_body(body)))
+            }
+        }
+        429 => StatusOutcome::Unavailable(
+            "Rate limited -- usage data temporarily unavailable".to_string(),
+        ),
+        s => StatusOutcome::Unavailable(format!("API error {s}: {}", clamp_error_body(body))),
     }
 }
 
@@ -820,17 +925,18 @@ mod tests {
     }
 
     #[test]
-    fn freebuff_usage_403_returns_logged_out() {
-        // 403 (Forbidden / revoked session) takes the same
-        // logged_out branch as 401 — explicit test so a future
-        // refactor that adds a separate 403 branch (e.g.
-        // region-disabled) doesn't accidentally collapse the
-        // user-visible copy.
+    fn freebuff_usage_403_with_unparseable_body_preserves_logged_in() {
+        // 403 with an unparseable body (HTML error page from a WAF
+        // / CDN, or an empty body) MUST NOT log the user out --
+        // doing so would wipe their login state on a Cloudflare
+        // block, which is the wrong UX (PR #1443 review round-4
+        // item #2). The fetcher treats unparseable 403 as
+        // `unavailable` and keeps `logged_in = true`.
         let dir = tempfile::tempdir().unwrap();
         let path = write_freebuff_credentials(
             dir.path(),
             r#"{
-                "authToken": "fb_revoked_token",
+                "authToken": "fb_token",
                 "fingerprintId": "fb_fp",
                 "email": "user@example.com"
             }"#,
@@ -842,7 +948,158 @@ mod tests {
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
         );
-        assert!(!usage.logged_in, "403 must flip to logged_out");
+        assert!(usage.logged_in, "403 with unparseable body must NOT log the user out");
+        assert_eq!(
+            usage.error.as_deref(),
+            Some("Access forbidden (HTTP 403)")
+        );
+    }
+
+    #[test]
+    fn freebuff_usage_403_with_country_blocked_body_preserves_logged_in() {
+        // 403 with the documented `{"status":"country_blocked"}` body
+        // -- the user IS logged in (token valid), just not available
+        // in this region. Surface as `unavailable`, not `logged_out`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_freebuff_credentials(
+            dir.path(),
+            r#"{
+                "authToken": "fb_token",
+                "fingerprintId": "fb_fp",
+                "email": "user@example.com"
+            }"#,
+        );
+        let port = spawn_loopback(1, |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string(r#"{"status":"country_blocked"}"#)
+                    .with_status_code(403),
+            );
+        });
+        let usage = freebuff_usage_with(
+            &one_candidate(&path),
+            &format!("http://127.0.0.1:{port}/usage"),
+        );
+        assert!(usage.logged_in);
+        assert_eq!(
+            usage.error.as_deref(),
+            Some("Freebuff is not available in this region")
+        );
+    }
+
+    #[test]
+    fn freebuff_usage_403_with_banned_body_logs_out() {
+        // 403 with a valid JSON `{"status":"banned"}` body -- the
+        // upstream IS actively informing us the account is suspended,
+        // NOT a WAF block (a Cloudflare HTML block fails JSON parsing
+        // and falls into the unparseable 403 arm). Log out so the
+        // user sees the suspension and re-authenticates -- mirror the
+        // 401 + banned behaviour. PR #1443 round-6 review item #4.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_freebuff_credentials(
+            dir.path(),
+            r#"{
+                "authToken": "fb_token",
+                "fingerprintId": "fb_fp",
+                "email": "user@example.com"
+            }"#,
+        );
+        let port = spawn_loopback(1, |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string(r#"{"status":"banned"}"#)
+                    .with_status_code(403),
+            );
+        });
+        let usage = freebuff_usage_with(
+            &one_candidate(&path),
+            &format!("http://127.0.0.1:{port}/usage"),
+        );
+        assert!(!usage.logged_in, "403 banned must log the user out");
+        assert_eq!(usage.error.as_deref(), Some("Freebuff account suspended"));
+    }
+
+    #[test]
+    fn freebuff_usage_404_with_no_active_session_body_surfaces_empty_card() {
+        // The documented "no active session" reply -- empty body OR
+        // `{"status":"none"}`. Token is still good; surface as a
+        // logged-in card with empty windows + "no active session"
+        // detail.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_freebuff_credentials(
+            dir.path(),
+            r#"{
+                "authToken": "fb_token",
+                "fingerprintId": "fb_fp",
+                "email": "user@example.com"
+            }"#,
+        );
+
+        // Empty 404 body.
+        let port_empty = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::empty(404));
+        });
+        let usage_empty = freebuff_usage_with(
+            &one_candidate(&path),
+            &format!("http://127.0.0.1:{port_empty}/usage"),
+        );
+        assert!(usage_empty.logged_in, "404 must not log the user out");
+        assert!(usage_empty.error.is_none());
+        assert!(usage_empty.windows.is_empty());
+        assert_eq!(
+            usage_empty.detail.as_deref(),
+            Some("no active session")
+        );
+
+        // {"status":"none"} body.
+        let port_status = spawn_loopback(1, |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string(r#"{"status":"none"}"#).with_status_code(404),
+            );
+        });
+        let usage_status = freebuff_usage_with(
+            &one_candidate(&path),
+            &format!("http://127.0.0.1:{port_status}/usage"),
+        );
+        assert!(usage_status.logged_in);
+        assert!(usage_status.windows.is_empty());
+        assert_eq!(
+            usage_status.detail.as_deref(),
+            Some("no active session")
+        );
+    }
+
+    #[test]
+    fn freebuff_usage_404_with_html_body_surfaces_unavailable() {
+        // Generic 404 (HTML page from a retired route or missing
+        // reverse-proxy entry) must surface as `unavailable`, NOT as
+        // a logged-in "no active session" card. PR #1443 review
+        // round-4 item #4.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_freebuff_credentials(
+            dir.path(),
+            r#"{
+                "authToken": "fb_token",
+                "fingerprintId": "fb_fp",
+                "email": "user@example.com"
+            }"#,
+        );
+        let port = spawn_loopback(1, |req| {
+            let _ = req.respond(
+                tiny_http::Response::from_string("<html>not found</html>").with_status_code(404),
+            );
+        });
+        let usage = freebuff_usage_with(
+            &one_candidate(&path),
+            &format!("http://127.0.0.1:{port}/usage"),
+        );
+        assert!(usage.logged_in);
+        assert!(
+            usage
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("API error 404:")),
+            "generic 404 must surface as Unavailable, got: {:?}",
+            usage.error
+        );
     }
 
     #[test]
