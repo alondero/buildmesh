@@ -23,7 +23,7 @@
  *    FIXTURE data. This is the path for a headless/non-Windows host (Claude
  *    Code on the web, CI) where modes 1–2 can't run. It proves the UI
  *    renders + reacts, NOT that the backend behaves — treat it as a visual
- *    smoke check, and say so in the PR. Start `npm run dev` yourself, or pass
+ *    smoke check, and say so in the PR. Start Vite yourself, or pass
  *    `--serve` to have this script start (and stop) it for you.
  *
  * Usage:
@@ -42,7 +42,7 @@
  *   --mock               mock mode: headless Chromium + fake Tauri IPC (see above)
  *   --mock-url <url>     dev-server URL for --mock (default http://localhost:1420)
  *   --fixtures <file>    --mock only: .mjs/.json overriding the default IPC fixtures
- *   --serve              --mock only: start `npm run dev` and wait for it (auto-stops)
+ *   --serve              --mock only: start this worktree's Vite server and wait for it (auto-stops)
  *   --steps <file.mjs>   module whose default export is `async ({ page, invoke, mock }) => {}`
  *                        run before the screenshot (click, fill, wait, assert…)
  *   --selector <css>     screenshot only this element (default: full window/page)
@@ -64,8 +64,8 @@ import { chromium } from 'playwright';
 import { mkdirSync, existsSync } from 'fs';
 import { dirname, resolve, join } from 'path';
 import { pathToFileURL } from 'url';
-import { spawn } from 'child_process';
 import { buildInitScript, loadFixtures } from './ui-mock/tauri-mock.mjs';
+import { startDevServer, stopDevServer } from './ui-shot-server.mjs';
 
 /**
  * Launch Chromium, tolerating a host whose pre-installed browser doesn't
@@ -118,35 +118,6 @@ if (!out) {
   process.exit(1);
 }
 
-/**
- * --mock --serve: start `npm run dev` and resolve once it answers on
- * `mockUrl`. Returns the child process (so we can kill it) or null when the
- * dev server is already up (we reuse it and leave it running).
- */
-async function startDevServer() {
-  const alreadyUp = await fetch(mockUrl).then((r) => r.ok).catch(() => false);
-  if (alreadyUp) {
-    console.log(`Reusing dev server already listening at ${mockUrl}`);
-    return null;
-  }
-  console.log('Starting `npm run dev` …');
-  const child = spawn('npm', ['run', 'dev'], {
-    cwd: resolve(dirname(new URL(import.meta.url).pathname), '..'),
-    stdio: 'ignore',
-    detached: false,
-  });
-  const start = Date.now();
-  while (Date.now() - start < 60000) {
-    if (await fetch(mockUrl).then((r) => r.ok).catch(() => false)) {
-      console.log(`Dev server ready at ${mockUrl}`);
-      return child;
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  child.kill();
-  throw new Error(`Dev server did not come up at ${mockUrl} within 60s`);
-}
-
 async function invoke(cmd, args = {}) {
   const res = await fetch(`http://127.0.0.1:${invokePort}/invoke`, {
     method: 'POST',
@@ -162,15 +133,27 @@ async function invoke(cmd, args = {}) {
 async function getPage() {
   if (mock) {
     const [w, h] = viewport.split('x').map(Number);
-    const devServer = serve ? await startDevServer() : null;
-    const browser = await launchChromium();
+    let devServer = null;
+    let browser;
     try {
+      devServer = serve ? await startDevServer(mockUrl) : null;
+      browser = await launchChromium();
       const page = await browser.newPage({ viewport: { width: w || 1440, height: h || 900 } });
       // Install the fake Tauri IPC before ANY app module runs.
       await page.addInitScript(buildInitScript(await loadFixtures(fixturesFile)));
       // Surface app-side crashes (a React error, an unhandled rejection) on
       // stderr so a mock render that "renders blank" is diagnosable.
-      page.on('pageerror', (e) => console.error('[page error]', e.message));
+      const pageErrors = [];
+      page.on('pageerror', (e) => {
+        pageErrors.push(e.message);
+        console.error('[page error]', e.message);
+      });
+      page.on('console', (message) => {
+        if (message.type() === 'error') {
+          pageErrors.push(message.text());
+          console.error('[page console error]', message.text());
+        }
+      });
       // NOT networkidle: index.html preconnects to Google Fonts, which never
       // settles on an offline/proxied host. Wait for the DOM, then for the app
       // to actually mount something under #root.
@@ -180,17 +163,15 @@ async function getPage() {
           `or pass --serve to have this script start it.\n${e.message}`
         );
       });
-      await page.waitForFunction(() => {
-        const r = document.getElementById('root');
-        return r && r.childElementCount > 0;
-      }, { timeout: 15000 }).catch(() => {
-        console.error('[tauri-mock] #root never populated — the app may have crashed; screenshotting anyway.');
+      await page.locator('#root > *').first().waitFor({ state: 'attached', timeout: 15000 }).catch(() => {
+        const details = pageErrors.length > 0 ? ` Page errors: ${pageErrors.join(' | ')}` : '';
+        throw new Error(`[tauri-mock] #root never populated within 15s.${details}`);
       });
       return { browser, page, devServer };
     } catch (e) {
       // Don't leak the browser or a dev server we spawned if setup failed.
-      await browser.close().catch(() => {});
-      if (devServer) devServer.kill();
+      if (browser) await browser.close().catch(() => {});
+      if (devServer) await stopDevServer(devServer);
       throw e;
     }
   }
@@ -198,7 +179,7 @@ async function getPage() {
     const [w, h] = viewport.split('x').map(Number);
     const browser = await launchChromium();
     const page = await browser.newPage({ viewport: { width: w || 390, height: h || 844 } });
-    await page.goto(url, { waitUntil: 'networkidle' });
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
     return { browser, page };
   }
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`).catch((e) => {
@@ -245,7 +226,10 @@ try {
 } finally {
   // In CDP mode this detaches from the app without closing it;
   // in --url/--mock mode it closes the headless browser.
-  await browser.close();
-  // Only stop a dev server WE started (--serve); a reused one is left up.
-  if (devServer) devServer.kill();
+  try {
+    await browser.close();
+  } finally {
+    // Only stop a dev server WE started (--serve); a reused one is left up.
+    if (devServer) await stopDevServer(devServer);
+  }
 }

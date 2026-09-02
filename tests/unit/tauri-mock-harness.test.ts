@@ -9,7 +9,7 @@
  * plugin calls get benign defaults, unknown commands resolve null (not throw),
  * and the listen/emit event roundtrip works.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { buildInitScript, defaultFixtures, loadFixtures } from '../../scripts/ui-mock/tauri-mock.mjs';
 
 declare global {
@@ -84,6 +84,53 @@ describe('tauri-mock harness', () => {
     install();
     window.__BUILDMESH_MOCK__.on('list_meshes', []);
     await expect(window.__TAURI_INTERNALS__.invoke('list_meshes')).resolves.toEqual([]);
+  });
+
+  it('advances idle nodes when the mock receives a spawn request', async () => {
+    install({
+      list_agent_nodes: [{ id: 42, status: 'idle' }],
+    });
+
+    await expect(window.__TAURI_INTERNALS__.invoke('spawn_agent', {
+      request: { sessionId: 42 },
+    })).resolves.toBeNull();
+    await expect(window.__TAURI_INTERNALS__.invoke('list_agent_nodes')).resolves.toEqual([
+      { id: 42, status: 'spawning' },
+    ]);
+  });
+
+  it('keeps runtime overrides ahead of request-specific handlers', async () => {
+    install();
+    const override = [{ sentinel: true }];
+    window.__BUILDMESH_MOCK__.on('list_circuits_with_runs', override);
+
+    await expect(window.__TAURI_INTERNALS__.invoke('list_circuits_with_runs', { meshId: 1 }))
+      .resolves.toEqual(override);
+  });
+
+  it('ships a circuit ledger fixture for Probe screenshots', () => {
+    expect(defaultFixtures.list_circuits_with_runs).toHaveLength(1);
+    expect(defaultFixtures.list_circuits_with_runs[0].runs[0].run.state).toBe('failed');
+  });
+
+  it('keeps circuit fixtures scoped to the requested mesh', async () => {
+    install();
+    await expect(window.__TAURI_INTERNALS__.invoke('list_circuits_with_runs', { meshId: 2 })).resolves.toEqual([]);
+  });
+
+  it('does not send unknown-command diagnostics through console.info', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      install();
+      window.__BUILDMESH_MOCK__.quiet = false;
+      await expect(window.__TAURI_INTERNALS__.invoke('unknown_command')).resolves.toBeNull();
+      expect(info).not.toHaveBeenCalled();
+      expect(debug).toHaveBeenCalled();
+    } finally {
+      info.mockRestore();
+      debug.mockRestore();
+    }
   });
 
   it('loadFixtures() with no override returns the defaults', async () => {

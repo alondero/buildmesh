@@ -59,7 +59,8 @@ export default async function ({ page, invoke }) {
   const mesh = await invoke('create_test_mesh', { name: 'Shot fixture' });
   // Bridge writes go straight to the DB and (mostly) emit no frontend
   // events — reload so the stores refetch and the fixture appears:
-  await page.reload({ waitUntil: 'networkidle' });
+  // Vite keeps its HMR WebSocket open, so network-idle never settles here.
+  await page.reload({ waitUntil: 'domcontentloaded' });
   // Drive the real UI with Playwright:
   await page.locator('[title="New session"]').first().click();
   // Assert the feature works — a failed expectation throws → exit 1:
@@ -109,7 +110,7 @@ node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/<slug>-after.png --m
 ```
 
 - **Before/after** works the same as the CDP path (§1): shoot the merge-base tree first, then your branch. No second Tauri build — just `git switch` and re-run, since the dev server rebuilds from the working tree via Vite HMR (restart it, or use `--serve` which spawns a fresh one).
-- **Fixtures.** `scripts/ui-mock/tauri-mock.mjs` seeds two meshes + agent nodes so the shell renders populated; unknown IPC commands resolve `null` (the screen renders empty, not a crash) and log `[tauri-mock] unmocked invoke: <cmd>` so you know what to add. Override with `--fixtures <file.mjs|json>` (merged over the defaults).
+- **Fixtures.** `scripts/ui-mock/tauri-mock.mjs` seeds two meshes + agent nodes so the shell renders populated; unknown IPC commands resolve `null` (the screen renders empty, not a crash) and log `[tauri-mock] unmocked invoke: <cmd>` via `console.debug`, which avoids the frontend log bridge. Override with `--fixtures <file.mjs|json>` (merged over the defaults).
 - **Steps** get `{ page, mock }` instead of `{ page, invoke }` — there's no HTTP bridge. Use `mock.on('cmd', value)` to set an IPC response and `mock.emit('event', payload)` to push a backend event to the app's listeners. Drive everything else through `page` (real Playwright clicks/asserts). A throwing steps module fails the run.
 - **Look at the PNG yourself** (Read it) before attaching, same as always. Then say in the PR: *visual smoke via mock IPC — renders + reacts to fixtures, backend not exercised.*
 - **Limits.** Anything that needs real backend output — terminal PTY content, a real git diff, live provider usage — will be blank/empty here. For those, the Windows CDP path is the only real verification; note the gap rather than claiming coverage.
@@ -134,5 +135,5 @@ node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/mobile-after.png --u
 - Don't minimize the dev window while shooting — Chromium throttles hidden renderers.
 - No Windows Firewall prompt should appear: everything binds loopback (the test bridge was moved off `0.0.0.0` for exactly this). If a prompt appears, a wildcard bind regressed — investigate, don't just dismiss it.
 - The steps `invoke()` bridge only knows the commands routed in `src-tauri/src/commands/test.rs`. Anything else: drive it through the UI, or add a route there (and to this list of pitfalls if it bites you).
-- Fixtures seeded via the bridge don't show up in the live window until the stores refetch — `await page.reload({ waitUntil: 'networkidle' })` after seeding (most bridge handlers emit no frontend event).
+- Fixtures seeded via the bridge don't show up in the live window until the stores refetch — `await page.reload({ waitUntil: 'domcontentloaded' })` after seeding (most bridge handlers emit no frontend event). Vite's HMR WebSocket keeps network-idle open indefinitely.
 - Talking to the bridge from PowerShell: `Invoke-RestMethod` hangs/fails against it (single-read parser vs 100-continue); use a `node -e "fetch(...)"` one-liner instead.
