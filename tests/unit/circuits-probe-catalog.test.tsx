@@ -165,7 +165,7 @@ describe('Circuits Probe catalog contract (#1469)', () => {
     'every catalog blueprint is selectable in the Probe blueprint dropdown ($kind)',
     async (entry) => {
       mockBackend();
-      await openProbeDestination('circuits');
+      openProbeDestination('circuits');
       const select = await screen.findByTestId('circuit-blueprint-select');
       const options = Array.from(select.querySelectorAll('option')).map(
         (opt) => (opt as HTMLOptionElement).value
@@ -186,7 +186,7 @@ describe('Circuits Probe catalog contract (#1469)', () => {
     async (entry) => {
       mockBackend();
       const user = userEvent.setup();
-      await openProbeDestination('circuits');
+      openProbeDestination('circuits');
 
       // Pick the catalog entry, fill the minimum required fields
       // (name + trigger label for issue-label blueprints, since

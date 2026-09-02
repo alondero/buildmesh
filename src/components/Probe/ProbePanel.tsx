@@ -10,6 +10,21 @@
  * inspector is closed, no rail, replacement sidebar, or always-visible Probe
  * button remains, and the workspace regains the full width.
  *
+ * **Closed-render discipline (PR #1489 review).** The exported `ProbePanel`
+ * is a thin gatekeeper that subscribes to exactly one boolean (`probeOpen`)
+ * and returns `null` when the inspector is hidden. The full body, the
+ * `useProbeResize` hook (which reads `localStorage` and arms the drag
+ * handles), and `useProbeContext` (which subscribes to `nodesById`,
+ * `meshesById`, `selectedMeshId`, `activeNodeId`, `viewMode`, `probeTab`,
+ * and `probeContextPins`) all live behind that gate in `ProbePanelContent`,
+ * so a hidden panel performs zero work — no store subscriptions fire, no
+ * resize state mutates, no context resolves. Every re-render of the closed
+ * panel would otherwise walk into `useProbeContext` and `bodyWidthRef`
+ * before bailing at the `if (!probeOpen) return null;` check.
+ * The `openProbeDestination` test helper must keep calling `render(<ProbePanel />)`
+ * — mounting the outer component is fine because it returns `null` when closed,
+ * and the helper flips `probeOpen` on via the store before rendering.
+ *
  * The body width is **horizontally resizable** (issue #724) via a separator
  * handle on the body's left edge. Default 360px, clamped to [240, 720];
  * the chosen width persists across launches via localStorage. The bounds
@@ -108,8 +123,24 @@ function ContextPinIcon({ className = 'w-3.5 h-3.5' }: { className?: string }) {
   );
 }
 
+/**
+ * Closed-render gatekeeper (PR #1489 review): subscribe to exactly one
+ * boolean and return null when the inspector is hidden. All other
+ * subscriptions, the resize hook, and the context resolver live in
+ * `ProbePanelContent` below so a hidden panel does zero work.
+ */
 export function ProbePanel() {
   const probeOpen = useUIStore((s) => s.probeOpen);
+  if (!probeOpen) return null;
+  return <ProbePanelContent />;
+}
+
+/**
+ * The full inspector body — only mounted while `probeOpen` is true.
+ * Everything that fires every store update lives inside this component so
+ * the closed-state `ProbePanel` render cost is one boolean comparison.
+ */
+function ProbePanelContent() {
   const probeTab = useUIStore((s) => s.probeTab);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
   const pinProbeContext = useUIStore((s) => s.pinProbeContext);
@@ -139,8 +170,6 @@ export function ProbePanel() {
   // Issue #1375 — the inspector is fully on-demand: closed means GONE. There
   // is no rail or always-visible button to reopen it; the palette, the
   // title-bar Usage action, and contextual entries own reopening.
-  if (!probeOpen) return null;
-
   const activeDef = PROBE_TABS.find((t) => t.tab === probeTab) ?? PROBE_TABS[0];
   const ActiveIcon = activeDef.icon;
   const contextModeLabel = context.mode === 'pinned'

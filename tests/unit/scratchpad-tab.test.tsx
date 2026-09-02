@@ -35,6 +35,7 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { openProbeDestination } from './helpers/openProbeDestination';
 
 function makeMesh(id: number, name: string): Mesh {
   return {
@@ -132,10 +133,10 @@ function renderWithScratchpadOpen() {
 describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
   it('opens with the "Notes" accessible name via openProbeTab', () => {
     // #1375: the rail is gone — the Notes destination opens through the
-    // store action driven by the palette / title bar / contextual entries,
-    // and the inspector header carries the visible label.
-    useUIStore.getState().openProbeTab('scratchpad');
-    render(<ProbePanel />);
+    // same store action the palette / title bar / contextual entries
+    // use, then renders the inspector so the header (with the visible
+    // label) lands in the DOM. The shared helper drives both halves.
+    openProbeDestination('scratchpad');
     const header = screen.getByRole('region', { name: 'Probe panel' });
     expect(header.textContent).toContain('Notes');
   });
