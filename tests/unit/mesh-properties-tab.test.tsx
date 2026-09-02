@@ -1,4 +1,5 @@
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { openProbeDestination } from './helpers/openProbeDestination';
 /**
  * Tests for the clean Mesh Properties tab — issue #375.
  *
@@ -7,8 +8,9 @@ import { seedAgentNodes } from './helpers/seedAgentNodes';
  * the field surface that must stay, and the surface that must NOT come
  * back when we delete the legacy drawer.
  *
- * Rendering strategy: mount the full `ProbePanel` and click into the
- * properties tab, so the test also covers the routing wiring in
+ * Rendering strategy: mount the full `ProbePanel` with the properties
+ * destination opened via `openProbeTab` (the post-#1375 on-demand entry
+ * point), so the test also covers the routing wiring in
  * `ProbePanel.tsx` (otherwise the routing test in `probe-panel.test.tsx`
  * would have to know the tab's internal structure).
  */
@@ -194,12 +196,6 @@ function mockBackend() {
   });
 }
 
-async function openPropertiesTab() {
-  const user = userEvent.setup();
-  render(<ProbePanel />);
-  await user.click(screen.getByRole('button', { name: 'Mesh Properties' }));
-}
-
 beforeEach(() => {
   useMeshStore.setState({
     meshes: [MESH],
@@ -213,21 +209,25 @@ beforeEach(() => {
 
 describe('MeshPropertiesTab (issue #375)', () => {
   it('renders the config form when the âš™ï¸ tab is open and a mesh is selected', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     // Config fields that the new tab must keep. The label regex anchors
     // at the start with `\b` because the Field component renders the
     // visible label + hint as one accessible name inside `<label>`
     // (e.g. "Model (Claude Code only)"); the open end lets the suffix
     // pass through so a future hint rewrite doesn't break the matcher.
+    // Every lookup is awaited: the #1375 open path no longer goes through
+    // a rail click whose async settle used to cover the form's load, so
+    // each control waits for its own mount (the Model select arrives with
+    // the async provider list).
     expect(await screen.findByLabelText('Name')).toBeTruthy();
-    expect(screen.getByLabelText('Directory')).toBeTruthy();
-    expect(screen.getByLabelText(/^Model\b/)).toBeTruthy();
-    expect(screen.getByLabelText(/^Effort\b/)).toBeTruthy();
-    expect(screen.getByLabelText('Default provider')).toBeTruthy();
-    expect(screen.getByLabelText('Project preset')).toBeTruthy();
-    expect(screen.getByLabelText(/^Build command/)).toBeTruthy();
-    expect(screen.getByLabelText(/^Run command/)).toBeTruthy();
+    expect(await screen.findByLabelText('Directory')).toBeTruthy();
+    expect(await screen.findByLabelText(/^Model\b/)).toBeTruthy();
+    expect(await screen.findByLabelText(/^Effort\b/)).toBeTruthy();
+    expect(await screen.findByLabelText('Default provider')).toBeTruthy();
+    expect(await screen.findByLabelText('Project preset')).toBeTruthy();
+    expect(await screen.findByLabelText(/^Build command/)).toBeTruthy();
+    expect(await screen.findByLabelText(/^Run command/)).toBeTruthy();
   });
 
   it('shows the active tab label in the probe header', async () => {
@@ -235,11 +235,11 @@ describe('MeshPropertiesTab (issue #375)', () => {
     render(<ProbePanel />);
 
     const header = screen.getByRole('region', { name: 'Probe panel' });
-    expect(header.textContent).toContain('Mesh Properties');
+    expect(header.textContent).toContain('Project Settings');
   });
 
   it('excludes the worktree/branch maintenance fields', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
     // Wait for the form to mount so the negative assertions are stable.
     expect(await screen.findByLabelText('Name')).toBeTruthy();
 
@@ -256,29 +256,30 @@ describe('MeshPropertiesTab (issue #375)', () => {
   });
 
   it('preloads the mesh config (Name, Model, Build/Run) from the backend', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const name = (await screen.findByLabelText('Name')) as HTMLInputElement;
     expect(name.value).toBe('demo');
 
-    const model = screen.getByLabelText(/^Model\b/) as HTMLInputElement;
+    // Awaited lookups — see the note in the config-form test above.
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
     expect(model.value).toBe('opus-4');
 
-    const effort = screen.getByLabelText(/^Effort\b/) as HTMLSelectElement;
+    const effort = (await screen.findByLabelText(/^Effort\b/)) as HTMLSelectElement;
     expect(effort.value).toBe('high');
 
-    const build = screen.getByLabelText(/^Build command/) as HTMLInputElement;
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
     expect(build.value).toBe('npm run build');
 
-    const run = screen.getByLabelText(/^Run command/) as HTMLInputElement;
+    const run = (await screen.findByLabelText(/^Run command/)) as HTMLInputElement;
     expect(run.value).toBe('npm run dev');
 
-    const provider = screen.getByLabelText('Default provider') as HTMLSelectElement;
+    const provider = (await screen.findByLabelText('Default provider')) as HTMLSelectElement;
     expect(provider.value).toBe('anthropic');
   });
 
   it('groups the default-provider options by harness (issue #575) with no "Legacy" header', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const provider = (await screen.findByLabelText('Default provider')) as HTMLSelectElement;
     // Issue #575 / ADR-0016 — the Spawn Menu is harness-grouped. A group
@@ -298,7 +299,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
 
   it('saves text fields on blur via upsert_mesh_harness_override', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
     await user.clear(model);
@@ -316,7 +317,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
 
   it('saves Build/Run on blur', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
     await user.clear(build);
@@ -334,7 +335,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
 
   // Per-context build/run commands (issue #802).
   it('renders the optional Root build/run command fields with a fallback hint', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const rootBuild = (await screen.findByLabelText(/^Root build command/)) as HTMLInputElement;
     const rootRun = screen.getByLabelText(/^Root run command/) as HTMLInputElement;
@@ -362,7 +363,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
       if (cmd === 'list_providers') return Promise.resolve([]);
       return Promise.resolve({});
     });
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const rootBuild = (await screen.findByLabelText(/^Root build command/)) as HTMLInputElement;
     const rootRun = screen.getByLabelText(/^Root run command/) as HTMLInputElement;
@@ -372,7 +373,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
 
   it('saves Root build/run on blur via update_mesh_column', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const rootBuild = (await screen.findByLabelText(/^Root build command/)) as HTMLInputElement;
     await user.clear(rootBuild);
@@ -405,7 +406,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
   // `disabled`, no `readOnly`, no parent overlay swallowing keystrokes.
   it('keeps the Build/Run inputs editable: typing updates the value without blurring', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
     const run = (await screen.findByLabelText(/^Run command/)) as HTMLInputElement;
@@ -467,7 +468,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
 
   it('saves Effort on change and skips writes when cleared to ""', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const effort = (await screen.findByTestId('mesh-override-effort-select-claude')) as HTMLSelectElement;
     await user.selectOptions(effort, 'medium');
@@ -495,7 +496,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
 
   it('applies a project preset to both Build and Run on a single change', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const preset = (await screen.findByLabelText('Project preset')) as HTMLSelectElement;
     await user.selectOptions(preset, 'rust');
@@ -514,7 +515,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
   // The DB column is `sandbox` and is OS-agnostic at this layer; the OS-
   // specific spawn policy is decided at `spawn_environment::wrap`.
   it('renders the Sandbox toggle as an editable checkbox (#498)', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
     const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
     expect(sandbox.type).toBe('checkbox');
     expect(sandbox.disabled).toBe(false);
@@ -538,14 +539,14 @@ describe('MeshPropertiesTab (issue #375)', () => {
         });
       return Promise.resolve({});
     });
-    await openPropertiesTab();
+    openProbeDestination('properties');
     const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
     expect(sandbox.checked).toBe(true);
   });
 
   it('saves the Sandbox toggle on change via update_mesh_sandbox', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
     expect(sandbox.checked).toBe(true);
@@ -563,7 +564,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
   // alongside the unified #498 OS-agnostic one, both bound to `form.sandbox`.
   // The OS-agnostic surface (canonical per ADR 0012) is the only one allowed.
   it('renders exactly one Sandbox toggle (no duplicate #497 macOS-only block)', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
     // Regex matches both "Sandbox agent processes" and the old
     // "Sandbox agent processes (macOS only)" accessible names.
     const sandboxes = await screen.findAllByLabelText(/Sandbox agent processes/);
@@ -580,7 +581,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
   // future change can't silently re-introduce the dual-edit surface.
 
   it('does NOT render Autopilot Policy fields (issue #1013)', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     // Master toggle + 4 policy fields, none of which should be in the DOM.
     // The 'Autopilot Mode' label previously anchored the section's master
@@ -703,7 +704,7 @@ describe('MeshPropertiesTab — Directory field shows the mesh root (not the foc
 // + probe-close behaviour are ported verbatim from the legacy handleDelete.
 describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => {
   it('renders a Delete Mesh button at the bottom of the form', async () => {
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     // Only the trigger button is in the DOM at this point (no dialog yet).
     const button = await screen.findByRole('button', { name: /delete mesh/i });
@@ -712,7 +713,7 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
 
   it('opens a confirmation dialog when the Delete Mesh button is clicked', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const trigger = await screen.findByRole('button', { name: /delete mesh/i });
     await user.click(trigger);
@@ -737,7 +738,7 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
 
   it('cancels without deleting when Cancel is pressed', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const trigger = await screen.findByRole('button', { name: /delete mesh/i });
     await user.click(trigger);
@@ -757,9 +758,11 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
 
   it('confirms: calls delete_mesh via the store, refetches, and closes the probe', async () => {
     const user = userEvent.setup();
-    // `openPropertiesTab()` opens the probe by clicking the activity bar
-    // (handleTabClick toggles probeOpen falseâ†’true on a non-active tab).
-    await openPropertiesTab();
+    // Issue #1375: the rail is gone, so the probe is opened by routing
+    // through the same store action the palette / title bar / contextual
+    // entries use. `openProbeDestination` is synchronous; the assertion
+    // below pins probeOpen=true before the click flow runs.
+    openProbeDestination('properties');
     expect(useUIStore.getState().probeOpen).toBe(true);
 
     const trigger = await screen.findByRole('button', { name: /delete mesh/i });
@@ -846,7 +849,7 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
 
   it('shows a global "Saved" indicator after a successful blur save', async () => {
     const user = userEvent.setup();
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
     await user.clear(model);
@@ -868,7 +871,7 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
   it('shows "Save failed: <message>" and rolls the field back to the last confirmed value', async () => {
     const user = userEvent.setup();
     rejectNextOverrideWrite('boom-model-save');
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
     expect(model.value).toBe('opus-4');
@@ -904,7 +907,7 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     window.addEventListener('unhandledrejection', listener);
 
     rejectNextOverrideWrite('boom-leak-test');
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
     await user.clear(model);
@@ -963,7 +966,7 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
       return Promise.resolve({});
     });
 
-    await openPropertiesTab();
+    openProbeDestination('properties');
     const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
     await user.clear(model);
     await user.type(model, 'mesh-a-edit');
@@ -991,7 +994,7 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
   it('clears the previous "Save failed" indicator when a subsequent save succeeds', async () => {
     const user = userEvent.setup();
     rejectNextOverrideWrite('first-failure');
-    await openPropertiesTab();
+    openProbeDestination('properties');
 
     const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
     await user.clear(model);

@@ -6,8 +6,8 @@ import { getNodeGitPath } from './paths';
  *
  * A lens is the thing a view is about, not merely the store value that
  * happened to be selected when the view rendered. Keeping this vocabulary in
- * one module gives the activity rail, empty states, and tab implementations a
- * shared seam for context decisions.
+ * one module gives the inspector header, empty states, and destination
+ * implementations a shared seam for context decisions.
  */
 export type ProbeLens = 'host' | 'mesh' | 'agent';
 
@@ -17,7 +17,7 @@ export type ProbeContextMode = 'fixed' | 'following' | 'pinned';
 export type ProbeBaseline = 'host' | 'mesh' | 'head' | 'node-base';
 
 export interface ProbeTabDefinition {
-  /** Human-readable title used by the dock header and activity rail. */
+  /** Human-readable title used by the inspector header. */
   label: string;
   /** Longer accessible label for destinations whose short title is ambiguous. */
   tooltip?: string;
@@ -79,7 +79,9 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   properties: {
-    label: 'Mesh Properties',
+    // Issue #1375 — the inspector header and the palette entry must agree on
+    // the user-facing task name ("Open Project Settings" in the palette).
+    label: 'Project Settings',
     lens: 'mesh',
     followsSelection: true,
     pinnable: true,
@@ -103,7 +105,9 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   issues: {
-    label: 'Git Issues',
+    // Issue #1375 — the header names the user-facing destination; the palette
+    // entry is "Open GitHub Issues".
+    label: 'GitHub Issues',
     lens: 'mesh',
     followsSelection: true,
     pinnable: true,
@@ -119,8 +123,11 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   sessions: {
-    label: 'Archive',
-    tooltip: 'Archived Nodes',
+    // Issue #1375 — "Agent History" is the user-facing destination name (the
+    // palette entry matches); the body lists completed, archived, failed, and
+    // resumable agent work.
+    label: 'Agent History',
+    tooltip: 'Completed, archived, failed, and resumable agent work',
     lens: 'mesh',
     followsSelection: true,
     pinnable: true,
@@ -130,7 +137,10 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
       'Mesh-owned Agent Node history index; each listed row is an Agent Node and resume acts on that row.',
   },
   scratchpad: {
-    label: 'Scratch Pad',
+    // Issue #1375 — "Notes" is the user-facing destination name; the body it
+    // opens is the mesh-aware Scratch Pad (the textarea label keeps that name).
+    label: 'Notes',
+    tooltip: 'Scratch Pad',
     lens: 'mesh',
     followsSelection: true,
     pinnable: true,
@@ -139,7 +149,10 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
   },
 };
 
-/** Activity-rail order. Presentation owns icons; ownership stays above it. */
+/** Inspector destination order — feeds the `PROBE_TABS` presentation list
+ *  (header chip + placeholder lookups) and, via the omnibar's
+ *  `PROBE_TAB_COMMANDS` alias, the palette destination coverage. The
+ *  palette's DISPLAY order is `APP_COMMANDS`' array order, not this one. */
 export const PROBE_TAB_ORDER: readonly ProbeTab[] = [
   'files',
   'review',
@@ -156,7 +169,7 @@ export const PROBE_TAB_ORDER: readonly ProbeTab[] = [
 
 /**
  * A pin is intentionally keyed by destination. Pinning Agent Changes must not
- * make Git Issues silently operate on that same mesh after the user changes
+ * make GitHub Issues silently operate on that same mesh after the user changes
  * tabs; each destination gets an independent context decision.
  */
 export interface ProbeContextPin {

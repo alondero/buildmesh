@@ -201,7 +201,7 @@ export function compatibilityReasonCopy(
     case 'worktree_disabled':
       return {
         headline: 'Worktrees are disabled on this mesh.',
-        remedy: 'Enable worktrees in Mesh Properties → Worktrees.',
+        remedy: 'Enable worktrees in Project Settings → Worktrees.',
       };
     // Defensive default: the wire-side Rust enum is the source of truth
     // for `AutopilotCompatibilityReason`, but the formatter lives in the

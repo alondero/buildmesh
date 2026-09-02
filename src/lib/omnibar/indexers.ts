@@ -14,7 +14,8 @@
  *   - Meshes:       mesh name, repo path, and active branch.
  *   - App Commands: theme toggling, view mode switches (Single, Mesh,
  *                   Pinned, All), open Settings, open Remote Access, show
- *                   Cheatsheet, Git sync, and Probe tab shortcuts.
+ *                   Cheatsheet, Git sync, and the inspector destinations
+ *                   (issue #1375).
  *   - GitHub:       loaded issues and pull requests for active/cached meshes.
  *   - Spawning:     quick-spawn actions for all registered harnesses across
  *                   available meshes.
@@ -26,6 +27,7 @@ import type { GitHubPullRequest } from '../../types/generated/GitHubPullRequest'
 import type { SpawnOption } from '../groups';
 import type { ProbeTab } from '../../stores/uiStore';
 import type { ViewMode } from '../../stores/uiStore';
+import { PROBE_TAB_ORDER } from '../probeContext';
 import { getStatusConfig } from '../status';
 import type { IndexedField, IndexedItem, FieldWeight } from './fuzzySearch';
 
@@ -132,9 +134,118 @@ export interface AppCommand {
   keywords?: string[];
 }
 
-/** The full built-in command catalog (issue #1410 §1 — theme toggling, view
- *  mode switches, Settings, Remote Access, Cheatsheet, Git sync, Probe tabs).
- *  The UI layer maps the `id` to the actual store action when executed. */
+/**
+ * Inspector-destination palette commands (issue #1375). The Record is
+ * keyed by the `probe-<tab>` routing id and typed as
+ * `Record<\`probe-${ProbeTab}\`, AppCommand>` so adding a value to
+ * `PROBE_TAB_ORDER` in `probeContext.ts:155` forces a matching entry
+ * here at compile time. The previous `PROBE_TAB_COMMANDS =
+ * PROBE_TAB_ORDER` alias was tautological — it never read from the
+ * AppCommand array, so a missing entry on this side compiled cleanly
+ * (PR #1489 review #1B). The flat `APP_COMMANDS` array below merges
+ * non-probe entries with `Object.values` of this map; consumers stay
+ * ignorant of the split.
+ */
+const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand> = {
+  'probe-files': {
+    id: 'probe-files',
+    label: 'Open Files',
+    subtitle: 'Browse the project explorer',
+    icon: 'files',
+    keywords: ['project', 'explorer', 'file tree'],
+  },
+  'probe-review': {
+    id: 'probe-review',
+    label: 'Open Agent Changes',
+    subtitle: 'Review what your agent changed',
+    icon: 'review',
+    keywords: ['changes', 'diff', 'review'],
+  },
+  'probe-usage': {
+    id: 'probe-usage',
+    label: 'Open Usage',
+    subtitle: 'Check provider usage and limits',
+    icon: 'usage',
+    keywords: ['meters', 'limits', 'quota', 'balance'],
+  },
+  'probe-worktrees': {
+    id: 'probe-worktrees',
+    label: 'Open Worktrees',
+    subtitle: 'Switch branches and working folders',
+    icon: 'worktrees',
+    keywords: ['git', 'worktree', 'branch'],
+  },
+  'probe-properties': {
+    id: 'probe-properties',
+    label: 'Open Project Settings',
+    subtitle: 'Configure the selected project',
+    icon: 'properties',
+    keywords: ['project', 'properties', 'build', 'run'],
+  },
+  'probe-autopilot': {
+    // ADR-0030 "one name per destination" — the palette label carries the
+    // inspector header (`Autopilot`) under the established `Open <Header>`
+    // pattern (Open Project Settings, Open GitHub Issues, ...). The previous
+    // `Open Automation: Autopilot` form added a namespace the inspector
+    // header did not share, breaking the palette ↔ header parity rule.
+    id: 'probe-autopilot',
+    label: 'Open Autopilot',
+    subtitle: 'Keep recurring work moving',
+    icon: 'autopilot',
+    keywords: ['automation', 'policies', 'loops', 'issue-driven'],
+  },
+  'probe-circuits': {
+    // See probe-autopilot above — the `Automation:` prefix was a one-off
+    // namespace that did not appear in the inspector header, so the palette
+    // entry was the only surface using two words for the same destination.
+    id: 'probe-circuits',
+    label: 'Open Circuits',
+    subtitle: 'Inspect connected automations',
+    icon: 'circuits',
+    keywords: ['automation', 'flows', 'graphs'],
+  },
+  'probe-issues': {
+    id: 'probe-issues',
+    label: 'Open GitHub Issues',
+    subtitle: 'Find work to pick up',
+    icon: 'issues',
+    keywords: ['github', 'bugs', 'backlog'],
+  },
+  'probe-pulls': {
+    id: 'probe-pulls',
+    label: 'Open GitHub Pull Requests',
+    subtitle: 'See what is ready to merge',
+    icon: 'pulls',
+    keywords: ['github', 'pr', 'merge'],
+  },
+  'probe-sessions': {
+    id: 'probe-sessions',
+    label: 'Open Agent History',
+    subtitle: 'Return to previous agent work',
+    icon: 'sessions',
+    keywords: ['archive', 'resume', 'history', 'completed', 'failed'],
+  },
+  'probe-scratchpad': {
+    id: 'probe-scratchpad',
+    label: 'Open Notes',
+    subtitle: 'Keep notes beside the work',
+    icon: 'scratchpad',
+    keywords: ['scratch pad', 'notes', 'memo'],
+  },
+};
+
+/**
+ * The task-oriented palette destinations (issue #1375). The palette is the
+ * primary navigation surface, so these entries use user-facing task names
+ * and descriptions — never internal vocabulary like "Probe tab" or the
+ * Host/Mesh/Agent lens headings. Every inspector destination is reachable
+ * here (via the typed `PROBE_DESTINATION_COMMANDS` map above); Usage
+ * additionally has a dedicated title-bar action. The UI layer maps the
+ * `id` to the actual store action when executed.
+ *
+ * Probe destinations are spread from the type-checked Record so a missing
+ * entry fails the build, not just the omnibar search test.
+ */
 export const APP_COMMANDS: readonly AppCommand[] = [
   {
     id: 'toggle-theme',
@@ -147,28 +258,26 @@ export const APP_COMMANDS: readonly AppCommand[] = [
   { id: 'view-mesh', label: 'Switch view: Mesh Grid', subtitle: 'Scope to the selected mesh', icon: 'mesh', keywords: ['grid', 'scope'] },
   { id: 'view-pinned', label: 'Switch view: Pinned', subtitle: 'Pinned nodes across all meshes', icon: 'pinned', keywords: ['pin'] },
   { id: 'view-all', label: 'Switch view: All Nodes', subtitle: 'Every loaded node', icon: 'all', keywords: ['all', 'nodes'] },
-  { id: 'open-settings', label: 'Open Settings', subtitle: 'App preferences', icon: 'settings', keywords: ['preferences', 'config'] },
+  // 'settings' is an explicit alias so the dedicated command outranks the
+  // "Open Project Settings" destination (whose label also matches the
+  // query) when the user types a bare `settings` (issue #1375).
+  { id: 'open-settings', label: 'Open Settings', subtitle: 'App preferences', icon: 'settings', keywords: ['settings', 'preferences', 'config'] },
   { id: 'open-remote-access', label: 'Open Remote Access', subtitle: 'Mobile QR pairing', icon: 'remote', keywords: ['mobile', 'qr', 'pair'] },
   { id: 'show-cheatsheet', label: 'Show Cheatsheet', subtitle: 'Keyboard shortcuts', icon: 'cheatsheet', keywords: ['shortcuts', 'keys', 'help', '?'] },
   { id: 'git-sync', label: 'Git sync', subtitle: 'Fetch and pull all meshes', icon: 'sync', keywords: ['fetch', 'pull', 'git'] },
-  { id: 'probe-files', label: 'Probe tab: Files', subtitle: 'Open the Files tab', icon: 'files', keywords: ['project', 'files'] },
-  { id: 'probe-review', label: 'Probe tab: Review', subtitle: 'Open the Review tab', icon: 'review', keywords: ['changes', 'diff'] },
-  { id: 'probe-issues', label: 'Probe tab: Issues', subtitle: 'Open the Issues tab', icon: 'issues', keywords: ['github', 'issues'] },
-  { id: 'probe-pulls', label: 'Probe tab: Pull Requests', subtitle: 'Open the Pull Requests tab', icon: 'pulls', keywords: ['github', 'pr'] },
-  { id: 'probe-sessions', label: 'Probe tab: Sessions', subtitle: 'Open the Sessions tab', icon: 'sessions', keywords: ['agents'] },
-  { id: 'probe-worktrees', label: 'Probe tab: Worktrees', subtitle: 'Open the Worktrees tab', icon: 'worktrees', keywords: ['git', 'worktree'] },
+  ...Object.values(PROBE_DESTINATION_COMMANDS),
 ];
 
-/** The `ProbeTab` ids covered by the probe-tab commands above — keeps the
- *  catalog and the store's tab vocabulary from drifting. */
-export const PROBE_TAB_COMMANDS: readonly ProbeTab[] = [
-  'files',
-  'review',
-  'issues',
-  'pulls',
-  'sessions',
-  'worktrees',
-];
+/**
+ * The `ProbeTab` ids covered by the destination commands above. Derived
+ * from the typed `PROBE_DESTINATION_COMMANDS` map (issue #1375) so the
+ * palette catalog and the inspector's destination vocabulary cannot
+ * drift — every inspector destination is reachable from the palette by
+ * construction. The `as ProbeTab[]` cast is safe: the Record key is
+ * `probe-${ProbeTab}`, so stripping the prefix round-trips into
+ * `PROBE_TAB_ORDER` membership.
+ */
+export const PROBE_TAB_COMMANDS: readonly ProbeTab[] = PROBE_TAB_ORDER;
 
 /** Map a `ViewMode` to its omnibar command id (shared with the UI layer). */
 export function viewModeCommandId(mode: ViewMode): string {

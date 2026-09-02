@@ -1,7 +1,7 @@
 /**
- * ArchivedNodesTab — the Probe Panel's Archive tab body (issue #378;
- * renamed from DiscoveredNodesTab after PR #523 set the visible label
- * to "Archive" / tooltip "Archived Nodes"). The panel shows agent
+ * ArchivedNodesTab — the Probe Panel's Agent History tab body (issue #378;
+ * renamed from DiscoveredNodesTab after PR #523; issue #1375 renamed the
+ * destination to "Agent History"). The panel shows agent
  * nodes discoverable on disk for the current mesh (Claude Code CLI
  * sessions that buildmesh has not yet adopted) and offers a one-click
  * resume.

@@ -527,8 +527,9 @@ export const useUIStore = create<UIState>((set, get) => {
     },
 
     // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
-    // probeOpen = true`. Call sites stay one-liners; the activity-bar owns
-    // the "click active tab to collapse" UX. The probe tabs (#376, #377,
+    // probeOpen = true`. Call sites stay one-liners; the inspector's close
+    // button owns hiding (issue #1375 removed the always-visible rail, so
+    // there is no collapse affordance beyond it). The probe tabs (#376, #377,
     // #378) all open via this action. Does not touch `activeDiffFile`: the
     // diff overlay (#379) is independent of the active tab.
     openProbeTab: (tab) => {

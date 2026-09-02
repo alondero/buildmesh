@@ -35,6 +35,7 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { openProbeDestination } from './helpers/openProbeDestination';
 
 function makeMesh(id: number, name: string): Mesh {
   return {
@@ -130,20 +131,14 @@ function renderWithScratchpadOpen() {
 }
 
 describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
-  it('appears in the probe activity rail with the "Scratch Pad" accessible name', () => {
-    const user = userEvent.setup();
-    render(<ProbePanel />);
-    // The rail is icon-only (post-revamp VS Code idiom): the accessible
-    // name comes from the button's aria-label, and the glyph is an
-    // aria-hidden SVG — there is no visible caption to assert.
-    const button = screen.getByRole('button', { name: 'Scratch Pad' });
-    expect(button).toBeTruthy();
-    expect(button.getAttribute('title')).toBe('Scratch Pad');
-    // Clicking the activity-rail button opens the dock on this tab.
-    return user.click(button).then(() => {
-      const header = screen.getByRole('region', { name: 'Probe panel' });
-      expect(header.textContent).toContain('Scratch Pad');
-    });
+  it('opens with the "Notes" accessible name via openProbeTab', () => {
+    // #1375: the rail is gone — the Notes destination opens through the
+    // same store action the palette / title bar / contextual entries
+    // use, then renders the inspector so the header (with the visible
+    // label) lands in the DOM. The shared helper drives both halves.
+    openProbeDestination('scratchpad');
+    const header = screen.getByRole('region', { name: 'Probe panel' });
+    expect(header.textContent).toContain('Notes');
   });
 
   it('loads the active mesh\'s scratch pad into the textarea on mount', async () => {

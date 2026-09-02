@@ -2,8 +2,9 @@
  * Tests for the Autopilot Probe tab — wayfinder #990, ticket #994.
  *
  * Strategy mirrors `mesh-properties-tab.test.tsx`: mount the full
- * `ProbePanel`, click the new tab's activity-rail button, then assert
- * on the rendered form and on the IPC calls the tab fires. The mesh
+ * `ProbePanel` with the Autopilot destination opened via `openProbeTab`
+ * (the post-#1375 on-demand entry point), then assert on the rendered
+ * form and on the IPC calls the tab fires. The mesh
  * store is seeded directly, the `invoke` mock is wired per-test, and
  * the `MeshRow` fixture carries the full v30 surface (issue-driven
  * columns + the six looping columns) so the tab's load effect sees
@@ -22,6 +23,7 @@ import type { MeshRow } from '../../src/types/generated/MeshRow';
 import type { LoopStatusDto } from '../../src/types/generated/LoopStatus';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { openProbeDestination } from './helpers/openProbeDestination';
 
 // The Mesh store's `Mesh` is the full generated 14+ field wire type
 // (wayfinder #990 ticket #991 added the six `loop_*` and the
@@ -175,13 +177,6 @@ function mockBackend(
   });
 }
 
-async function openAutopilotTab() {
-  const user = userEvent.setup();
-  render(<ProbePanel />);
-  // Activity-rail button — tooltip/label both resolve to "Autopilot".
-  await user.click(screen.getByRole('button', { name: 'Autopilot' }));
-}
-
 beforeEach(() => {
   useMeshStore.setState({
     meshes: [MESH],
@@ -193,14 +188,13 @@ beforeEach(() => {
 });
 
 describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
-  it('mounts via the activity rail and shows the mode toggle (issue-driven by default)', async () => {
+  it('opens via openProbeTab and shows the mode toggle (issue-driven by default)', async () => {
     mockBackend(meshRow());
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
-    // The segmented control is always visible (both modes exist). The
-    // ticket's label "Autopilot" is on the rail button AND in the
-    // header, so the role lookup for the button is unambiguous.
-    expect(await screen.findByRole('button', { name: 'Autopilot' })).toBeTruthy();
+    // The segmented control is always visible (both modes exist). The old
+    // rail button carried the "Autopilot" name; with the rail gone (#1375)
+    // the header label and the mode-toggle buttons are the naming surface.
     expect(
       (await screen.findByRole('button', { name: 'Looping', pressed: false }))
     ).toBeTruthy();
@@ -225,7 +219,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
   it('switching to Looping writes the full loop config atomically', async () => {
     mockBackend(meshRow());
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     await user.click(await screen.findByRole('button', { name: 'Looping' }));
 
@@ -256,7 +250,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
   it('initial prompt saves on blur, trimming blank text to null', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }));
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const textarea = await screen.findByLabelText(/^Initial prompt/i);
     await user.type(textarea, 'Ship the top issue');
@@ -292,7 +286,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
   it('numeric loop fields parse to integers; blank max iterations means continuous', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }));
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);
     const interval = screen.getByLabelText(/^Pause between/i);
@@ -333,7 +327,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
   it('rejects invalid numeric input with a SaveIndicator error and skips the IPC', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }));
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);
     // "-1" passes type="number" coercion but fails the form's regex +
@@ -355,7 +349,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
   it('worktree toggle writes use_worktree via its dedicated IPC, not the loop config', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }));
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const checkbox = await screen.findByLabelText(/Run loop iterations in a worktree/i);
     // Fixture use_worktree=true â†’ uncheck on click.
@@ -382,7 +376,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
         loop_initial_prompt: 'ship the next issue',
       })
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const badge = await screen.findByTestId('loop-status-badge');
     // The badge starts as "Checking…" then resolves to Stopped once the
@@ -408,7 +402,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
       })
     );
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     await waitFor(() => {
       expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
@@ -436,7 +430,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
       })
     );
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     await waitFor(() => {
       expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('idle');
@@ -461,7 +455,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
         loop_initial_prompt: null,
       })
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     await waitFor(() => {
       expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
@@ -480,7 +474,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
       }),
       { loopStatus: { enabled: true, active_iteration: 3, total_iterations: 3 } }
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     await waitFor(() => {
       expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('active');
@@ -503,7 +497,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
       { rejectSetEnabled: true }
     );
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     await waitFor(() => {
       expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
@@ -518,7 +512,7 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
   it('surfaces a backend rejection in the SaveIndicator', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }), { rejectLoopConfig: true });
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);
     fireEvent.change(max, { target: { value: '10' } });
@@ -527,14 +521,13 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
     expect(await screen.findByText(/Save failed: .*mock/i)).toBeTruthy();
   });
 
-  it('registers its rail button so the activity bar lands it cleanly', () => {
-    // Pure routing smoke test — the rest of the suite opens via the
-    // rail, but pinning "the rail exposes the label" here makes a
-    // future rename that drops a PROBE_TABS entry fail with an
-    // unambiguous error.
+  it('stays a registered inspector destination so openProbeTab lands it cleanly', () => {
+    // Pure routing smoke test — pinning the destination's ownership entry
+    // makes a future rename that drops the PROBE_TAB_DEFINITIONS entry fail
+    // with an unambiguous error.
     mockBackend(meshRow());
-    render(<ProbePanel />);
-    expect(screen.getByRole('button', { name: 'Autopilot' })).toBeTruthy();
+    openProbeDestination('autopilot');
+    expect(screen.getByRole('region', { name: 'Probe panel' }).textContent).toContain('Autopilot');
   });
 });
 
@@ -562,7 +555,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
 
   it('renders all four policy fields when autopilot is on', async () => {
     mockBackend(ON_ROW());
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     // The master checkbox shows enabled=true. The four policy fields
     // render because the gate is open. `Trigger label` carries the
@@ -591,7 +584,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         { id: 'codex', label: 'Codex', color: '#000', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
       ],
     });
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const trigger = (await screen.findByLabelText(/^Trigger label/)) as HTMLInputElement;
     expect(trigger.value).toBe('buildmesh:run');
@@ -607,7 +600,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
 
   it('hides the four policy fields when the master toggle is off (default)', async () => {
     mockBackend(meshRow({ autopilot_enabled: false }));
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     expect(
       ((await screen.findByLabelText(/^Autopilot on/i)) as HTMLInputElement).checked
@@ -623,7 +616,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
   it('replaces the issue-driven form with the looping form when mode flips to Looping', async () => {
     mockBackend(ON_ROW());
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     // Sanity: issue-driven fields are visible right now.
     expect(await screen.findByLabelText(/^Trigger label/)).toBeTruthy();
@@ -651,7 +644,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
       })
     );
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const checkbox = await screen.findByLabelText(/^Autopilot on/i);
     await user.click(checkbox);
@@ -675,7 +668,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
   it('trigger label saves on blur via update_mesh_autopilot (atomic 5-field write)', async () => {
     mockBackend(ON_ROW());
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const input = await screen.findByLabelText(/^Trigger label/);
     await user.clear(input);
@@ -710,7 +703,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
       })
     );
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     // Atomic 5-field contract — every IPC carries ALL policy columns
     // (enabled + trigger + concurrency + provider + action) so a
@@ -720,8 +713,10 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
     // `get_autopilot_compatibility` follow-up call after every save,
     // so we assert via `toHaveBeenCalledWith` (not `Last`) — the
     // exact "last call" is now the compatibility refresh.
+    // The form loads asynchronously; the first control lookup awaits it
+    // (findBy*), after which the form is mounted for the rest of the test.
     await user.selectOptions(
-      screen.getByLabelText('Max concurrent autopilot nodes'),
+      await screen.findByLabelText('Max concurrent autopilot nodes'),
       '5'
     );
     await waitFor(() => {
@@ -771,7 +766,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         autopilot_trigger_label: 'buildmesh:run',
       })
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const input = await screen.findByLabelText(/^Trigger label/);
     fireEvent.change(input, { target: { value: '   ' } });
@@ -833,7 +828,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         }),
       }
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     // Banner is visible with the explicit-selection label.
     const banner = await screen.findByTestId('autopilot-compatibility-banner');
@@ -864,7 +859,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         }),
       }
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const banner = await screen.findByTestId('autopilot-compatibility-banner');
     expect(banner.textContent).toMatch(/Default Autopilot Spawn Option is incompatible/);
@@ -890,7 +885,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         }),
       }
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const checkbox = (await screen.findByTestId(
       'autopilot-policy-enabled'
@@ -924,7 +919,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         }),
       }
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
     await waitFor(() => {
       expect(screen.queryByTestId('autopilot-compatibility-banner')).toBeNull();
     });
@@ -956,7 +951,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
       }
     );
     const user = userEvent.setup();
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const start = (await screen.findByTestId(
       'autopilot-loop-start'
@@ -989,7 +984,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         }),
       }
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
 
     const banner = await screen.findByTestId('autopilot-compatibility-banner');
     expect(banner.textContent).toMatch(/worktrees are disabled on this mesh/i);
@@ -1009,7 +1004,7 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
         }),
       }
     );
-    await openAutopilotTab();
+    openProbeDestination('autopilot');
     // Give the verdict fetch a tick to resolve.
     await waitFor(() => {
       expect(screen.queryByTestId('autopilot-compatibility-banner')).toBeNull();

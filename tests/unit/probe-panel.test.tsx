@@ -1,5 +1,5 @@
 ﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
@@ -32,23 +32,6 @@ const NODE: AgentNode = {
   position: 0,
   created_at: new Date(0).toISOString(),
 };
-
-/** The six tabs in the order the activity bar presents them (issue #374).
- *  The Archive entry uses its longer tooltip text because the activity-bar
- *  button's accessible name resolves to `tooltip ?? label` (so SR users hear
- *  the same disambiguating form as sighted hover). */
-const TAB_LABELS = [
-  'Project Files',
-  'Agent Changes',
-  'Worktree Manager',
-  'Mesh Properties',
-  'Git Issues',
-  'Archived Nodes',
-];
-
-function tabButton(label: string): HTMLElement {
-  return screen.getByRole('button', { name: label });
-}
 
 const FILES: GitStatus[] = [
   { path: 'src/app.ts', status: 'modified', additions: 2, deletions: 1 },
@@ -98,36 +81,35 @@ describe('ProbePanel', () => {
     });
   });
 
-  it('renders an activity-bar button for all six tabs even when collapsed', () => {
-    render(<ProbePanel />);
-    for (const label of TAB_LABELS) {
-      expect(tabButton(label)).toBeTruthy();
-    }
+  it('renders nothing when closed — no rail, sidebar, or Probe button (issue #1375)', () => {
+    // The on-demand inspector model: closed means GONE. Reopening happens
+    // through the palette, the title-bar Usage action, and contextual
+    // entries — none of which live in this component.
+    const { container } = render(<ProbePanel />);
+    expect(container.childElementCount).toBe(0);
+    expect(screen.queryByRole('region', { name: 'Probe panel' })).toBeNull();
+    expect(screen.queryByRole('navigation')).toBeNull();
   });
 
-  it('keeps the body collapsed until a tab is clicked', () => {
+  it('opens on the requested destination via openProbeTab (palette / title-bar entries)', () => {
     render(<ProbePanel />);
     expect(screen.queryByRole('region', { name: 'Probe panel' })).toBeNull();
 
-    fireEvent.click(tabButton('Project Files'));
+    act(() => {
+      useUIStore.getState().openProbeTab('files');
+    });
     expect(useUIStore.getState().probeOpen).toBe(true);
     expect(useUIStore.getState().probeTab).toBe('files');
     expect(screen.getByRole('region', { name: 'Probe panel' })).toBeTruthy();
   });
 
-  it('collapses when the active tab icon is clicked a second time', () => {
+  it('switches destination when openProbeTab is called while open', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
-    fireEvent.click(tabButton('Project Files'));
-    expect(useUIStore.getState().probeOpen).toBe(false);
-  });
-
-  it('switches tab (and stays open) when a different icon is clicked', () => {
-    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
-    render(<ProbePanel />);
-
-    fireEvent.click(tabButton('Git Issues'));
+    act(() => {
+      useUIStore.getState().openProbeTab('issues');
+    });
     expect(useUIStore.getState().probeOpen).toBe(true);
     expect(useUIStore.getState().probeTab).toBe('issues');
   });
@@ -145,7 +127,7 @@ describe('ProbePanel', () => {
     render(<ProbePanel />);
 
     const header = screen.getByRole('region', { name: 'Probe panel' });
-    expect(header.textContent).toContain('Archive');
+    expect(header.textContent).toContain('Agent History');
   });
 
   it('shows the active lens and Mesh subject in the header', () => {
@@ -315,10 +297,9 @@ describe('useUIStore.openProbeTab (issue #375, the next 5 tabs rely on this)', (
   });
 
   it('is idempotent: second call with the same tab does not toggle', () => {
-    // The activity-bar owns the "click active to collapse" UX via
-    // `toggleProbe`. `openProbeTab` is pure "make visible" so call
-    // sites stay one-liners; a toggle semantic here would silently
-    // no-op repeated triggers (e.g. right-clicking a different mesh).
+    // `openProbeTab` is pure "make visible" so call sites stay one-liners;
+    // a toggle semantic here would silently no-op repeated triggers (e.g.
+    // right-clicking a different mesh).
     useUIStore.getState().openProbeTab('properties');
     expect(useUIStore.getState().probeOpen).toBe(true);
     expect(useUIStore.getState().probeTab).toBe('properties');

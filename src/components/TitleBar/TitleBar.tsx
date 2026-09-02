@@ -7,6 +7,7 @@ import { GridControls } from './GridControls';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';
+import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 
 /**
  * Bespoke window chrome for the frameless window (`decorations: false`).
@@ -15,7 +16,22 @@ import { useUIStore } from '../../stores/uiStore';
  * the lights are drawn by us. Drag-region placement (per-target, never
  * on buttons or SVGs) is the load-bearing detail; see the recipe in
  * `docs/knowledge-primer.md`.
+ *
+ * Issue #1375 moved navigation title-bar-first: a labelled "Search or
+ * open…" command field opens the Universal Command Omnibar (the palette
+ * is the primary way to reach destinations), and Usage — a high-frequency,
+ * host-global utility — gets its own labelled action instead of living
+ * behind icon-only Probe navigation. Neither shows data in the bar itself;
+ * they are entry points, not readouts.
  */
+
+// `SHORTCUT_CATALOG` is a static module constant; resolving the
+// `open-omnibar` row once at module scope avoids an O(n) array `.find()`
+// on every render of `NavigationControls` (PR #1489 review #2B).
+// The label is platform-aware via `shortcutLabel(entry, isMac)` and
+// `isMac` is itself a module-load-time read of `navigator.platform`.
+const OMNIBAR_CATALOG_ENTRY = SHORTCUT_CATALOG.find((entry) => entry.action === 'open-omnibar');
+const SEARCH_SHORTCUT_LABEL = OMNIBAR_CATALOG_ENTRY ? shortcutLabel(OMNIBAR_CATALOG_ENTRY) : '';
 
 const appWindow = getCurrentWindow();
 
@@ -57,6 +73,102 @@ function MobileIcon({ className }: IconProps) {
       <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
       <line x1="12" y1="18" x2="12" y2="18" />
     </Svg>
+  );
+}
+
+/** Lucide `search`. */
+function SearchIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </Svg>
+  );
+}
+
+/** Gauge glyph for the Usage action (semi-dial + needle), drawn locally so
+    the title bar keeps its icons self-contained like Settings/Mobile. */
+function UsageIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M4 19a8 8 0 1 1 16 0" />
+      <path d="M12 11v4" />
+      <path d="M12 19h.01" />
+    </Svg>
+  );
+}
+
+/** Issue #1375 — the title-bar navigation cluster. The labelled "Search or
+    open…" field is the global entry point to the command palette (views,
+    commands, nodes, issues, pull requests), and Usage is a separate labelled
+    action because it is a high-frequency, host-global utility. Both open
+    surfaces rather than displaying data inline: no aggregate Usage number is
+    shown in the bar. The kbd hint is read from the shortcut catalog (the
+    knowledge-primer's single source for display labels) so it can never
+    drift from the cheatsheet row. */
+function NavigationControls() {
+  // Both reads below drive the visible aria state of the navigation
+  // cluster — `Usage` flips between an "open" and "active" treatment,
+  // and the palette field's `aria-expanded` mirrors the omnibar's
+  // mounted state. Selecting the primitive directly keeps the
+  // subscription cheap so unrelated store ticks (terminal output,
+  // agent node updates) don't re-render this header.
+  const probeOpen = useUIStore((s) => s.probeOpen);
+  const probeTab = useUIStore((s) => s.probeTab);
+  const omnibarOpen = useUIStore((s) => s.omnibarOpen);
+  const usageActive = probeOpen && probeTab === 'usage';
+  return (
+    <div className="flex items-center gap-1.5 px-2">
+      <button
+        type="button"
+        onClick={() => useUIStore.getState().openOmnibar('files')}
+        data-testid="titlebar-command-search"
+        aria-label="Search or open"
+        aria-haspopup="dialog"
+        // `aria-expanded` mirrors the omnibar's open state so assistive
+        // tech reads the same closed→open transition a sighted user gets.
+        aria-expanded={omnibarOpen}
+        title="Search or open… (command palette)"
+        // `w-64` is the design width; `min-w-40` lets the field shrink to
+        // 160px on half-screen windows (PR #1489 review — drag-region
+        // starvation at sub-1000px). At that minimum the placeholder
+        // still reads "Search or open…" without truncation; on tighter
+        // screens the user types into the palette, not the bar.
+        className="flex h-7 w-64 min-w-40 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-2.5 text-2xs text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
+      >
+        <SearchIcon className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
+        {/* `SEARCH_SHORTCUT_LABEL` is resolved once at module scope. The
+            conditional still keeps an empty <kbd> chip from appearing if
+            the catalog row were ever renamed. */}
+        {SEARCH_SHORTCUT_LABEL !== '' && (
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[9px] text-text-muted">
+            {SEARCH_SHORTCUT_LABEL}
+          </kbd>
+        )}
+      </button>
+      <button
+        type="button"
+        onClick={() => useUIStore.getState().openProbeTab('usage')}
+        data-testid="titlebar-usage"
+        aria-label="Open Usage"
+        aria-expanded={usageActive}
+        // `title` flips to match the active state — "close" when Usage is
+        // already in the inspector, "open" otherwise. The visible label
+        // stays "Usage" so the surface name doesn't change mid-flight.
+        title={usageActive
+          ? 'Usage surface is open — click the inspector close (X) to dismiss'
+          : 'Open Usage (provider meters and limits)'}
+        className={`flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-2xs transition-colors ${
+          usageActive
+            ? 'border-accent-cyan/40 bg-accent-cyan/10 text-accent-cyan'
+            : 'border-border-default text-text-secondary hover:bg-bg-card hover:text-text-primary'
+        }`}
+      >
+        <UsageIcon className="h-3.5 w-3.5 shrink-0" />
+        <span>Usage</span>
+      </button>
+    </div>
   );
 }
 
@@ -257,9 +369,21 @@ export function TitleBar() {
           <ViewModeSwitcher />
         </div>
 
+        {/* Issue #1375 — title-bar-first navigation: the labelled command
+            field and the Usage action. Non-draggable (the header carries
+            `data-tauri-drag-region`, never this cluster) so clicks don't
+            grab the window. */}
+        <NavigationControls />
+
         {/* Drag-region spacer — the "empty" part of the strip the user grabs
-            to move the window; grows to push the right-side controls over. */}
-        <div data-tauri-drag-region className="flex-1" />
+            to move the window; grows to push the right-side controls over.
+            `min-w-8` (32px) guarantees at least a usable grab zone on
+            half-screen windows where the cluster adds up past the viewport
+            width (PR #1489 review — at sub-1000px the bare `flex-1`
+            collapses to 0px and users can no longer drag the window). The
+            search field's `min-w-40` mirrors this: search yields space first
+            so the drag region stays grabbable. */}
+        <div data-tauri-drag-region className="flex-1 min-w-8" />
 
         {/* Issue #998 — grid search control. Lives on the right side of the
             slim top bar, between the drag-region spacer and the

@@ -7,11 +7,11 @@
  * collapsible header (the probe already provides the surface chrome) and
  * the always-visible one-liner (the probe header shows the tab name).
  *
- * Rendering strategy: mount the full `ProbePanel` and click the 🌳 tab
- * button, the same way the existing `mesh-properties-tab.test.tsx` does
- * for âš™ï¸. This keeps the routing wiring in `ProbePanel.tsx` covered by
- * the same suite — a separate routing test would have to know the tab's
- * internal structure.
+ * Rendering strategy: mount the full `ProbePanel` with the worktrees
+ * destination opened via `openProbeTab`, the same way the existing
+ * `mesh-properties-tab.test.tsx` does. This keeps the routing wiring in
+ * `ProbePanel.tsx` covered by the same suite — a separate routing test
+ * would have to know the tab's internal structure.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -26,6 +26,7 @@ import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
 import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { openProbeDestination } from './helpers/openProbeDestination';
 
 const MESH: Mesh = {
   id: 42,
@@ -234,12 +235,6 @@ function mockBackend(
   });
 }
 
-async function openWorktreesTab() {
-  const user = userEvent.setup();
-  render(<ProbePanel />);
-  await user.click(screen.getByRole('button', { name: 'Worktree Manager' }));
-}
-
 beforeEach(() => {
   useMeshStore.setState({
     meshes: [MESH],
@@ -253,7 +248,7 @@ beforeEach(() => {
 describe('WorktreeManagerTab (issue #377)', () => {
   it('renders the 🌳 tab body when clicked (no longer the "coming soon" placeholder)', async () => {
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // The header should still show the tab's name — the friendly placeholder
     // "This tab's content is coming soon." must be gone.
@@ -273,7 +268,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
 
   it('lists local branches and worktrees returned by get_git_prune_info', async () => {
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Branches surface with their names. `main` and the merged
     // `feature/done` must both appear once the prune info resolves.
@@ -285,7 +280,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
 
   it('shows no HealthBlock when the mesh is clean (no drift / no hostage)', async () => {
     mockBackend({ health: HEALTHY });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Wait for the prune list to render so the negative assertion is stable
     // (the health block also mounts after `get_mesh_health` resolves).
@@ -298,7 +293,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
 
   it('shows the HealthBlock with Restore + Free buttons when the mesh is drifted with a hostage', async () => {
     mockBackend({ health: DRIFTED_HEALTH });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const restore = await screen.findByRole('button', { name: /Restore root to main/i });
     expect(restore).toBeTruthy();
@@ -321,7 +316,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
 
   it('exposes Refresh / Select recommended / Delete Selected in the toolbar', async () => {
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // The toolbar controls must be present once the prune info resolves.
     // The merged/clean `feature/done` branch is recommended; the stale
@@ -338,7 +333,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
   it('opens a confirmation dialog before deleting, and only invokes delete_branches/delete_worktrees after confirm', async () => {
     const user = userEvent.setup();
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Wait for the prune list, then select the recommended merged branch +
     // stale worktree (the (2) the toolbar's "Select recommended" button
@@ -372,7 +367,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
   it('clicking Free on a hostage triggers free_base_branch and re-fetches health + prune info', async () => {
     const user = userEvent.setup();
     mockBackend({ health: DRIFTED_HEALTH });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const free = await screen.findByRole('button', { name: /Free main \(holder\)/i });
     await user.click(free);
@@ -400,7 +395,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
     // shows the fallback text.
     const user = userEvent.setup();
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const prune = await screen.findByRole('button', { name: /^Prune$/ });
     expect(prune).toBeTruthy();
@@ -433,7 +428,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
   it('clicking Prune with a failing backend surfaces an inline error prefixed "Prune failed: " (issue #657)', async () => {
     const user = userEvent.setup();
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // The default mock returns success for `prune_remote_tracking`.
     // Override the *next* call so this single click fails — leaves other
@@ -498,7 +493,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
       return Promise.resolve('');
     });
 
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const prune = await screen.findByRole('button', { name: /^Prune$/ });
     await user.click(prune);
@@ -527,7 +522,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
       base_branch_holder: null,
     };
     mockBackend({ health: driftedNoHostage });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const restore = await screen.findByRole('button', { name: /Restore root to main/i });
     await user.click(restore);
@@ -543,7 +538,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
     // tab mirrors that guard in the UI: the button is disabled and the
     // tooltip says why.
     mockBackend({ health: DRIFTED_HEALTH });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const restore = (await screen.findByRole('button', {
       name: /Restore root to main/i,
@@ -566,11 +561,21 @@ describe('ProbePanel routing for the 🌳 tab (issue #377)', () => {
     expect(screen.queryByText("This tab's content is coming soon.")).toBeNull();
   });
 
-  it('the 🌳 tab in the activity bar opens the panel on the worktrees tab', () => {
+  it('openProbeTab opens the panel on the worktrees destination', () => {
+    // #1375: the rail is gone — destinations open through the store action
+    // driven by the palette, title bar, and contextual entries. Closed first
+    // proves the panel renders nothing; reopened via the store proves the
+    // same mount path the real entry points use.
+    useUIStore.setState({ probeOpen: false, probeTab: 'files' });
+    const closed = render(<ProbePanel />);
+    expect(screen.queryByRole('region', { name: 'Probe panel' })).toBeNull();
+    closed.unmount();
+
+    useUIStore.getState().openProbeTab('worktrees');
     render(<ProbePanel />);
-    fireEvent.click(screen.getByRole('button', { name: 'Worktree Manager' }));
     expect(useUIStore.getState().probeOpen).toBe(true);
     expect(useUIStore.getState().probeTab).toBe('worktrees');
+    expect(screen.getByRole('region', { name: 'Probe panel' })).toBeTruthy();
   });
 });
 
@@ -583,7 +588,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
 
   it('initial load populates the form from get_mesh_properties', async () => {
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Wait for the form to populate from the load effect.
     const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
@@ -603,7 +608,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
   it('toggling the use_worktree checkbox calls update_mesh_use_worktree and collapses the radios', async () => {
     const user = userEvent.setup();
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Wait for the form to populate.
     const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
@@ -628,7 +633,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
   it('selecting the Head radio calls update_worktree_base_ref with HEAD on the wire', async () => {
     const user = userEvent.setup();
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // The default is Fresh (base_ref: origin/main). Click Head to flip.
     const headRadio = (await screen.findByLabelText(/Head — resume last session/i)) as HTMLInputElement;
@@ -649,7 +654,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
   it('selecting the Detached radio calls update_mesh_column with column=worktree_mode', async () => {
     const user = userEvent.setup();
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // The default is branched. Click Detached to flip.
     const detachedRadio = (await screen.findByLabelText(/Detached/i)) as HTMLInputElement;
@@ -671,7 +676,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
   it('collapsing use_worktree hides the two radio groups', async () => {
     const user = userEvent.setup();
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Both group labels are present while use_worktree is true.
     expect(await screen.findByText('Starting point')).toBeTruthy();
@@ -689,7 +694,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
   it('save failure surfaces inline and does NOT revert the form state', async () => {
     const user = userEvent.setup();
     mockBackend({ saveUseWorktreeFails: true });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
     expect(checkbox.checked).toBe(true);
@@ -714,7 +719,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // The card must fall back to the default rather than rendering
     // an empty radio group.
     mockBackend({ meshRow: { worktree_mode: null } });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
     expect(branched.checked).toBe(true);
@@ -731,7 +736,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
 
   it('renders a repo-path open-in-explorer button that calls open_in_file_manager with the repo path', async () => {
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Wait for the prune list to render before asserting on the button —
     // the repo path appears only after `get_git_prune_info` resolves.
@@ -754,7 +759,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
 
   it('renders a per-worktree open-in-explorer button that calls open_in_file_manager with that worktree path', async () => {
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Wait for the prune list to render. `orphan` is the worktree
     // directory name (`/repos/demo/.worktrees/orphan`).
@@ -779,7 +784,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // the label) actually isolates the click target: a per-worktree
     // open click leaves the selection set empty.
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
     await screen.findByText('orphan');
 
     const orphanButton = screen.getByTestId('worktree-open-w:/repos/demo/.worktrees/orphan');
@@ -845,7 +850,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
         },
       ],
     });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Wait for the prune info to render.
     await screen.findByText('feature/live');
@@ -927,7 +932,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
         },
       ],
     });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     await screen.findByText('feature/merged-active');
 
@@ -992,7 +997,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
     // Default meshRow has pre_spawn_pool_size: 0; mockBackend default
     // poolCount: 0. The badge must NOT render.
     mockBackend();
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Wait for the config card to render so the negative assertion is
     // stable (the badge mounts after the form populates from the load).
@@ -1005,7 +1010,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
       meshRow: { pre_spawn_pool_size: 3 },
       poolCount: 2,
     });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // The badge uses the live count (2) and the persisted target (3).
     const status = await screen.findByTestId('pool-status');
@@ -1030,7 +1035,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
       meshRow: { pre_spawn_pool_size: 1 },
       poolCount: 0,
     });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     const text = await screen.findByTestId('pool-status-text');
     expect(text.textContent).toBe('0 / 1 ready');
@@ -1044,7 +1049,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
       meshRow: { pre_spawn_pool_size: 5 },
       poolCount: 1,
     });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     // Sanity check: initial fetch resolved.
     await waitFor(() => {
@@ -1090,7 +1095,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
       meshRow: { pre_spawn_pool_size: 3 },
       poolCount: 2,
     });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
     await waitFor(() => {
       expect(screen.getByTestId('pool-status-text').textContent).toBe(
         '2 / 3 ready',
@@ -1196,7 +1201,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
         },
       ],
     });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     await screen.findByText('feature/orphan');
 
@@ -1301,7 +1306,7 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
         },
       ],
     });
-    await openWorktreesTab();
+    openProbeDestination('worktrees');
 
     await screen.findByText('feature/merged-orphan-wt');
 

@@ -101,6 +101,13 @@ describe('TitleBar on macOS', () => {
       // The rest of the chrome is still present.
       expect(screen.getByAltText('Buildmesh')).toBeTruthy();
       expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
+      // Issue #1375 — the navigation cluster renders on macOS too, with the
+      // macOS chord from the shortcut catalog (`⌘+K`, the open-omnibar row)
+      // as the palette hint.
+      const search = screen.getByRole('button', { name: 'Search or open' });
+      expect(search).toBeTruthy();
+      expect(search.textContent).toContain('⌘+K');
+      expect(screen.getByRole('button', { name: 'Open Usage' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Open settings' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Open remote access' })).toBeTruthy();
     });
