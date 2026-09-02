@@ -57,6 +57,10 @@ import { ArchivedNodesTab } from './ArchivedNodesTab';
 import { ScratchpadTab } from './ScratchpadTab';
 import { UsageTab } from './UsageTab';
 import {
+  getProbePrototypeVariant,
+  ProbePanelPrototype,
+} from './ProbePanelPrototypeBig';
+import {
   ArchiveIcon,
   AutopilotIcon,
   CircuitsIcon,
@@ -117,6 +121,21 @@ function ContextPinIcon({ className = 'w-3.5 h-3.5' }: { className?: string }) {
 }
 
 export function ProbePanel() {
+  const prototypeVariant = getProbePrototypeVariant();
+  if (prototypeVariant !== null) {
+    return (
+      <ProbePanelPrototype
+        variant={prototypeVariant}
+        tabs={PROBE_TABS}
+        renderTab={(tab) => <ProbeTabBody tab={tab} />}
+      />
+    );
+  }
+
+  return <ProductionProbePanel />;
+}
+
+function ProductionProbePanel() {
   const probeOpen = useUIStore((s) => s.probeOpen);
   const probeTab = useUIStore((s) => s.probeTab);
   const setProbeTab = useUIStore((s) => s.setProbeTab);

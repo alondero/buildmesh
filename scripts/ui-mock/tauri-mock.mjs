@@ -71,7 +71,11 @@ export const defaultFixtures = {
   list_agent_nodes: agentNodes,
   get_default_provider: 'anthropic',
   list_providers: [
-    { id: 'anthropic', name: 'Claude', description: 'Anthropic Claude Code', icon: null, available: true, kind: 'cwrap' },
+    {
+      id: 'anthropic', label: 'Claude', name: 'Claude', description: 'Anthropic Claude Code',
+      icon: null, available: true, kind: 'cwrap', harness_id: 'claude',
+      provider_id: 'anthropic', is_proxied: false, group_key: 'anthropic',
+    },
   ],
   get_app_preferences: { default_provider: 'anthropic', minimax_api_key_set: false, google_cloud_project: null },
   get_provider_accounts: [],

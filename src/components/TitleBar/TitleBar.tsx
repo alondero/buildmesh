@@ -7,6 +7,7 @@ import { GridControls } from './GridControls';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';
+import { getProbePrototypeVariant, ProbeTitleBarPrototype } from '../Probe/ProbePanelPrototypeBig';
 
 /**
  * Bespoke window chrome for the frameless window (`decorations: false`).
@@ -196,6 +197,7 @@ export function TitleBar() {
   const appSettingsOpen = useUIStore((s) => s.appSettingsOpen);
   const remoteAccessOpen = useUIStore((s) => s.remoteAccessOpen);
   const [isMaximized, setIsMaximized] = useState(false);
+  const prototypeVariant = getProbePrototypeVariant();
 
   // Track the maximized state so the middle window control can swap between
   // the maximize and restore glyphs. `onResized` fires for maximize,
@@ -256,6 +258,8 @@ export function TitleBar() {
         <div className="flex items-center">
           <ViewModeSwitcher />
         </div>
+
+        {prototypeVariant && <ProbeTitleBarPrototype variant={prototypeVariant} />}
 
         {/* Drag-region spacer — the "empty" part of the strip the user grabs
             to move the window; grows to push the right-side controls over. */}
