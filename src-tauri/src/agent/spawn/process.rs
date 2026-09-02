@@ -1,5 +1,5 @@
-use portable_pty::{CommandBuilder, PtyPair};
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
+use portable_pty::{CommandBuilder, PtyPair};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -255,7 +255,7 @@ pub(super) fn register_agent(
             // Issue #634: stored at registration so `write_bytes` and the
             // PTY read loop can record per-mesh activity without a DB
             // lookup on every chunk. `mesh_id` was already resolved at
-            // `spawn_agent_inner:797` via `db::get_mesh_by_path(&node.path)`
+            // `prepare_context` via `db::get_mesh_by_path(&node.path)`
             // — the value is in scope here.
             mesh_id,
         },

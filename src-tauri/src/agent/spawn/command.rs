@@ -267,7 +267,7 @@ pub(crate) fn cascade_inputs_for<'a>(
 /// standing up a Tauri runtime, a preferences cache, or a DB.
 ///
 /// `app_default` is the ALREADY-LOOKED-UP value for the harness
-/// profile. The orchestrator parses the composite `node.provider` id
+/// profile. The launch phase parses the composite harness id
 /// (`"<harness>:<provider>"` for Proxied rows) and resolves the harness
 /// default at its seam so this helper stays free of
 /// `preferences::load()` (which would force the test to populate the

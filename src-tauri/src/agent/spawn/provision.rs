@@ -5,35 +5,40 @@
 //! provisioning. Command construction stays in `command`; process sandboxing
 //! stays in `process`.
 
-use super::prepare::PreparedSpawn;
 use super::reader::SpawnTimer;
 use super::wire::emit_provider_error;
 use super::{MeshSyncOutcome, MeshSyncWarningPayload};
-use crate::agent::session_lifecycle;
 use crate::agent::session_lifecycle::SessionLifecycleSink as _;
 use crate::git::worktree::provision::{
     fork_remote_alias, locked_fetch_pr_head, provision_for_spawn, read_origin_ref_sha,
     AppHandleSink, ProvisionHooks, SpawnContext, SpawnSource,
 };
-use crate::models::Provider;
+use crate::models::{AgentNode, Provider};
 use tauri::Emitter;
 
-/// Workspace ready for command construction and PTY launch.
+/// Git/workspace inputs for this phase. Launch knobs (PTY size, prefill,
+/// cascade overrides) stay on [`super::launch::LaunchParams`].
+pub(super) struct WorkspaceToProvision {
+    pub session_id: i64,
+    pub provider: Provider,
+    pub node: AgentNode,
+    pub use_worktree: bool,
+    pub worktree_mode: String,
+    pub base_ref: String,
+    pub warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry>,
+    pub pool_was_drained_by_this_spawn: bool,
+    pub spawn_worktree_name: Option<String>,
+    pub resolved: crate::env::ResolvedPath,
+}
+
+/// Disk/runtime state after fetch, worktree provision, and provider
+/// preflight. Command-construction knobs are not here — the orchestrator
+/// passes [`super::launch::LaunchParams`] alongside this to launch.
 pub(super) struct ProvisionedWorkspace {
     pub session_id: i64,
     pub provider: Provider,
-    pub rows: u16,
-    pub cols: u16,
-    pub prefill: Option<String>,
-    pub explicit_model: Option<String>,
-    pub explicit_effort: Option<String>,
-    pub explicit_extra_args: Option<String>,
-    pub node: crate::models::AgentNode,
-    pub session_id_mode: super::reader::SessionIdMode,
-    pub sandbox: bool,
     pub resolved: crate::env::ResolvedPath,
     pub routing: crate::agent::launch_routing::PreparedLaunchRouting,
-    pub mesh_id: i64,
 }
 
 /// Run the two provider-owned launch prerequisites in order while preserving
@@ -82,7 +87,7 @@ pub(super) fn emit_sync_outcome_event(
             // node IS fresh. Only the parent checkout's fast-forward was
             // skipped, and the user already knows their own tree is dirty.
             tracing::info!(
-                "spawn_agent_inner: auto-sync fetched {} commit(s) but skipped the pull \
+                "provision_workspace: auto-sync fetched {} commit(s) but skipped the pull \
                  (parent dirty) for session {}",
                 new_commits,
                 session_id
@@ -91,21 +96,21 @@ pub(super) fn emit_sync_outcome_event(
         }
         Ok(crate::git::sync::FetchOutcome::SkippedNoRemote) => {
             tracing::info!(
-                "spawn_agent_inner: auto-sync skipped (no origin) for session {}",
+                "provision_workspace: auto-sync skipped (no origin) for session {}",
                 session_id
             );
             return;
         }
         Ok(crate::git::sync::FetchOutcome::UpToDate) => {
             tracing::info!(
-                "spawn_agent_inner: auto-sync up-to-date for session {}",
+                "provision_workspace: auto-sync up-to-date for session {}",
                 session_id
             );
             return;
         }
         Ok(crate::git::sync::FetchOutcome::Synced { new_commits }) => {
             tracing::info!(
-                "spawn_agent_inner: auto-sync pulled {} commit(s) for session {}",
+                "provision_workspace: auto-sync pulled {} commit(s) for session {}",
                 new_commits,
                 session_id
             );
@@ -124,7 +129,7 @@ pub(super) fn emit_sync_outcome_event(
                 "Fetched {} new commit(s) from origin, but local history has diverged ({}). Spawning from local HEAD — pull manually to sync.",
                 new_commits, reason
             );
-            tracing::warn!("spawn_agent_inner: {}", message);
+            tracing::warn!("provision_workspace: {}", message);
             Some(MeshSyncWarningPayload {
                 node_id: session_id,
                 mesh_path: mesh_path.to_string(),
@@ -145,7 +150,7 @@ pub(super) fn emit_sync_outcome_event(
                 "Couldn't auto-sync the mesh — repository is unusable: {}. Spawning from local HEAD instead.",
                 reason
             );
-            tracing::warn!("spawn_agent_inner: {}", message);
+            tracing::warn!("provision_workspace: {}", message);
             Some(MeshSyncWarningPayload {
                 node_id: session_id,
                 mesh_path: mesh_path.to_string(),
@@ -175,7 +180,7 @@ pub(super) fn emit_sync_outcome_event(
                     reason
                 )
             };
-            tracing::warn!("spawn_agent_inner: {}", message);
+            tracing::warn!("provision_workspace: {}", message);
             Some(MeshSyncWarningPayload {
                 node_id: session_id,
                 mesh_path: mesh_path.to_string(),
@@ -206,32 +211,27 @@ pub(super) fn emit_sync_outcome_event(
 
 /// Fetch, cut or adopt the worktree, then run provider preflight and
 /// workspace-trust / attention-hook provisioning.
+///
+/// Failures return `Err` to the orchestrator. This phase must not emit
+/// `node-spawn-failed` or write session-lifecycle Error — `spawn_with_intent`
+/// is the sole owner of those so Resume can call `on_resume_failed`.
 pub(super) async fn provision_workspace(
     app: &tauri::AppHandle,
-    prepared: PreparedSpawn,
+    workspace: WorkspaceToProvision,
     timer: &SpawnTimer,
 ) -> Result<ProvisionedWorkspace, String> {
-    let PreparedSpawn {
+    let WorkspaceToProvision {
         session_id,
         provider,
-        rows,
-        cols,
-        prefill,
-        explicit_model,
-        explicit_effort,
-        explicit_extra_args,
         node,
-        session_id_mode,
         use_worktree,
-        sandbox,
         worktree_mode,
         base_ref,
-        mesh_id,
         mut warm_claimed,
         pool_was_drained_by_this_spawn,
         spawn_worktree_name,
         resolved,
-    } = prepared;
+    } = workspace;
     let adapter = provider.adapter();
 
     // Set true when the spawn-time fetch advances the mesh's base ref, so the
@@ -252,7 +252,7 @@ pub(super) async fn provision_workspace(
         if !host_path_exists {
             if crate::services::fetch_freshness::spawn_can_skip_fetch(&node.path) {
                 tracing::info!(
-                    "spawn_agent_inner: skipping auto-sync for session {} — mesh {} was synced {}s ago (< TTL)",
+                    "provision_workspace: skipping auto-sync for session {} — mesh {} was synced {}s ago (< TTL)",
                     session_id,
                     node.path,
                     crate::services::fetch_freshness::time_since_success(&node.path).as_secs()
@@ -287,7 +287,7 @@ pub(super) async fn provision_workspace(
                 })
                 .await
                 .unwrap_or_else(|e| {
-                    tracing::warn!("spawn_agent_inner: fetch task panicked: {}", e);
+                    tracing::warn!("provision_workspace: fetch task panicked: {}", e);
                     false
                 });
                 timer.checkpoint("after_fetch_pr_head");
@@ -307,7 +307,7 @@ pub(super) async fn provision_workspace(
                     .await
                     .unwrap_or_else(|e| {
                         tracing::warn!(
-                            "spawn_agent_inner: read_origin_ref_sha task panicked: {}",
+                            "provision_workspace: read_origin_ref_sha task panicked: {}",
                             e
                         );
                         None
@@ -322,7 +322,11 @@ pub(super) async fn provision_workspace(
                                 "PR #{} was force-pushed or rebased after you clicked Spawn                                  (expected {}, now {} on {}). Spawning on the new tip —                                  re-spawn to pin to a fresh SHA.",
                                 pr_number, expected, actual, remote_ref,
                             );
-                            tracing::warn!("spawn_agent_inner: {} (node {})", message, session_id,);
+                            tracing::warn!(
+                                "provision_workspace: {} (node {})",
+                                message,
+                                session_id,
+                            );
                             let _ = app.emit(
                                 "mesh-sync-warning",
                                 MeshSyncWarningPayload {
@@ -361,7 +365,7 @@ pub(super) async fn provision_workspace(
                         "Could not fetch PR #{} head ref '{}' from {};                          spawning from the mesh's base ref '{}' instead.                          The agent may land on stale commits — re-spawn                          when the network is back to retry.",
                         pr_number, head_ref, source_label, base_ref,
                     );
-                    tracing::warn!("spawn_agent_inner: {} (node {})", message, session_id,);
+                    tracing::warn!("provision_workspace: {} (node {})", message, session_id,);
                     let mut head_repo_owner_str: Option<String> = None;
                     let mut head_repo_clone_url_str: Option<String> = None;
                     if let (Some(owner), Some(url)) = (
@@ -405,7 +409,7 @@ pub(super) async fn provision_workspace(
         base_ref.to_string()
     };
 
-    // 7. Provision the Worktree Node via `provision_for_spawn` (issue #677).
+    // Provision the Worktree Node via `provision_for_spawn` (issue #677).
     //    CRITICAL CORRECTNESS:
     //    * `ctx.base_ref` is `worktree_base_ref` (post-fetch for PR/Issue,
     //      the mesh base otherwise). Setting this AFTER the PR-head-fetch
@@ -437,28 +441,16 @@ pub(super) async fn provision_workspace(
     .await
     .unwrap_or_else(|e| Err(format!("provision_for_spawn task panicked: {}", e)));
     timer.checkpoint("after_provision");
-    match provision_result {
-        Ok(_outcome) => {}
-        Err(e) => {
-            tracing::error!("spawn_agent_inner: provision_for_spawn failed: {}", e);
-            let sink = session_lifecycle::AppSessionLifecycleSink { app };
-            let _ = session_lifecycle::on_error(&sink, session_id);
-            let _ = app.emit(
-                "node-spawn-failed",
-                crate::commands::agent::NodeSpawnFailedPayload {
-                    node_id: session_id,
-                    error: e.clone(),
-                },
-            );
-            return Err(e);
-        }
+    if let Err(e) = provision_result {
+        tracing::error!("provision_workspace: provision_for_spawn failed: {}", e);
+        return Err(e);
     }
 
     if let Err(e) =
         crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type)
     {
         tracing::warn!(
-            "spawn_agent_inner: failed to sanitize worktree .git file: {}",
+            "provision_workspace: failed to sanitize worktree .git file: {}",
             e
         );
     }
@@ -533,7 +525,7 @@ pub(super) async fn provision_workspace(
         Ok((trust, hooks)) => {
             if let Err(e) = trust {
                 tracing::warn!(
-                    "spawn_agent_inner: workspace trust provisioning failed for session {}: {}",
+                    "provision_workspace: workspace trust provisioning failed for session {}: {}",
                     session_id,
                     e
                 );
@@ -546,7 +538,7 @@ pub(super) async fn provision_workspace(
             }
             if let Err(e) = hooks {
                 tracing::warn!(
-                    "spawn_agent_inner: attention hook provisioning failed for session {}: {}",
+                    "provision_workspace: attention hook provisioning failed for session {}: {}",
                     session_id,
                     e
                 );
@@ -570,7 +562,7 @@ pub(super) async fn provision_workspace(
         }
         Err(error) => {
             tracing::warn!(
-                "spawn_agent_inner: provider provisioning task failed for session {}: {}",
+                "provision_workspace: provider provisioning task failed for session {}: {}",
                 session_id,
                 error
             );
@@ -594,17 +586,7 @@ pub(super) async fn provision_workspace(
     Ok(ProvisionedWorkspace {
         session_id,
         provider,
-        rows,
-        cols,
-        prefill,
-        explicit_model,
-        explicit_effort,
-        explicit_extra_args,
-        node,
-        session_id_mode,
-        sandbox,
         resolved,
         routing,
-        mesh_id,
     })
 }

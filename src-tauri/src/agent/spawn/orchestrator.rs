@@ -1,12 +1,16 @@
 //! High-level spawn pipeline: intent dispatch plus the four phase calls.
 //!
-//! `spawn_with_intent` is the public seam. `spawn_agent_inner` sequences
-//! prepare → provision → launch → streams and holds the in-flight claim
-//! across every phase. Command construction, process sandboxing, and
-//! attention-hook writes stay in their dedicated modules.
+//! `spawn_with_intent` is the public seam and the sole owner of
+//! `node-spawn-failed` / session-lifecycle Error (so Resume can call
+//! `on_resume_failed`). `spawn_agent_inner` acquires the in-flight claim,
+//! then coordinates prepare → provision → launch → streams. Prepare
+//! returns workspace params and launch params separately; provision
+//! never sees PTY size or cascade overrides. Command construction,
+//! process sandboxing, and attention-hook writes stay in their
+//! dedicated modules.
 
 use super::launch::launch_process;
-use super::prepare::{prepare_context, PrepareOutcome};
+use super::prepare::{prepare_context, PrepareOutcome, SpawnInFlightClaim};
 use super::process::is_agent_already_running;
 use super::provision::provision_workspace;
 use super::reader::SpawnTimer;
@@ -220,16 +224,16 @@ pub(crate) async fn spawn_with_intent(
             prefill,
             node: Some(node.clone()),
             // Issue #1358: per-spawn extra_args ride the explicit layer
-            // through to `spawn_agent_inner`, where `resolve_spawn_config`
+            // through to launch, where `resolve_spawn_config`
             // capability-masks them against `HarnessCapabilities
             // .supports_extra_args` (Terminal drops; every interactive
             // harness keeps).
             explicit_extra_args: explicit.extra_args,
             // Cascade layer-1 overrides flow through verbatim. Empty /
             // whitespace-only values are normalised at `cascade_inputs_for`
-            // inside `spawn_agent_inner` so the cascade falls through to
-            // the next layer rather than forwarding a synthetic blank
-            // arg to the harness (issue #1148 AC #32 + #1155 AC #3).
+            // in `command` so the cascade falls through to the next layer
+            // rather than forwarding a synthetic blank arg to the harness
+            // (issue #1148 AC #32 + #1155 AC #3).
             explicit_model: explicit.model,
             explicit_effort: explicit.effort,
             worktree_policy,
@@ -273,8 +277,10 @@ pub(super) fn intent_replaces_conversation(intent: &SpawnIntent) -> bool {
 }
 
 /// Transitional implementation retained while transport callers migrate to
-/// [`spawn_with_intent`]. It sequences the four spawn phases and holds the
-/// in-flight claim until every phase has returned.
+/// [`spawn_with_intent`]. It acquires the in-flight claim, then sequences
+/// the four spawn phases. Phase modules return `Result` and do not emit
+/// `node-spawn-failed` or write session-lifecycle Error — that stays here
+/// via [`spawn_with_intent`].
 pub(crate) async fn spawn_agent_inner(
     app: &tauri::AppHandle,
     opts: SpawnOptions,
@@ -289,15 +295,30 @@ pub(crate) async fn spawn_agent_inner(
     );
 
     let timer = SpawnTimer::new(opts.session_id);
-    let (prepared, _claim) = match prepare_context(app, opts, &timer).await? {
-        PrepareOutcome::Skipped => return Ok(()),
-        PrepareOutcome::Ready { claim, spawn } => (*spawn, claim),
+
+    // Named local, held across every phase. Binding this as `_claim` (or
+    // returning it from prepare as a tuple item a match can ignore) would
+    // let a future refactor drop the RAII guard at the prepare seam and
+    // reopen the #650 concurrent-spawn race.
+    let Some(claim) = SpawnInFlightClaim::try_claim(opts.session_id) else {
+        tracing::info!(
+            "spawn_agent_inner: spawn already in flight for session {}, skipping duplicate call",
+            opts.session_id
+        );
+        return Ok(());
     };
-    let provisioned = provision_workspace(app, prepared, &timer).await?;
-    let launched = launch_process(app, provisioned, &timer).await?;
-    start_streams(app, launched, &timer).await?;
+
+    match prepare_context(app, opts, &timer).await? {
+        PrepareOutcome::Skipped => {}
+        PrepareOutcome::Ready(phases) => {
+            let provisioned = provision_workspace(app, phases.workspace, &timer).await?;
+            let launched = launch_process(app, provisioned, phases.launch, &timer).await?;
+            start_streams(app, launched, &timer).await?;
+        }
+    }
 
     tracing::info!("spawn_agent_inner: complete");
     timer.total();
+    drop(claim);
     Ok(())
 }

@@ -1,18 +1,20 @@
 //! Prepare-context phase of Agent Node spawn.
 //!
 //! Resolves everything the later phases need before touching git or a PTY:
-//! the in-flight claim, the node row, session-id mode, mesh worktree policy,
-//! optional warm-pool claim, and the host/spawn paths. The orchestrator holds
-//! the claim for the rest of the pipeline.
+//! the node row, session-id mode, mesh worktree policy, optional warm-pool
+//! claim, and the host/spawn paths. The orchestrator acquires the in-flight
+//! claim *before* calling this function and holds it across every phase.
 
+use super::launch::LaunchParams;
 use super::process::is_agent_already_running;
+use super::provision::WorkspaceToProvision;
 use super::reader::{SessionIdMode, SpawnTimer};
 use super::WorktreePolicy;
 use crate::models::{AgentNode, Provider};
 use crate::{db, env};
 
 /// Default `worktree_mode` when the mesh config leaves it unset. Pinned by
-/// `default_worktree_mode_is_branched` in `provision_tests.rs`.
+/// `default_worktree_mode_is_branched` in `prepare_tests.rs`.
 ///
 /// This was previously paired with a TS sentinel at `src/lib/worktreeMode.ts`,
 /// deleted in #411 once the TS side lost its only consumer (a self-referential
@@ -29,6 +31,11 @@ pub(super) static SPAWNS_IN_FLIGHT: once_cell::sync::Lazy<
 
 /// RAII claim on a session id in [`SPAWNS_IN_FLIGHT`]. Dropping releases
 /// the claim on every exit path, including a cancelled async task.
+///
+/// `spawn_agent_inner` acquires this *before* the phase calls and binds
+/// it as a named local (`claim`, never `_claim`) so a future match cannot
+/// drop it at the prepare seam and reopen the #650 race.
+#[must_use = "dropping the claim releases the in-flight spawn slot"]
 pub(crate) struct SpawnInFlightClaim {
     session_id: i64,
 }
@@ -73,7 +80,7 @@ pub(crate) struct SpawnOptions {
     /// Cascade layer-1 model override (issue #1155). Highest precedence
     /// in the spawn-config cascade — wins over the Mesh row and the
     /// application default. `None` or whitespace-only collapses to
-    /// absent at [`super::orchestrator::cascade_inputs_for`] so the cascade
+    /// absent at [`super::command::cascade_inputs_for`] so the cascade
     /// falls through.
     pub explicit_model: Option<String>,
     /// Cascade layer-1 effort / reasoning override (issue #1155). Same
@@ -93,36 +100,19 @@ pub(crate) struct SpawnOptions {
     pub worktree_policy: WorktreePolicy,
 }
 
-/// Fully resolved spawn state at the prepare → provision seam.
-pub(super) struct PreparedSpawn {
-    pub session_id: i64,
-    pub provider: Provider,
-    pub rows: u16,
-    pub cols: u16,
-    pub prefill: Option<String>,
-    pub explicit_model: Option<String>,
-    pub explicit_effort: Option<String>,
-    pub explicit_extra_args: Option<String>,
-    pub node: AgentNode,
-    pub session_id_mode: SessionIdMode,
-    pub use_worktree: bool,
-    pub sandbox: bool,
-    pub worktree_mode: String,
-    pub base_ref: String,
-    pub mesh_id: i64,
-    pub warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry>,
-    pub pool_was_drained_by_this_spawn: bool,
-    pub spawn_worktree_name: Option<String>,
-    pub resolved: env::ResolvedPath,
+/// Workspace inputs + launch knobs produced by prepare. Boxed in
+/// [`PrepareOutcome::Ready`] so the Skipped unit variant doesn't trip
+/// `large_enum_variant`.
+pub(super) struct PreparedPhases {
+    pub workspace: WorkspaceToProvision,
+    pub launch: LaunchParams,
 }
 
 pub(super) enum PrepareOutcome {
-    /// Duplicate in-flight spawn or a live process already occupies the node.
+    /// A live process already occupies the node (the orchestrator's
+    /// in-flight claim still covers the skip so a racer cannot sneak in).
     Skipped,
-    Ready {
-        claim: SpawnInFlightClaim,
-        spawn: Box<PreparedSpawn>,
-    },
+    Ready(Box<PreparedPhases>),
 }
 
 /// Resolve the `base_ref` string that `git::sync::fetch_origin` will use for
@@ -182,13 +172,18 @@ pub(crate) fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Optio
     format!("origin/{}", branch)
 }
 
-/// Load the node, resolve worktree policy and paths, and claim the session
-/// for the rest of the pipeline.
+/// Load the node, resolve worktree policy and paths. The orchestrator
+/// must already hold [`SpawnInFlightClaim`] for `opts.session_id`.
 pub(super) async fn prepare_context(
     app: &tauri::AppHandle,
     opts: SpawnOptions,
     timer: &SpawnTimer,
 ) -> Result<PrepareOutcome, String> {
+    debug_assert!(
+        SPAWNS_IN_FLIGHT.lock().contains(&opts.session_id),
+        "prepare_context requires spawn_agent_inner to hold SpawnInFlightClaim"
+    );
+
     let SpawnOptions {
         session_id,
         provider,
@@ -203,38 +198,17 @@ pub(super) async fn prepare_context(
         worktree_policy,
     } = opts;
 
-    // 0. Claim the session for the WHOLE pipeline. `is_agent_already_running`
-    //    below only sees registered processes, and registration is seconds
-    //    away (git fetch + worktree provisioning) — without this claim a
-    //    concurrent duplicate call (backend stage-2 vs frontend Terminal
-    //    auto-spawn) passes that check and its step-2 stale-kill destroys
-    //    THIS call's freshly-booted process. Returning Ok mirrors the
-    //    already-running short-circuit: the node is being brought up, the
-    //    caller has nothing further to do.
-    let claim = match SpawnInFlightClaim::try_claim(session_id) {
-        Some(claim) => claim,
-        None => {
-            tracing::info!(
-                "spawn_agent_inner: spawn already in flight for session {}, skipping duplicate call",
-                session_id
-            );
-            return Ok(PrepareOutcome::Skipped);
-        }
-    };
-
-    // 1. Check if already running
     if is_agent_already_running(&session_id) {
         return Ok(PrepareOutcome::Skipped);
     }
 
-    // 2. Kill any stale process for this session
     tracing::debug!(
-        "spawn_agent_inner: killing stale processes for session {}",
+        "prepare_context: killing stale processes for session {}",
         session_id
     );
     crate::agent::process::kill_agent(session_id).await.ok();
 
-    // 3. Get node and resolve paths (skip DB read if caller provided the node)
+    // Load the node (skip the DB read if the caller already has it).
     let node = match preloaded_node {
         Some(n) => n,
         None => db::get_agent_node_by_id(session_id).map_err(|e| {
@@ -247,7 +221,7 @@ pub(super) async fn prepare_context(
         })?,
     };
     tracing::info!(
-        "spawn_agent_inner: node path={}, env={:?}",
+        "prepare_context: node path={}, env={:?}",
         node.path,
         node.env
     );
@@ -255,7 +229,8 @@ pub(super) async fn prepare_context(
 
     let adapter = provider.adapter();
 
-    // 4. Determine session ID mode
+    // Session-id mode: Assign writes the UUID before launch; Resume
+    // reuses the captured id; None leaves capture to the adapter.
     let session_id_mode = if adapter.supports_resume() {
         match resume {
             Some(ref id) if !id.is_empty() => SessionIdMode::Resume(id.clone()),
@@ -265,7 +240,7 @@ pub(super) async fn prepare_context(
                 } else {
                     let cli_uuid = uuid::Uuid::new_v4().to_string();
                     db::update_cli_session_id(session_id, &cli_uuid).map_err(|e| e.to_string())?;
-                    tracing::info!("spawn_agent_inner: assigned cli_session_id={}", cli_uuid);
+                    tracing::info!("prepare_context: assigned cli_session_id={}", cli_uuid);
                     SessionIdMode::Assign(cli_uuid)
                 }
             }
@@ -274,7 +249,7 @@ pub(super) async fn prepare_context(
         SessionIdMode::None
     };
 
-    // 5. Read mesh row for use_worktree / worktree_mode (legacy
+    // Mesh row for use_worktree / worktree_mode (legacy
     // model/effort columns are no longer read as active spawn
     // configuration — the v33 migration copied any non-empty legacy
     // values into the new map; see issue #1151 acceptance criteria 6).
@@ -307,7 +282,7 @@ pub(super) async fn prepare_context(
 
     timer.checkpoint("after_mesh_row_read");
 
-    // 6. Compute spawn path. The pool claim (issue #609/#612) decides whether
+    // Spawn path. The pool claim (issue #609/#612) decides whether
     //    the spawn adopts a pre-warmed worktree (Manual: pool slug IS the
     //    node name; Issue/PR: `git worktree move` the pool dir onto the
     //    `gh{N}-`/`pr{N}-` target) or falls through to a cold create. A
@@ -318,7 +293,7 @@ pub(super) async fn prepare_context(
     // downstream: Manual adopts the pool's slug as the node name (issue #609);
     // Issue/PR keep their own `gh{N}-`/`pr{N}-` name and move the pool dir
     // to match (issue #612). Consumed by the post-spawn name adoption
-    // (further below) and by the SpawnContext built at phase 7.
+    // (in the provisioner) and by the SpawnContext built during provision.
     let is_rename_spawn = node.source_issue.is_some() || node.source_pr.is_some();
     let mut warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry> = None;
     // Issue #653: a successful `try_claim` that the use-site recheck later
@@ -341,7 +316,7 @@ pub(super) async fn prepare_context(
             match crate::services::warm_pool::try_claim(app, mesh_id) {
                 Ok(Some(entry)) => {
                     tracing::info!(
-                        "spawn_agent_inner: claimed warm pool entry id={} path={} slug={} base_sha={}",
+                        "prepare_context: claimed warm pool entry id={} path={} slug={} base_sha={}",
                         entry.id,
                         entry.path,
                         entry.preassigned_name,
@@ -376,13 +351,13 @@ pub(super) async fn prepare_context(
                 }
                 Ok(None) => {
                     tracing::info!(
-                        "spawn_agent_inner: warm pool empty for mesh {}; cold spawn",
+                        "prepare_context: warm pool empty for mesh {}; cold spawn",
                         mesh_id
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "spawn_agent_inner: warm pool claim failed (non-fatal, falling back to cold): {}",
+                        "prepare_context: warm pool claim failed (non-fatal, falling back to cold): {}",
                         e
                     );
                 }
@@ -397,16 +372,16 @@ pub(super) async fn prepare_context(
     //    resolves straight onto the already-on-disk pool directory (#609).
     //  * Issue/PR warm claim (`is_rename_spawn`): keep the node's own
     //    `gh{N}-`/`pr{N}-` `worktree_name`. It resolves to a path that does
-    //    NOT exist yet, so we enter the cold-create block below — where the
-    //    PR-head fetch runs — and there `git worktree move` the pool directory
-    //    onto this target instead of a cold `git worktree add` (#612).
+    //    NOT exist yet; provision then `git worktree move`s the pool
+    //    directory onto this target instead of a cold `git worktree add`
+    //    (#612), after the PR-head fetch.
     //  * No claim: fall back to whatever the node row carries (resumes, or a
     //    cold issue/PR spawn).
     //
-    // Owned (`Option<String>`, not `Option<&str>`) on purpose: the Issue/PR
-    // path mutates `warm_claimed` (take / re-assign) inside the worktree block
-    // below, so `spawn_worktree_name` must not hold a borrow into it. The slugs
-    // are short, so the clone is negligible.
+    // Owned (`Option<String>`, not `Option<&str>`) on purpose: provision
+    // later `take()`s `warm_claimed`, so `spawn_worktree_name` must not
+    // hold a borrow into it. The slugs are short, so the clone is
+    // negligible.
     let spawn_worktree_name: Option<String> = if let Some(ref entry) = warm_claimed {
         if is_rename_spawn {
             node.worktree_name.clone()
@@ -416,52 +391,57 @@ pub(super) async fn prepare_context(
     } else if use_worktree {
         node.worktree_name.clone()
     } else {
-        tracing::info!("spawn_agent_inner: use_worktree=false, using repo root directly");
+        tracing::info!("prepare_context: use_worktree=false, using repo root directly");
         None
     };
 
     let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name.as_deref());
     tracing::info!(
-        "spawn_agent_inner: resolved spawn_path={}, host_path={}, env={:?}",
+        "prepare_context: resolved spawn_path={}, host_path={}, env={:?}",
         resolved.spawn_path,
         resolved.host_path,
         resolved.env_type
     );
 
     // For a Manual warm claim, the pool's preassigned slug IS the node's
-    // `worktree_name` once the spawn completes — the post-spawn DB write
-    // (below, before `register_agent`) persists that, but `provision_for_spawn`
-    // needs the right branch name in the Spawn Context NOW so the manual
-    // `Upgraded` branch's `git checkout -B <branch>` targets the pool's slug
-    // rather than the node's stage-1 throwaway. Mutate `node.worktree_name`
-    // in place here; `node.clone()` carries the value into the Spawn Context.
+    // `worktree_name` once the spawn completes — the provisioner persists
+    // that, but `provision_for_spawn` needs the right branch name in the
+    // Spawn Context NOW so the manual `Upgraded` branch's `git checkout -B
+    // <branch>` targets the pool's slug rather than the node's stage-1
+    // throwaway. Mutate `node.worktree_name` in place here; the node
+    // travels into WorkspaceToProvision.
     let mut node = node;
     if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
         node.worktree_name = Some(entry.preassigned_name.clone());
     }
 
-    Ok(PrepareOutcome::Ready {
-        claim,
-        spawn: Box::new(PreparedSpawn {
+    let harness_id = node.provider.clone();
+    let node_mesh_id = node.mesh_id;
+    Ok(PrepareOutcome::Ready(Box::new(PreparedPhases {
+        workspace: WorkspaceToProvision {
             session_id,
             provider,
+            node,
+            use_worktree,
+            worktree_mode: worktree_mode.to_string(),
+            base_ref,
+            warm_claimed,
+            pool_was_drained_by_this_spawn,
+            spawn_worktree_name,
+            resolved,
+        },
+        launch: LaunchParams {
             rows,
             cols,
             prefill,
             explicit_model,
             explicit_effort,
             explicit_extra_args,
-            node,
+            harness_id,
+            node_mesh_id,
+            registry_mesh_id: mesh_id,
             session_id_mode,
-            use_worktree,
             sandbox,
-            worktree_mode: worktree_mode.to_string(),
-            base_ref,
-            mesh_id,
-            warm_claimed,
-            pool_was_drained_by_this_spawn,
-            spawn_worktree_name,
-            resolved,
-        }),
-    })
+        },
+    })))
 }

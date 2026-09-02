@@ -1,6 +1,4 @@
-#![allow(unused_imports)]
-
-use super::{reader::*, *};
+use super::reader::*;
 
 /// The start_reader pattern: `pump_pty_output` inside `with_batcher`.
 /// If the producer isn't dropped before join, this hangs on EOF.
@@ -88,7 +86,7 @@ fn plain_terminal_natural_exit_is_idle_regardless_of_elapsed() {
 // -----------------------------------------------------------------------
 // Reader-thread session-id capture gate (issue #651)
 //
-// The orchestrator's pre-write at spawn_agent_inner (Assign mode) and the
+// Prepare's pre-write (Assign mode) and the
 // PTY reader thread's capture-from-output path both target the same
 // `agent_nodes.cli_session_id` column. They are unsynchronised, so a
 // last-writer-wins race left the row holding a UUID the agent never
@@ -102,7 +100,7 @@ fn plain_terminal_natural_exit_is_idle_regardless_of_elapsed() {
 /// Regression for issue #651. Even if a future adapter returns
 /// `self_assigns_session_id() = true`, the reader thread MUST NOT capture
 /// when the orchestrator is in Assign mode — the orchestrator already
-/// wrote a UUID at `spawn_agent_inner` step 4, and the reader would
+/// wrote a UUID in `prepare_context` (Assign mode), and the reader would
 /// overwrite it with whatever UUID matched the regex on PTY output
 /// (possibly a different log line, possibly never echoed back).
 #[test]

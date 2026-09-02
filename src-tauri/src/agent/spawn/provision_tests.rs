@@ -1,6 +1,4 @@
-#![allow(unused_imports)]
-
-use super::{prepare::*, provision::*, *};
+use super::provision::*;
 use crate::git::worktree::provision::{
     adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
     locked_fetch_pr_head, read_origin_ref_sha, upgrade_warm_to_mode,
@@ -9,13 +7,6 @@ use tempfile::TempDir;
 
 /// Atomic counter for unique bare-repo paths (one per test run).
 static NEXT_FORK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Pin the spawn-time fallback. Sole pin of `DEFAULT_WORKTREE_MODE`
-/// after #411 deleted the TS-side sentinel (it had no real consumer).
-#[test]
-fn default_worktree_mode_is_branched() {
-    assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
-}
 
 #[test]
 fn provider_provisioning_runs_hooks_after_trust_failure() {
@@ -344,232 +335,6 @@ fn adopt_warm_worktree_refuses_to_clobber_an_existing_branch() {
         "target must not be materialised by a refused adoption"
     );
 }
-
-// -----------------------------------------------------------------------
-// base_ref resolution (master-trunk regression)
-//
-// Pre-fix, the spawn path hardcoded `"origin/main"` as the default
-// `base_ref` when the `meshes.base_ref` DB column was `'origin/main'`
-// (its COALESCE default) — meaning a master-trunk repo always hit
-// `mesh-sync-warning` on every spawn (`fatal: couldn't find remote
-// ref main`). These tests pin the resolution chain:
-//
-//   1. meshes.base_ref (BUT NOT the COALESCE default — that's
-//      treated as "no config" so the detection chain runs)
-//   2. refs/remotes/origin/HEAD read from the local repo
-//   3. "origin/main" last resort
-//
-// The COALESCE-sentinel treatment is critical: the DB column is
-// NOT NULL with default `'origin/main'`, so `Mesh.base_ref` is
-// ALWAYS a non-empty `String` and `MeshRow.base_ref` is ALWAYS
-// `Some(_)` — a naive `if let Some(b) = config_base_ref { return b }`
-// would make the detection chain dead code in production. The
-// `resolve_base_ref_treats_coalesce_sentinel_as_unset` test pins the
-// production call path (`Some("origin/main")`).
-// -----------------------------------------------------------------------
-
-#[test]
-fn resolve_base_ref_uses_config_value_when_set() {
-    // The config wins even on a non-repo / non-master path — explicit
-    // user intent overrides any auto-detection. Empty / whitespace
-    // config falls through to the detection chain (regression guard
-    // for an empty-string value slipping through the COALESCE).
-    let tmp = TempDir::new().unwrap();
-    assert_eq!(
-        resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("origin/develop")),
-        "origin/develop"
-    );
-    // Empty / whitespace strings are treated as "no config" so the
-    // detection chain runs — mirrors the COALESCE-to-default contract
-    // in the DB layer.
-    assert_eq!(
-        resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("")),
-        "origin/main",
-        "empty config base_ref must fall through to detection, not propagate"
-    );
-    assert_eq!(
-        resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("   ")),
-        "origin/main",
-        "whitespace-only config base_ref must fall through to detection"
-    );
-}
-
-#[test]
-fn resolve_base_ref_falls_back_to_origin_main_for_non_repo() {
-    // Non-repo path with no config — must not panic. Last-resort
-    // behaviour preserved: `get_default_branch` returns "main" on a
-    // failed `Repository::open`, and we prefix it with "origin/".
-    // The spawn path itself short-circuits to `RepoUnusable` so the
-    // auto-sync result is non-blocking.
-    let tmp = TempDir::new().unwrap();
-    let resolved = resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), None);
-    assert_eq!(resolved, "origin/main");
-}
-
-#[test]
-fn resolve_base_ref_detects_master_via_origin_head() {
-    // Headline regression test: a master-trunk repo with no
-    // `base_ref` in mesh config must produce "origin/master", not
-    // the legacy "origin/main". Pre-fix, this always returned
-    // "origin/main" and the spawn emitted a `mesh-sync-warning` on
-    // every node.
-    use crate::env::test_helpers::TestDir;
-    use git2;
-
-    let td = TestDir::new("base_ref_master");
-    let parent = td.path();
-    // Create a working repo on whatever default branch git picks.
-    // The local branch name doesn't matter — what matters is that
-    // `refs/remotes/origin/HEAD` points at `refs/remotes/origin/master`.
-    crate::env::test_helpers::init_repo_with_commit(parent, &[("README.md", "v1\n")]);
-
-    let repo = git2::Repository::open(parent).unwrap();
-    let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
-    // Build the symbolic ref that `get_default_branch` reads.
-    repo.reference("refs/remotes/origin/master", oid, true, "test setup")
-        .unwrap();
-    repo.reference_symbolic(
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/origin/master",
-        true,
-        "test setup",
-    )
-    .unwrap();
-
-    // Sanity: precondition for the test to be meaningful.
-    let head_ref = repo
-        .find_reference("refs/remotes/origin/HEAD")
-        .unwrap()
-        .symbolic_target()
-        .unwrap()
-        .to_string();
-    assert_eq!(
-        head_ref, "refs/remotes/origin/master",
-        "precondition: origin/HEAD must point at refs/remotes/origin/master"
-    );
-
-    let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), None);
-    assert_eq!(
-        resolved, "origin/master",
-        "master-trunk repo with no base_ref in config must yield origin/master, \
-             not the legacy hardcoded origin/main (this is the master-trunk regression)"
-    );
-}
-
-#[test]
-fn resolve_base_ref_detects_main_via_origin_head() {
-    // Sanity pin: the existing main-trunk behaviour (a repo whose
-    // origin/HEAD points at `main`) must still resolve to
-    // "origin/main" after the fix. Guards against the master fix
-    // accidentally regressing the main case.
-    use crate::env::test_helpers::TestDir;
-    use git2;
-
-    let td = TestDir::new("base_ref_main");
-    let parent = td.path();
-    crate::env::test_helpers::init_repo_with_commit(parent, &[("README.md", "v1\n")]);
-
-    let repo = git2::Repository::open(parent).unwrap();
-    let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
-    repo.reference("refs/remotes/origin/main", oid, true, "test setup")
-        .unwrap();
-    repo.reference_symbolic(
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/origin/main",
-        true,
-        "test setup",
-    )
-    .unwrap();
-
-    let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), None);
-    assert_eq!(
-        resolved, "origin/main",
-        "main-trunk repo must still resolve to origin/main (no regression)"
-    );
-}
-
-#[test]
-fn resolve_base_ref_treats_coalesce_sentinel_as_unset() {
-    // The production call path: `meshes.base_ref` is a NOT NULL
-    // column with a COALESCE default of `'origin/main'` (see
-    // `db::MESH_COLUMNS`). A fresh mesh whose base_ref was never
-    // explicitly set reads as `Some("origin/main")` from the DB →
-    // `MeshRow.base_ref = Some("origin/main")` →
-    // `config.as_ref().and_then(|c| c.base_ref.as_deref())` returns
-    // `Some("origin/main")`. The helper MUST treat this sentinel as
-    // "no config" and fall through to the detection chain, otherwise
-    // a master-trunk repo's spawn still hits `mesh-sync-warning`.
-    // The earlier `_detects_master_via_origin_head` test passes
-    // `None` (which never reaches production); THIS test pins the
-    // actual production contract.
-    use crate::env::test_helpers::TestDir;
-    use git2;
-
-    let td = TestDir::new("base_ref_coalesce_master");
-    let parent = td.path();
-    crate::env::test_helpers::init_repo_with_commit(parent, &[("README.md", "v1\n")]);
-
-    let repo = git2::Repository::open(parent).unwrap();
-    let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
-    repo.reference("refs/remotes/origin/master", oid, true, "test setup")
-        .unwrap();
-    repo.reference_symbolic(
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/origin/master",
-        true,
-        "test setup",
-    )
-    .unwrap();
-
-    // Production-shaped input: COALESCE default from the DB.
-    let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), Some("origin/main"));
-    assert_eq!(
-        resolved, "origin/master",
-        "the COALESCE default 'origin/main' from a fresh mesh's DB row \
-             must be treated as 'no config' — fall through to origin/HEAD \
-             detection. A master-trunk repo with an unconfigured mesh \
-             produces origin/master, not origin/main. This is the actual \
-             production contract; the test passing None never reaches \
-             production."
-    );
-}
-
-#[test]
-fn resolve_base_ref_keeps_explicit_user_value_for_main_trunk() {
-    // A user who LEGITIMATELY sets `base_ref = "origin/main"` (via
-    // the 'Fresh' UI option) on a main-trunk repo must still get
-    // "origin/main" back. The COALESCE-sentinel treatment must
-    // apply to the *fresh* / *unconfigured* case, not penalize a
-    // user who explicitly chose the same value. For a main-trunk
-    // repo the auto-detect would return the same value, so this
-    // test is mostly a documentation pin.
-    use crate::env::test_helpers::TestDir;
-    use git2;
-
-    let td = TestDir::new("base_ref_explicit_main");
-    let parent = td.path();
-    crate::env::test_helpers::init_repo_with_commit(parent, &[("README.md", "v1\n")]);
-
-    let repo = git2::Repository::open(parent).unwrap();
-    let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
-    repo.reference("refs/remotes/origin/main", oid, true, "test setup")
-        .unwrap();
-    repo.reference_symbolic(
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/origin/main",
-        true,
-        "test setup",
-    )
-    .unwrap();
-
-    let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), Some("origin/main"));
-    assert_eq!(
-        resolved, "origin/main",
-        "explicit user-set 'origin/main' on a main-trunk repo must resolve \
-             to 'origin/main' (same as auto-detect — no behaviour change)"
-    );
-}
-
 // -----------------------------------------------------------------------
 // SHA-drift detection (issue #444)
 //
@@ -832,7 +597,7 @@ fn fetch_fork_head_updates_url_on_drift() {
 }
 
 /// Failure path: a non-existent clone URL must return `false` rather
-/// than panic. The caller (`spawn_agent_inner`) falls back to the
+/// than panic. The caller (`provision_workspace`) falls back to the
 /// mesh's `base_ref` and emits a `mesh-sync-warning` toast with
 /// `outcome: "pr_fork_unfetchable"`. Without the failure-as-false
 /// contract, a typo'd clone URL would either spawn on the wrong
@@ -1101,8 +866,8 @@ fn fetch_single_ref_fetches_despite_dirty_parent() {
 
 /// Regression test for issue #698 — `locked_fetch_pr_head` must acquire
 /// the per-Mesh `with_mesh_sync_lock` keyed on the spawn's `node.path`,
-/// matching what `spawn_agent_inner` calls `fetch_origin` with two steps
-/// earlier. Without this wrap, concurrent PR-spawns on the same Mesh
+/// matching what `provision_workspace` calls `fetch_origin` before the
+/// PR-head fetch. Without this wrap, concurrent PR-spawns on the same Mesh
 /// (and a PR-spawn racing the manual `git_sync` button) race on
 /// `.git/FETCH_HEAD` / `refs/remotes/<remote>/<ref>.lock` and the loser
 /// silently falls back to `base_ref`.
@@ -1184,7 +949,7 @@ fn locked_fetch_pr_head_serializes_via_per_mesh_sync_lock_gh698() {
 /// — exercises the FORK branch (`Some/Some` → `fetch_fork_head`) of the
 /// wrapper. The same-repo test alone leaves a CI blind spot: a #698
 /// regression that bypassed the wrapper for fork PRs (e.g. an inlined
-/// `fetch_fork_head` call in `spawn_agent_inner` to skip the remote-
+/// `fetch_fork_head` call in `provision_workspace` to skip the remote-
 /// config lock acquisition) would still pass the same-repo test and
 /// every existing #443 fork unit test (those hit the bare helper
 /// directly, no lock). This test closes the gap by hitting the fork
@@ -1240,5 +1005,28 @@ fn locked_fetch_pr_head_serializes_fork_branch_via_per_mesh_sync_lock_gh698() {
              refs/remotes/fork-<login>/<ref>.lock, AND the git remote add/config \
              files that fetch_fork_head writes before its fetch",
         elapsed,
+    );
+}
+
+/// Provision failures return Err. spawn_with_intent owns the toast and
+/// the Error / on_resume_failed lifecycle write.
+#[test]
+fn provision_workspace_propagates_err_without_spawn_failed_side_effects() {
+    let src = include_str!("provision.rs");
+    let start = src
+        .find("pub(super) async fn provision_workspace")
+        .expect("provision_workspace must exist");
+    let body = &src[start..];
+    assert!(
+        body.contains("provision_workspace: provision_for_spawn failed"),
+        "provision must log under its own name on provision_for_spawn failure"
+    );
+    assert!(
+        !body.contains("\"node-spawn-failed\""),
+        "provision_workspace must not emit node-spawn-failed"
+    );
+    assert!(
+        !body.contains("session_lifecycle::on_error"),
+        "provision_workspace must not write session-lifecycle Error"
     );
 }

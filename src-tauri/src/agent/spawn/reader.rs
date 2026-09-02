@@ -8,7 +8,7 @@ use std::sync::Arc;
 /// If the reader thread exits within this window the agent is flagged
 /// `Error` — typically because `--resume <uuid>` failed against an expired
 /// session. The orchestrator's delayed `Spawning → Running` promotion sleeps
-/// just past this same window (see `spawn_agent_inner` step 14b) so the two
+/// just past this same window (see `start_streams`' delayed promotion) so the two
 /// sites MUST stay in sync; bumping this constant without re-checking the
 /// promotion delay recreates the ghost-Running race.
 /// Shared by the reader thread's early-exit heuristic and the
@@ -135,7 +135,7 @@ pub enum SessionIdMode {
 /// from live PTY output (issue #651).
 ///
 /// Two independent code paths target the same `agent_nodes.cli_session_id`
-/// column: the orchestrator's pre-write in `spawn_agent_inner` step 4 (Assign
+/// column: prepare's pre-write in `prepare_context` (Assign
 /// mode) and the reader thread's `session_capture::try_extract_session_id`
 /// match. They are unsynchronised, so a last-writer-wins race leaves the DB
 /// holding either the orchestrator's UUID or a regex match — and on
@@ -251,7 +251,7 @@ pub(super) fn start_reader(
     }
 
     std::thread::spawn(move || {
-        // The SpawnTimer in spawn_agent_inner stops at process *creation*
+        // The SpawnTimer in the spawn pipeline stops at process *creation*
         // (`after_pty_spawn`), so the shell → agent-CLI boot tail is invisible
         // to it. Log the gap from spawn to the first byte of PTY output here —
         // that first byte is the earliest signal the agent process is actually

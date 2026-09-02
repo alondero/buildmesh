@@ -3,11 +3,13 @@
 //! Provider-specific recipe lives behind `Provider::adapter()` (see `agent/provider`).
 //! OS-specific wrapping lives in `spawn_environment`.
 //! This facade preserves the established `agent::spawn::*` API while the
-//! implementation is divided by responsibility: intent resolution and the
-//! four-phase pipeline in `orchestrator` (prepare context, provision
-//! workspace, launch PTY/process, register/start streams), command
-//! construction in `command`, process sandboxing/hooks in `process`,
-//! PTY reader lifecycle in `reader`, and Tauri payloads in `wire`.
+//! implementation is divided by responsibility: intent resolution and
+//! phase coordination in `orchestrator` (prepare returns workspace
+//! params + launch params; provision takes only git/disk inputs;
+//! launch takes the provisioned workspace plus launch params;
+//! streams register the process). Command construction lives in
+//! `command`, process sandboxing/hooks in `process`, PTY reader
+//! lifecycle in `reader`, Tauri payloads in `wire`.
 
 mod command;
 mod intent;
@@ -25,19 +27,12 @@ mod streams;
 mod wire;
 
 pub use command::{build_spawn_command, build_spawn_command_prepared};
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use command::{cascade_inputs_for, resolve_spawn_config};
 pub(crate) use orchestrator::spawn_with_intent;
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use orchestrator::{decide_startup_resume, spawn_agent_inner, ResumeSkipDecision};
 pub(crate) use prepare::resolve_base_ref_for_spawn;
 pub use prepare::DEFAULT_WORKTREE_MODE;
 pub use process::{inject_attention_hook, is_agent_already_running, spawn_child};
 #[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use reader::{maybe_buffer_for_naming, post_exit_action, PostExitAction};
+pub(crate) use reader::maybe_buffer_for_naming;
 pub use reader::{open_pty_pair, pump_pty_output, SessionIdMode, EARLY_EXIT_WINDOW};
 pub use wire::{
     AgentOutputPayload, AgentSpawnedPayload, MeshSyncOutcome, MeshSyncWarningPayload,
@@ -47,10 +42,16 @@ pub use wire::{
 #[cfg(test)]
 mod command_tests;
 #[cfg(test)]
+mod launch_tests;
+#[cfg(test)]
 mod orchestrator_tests;
+#[cfg(test)]
+mod prepare_tests;
 #[cfg(test)]
 mod process_tests;
 #[cfg(test)]
 mod provision_tests;
 #[cfg(test)]
 mod reader_tests;
+#[cfg(test)]
+mod streams_tests;

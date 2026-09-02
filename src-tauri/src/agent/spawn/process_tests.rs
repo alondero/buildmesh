@@ -1,6 +1,4 @@
-#![allow(unused_imports)]
-
-use super::*;
+use super::inject_attention_hook;
 use tempfile::TempDir;
 
 fn read_injected_settings(project: &std::path::Path) -> serde_json::Value {
