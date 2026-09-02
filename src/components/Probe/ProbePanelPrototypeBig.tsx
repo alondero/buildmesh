@@ -287,11 +287,11 @@ function ContextActionMenu(props: VariantProps) {
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg-surface">
       <DetailHeader {...props} eyebrow="CURRENT WORK" title={props.context.subjectLabel} />
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3">
         <div className="rounded-lg border border-accent-cyan/30 bg-accent-cyan/5 px-3 py-2.5">
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-accent-cyan" />
-            <span className="truncate text-xs font-medium text-text-primary">{props.context.subjectLabel}</span>
+            <span className="break-words text-xs font-medium text-text-primary">{props.context.subjectLabel}</span>
           </div>
           <div className="mt-1 text-2xs text-text-secondary">What do you want to do with this?</div>
         </div>
@@ -342,10 +342,10 @@ function DetailHeader({ eyebrow, title, headerAction, ...props }: VariantProps &
       <div className="min-w-0 flex-1">
         <div className="text-2xs font-semibold uppercase tracking-[0.14em] text-text-muted">{eyebrow}</div>
         <h2 className="mt-1 truncate text-sm font-medium text-text-primary">{title}</h2>
-        <div className="mt-1 flex min-w-0 items-center gap-1 text-xs text-text-secondary" title={props.context.subjectLabel}>
-          <span className="truncate">{props.context.subjectLabel}</span>
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-xs text-text-secondary" title={props.context.subjectLabel}>
+          <span className="break-words">{props.context.subjectLabel}</span>
           <span className="shrink-0 text-text-muted">-</span>
-          <span className="truncate text-text-muted">{contextModeLabel(props.context)}</span>
+          <span className="break-words text-text-muted">{contextModeLabel(props.context)}</span>
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1">
@@ -374,7 +374,7 @@ function HomeButton({ onClick }: { onClick: () => void }) {
 }
 
 function ActiveContextLine({ context, activeDef }: { context: ProbeContext; activeDef: ProbePrototypeTab }) {
-  return <div className="flex shrink-0 items-center gap-2 border-b border-border-subtle px-3 py-2 text-2xs text-text-muted"><span className="truncate">{taskLabel(activeDef.tab)}</span><span className="ml-auto truncate">{context.detailLabel ?? contextModeLabel(context)}</span></div>;
+  return <div className="flex shrink-0 items-start gap-2 border-b border-border-subtle px-3 py-2 text-2xs text-text-muted"><span className="shrink-0">{taskLabel(activeDef.tab)}</span><span className="ml-auto break-words text-right">{context.detailLabel ?? contextModeLabel(context)}</span></div>;
 }
 
 function ActiveTabContent({ tab, label, renderTab }: { tab: ProbeTab; label: string; renderTab: (tab: ProbeTab) => ReactNode }) {
