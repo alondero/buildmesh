@@ -3239,6 +3239,56 @@ pub(crate) fn mark_codex_legacy_session_backfill_completed_inner(
     Ok(())
 }
 
+const AGY_LEGACY_SESSION_BACKFILL_KEY: &str = "agy_legacy_session_backfill_v1";
+
+pub fn list_suspended_agy_nodes_without_cli_session_id() -> SqlResult<Vec<AgentNode>> {
+    let db = read_conn();
+    list_suspended_agy_nodes_without_cli_session_id_inner(&db)
+}
+
+pub(crate) fn list_suspended_agy_nodes_without_cli_session_id_inner(
+    conn: &Connection,
+) -> SqlResult<Vec<AgentNode>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM agent_nodes WHERE status = 'suspended' \
+         AND (cli_session_id IS NULL OR cli_session_id = '') \
+         AND (provider = 'agy' OR provider LIKE 'agy:%')",
+        AGENT_NODE_COLUMNS
+    ))?;
+    let rows = stmt.query_map([], map_agent_node_row)?;
+    rows.collect()
+}
+
+pub fn agy_legacy_session_backfill_completed() -> SqlResult<bool> {
+    let db = read_conn();
+    agy_legacy_session_backfill_completed_inner(&db)
+}
+
+pub(crate) fn agy_legacy_session_backfill_completed_inner(
+    conn: &Connection,
+) -> SqlResult<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM app_settings WHERE key = ?1",
+        params![AGY_LEGACY_SESSION_BACKFILL_KEY],
+        |row| row.get::<_, i64>(0).map(|count| count > 0),
+    )
+}
+
+pub fn mark_agy_legacy_session_backfill_completed() -> SqlResult<()> {
+    let db = write_conn();
+    mark_agy_legacy_session_backfill_completed_inner(&db)
+}
+
+pub(crate) fn mark_agy_legacy_session_backfill_completed_inner(
+    conn: &Connection,
+) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+        params![AGY_LEGACY_SESSION_BACKFILL_KEY],
+    )?;
+    Ok(())
+}
+
 // --- Pending worktree removal queue ---
 //
 // Closing a node deletes its row immediately so the UI can drop it at once, but

@@ -8,7 +8,8 @@
 #[cfg(test)]
 mod tests {
     use crate::db::{
-        clear_cli_session_id_inner, codex_legacy_session_backfill_completed_inner,
+        agy_legacy_session_backfill_completed_inner, clear_cli_session_id_inner,
+        codex_legacy_session_backfill_completed_inner, mark_agy_legacy_session_backfill_completed_inner,
         mark_codex_legacy_session_backfill_completed_inner, update_agent_node_status_if_inner,
         update_agent_node_status_inner as update_unconditional_inner,
         update_agent_node_status_unless_in_inner,
@@ -91,6 +92,17 @@ mod tests {
         assert!(!codex_legacy_session_backfill_completed_inner(&conn).unwrap());
         mark_codex_legacy_session_backfill_completed_inner(&conn).unwrap();
         assert!(codex_legacy_session_backfill_completed_inner(&conn).unwrap());
+    }
+
+    /// Issue #1499: the AGY one-time backfill flag round-trips independently
+    /// of the Codex flag so pre-fix suspended AGY rows are repaired exactly
+    /// once without re-scanning on every startup.
+    #[test]
+    fn agy_legacy_session_backfill_completion_is_persisted() {
+        let conn = conn_with_agent_nodes();
+        assert!(!agy_legacy_session_backfill_completed_inner(&conn).unwrap());
+        mark_agy_legacy_session_backfill_completed_inner(&conn).unwrap();
+        assert!(agy_legacy_session_backfill_completed_inner(&conn).unwrap());
     }
 
     /// Happy path: when `expected` matches the current row status, the new

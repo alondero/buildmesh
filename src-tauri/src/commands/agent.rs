@@ -742,6 +742,11 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     if let Err(error) = crate::services::codex_session::backfill_legacy_suspended_nodes_once().await {
         tracing::warn!("auto_resume_agent_nodes: legacy Codex session migration failed: {error}");
     }
+    // Issue #1499: repair AGY rows created before brain-directory capture
+    // existed so pre-fix suspended nodes resume instead of staying NULL.
+    if let Err(error) = crate::services::agy_session::backfill_legacy_suspended_nodes_once().await {
+        tracing::warn!("auto_resume_agent_nodes: legacy AGY session migration failed: {error}");
+    }
 
     let nodes = crate::commands::run_blocking("auto_resume_agent_nodes", || {
         db::list_suspended_nodes().map_err(|e| e.to_string())

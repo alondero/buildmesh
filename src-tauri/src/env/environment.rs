@@ -376,6 +376,45 @@ pub fn agy_brain_dir() -> PathBuf {
     agy_dir().join("brain")
 }
 
+/// The Antigravity CLI home for an agent environment, expressed in that
+/// environment's native path syntax. Mirrors [`codex_dir_for_env`]: the WSL
+/// home is derived from the spawn path's `/home/<user>` prefix instead of
+/// launching a WSL shell (issue #1499 — the capture poller needs the brain
+/// dir for the node's own environment, not the host's `current_env()`).
+pub(crate) fn agy_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    match env_type {
+        EnvType::Windows => Some(agy_dir()),
+        EnvType::Wsl => {
+            if let Ok(home) = env::var("GEMINI_HOME") {
+                if !home.trim().is_empty() && home.starts_with('/') {
+                    return Some(PathBuf::from(home).join("antigravity-cli"));
+                }
+            }
+            if let Ok(home) = env::var("ANTIGRAVITY_HOME") {
+                if !home.trim().is_empty() && home.starts_with('/') {
+                    return Some(PathBuf::from(home));
+                }
+            }
+            if let Some(user) = spawn_path
+                .strip_prefix("/home/")
+                .and_then(|path| path.split('/').next())
+            {
+                if !user.is_empty() {
+                    return Some(
+                        PathBuf::from(format!("/home/{user}/.gemini/antigravity-cli")),
+                    );
+                }
+            }
+            let user = env::var("USERNAME")
+                .ok()
+                .or_else(|| env::var("USER").ok())?;
+            Some(PathBuf::from(format!(
+                "/home/{user}/.gemini/antigravity-cli"
+            )))
+        }
+    }
+}
+
 /// The Grok Code CLI home directory — `<home>/.grok/`. Sessions land under
 /// `<grok>/sessions/<session_id>/chat_history.jsonl` (issue #1281) and
 /// updates stream to `<grok>/sessions/<session_id>/updates.jsonl`. Mirrors
