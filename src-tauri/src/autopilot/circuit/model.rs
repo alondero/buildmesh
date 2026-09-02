@@ -509,6 +509,29 @@ impl CircuitGraph {
         self.edges.iter().filter(|e| e.to == node_id).collect()
     }
 
+    /// True if `ancestor` lies upstream of `descendant` via incoming
+    /// edges. The stepper's target-resolution seam relies on this for
+    /// both the explicit-target validation and the implicit lineage
+    /// walk when a step's `target_node_id` is `None`.
+    pub fn is_ancestor(&self, descendant: &str, ancestor: &str) -> bool {
+        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+        queue.push_back(descendant);
+        visited.insert(descendant);
+        while let Some(curr) = queue.pop_front() {
+            for edge in self.incoming(curr) {
+                let from = edge.from.as_str();
+                if from == ancestor {
+                    return true;
+                }
+                if visited.insert(from) {
+                    queue.push_back(from);
+                }
+            }
+        }
+        false
+    }
+
     /// Nodes with no incoming edges — the triggers.
     pub fn roots(&self) -> Vec<&CircuitNode> {
         self.nodes

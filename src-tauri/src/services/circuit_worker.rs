@@ -505,6 +505,30 @@ fn load_steps(run_id: i64) -> Result<Vec<StepView>, String> {
         .collect())
 }
 
+/// Resolve the agent node id the per-tick observer should check existence
+/// for. Returns the step's direct `agent_node_id` when set (the
+/// `SpawnAgentNode` case — spawn owns the agent it created), or — for
+/// steps that act on an upstream spawned agent (`InjectPty`,
+/// `LlmTurnClassifier`, `SetNodeStatus`, `CloseAgentNode`) — the resolved
+/// lineage agent via [`resolve_target_agent`]. Returns `None` when
+/// neither applies (not a piloted step, or no spawn in lineage).
+///
+/// Used by [`observe`] and the matching startup-recovery pass to detect
+/// orphaned injection/classifier steps whose piloted agent row has been
+/// deleted. Without this seam, a `running` `InjectPty` whose target
+/// agent_node vanished mid-run would stay `running` forever, holding a
+/// `circuit_run_capacity` slot indefinitely.
+fn observed_agent_for_step(
+    step: &StepView,
+    graph: &CircuitGraph,
+    steps: &[StepView],
+) -> Option<i64> {
+    if let Some(id) = step.agent_node_id {
+        return Some(id);
+    }
+    crate::autopilot::circuit::stepper::resolve_target_agent(graph, steps, &step.node_id)
+}
+
 /// Observe the world and turn it into pure events for this run.
 fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> Vec<CircuitEvent> {
     let mut events = Vec::new();
@@ -518,13 +542,27 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     }
 
     // Piloted-agent observation for running steps bound to agent nodes.
+    //
+    // Two observation sources per step:
+    //   * **direct** — `SpawnAgentNode` carries the agent it owns on
+    //     `step.agent_node_id`. The original code path.
+    //   * **lineage** — `InjectPty` / `LlmTurnClassifier` / `SetNodeStatus` /
+    //     `CloseAgentNode` act on an upstream spawned agent; their own
+    //     `step.agent_node_id` is NULL. If the upstream spawn's agent is
+    //     deleted mid-run, the dependent step stays `running` forever
+    //     (the legacy draft-only `SpawnAgentNode` filter let this leak —
+    //     issue surfaced via `buildmesh` mesh 65, runs 3/5/6).
+    //
+    // Both paths converge on the same AgentLost event so the stepper
+    // cancels the step via `cancel_step` and the run reaches a terminal
+    // state through the normal cascade.
     for step in &view.steps {
-        let Some(agent_node_id) = step.agent_node_id else {
-            continue;
-        };
         if step.status != StepStatus::Running {
             continue;
         }
+        let Some(agent_node_id) = observed_agent_for_step(step, &view.graph, &view.steps) else {
+            continue;
+        };
         let node = db::get_agent_node_by_id(agent_node_id).ok();
         match node {
             // Closed/deleted mid-run → clean cancel.
@@ -593,11 +631,11 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     // process is now live fires its AgentReady event.
     for step in &view.steps {
         if step.status == StepStatus::Running {
-            if let Some(CircuitNodeKind::InjectPty { target_node_id, .. }) =
+            if let Some(CircuitNodeKind::InjectPty { .. }) =
                 view.graph.node(&step.node_id).map(|n| &n.kind)
             {
                 if let Some(agent_node_id) =
-                    view.resolve_target_agent(&step.node_id, target_node_id.as_deref())
+                    view.resolve_target_agent(&step.node_id)
                 {
                     if crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
                         events.push(CircuitEvent::AgentReady {
@@ -710,11 +748,11 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
 fn observe_close_agent_retries(view: &RunView, events: &mut Vec<CircuitEvent>) {
     for step in &view.steps {
         if step.status == StepStatus::Completed {
-            if let Some(CircuitNodeKind::CloseAgentNode { target_node_id }) =
+            if let Some(CircuitNodeKind::CloseAgentNode { .. }) =
                 view.graph.node(&step.node_id).map(|node| &node.kind)
             {
                 if view
-                    .resolve_target_agent(&step.node_id, target_node_id.as_deref())
+                    .resolve_target_agent(&step.node_id)
                     .is_some()
                 {
                     events.push(CircuitEvent::CloseAgentRetry {
@@ -799,13 +837,7 @@ fn classify_step_turn(
     node_id: &str,
 ) -> Option<(i64, Option<crate::autopilot::evaluator::Classification>, String)> {
     use crate::autopilot::evaluator;
-    let target_node_id = match view.graph.node(node_id).map(|n| &n.kind) {
-        Some(CircuitNodeKind::LlmTurnClassifier { target_node_id }) => {
-            target_node_id.as_deref()
-        }
-        _ => None,
-    };
-    let agent_node_id = view.resolve_target_agent(node_id, target_node_id)?;
+    let agent_node_id = view.resolve_target_agent(node_id)?;
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
         return None;
     }
@@ -1031,7 +1063,7 @@ fn call_github_effect(
                     );
                 }
                 let agent_node_id = view
-                    .resolve_target_agent(node_id, None)
+                    .resolve_target_agent(node_id)
                     .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
                 let agent_node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
                 let wrapup =
@@ -1162,7 +1194,7 @@ fn call_github_effect(
 /// spawn (no worktree) cannot open a PR and fails loudly instead.
 fn open_pr_head_branch(view: &RunView, node_id: &str) -> Result<String, String> {
     let agent_node_id = view
-        .resolve_target_agent(node_id, None)
+        .resolve_target_agent(node_id)
         .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
     let node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
     if !node.use_worktree {
@@ -1219,9 +1251,31 @@ fn execute_effects(
             Effect::SpawnAgentNode { node_id } => {
                 spawn_step_agent(app, active.run.id, active.run.mesh_id, view, node_id)?;
             }
-            Effect::InjectPty { node_id, prompt, target_node_id } => {
-                match view.resolve_target_agent(node_id, target_node_id.as_deref()) {
+            Effect::InjectPty { node_id, prompt, .. } => {
+                match view.resolve_target_agent(node_id) {
                     Some(target) => {
+                        // Mirrors `observe`'s agent-existence check: treat
+                        // both "row deleted" AND "row archived" as lost.
+                        // An archived row can't accept a PTY write, and
+                        // returning Err here makes `drive_run` persist
+                        // `status: "failed"` directly via
+                        // `commit_circuit_advance` — no AgentLost event,
+                        // no stepper cascade. That's intentional: the
+                        // stepper only emits AgentLost via observation,
+                        // and a missing target here means the row is
+                        // already gone, so a direct write is honest.
+                        let agent_alive = db::get_agent_node_by_id(target)
+                            .ok()
+                            .filter(|n| n.status != SessionStatus::Archived)
+                            .is_some();
+                        if !agent_alive {
+                            let reason = format!(
+                                "target agent {} for step {} was lost before prompt injection",
+                                target, node_id
+                            );
+                            tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                            return Err(reason);
+                        }
                         crate::autopilot::evaluator::note_turn_start(target);
                         crate::autopilot::pipeline::write_prompt_to_pty(target, prompt, app)
                             .map_err(|e| format!("PTY injection failed: {}", e))?;
@@ -1241,17 +1295,35 @@ fn execute_effects(
                     }
                 }
             }
-            Effect::SetNodeStatus { node_id, status, target_node_id } => {
+            Effect::SetNodeStatus { node_id, status, .. } => {
                 let agent_node_id = view
-                    .resolve_target_agent(node_id, target_node_id.as_deref())
+                    .resolve_target_agent(node_id)
                     .ok_or_else(|| format!("SetNodeStatus target agent not found in lineage for node {}", node_id))?;
+                // Same orphan check as `Effect::InjectPty` — mirror the
+                // per-tick observer's "deleted OR archived" semantics so a
+                // row that vanishes between observe and execute is caught
+                // here. Returns Err; `drive_run` persists `status: "failed"`
+                // directly via `commit_circuit_advance` (no AgentLost
+                // cascade — see InjectPty's note above).
+                let agent_alive = db::get_agent_node_by_id(agent_node_id)
+                    .ok()
+                    .filter(|n| n.status != SessionStatus::Archived)
+                    .is_some();
+                if !agent_alive {
+                    let reason = format!(
+                        "target agent {} for step {} was lost before status write",
+                        agent_node_id, node_id
+                    );
+                    tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                    return Err(reason);
+                }
                 let kind = SessionStatus::from_db_str(status);
                 db::update_agent_node_status(agent_node_id, kind)
                     .map_err(|e| format!("status write failed: {}", e))?;
             }
             Effect::CloseAgentNode { node_id, target_node_id } => {
                 let target = view
-                    .resolve_target_agent(node_id, target_node_id.as_deref())
+                    .resolve_target_agent(node_id)
                     .ok_or_else(|| {
                         format!(
                             "CloseAgentNode target agent not found in lineage for node {}",
@@ -1765,37 +1837,95 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
             let Some(node) = graph.node(&step.node_id) else {
                 continue;
             };
-            if !matches!(node.kind, CircuitNodeKind::SpawnAgentNode { .. }) {
-                // InjectPty steps re-fire AgentReady once auto-resume
-                // respawns the process; instant actions never persist as
-                // Running across a clean shutdown. Nothing to decide.
-                continue;
-            }
-            let node_state = step.agent_node_id.and_then(|id| {
-                db::get_agent_node_by_id(id).ok().map(|n| ReconcileNodeState {
-                    archived: n.status == SessionStatus::Archived,
-                    worktree_dir_exists: if n.use_worktree {
-                        Some(std::path::Path::new(&n.path).exists())
-                    } else {
-                        None
-                    },
-                })
-            });
-            match reconcile_spawn_step(step.agent_node_id, node_state) {
-                SpawnReconciliation::Leave => {}
-                SpawnReconciliation::Lost => {
-                    let reason =
-                        "piloted agent was lost while the app was offline".to_string();
-                    tracing::warn!("circuits: run {}: {}", active.run.id, reason);
-                    let _ = fail_run_step(app, &active.run.id, &step.node_id, "cancelled", &reason);
+            match &node.kind {
+                CircuitNodeKind::SpawnAgentNode { .. } => {
+                    let node_state = step.agent_node_id.and_then(|id| {
+                        db::get_agent_node_by_id(id).ok().map(|n| ReconcileNodeState {
+                            archived: n.status == SessionStatus::Archived,
+                            worktree_dir_exists: if n.use_worktree {
+                                Some(std::path::Path::new(&n.path).exists())
+                            } else {
+                                None
+                            },
+                        })
+                    });
+                    match reconcile_spawn_step(step.agent_node_id, node_state) {
+                        SpawnReconciliation::Leave => {}
+                        SpawnReconciliation::Lost => {
+                            let reason =
+                                "piloted agent was lost while the app was offline".to_string();
+                            tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                            let _ = fail_run_step(
+                                app,
+                                &active.run.id,
+                                &step.node_id,
+                                "cancelled",
+                                &reason,
+                            );
+                        }
+                        SpawnReconciliation::NeverAttached => {
+                            let reason = "the app shut down before the spawn attached an \
+                                          agent node — restarting the step is unsafe, \
+                                          failing the run"
+                                .to_string();
+                            tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                            let _ = fail_run_step(
+                                app,
+                                &active.run.id,
+                                &step.node_id,
+                                "failed",
+                                &reason,
+                            );
+                        }
+                    }
                 }
-                SpawnReconciliation::NeverAttached => {
-                    let reason = "the app shut down before the spawn attached an \
-                                  agent node — restarting the step is unsafe, \
-                                  failing the run"
-                        .to_string();
-                    tracing::warn!("circuits: run {}: {}", active.run.id, reason);
-                    let _ = fail_run_step(app, &active.run.id, &step.node_id, "failed", &reason);
+                // Orphan-detection for non-spawn steps whose target agent
+                // vanished while the app was offline. The legacy pass
+                // skipped these with a "Nothing to decide" comment — that
+                // was wrong when the lineage agent is gone: auto-resume
+                // has nothing to respawn, and the step stays `running`
+                // holding a `circuit_run_capacity` slot until the user
+                // cancels the run by hand.
+                //
+                // Step types without a target lineage (`Notify`, `Join`,
+                // `RetryLimit`, `AnyCompleted`, classifier-only markers,
+                // `GithubAction`) are NOT piloted — there is no agent to
+                // lose, so the wildcard arm must skip them. The helper
+                // returns `None` for those step kinds and we leave the
+                // step alone.
+                CircuitNodeKind::InjectPty { .. }
+                | CircuitNodeKind::LlmTurnClassifier { .. }
+                | CircuitNodeKind::SetNodeStatus { .. }
+                | CircuitNodeKind::CloseAgentNode { .. } => {
+                    let observed =
+                        observed_agent_for_step(step, &graph, &steps).and_then(|id| {
+                            // A present-but-archived lineage target is
+                            // also lost from the run's perspective.
+                            db::get_agent_node_by_id(id)
+                                .ok()
+                                .filter(|n| n.status != SessionStatus::Archived)
+                                .map(|_| id)
+                        });
+                    if observed.is_none() {
+                        let reason = format!(
+                            "target agent lineage for step {} was lost while the app was offline",
+                            step.node_id
+                        );
+                        tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                        let _ = fail_run_step(
+                            app,
+                            &active.run.id,
+                            &step.node_id,
+                            "cancelled",
+                            &reason,
+                        );
+                    }
+                }
+                _ => {
+                    // Non-piloted step type (`Notify`, `Join`, `RetryLimit`,
+                    // `AnyCompleted`, `GithubAction`, etc.) — nothing to
+                    // orphan-detect. The legacy comment said "Nothing to
+                    // decide"; that's still true here.
                 }
             }
         }
@@ -2250,6 +2380,236 @@ mod tests {
         assert_eq!(
             reconcile_spawn_step(Some(7), Some(node_state(false, None))),
             SpawnReconciliation::Leave
+        );
+    }
+
+    // -- orphan-detection regression (mesh 65 / runs 3, 5, 6) -----------------
+    //
+    // The legacy pass skipped non-SpawnAgentNode steps with a "Nothing to
+    // decide" comment. Live incident 2026-09-02 showed the assumption was
+    // wrong: when a piloted agent row is deleted while the run is in
+    // flight, an `InjectPty` / `LlmTurnClassifier` / `CloseAgentNode` /
+    // `SetNodeStatus` step that waits on it stays `running` forever,
+    // holding a `circuit_run_capacity` slot. The tests below pin the fix
+    // on both observation paths (per-tick `observe` and the one-shot
+    // `startup_reconcile_pass`).
+
+    /// Build a `RunView` whose `implementer` spawn step has the given
+    /// `agent_node_id` (None = unattached, mirroring a deleted row) and
+    /// whose `follow_feedback` step is `Running` with NULL `agent_node_id`
+    /// (the canonical shape of an orphaned inject step on the review
+    /// blueprint). Used by the orphan-detection regression tests below.
+    fn review_blueprint_view_with_orphan_inject(orphan_target_id: Option<i64>) -> RunView {
+        RunView {
+            run_id: 7,
+            graph: CircuitGraph::issue_driven_autopilot_review("buildmesh:run"),
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView {
+                    node_id: "trigger".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "implementer".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(GraphStepOutcome::Completed),
+                    error: None,
+                    agent_node_id: orphan_target_id,
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "follow_feedback".into(),
+                    status: StepStatus::Running,
+                    outcome: None,
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn observed_agent_for_step_resolves_lineage_for_running_inject_step() {
+        let view = review_blueprint_view_with_orphan_inject(Some(42));
+        let follow = view
+            .step("follow_feedback")
+            .expect("fixture includes follow_feedback");
+        assert_eq!(
+            observed_agent_for_step(follow, &view.graph, &view.steps),
+            Some(42),
+            "InjectPty lineage walks back to implementer's agent_node_id"
+        );
+    }
+
+    #[test]
+    fn observed_agent_for_step_returns_none_when_lineage_spawn_has_no_agent() {
+        let view = review_blueprint_view_with_orphan_inject(None);
+        let follow = view.step("follow_feedback").unwrap();
+        assert_eq!(
+            observed_agent_for_step(follow, &view.graph, &view.steps),
+            None,
+            "no spawn attachment → no observed agent"
+        );
+    }
+
+    #[test]
+    fn observed_agent_for_step_prefers_direct_id_when_present() {
+        let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let step = StepView {
+            node_id: "reviewer".into(),
+            status: StepStatus::Running,
+            outcome: None,
+            error: None,
+            agent_node_id: Some(99),
+            attempt: 1,
+        };
+        // Empty steps slice is fine here — the early-return on direct id
+        // short-circuits before any lineage walk.
+        assert_eq!(observed_agent_for_step(&step, &graph, &[]), Some(99));
+    }
+
+    #[test]
+    fn observed_agent_for_step_returns_none_for_non_piloted_steps() {
+        let graph = CircuitGraph::walking_skeleton("{{issue.prefill}}");
+        graph.validate().unwrap();
+        let step = StepView {
+            node_id: graph.nodes[0].id.clone(),
+            status: StepStatus::Running,
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+        };
+        assert_eq!(observed_agent_for_step(&step, &graph, &[]), None);
+    }
+
+    #[test]
+    fn observed_agent_for_step_walks_lineage_when_target_node_id_is_none() {
+        // Regression for review feedback — the helper previously short-
+        // circuited on `target_node_id = None` because the `?` on the
+        // `Option<&str>` match arms extracted the inner `&str` instead of
+        // passing the option through. The default AST representation for
+        // any step relying on upstream BFS lineage uses `None`, so this
+        // case is the COMMON one — every non-explicit target resolves via
+        // BFS.
+        use crate::autopilot::circuit::model::{
+            CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind,
+        };
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode { id: "trigger".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode {
+                    id: "spawn".into(),
+                    kind: CircuitNodeKind::SpawnAgentNode {
+                        prompt: "fix it".into(),
+                        name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
+                    },
+                },
+                CircuitNode {
+                    id: "inject".into(),
+                    kind: CircuitNodeKind::InjectPty {
+                        prompt: "follow-up".into(),
+                        target_node_id: None,
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "trigger".into(),
+                    to: "spawn".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "spawn".into(),
+                    to: "inject".into(),
+                    condition: Default::default(),
+                },
+            ],
+        };
+        let steps = vec![
+            StepView {
+                node_id: "trigger".into(),
+                status: StepStatus::Completed,
+                outcome: Some(GraphStepOutcome::Completed),
+                error: None,
+                agent_node_id: None,
+                attempt: 1,
+            },
+            StepView {
+                node_id: "spawn".into(),
+                status: StepStatus::Completed,
+                outcome: Some(GraphStepOutcome::Completed),
+                error: None,
+                agent_node_id: Some(42),
+                attempt: 1,
+            },
+            StepView {
+                node_id: "inject".into(),
+                status: StepStatus::Running,
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+                attempt: 1,
+            },
+        ];
+        let inject = steps.iter().find(|s| s.node_id == "inject").unwrap();
+        assert_eq!(
+            observed_agent_for_step(inject, &graph, &steps),
+            Some(42),
+            "InjectPty with target_node_id=None must walk upstream BFS, not short-circuit"
+        );
+    }
+
+    #[test]
+    fn observed_agent_for_step_returns_none_for_healthy_step_with_no_lineage() {
+        // Defensive: a Running step whose kind has no lineage arm AND
+        // whose own `agent_node_id` is None (e.g. a `Notify` step)
+        // must return None — startup_reconcile's `_` arm then leaves it
+        // alone rather than falsely cancelling.
+        use crate::autopilot::circuit::model::{
+            CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind,
+        };
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode { id: "trigger".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode {
+                    id: "notify".into(),
+                    kind: CircuitNodeKind::Notify { message: "done".into() },
+                },
+            ],
+            edges: vec![CircuitEdge {
+                from: "trigger".into(),
+                to: "notify".into(),
+                condition: Default::default(),
+            }],
+        };
+        let steps = vec![StepView {
+            node_id: "notify".into(),
+            status: StepStatus::Running,
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+        }];
+        let notify = steps.first().unwrap();
+        assert_eq!(
+            observed_agent_for_step(notify, &graph, &steps),
+            None,
+            "Notify has no lineage arm → no agent to check → helper returns None"
         );
     }
 
