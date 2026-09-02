@@ -289,6 +289,12 @@ pub struct HookSignalDetail {
     /// (e.g. a question-shaped notification message); the lifecycle falls
     /// back to deriving the kind from the semantic turn.
     pub kind: Option<LifecycleKind>,
+    /// Raw Grok `notificationType` (issue #1366) — `permission_prompt`,
+    /// `idle_prompt`, `task_complete`, etc. Carried alongside
+    /// `provider_event` so the UI can render the harness's own
+    /// classification when the shared lifecycle has collapsed
+    /// structurally distinct notifications to one normalized kind.
+    pub notification_type: Option<String>,
 }
 
 /// Payload of the `agent-lifecycle` Tauri/WebSocket event (issue #1364).

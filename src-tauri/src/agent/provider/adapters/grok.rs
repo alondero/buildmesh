@@ -63,15 +63,43 @@ use std::path::Path;
 pub struct GrokAdapter;
 pub static GROK: GrokAdapter = GrokAdapter;
 
-/// The HTTP URL the Grok hook runner POSTs the event envelope to. Both
-/// `$BUILDMESH_PORT` and `$BUILDMESH_SESSION_ID` expand at hook-run time
-/// (set per-agent by `spawn_environment`) — the file is therefore
-/// reusable across nodes without rewriting the literal session id or
-/// port. The Grok docs (`~/.grok/docs/user-guide/10-hooks.md`,
-/// "Using variables in `command` and `url` fields") explicitly state
-/// that both `command` and `url` support `${VAR}` and `$VAR` expansion.
-const HOOK_URL: &str =
-    "http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID";
+/// Minimum Grok release the Buildmesh hook integration has been
+/// validated against (issue #1366). The detailed event contract
+/// (`Notification` with `notificationType` =
+/// `permission_prompt` / `idle_prompt` / `task_complete`, `Stop`
+/// with `reason`, `$VAR` expansion in `url`) is documented in the
+/// bundled `~/.grok/docs/user-guide/10-hooks.md` reference shipped
+/// with 1.0.5 but is *not* fully exposed on the public xAI docs.
+/// Pinned here so the `AttentionCapability` descriptor advertises
+/// the supported version and a release that drops any of these
+/// fields surfaces a visible capability/health change.
+///
+/// Note: the constant name carries `_MIN_` for descriptor-shape
+/// compatibility (the `AttentionCapability::min_version` field
+/// declares "minimum" semantics). We do **not** enforce a strict
+/// `>=` comparison at runtime — semver isn't wired through the hook
+/// surface, and `>=` would require either a `semver::Version`
+/// dependency or a hand-rolled tuple parser. The path-coverage test
+/// pins that the descriptor advertises the exact pin; treat runtime
+/// version drift as a documented upgrade story rather than a gate.
+pub const GROK_MIN_HOOK_VERSION: &str = "1.0.5";
+
+/// The HTTP URL the Grok hook runner POSTs the event envelope to. The
+/// `$BUILDMESH_PORT`, `$BUILDMESH_SESSION_ID`, and `$BUILDMESH_HOOK_TOKEN`
+/// tokens expand at hook-run time (set per-agent by
+/// `spawn_environment`) — the file is therefore reusable across nodes
+/// without rewriting the literal values. The Grok docs
+/// (`~/.grok/docs/user-guide/10-hooks.md`, "Using variables in
+/// `command` and `url` fields") explicitly state that both `command`
+/// and `url` support `${VAR}` and `$VAR` expansion.
+///
+/// The trailing `?token=$BUILDMESH_HOOK_TOKEN` carries the
+/// runtime-scoped token (issue #1366) so the attention route can
+/// reject non-Buildmesh callbacks even on a same-box collision. The
+/// marker predicate in `is_buildmesh_handler` matches on the
+/// canonical `/api/attention/` + `BUILDMESH_PORT` anchors, so this
+/// URL change does not disturb the additive merge.
+const HOOK_URL: &str = "http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID?token=$BUILDMESH_HOOK_TOKEN";
 
 /// File name we own under `~/.grok/hooks/`. Namespaced so a user's
 /// existing hooks (and any future Buildmesh hook with a different
@@ -96,44 +124,157 @@ fn grok_home() -> Result<std::path::PathBuf, String> {
         .map(|p| p.join(".grok").join("hooks"))
 }
 
-/// Write the attention hook file. Idempotent — preserves unrelated
-/// top-level keys the user may have authored. Uses Grok's native HTTP
-/// handler type — the runner POSTs the event envelope directly as
-/// JSON (camelCase: `hookEventName`, `sessionId`, …), no curl wrapper.
+/// Atomically persist `content` to `path` via `tempfile::NamedTempFile +
+/// persist`. The Codex/AGY precedents both pin this pattern
+/// (`codex.rs:998-1007`); the Python `os.replace` analogue. A
+/// crash mid-rename or pre-rename leaves the canonical file
+/// untouched and the orphan `.tmp` is the only residue — visible at
+/// `dir.parent().join("name.*.tmp")` until the OS reclaims it.
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
+/// Human-readable JSON kind tag for error messages. The codec
+/// distinguishes `Object`, `Array`, `String`, `Number`, `Boolean`,
+/// `Null`. Non-`Object` values produce the right rejection: the
+/// path-coverage test pins the rejection for an Array.
+fn settings_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Object(_) => "Object",
+        serde_json::Value::Array(_) => "Array",
+        serde_json::Value::String(_) => "String",
+        serde_json::Value::Number(_) => "Number",
+        serde_json::Value::Bool(_) => "Boolean",
+        serde_json::Value::Null => "Null",
+    }
+}
+
+/// Marker predicate: a Grok HTTP handler is Buildmesh-owned when its
+/// `url` carries both anchors. URL-anchored rather than on a custom
+/// `statusMessage` field because Grok's parser tolerance for unknown
+/// handler fields is undocumented; the `url` is guaranteed preserved
+/// byte-for-byte. Substring match (not strict equality) so future
+/// refactors (adding a `?token=` query param, etc.) keep the merge
+/// stable — only the canonical anchors matter.
+fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
+    handler
+        .get("url")
+        .and_then(|v| v.as_str())
+        .is_some_and(|url| url.contains("/api/attention/") && url.contains("BUILDMESH_PORT"))
+}
+
+/// Add or update the Buildmesh-owned handler in a single event's
+/// matcher-group array. Returns `true` when something changed
+/// (caller decides whether to rewrite the document). User-authored
+/// sibling handlers, matcher groups, and the array itself are
+/// preserved across the merge — only the Buildmesh entry is created
+/// (one per event) or replaced (handler-shape drift).
+fn merge_buildmesh_handler(
+    groups: &mut Vec<serde_json::Value>,
+    new_handler: &serde_json::Value,
+) -> bool {
+    for group in groups.iter_mut() {
+        let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        if let Some(index) = handlers.iter().position(is_buildmesh_handler) {
+            if handlers[index] != *new_handler {
+                handlers[index] = new_handler.clone();
+                return true;
+            }
+            // Already correct → no-op. Caller skips the rewrite.
+            return false;
+        }
+    }
+    // No Buildmesh entry yet → append a fresh matcher group.
+    groups.push(serde_json::json!({ "hooks": [new_handler.clone()] }));
+    true
+}
+
+/// Write the attention hook file. Idempotent — preserves ALL existing
+/// hooks the user authored (sibling matcher groups, sibling handler
+/// fields, additional events), atomically (named temp file +
+/// `persist`), and only rewrites when the Buildmesh entry actually
+/// changes (so re-running over a fresh write is a no-op on mtime and
+/// bytes — the spawn-path idempotency invariant from issue #886).
+/// Uses Grok's native HTTP handler type — the runner POSTs the event
+/// envelope directly as JSON (camelCase: `hookEventName`,
+/// `sessionId`, …), no curl wrapper.
 ///
-/// `Notification` uses an **empty matcher** (the docs say "An empty or
-/// omitted matcher matches everything"), catching `idle_prompt`,
-/// `permission_prompt`, `task_complete`, and any future notification
-/// type in one entry. `Stop` has no matcher — the docs warn "A matcher
-/// on `Stop` or `UserPromptSubmit` is ignored with a warning".
+/// `Notification` is wired with no matcher field at all (Grok docs
+/// match-all behaviour); the matcher-group array is the array of
+/// matcher groups, each `{"hooks":[handler]}` shaped. `Stop` has no
+/// matcher either — Grok's docs warn "A matcher on `Stop` or
+/// `UserPromptSubmit` is ignored with a warning".
 fn ensure_hooks_json(path: &Path) -> Result<(), String> {
-    let mut settings: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
+    // If the file already exists, refuse to overwrite a malformed
+    // user-authored payload (trailing comma, partial edit, …) — the
+    // Codex pattern (`codex.rs:938`) treats parse failure as an
+    // explicit `Err` so the spawn path surfaces a provision error
+    // rather than silently wiping user data. A missing file is the
+    // happy path (fresh install); only an existing-but-unparseable
+    // file is the failure case.
+    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "refusing to overwrite malformed {path:?}: {e}. \
+                 Repair or remove the file and retry"
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::json!({})
+        }
+        Err(e) => return Err(format!("failed to read {path:?}: {e}")),
+    };
+    // Round-2 fix (reviewer point 5): a valid JSON top-level that
+    // isn't an object (e.g. an array, a string, a number, `null`)
+    // is a misconfiguration — return Err instead of clobbering the
+    // user's payload with `{}`. Mirrors `codex.rs:941`.
     if !settings.is_object() {
-        settings = serde_json::json!({});
+        return Err(format!(
+            "{path:?}: top-level value must be a JSON object; got {}",
+            settings_kind(&settings)
+        ));
     }
 
-    let hook = serde_json::json!({
+    let new_handler = serde_json::json!({
         "type": "http",
         "url": HOOK_URL,
     });
-    let expected_hooks = serde_json::json!({
-        "Notification": [{
-            "hooks": [hook.clone()]
-        }],
-        "Stop": [{
-            "hooks": [hook]
-        }]
-    });
-    if settings.get("hooks") == Some(&expected_hooks) {
+
+    let settings_obj = settings
+        .as_object_mut()
+        .expect("settings coerced to object above");
+    let hooks = settings_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_obj = hooks
+        .as_object_mut()
+        .ok_or_else(|| "hooks.json `hooks` value must be an object".to_string())?;
+
+    let mut changed = false;
+    for event in ["Notification", "Stop"] {
+        let groups = hooks_obj
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]));
+        let groups_array = groups
+            .as_array_mut()
+            .ok_or_else(|| format!("hooks.json event `{event}` must be an array"))?;
+        changed = merge_buildmesh_handler(groups_array, &new_handler) || changed;
+    }
+
+    if !changed {
         return Ok(());
     }
-    settings["hooks"] = expected_hooks;
+
     let content = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    std::fs::write(path, content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
+    write_atomic(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
     tracing::info!("grok provision_attention_hooks: wrote {:?}", path);
     Ok(())
 }
@@ -198,7 +339,13 @@ impl AgentProvider for GrokAdapter {
             ],
             launch_mode: AttentionLaunchMode::PermissionAsk,
             trust: Some("global hook dir".into()),
-            min_version: None,
+            // Issue #1366: pin the Grok release the integration has
+            // been validated against. A future Grok release that drops
+            // `notificationType`, `$VAR` expansion, or the `Stop`
+            // envelope would surface as "this is now an
+            // unversioned/integration-at-risk harness" via the
+            // Inspector capabilities table.
+            min_version: Some(GROK_MIN_HOOK_VERSION.into()),
         }
     }
 
@@ -220,6 +367,27 @@ impl AgentProvider for GrokAdapter {
         _runtime: &LaunchRuntime,
         _node_id: i64,
     ) -> Result<(), String> {
+        // Issue #1366 — mint the process-wide hook token **here**, not
+        // in `spawn_environment::wrap` (which fires for every agent
+        // spawn including Claude / Codex / AGY). Scoping the mint
+        // to the Grok path means non-Grok agents never see the
+        // process-wide token, and the route's token check below
+        // correctly discriminates Grok callbacks from sibling
+        // harnesses (Claude / Codex / AGY POST without `?token=` and
+        // bypass the gate).
+        //
+        // The call is idempotent: first invocation mints; subsequent
+        // spawns in the same runtime see the same value, so all
+        // Grok hooks in this process share one token. The token
+        // itself never appears in the JSON file — the URL template
+        // stores `$BUILDMESH_HOOK_TOKEN` as a literal and the Grok
+        // runner expands `$VAR` at hook-run time (the docs the
+        // issue links pin this; the same mechanism is documented
+        // for `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID`).
+        let token = crate::agent::mint_runtime_hook_token();
+        tracing::info!(
+            "grok provision_attention_hooks: minted runtime hook token {token}"
+        );
         let dir = grok_home()?;
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("failed to create .grok/hooks dir: {e}"))?;
@@ -289,6 +457,21 @@ mod tests {
         GROK
             .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
             .unwrap();
+    }
+
+    /// Same as `provision_grok` but returns the `Result` so callers can
+    /// exercise the `Err` path (the malformed-file test below asserts
+    /// `Err`). The `_` variant panics on `Err` — preserved for the
+    /// happy-path tests that don't care about the result.
+    fn try_provision_grok(project: &Path) -> Result<(), String> {
+        let path = project.to_string_lossy().into_owned();
+        let resolved = ResolvedPath {
+            host_path: path.clone(),
+            spawn_path: path.clone(),
+            raw_path: path,
+            env_type: EnvType::Windows,
+        };
+        GROK.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
     }
 
     #[test]
@@ -804,8 +987,11 @@ mod tests {
 
     /// The URL template is the single source of truth for the
     /// attention endpoint — both events reference the same one, and
-    /// both env vars (port + session id) appear so the runner expands
-    /// them per agent.
+    /// all three env vars (port + session id + hook token) appear so
+    /// the runner expands them per agent. Issue #1366 added the
+    /// `?token=$BUILDMESH_HOOK_TOKEN` query for the runtime-scoped
+    /// token gate; without it a non-Buildmesh Grok session could
+    /// POST to a Buildmesh node on a box collision.
     #[test]
     fn hook_url_targets_attention_endpoint_with_env_expansion() {
         assert!(HOOK_URL.starts_with("http://localhost:$BUILDMESH_PORT/"));
@@ -814,6 +1000,19 @@ mod tests {
             !HOOK_URL.contains("127.0.0.1"),
             "use `localhost` so the loopback-only peer check accepts the runner: {HOOK_URL}"
         );
+        // Issue #1366: the runtime-scoped token template. Pin the
+        // exact `?token=$BUILDMESH_HOOK_TOKEN` query so a refactor
+        // that drops the token trips here before reaching the wire.
+        assert!(
+            HOOK_URL.contains("?token=$BUILDMESH_HOOK_TOKEN"),
+            "hook URL must carry the runtime-scoped token template: {HOOK_URL}"
+        );
+        // Pin the canonical anchors the marker predicate matches on
+        // — additive merge looks for these to recognise the
+        // Buildmesh-owned handler. If either anchor changes, the
+        // marker fails to find its own handler and starts appending
+        // duplicates on every re-run.
+        assert!(HOOK_URL.contains("/api/attention/") && HOOK_URL.contains("BUILDMESH_PORT"));
     }
 
     /// The hook file lives in the user's home Grok hooks dir, not in
@@ -848,6 +1047,308 @@ mod tests {
         let temp = with_user_home_redirect();
         let resolved = grok_home().expect("home should resolve");
         assert_eq!(resolved, temp.path().join(".grok").join("hooks"));
+    }
+
+    // -----------------------------------------------------------------
+    // Additive merging + atomic write — issue #1366.
+    //
+    // The pre-#1366 `ensure_hooks_json` wholesale-assigned
+    // `settings["hooks"] = expected_hooks`, destroying any
+    // user-authored matcher groups, sibling handlers, and unrelated
+    // events on every re-run. The fix mirrors Codex's per-event
+    // additive merge (codex.rs:931-996): iterate over the event
+    // list, locate a Buildmesh-owned handler via a URL-anchored
+    // match, update it in place; otherwise append a new matcher
+    // group — leaving every user-authored entry untouched.
+    //
+    // The marker is anchored on the handler's documented `url`
+    // field (Grok's parser tolerance for unknown handler fields
+    // like `statusMessage` is undocumented; the URL is guaranteed
+    // preserved byte-for-byte). A handler is "Buildmesh-owned"
+    // when its `url` carries both `/api/attention/` and the
+    // `BUILDMESH_PORT` expansion token — the canonical anchors of
+    // every Buildmesh attention webhook.
+    // -----------------------------------------------------------------
+
+    /// Marker predicate: a Grok HTTP handler is Buildmesh-owned
+    /// when its `url` carries both anchors. Substring match (not
+    /// strict equality) so future URL refactors (adding a query
+    /// param, swapping `localhost` for `127.0.0.1`, etc.) keep the
+    /// merge stable — only the canonical anchors matter.
+    fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
+        handler
+            .get("url")
+            .and_then(|v| v.as_str())
+            .is_some_and(|url| url.contains("/api/attention/") && url.contains("BUILDMESH_PORT"))
+    }
+
+    #[test]
+    fn marker_predicate_matches_canonical_buildmesh_url() {
+        let buildmesh = serde_json::json!({
+            "type": "http",
+            "url": HOOK_URL,
+        });
+        assert!(is_buildmesh_handler(&buildmesh));
+
+        let user = serde_json::json!({
+            "type": "http",
+            "url": "https://hooks.example.com/user-event",
+            "timeout": 30,
+        });
+        assert!(!is_buildmesh_handler(&user));
+
+        let bare = serde_json::json!({"type": "http"});
+        assert!(!is_buildmesh_handler(&bare));
+
+        let command_style = serde_json::json!({
+            "type": "command",
+            "command": "echo hello",
+        });
+        assert!(!is_buildmesh_handler(&command_style));
+    }
+
+    /// Pre-existing user-authored Notification handler survives a
+    /// Buildmesh inject — the user's matcher group is preserved
+    /// AND the Buildmesh handler is appended as a sibling matcher
+    /// group on the same event.
+    #[test]
+    fn inject_preserves_user_handler_on_notification() {
+        let temp = with_user_home_redirect();
+        let dir = temp.path().join(".grok").join("hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let user_handler = serde_json::json!({
+            "type": "http",
+            "url": "https://hooks.example.com/user-event",
+            "timeout": 30,
+        });
+        let existing = serde_json::json!({
+            "hooks": {
+                "Notification": [
+                    { "hooks": [user_handler] }
+                ]
+            }
+        });
+        std::fs::write(
+            dir.join("buildmesh-attention.json"),
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
+
+        provision_grok(Path::new("/any"));
+
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("buildmesh-attention.json")).unwrap(),
+        )
+        .unwrap();
+        let notification = value["hooks"]["Notification"]
+            .as_array()
+            .expect("Notification must be an array");
+        assert_eq!(
+            notification.len(),
+            2,
+            "Notification must carry BOTH user and Buildmesh matcher groups; got {value:#}"
+        );
+        // User handler preserved byte-for-byte (matcher group index 0).
+        assert_eq!(
+            notification[0]["hooks"][0]["url"].as_str(),
+            Some("https://hooks.example.com/user-event")
+        );
+        // Buildmesh matcher group appended (index 1).
+        let buildmesh_url = notification[1]["hooks"][0]["url"]
+            .as_str()
+            .expect("buildmesh handler appended");
+        assert!(
+            buildmesh_url.contains("/api/attention/") && buildmesh_url.contains("BUILDMESH_PORT"),
+            "buildmesh matcher group must carry the canonical URL anchors: {buildmesh_url}"
+        );
+    }
+
+    /// Pre-existing user hooks under an event the integration
+    /// doesn't touch (e.g. `SessionStart`) survive unchanged. Only
+    /// the Buildmesh-owned `Notification` and `Stop` events are
+    /// managed.
+    #[test]
+    fn inject_preserves_unrelated_events_alongside_notification_and_stop() {
+        let temp = with_user_home_redirect();
+        let dir = temp.path().join(".grok").join("hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let user_handler = serde_json::json!({
+            "type": "http",
+            "url": "https://hooks.example.com/user-event",
+        });
+        let user_other_handler = serde_json::json!({
+            "type": "http",
+            "url": "https://hooks.example.com/some-other-event",
+        });
+        let existing = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{ "hooks": [user_handler] }],
+                "UserCustom": [{ "hooks": [user_other_handler] }],
+            }
+        });
+        std::fs::write(
+            dir.join("buildmesh-attention.json"),
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
+
+        provision_grok(Path::new("/any"));
+
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("buildmesh-attention.json")).unwrap(),
+        )
+        .unwrap();
+
+        // Unrelated user events survive byte-for-byte.
+        assert_eq!(
+            value["hooks"]["SessionStart"][0]["hooks"][0]["url"].as_str(),
+            Some("https://hooks.example.com/user-event")
+        );
+        assert_eq!(
+            value["hooks"]["UserCustom"][0]["hooks"][0]["url"].as_str(),
+            Some("https://hooks.example.com/some-other-event")
+        );
+        // Notification / Stop are populated by the inject.
+        let notification = value["hooks"]["Notification"]
+            .as_array()
+            .expect("Notification must be present");
+        assert_eq!(notification.len(), 1, "single Buildmesh matcher group expected");
+        assert!(is_buildmesh_handler(&notification[0]["hooks"][0]));
+        let stop = value["hooks"]["Stop"]
+            .as_array()
+            .expect("Stop must be present");
+        assert_eq!(stop.len(), 1, "single Buildmesh matcher group expected");
+        assert!(is_buildmesh_handler(&stop[0]["hooks"][0]));
+    }
+
+    /// Repeat injects add no duplicate Buildmesh handlers. The
+    /// marker-anchored merge must update in place — not append —
+    /// when the URL anchor is recognised.
+    #[test]
+    fn inject_creates_no_duplicates_on_repeat() {
+        let temp = with_user_home_redirect();
+        provision_grok(Path::new("/any"));
+        provision_grok(Path::new("/any"));
+        provision_grok(Path::new("/any"));
+
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                temp.path().join(".grok").join("hooks").join("buildmesh-attention.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for event in ["Notification", "Stop"] {
+            let groups = value["hooks"][event]
+                .as_array()
+                .unwrap_or_else(|| panic!("{event} not an array: {value:#}"));
+            assert_eq!(
+                groups.len(),
+                1,
+                "{event} must have exactly one matcher group after 3 injects; got {value:#}"
+            );
+        }
+    }
+
+    /// Atomic write leaves no `.tmp` residue in the hooks dir.
+    /// Mirrors AGY precedent (`agy.rs:540-555`,
+    /// `inject_leaves_no_tmp_residue`).
+    #[test]
+    fn inject_atomic_write_leaves_no_tmp_residue() {
+        let temp = with_user_home_redirect();
+        provision_grok(Path::new("/any"));
+
+        let dir = temp.path().join(".grok").join("hooks");
+        let entries = std::fs::read_dir(&dir).unwrap();
+        let tmp_files: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            tmp_files.is_empty(),
+            "atomic write must not leave .tmp residue; found {tmp_files:?}"
+        );
+    }
+
+    /// When both events already carry a Buildmesh handler (idempotent
+    /// re-run) the file is NOT rewritten. We assert this by checking
+    /// the file's `mtime` is unchanged between two injects that find
+    /// the integration already wired. (mtime is OS-resolution dependent
+    /// — we wrap the writes in a brief sleep to make the assertion
+    /// deterministic.)
+    #[test]
+    fn idempotent_rerun_does_not_rewrite_when_already_wired() {
+        let temp = with_user_home_redirect();
+        let path = temp.path().join(".grok").join("hooks").join("buildmesh-attention.json");
+        provision_grok(Path::new("/any"));
+        let first_bytes = std::fs::read(&path).unwrap();
+        let first_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        provision_grok(Path::new("/any"));
+        let second_bytes = std::fs::read(&path).unwrap();
+        let second_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        assert_eq!(first_bytes, second_bytes, "byte-identical re-run");
+        assert_eq!(
+            first_mtime, second_mtime,
+            "idempotent re-run must NOT rewrite the file (no mtime change)"
+        );
+    }
+
+    /// Issue #1366 review point 2.3: refuse to silently wipe a
+    /// malformed user-authored file. A trailing comma, partial edit,
+    /// or syntax error must NOT cause `ensure_hooks_json` to fall
+    /// back to `{}` and overwrite the user's data. The function
+    /// returns an `Err`, the spawn path surfaces it as a provision
+    /// failure, and the user's content survives intact.
+    #[test]
+    fn inject_refuses_to_overwrite_malformed_user_file() {
+        let temp = with_user_home_redirect();
+        let dir = temp.path().join(".grok").join("hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("buildmesh-attention.json");
+        // Deliberately malformed: trailing comma + unmatched brace.
+        let malformed = "{ \"hooks\": { \"Notification\": [],, }";
+        std::fs::write(&path, malformed).unwrap();
+
+        let result = try_provision_grok(Path::new("/any"));
+        assert!(
+            result.is_err(),
+            "provision must refuse a malformed existing file; got {result:?}"
+        );
+
+        // The user's malformed content must survive intact — the
+        // refactor that triggered this test (silently overwriting
+        // with `{}`) clobbered user data; the new behaviour leaves
+        // it for the user to repair.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            on_disk, malformed,
+            "malformed file content must NOT be overwritten"
+        );
+    }
+
+    /// The matching positive case for the malformed-file pin: a
+    /// missing file should be treated as `{}` (fresh install) and
+    /// written normally. Lock the happy path so a future refactor
+    /// that treats both missing AND malformed the same way trips
+    /// both regressions in one place.
+    #[test]
+    fn inject_treats_missing_file_as_empty_settings() {
+        let temp = with_user_home_redirect();
+        let dir = temp.path().join(".grok").join("hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Note: no file at buildmesh-attention.json — fresh install.
+        assert!(!dir.join("buildmesh-attention.json").exists());
+
+        try_provision_grok(Path::new("/any")).unwrap();
+        let written = std::fs::read_to_string(
+            dir.join("buildmesh-attention.json"),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert!(value["hooks"]["Notification"].is_array());
+        assert!(value["hooks"]["Stop"].is_array());
     }
 
     /// `with_user_home_redirect` is the test scaffolding for every test

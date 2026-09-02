@@ -108,7 +108,22 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(effortAllowedFor(c)).toEqual(
       expect.arrayContaining(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
     );
-  });
+      // Issue #1366: pin Grok's min_version via vitest so a
+    // flip-back to null trips the gate here, not just the
+    // Rust inventory. (round-3 N1 follow-up.)
+    expect(c.attention_capability).toEqual({
+      kind: 'hook',
+      events: expect.arrayContaining([
+        'turn_completed',
+        'input_required',
+        'permission_requested',
+        'question_requested',
+      ]),
+      launch_mode: 'permission_ask',
+      trust: 'global hook dir',
+      min_version: '1.0.5',
+    });
+});
 
   // Cursor — model yes, effort no, prefill yes (issue #1143).
   it('Cursor matches the Rust inventory', () => {

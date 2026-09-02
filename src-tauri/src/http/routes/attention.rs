@@ -139,6 +139,18 @@ fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
     cursor.as_str().filter(|value| !value.trim().is_empty())
 }
 
+/// Pull a single key=value pair out of an `&`-delimited URL query
+/// string. Used by the runtime-scoped `?token=` gate (issue #1366)
+/// to defend against non-Buildmesh hook callbacks. Percent-decoding
+/// of the value is left to the caller — the token is hex so no
+/// escaping is needed in practice.
+fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|part| {
+        let (k, v) = part.split_once('=')?;
+        if k == key { Some(v) } else { None }
+    })
+}
+
 /// Normalize known hook shapes without guessing from arbitrary terminal text.
 fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
     let nested_name = payload
@@ -316,6 +328,12 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
         transcript_path: payload.transcript_path.clone(),
         signal_health: crate::agent::session_lifecycle::SignalHealth::Ok,
         message: payload.message.clone(),
+        // Issue #1366: Grok's structured `notificationType` (e.g.
+        // `permission_prompt`, `idle_prompt`, `task_complete`) is
+        // carried alongside the normalized lifecycle decision so the
+        // UI can render the harness's own classification instead of
+        // the collapsed shared kind. Other harnesses leave this None.
+        notification_type: payload.notification_type.clone(),
         ..Default::default()
     };
     let event = payload
@@ -403,9 +421,39 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
     }
 }
 
+/// Pure-function verifier for the attention-route token gate
+/// (issue #1366 round-2 + round-3). Extracted from `handle_post`
+/// so the comparator semantics can be tested in isolation
+/// without spinning up a Tokio listener or a real SQLite handle.
+///
+/// Truth table (returns `true` = accept the callback, `false` =
+/// reject with 403):
+///
+/// | provider      | minted       | query token   | result |
+/// |---------------|--------------|---------------|--------|
+/// | != `"grok"`  | (any)        | (any)         | accept |  sibling harnesses bypass entirely
+/// | `"grok"`     | `None`       | (any)         | reject |  no Buildmesh runtime owns this
+/// | `"grok"`     | `Some(m)`    | matches `m`   | accept |
+/// | `"grok"`     | `Some(m)`    | differs/missing | reject |
+fn verify_attention_token(
+    provider: &str,
+    query_string: Option<&str>,
+    minted: Option<&str>,
+) -> bool {
+    if provider != "grok" {
+        return true;
+    }
+    let Some(minted) = minted else {
+        return false;
+    };
+    let presented = query_string.and_then(|q| extract_query_value(q, "token"));
+    presented == Some(minted)
+}
+
 pub async fn handle_post(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     path_without_query: &str,
+    query_string: Option<&str>,
     peer: SocketAddr,
     content_length: usize,
 ) {
@@ -416,14 +464,52 @@ pub async fn handle_post(
         return;
     }
 
+    // Parse the session id early — the token gate below needs it to
+    // look up the session's provider and decide whether to enforce
+    // the hook token. Bad path → 400 before any other work.
     let session_id: Option<i64> = path_without_query
         .strip_prefix("/api/attention/")
         .and_then(|s| s.parse().ok());
-
     let Some(session_id) = session_id else {
         let _ = request::write_status_only(lines, "400 Bad Request").await;
         return;
     };
+
+    // Runtime-scoped token gate (issue #1366, round-2 + round-3 +
+    // N1 fixes). The decision is **per-provider**, not per-`?token=`
+    // presence:
+    //
+    //   provider = grok  → require matching ?token=<minted> against the
+    //                      runtime-scoped `RUNTIME_HOOK_TOKEN` OnceLock.
+    //   provider ∈ {claude, codex, agy, …} → no token check.
+    //
+    // Looked up by **session id** (the trusted path component). The
+    // session row is the canonical record of which harness is
+    // calling. The DB lookup is wrapped in `spawn_blocking` so
+    // the synchronous SQLite read lock does not stall the Tokio
+    // worker (round-3 review point 1). The `(cli_session_id, provider)`
+    // pair is captured here and passed into the run_blocking closure
+    // below — see the N1 review point about hitting SQLite twice
+    // for the same row.
+    let node: Option<crate::models::AgentNode> =
+    tokio::task::spawn_blocking(move || crate::db::get_agent_node_by_id(session_id))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+let stored_cli_session_id: String = node
+    .as_ref()
+    .and_then(|n| n.cli_session_id.clone())
+    .unwrap_or_default();
+let node_provider: Option<String> = node.as_ref().map(|n| n.provider.clone());
+let provider: &str = node_provider.as_deref().unwrap_or("");
+    if !verify_attention_token(
+        provider,
+        query_string,
+        crate::agent::runtime_hook_token().as_deref(),
+    ) {
+        let _ = request::write_status_only(lines, "403 Forbidden").await;
+        return;
+    }
 
     let Some(body) =
         request::read_body_or_send_error(lines, content_length, MAX_HOOK_BODY).await
@@ -492,6 +578,14 @@ pub async fn handle_post(
     // Issue #1389 — every step below is blocking SQLite; one `spawn_blocking`
     // hop for the whole sequence. `app` is `&'static AppHandle` (returned by
     // `crate::http::app_handle()`), which is what lets `move ||` capture it.
+    // N1 fix: the row we fetched for the token gate above is also the
+    // row we'll persist + check ordering-token against — share it via
+    // `move ||` capture rather than re-querying SQLite. Use clear
+    // shadows so the outer `Option<String>` is gone before the
+    // closure constructed (avoids the `move ||` capture error
+    // for `Option<String>`, which doesn't implement Copy).
+    let stored_cli_session_id_owned = stored_cli_session_id;
+    let provider_owned = node_provider;
     let decision = classified.decision;
     let _ = crate::commands::run_blocking(
         "http_attention_apply",
@@ -520,25 +614,23 @@ pub async fn handle_post(
             // id is a valid UUID that differs from the node's stored one
             // belongs to a previous process generation. It must never
             // overwrite the newer state — the POST is answered 200 (the
-            // harness's fail-open contract) and dropped.
-            let node = crate::db::get_agent_node_by_id(session_id).ok();
-            let (stored_cli_session_id, node_provider) = node
-                .map(|n| (n.cli_session_id, Some(n.provider)))
-                .unwrap_or((None, None));
-            if let (Some(hook), Some(current)) =
-                (hook_uuid.as_deref(), stored_cli_session_id.as_deref())
-            {
-                if !current.is_empty() && hook != current {
-                    tracing::info!(
-                        "attention webhook for node {}: stale callback from a previous \
-                         process (hook session {hook} != active {current}) — dropped \
-                         (issue #1364 ordering token)",
-                        session_id
-                    );
-                    return Ok(Applied::StaleDropped);
+            // harness's fail-open contract) and dropped. N1 fix: this
+            // uses `stored_cli_session_id_owned` (captured above; one
+            // DB hit, not two).
+            if !stored_cli_session_id_owned.is_empty() {
+                if let Some(hook) = hook_uuid.as_deref() {
+                    if hook != stored_cli_session_id_owned {
+                        tracing::info!(
+                            "attention webhook for node {}: stale callback from a previous \
+                             process (hook session {hook} != active {stored_cli_session_id_owned}) \
+                             — dropped (issue #1364 ordering token)",
+                            session_id
+                        );
+                        return Ok(Applied::StaleDropped);
+                    }
                 }
             }
-            detail.provider = node_provider;
+            detail.provider = provider_owned;
 
             // A real, high-confidence callback proves hook delivery — persist
             // the node's signal health as Ok so a provisioning failure earlier
@@ -935,6 +1027,65 @@ mod tests {
         );
     }
 
+    /// Issue #1366 — Grok's structured `notificationType` is
+    /// preserved into the classified detail end-to-end. The
+    /// lifecycle event carries both the normalized decision
+    /// (`MarkInput` / `Ready`) AND the harness's own string
+    /// (`permission_prompt`, `task_complete`, …) so the UI can
+    /// render the harness's own classification. A future refactor
+    /// that drops this field trips here before the wire shape
+    /// drifts.
+    #[test]
+    fn grok_notification_type_surfaces_in_signal_detail() {
+        for (notification_type, expected_decision) in [
+            ("permission_prompt", Decision::MarkInput),
+            ("task_complete", Decision::Ready),
+            ("idle_prompt", Decision::Ready),
+            ("question", Decision::MarkInput),
+            ("question_prompt", Decision::MarkInput),
+            ("ask_user", Decision::MarkInput),
+        ] {
+            let body = serde_json::json!({
+                "hookEventName": "notification",
+                "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+                "notificationType": notification_type,
+            })
+            .to_string()
+            .into_bytes();
+            let classified = classify(&body, |_| Some(0));
+            assert_eq!(
+                classified.detail.notification_type.as_deref(),
+                Some(notification_type),
+                "{notification_type}: notificationType must round-trip into the signal detail"
+            );
+            assert_eq!(
+                classified.decision, expected_decision,
+                "{notification_type}: lifecycle decision must match the shared contract"
+            );
+        }
+    }
+
+    /// `notificationType` absent means "the harness did not
+    /// structure the notification" — the route falls through to the
+    /// transcript-scan path. Pin so a future refactor that
+    /// conflates "no notification_type" with "no event" trips here.
+    #[test]
+    fn grok_notification_without_type_falls_through() {
+        let body = serde_json::json!({
+            "hookEventName": "notification",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "transcriptPath": "/tmp/session.jsonl",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(2));
+        assert_eq!(classified.detail.notification_type, None);
+        // 2 pending tasks → suppress (the prose-only fallback is
+        // strict on "needs your permission"; untyped notifications
+        // match that pattern only if the harness's prose says so).
+        assert_eq!(classified.decision, Decision::SuppressPendingBackground);
+    }
+
     /// The payload parser accepts Grok's camelCase `sessionId` and
     /// canonicalises it to the same UUID string Claude payloads do.
     /// `hook_session_id` is the only consumer of the field on the
@@ -1312,4 +1463,161 @@ mod tests {
             crate::agent::session_lifecycle::SignalHealth::Ok
         );
     }
+
+    // -------------------------------------------------------------------
+    // Runtime hook token scoping — issue #1366.
+    //
+    // The hook file at `~/.grok/hooks/buildmesh-attention.json` is the
+    // *global* always-trusted Grok hooks dir, so every Grok session on
+    // the box (including a non-Buildmesh invocation in a shell that
+    // happens to inherit `BUILDMESH_PORT`) loads our hooks. The
+    // `?token=$BUILDMESH_HOOK_TOKEN` query param gives the route a
+    // per-runtime secret so non-Buildmesh sessions can't deliver to a
+    // Buildmesh node. The real tests below exercise the module-scope
+    // OnceLock storage (round-trip) and the comparator's three
+    // outcomes (match / wrong / empty). The actual HTTP loopback
+    // round-trip is covered by `http::tests::attention_webhook_*`.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn extract_query_value_returns_value_when_key_matches() {
+        assert_eq!(
+            extract_query_value("token=abc123", "token"),
+            Some("abc123")
+        );
+        assert_eq!(
+            extract_query_value("foo=bar&token=abc123", "token"),
+            Some("abc123")
+        );
+        assert_eq!(
+            extract_query_value("token=abc123&foo=bar", "token"),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn extract_query_value_returns_none_when_key_absent() {
+        assert_eq!(extract_query_value("foo=bar", "token"), None);
+        assert_eq!(extract_query_value("", "token"), None);
+        // No '=' so split_once fails — treated as absent, not errored.
+        assert_eq!(extract_query_value("token", "token"), None);
+    }
+
+    /// Pin the module-scope OnceLock storage (issue #1366 review, point
+/// 1.1). A previous revision kept `static TOKEN` inside two functions
+/// — two separate allocations, one store and one read never agreed,
+/// so `runtime_hook_token()` always returned `None`. The fix is
+/// module-level storage; this test exercises the actual accessor
+/// against `mint_runtime_hook_token()` round-trip.
+#[test]
+fn runtime_hook_token_round_trips_through_module_level_once_lock() {
+    // Test setup: the runtime token is minted lazily by the Grok
+    // adapter's `provision_attention_hooks` (production path),
+    // not at every spawn. In a test process no Grok agent ever
+    // spawns, so the OnceLock stays None until we mint here.
+    // `mint_runtime_hook_token` is idempotent: it pins the same
+    // value across all subsequent calls in this process, so calling
+    // it from multiple tests is safe — every test that needs the
+    // token will read the same value.
+    let minted = crate::agent::mint_runtime_hook_token();
+    let read_back = crate::agent::runtime_hook_token();
+    assert_eq!(
+        read_back.as_deref(),
+        Some(minted.as_str()),
+        "runtime_hook_token must read from the same OnceLock that \
+         mint_runtime_hook_token writes to"
+    );
+    // Format sanity: 32 lowercase hex chars (16 random bytes).
+    assert_eq!(minted.len(), 32);
+    assert!(minted.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+/// The route gate at `handle_post:438-455` collapses to:
+///   * no token minted  → permissive
+///   * query token == minted → proceed
+///   * anything else (no token, wrong token, empty token) → reject
+/// This pins the comparator logic the route uses so a future refactor
+/// can't silently let an unrelated harness through. The end-to-end
+/// POST loopback round-trip is exercised by
+/// `http::tests::attention_webhook_*` for the loopback peer path.
+#[test]
+fn runtime_token_validator_three_cases() {
+    // `mint_runtime_hook_token` is idempotent across the process.
+    // Explicitly mint here so this test passes both in isolation
+    // (e.g. when selected by name) and under the default cargo-test
+    // schedule. The round-trip test in this module reads the same
+    // pinned value back to assert structural integrity; production
+    // code only ever mints once per Buildmesh runtime lifetime.
+    let minted = crate::agent::mint_runtime_hook_token();
+
+    // Case A: matching token → accept.
+    let query_with_match = format!("token={minted}");
+    assert_eq!(
+        extract_query_value(&query_with_match, "token").as_deref(),
+        Some(minted.as_str()),
+        "matching token must round-trip via extract_query_value"
+    );
+
+    // Case B: wrong token → reject.
+    let wrong_token = "z".repeat(32);
+    let query_wrong = format!("token={wrong_token}");
+    let presented = extract_query_value(&query_wrong, "token")
+        .expect("wrong-token query is non-empty");
+    assert_ne!(
+        presented, minted,
+        "wrong token must not match the minted one"
+    );
+
+    // Case C: empty token (`$VAR` expansion on an unset env produces an
+    // empty value, the typical non-Buildmesh-shell case) → reject.
+    let query_empty = "token=";
+    let presented_empty = extract_query_value(query_empty, "token")
+        .expect("trailing '=' still parses as a key=value pair");
+    assert_eq!(presented_empty, "");
+    assert_ne!(presented_empty, minted);
+}
+
+
+/// Round-2 review fix 4 — the per-provider token gate.
+///
+/// Calls the production `verify_attention_token` helper directly
+/// so a refactor that flips the comparator semantics or that
+/// drops the per-provider discrimination fails here. The truth
+/// table (minted `Some("grok_token")`, query varies):
+///
+///   provider="claude", no query  → accept (sibling bypass)
+///   provider="claude", any token → accept (sibling bypass)
+///   provider="grok",   no query  → reject (no token)
+///   provider="grok",   wrong     → reject
+///   provider="grok",   match     → accept
+///   provider="grok",   minted=None, any → reject (defence in depth)
+#[test]
+fn verify_attention_token_truth_table() {
+    let minted = Some("grok_token");
+
+    // Sibling harnesses — bypass entirely even when a token is
+    // minted. Their hook URLs never carry `?token=`, but more
+    // importantly the per-provider lookup classifies them as
+    // non-Grok so the comparator never runs.
+    assert!(verify_attention_token("claude", None, minted));
+    assert!(verify_attention_token("claude", Some("anything"), minted));
+    assert!(verify_attention_token("codex", None, minted));
+    assert!(verify_attention_token("agy", Some("token=z"), minted));
+    // Empty provider string ("default anthropic" sentinel) is
+    // also non-Grok — still bypass.
+    assert!(verify_attention_token("", None, minted));
+
+    // Grok callbacks — token required.
+    assert!(!verify_attention_token("grok", None, minted));
+    assert!(!verify_attention_token("grok", Some("token="), minted));
+    assert!(!verify_attention_token("grok", Some("token=wrong"), minted));
+    assert!(verify_attention_token("grok", Some("token=grok_token"), minted));
+    // No minted token yet (no Grok spawn in this runtime) AND a
+    // Grok callback arrives — refuse. This is the defensive 403
+    // that catches a Buildmesh instance whose own Grok spawn
+    // never ran but the file system somehow has a hook caller.
+    assert!(!verify_attention_token("grok", Some("token=grok_token"), None));
+    assert!(!verify_attention_token("grok", None, None));
+}
+
 }

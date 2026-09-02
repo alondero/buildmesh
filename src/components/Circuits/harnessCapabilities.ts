@@ -172,7 +172,7 @@ const GROK_CAPS: HarnessCapabilities = {
     ],
     launch_mode: 'permission_ask',
     trust: 'global hook dir',
-    min_version: null,
+    min_version: '1.0.5',
   },
   supports_passive_turn_watcher: false,
   produces_readable_transcript: true,
