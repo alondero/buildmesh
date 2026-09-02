@@ -9,11 +9,23 @@ const terminalTestState = vi.hoisted(() => ({
   } | undefined,
 }));
 
-globalThis.ResizeObserver = class {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-} as unknown as typeof ResizeObserver;
+const resizeObservers: MockResizeObserver[] = [];
+const originalResizeObserver = globalThis.ResizeObserver;
+
+class MockResizeObserver {
+  callback: ResizeObserverCallback;
+  observe = vi.fn();
+  disconnect = vi.fn();
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    resizeObservers.push(this);
+  }
+
+  trigger(): void {
+    this.callback([], this as unknown as ResizeObserver);
+  }
+}
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockImplementation((_event: string, _callback: unknown) => {
@@ -57,11 +69,23 @@ vi.mock('@xterm/xterm', () => {
     write = vi.fn();
     onData = vi.fn();
     onTitleChange = vi.fn();
-    onResize = vi.fn();
+    resizeCallback: ((size: { cols: number; rows: number }) => void) | undefined;
+    onResize = vi.fn((callback: (size: { cols: number; rows: number }) => void) => {
+      this.resizeCallback = callback;
+    });
     open = vi.fn();
     dispose = vi.fn();
     focus = vi.fn();
-    loadAddon = vi.fn();
+    loadAddon = vi.fn((addon: unknown) => {
+      if (
+        addon !== null &&
+        typeof addon === 'object' &&
+        'attachTerminal' in addon &&
+        typeof addon.attachTerminal === 'function'
+      ) {
+        addon.attachTerminal(this);
+      }
+    });
     attachCustomKeyEventHandler = vi.fn();
     scrollToBottom = vi.fn();
     refresh = vi.fn();
@@ -104,7 +128,17 @@ vi.mock('@xterm/xterm', () => {
 
 vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
-    fit = vi.fn();
+    private terminal: { resizeCallback?: (size: { cols: number; rows: number }) => void } | null = null;
+
+    attachTerminal(terminal: { resizeCallback?: (size: { cols: number; rows: number }) => void }): void {
+      this.terminal = terminal;
+    }
+
+    fit = vi.fn(() => {
+      // Real FitAddon.fit calls Terminal.resize when its proposed dimensions
+      // change, which fires Terminal.onResize and reaches resize_agent.
+      this.terminal?.resizeCallback?.({ cols: 80, rows: 24 });
+    });
     dispose = vi.fn();
     proposeDimensions = vi.fn().mockReturnValue({ cols: 80, rows: 24 });
   }
@@ -160,12 +194,15 @@ describe('TerminalRegistry', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
     terminalTestState.latestTerminalOptions = undefined;
+    resizeObservers.length = 0;
     registry = new TerminalRegistry();
   });
 
   afterEach(() => {
     registry.destroy();
+    globalThis.ResizeObserver = originalResizeObserver;
   });
 
   describe('getOrCreate', () => {
@@ -266,6 +303,49 @@ describe('TerminalRegistry', () => {
     it('detach is safe for non-existent node', () => {
       expect(() => registry.detach(999)).not.toThrow();
     });
+
+    it('coalesces a quiet container-resize burst into one terminal fit', async () => {
+      vi.useFakeTimers();
+      try {
+        const container = document.createElement('div');
+        const inst = await registry.attach(1, container);
+        vi.runOnlyPendingTimers();
+        vi.mocked(inst!.fitAddon.fit).mockClear();
+        vi.mocked(invoke).mockClear();
+
+        for (let i = 0; i < 2; i++) {
+          resizeObservers.at(-1)!.trigger();
+          // Every observation arrives before the 50 ms quiet window expires.
+          vi.advanceTimersByTime(25);
+        }
+
+        expect(inst!.fitAddon.fit).not.toHaveBeenCalled();
+        vi.runAllTimers();
+        expect(inst!.fitAddon.fit).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'resize_agent'))
+          .toEqual([['resize_agent', { sessionId: 1, rows: 24, cols: 80 }]]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancels a pending resize fit when the terminal detaches', async () => {
+      vi.useFakeTimers();
+      try {
+        const container = document.createElement('div');
+        const inst = await registry.attach(1, container);
+        vi.runOnlyPendingTimers();
+        vi.mocked(inst!.fitAddon.fit).mockClear();
+
+        resizeObservers.at(-1)!.trigger();
+        registry.detach(1);
+        vi.runAllTimers();
+
+        expect(inst!.fitAddon.fit).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('dispose', () => {
@@ -304,6 +384,24 @@ describe('TerminalRegistry', () => {
 
     it('is idempotent', () => {
       expect(() => registry.dispose(999)).not.toThrow();
+    });
+
+    it('cancels a pending resize fit when the terminal is disposed', async () => {
+      vi.useFakeTimers();
+      try {
+        const container = document.createElement('div');
+        const inst = await registry.attach(1, container);
+        vi.runOnlyPendingTimers();
+        vi.mocked(inst!.fitAddon.fit).mockClear();
+
+        resizeObservers.at(-1)!.trigger();
+        registry.dispose(1);
+        vi.runAllTimers();
+
+        expect(inst!.fitAddon.fit).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

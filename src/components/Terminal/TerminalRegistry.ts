@@ -21,6 +21,7 @@ import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { terminalWebglPool } from './WebglRendererPool';
 import { decodeBase64Bytes } from '../../lib/base64';
 import { setTheme, type ThemeName } from '../../lib/theme';
+import { TerminalResizeScheduler } from './TerminalResizeScheduler';
 
 export interface TerminalInstance {
   term: Terminal;
@@ -29,7 +30,7 @@ export interface TerminalInstance {
   searchAddon: SearchAddon;
   unlisten: UnlistenFn;
   opened: boolean;
-  resizeObserver: ResizeObserver | null;
+  resizeScheduler: TerminalResizeScheduler;
   attachedContainer: HTMLElement | null;
   onFindRequest: (() => void) | null;
 }
@@ -161,19 +162,11 @@ export class TerminalRegistry {
 
     inst.attachedContainer = container;
 
-    if (inst.resizeObserver) {
-      inst.resizeObserver.disconnect();
-    }
-    inst.resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => {
-        if (!inst.attachedContainer) return;
-        measureAndFit(inst);
-      });
-    });
-    inst.resizeObserver.observe(container);
+    inst.resizeScheduler.attach(container);
+    inst.resizeScheduler.fitNextFrame();
 
     requestAnimationFrame(() => {
-      measureAndFit(inst);
+      if (inst.attachedContainer !== container) return;
       // Only auto-scroll-to-tail on the first open. On re-attach the user
       // may have scrolled back to read history; forcing the tail here would
       // silently destroy that position (and flash the jump-to-latest pill).
@@ -210,10 +203,7 @@ export class TerminalRegistry {
     const inst = this.instances.get(nodeId);
     if (!inst) return;
 
-    if (inst.resizeObserver) {
-      inst.resizeObserver.disconnect();
-      inst.resizeObserver = null;
-    }
+    inst.resizeScheduler.detach();
     inst.term.element?.remove();
     inst.attachedContainer = null;
     terminalWebglPool.release(`agent:${nodeId}`);
@@ -268,9 +258,7 @@ export class TerminalRegistry {
   dispose(nodeId: number): void {
     const instance = this.instances.get(nodeId);
     if (instance) {
-      if (instance.resizeObserver) {
-        instance.resizeObserver.disconnect();
-      }
+      instance.resizeScheduler.dispose();
       instance.unlisten();
       api.unsubscribeAgentOutput(nodeId).catch(() => {});
       terminalWebglPool.release(`agent:${nodeId}`);
@@ -350,14 +338,15 @@ export class TerminalRegistry {
       // attached terminals; everything else uses xterm's DOM renderer —
       // see WebglRendererPool.ts and loadWebglRenderer.ts.
 
-      const instance: TerminalInstance = {
+      let instance: TerminalInstance;
+      instance = {
         term,
         fitAddon,
         serializeAddon,
         searchAddon,
         unlisten: () => {},
         opened: false,
-        resizeObserver: null,
+        resizeScheduler: new TerminalResizeScheduler(() => measureAndFit(instance)),
         attachedContainer: null,
         onFindRequest: null,
       };

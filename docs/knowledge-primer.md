@@ -89,6 +89,8 @@ The first-spawn path is the load-bearing one. The frontend subscribes as soon as
 
 Tauri 2.11's raw Channel transport has a payload-shape boundary: frames smaller than 1 KiB reach JavaScript directly as an `ArrayBuffer`, while frames at or above 1 KiB use the fetch path and arrive as a `Response`. `subscribeAgentOutput` / `subscribeBuildRunOutput` (shared `subscribeRawPtyOutput`) must consume `Response.arrayBuffer()` asynchronously and serialize those reads with later frames so terminal bytes cannot overtake each other. The boundary-to-xterm regression is pinned in `tests/integration/agent-terminal-auto-spawn.test.tsx` and `tests/unit/build-run-terminal-persistence.test.tsx`.
 
+Terminal container resize is coalesced by the shared `TerminalResizeScheduler`, used by both agent and build/run registries. A horizontal xterm resize reflows the normal-buffer scrollback, and every changed terminal size also reaches the PTY resize command, causing a full-screen TUI to repaint after the PTY resize. Do not restore per-observation or per-frame `fit()` calls during pane dragging. The scheduler keeps a short trailing quiet period, caps the maximum delay during a long drag, and performs the DOM measurement on the next animation frame.
+
 ### Layout: Grid-Only
 Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid. The UI auto-scales 1–6 panes via CSS grid.
 

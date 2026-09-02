@@ -20,13 +20,28 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 
-// jsdom doesn't ship ResizeObserver and the registry instantiates one in
-// `attachToDOM`. Stub it out before the registry import.
-globalThis.ResizeObserver = class {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-} as unknown as typeof ResizeObserver;
+// jsdom doesn't ship ResizeObserver. Keep each observer instance so the
+// resize scheduler can be driven without a module-level callback singleton.
+const resizeObservers: Array<{
+  callback: ResizeObserverCallback;
+  trigger: () => void;
+}> = [];
+const originalResizeObserver = globalThis.ResizeObserver;
+
+class MockResizeObserver {
+  private readonly callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    resizeObservers.push({
+      callback,
+      trigger: () => this.callback([], this as unknown as ResizeObserver),
+    });
+  }
+
+  observe(): void {}
+  disconnect(): void {}
+}
 
 // Capture every `new Terminal()` instance the registry creates so we can
 // assert "the same Terminal object survived remount" at the lifecycle
@@ -49,13 +64,25 @@ vi.mock('@xterm/xterm', () => {
   class TrackedTerminal {
     write = vi.fn();
     onData = vi.fn();
-    onResize = vi.fn();
+    resizeCallback: ((size: { cols: number; rows: number }) => void) | undefined;
+    onResize = vi.fn((callback: (size: { cols: number; rows: number }) => void) => {
+      this.resizeCallback = callback;
+    });
     open = vi.fn((container: HTMLElement) => {
       this.element = container as unknown as HTMLElement;
     });
     dispose = vi.fn();
     focus = vi.fn();
-    loadAddon = vi.fn();
+    loadAddon = vi.fn((addon: unknown) => {
+      if (
+        addon !== null &&
+        typeof addon === 'object' &&
+        'attachTerminal' in addon &&
+        typeof addon.attachTerminal === 'function'
+      ) {
+        addon.attachTerminal(this);
+      }
+    });
     attachCustomKeyEventHandler = vi.fn();
     scrollToBottom = vi.fn();
     refresh = vi.fn();
@@ -86,6 +113,24 @@ vi.mock('@xterm/xterm', () => {
   return { Terminal: TrackedTerminal };
 });
 
+vi.mock('@xterm/addon-fit', () => {
+  class TrackedFitAddon {
+    private terminal: { resizeCallback?: (size: { cols: number; rows: number }) => void } | null = null;
+
+    attachTerminal(terminal: { resizeCallback?: (size: { cols: number; rows: number }) => void }): void {
+      this.terminal = terminal;
+    }
+
+    fit = vi.fn(() => {
+      this.terminal?.resizeCallback?.({ cols: 80, rows: 24 });
+    });
+    dispose = vi.fn();
+    proposeDimensions = vi.fn().mockReturnValue({ cols: 80, rows: 24 });
+  }
+
+  return { FitAddon: TrackedFitAddon };
+});
+
 vi.mock('@xterm/addon-webgl', () => ({
   // Issue #1122: WebGL addon is loaded on every terminal. The mock exposes
   // `onContextLoss` so the production loader's fallback handler can subscribe
@@ -97,9 +142,18 @@ vi.mock('@xterm/addon-webgl', () => ({
 // tracked Terminal constructor.
 import { buildRunTerminalManager } from '../../src/components/Terminal/BuildRunTerminalRegistry';
 
+beforeEach(() => {
+  globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+});
+
+afterEach(() => {
+  globalThis.ResizeObserver = originalResizeObserver;
+});
+
 describe('BuildRunTerminalRegistry — persistence across remount (issue: build-run terminal resets on mesh navigation)', () => {
   beforeEach(() => {
     terminalInstances.length = 0;
+    resizeObservers.length = 0;
     // The setup's `beforeEach` already calls `vi.clearAllMocks()` which
     // wipes `invoke.mock.calls` between tests, but call it explicitly so
     // each test's assertions are obvious.
@@ -152,6 +206,41 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
       ([cmd]) => cmd === 'close_build_run',
     );
     expect(closeCalls).toHaveLength(0);
+  });
+
+  it('coalesces interactive terminal resize observations', async () => {
+    vi.useFakeTimers();
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const rafQueue: Array<() => void> = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: () => void) => {
+      rafQueue.push(callback);
+      return 0;
+    });
+
+    try {
+      const container = document.createElement('div');
+      const inst = await buildRunTerminalManager.attach(75, 'terminal', true, container);
+      expect(resizeObservers).toHaveLength(1);
+      while (rafQueue.length > 0) rafQueue.shift()!(); // initial fit + repaint
+      vi.mocked(inst!.fitAddon.fit).mockClear();
+      vi.mocked(invoke).mockClear();
+
+      for (let i = 0; i < 4; i++) {
+        resizeObservers[0].trigger();
+        vi.advanceTimersByTime(25);
+      }
+
+      expect(inst!.fitAddon.fit).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(25); // max wait flushes at 100 ms
+      expect(rafQueue).toHaveLength(1);
+      rafQueue.shift()!();
+      expect(inst!.fitAddon.fit).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'resize_build_run'))
+        .toEqual([['resize_build_run', { nodeId: 75, rows: 24, cols: 80 }]]);
+    } finally {
+      vi.stubGlobal('requestAnimationFrame', originalRequestAnimationFrame);
+      vi.useRealTimers();
+    }
   });
 
   it('B: dispose() tears down the instance AND kills the Rust PTY (X-button path)', async () => {
@@ -240,6 +329,7 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     // Re-attach to a different container; scrollback should be repainted.
     const newContainer = document.createElement('div');
     await buildRunTerminalManager.attach(20, 'build', true, newContainer);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     expect(term.refresh).toHaveBeenCalled();
   });
 
