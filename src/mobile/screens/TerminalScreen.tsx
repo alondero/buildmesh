@@ -95,10 +95,15 @@ export default function TerminalScreen({
     const t = e.touches[0];
     const dy = t.clientY - start.y;
     const dx = t.clientX - start.x;
-    // Horizontal swipe took over (e.g. user is on the xterm surface and
-    // starts panning). Drop the anchor so a later vertical drag from
-    // this same touch isn't mis-attributed to the original start point.
-    if (Math.abs(dx) > Math.abs(dy) * 1.5 && dy <= 0) {
+    // Horizontal-axis lock (review feedback #3): if a horizontal swipe
+    // takes over (xterm pan-scroll, deck carousel, etc.), drop the
+    // anchor so a later vertical drag from this same touch isn't
+    // mis-attributed to the original start point. NO direction
+    // qualifier on dy — a horizontal stroke with a 1–2px downward
+    // drift is still horizontal, and falling through to the translate
+    // path with dy > 0 would leak a small downward translation onto
+    // the app bar during a clearly horizontal swipe.
+    if (Math.abs(dx) > Math.abs(dy) * 1.5) {
       swipeStartRef.current = null;
       resetSwipeVisual();
       return;

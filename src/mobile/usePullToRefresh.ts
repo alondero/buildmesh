@@ -24,20 +24,30 @@ import { useCallback, useEffect, useRef, useState, type TouchEvent } from "react
 // before the pull engages (and reset the anchor if a horizontal swipe
 // takes over mid-drag).
 //
-// Performance (#1377 review feedback): the previous implementation called
-// `setPull(dy)` on every raw touchmove, which re-rendered the entire
-// NodeList tree (mesh sections, node rows, deck cards) at 60–120 Hz. We
-// now mirror the pull distance directly into a CSS custom property
-// (`--pull-translate`) on the scroll container via ref, and only call
-// `setPull` for the indicator's state and label. The indicator uses
-// `transform: translateY(...)` so it stays on the GPU compositor and
-// skips layout entirely. The list scrolls below it, but the indicator
-// floats above — see styles.css `.pull-indicator`.
+// Performance (#1377 review feedback, round 2): the previous build STILL
+// called `setPull(dy)` on every raw touchmove (despite the comment that
+// said it didn't) AND animated inline `height` on the indicator — both
+// forced a full NodeList re-render at 60–120 Hz AND a main-thread layout
+// reflow per pixel. The fixed path:
+//
+//   1. **No React state on the pull distance.** The handler writes the
+//      pull distance directly into a CSS custom property (`--pull-y`) on
+//      a child indicator element via ref, at requestAnimationFrame
+//      cadence. React state only holds `isPastThreshold` — a boolean
+//      that flips once per threshold crossing, used solely for the
+//      "Pull to refresh" / "Release to refresh" label.
+//
+//   2. **GPU-accelerated translation.** The indicator uses
+//      `transform: translateY(var(--pull-y))` with `will-change: transform`,
+//      not animated height. The element is `position: absolute` over the
+//      list so the list's height doesn't reflow during the drag — the
+//      indicator floats over the top of the list, anchored to the top
+//      edge of the scroller.
 //
 // Unmount safety (#1377 review feedback): the refresh callback's
 // `finally` previously called `setRefreshing(false)` against an unmounted
 // component if the user navigated away mid-refresh. `mountedRef` guards
-// that path.
+// that.
 
 const THRESHOLD_PX = 64;
 const MAX_PULL_PX = 88;
@@ -60,18 +70,23 @@ export function usePullToRefresh(
   onRefresh: () => Promise<void> | void,
   enabled: boolean,
 ): {
-  pull: number;
+  /// `isPastThreshold` flips true while the user's pull has crossed the
+  /// 64px release threshold — used ONLY for the "Pull" / "Release" label
+  /// (a single render per crossing, not per pixel). The visual pull
+  /// distance is NOT a render signal.
+  isPastThreshold: boolean;
   refreshing: boolean;
   handlers: PullHandlers;
-  /// Imperative API for callers that want to attach the indicator to an
-  /// arbitrary element. The hook reads `pull` every animation frame (via
-  /// a `requestAnimationFrame` loop that's only active while `pull > 0`)
-  /// and mirrors it into `--pull-translate` on the returned element. The
-  /// element's styles.css rule is the only place that consumes the
-  /// custom property.
+  /// Imperative API for the indicator element. The hook reads `pullRef`
+  /// every animation frame (while `pullRef > 0 || refreshingRef`) and
+  /// mirrors it into the `--pull-y` custom property on the returned
+  /// element. The element's styles.css rule is the only place that
+  /// consumes the custom property — the indicator does NOT live in the
+  /// document flow (it's `position: absolute`), so the list below it
+  /// doesn't reflow during the drag.
   bindIndicator: (el: HTMLElement | null) => void;
 } {
-  const [pull, setPull] = useState(0);
+  const [isPastThreshold, setIsPastThreshold] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   // Anchor at gesture start: both x and y so we can apply the horizontal
   // axis lock below.
@@ -79,8 +94,13 @@ export function usePullToRefresh(
   // Latest pull distance, mirrored out of state: touchend must read the
   // distance the last touchmove actually reached, not whichever render
   // the handler closure was built from (state updates from move events
-  // race the end event under batching).
+  // race the end event under batching). Also the source-of-truth for
+  // the rAF mirror into --pull-y.
   const pullRef = useRef(0);
+  // `isPastThresholdRef` mirrors the boolean React state so the touchmove
+  // handler can detect threshold crossings without reading stale state
+  // (React state updates are async).
+  const isPastThresholdRef = useRef(false);
   // Mirrors `refreshing` for the touch handlers — state updates are
   // async, and a second finger landing mid-refresh must not queue a
   // second refresh.
@@ -98,9 +118,9 @@ export function usePullToRefresh(
       mountedRef.current = false;
     };
   }, []);
-  // rAF loop for mirroring `pullRef` into the indicator's CSS variable.
-  // Active only while `pull > 0 || refreshing`, so the steady-state idle
-  // has zero rAF cost.
+  // rAF loop for mirroring `pullRef` into the indicator's `--pull-y` CSS
+  // variable. Active only while `pull > 0 || refreshing`, so the
+  // steady-state idle has zero rAF cost.
   const indicatorRef = useRef<HTMLElement | null>(null);
   const rafRef = useRef<number | null>(null);
 
@@ -108,20 +128,21 @@ export function usePullToRefresh(
     const el = indicatorRef.current;
     if (el) {
       const px = refreshingRef.current ? MAX_PULL_PX : pullRef.current;
-      el.style.setProperty("--pull-translate", `${Math.round(px)}px`);
+      el.style.setProperty("--pull-y", `${Math.round(px)}px`);
     }
     if (pullRef.current > 0 || refreshingRef.current) {
       rafRef.current = requestAnimationFrame(mirrorPull);
     } else {
       rafRef.current = null;
-      if (el) el.style.setProperty("--pull-translate", "0px");
+      if (el) el.style.setProperty("--pull-y", "0px");
     }
   }, []);
 
   const endGesture = useCallback(() => {
     startRef.current = null;
     pullRef.current = 0;
-    setPull(0);
+    isPastThresholdRef.current = false;
+    setIsPastThreshold(false);
     // Drive one final mirror tick so the indicator translates back to 0
     // (the rAF loop is already spinning if pull > 0; if pull is already
     // 0 we still want the CSS variable cleared).
@@ -144,10 +165,19 @@ export function usePullToRefresh(
       const dx = t.clientX - start.x;
       // Horizontal-axis lock: if a horizontal swipe takes over (deck
       // carousel), drop the pull anchor and let the carousel handle it.
-      if (Math.abs(dx) > dy * DOMINANT_RATIO) {
+      // The check is on |dx| > |dy| * RATIO — NO direction qualifier on
+      // dy, because a horizontal stroke with a 1-2px downward drift is
+      // still horizontal (review feedback #3). Dropping the anchor also
+      // resets the indicator visual so the user doesn't see a residual
+      // downward translation.
+      if (Math.abs(dx) > Math.abs(dy) * DOMINANT_RATIO) {
         startRef.current = { x: t.clientX, y: t.clientY };
         pullRef.current = 0;
-        setPull(0);
+        isPastThresholdRef.current = false;
+        setIsPastThreshold(false);
+        if (!rafRef.current) {
+          rafRef.current = requestAnimationFrame(mirrorPull);
+        }
         return;
       }
       if (dy <= 0 || e.currentTarget.scrollTop > 0) {
@@ -157,12 +187,24 @@ export function usePullToRefresh(
         // point.
         startRef.current = { x: t.clientX, y: t.clientY };
         pullRef.current = 0;
-        setPull(0);
+        isPastThresholdRef.current = false;
+        setIsPastThreshold(false);
+        if (!rafRef.current) {
+          rafRef.current = requestAnimationFrame(mirrorPull);
+        }
         return;
       }
       const next = Math.min(dy * DAMPING, MAX_PULL_PX);
       pullRef.current = next;
-      setPull(next);
+      // Threshold-crossing detection: ONLY flip the React state when we
+      // actually cross 64px (per release-affordance label), not every
+      // pixel. The `prev !== next` check skips the setState call entirely
+      // for the 63 frames of in-flight drag between crossings.
+      const pastThreshold = next >= THRESHOLD_PX;
+      if (pastThreshold !== isPastThresholdRef.current) {
+        isPastThresholdRef.current = pastThreshold;
+        setIsPastThreshold(pastThreshold);
+      }
       if (!rafRef.current) {
         rafRef.current = requestAnimationFrame(mirrorPull);
       }
@@ -171,7 +213,8 @@ export function usePullToRefresh(
       const pulled = pullRef.current;
       startRef.current = null;
       pullRef.current = 0;
-      setPull(0);
+      isPastThresholdRef.current = false;
+      setIsPastThreshold(false);
       if (!rafRef.current) {
         rafRef.current = requestAnimationFrame(mirrorPull);
       }
@@ -191,9 +234,9 @@ export function usePullToRefresh(
   const bindIndicator = useCallback((el: HTMLElement | null) => {
     indicatorRef.current = el;
     if (el) {
-      el.style.setProperty("--pull-translate", "0px");
+      el.style.setProperty("--pull-y", "0px");
     }
   }, []);
 
-  return { pull, refreshing, handlers, bindIndicator };
+  return { isPastThreshold, refreshing, handlers, bindIndicator };
 }

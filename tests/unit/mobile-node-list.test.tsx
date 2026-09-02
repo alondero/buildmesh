@@ -636,18 +636,29 @@ describe("NodeList", () => {
     warnSpy.mockRestore();
   });
 
-  it("prunes keySent + lastPrompts when the node leaves awaiting_input via polling (issue #1377 review)", async () => {
-    // The WS event path cleared these maps on agent-lifecycle /
-    // attention-cleared, but a node can also leave awaiting_input via
-    // plain polling (reconnect, missed event, refetch on tab return).
-    // Post-review fix: a useEffect keyed on the awaiting-id set drops
-    // stale entries on every reconcile. Here we:
-    //   1. mount with an awaiting-input node — fires the first
-    //      WS-triggered lifecycle event, seeding keySent and lastPrompts
-    //   2. simulate a second refresh that flips the same node's status to
-    //      "running" — the reconciliation effect MUST drop the stale
-    //      keySent entry and the stale lastPrompts entry, so a future
-    //      return to awaiting_input starts clean
+  it("prunes keySent + lastPrompts when the node leaves awaiting_input via plain HTTP polling (issue #1377 review)", async () => {
+    // The previous build's WS-event path cleared these maps on
+    // `agent-lifecycle` / `attention-cleared`, but the reconciliation
+    // contract is broader: a node can also leave `awaiting_input` via
+    // plain HTTP polling (reconnect, missed event, refetch on tab
+    // return). The new `useEffect` keyed on the awaiting-id set must
+    // drop stale `keySent` + `lastPrompts` entries on the polling path
+    // too — and the next time the same node returns to
+    // `awaiting_input` (a fresh tool call from the agent), the card
+    // must render with the FRESH "Approve" / "Reject" labels, NOT the
+    // sticky "Approved ✓" / stale prompt from the previous turn.
+    //
+    // Round-2 review: the previous version of this test fired an
+    // `agent-lifecycle` WebSocket event to flip the node's status —
+    // that's the WS-event path the original code already handled. A
+    // real polling reconciliation MUST go through `listNodes()` (the
+    // plain HTTP path), so the test below:
+    //   * never fires any `agent-lifecycle` / `attention-cleared` event
+    //   * changes the next `/api/nodes` response to return `running`
+    //   * asserts the deck disappears (reconciliation ran)
+    //   * flips `/api/nodes` back to `awaiting_input` and asserts the
+    //     card reappears with the chip labels reset to "Approve (Y)"
+    //     / "Reject (N)" — the stale "Approved ✓" must be gone
     let nodeStatus: "awaiting_input" | "running" = "awaiting_input";
     const fetch = vi.fn().mockImplementation(async (url: string) => {
       if (url.includes("/api/nodes")) {
@@ -693,39 +704,76 @@ describe("NodeList", () => {
         "Approved",
       );
     });
+    // Both chips must be disabled — that's the post-send contract
+    // that we're about to prove gets RESET on re-entry.
+    expect(
+      (screen.getByTestId("attn-approve-3") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("attn-reject-3") as HTMLButtonElement).disabled,
+    ).toBe(true);
 
-    // The same node is then refreshed with status=running. The deck
-    // disappears (no awaiting_input nodes); the next time it returns
-    // to awaiting_input, the stale "Approved" state must NOT reappear.
+    // The same node is then polled as `running` — purely via the next
+    // `/api/nodes` response, NO `agent-lifecycle` WS event. The
+    // reconciliation effect must drop the stale keySent + lastPrompts
+    // entries when the awaiting-id set changes.
     nodeStatus = "running";
-    // Manually drive a refresh by re-rendering with the updated fetch.
-    await act(async () => {
-      // Trigger another fetch by re-mounting the events WS message.
-      const eventsSocket = sockets.find((s) => s.url.includes("/ws/events"));
-      expect(eventsSocket).toBeTruthy();
-      eventsSocket!.onmessage?.({
-        data: JSON.stringify({
-          type: "agent-lifecycle",
-          session_id: 3,
-          provider: "anthropic",
-          kind: "running",
-          status: "running",
-          message: null,
-          provider_event: null,
-          provider_session_id: null,
-          completion_reason: null,
-          transcript_path: null,
-          timestamp: "2026-06-11T00:00:00Z",
-          signal_health: "ok",
-          semantic_turn: null,
-        }),
-      });
+    // Drive a refresh through the pull-to-refresh path — this is the
+    // purest "polling only, no events" trigger since PTR doesn't go
+    // through useWsEvents.
+    const scroller = screen.getByTestId("node-list");
+    fireEvent.touchStart(scroller, {
+      touches: [{ clientX: 100, clientY: 200 }],
+    });
+    fireEvent.touchMove(scroller, {
+      touches: [{ clientX: 100, clientY: 400 }],
+    });
+    fireEvent.touchEnd(scroller, {
+      changedTouches: [{ clientX: 100, clientY: 400 }],
     });
 
-    // Deck should disappear (node is no longer awaiting_input).
+    // Deck disappears once the polled refresh lands — node 3 is no
+    // longer `awaiting_input`.
     await waitFor(() => {
       expect(screen.queryByTestId("attention-deck")).toBeNull();
     });
+
+    // Now flip the same node back to `awaiting_input` via a SECOND
+    // polling refresh. The card must reappear with FRESH labels (no
+    // sticky "Approved ✓"), FRESH enabled state (both chips enabled),
+    // and the placeholder prompt (no stale WS-event prompt seeded
+    // — the polling path never seeded one in the first place, so
+    // the test also pins that the empty-prompt default is restored).
+    nodeStatus = "awaiting_input";
+    fireEvent.touchStart(scroller, {
+      touches: [{ clientX: 100, clientY: 200 }],
+    });
+    fireEvent.touchMove(scroller, {
+      touches: [{ clientX: 100, clientY: 400 }],
+    });
+    fireEvent.touchEnd(scroller, {
+      changedTouches: [{ clientX: 100, clientY: 400 }],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+    const approveChip = screen.getByTestId("attn-approve-3");
+    const rejectChip = screen.getByTestId("attn-reject-3");
+    // Sticky success label cleared — the chip shows the fresh
+    // "Approve (Y)" label, NOT "Approved ✓".
+    expect(approveChip.textContent).toContain("Approve (Y)");
+    expect(approveChip.textContent).not.toContain("Approved");
+    expect(rejectChip.textContent).toContain("Reject (N)");
+    // Both chips enabled again — the disable-after-send state did
+    // NOT survive the polling-driven reconcile.
+    expect((approveChip as HTMLButtonElement).disabled).toBe(false);
+    expect((rejectChip as HTMLButtonElement).disabled).toBe(false);
+    // Prompt placeholder restored — no stale WS-event prompt carried
+    // over from the previous turn.
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+      "Waiting for the agent's prompt",
+    );
   });
 
   it("disables BOTH action chips after a successful send (issue #1377 review)", async () => {

@@ -252,3 +252,142 @@ pub async fn post_input(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Issue #1377 — `POST /api/nodes/{id}/input` is the new triage-deck
+    //! input endpoint (replaces the previous "open a terminal WS, send
+    //! bytes, close" pattern). The handler must:
+    //!   * reject malformed JSON with `400 Bad Request`
+    //!   * reject an empty `seq` with `400 Bad Request` (otherwise we'd
+    //!     push zero bytes and the agent would never see a CR/LF — the
+    //!     triage chip's whole reason for existing)
+    //!   * reject a body past `INPUT_BODY_MAX_BYTES` with `413` BEFORE
+    //!     any DB call (the cap is the DoS bound)
+    //!   * return `404` when the node id isn't in the DB (the SPA can
+    //!     distinguish this from the PTY-down 503)
+    //!
+    //! These tests call `post_input` directly over a TCP socket so the
+    //! body-read path is exercised end-to-end. They stop at the body/
+    //! DB boundary — the 404 case uses `node_id = 0`, which `db::
+    //! get_agent_node_by_id` resolves to "not found" in the per-test DB
+    //! without us having to seed a row. The PTY-down 503 path lives
+    //! behind a real `ProcessRegistry` and is covered by `ws::tests::
+    //! forward_mobile_input_handles_registry_error` (the same code path
+    //! `post_input` runs through `write_mobile_input`).
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Drive `post_input` over a real TCP socket and return the response
+    /// bytes. `node_id = 0` exercises the 404 path without DB seeding
+    /// (the per-test DB has no row 0).
+    async fn drive(body: &[u8], node_id: i64) -> Vec<u8> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let content_length = body.len();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut lines = tokio::io::BufStream::new(crate::http::MaybeTls::Plain(stream));
+            post_input(&mut lines, node_id, content_length).await;
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut resp = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_to_end(&mut resp),
+        )
+        .await
+        .expect("server hung");
+        let _ = server.await;
+        resp
+    }
+
+    fn status_line(resp: &[u8]) -> String {
+        String::from_utf8_lossy(resp)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn body(resp: &[u8]) -> String {
+        String::from_utf8_lossy(resp).into_owned()
+    }
+
+    /// Issue #1377 (post-review): malformed JSON must reject with 400
+    /// BEFORE any DB lookup — the body is the only thing we know about
+    /// the caller's intent, so a parse failure is a client error.
+    #[tokio::test]
+    async fn rejects_malformed_json() {
+        let resp = drive(b"not json at all", 0).await;
+        let s = status_line(&resp);
+        assert!(s.starts_with("HTTP/1.1 400"), "expected 400; got: {s:?}");
+        assert!(
+            body(&resp).contains("Invalid JSON"),
+            "expected JSON-parse error envelope; got: {:?}",
+            body(&resp)
+        );
+    }
+
+    /// A `seq` of zero bytes would be a no-op against the PTY (the
+    /// attention autoclear only fires on \r or \n) and would silently
+    /// leave the card stuck on "Approved ✓" while the agent saw nothing.
+    /// The handler must reject so the SPA never sees a "200 OK" for a
+    /// tap that didn't deliver anything.
+    #[tokio::test]
+    async fn rejects_empty_seq() {
+        let resp = drive(br#"{"seq":""}"#, 0).await;
+        let s = status_line(&resp);
+        assert!(
+            s.starts_with("HTTP/1.1 400"),
+            "expected 400 for empty seq; got: {s:?}"
+        );
+    }
+
+    /// Body past `INPUT_BODY_MAX_BYTES` (1024) — the cap is the DoS
+    /// bound, and `request::read_body_or_send_error` short-circuits with
+    /// 413 BEFORE the JSON parser runs. A regression that drops the cap
+    /// (or moves it past the read) would let a malformed 10MB body
+    /// pin a tokio worker for the full upload window.
+    #[tokio::test]
+    async fn rejects_oversized_body() {
+        let mut body = br#"{"seq":""#.to_vec();
+        // Pad past the 1024-byte cap with `a` chars — still parseable
+        // JSON if it slipped through, but the cap rejects first.
+        body.extend(std::iter::repeat(b'a').take(2048));
+        body.extend_from_slice(br#""}"#);
+        let resp = drive(&body, 0).await;
+        let s = status_line(&resp);
+        assert!(
+            s.starts_with("HTTP/1.1 413"),
+            "expected 413 for oversized body; got: {s:?}"
+        );
+    }
+
+    /// `node_id = 0` doesn't exist in the per-test DB, so the
+    /// `db::get_agent_node_by_id` lookup returns `Err` and the route
+    /// short-circuits with 404 BEFORE any PTY work runs. The SPA can
+    /// distinguish this from the PTY-down 503 — a deleted node gets a
+    /// different status code than a killed agent, so the triage card
+    /// can show different user-facing copy.
+    #[tokio::test]
+    async fn returns_404_for_unknown_node() {
+        // NOTE: relies on `db::init` having been called by another test
+        // first (the global OnceCell is process-shared). If this fails
+        // with "Database not initialized", check the test ordering.
+        let resp = drive(br#"{"seq":"y\r"}"#, 0).await;
+        let s = status_line(&resp);
+        assert!(
+            s.starts_with("HTTP/1.1 404"),
+            "expected 404 for missing node; got: {s:?}"
+        );
+        assert!(
+            body(&resp).contains("Node not found"),
+            "expected 'Node not found' envelope; got: {:?}",
+            body(&resp)
+        );
+    }
+}

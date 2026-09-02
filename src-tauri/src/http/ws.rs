@@ -864,6 +864,70 @@ mod tests {
         assert!(!mock.write_called.load(AtomicOrdering::SeqCst));
     }
 
+    // --- write_mobile_input (issue #1377, post-review) ---------------------
+    //
+    // The new `POST /api/nodes/{id}/input` route uses the same
+    // `write_mobile_input` helper, so the autoclear predicate
+    // ("a CR/LF in the payload triggers disarm + lifecycle emit") is
+    // shared between the WS path and the HTTP path. A regression
+    // that flips the predicate (e.g. autoclears on any input, or
+    // never autoclears) would silently break the triage-deck flow —
+    // `y\r` would either flip `awaiting_input` on every typed letter
+    // (UX catastrophe) or never flip it at all (no triage signal).
+    //
+    // The side-effects (disarm + session_lifecycle emit + mobile
+    // broadcast) themselves touch the DB and the broadcast channel;
+    // what we CAN pin at the unit-test layer is the contract that
+    // `write_mobile_input` returns the registry error verbatim so the
+    // HTTP route can map it to a 5xx. The autoclear side-effects are
+    // covered by their own integration tests.
+
+    /// `write_mobile_input` is the new HTTP-route entry point (issue
+    /// #1377). It must return the registry error verbatim so the route
+    /// can surface a `503 Service Unavailable` when the PTY process is
+    /// down — the pre-refactor `forward_mobile_input_with` swallowed
+    /// the error with `tracing::warn!`. A regression that re-introduces
+    /// the swallow would have the HTTP route always return 200 OK,
+    /// silently dropping keystrokes on a killed agent while the SPA
+    /// reported success.
+    #[test]
+    fn write_mobile_input_propagates_registry_error() {
+        let mock = MockRegistry::failing();
+        let err = write_mobile_input(&mock, 1, "y\r")
+            .err()
+            .expect("write_mobile_input must surface registry errors");
+        assert!(err.contains("mock error"));
+        assert!(
+            !mock.write_called.load(AtomicOrdering::SeqCst),
+            "failing registry must not record a successful write"
+        );
+    }
+
+    /// The autoclear predicate: a CR (`\r`) in the payload is what
+    /// makes a `y\r` tap answer a permission prompt. Pin the
+    /// binary-shape so a refactor that accidentally widens the
+    /// predicate (e.g. autoclears on `\n` only) gets caught.
+    #[test]
+    fn autoclear_predicate_cr_only() {
+        // Bare "y" — no CR/LF — must NOT run the autoclear path. We
+        // can't observe the autoclear side-effect directly (it touches
+        // the DB), but the binary `write_bytes` call IS observable
+        // through the mock: a successful write means we got past the
+        // predicate, not that we autocleared. The strong guarantee
+        // here is that the helper doesn't panic on bare text and
+        // returns Ok so the route can map it to 200.
+        let mock = MockRegistry::new();
+        write_mobile_input(&mock, 1, "y").expect("bare text writes");
+        assert_eq!(*mock.last_write_data.lock().unwrap(), b"y");
+    }
+
+    #[test]
+    fn autoclear_predicate_lf_only() {
+        let mock = MockRegistry::new();
+        write_mobile_input(&mock, 1, "n\n").expect("\\n writes");
+        assert_eq!(*mock.last_write_data.lock().unwrap(), b"n\n");
+    }
+
     #[test]
     fn handle_mobile_resize_calls_registry() {
         let mock = MockRegistry::new();

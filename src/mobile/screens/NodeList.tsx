@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AgentNode,
   Mesh,
@@ -16,9 +16,12 @@ import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { useWsEvents } from "../useWsEvents";
 import { useVisibilityPolling } from "../useVisibilityPolling";
 import {
-  PULL_REFRESH_THRESHOLD_PX,
   usePullToRefresh,
 } from "../usePullToRefresh";
+// The hook owns the threshold value internally and exposes
+// `isPastThreshold` as a boolean signal so callers don't pay a render
+// per pixel (review feedback #1). No need to import the numeric
+// `PULL_REFRESH_THRESHOLD_PX` from the hook in this file.
 import { groupByHarness } from "../../lib/groups";
 import { STATUS_CONFIG } from "../../lib/status";
 
@@ -281,21 +284,35 @@ export default function NodeList({
     .filter((n) => n.status === "awaiting_input")
     .sort((a, b) => a.id - b.id);
 
-  // Triage-deck zombie-state reconciliation (issue #1377, post-review):
-  // the WS handler clears `lastPrompts`/`keySent` on `agent-lifecycle`
-  // transitions and `attention-cleared` events, but a node can leave
-  // `awaiting_input` via plain polling too (reconnect, missed event,
-  // refetch on tab return). Without this sweep, a card for a node that's
-  // already `running` keeps its "Approved ✓" chip and prompt line until
-  // the next lifecycle event — and the next attention ask on that same
-  // node would inherit a stale prompt and a still-disabled chip.
+  // Triage-deck zombie-state reconciliation (issue #1377, post-review,
+  // round-2): the WS handler clears `lastPrompts`/`keySent` on
+  // `agent-lifecycle` transitions and `attention-cleared` events, but a
+  // node can leave `awaiting_input` via plain polling too (reconnect,
+  // missed event, refetch on tab return). Without this sweep, a card
+  // for a node that's already `running` keeps its "Approved ✓" chip
+  // and prompt line until the next lifecycle event — and the next
+  // attention ask on that same node would inherit a stale prompt and
+  // a still-disabled chip.
   //
-  // Runs as a `useEffect` keyed on the awaiting-id Set so it fires exactly
-  // when the reconciliation surface changes (initial render + every nodes
-  // refresh), never on unrelated re-renders. The functional `setState`
-  // returns the same `Map` reference when nothing changed, so React skips
-  // the re-render — no infinite loop.
-  const awaitingIds = new Set(attentionNodes.map((n) => n.id));
+  // Round-2 review: synchronizing state from other state via useEffect
+  // IS an anti-pattern. The right shape is to prune inside the
+  // authoritative transition points (`refresh()` and the WS handler).
+  // We keep a single useEffect here for the polling case (no event
+  // fires when a node leaves `awaiting_input` via plain HTTP refresh),
+  // but the effect's dep MUST be a stable reference: an inline
+  // `new Set(...)` would change identity on every render and fire
+  // the effect on every render — a React 101 violation. Memoizing on
+  // the sorted id list (the canonical serialization of "which nodes
+  // are awaiting") gives us stable identity until the set actually
+  // changes.
+  const awaitingIdList = useMemo(
+    () => attentionNodes.map((n) => n.id).join(","),
+    [attentionNodes],
+  );
+  const awaitingIds = useMemo(
+    () => new Set(awaitingIdList ? awaitingIdList.split(",").map(Number) : []),
+    [awaitingIdList],
+  );
   useEffect(() => {
     setKeySent((prev) => {
       let next: Map<number, "approve" | "reject"> | null = null;
@@ -348,7 +365,7 @@ export default function NodeList({
         }
       />
 
-      {(pullToRefresh.pull > 0 || pullToRefresh.refreshing) && (
+      {(pullToRefresh.isPastThreshold || pullToRefresh.refreshing) && (
         <div
           ref={pullToRefresh.bindIndicator}
           data-testid="pull-indicator"
@@ -361,7 +378,7 @@ export default function NodeList({
               style={{ fontSize: 11, color: "var(--text-faint)" }}
               data-testid="pull-indicator-label"
             >
-              {pullToRefresh.pull >= PULL_REFRESH_THRESHOLD_PX
+              {pullToRefresh.isPastThreshold
                 ? "Release to refresh"
                 : "Pull to refresh"}
             </span>
