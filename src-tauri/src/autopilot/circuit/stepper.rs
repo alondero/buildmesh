@@ -214,23 +214,9 @@ impl RunView {
     }
 
     /// Check if `ancestor` is an upstream ancestor of `descendant` via incoming edges.
+    /// Delegates to [`CircuitGraph::is_ancestor`].
     pub fn is_upstream_ancestor(&self, descendant: &str, ancestor: &str) -> bool {
-        let mut visited = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(descendant);
-        visited.insert(descendant);
-        while let Some(curr) = queue.pop_front() {
-            for edge in self.graph.incoming(curr) {
-                let from = edge.from.as_str();
-                if from == ancestor {
-                    return true;
-                }
-                if visited.insert(from) {
-                    queue.push_back(from);
-                }
-            }
-        }
-        false
+        self.graph.is_ancestor(descendant, ancestor)
     }
 
     /// Check if any upstream ancestor of `node_id` in the graph satisfies a predicate.
@@ -260,48 +246,20 @@ impl RunView {
 
     /// Resolve the target agent node for an `InjectPty`, `SetNodeStatus`,
     /// classifier, or close step:
-    /// - If `target_node_id` is explicitly set, validate that it is an upstream
-    ///   `SpawnAgentNode` in this step's lineage (or is the step itself) and return its
-    ///   `agent_node_id`. If invalid or not upstream, fails closed (`None`).
-    /// - If omitted (`None`), walk backward from `node_id` through incoming edges
-    ///   in the graph's dependency lineage and return the `agent_node_id` of the
-    ///   nearest upstream `SpawnAgentNode`. Fails closed (`None`) if none exists in branch.
-    pub fn resolve_target_agent(&self, node_id: &str, target_node_id: Option<&str>) -> Option<i64> {
-        if let Some(target) = target_node_id {
-            let is_spawn = matches!(
-                self.graph.node(target).map(|n| &n.kind),
-                Some(CircuitNodeKind::SpawnAgentNode { .. })
-            );
-            if !is_spawn {
-                return None;
-            }
-            if target != node_id && !self.is_upstream_ancestor(node_id, target) {
-                return None;
-            }
-            return self.step(target).and_then(|s| s.agent_node_id);
-        }
-        let mut visited = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(node_id);
-        visited.insert(node_id);
-        while let Some(curr) = queue.pop_front() {
-            for edge in self.graph.incoming(curr) {
-                let from = edge.from.as_str();
-                if visited.insert(from) {
-                    if let Some(node) = self.graph.node(from) {
-                        if matches!(node.kind, CircuitNodeKind::SpawnAgentNode { .. }) {
-                            if let Some(step) = self.step(from) {
-                                if let Some(agent_id) = step.agent_node_id {
-                                    return Some(agent_id);
-                                }
-                            }
-                        }
-                    }
-                    queue.push_back(from);
-                }
-            }
-        }
-        None
+    /// - If the node's `target_node_id` is explicitly set, validate that
+    ///   it is an upstream `SpawnAgentNode` in this step's lineage (or is
+    ///   the step itself) and return its `agent_node_id`. If invalid or
+    ///   not upstream, fails closed (`None`).
+    /// - If the node's `target_node_id` is `None`, walk backward from
+    ///   `node_id` through incoming edges in the graph's dependency
+    ///   lineage and return the `agent_node_id` of the nearest upstream
+    ///   `SpawnAgentNode`. Fails closed (`None`) if none exists in branch.
+    ///
+    /// The target is read from the node itself so callers don't pattern-
+    /// match on `CircuitNodeKind` to extract a target the resolver has
+    /// direct access to.
+    pub fn resolve_target_agent(&self, node_id: &str) -> Option<i64> {
+        resolve_target_agent(&self.graph, &self.steps, node_id)
     }
 
     /// Attach the spawned mesh agent node to its step. Called by the seam
@@ -313,15 +271,78 @@ impl RunView {
     }
 }
 
+/// Resolve the target agent node id for any step kind. The target comes
+/// from the node's own kind — explicit `target_node_id` if set, else the
+/// nearest upstream `SpawnAgentNode` in the graph's dependency lineage.
+///
+/// Free-function form (not a method on `RunView`) so the per-tick
+/// observation hot path doesn't pay a `RunView` clone per call. Both
+/// `RunView::resolve_target_agent` (for ergonomic call sites that
+/// already hold a view) and the circuit worker's orphan-detection helper
+/// (`observed_agent_for_step`) call this.
+pub fn resolve_target_agent(
+    graph: &CircuitGraph,
+    steps: &[StepView],
+    node_id: &str,
+) -> Option<i64> {
+    let explicit = match graph.node(node_id).map(|n| &n.kind) {
+        Some(CircuitNodeKind::InjectPty { target_node_id, .. }) => target_node_id.as_deref(),
+        Some(CircuitNodeKind::LlmTurnClassifier { target_node_id }) => target_node_id.as_deref(),
+        Some(CircuitNodeKind::SetNodeStatus { target_node_id, .. }) => target_node_id.as_deref(),
+        Some(CircuitNodeKind::CloseAgentNode { target_node_id, .. }) => target_node_id.as_deref(),
+        // GithubAction / Notify / Join / RetryLimit / AnyCompleted /
+        // Manual / Interval / SpawnAgentNode have no target lineage —
+        // nothing to resolve. `SpawnAgentNode` owns its agent directly
+        // via `step.agent_node_id`, not via this resolver.
+        _ => return None,
+    };
+    if let Some(target) = explicit {
+        let is_spawn = matches!(
+            graph.node(target).map(|n| &n.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { .. })
+        );
+        if !is_spawn {
+            return None;
+        }
+        if target != node_id && !graph.is_ancestor(node_id, target) {
+            return None;
+        }
+        return steps
+            .iter()
+            .find(|s| s.node_id == target)
+            .and_then(|s| s.agent_node_id);
+    }
+    // `target_node_id` is `None` — walk backward through incoming edges
+    // and return the nearest upstream `SpawnAgentNode`'s agent id.
+    let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+    queue.push_back(node_id);
+    visited.insert(node_id);
+    while let Some(curr) = queue.pop_front() {
+        for edge in graph.incoming(curr) {
+            let from = edge.from.as_str();
+            if visited.insert(from) {
+                if let Some(node) = graph.node(from) {
+                    if matches!(node.kind, CircuitNodeKind::SpawnAgentNode { .. }) {
+                        if let Some(step) = steps.iter().find(|s| s.node_id == from) {
+                            if let Some(agent_id) = step.agent_node_id {
+                                return Some(agent_id);
+                            }
+                        }
+                    }
+                }
+                queue.push_back(from);
+            }
+        }
+    }
+    None
+}
+
 /// Resolve the SpawnAgentNode that owns a classifier's target agent. A
 /// classifier often runs after the spawn step is terminal, so its own step
 /// cannot be used as the output namespace owner.
 fn spawn_node_for_agent(run: &RunView, classifier_node_id: &str) -> Option<String> {
-    let target_node_id = match run.graph.node(classifier_node_id).map(|node| &node.kind) {
-        Some(CircuitNodeKind::LlmTurnClassifier { target_node_id }) => target_node_id.as_deref(),
-        _ => None,
-    };
-    let agent_node_id = run.resolve_target_agent(classifier_node_id, target_node_id)?;
+    let agent_node_id = run.resolve_target_agent(classifier_node_id)?;
     run.steps
         .iter()
         .find(|step| {
@@ -611,10 +632,22 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
             }
         }
         CircuitEvent::AgentLost { agent_node_id } => {
+            // Match both direct (`step.agent_node_id == Some(*id)`) and
+            // lineage-resolved targets — `InjectPty` / `LlmTurnClassifier` /
+            // `SetNodeStatus` / `CloseAgentNode` steps carry their target
+            // agent via the lineage walk, not on the step row. Without
+            // the lineage fallback, an orphaned `InjectPty` step (target
+            // agent row deleted mid-run) would never cancel.
             let bound: Option<String> = run
                 .steps
                 .iter()
-                .find(|s| s.status == StepStatus::Running && s.agent_node_id == Some(*agent_node_id))
+                .filter(|s| s.status == StepStatus::Running)
+                .find(|s| {
+                    if s.agent_node_id == Some(*agent_node_id) {
+                        return true;
+                    }
+                    run.resolve_target_agent(&s.node_id) == Some(*agent_node_id)
+                })
                 .map(|s| s.node_id.clone());
             if let Some(step_node) = bound {
                 cancel_step(run, &mut t, &step_node);
@@ -798,7 +831,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 if let Some(CircuitNodeKind::CloseAgentNode { target_node_id }) =
                     run.graph.node(node_id).map(|node| &node.kind)
                 {
-                    if run.resolve_target_agent(node_id, target_node_id.as_deref()).is_some() {
+                    if run.resolve_target_agent(node_id).is_some() {
                         t.effects.push(Effect::CloseAgentNode {
                             node_id: node_id.clone(),
                             target_node_id: target_node_id.clone(),
@@ -1276,7 +1309,7 @@ fn start_effects_and_completion(
             set_step(run, t, node_id, StepStatus::Completed);
         }
         CircuitNodeKind::SetNodeStatus { status, target_node_id } => {
-            let target_agent = run.resolve_target_agent(node_id, target_node_id.as_deref());
+            let target_agent = run.resolve_target_agent(node_id);
             if target_agent.is_none() {
                 fail_step(
                     run,
@@ -1299,7 +1332,7 @@ fn start_effects_and_completion(
             }
         }
         CircuitNodeKind::CloseAgentNode { target_node_id } => {
-            let target_agent = run.resolve_target_agent(node_id, target_node_id.as_deref());
+            let target_agent = run.resolve_target_agent(node_id);
             if target_agent.is_none() {
                 fail_step(
                     run,
@@ -1320,7 +1353,7 @@ fn start_effects_and_completion(
             // and the agent process be live before we write bytes.
             // But without any earlier spawn in this run, inject has no
             // target at all — fail fast.
-            if run.resolve_target_agent(node_id, target_node_id.as_deref()).is_none() =>
+            if run.resolve_target_agent(node_id).is_none() =>
         {
             fail_step(
                 run,
@@ -1358,7 +1391,7 @@ fn start_effects_and_completion(
             // agent's next turn yield and feeds TurnClassified back.
             // Without any spawned agent there is nothing to classify —
             // fail fast rather than wedge.
-            if run.resolve_target_agent(node_id, target_node_id.as_deref()).is_none() =>
+            if run.resolve_target_agent(node_id).is_none() =>
         {
             fail_step(
                 run,
@@ -1887,6 +1920,101 @@ mod tests {
         let w = t.step_writes.last().unwrap();
         assert_eq!(w.status, StepStatus::Cancelled);
         assert_eq!(w.outcome, Some(Some(StepOutcome::Cancelled)));
+    }
+
+    #[test]
+    fn agent_lost_cancels_a_lineage_only_step_whose_own_agent_node_id_is_null() {
+        // Regression for the live incident (buildmesh mesh 65, runs 3/5/6):
+        // `InjectPty` / `LlmTurnClassifier` / `CloseAgentNode` carry their
+        // target via the spawn-step lineage, not on the step row itself.
+        // The per-tick observer emits `AgentLost { agent_node_id }` with
+        // the resolved lineage id; the stepper must walk the lineage to
+        // match. Without the lineage fallback (the previous bug), the
+        // orphaned `InjectPty` step stayed `running` forever, holding a
+        // `circuit_run_capacity` slot.
+        //
+        // Layout: trigger → spawn → inject_pty(→spawn). Spawn owns the
+        // piloted agent; `inject` references it via lineage only.
+        let mut run = RunView {
+            run_id: 99,
+            graph: CircuitGraph {
+                version: 1,
+                blueprint: None,
+                nodes: vec![
+                    CircuitNode { id: "trigger".into(), kind: CircuitNodeKind::Manual },
+                    CircuitNode { id: "spawn".into(), kind: spawn_kind("fix it") },
+                    CircuitNode {
+                        id: "inject".into(),
+                        kind: CircuitNodeKind::InjectPty {
+                            prompt: "follow-up".into(),
+                            target_node_id: Some("spawn".into()),
+                        },
+                    },
+                ],
+                edges: vec![
+                    CircuitEdge { from: "trigger".into(), to: "spawn".into(), condition: Default::default() },
+                    CircuitEdge { from: "spawn".into(), to: "inject".into(), condition: Default::default() },
+                ],
+            },
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView {
+                    node_id: "trigger".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(StepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "spawn".into(),
+                    status: StepStatus::Completed,
+                    outcome: Some(StepOutcome::Completed),
+                    error: None,
+                    agent_node_id: Some(900),
+                    attempt: 1,
+                },
+                StepView {
+                    node_id: "inject".into(),
+                    status: StepStatus::Running,
+                    outcome: None,
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                },
+            ],
+        };
+        let t = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
+        assert_eq!(
+            status_of(&run, "inject"),
+            StepStatus::Cancelled,
+            "lineage-only step must be cancelled by AgentLost for its target spawn's agent"
+        );
+        assert_eq!(run.state, RunState::Failed);
+        let w = t.step_writes.last().unwrap();
+        assert_eq!(w.node_id, "inject");
+        assert_eq!(w.status, StepStatus::Cancelled);
+    }
+
+    #[test]
+    fn agent_lost_for_a_nonexistent_lineage_target_is_a_no_op() {
+        // Defensive: an AgentLost with a `agent_node_id` that doesn't
+        // match any running step's direct id OR lineage must produce no
+        // step writes — the orphan-detection helper can only emit
+        // AgentLost for agents that were actually bound, but a future
+        // caller could pass anything.
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1, 1));
+        run.attach_agent_node("spawn", 900);
+        let t = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 999_999 });
+        assert!(
+            t.step_writes.is_empty(),
+            "AgentLost for an unknown agent must be a no-op; got {:?}",
+            t.step_writes
+        );
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
     }
 
     #[test]
@@ -2946,7 +3074,7 @@ mod tests {
                 target_node_id: Some("agent_a".into()),
             }]
         );
-        assert_eq!(run.resolve_target_agent("inject_a", Some("agent_a")), Some(101));
+        assert_eq!(run.resolve_target_agent("inject_a"), Some(101));
 
         // Finish agent_b
         advance(&mut run, &agent_finished(202, true));
@@ -2961,7 +3089,7 @@ mod tests {
                 target_node_id: Some("agent_b".into()),
             }]
         );
-        assert_eq!(run.resolve_target_agent("inject_b", Some("agent_b")), Some(202));
+        assert_eq!(run.resolve_target_agent("inject_b"), Some(202));
     }
 
     #[test]
@@ -3008,9 +3136,9 @@ mod tests {
         run.attach_agent_node("spawn_branch_2", 2002);
 
         // Target agent for inject_branch_1 traverses upstream and finds spawn_branch_1 (1001)
-        assert_eq!(run.resolve_target_agent("inject_branch_1", None), Some(1001));
+        assert_eq!(run.resolve_target_agent("inject_branch_1"), Some(1001));
         // Target agent for inject_branch_2 traverses upstream and finds spawn_branch_2 (2002)
-        assert_eq!(run.resolve_target_agent("inject_branch_2", None), Some(2002));
+        assert_eq!(run.resolve_target_agent("inject_branch_2"), Some(2002));
     }
 
     #[test]
@@ -3215,7 +3343,7 @@ mod tests {
         run.attach_agent_node("branch_b", 202);
 
         // Explicit target "branch_b" is not in step_in_a's lineage -> must fail closed (None)!
-        assert_eq!(run.resolve_target_agent("step_in_a", Some("branch_b")), None);
+        assert_eq!(run.resolve_target_agent("step_in_a"), None);
 
         // Advancing into step_in_a fails fast because target cannot be resolved!
         advance(&mut run, &agent_finished(101, true));
