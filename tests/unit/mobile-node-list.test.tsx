@@ -17,13 +17,26 @@ import type {
   Provider,
 } from "../../src/mobile/api";
 
+let sockets: FakeWebSocket[] = [];
+
 class FakeWebSocket {
+  url: string;
+  sent: string[] = [];
+  closed = false;
   onopen: (() => void) | null = null;
   onmessage: ((e: unknown) => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
-  close() {}
-  send() {}
+  constructor(url: string) {
+    this.url = url;
+    sockets.push(this);
+  }
+  send(data: string) {
+    this.sent.push(data);
+  }
+  close() {
+    this.closed = true;
+  }
 }
 
 const mesh: Mesh = {
@@ -58,7 +71,8 @@ function mockApi(
   const fn = vi.fn().mockImplementation(async (url: string) => {
     const ok = status >= 200 && status < 300;
     let body: unknown;
-    if (url.includes("/api/meshes")) body = [mesh];
+    if (url.includes("/api/ws-ticket")) body = { ticket: "t" };
+    else if (url.includes("/api/meshes")) body = [mesh];
     else if (url.includes("/api/nodes")) body = nodes;
     else if (url.includes("/api/providers")) body = providers ?? [];
     else body = [];
@@ -77,6 +91,7 @@ const noop = () => {};
 describe("NodeList", () => {
   beforeEach(() => {
     localStorage.clear();
+    sockets = [];
     vi.stubGlobal("WebSocket", FakeWebSocket);
   });
 
@@ -119,6 +134,279 @@ describe("NodeList", () => {
     expect(screen.getAllByTestId("node-3")).toHaveLength(1);
     // Running node renders normally.
     expect(screen.getByTestId("node-1")).toBeTruthy();
+  });
+
+  it("triage card shows repo, branch, prompt placeholder and one-tap chips (issue #1377)", async () => {
+    mockApi([{ ...makeNode(3, "awaiting_input"), branch: "feature/deck" }]);
+
+    const onOpenNode = vi.fn();
+    render(
+      <NodeList
+        onOpenNode={onOpenNode}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    // Repo (mesh name) + branch on the card body.
+    const body = screen.getByTestId("node-3");
+    expect(body.textContent).toContain("buildmesh");
+    expect(body.textContent).toContain("feature/deck");
+    // No lifecycle event yet → the placeholder prompt line, not silence.
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+      "Waiting for the agent's prompt",
+    );
+    // The three one-tap chips.
+    expect(screen.getByTestId("attn-approve-3").textContent).toContain(
+      "Approve (Y)",
+    );
+    expect(screen.getByTestId("attn-reject-3").textContent).toContain(
+      "Reject (N)",
+    );
+    expect(screen.getByTestId("attn-focus-3").textContent).toContain(
+      "Focus terminal",
+    );
+
+    // Focus (chip or card body) opens the node's terminal.
+    fireEvent.click(screen.getByTestId("attn-focus-3"));
+    expect(onOpenNode).toHaveBeenCalledTimes(1);
+    expect(onOpenNode.mock.calls[0][0].id).toBe(3);
+  });
+
+  it("Approve/Reject chips send y/n+Enter down the node terminal WS (issue #1377)", async () => {
+    mockApi([makeNode(3, "awaiting_input")]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    // Approve: the chip must answer the prompt with `y` + Enter — the `\r`
+    // is what makes the server autoclear the attention state.
+    fireEvent.click(screen.getByTestId("attn-approve-3"));
+    let approveSocket: FakeWebSocket | undefined;
+    await waitFor(() => {
+      approveSocket = sockets.find((s) => s.url.includes("/ws/terminal/3"));
+      expect(approveSocket).toBeTruthy();
+    });
+    await act(async () => {
+      approveSocket!.onopen?.();
+    });
+    expect(approveSocket!.sent).toContain("y\r");
+    expect(approveSocket!.closed).toBe(true);
+    // Delivered → the chip confirms without waiting for the refetch cycle.
+    await waitFor(() => {
+      expect(screen.getByTestId("attn-approve-3").textContent).toContain(
+        "Sent",
+      );
+    });
+  });
+
+  it("Reject chip sends n+Enter down the node terminal WS (issue #1377)", async () => {
+    mockApi([makeNode(5, "awaiting_input")]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId("attn-reject-5"));
+    await waitFor(() => {
+      expect(
+        sockets.find((s) => s.url.includes("/ws/terminal/5")),
+      ).toBeTruthy();
+    });
+    const ws = sockets.find((s) => s.url.includes("/ws/terminal/5"))!;
+    await act(async () => {
+      ws.onopen?.();
+    });
+    expect(ws.sent).toContain("n\r");
+    expect(ws.closed).toBe(true);
+  });
+
+  it("shows the last prompt from agent-lifecycle events and clears it when attention clears (issue #1377)", async () => {
+    mockApi([makeNode(3, "awaiting_input")]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    const eventsSocket = sockets.find((s) => s.url.includes("/ws/events"));
+    expect(eventsSocket).toBeTruthy();
+
+    // The awaiting-input lifecycle event carries the semantic turn
+    // description — that is the "last prompt / permission request" line.
+    await act(async () => {
+      eventsSocket!.onmessage?.({
+        data: JSON.stringify({
+          type: "agent-lifecycle",
+          session_id: 3,
+          provider: "anthropic",
+          kind: "awaiting_input",
+          status: "awaiting_input",
+          message: null,
+          provider_event: "permission_request",
+          provider_session_id: null,
+          completion_reason: null,
+          transcript_path: null,
+          timestamp: "2026-06-11T00:00:00Z",
+          signal_health: "ok",
+          semantic_turn: {
+            node_id: 3,
+            kind: "needs_input",
+            description: "Allow npm install?",
+          },
+        }),
+      });
+    });
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+      "Allow npm install?",
+    );
+
+    // When attention clears, the prompt must not outlive the state — the
+    // card itself disappears (status left awaiting_input via the same
+    // event's optimistic patch + refetch), and a still-awaiting card that
+    // receives attention-cleared loses the line with it.
+    await act(async () => {
+      eventsSocket!.onmessage?.({
+        data: JSON.stringify({ type: "attention-cleared", session_id: 3 }),
+      });
+    });
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+      "Waiting for the agent's prompt",
+    );
+  });
+
+  it("pull-to-refresh refetches the node list (issue #1377)", async () => {
+    let nodesCalls = 0;
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        nodesCalls += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [makeNode(1, "running")],
+        };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("node-list")).toBeTruthy();
+    });
+    const before = nodesCalls;
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    // Drag down 200px at the top of the list — damped to 80px, past the
+    // 64px threshold. jsdom keeps scrollTop at 0, exactly the "at top"
+    // precondition.
+    const scroller = screen.getByTestId("node-list");
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 200 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientY: 400 }] });
+    // Mid-pull the indicator shows the release affordance.
+    expect(screen.getByTestId("pull-indicator-label").textContent).toBe(
+      "Release to refresh",
+    );
+    fireEvent.touchEnd(scroller, { changedTouches: [{ clientY: 400 }] });
+
+    await waitFor(() => {
+      expect(nodesCalls).toBeGreaterThan(before);
+    });
+  });
+
+  it("small vertical drags do not trigger pull-to-refresh (issue #1377)", async () => {
+    let nodesCalls = 0;
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        nodesCalls += 1;
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("node-list")).toBeTruthy();
+    });
+    const before = nodesCalls;
+
+    const scroller = screen.getByTestId("node-list");
+    // 100px raw → 40px damped, below the 64px threshold.
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 200 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientY: 300 }] });
+    fireEvent.touchEnd(scroller, { changedTouches: [{ clientY: 300 }] });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(nodesCalls).toBe(before);
   });
 
   it("resolves the initial list when mounted through the production StrictMode wrapper", async () => {
@@ -211,7 +499,10 @@ describe("NodeList", () => {
     // its inline `background` style must come from STATUS_CONFIG (jsdom
     // normalizes hex → rgb(), so compare via `hexToRgbString`).
     expect(railHex(row1)).toBe(hexToRgbString("#00d4ff")); // running
-    expect(railHex(row3)).toBe(hexToRgbString("#f59e0b")); // awaiting_input
+    // Issue #1377: the awaiting-input node renders as a triage-deck card
+    // (amber ring via .deck-card, no status rail), so only the running
+    // NodeRow carries a rail to assert here.
+    expect(screen.getByTestId("attn-card-3")).toBeTruthy();
   });
 
   it("routes a 401 to onAuthFailed, not the offline overlay", async () => {

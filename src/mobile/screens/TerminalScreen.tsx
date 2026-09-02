@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type TouchEvent } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -10,6 +10,15 @@ import { loadUnicode11Widths } from "../../components/Terminal/loadUnicode11Widt
 
 const MAX_RECONNECT = 5;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+
+// Swipe-down-to-dismiss (issue #1377): a downward drag on the app bar closes
+// the terminal, mirroring the sheet-dismiss muscle memory. Anchored to the
+// app bar only — the xterm surface below belongs to pan-scrolling
+// (attachTouchPan), and hijacking a scrollback drag to close the screen
+// would fire on exactly the users reading history. Mostly-vertical strokes
+// only (dy > SWIPE_DISMISS_PX and dy dominating dx) so an accidental
+// diagonal during horizontal chrome taps doesn't dismiss.
+const SWIPE_DISMISS_PX = 72;
 
 type Props = {
   node: AgentNode;
@@ -48,6 +57,22 @@ export default function TerminalScreen({
   const [bufferText, setBufferText] = useState("");
   const [copied, setCopied] = useState(false);
   const [draft, setDraft] = useState("");
+
+  // Touch anchor for the app bar swipe-down dismiss (issue #1377).
+  const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const onTouchStart = (e: TouchEvent) => {
+    const t = e.touches[0];
+    swipeStartRef.current = { x: t.clientX, y: t.clientY };
+  };
+  const onTouchEnd = (e: TouchEvent) => {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+    if (!start) return;
+    const t = e.changedTouches[0];
+    const dy = t.clientY - start.y;
+    const dx = t.clientX - start.x;
+    if (dy > SWIPE_DISMISS_PX && dy > Math.abs(dx) * 1.5) onBack();
+  };
 
   function sendToPty(data: string): boolean {
     const ws = wsRef.current;
@@ -445,33 +470,41 @@ export default function TerminalScreen({
 
   return (
     <div data-testid="terminal-screen" className="screen">
-      <AppBar
-        onBack={onBack}
-        backTestId="terminal-back"
-        title={node.name}
-        subtitle={
-          node.branch ? `${node.provider} · ⎇ ${node.branch}` : node.provider
-        }
+      {/* Swipe-down on the app bar dismisses back to the list (issue #1377).
+          The wrapper owns the gesture so AppBar itself stays generic chrome. */}
+      <div
+        data-testid="terminal-appbar"
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
       >
-        <button
-          onClick={enterCopyMode}
-          aria-label="Copy text"
-          data-testid="terminal-copy"
-          className="chip-btn"
+        <AppBar
+          onBack={onBack}
+          backTestId="terminal-back"
+          title={node.name}
+          subtitle={
+            node.branch ? `${node.provider} · ⎇ ${node.branch}` : node.provider
+          }
         >
-          Copy
-        </button>
-        {onOpenChanges && (
           <button
-            onClick={onOpenChanges}
-            aria-label="Changes"
-            data-testid="terminal-open-changes"
+            onClick={enterCopyMode}
+            aria-label="Copy text"
+            data-testid="terminal-copy"
             className="chip-btn"
           >
-            Changes
+            Copy
           </button>
-        )}
-      </AppBar>
+          {onOpenChanges && (
+            <button
+              onClick={onOpenChanges}
+              aria-label="Changes"
+              data-testid="terminal-open-changes"
+              className="chip-btn"
+            >
+              Changes
+            </button>
+          )}
+        </AppBar>
+      </div>
 
       {rateLimited && (
         <div data-testid="rate-limited-toast" className="banner warn">

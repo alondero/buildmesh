@@ -9,11 +9,16 @@ import {
   listMeshes,
   listNodes,
   listProviders,
+  sendNodeKeys,
 } from "../api";
 import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { useWsEvents } from "../useWsEvents";
 import { useVisibilityPolling } from "../useVisibilityPolling";
+import {
+  PULL_REFRESH_THRESHOLD_PX,
+  usePullToRefresh,
+} from "../usePullToRefresh";
 import { groupByHarness } from "../../lib/groups";
 import { STATUS_CONFIG } from "../../lib/status";
 
@@ -59,6 +64,25 @@ export default function NodeList({
   const [meshActions, setMeshActions] = useState<Mesh | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+
+  // Triage deck (issue #1377): the last prompt / permission request per
+  // awaiting-input node, learned from `agent-lifecycle` WS events (the wire
+  // carries it as `semantic_turn.description`, with `message` as fallback).
+  // There is no HTTP surface for it — /api/nodes returns bare AgentNode rows
+  // — so on a cold app load the cards render the placeholder line until the
+  // node's next lifecycle event arrives. Cleared the moment the node leaves
+  // `awaiting_input` (or an `attention-cleared` lands) so a stale prompt
+  // never outlives its card.
+  const [lastPrompts, setLastPrompts] = useState<Map<number, string>>(
+    new Map(),
+  );
+  // Per-card quick-action state: which chip is in flight ("approve"/"reject")
+  // and which nodes have had a sequence delivered (chip flips to "Sent ✓"
+  // until the node's status actually leaves awaiting_input).
+  const [keyBusy, setKeyBusy] = useState<Map<number, "approve" | "reject">>(
+    new Map(),
+  );
+  const [keySent, setKeySent] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -118,9 +142,76 @@ export default function NodeList({
             )
           : prev,
       );
+      // Triage deck (issue #1377): remember what the node is waiting on
+      // while it's awaiting input, forget it the moment it isn't.
+      setLastPrompts((prev) => {
+        if (msg.status === "awaiting_input") {
+          const text = msg.semantic_turn?.description ?? msg.message;
+          if (!text) return prev;
+          const next = new Map(prev);
+          next.set(msg.session_id, text);
+          return next;
+        }
+        if (!prev.has(msg.session_id)) return prev;
+        const next = new Map(prev);
+        next.delete(msg.session_id);
+        return next;
+      });
+      if (msg.status !== "awaiting_input") clearSentMarker(msg.session_id);
+    }
+    if (msg.type === "attention-cleared" && mountedRef.current) {
+      setLastPrompts((prev) => {
+        if (!prev.has(msg.session_id)) return prev;
+        const next = new Map(prev);
+        next.delete(msg.session_id);
+        return next;
+      });
+      clearSentMarker(msg.session_id);
     }
     void refresh(() => true);
   }, onAuthFailed);
+
+  const clearSentMarker = (nodeId: number) => {
+    setKeySent((prev) => {
+      if (!prev.has(nodeId)) return prev;
+      const next = new Set(prev);
+      next.delete(nodeId);
+      return next;
+    });
+  };
+
+  // Triage card chips (issue #1377): answer a permission prompt without
+  // opening the terminal. `y\r` / `n\r` ride the node's terminal WS — the
+  // server treats the `\r` as user input and autoclears the attention state,
+  // so the card drops out of the deck as soon as the refetch lands.
+  const sendQuickAction = async (
+    nodeId: number,
+    action: "approve" | "reject",
+  ) => {
+    if (keyBusy.has(nodeId)) return;
+    setKeyBusy((prev) => new Map(prev).set(nodeId, action));
+    try {
+      await sendNodeKeys(nodeId, action === "approve" ? "y\r" : "n\r");
+      if (!mountedRef.current) return;
+      setKeySent((prev) => new Set(prev).add(nodeId));
+      void refresh(() => true);
+    } catch (e) {
+      if (!mountedRef.current) return;
+      if (isAuthError(e)) {
+        onAuthFailed();
+        return;
+      }
+      setError((e as Error).message);
+    } finally {
+      if (mountedRef.current) {
+        setKeyBusy((prev) => {
+          const next = new Map(prev);
+          next.delete(nodeId);
+          return next;
+        });
+      }
+    }
+  };
 
   // Lazy-load the provider list; fallback gives the user something to tap
   // even if the request 401s or the server hasn't woken up yet.
@@ -175,6 +266,13 @@ export default function NodeList({
     nodesByMesh.get(node.mesh_id)!.push(node);
   }
 
+  // Pull-to-refresh (issue #1377) — user-initiated, so the result always
+  // applies (the same `isLatest` stance the WS path takes).
+  const pullToRefresh = usePullToRefresh(
+    () => refresh(() => true),
+    meshes !== null,
+  );
+
   return (
     <div className="screen">
       <AppBar
@@ -185,6 +283,33 @@ export default function NodeList({
             : `${meshes.length} ${meshes.length === 1 ? "mesh" : "meshes"} · ${visibleNodes.length} ${visibleNodes.length === 1 ? "node" : "nodes"}`
         }
       />
+
+      {(pullToRefresh.pull > 0 || pullToRefresh.refreshing) && (
+        <div
+          data-testid="pull-indicator"
+          style={{
+            flexShrink: 0,
+            height: pullToRefresh.refreshing ? 40 : pullToRefresh.pull,
+            overflow: "hidden",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          {pullToRefresh.refreshing ? (
+            <PulseDots />
+          ) : (
+            <span
+              style={{ fontSize: 11, color: "var(--text-faint)" }}
+              data-testid="pull-indicator-label"
+            >
+              {pullToRefresh.pull >= PULL_REFRESH_THRESHOLD_PX
+                ? "Release to refresh"
+                : "Pull to refresh"}
+            </span>
+          )}
+        </div>
+      )}
 
       {meshes === null ? (
         <div
@@ -205,21 +330,31 @@ export default function NodeList({
       ) : (
         <div
           data-testid="node-list"
+          className="list-scroll"
           style={{ flex: 1, overflowY: "auto", padding: "0 8px 8px" }}
+          {...pullToRefresh.handlers}
         >
           {attentionNodes.length > 0 && (
             <section data-testid="attention-section" style={{ marginBottom: 8 }}>
               <SectionHeading color="var(--amber)">
                 Needs attention
               </SectionHeading>
-              {attentionNodes.map((node) => (
-                <NodeRow
-                  key={`attn-${node.id}`}
-                  node={node}
-                  onClick={() => onOpenNode(node)}
-                  providers={providers}
-                />
-              ))}
+              <div className="deck" data-testid="attention-deck">
+                {attentionNodes.map((node) => (
+                  <AttentionCard
+                    key={`attn-${node.id}`}
+                    node={node}
+                    meshName={meshes.find((m) => m.id === node.mesh_id)?.name}
+                    prompt={lastPrompts.get(node.id)}
+                    providers={providers}
+                    busy={keyBusy.get(node.id)}
+                    sent={keySent.has(node.id)}
+                    onApprove={() => void sendQuickAction(node.id, "approve")}
+                    onReject={() => void sendQuickAction(node.id, "reject")}
+                    onFocus={() => onOpenNode(node)}
+                  />
+                ))}
+              </div>
             </section>
           )}
           {meshes.map((mesh) => {
@@ -446,6 +581,136 @@ function SheetButton({
         {hint}
       </div>
     </button>
+  );
+}
+
+// Triage deck card (issue #1377): one awaiting-input node with its context
+// (mesh/repo, branch, last prompt) and one-tap answers. The whole upper body
+// is the "Focus Terminal" tap target; Approve/Reject answer the prompt over
+// the node's terminal WS without ever opening it. Styled via styles.css —
+// press states and the carousel snap can't live in inline styles.
+function AttentionCard({
+  node,
+  meshName,
+  prompt,
+  providers,
+  busy,
+  sent,
+  onApprove,
+  onReject,
+  onFocus,
+}: {
+  node: AgentNode;
+  meshName?: string;
+  prompt?: string;
+  providers?: Provider[];
+  busy?: "approve" | "reject";
+  sent?: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+  onFocus: () => void;
+}) {
+  // Same live-provider lookup contract as `NodeRow` (issue #328): the label
+  // and chip colour come from the fetched `listProviders()` payload, with a
+  // deterministic raw-id fallback before it resolves.
+  const providerMeta = providers?.find((p) => p.id === node.provider);
+  const providerLabel = providerMeta?.label ?? node.provider;
+  const chipsDisabled = busy !== undefined;
+  return (
+    <div className="deck-card" data-testid={`attn-card-${node.id}`}>
+      <button
+        type="button"
+        className="deck-body"
+        data-testid={`node-${node.id}`}
+        aria-label={`Open ${node.name} terminal`}
+        onClick={onFocus}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ProviderIcon
+            providerId={node.provider}
+            withBackground
+            backgroundColor={providerMeta?.color}
+            fallbackGlyph={providerMeta?.icon}
+            chipTestId="node-avatar"
+            title={providerLabel}
+            className="h-4 w-4"
+          />
+          <span
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontSize: 14,
+              fontWeight: 500,
+              color: "#fff",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              textAlign: "left",
+            }}
+          >
+            {node.name}
+          </span>
+        </div>
+        <div
+          style={{
+            fontSize: 11,
+            color: "var(--text-faint)",
+            marginTop: 4,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            textAlign: "left",
+          }}
+        >
+          {meshName ?? "…"}
+          {node.branch ? ` · ⎇ ${node.branch}` : ""} · {providerLabel}
+        </div>
+        <div
+          data-testid={`attn-prompt-${node.id}`}
+          style={{
+            fontSize: 12,
+            color: "var(--amber)",
+            marginTop: 8,
+            textAlign: "left",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {prompt ?? "Waiting for the agent's prompt…"}
+        </div>
+      </button>
+      <div className="deck-chips">
+        <button
+          type="button"
+          className="deck-chip approve"
+          data-testid={`attn-approve-${node.id}`}
+          disabled={chipsDisabled}
+          onClick={onApprove}
+        >
+          {busy === "approve" ? "Sending…" : sent ? "Sent ✓" : "Approve (Y)"}
+        </button>
+        <button
+          type="button"
+          className="deck-chip reject"
+          data-testid={`attn-reject-${node.id}`}
+          disabled={chipsDisabled}
+          onClick={onReject}
+        >
+          {busy === "reject" ? "Sending…" : sent ? "Sent ✓" : "Reject (N)"}
+        </button>
+        <button
+          type="button"
+          className="deck-chip"
+          data-testid={`attn-focus-${node.id}`}
+          onClick={onFocus}
+        >
+          Focus terminal
+        </button>
+      </div>
+    </div>
   );
 }
 
