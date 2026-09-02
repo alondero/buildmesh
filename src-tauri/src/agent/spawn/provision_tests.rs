@@ -1,133 +1,631 @@
 #![allow(unused_imports)]
 
-use super::{orchestrator::*, provision::*, reader::*, *};
-use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
-use crate::agent::provider::Platform;
-use crate::models::{EnvType, Provider};
-// The eight worktree-provision helpers were moved to
-// `crate::git::worktree::provision` in PR #676 / issue #677, and #698
-// added `locked_fetch_pr_head` on top. The tests here exercise them by
-// name, so re-import at the test-module scope.
-use crate::agent::capabilities::ResolvedAgentConfig;
+use super::{prepare::*, provision::*, *};
 use crate::git::worktree::provision::{
     adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
     locked_fetch_pr_head, read_origin_ref_sha, upgrade_warm_to_mode,
 };
 use tempfile::TempDir;
 
-fn read_injected_settings(project: &std::path::Path) -> serde_json::Value {
-    let path = project.join(".claude").join("settings.local.json");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("settings.local.json not written: {}", e));
-    serde_json::from_str(&content).expect("settings.local.json is not valid JSON")
+/// Atomic counter for unique bare-repo paths (one per test run).
+static NEXT_FORK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Pin the spawn-time fallback. Sole pin of `DEFAULT_WORKTREE_MODE`
+/// after #411 deleted the TS-side sentinel (it had no real consumer).
+#[test]
+fn default_worktree_mode_is_branched() {
+    assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
 }
 
-/// The Notification hook must fire on EVERY notification type, not just
-/// `idle_prompt`. An empty matcher is Claude Code's "match all" — without it
-/// the hook ignores `permission_prompt` notifications, so the user is never
-/// alerted when an agent asks to run a tool or otherwise needs a decision.
-/// Regression guard for the "only alerted after the agent finishes" gap.
 #[test]
-fn attention_hook_notification_matcher_is_catch_all() {
-    let temp = TempDir::new().unwrap();
-    inject_attention_hook(temp.path()).unwrap();
+fn provider_provisioning_runs_hooks_after_trust_failure() {
+    let trust_finished = std::cell::Cell::new(false);
+    let hook_saw_trust_finish = std::cell::Cell::new(false);
+    let (trust, hooks) = run_provider_provisioning(
+        || {
+            trust_finished.set(true);
+            Err("trust failed".to_string())
+        },
+        || {
+            hook_saw_trust_finish.set(trust_finished.get());
+            Err("hooks failed".to_string())
+        },
+        true,
+    );
 
-    let settings = read_injected_settings(temp.path());
-    let notification = &settings["hooks"]["Notification"][0];
+    assert_eq!(trust.unwrap_err(), "trust failed");
+    assert_eq!(hooks.unwrap_err(), "hooks failed");
+    assert!(hook_saw_trust_finish.get());
+
+    let hook_called = std::cell::Cell::new(false);
+    let (trust, hooks) = run_provider_provisioning(
+        || Ok(()),
+        || {
+            hook_called.set(true);
+            Ok(())
+        },
+        false,
+    );
+    assert!(trust.is_ok());
+    assert!(hooks.is_ok());
+    assert!(!hook_called.get());
+}
+
+// -----------------------------------------------------------------------
+// Warm-pool manual claim — .worktreeinclude re-application (issue #639
+// gap 1). The cold `create_git_worktree` and the Issue/PR `adopt…by_move`
+// both call `apply_worktree_include` so an adopted worktree is byte-for-
+// byte equivalent to a cold spawn. The manual warm-claim fast path
+// (upgrade_warm_to_mode) MUST do the same — otherwise a user who edits a
+// `.worktreeinclude`-referenced file (typical: `.env`, build cache) between
+// prewarm time and spawn time lands on a stale copy.
+// -----------------------------------------------------------------------
+
+#[test]
+fn upgrade_warm_to_mode_reapplies_worktreeinclude_after_checkout() {
+    use std::fs;
+    let (_td, root, pool) = setup_warm_pool_with_include();
+
+    // User edits the source file BETWEEN prewarm and manual spawn —
+    // exactly the window the missing apply_worktree_include used to leak.
+    fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
+
+    // The manual warm claim's mode upgrade — must re-copy `.worktreeinclude`
+    // sources so the agent's worktree matches the live repo state, not the
+    // stale prewarm snapshot.
+    upgrade_warm_to_mode(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        "bold-amber-fox",
+        "branched",
+    )
+    .expect("upgrade_warm_to_mode must succeed");
+
+    // The worktree's `.worktreeinclude`-referenced file must now reflect
+    // the live repo content (NEW), not the prewarm-time snapshot (old).
     assert_eq!(
-        notification["matcher"], "",
-        "Notification matcher must be empty (catch-all) so permission_prompt \
-             notifications alert the user, not just idle_prompt"
+        fs::read_to_string(pool.join("secrets.env")).unwrap(),
+        "v1=NEW\n",
+        "manual warm claim must re-apply .worktreeinclude so the agent sees the live source"
     );
-    let command = notification["hooks"][0]["command"]
-        .as_str()
-        .expect("notification hook command should be a string");
+}
+
+/// No `.worktreeinclude` at the repo root → the upgrade is still a no-op
+/// rather than an error. Prevents a regression where adding the include
+/// re-application broke a repo that never used the feature.
+#[test]
+fn upgrade_warm_to_mode_is_noop_when_no_worktreeinclude() {
+    use crate::env::test_helpers::init_repo_with_commit;
+    use std::fs;
+    // Skip the .worktreeinclude side of the helper — bare repo + pool.
+    let td = TempDir::new().unwrap();
+    let root = td.path();
+    let _ = init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
+    let pool = root
+        .join(".claude")
+        .join("worktrees")
+        .join("warm-amber-fox");
+    crate::git::worktree::create_git_worktree(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        "warm-amber-fox",
+        "detached",
+        "HEAD",
+    )
+    .unwrap();
+    let _ = td; // keep alive for the duration of the test
+
+    upgrade_warm_to_mode(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        "bold-amber-fox",
+        "branched",
+    )
+    .expect("must succeed when no .worktreeinclude exists");
+    // No spurious `.worktreeinclude` was created in the worktree.
     assert!(
-        command.contains("/api/attention/"),
-        "notification hook should POST to the attention endpoint, got: {command}"
+        !pool.join(".worktreeinclude").exists(),
+        "absent manifest must not be materialised by the upgrade"
     );
+    // The tracked file round-trips.
+    assert_eq!(fs::read_to_string(pool.join("f.txt")).unwrap(), "tracked\n");
 }
 
-/// A `Stop` hook fires the instant the agent finishes a turn, so the user is
-/// alerted immediately rather than waiting for the `idle_prompt` idle timer.
+/// Detached mode must also re-apply `.worktreeinclude` (issue #639 gap 1,
+/// review finding). The original `upgrade_warm_to_mode` returned early on
+/// `mode == "detached"` and skipped the include copy — a regression that
+/// re-instated that early-return would pass `…_reapplies…_after_checkout`
+/// (branched) but leave a detached-mode spawn on the stale prewarm
+/// snapshot, defeating the gap-1 fix for half the meshes.
 #[test]
-fn attention_hook_includes_stop_event() {
-    let temp = TempDir::new().unwrap();
-    inject_attention_hook(temp.path()).unwrap();
+fn upgrade_warm_to_mode_reapplies_worktreeinclude_in_detached_mode() {
+    use std::fs;
+    let (_td, root, pool) = setup_warm_pool_with_include();
 
-    let settings = read_injected_settings(temp.path());
-    let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
-        .as_str()
-        .expect("Stop hook command should be present so turn-end alerts fire immediately");
+    // User edits the source — same window as the branched-mode test.
+    fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
+
+    // Upgrade in DETACHED mode. The branch name is unused (no checkout),
+    // but we pass the preassigned slug for consistency with the call site.
+    upgrade_warm_to_mode(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        "warm-amber-fox",
+        "detached",
+    )
+    .expect("upgrade_warm_to_mode must succeed in detached mode");
+
+    assert_eq!(
+        fs::read_to_string(pool.join("secrets.env")).unwrap(),
+        "v1=NEW\n",
+        "manual warm claim in detached mode must also re-apply .worktreeinclude"
+    );
+    // And the worktree stayed detached — no branch was created.
+    let wt = git2::Repository::open(&pool).unwrap();
     assert!(
-        command.contains("/api/attention/"),
-        "Stop hook should POST to the attention endpoint, got: {command}"
+        wt.head_detached().unwrap_or(false),
+        "detached mode must leave the worktree detached"
     );
 }
 
-/// Both hooks must forward the hook's stdin JSON as the POST body (issue
-/// #878). Claude Code pipes `{hook_event_name, transcript_path, …}` into
-/// the command; without `--data-binary @-` the backend gets an empty body
-/// and cannot tell "turn ended, user needed" from "turn ended, waiting on
-/// background tasks".
-#[test]
-fn attention_hook_forwards_stdin_payload() {
-    let temp = TempDir::new().unwrap();
-    inject_attention_hook(temp.path()).unwrap();
+/// Shared setup for the two `upgrade_warm_to_mode` `.worktreeinclude`
+/// re-application tests (#642.5). The third test
+/// (`…_is_noop_when_no_worktreeinclude`) deliberately inlines its own
+/// setup because the no-manifest case is the whole point of that test
+/// — running it through the helper would materialise `secrets.env` and
+/// `.worktreeinclude` in the worktree, defeating the no-op assertion.
+///
+/// The helper stands up: a tempdir holding a real git repo with
+/// `secrets.env` + `.worktreeinclude` (both tracked), AND a pool-shaped
+/// DETACHED worktree under `.claude/worktrees/warm-amber-fox` that has
+/// already had the include copied at prewarm time (so the tests assert
+/// the upgrade re-applies, not the original copy). Both the branched and
+/// the detached call-site tests cut the pool as detached (the pool's
+/// on-disk shape) — the difference between them is the
+/// `upgrade_warm_to_mode` mode argument, not the helper's setup.
+///
+/// Returns `(tempdir, repo_root_path, pool_path)`. The tempdir is held
+/// to keep the underlying directory alive for the duration of the test
+/// — dropping it would delete the repo and break subsequent asserts.
+fn setup_warm_pool_with_include() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+    use crate::env::test_helpers::{commit_file, init_repo_with_commit};
+    use std::fs;
 
-    let settings = read_injected_settings(temp.path());
-    for (event, path) in [
-        (
-            "Notification",
-            &settings["hooks"]["Notification"][0]["hooks"][0],
-        ),
-        ("Stop", &settings["hooks"]["Stop"][0]["hooks"][0]),
-    ] {
-        let command = path["command"].as_str().unwrap();
-        assert!(
-            command.contains("--data-binary @-"),
-            "{event} hook must forward stdin as the POST body, got: {command}"
-        );
-        assert!(
-            command.contains("Content-Type: application/json"),
-            "{event} hook must declare a JSON body, got: {command}"
-        );
-    }
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+
+    init_repo_with_commit(&root, &[("f.txt", "tracked\n")]);
+    fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
+    fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
+    // Commit the manifest so `.worktreeinclude` is reachable for `git
+    // worktree add`; the pool helper copies files relative to the repo
+    // root regardless of whether the manifest itself is tracked, but
+    // committing keeps the test setup close to a realistic repo.
+    let repo = git2::Repository::open(&root).unwrap();
+    commit_file(&repo, &root, ".worktreeinclude", "secrets.env\n");
+
+    let pool = root
+        .join(".claude")
+        .join("worktrees")
+        .join("warm-amber-fox");
+    crate::git::worktree::create_git_worktree(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        "warm-amber-fox",
+        "detached",
+        "HEAD",
+    )
+    .expect("prewarm-shape worktree must be creatable for this helper");
+    assert_eq!(
+        fs::read_to_string(pool.join("secrets.env")).unwrap(),
+        "v1=old\n",
+        "prewarm-time copy must reflect the original source"
+    );
+    (td, root, pool)
 }
 
-/// Injection is idempotent: a second call over an already-correct file must
-/// not rewrite it (the early-return guard) and must leave it parseable.
-#[test]
-fn attention_hook_injection_is_idempotent() {
-    let temp = TempDir::new().unwrap();
-    inject_attention_hook(temp.path()).unwrap();
-    let first = read_injected_settings(temp.path());
-    inject_attention_hook(temp.path()).unwrap();
-    let second = read_injected_settings(temp.path());
-    assert_eq!(first, second, "second injection should be a no-op");
-}
+// -----------------------------------------------------------------------
+// Warm-pool Issue/PR adoption (issue #612): move a detached pool worktree
+// onto the node's target name and check it out to the resolved base SHA on
+// its own branch. These pin the code-review fixes for two confirmed bugs:
+// resolving `base_ref` → SHA (offline resilience), and using `-b` (NOT
+// `-B`) so a re-spawn can never force-reset a branch carrying prior work.
+// -----------------------------------------------------------------------
 
-/// Injection must preserve unrelated keys already present in the user's
-/// settings.local.json (e.g. `permissions`) — it only owns `hooks`.
 #[test]
-fn attention_hook_preserves_other_settings() {
-    let temp = TempDir::new().unwrap();
-    let claude_dir = temp.path().join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-    std::fs::write(
-        claude_dir.join("settings.local.json"),
-        r#"{"permissions":{"allow":["Bash(ls:*)"]}}"#,
+fn adopt_warm_worktree_moves_and_branches_at_base_sha() {
+    use crate::env::test_helpers::init_repo_with_commit;
+    let td = TempDir::new().unwrap();
+    let root = td.path();
+    let repo = init_repo_with_commit(root, &[("f.txt", "a\n")]);
+    let head = repo
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+
+    // The pool's on-disk shape: a DETACHED worktree under a plain slug.
+    let pool = root
+        .join(".claude")
+        .join("worktrees")
+        .join("warm-amber-fox");
+    crate::git::worktree::create_git_worktree(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        "warm-amber-fox",
+        "detached",
+        "HEAD",
     )
     .unwrap();
 
-    inject_attention_hook(temp.path()).unwrap();
+    let target = root.join(".claude").join("worktrees").join("gh123-fix");
+    adopt_warm_worktree_by_move(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        target.to_str().unwrap(),
+        "gh123-fix",
+        "branched",
+        "HEAD",
+    )
+    .expect("adoption must succeed");
 
-    let settings = read_injected_settings(temp.path());
-    assert_eq!(
-        settings["permissions"]["allow"][0], "Bash(ls:*)",
-        "pre-existing permissions must survive hook injection"
+    assert!(!pool.exists(), "pool directory must be gone after the move");
+    assert!(
+        target.exists(),
+        "target directory must exist after the move"
     );
-    assert_eq!(settings["hooks"]["Notification"][0]["matcher"], "");
+    let wt = git2::Repository::open(&target).unwrap();
+    assert_eq!(
+        wt.head().unwrap().shorthand().unwrap(),
+        "gh123-fix",
+        "the adopted worktree must be on the node's own branch"
+    );
+    assert_eq!(
+        wt.head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+            .to_string(),
+        head,
+        "the branch must sit at the resolved base SHA"
+    );
+}
+
+#[test]
+fn adopt_warm_worktree_refuses_to_clobber_an_existing_branch() {
+    use crate::env::test_helpers::init_repo_with_commit;
+    let td = TempDir::new().unwrap();
+    let root = td.path();
+    let repo = init_repo_with_commit(root, &[("f.txt", "a\n")]);
+    // A pre-existing deterministic branch standing in for a prior spawn's
+    // work. Force-resetting it (the old `-B` bug) would orphan its commits.
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("gh7-x", &head_commit, false).unwrap();
+
+    let pool = root
+        .join(".claude")
+        .join("worktrees")
+        .join("warm-amber-fox");
+    crate::git::worktree::create_git_worktree(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        "warm-amber-fox",
+        "detached",
+        "HEAD",
+    )
+    .unwrap();
+
+    let target = root.join(".claude").join("worktrees").join("gh7-x");
+    let err = adopt_warm_worktree_by_move(
+        root.to_str().unwrap(),
+        pool.to_str().unwrap(),
+        target.to_str().unwrap(),
+        "gh7-x",
+        "branched",
+        "HEAD",
+    )
+    .expect_err("adoption must refuse to overwrite an existing branch");
+    assert!(
+        err.contains("already exists"),
+        "the failure must name the existing branch refusal, got: {}",
+        err
+    );
+    // Fail-fast contract: refusal is pre-move — see the guard in
+    // `adopt_warm_worktree_by_move`.
+    assert!(
+        pool.exists(),
+        "pool entry must be untouched after a refused adoption"
+    );
+    assert!(
+        !target.exists(),
+        "target must not be materialised by a refused adoption"
+    );
+}
+
+// -----------------------------------------------------------------------
+// base_ref resolution (master-trunk regression)
+//
+// Pre-fix, the spawn path hardcoded `"origin/main"` as the default
+// `base_ref` when the `meshes.base_ref` DB column was `'origin/main'`
+// (its COALESCE default) — meaning a master-trunk repo always hit
+// `mesh-sync-warning` on every spawn (`fatal: couldn't find remote
+// ref main`). These tests pin the resolution chain:
+//
+//   1. meshes.base_ref (BUT NOT the COALESCE default — that's
+//      treated as "no config" so the detection chain runs)
+//   2. refs/remotes/origin/HEAD read from the local repo
+//   3. "origin/main" last resort
+//
+// The COALESCE-sentinel treatment is critical: the DB column is
+// NOT NULL with default `'origin/main'`, so `Mesh.base_ref` is
+// ALWAYS a non-empty `String` and `MeshRow.base_ref` is ALWAYS
+// `Some(_)` — a naive `if let Some(b) = config_base_ref { return b }`
+// would make the detection chain dead code in production. The
+// `resolve_base_ref_treats_coalesce_sentinel_as_unset` test pins the
+// production call path (`Some("origin/main")`).
+// -----------------------------------------------------------------------
+
+#[test]
+fn resolve_base_ref_uses_config_value_when_set() {
+    // The config wins even on a non-repo / non-master path — explicit
+    // user intent overrides any auto-detection. Empty / whitespace
+    // config falls through to the detection chain (regression guard
+    // for an empty-string value slipping through the COALESCE).
+    let tmp = TempDir::new().unwrap();
+    assert_eq!(
+        resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("origin/develop")),
+        "origin/develop"
+    );
+    // Empty / whitespace strings are treated as "no config" so the
+    // detection chain runs — mirrors the COALESCE-to-default contract
+    // in the DB layer.
+    assert_eq!(
+        resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("")),
+        "origin/main",
+        "empty config base_ref must fall through to detection, not propagate"
+    );
+    assert_eq!(
+        resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("   ")),
+        "origin/main",
+        "whitespace-only config base_ref must fall through to detection"
+    );
+}
+
+#[test]
+fn resolve_base_ref_falls_back_to_origin_main_for_non_repo() {
+    // Non-repo path with no config — must not panic. Last-resort
+    // behaviour preserved: `get_default_branch` returns "main" on a
+    // failed `Repository::open`, and we prefix it with "origin/".
+    // The spawn path itself short-circuits to `RepoUnusable` so the
+    // auto-sync result is non-blocking.
+    let tmp = TempDir::new().unwrap();
+    let resolved = resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), None);
+    assert_eq!(resolved, "origin/main");
+}
+
+#[test]
+fn resolve_base_ref_detects_master_via_origin_head() {
+    // Headline regression test: a master-trunk repo with no
+    // `base_ref` in mesh config must produce "origin/master", not
+    // the legacy "origin/main". Pre-fix, this always returned
+    // "origin/main" and the spawn emitted a `mesh-sync-warning` on
+    // every node.
+    use crate::env::test_helpers::TestDir;
+    use git2;
+
+    let td = TestDir::new("base_ref_master");
+    let parent = td.path();
+    // Create a working repo on whatever default branch git picks.
+    // The local branch name doesn't matter — what matters is that
+    // `refs/remotes/origin/HEAD` points at `refs/remotes/origin/master`.
+    crate::env::test_helpers::init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+
+    let repo = git2::Repository::open(parent).unwrap();
+    let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+    // Build the symbolic ref that `get_default_branch` reads.
+    repo.reference("refs/remotes/origin/master", oid, true, "test setup")
+        .unwrap();
+    repo.reference_symbolic(
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/master",
+        true,
+        "test setup",
+    )
+    .unwrap();
+
+    // Sanity: precondition for the test to be meaningful.
+    let head_ref = repo
+        .find_reference("refs/remotes/origin/HEAD")
+        .unwrap()
+        .symbolic_target()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        head_ref, "refs/remotes/origin/master",
+        "precondition: origin/HEAD must point at refs/remotes/origin/master"
+    );
+
+    let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), None);
+    assert_eq!(
+        resolved, "origin/master",
+        "master-trunk repo with no base_ref in config must yield origin/master, \
+             not the legacy hardcoded origin/main (this is the master-trunk regression)"
+    );
+}
+
+#[test]
+fn resolve_base_ref_detects_main_via_origin_head() {
+    // Sanity pin: the existing main-trunk behaviour (a repo whose
+    // origin/HEAD points at `main`) must still resolve to
+    // "origin/main" after the fix. Guards against the master fix
+    // accidentally regressing the main case.
+    use crate::env::test_helpers::TestDir;
+    use git2;
+
+    let td = TestDir::new("base_ref_main");
+    let parent = td.path();
+    crate::env::test_helpers::init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+
+    let repo = git2::Repository::open(parent).unwrap();
+    let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+    repo.reference("refs/remotes/origin/main", oid, true, "test setup")
+        .unwrap();
+    repo.reference_symbolic(
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+        true,
+        "test setup",
+    )
+    .unwrap();
+
+    let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), None);
+    assert_eq!(
+        resolved, "origin/main",
+        "main-trunk repo must still resolve to origin/main (no regression)"
+    );
+}
+
+#[test]
+fn resolve_base_ref_treats_coalesce_sentinel_as_unset() {
+    // The production call path: `meshes.base_ref` is a NOT NULL
+    // column with a COALESCE default of `'origin/main'` (see
+    // `db::MESH_COLUMNS`). A fresh mesh whose base_ref was never
+    // explicitly set reads as `Some("origin/main")` from the DB →
+    // `MeshRow.base_ref = Some("origin/main")` →
+    // `config.as_ref().and_then(|c| c.base_ref.as_deref())` returns
+    // `Some("origin/main")`. The helper MUST treat this sentinel as
+    // "no config" and fall through to the detection chain, otherwise
+    // a master-trunk repo's spawn still hits `mesh-sync-warning`.
+    // The earlier `_detects_master_via_origin_head` test passes
+    // `None` (which never reaches production); THIS test pins the
+    // actual production contract.
+    use crate::env::test_helpers::TestDir;
+    use git2;
+
+    let td = TestDir::new("base_ref_coalesce_master");
+    let parent = td.path();
+    crate::env::test_helpers::init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+
+    let repo = git2::Repository::open(parent).unwrap();
+    let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+    repo.reference("refs/remotes/origin/master", oid, true, "test setup")
+        .unwrap();
+    repo.reference_symbolic(
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/master",
+        true,
+        "test setup",
+    )
+    .unwrap();
+
+    // Production-shaped input: COALESCE default from the DB.
+    let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), Some("origin/main"));
+    assert_eq!(
+        resolved, "origin/master",
+        "the COALESCE default 'origin/main' from a fresh mesh's DB row \
+             must be treated as 'no config' — fall through to origin/HEAD \
+             detection. A master-trunk repo with an unconfigured mesh \
+             produces origin/master, not origin/main. This is the actual \
+             production contract; the test passing None never reaches \
+             production."
+    );
+}
+
+#[test]
+fn resolve_base_ref_keeps_explicit_user_value_for_main_trunk() {
+    // A user who LEGITIMATELY sets `base_ref = "origin/main"` (via
+    // the 'Fresh' UI option) on a main-trunk repo must still get
+    // "origin/main" back. The COALESCE-sentinel treatment must
+    // apply to the *fresh* / *unconfigured* case, not penalize a
+    // user who explicitly chose the same value. For a main-trunk
+    // repo the auto-detect would return the same value, so this
+    // test is mostly a documentation pin.
+    use crate::env::test_helpers::TestDir;
+    use git2;
+
+    let td = TestDir::new("base_ref_explicit_main");
+    let parent = td.path();
+    crate::env::test_helpers::init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+
+    let repo = git2::Repository::open(parent).unwrap();
+    let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+    repo.reference("refs/remotes/origin/main", oid, true, "test setup")
+        .unwrap();
+    repo.reference_symbolic(
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+        true,
+        "test setup",
+    )
+    .unwrap();
+
+    let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), Some("origin/main"));
+    assert_eq!(
+        resolved, "origin/main",
+        "explicit user-set 'origin/main' on a main-trunk repo must resolve \
+             to 'origin/main' (same as auto-detect — no behaviour change)"
+    );
+}
+
+// -----------------------------------------------------------------------
+// SHA-drift detection (issue #444)
+//
+// `read_origin_ref_sha` returns the local SHA at `origin/<head_ref>` so
+// the spawn path can compare it to the user-pinned `source_pr_pinned_sha`
+// and emit a `pr_sha_drift` warning on mismatch. The unit test creates
+// the local ref directly via git2 (no real remote / fetch roundtrip) so
+// the test is hermetic and fast.
+// -----------------------------------------------------------------------
+
+#[test]
+fn read_origin_ref_sha_returns_local_sha_when_ref_exists() {
+    let tmp = TempDir::new().unwrap();
+    let repo = git2::Repository::init(tmp.path()).unwrap();
+    // Create a real commit on a known branch — we need a tree OID the
+    // commit can point at. `Repository::init` leaves the index empty
+    // but write_tree() on an empty index still produces a valid tree.
+    let tree_oid = repo.index().unwrap().write_tree().unwrap();
+    let tree = repo.find_tree(tree_oid).unwrap();
+    let sig = git2::Signature::now("test", "test@example.com").unwrap();
+    let commit_oid = repo
+        .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+
+    // Manually create the remote-tracking ref the function reads. In
+    // production this is what `git fetch origin -- <head_ref>` writes;
+    // here we shortcut the network roundtrip to keep the test hermetic.
+    let ref_name = "refs/remotes/origin/feat-x";
+    repo.reference(ref_name, commit_oid, true, "test").unwrap();
+
+    let sha = read_origin_ref_sha(tmp.path().to_str().unwrap(), "origin/feat-x");
+    assert_eq!(
+        sha.as_deref(),
+        Some(commit_oid.to_string().as_str()),
+        "read_origin_ref_sha must return the full 40-char SHA the ref points to"
+    );
+}
+
+#[test]
+fn read_origin_ref_sha_returns_none_for_missing_ref() {
+    let tmp = TempDir::new().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    // No refs/remotes/origin/* exists; the function must return None
+    // (the spawn path treats this as "skip drift check" rather than
+    // failing — same fail-open semantics as `pr_head_unfetchable`).
+    let sha = read_origin_ref_sha(tmp.path().to_str().unwrap(), "origin/nope");
+    assert!(sha.is_none(), "missing ref must return None, not error");
+}
+
+#[test]
+fn read_origin_ref_sha_returns_none_for_non_git_directory() {
+    // A path that isn't a git repo at all — `git rev-parse` exits non-zero,
+    // the helper must swallow that and return None rather than panicking.
+    let tmp = TempDir::new().unwrap();
+    let sha = read_origin_ref_sha(tmp.path().to_str().unwrap(), "origin/main");
+    assert!(sha.is_none(), "non-repo path must return None, not error");
 }
 
 // ----- fork alias + fetch_fork_head (issue #443) ---------------------
@@ -205,9 +703,6 @@ fn init_fork_fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     git2::Repository::init(local.path()).unwrap();
     (local, bare_dir, src_path)
 }
-
-/// Atomic counter for unique bare-repo paths (one per test run).
-static NEXT_FORK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// First-time registration: the fork is added as `fork-alice` and the
 /// head ref is materialised. `fetch_fork_head` returns `true` and
@@ -745,424 +1240,5 @@ fn locked_fetch_pr_head_serializes_fork_branch_via_per_mesh_sync_lock_gh698() {
              refs/remotes/fork-<login>/<ref>.lock, AND the git remote add/config \
              files that fetch_fork_head writes before its fetch",
         elapsed,
-    );
-}
-
-// -----------------------------------------------------------------------
-// Reader-thread session-id capture gate (issue #651)
-//
-// The orchestrator's pre-write at spawn_agent_inner (Assign mode) and the
-// PTY reader thread's capture-from-output path both target the same
-// `agent_nodes.cli_session_id` column. They are unsynchronised, so a
-// last-writer-wins race left the row holding a UUID the agent never
-// claimed — and auto-resume later invoked `claude --resume <wrong-uuid>`
-// → "Conversation not found". The fix pins the gate to a single function
-// of `session_id_mode` (the source of truth) so the two writers can never
-// both target the same column. Each test pins one row of the truth table;
-// the regression test is the `Assign(_)` row.
-// -----------------------------------------------------------------------
-
-/// Regression for issue #651. Even if a future adapter returns
-/// `self_assigns_session_id() = true`, the reader thread MUST NOT capture
-/// when the orchestrator is in Assign mode — the orchestrator already
-/// wrote a UUID at `spawn_agent_inner` step 4, and the reader would
-/// overwrite it with whatever UUID matched the regex on PTY output
-/// (possibly a different log line, possibly never echoed back).
-#[test]
-fn reader_should_not_capture_in_assign_mode_even_if_provider_self_assigns() {
-    assert!(
-        !reader_should_capture_session_id(&SessionIdMode::Assign("orchestrator-uuid".into()), true,),
-        "Assign mode is authoritative — reader MUST NOT overwrite the \
-             orchestrator's pre-written UUID with a regex match from PTY output \
-             (issue #651: 'a UUID the agent never claimed')"
-    );
-}
-
-/// Resume already has the authoritative ID stored in `cli_session_id`
-/// (or, for fresh `--resume` calls, the resume arg passed to the CLI).
-/// Capture would race the in-flight `claude --resume <id>` with a
-/// possibly-different UUID from the regex, so the reader must stay quiet.
-#[test]
-fn reader_should_not_capture_in_resume_mode() {
-    assert!(
-        !reader_should_capture_session_id(&SessionIdMode::Resume("resume-uuid".into()), true,),
-        "Resume mode carries the authoritative ID; reader MUST NOT capture"
-    );
-}
-
-/// `None` mode is the only mode where reader capture is allowed — and only
-/// for providers that print a labeled UUID on the PTY (Codex, Agy).
-/// OpenCode self-assigns `ses_…` IDs but captures them in
-/// `after_fresh_spawn` (SQLite), so its PTY-capture flag is false.
-#[test]
-fn reader_should_capture_when_provider_self_assigns_and_mode_is_none() {
-    assert!(
-        reader_should_capture_session_id(&SessionIdMode::None, true),
-        "Codex / Agy fresh spawns rely on the reader capturing the UUID \
-             from PTY output (orchestrator has no pre-write in None mode)"
-    );
-}
-
-/// Self-assigning capability is necessary but not sufficient — if the
-/// provider accepts `--session-id` (Anthropic) or captures in
-/// `after_fresh_spawn` (OpenCode), the PTY regex is not the source of
-/// truth even when the orchestrator didn't pre-write.
-#[test]
-fn reader_should_not_capture_when_provider_does_not_self_assign() {
-    assert!(
-        !reader_should_capture_session_id(&SessionIdMode::None, false),
-        "reader MUST NOT capture when provider does not self-assign; \
-             any UUID match would overwrite the existing cli_session_id"
-    );
-}
-
-/// Issue #1180 — `SpawnIntent::initial_prompt` is the single source
-/// of truth for the GitHub-issue prefill. The spawn seam (`spawn_with_intent`)
-/// routes through it; so does the desktop draft response and the
-/// Autopilot watcher. Pin the wording here so any future drift would
-/// surface as a unit-test failure before the agent gets the wrong
-/// prompt.
-#[test]
-fn issue_intent_builds_its_prefill_at_the_spawn_seam() {
-    let intent = SpawnIntent::Issue(GitHubWorkContext {
-        owner: "alondero".into(),
-        repo: "buildmesh".into(),
-        number: 247,
-        title: "Deepen spawn pipeline".into(),
-    });
-
-    assert_eq!(
-        intent
-            .initial_prompt()
-            .as_ref()
-            .map(intent::InitialPrompt::as_str),
-        Some(
-            "Please work on GitHub issue #247 — Deepen spawn pipeline\n\
-https://github.com/alondero/buildmesh/issues/247"
-        )
-    );
-}
-
-// -----------------------------------------------------------------------
-// Resume-skip decision surface (issue #949 regression).
-//
-// Pins the PR #1121 fix: when a Startup resume is not viable, the
-// caller must NOT write `Idle` to `agent_nodes.status` — the node
-// stays `Suspended` so the user's Resume / Regenerate affordances
-// remain reachable. `decide_startup_resume` is the single source of
-// truth for that contract; `spawn_with_intent`'s Skip arms call no
-// sink. A future refactor that re-introduces an `on_idle` write here
-// fails review by virtue of the decision being a single enum variant.
-// -----------------------------------------------------------------------
-
-#[test]
-fn decide_startup_resume_no_session_id_is_skipped() {
-    let d = decide_startup_resume(None, ResumeCause::Startup, true);
-    assert_eq!(d, ResumeSkipDecision::SkipSuspended);
-}
-
-#[test]
-fn decide_startup_resume_empty_session_id_is_skipped() {
-    // Empty-string defense — `db::list_suspended_nodes`'s SQL filter
-    // only catches NULL; legacy writes could leave an empty string
-    // behind, so the empty case must be filtered here.
-    let d = decide_startup_resume(Some(""), ResumeCause::Startup, true);
-    assert_eq!(d, ResumeSkipDecision::SkipSuspended);
-}
-
-#[test]
-fn decide_startup_resume_when_adapter_declines_is_skipped() {
-    let d = decide_startup_resume(
-        Some("uuid"),
-        ResumeCause::Startup,
-        false, // OpenCode, Terminal — no --resume flag, no auto-resume
-    );
-    assert_eq!(
-        d,
-        ResumeSkipDecision::SkipAdapterDeclines,
-        "OpenCode/Terminal Startup resume must skip without writing Idle"
-    );
-}
-
-#[test]
-fn decide_startup_resume_explicit_no_session_id_is_an_error() {
-    // User clicked Resume on a node that never captured a session id.
-    // This is a hard error — surfacing it is the user-driven recovery
-    // path; the orchestrator-side Startup path silently skips.
-    let d = decide_startup_resume(None, ResumeCause::Explicit, true);
-    assert_eq!(d, ResumeSkipDecision::NoSessionId);
-}
-
-#[test]
-fn decide_startup_resume_explicit_with_session_id_proceeds() {
-    let d = decide_startup_resume(
-        Some("uuid-7"),
-        ResumeCause::Explicit,
-        false, // explicit cause is unaffected by auto_resume_on_startup
-    );
-    assert_eq!(d, ResumeSkipDecision::Proceed("uuid-7".to_string()));
-}
-
-#[test]
-fn decide_startup_resume_startup_with_session_id_and_adapter_accepts_proceeds() {
-    let d = decide_startup_resume(Some("uuid-7"), ResumeCause::Startup, true);
-    assert_eq!(d, ResumeSkipDecision::Proceed("uuid-7".to_string()));
-}
-
-// -----------------------------------------------------------------
-// Issue #1179: capability / recipe coherence table.
-//
-// For every adapter × every session mode × every value the resolver
-// might forward, the prepared recipe must contain exactly the flags
-// the capability descriptor advertises. The single test below drives
-// the full matrix; per-adapter adapter-level tests continue to pin
-// the arg shapes directly via `*_args` helpers.
-// -----------------------------------------------------------------
-
-fn make_input<'a>(
-    platform: Platform,
-    session: SessionIdModeRef<'a>,
-    config: &'a ResolvedAgentConfig,
-    prefill: Option<&'a str>,
-) -> HarnessLaunchInput<'a> {
-    HarnessLaunchInput {
-        platform,
-        runtime: EnvType::Windows,
-        session,
-        config,
-        prefill,
-        sandbox: false,
-    }
-}
-
-/// Coherence pin (issue #1179): for every adapter, the
-/// `HarnessCapabilities` descriptor and the recipe produced by
-/// `default_prepare` agree.
-///
-/// 1. The recipe's model-flag presence (the flag name from
-///    `adapter.model_args(m).first()`) matches
-///    `caps.supports_model_override`. Kimi uses `-m`, anthropic /
-///    codex / grok / agy / cursor use `--model`, mcode uses nothing.
-/// 2. The recipe's effort-flag presence (matched by
-///    `caps.effort_control` shape: `Closed => "--effort"`,
-///    `InlineConfig => key prefix`, `None => neither`) matches
-///    `caps.effort_control != None`.
-/// 3. The recipe's prefill marker (trailing positional, `--prefill`,
-///    or `--prompt-interactive`) matches `caps.supports_prefill`.
-#[test]
-fn capability_recipe_coherence() {
-    let mut any_adapters = 0;
-    for provider in crate::models::Provider::all() {
-        let adapter = provider.adapter();
-        let caps = adapter.capabilities();
-        any_adapters += 1;
-
-        // Build a config where every layer is populated, then verify
-        // the recipe only carries what caps allow. Ask the adapter
-        // itself for its model-flag shape — some harnesses use
-        // short forms (Kimi `-m`) or vendor-specific names; the
-        // adapter owns its flag vocabulary.
-        let model_value = match adapter.id() {
-            // mcode's `model` slot is no longer advertised; pick a
-            // plausible value to attempt smuggling it past the mask.
-            "mcode" => "minimax/MiniMax-Text-01",
-            "codex" => "gpt-4o",
-            "kimi" => "kimi-k2",
-            "grok" => "grok-3",
-            "agy" => "claude-sonnet",
-            "cursor" => "claude-3-7-sonnet",
-            "opencode" => "anthropic/claude-sonnet-4-5",
-            "anthropic" => "claude-sonnet-4-5",
-            "terminal" => "irrelevant",
-            _ => "model",
-        };
-        let effort_value = match adapter.id() {
-            "anthropic" => "high",
-            "codex" => "xhigh",
-            _ => "high", // other harnesses don't accept effort
-        };
-        let config = ResolvedAgentConfig {
-            model: Some(model_value.to_string()),
-            effort: Some(effort_value.to_string()),
-            extra_args: None,
-        };
-        let prefill_text = "fix the auth bug in handler.rs";
-        let input = make_input(
-            Platform::Linux,
-            SessionIdModeRef::None,
-            &config,
-            Some(prefill_text),
-        );
-        let prepared = crate::agent::launch::default_prepare(adapter, input);
-        let args = &prepared.recipe.base_args;
-
-        // 1. Model-flag coherence. Ask the adapter what its model-flag
-        //    shape is; the recipe must contain it iff caps advertises
-        //    the control. mcode (which used to advertise) now does
-        //    not, so the recipe must not carry `--model` even when
-        //    a value is in the resolved config.
-        let model_flag = adapter
-            .model_args(model_value)
-            .first()
-            .cloned()
-            .unwrap_or_default();
-        let has_model_flag = !model_flag.is_empty() && args.iter().any(|a| a == &model_flag);
-        assert_eq!(
-            has_model_flag,
-            caps.supports_model_override,
-            "model-flag / supports_model_override mismatch for {}: \
-                 recipe has {} = {}, caps.supports_model_override = {}; args = {:?}",
-            adapter.id(),
-            model_flag,
-            has_model_flag,
-            caps.supports_model_override,
-            args
-        );
-
-        // 2. Effort-flag coherence. Codex uses -c model_reasoning_effort=...;
-        //    anthropic uses --effort; everything else must not carry either.
-        //    Pin by `caps.effort_control` shape: Closed => "--effort";
-        //    InlineConfig => the configured key prefix; None => neither.
-        let has_effort_flag = match &caps.effort_control {
-            crate::agent::capabilities::EffortControlKind::Closed { .. } => {
-                args.iter().any(|a| a == "--effort")
-            }
-            crate::agent::capabilities::EffortControlKind::InlineConfig { key, .. } => {
-                args.iter().any(|a| a.starts_with(key))
-            }
-            crate::agent::capabilities::EffortControlKind::None => false,
-        };
-        let has_effort_vocab = !matches!(
-            caps.effort_control,
-            crate::agent::capabilities::EffortControlKind::None
-        );
-        assert_eq!(
-            has_effort_flag,
-            has_effort_vocab,
-            "effort-flag / effort_control mismatch for {}: \
-                 recipe has effort flag = {}, caps.effort_control != None = {}; args = {:?}",
-            adapter.id(),
-            has_effort_flag,
-            has_effort_vocab,
-            args
-        );
-
-        // 3. Prefill coherence.
-        let has_prefill_text = args.last().map(|a| a.as_str()) == Some(prefill_text);
-        let has_prefill_flag = args.iter().any(|a| a == "--prefill");
-        let has_prefill_marker = has_prefill_text
-            || has_prefill_flag
-            || args.iter().any(|a| a == "--prompt-interactive")
-            || args.iter().any(|a| a == "--prompt");
-        assert_eq!(
-            has_prefill_marker,
-            caps.supports_prefill,
-            "prefill-marker / supports_prefill mismatch for {}: \
-                 recipe has prefill marker = {}, caps.supports_prefill = {}; args = {:?}",
-            adapter.id(),
-            has_prefill_marker,
-            caps.supports_prefill,
-            args
-        );
-
-        // 4. Sandbox-flag coherence (issue #1287). The orchestrator's
-        //    outer containment (macOS Seatbelt / Windows restricted-
-        //    token) applies uniformly regardless of adapter; the
-        //    adapter-level flag only applies when the adapter itself
-        //    declared a `sandbox_args()` contribution. A second pass
-        //    with `sandbox: true` must therefore add the flag iff
-        //    `adapter.sandbox_args()` is non-empty. Any adapter that
-        //    silently starts emitting `--sandbox` (or fails to emit
-        //    it after overriding `sandbox_args`) trips this pin.
-        let sandbox_input = make_input(
-            Platform::Linux,
-            SessionIdModeRef::None,
-            &config,
-            Some(prefill_text),
-        );
-        let sandbox_input = HarnessLaunchInput {
-            sandbox: true,
-            ..sandbox_input
-        };
-        let sandbox_prepared = crate::agent::launch::default_prepare(adapter, sandbox_input);
-        let sandbox_args = sandbox_prepared
-            .recipe
-            .base_args
-            .iter()
-            .filter(|a| adapter.sandbox_args().contains(a))
-            .count();
-        let sandbox_vocab = adapter.sandbox_args().len();
-        assert_eq!(
-            sandbox_args,
-            sandbox_vocab,
-            "sandbox-flag / sandbox_args mismatch for {}: \
-                 recipe should carry all {} declared sandbox args when sandbox=true, \
-                 got {} matches; args = {:?}",
-            adapter.id(),
-            sandbox_vocab,
-            sandbox_args,
-            sandbox_prepared.recipe.base_args
-        );
-    }
-    assert!(
-        any_adapters >= 9,
-        "expected at least 9 adapters in the matrix"
-    );
-}
-
-/// Codex's subcommand-style resume is the one recipe shape that
-/// diverges from the default. Pin the recipe contains the
-/// `resume <id>` shape AND not the model's regular flags when the
-/// resume is in play.
-#[test]
-fn codex_resume_recipe_uses_subcommand_shape() {
-    let adapter =
-        &crate::agent::provider::adapters::CODEX as &dyn crate::agent::provider::AgentProvider;
-    let config = ResolvedAgentConfig::default();
-    let input = make_input(
-        Platform::Macos,
-        SessionIdModeRef::Resume("sess-xyz"),
-        &config,
-        None,
-    );
-    let prepared = crate::agent::launch::default_prepare(adapter, input);
-    let args: Vec<&str> = prepared.recipe.argv().collect();
-    assert!(args.contains(&"resume"));
-    assert!(args.contains(&"sess-xyz"));
-    assert_eq!(prepared.recipe.trailing_args, vec!["sess-xyz".to_string()]);
-    // Codex resume recipe is the subcommand form; no `--resume <id>`
-    // flag is appended.
-    assert!(!args.contains(&"--resume"));
-}
-
-/// Issue #1179 follow-up pin: `mcode` no longer advertises
-/// `supports_model_override`. Even with a value in the resolver
-/// config, the recipe must not contain `--model`.
-#[test]
-fn mcode_recipe_never_carries_model_arg_under_coherence_matrix() {
-    let adapter =
-        &crate::agent::provider::adapters::MCODE as &dyn crate::agent::provider::AgentProvider;
-    let config = ResolvedAgentConfig {
-        model: Some("minimax/MiniMax-Text-01".to_string()),
-        effort: None,
-        extra_args: None,
-    };
-    let input = make_input(
-        Platform::Macos,
-        SessionIdModeRef::None,
-        &config,
-        Some("check the auth handler"),
-    );
-    let prepared = crate::agent::launch::default_prepare(adapter, input);
-    let args = &prepared.recipe.base_args;
-    assert!(
-        !args.contains(&"--model".to_string()),
-        "mcode recipe must never carry --model; got {:?}",
-        args
-    );
-    assert!(
-        args.last().map(|a| a.as_str()) == Some("check the auth handler"),
-        "mcode prefill should be the trailing positional, got {:?}",
-        args
     );
 }

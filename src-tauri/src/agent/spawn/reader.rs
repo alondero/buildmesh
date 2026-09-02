@@ -60,34 +60,6 @@ pub(crate) fn post_exit_action(
     }
 }
 
-/// Session ids with a `spawn_agent_inner` call currently in flight.
-///
-/// `is_agent_already_running` only sees the PROCESS_REGISTRY, and
-/// registration happens seconds into the pipeline (after git fetch +
-/// worktree provisioning) — so two near-simultaneous spawn calls for the
-/// same node (e.g. the backend's `start_node_background` racing the
-/// frontend Terminal auto-spawn on an 'idle' row) both passed the check.
-/// The loser's step-2 stale-kill (or registry insert-replace) then killed
-/// the winner's freshly-booted process — the "failed to start, yet it
-/// boots seconds later" symptom — and, when the frontend had already
-/// picked up the captured `cli_session_id`, respawned with
-/// `--resume <uuid>` against a session that never persisted a
-/// conversation ("No conversation found with session ID").
-///
-/// This set closes the TOCTOU across the WHOLE pipeline: the claim is
-/// taken at function entry and held (RAII) until the spawn returns.
-///
-/// Implementation note: the lock is `std::sync::Mutex` rather than
-/// `tokio::sync::Mutex` because both the claim entry (synchronous) and
-/// the Drop (synchronous) are short, non-suspending operations on a
-/// tiny set. Holding the guard across `.await` suspension points is
-/// safe because Drop runs only at function scope exit (Rust's
-/// `NLL`-aware borrow checker keeps the binding alive across `.await`s
-/// without contending with the lock — a single contended acquire on
-/// Drop would be a tokio-worker-blocking scenario, but the only writer
-/// of contention is another concurrent claim, and `HashSet::insert` is
-/// bounded by the spawn rate which is ≪ 1k/s).
-
 /// Per-spawn timing log. Records elapsed milliseconds at each
 /// `checkpoint(name)` call and at the end via `total()`. Output goes to
 /// `buildmesh.log` via the existing `tracing` setup — no extra plumbing.

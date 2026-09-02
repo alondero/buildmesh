@@ -12,7 +12,8 @@
 //!   `list_providers` Tauri command)
 //! - `sandbox.rs` — macOS Seatbelt profile generation + `sandbox-exec` wrapping
 //! - `session_lifecycle.rs` — single owner of state transitions (issue #132)
-//! - `spawn.rs` — `spawn_agent_inner` orchestrating the above
+//! - `spawn.rs` — `spawn_agent_inner` sequencing prepare / provision /
+//!   launch / streams over the modules below
 //! - `spawn_environment.rs` — wraps a `SpawnRecipe` for the runtime `EnvType`
 //! - `workspace_trust.rs` — pre-trust the spawned worktree in the agent CLI's
 //!   settings so it doesn't hit the workspace-trust dialog on first prompt
