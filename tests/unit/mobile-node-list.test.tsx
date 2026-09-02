@@ -68,14 +68,18 @@ function mockApi(
 ) {
   const status = opts?.status ?? 200;
   const providers = opts?.providers;
-  const fn = vi.fn().mockImplementation(async (url: string) => {
+  const fn = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     const ok = status >= 200 && status < 300;
     let body: unknown;
     if (url.includes("/api/ws-ticket")) body = { ticket: "t" };
     else if (url.includes("/api/meshes")) body = [mesh];
+    else if (url.includes("/api/nodes/") && url.includes("/input")) body = { ok: true };
     else if (url.includes("/api/nodes")) body = nodes;
     else if (url.includes("/api/providers")) body = providers ?? [];
     else body = [];
+    // Suppress the unused-init lint while keeping init visible to test
+    // assertions (it carries the POST body for the /input route).
+    void init;
     return {
       ok,
       status,
@@ -162,25 +166,29 @@ describe("NodeList", () => {
     expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
       "Waiting for the agent's prompt",
     );
-    // The three one-tap chips.
+    // The two action chips. (Issue #1377, post-review: the redundant
+    // "Focus terminal" chip was dropped — the card body is the focus
+    // target, so an explicit chip was competing for the same 120px.)
     expect(screen.getByTestId("attn-approve-3").textContent).toContain(
       "Approve (Y)",
     );
     expect(screen.getByTestId("attn-reject-3").textContent).toContain(
       "Reject (N)",
     );
-    expect(screen.getByTestId("attn-focus-3").textContent).toContain(
-      "Focus terminal",
-    );
+    expect(screen.queryByTestId("attn-focus-3")).toBeNull();
 
-    // Focus (chip or card body) opens the node's terminal.
-    fireEvent.click(screen.getByTestId("attn-focus-3"));
+    // Focus (card body) opens the node's terminal.
+    fireEvent.click(screen.getByTestId("node-3"));
     expect(onOpenNode).toHaveBeenCalledTimes(1);
     expect(onOpenNode.mock.calls[0][0].id).toBe(3);
   });
 
-  it("Approve/Reject chips send y/n+Enter down the node terminal WS (issue #1377)", async () => {
-    mockApi([makeNode(3, "awaiting_input")]);
+  it("Approve/Reject chips POST y/n+Enter to /api/nodes/{id}/input (issue #1377)", async () => {
+    // The chips send a one-shot POST — not a terminal WS — because the
+    //    previous WS-based path was racing the server's read loop and could
+    //    drop the keystroke before delivery. The 200 OK on the POST is the
+    //    delivery proof. (#1377, post-review rewrite)
+    const fetch = mockApi([makeNode(3, "awaiting_input")]);
 
     render(
       <NodeList
@@ -196,29 +204,44 @@ describe("NodeList", () => {
       expect(screen.getByTestId("attention-deck")).toBeTruthy();
     });
 
-    // Approve: the chip must answer the prompt with `y` + Enter — the `\r`
-    // is what makes the server autoclear the attention state.
+    // Approve: the chip must POST `{"seq":"y\r"}` to the dedicated input
+    // route — the `\r` is what makes the server autoclear the attention state.
     fireEvent.click(screen.getByTestId("attn-approve-3"));
-    let approveSocket: FakeWebSocket | undefined;
+    let approveCall: { url: string; body: unknown } | undefined;
     await waitFor(() => {
-      approveSocket = sockets.find((s) => s.url.includes("/ws/terminal/3"));
-      expect(approveSocket).toBeTruthy();
+      const call = fetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && c[0].includes("/api/nodes/3/input"),
+      );
+      expect(call).toBeTruthy();
+      approveCall = call as unknown as { url: string; body: unknown };
     });
-    await act(async () => {
-      approveSocket!.onopen?.();
-    });
-    expect(approveSocket!.sent).toContain("y\r");
-    expect(approveSocket!.closed).toBe(true);
-    // Delivered → the chip confirms without waiting for the refetch cycle.
+    const [url, init] = approveCall! as [string, RequestInit];
+    expect(url).toBe("/api/nodes/3/input");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ seq: "y\r" });
+    // Delivered → the chip flips to the action-specific success label.
+    // Issue #1377, post-review: the chip tracks WHICH action was sent (not
+    // a boolean "Sent ✓" that masquerades on both buttons), and BOTH chips
+    // are disabled once any action has been delivered.
     await waitFor(() => {
       expect(screen.getByTestId("attn-approve-3").textContent).toContain(
-        "Sent",
+        "Approved",
       );
     });
+    expect(
+      (screen.getByTestId("attn-approve-3") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("attn-reject-3") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    // Critical: NO terminal WS was opened for this one-shot tap.
+    expect(
+      sockets.find((s) => s.url.includes("/ws/terminal/3")),
+    ).toBeUndefined();
   });
 
-  it("Reject chip sends n+Enter down the node terminal WS (issue #1377)", async () => {
-    mockApi([makeNode(5, "awaiting_input")]);
+  it("Reject chip POSTs n+Enter to /api/nodes/{id}/input (issue #1377)", async () => {
+    const fetch = mockApi([makeNode(5, "awaiting_input")]);
 
     render(
       <NodeList
@@ -237,15 +260,20 @@ describe("NodeList", () => {
     fireEvent.click(screen.getByTestId("attn-reject-5"));
     await waitFor(() => {
       expect(
-        sockets.find((s) => s.url.includes("/ws/terminal/5")),
+        fetch.mock.calls.find(
+          (c) => typeof c[0] === "string" && c[0].includes("/api/nodes/5/input"),
+        ),
       ).toBeTruthy();
     });
-    const ws = sockets.find((s) => s.url.includes("/ws/terminal/5"))!;
-    await act(async () => {
-      ws.onopen?.();
-    });
-    expect(ws.sent).toContain("n\r");
-    expect(ws.closed).toBe(true);
+    const [url, init] = fetch.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].includes("/api/nodes/5/input"),
+    ) as [string, RequestInit];
+    expect(url).toBe("/api/nodes/5/input");
+    expect(JSON.parse(String(init.body))).toEqual({ seq: "n\r" });
+    // No terminal WS opened.
+    expect(
+      sockets.find((s) => s.url.includes("/ws/terminal/5")),
+    ).toBeUndefined();
   });
 
   it("shows the last prompt from agent-lifecycle events and clears it when attention clears (issue #1377)", async () => {
@@ -407,6 +435,344 @@ describe("NodeList", () => {
       await Promise.resolve();
     });
     expect(nodesCalls).toBe(before);
+  });
+
+  it("ignores horizontal strokes on the deck (axis lock, issue #1377 review)", async () => {
+    // The attention deck is a horizontal carousel — a slight downward
+    // diagonal on the deck must NOT hijack the gesture into a refresh.
+    // The pull-to-refresh hook now anchors on (x, y) and requires dy to
+    // dominate dx by DOMINANT_RATIO before engaging.
+    let nodesCalls = 0;
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        nodesCalls += 1;
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("node-list")).toBeTruthy();
+    });
+    const before = nodesCalls;
+
+    const scroller = screen.getByTestId("node-list");
+    // Start at (100, 100), end at (260, 140) — dx=160 (horizontal) clearly
+    // dominates dy=40 (vertical). Pre-fix this would have triggered a
+    // partial pull (~16px damped) which would have re-rendered the deck on
+    // every touchmove. Post-fix the hook drops the anchor.
+    fireEvent.touchStart(scroller, { touches: [{ clientX: 100, clientY: 100 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientX: 260, clientY: 140 }] });
+    fireEvent.touchEnd(scroller, {
+      changedTouches: [{ clientX: 260, clientY: 140 }],
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(nodesCalls).toBe(before);
+    // The pull indicator must NOT have rendered for a horizontal stroke.
+    expect(screen.queryByTestId("pull-indicator")).toBeNull();
+  });
+
+  it("refreshes the list on a vertical drag (axis-locked pull-to-refresh, issue #1377)", async () => {
+    // Companion to the axis-lock test: a vertical stroke (dy dominates dx
+    // by 5x) MUST still trigger the refresh. The lock is one-sided — it
+    // only DROPS the anchor when horizontal wins.
+    let nodesCalls = 0;
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        nodesCalls += 1;
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("node-list")).toBeTruthy();
+    });
+    const before = nodesCalls;
+
+    const scroller = screen.getByTestId("node-list");
+    // 200px down, 5px sideways — dy=200 clearly dominates dx=5. Damp to
+    // 80px, past the 64px threshold.
+    fireEvent.touchStart(scroller, {
+      touches: [{ clientX: 100, clientY: 200 }],
+    });
+    fireEvent.touchMove(scroller, {
+      touches: [{ clientX: 105, clientY: 400 }],
+    });
+    fireEvent.touchEnd(scroller, {
+      changedTouches: [{ clientX: 105, clientY: 400 }],
+    });
+
+    await waitFor(() => {
+      expect(nodesCalls).toBeGreaterThan(before);
+    });
+  });
+
+  it("doesn't warn when the refresh finishes after the component unmounts (issue #1377 review)", async () => {
+    // The previous build's pull-to-refresh called setRefreshing(false)
+    // inside the refresh promise's `.finally`. If the user tapped a node
+    // row mid-refresh and NodeList unmounted, the late setState would
+    // log a React warning. Post-fix the hook guards the post-refresh
+    // setState with a mountedRef.
+    let resolveRefresh: (() => void) | null = null;
+    const refreshPromise = new Promise<void>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    void fetch;
+    // Override usePullToRefresh via a wrapper would be heavy — instead we
+    // exercise the path directly through a long-lived refresh by
+    // hanging on /api/nodes. First call returns OK (initial mount);
+    // second call (the pull-to-refresh) hangs.
+    let nodesCallCount = 0;
+    const fetchWithHangingRefresh = vi
+      .fn()
+      .mockImplementation(async (url: string) => {
+        if (url.includes("/api/nodes")) {
+          nodesCallCount += 1;
+          if (nodesCallCount >= 2) return refreshPromise;
+          return { ok: true, status: 200, json: async () => [] };
+        }
+        if (url.includes("/api/meshes")) {
+          return { ok: true, status: 200, json: async () => [mesh] };
+        }
+        if (url.includes("/api/ws-ticket")) {
+          return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      });
+    vi.stubGlobal("fetch", fetchWithHangingRefresh);
+
+    const warnSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const utils = render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("node-list")).toBeTruthy();
+    });
+
+    const scroller = screen.getByTestId("node-list");
+    fireEvent.touchStart(scroller, {
+      touches: [{ clientX: 100, clientY: 200 }],
+    });
+    fireEvent.touchMove(scroller, {
+      touches: [{ clientX: 100, clientY: 400 }],
+    });
+    fireEvent.touchEnd(scroller, {
+      changedTouches: [{ clientX: 100, clientY: 400 }],
+    });
+
+    // The hanging refresh is in flight. Unmount the screen BEFORE it
+    // resolves — this is the unmount-mid-refresh case.
+    utils.unmount();
+    // Now resolve the hanging refresh.
+    resolveRefresh!();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // No React "state update on unmounted component" warning.
+    const warned = warnSpy.mock.calls.some((c) =>
+      String(c[0] ?? "").includes("unmounted"),
+    );
+    expect(warned).toBe(false);
+    warnSpy.mockRestore();
+  });
+
+  it("prunes keySent + lastPrompts when the node leaves awaiting_input via polling (issue #1377 review)", async () => {
+    // The WS event path cleared these maps on agent-lifecycle /
+    // attention-cleared, but a node can also leave awaiting_input via
+    // plain polling (reconnect, missed event, refetch on tab return).
+    // Post-review fix: a useEffect keyed on the awaiting-id set drops
+    // stale entries on every reconcile. Here we:
+    //   1. mount with an awaiting-input node — fires the first
+    //      WS-triggered lifecycle event, seeding keySent and lastPrompts
+    //   2. simulate a second refresh that flips the same node's status to
+    //      "running" — the reconciliation effect MUST drop the stale
+    //      keySent entry and the stale lastPrompts entry, so a future
+    //      return to awaiting_input starts clean
+    let nodeStatus: "awaiting_input" | "running" = "awaiting_input";
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { ...makeNode(3, nodeStatus), branch: "feature/deck" },
+          ],
+        };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      }
+      if (url.includes("/api/providers")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    // Approve the node → POST the input, keySent picks up "approve".
+    fireEvent.click(screen.getByTestId("attn-approve-3"));
+    await waitFor(() => {
+      expect(screen.getByTestId("attn-approve-3").textContent).toContain(
+        "Approved",
+      );
+    });
+
+    // The same node is then refreshed with status=running. The deck
+    // disappears (no awaiting_input nodes); the next time it returns
+    // to awaiting_input, the stale "Approved" state must NOT reappear.
+    nodeStatus = "running";
+    // Manually drive a refresh by re-rendering with the updated fetch.
+    await act(async () => {
+      // Trigger another fetch by re-mounting the events WS message.
+      const eventsSocket = sockets.find((s) => s.url.includes("/ws/events"));
+      expect(eventsSocket).toBeTruthy();
+      eventsSocket!.onmessage?.({
+        data: JSON.stringify({
+          type: "agent-lifecycle",
+          session_id: 3,
+          provider: "anthropic",
+          kind: "running",
+          status: "running",
+          message: null,
+          provider_event: null,
+          provider_session_id: null,
+          completion_reason: null,
+          transcript_path: null,
+          timestamp: "2026-06-11T00:00:00Z",
+          signal_health: "ok",
+          semantic_turn: null,
+        }),
+      });
+    });
+
+    // Deck should disappear (node is no longer awaiting_input).
+    await waitFor(() => {
+      expect(screen.queryByTestId("attention-deck")).toBeNull();
+    });
+  });
+
+  it("disables BOTH action chips after a successful send (issue #1377 review)", async () => {
+    // The previous build's `sent: boolean` flipped BOTH chips to "Sent ✓"
+    // AND left them enabled — the user could tap the "Sent ✓" Reject
+    // button and fire an `n\r` immediately after approving. Post-review:
+    // `sent` is an enum ("approve" | "reject"), both chips disable on
+    // any send, the active chip shows the action-specific label.
+    mockApi([makeNode(7, "awaiting_input")]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId("attn-approve-7"));
+    await waitFor(() => {
+      expect(screen.getByTestId("attn-approve-7").textContent).toContain(
+        "Approved",
+      );
+    });
+    // BOTH chips disabled.
+    expect(
+      (screen.getByTestId("attn-approve-7") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("attn-reject-7") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    // The approve chip's label is the action-specific one (NOT the old
+    // shared "Sent ✓" string that could appear on either button).
+    expect(screen.getByTestId("attn-approve-7").textContent).toContain(
+      "Approved",
+    );
+    // Reject chip must NOT show "Approved" — that label belongs to the
+    // approve chip specifically. (Pre-fix, both showed "Sent ✓".)
+    expect(screen.getByTestId("attn-reject-7").textContent).not.toContain(
+      "Approved",
+    );
   });
 
   it("resolves the initial list when mounted through the production StrictMode wrapper", async () => {

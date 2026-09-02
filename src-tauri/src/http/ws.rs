@@ -246,11 +246,22 @@ pub(crate) async fn handle_ws_connection(
     tracing::debug!("WS connection closed for node {}", node_id);
 }
 
-fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, text: &str) {
-    if let Err(e) = registry.write_bytes(node_id, text.as_bytes()) {
-        tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
-        return;
-    }
+/// Write a raw keystroke sequence to a node's PTY and run the attention
+/// autoclear side-effect when the payload contains CR/LF (issue #1377).
+///
+/// Returns the registry's write error verbatim so the HTTP `/api/nodes/{id}/input`
+/// route can surface PTY-write failures as a 5xx — the WS path can swallow them
+/// because a long-lived socket gets to try again, but a one-shot HTTP tap must
+/// report success/failure to the caller. The autoclear side-effects are
+/// best-effort (the WS broadcasts + DB lifecycle emits are themselves infallible);
+/// we run them even when the underlying write_bytes succeeds so a `y\r` payload
+/// clears the awaiting_input flag exactly as a typed Enter would.
+pub(crate) fn write_mobile_input(
+    registry: &dyn ProcessRegistryApi,
+    node_id: i64,
+    text: &str,
+) -> Result<(), String> {
+    registry.write_bytes(node_id, text.as_bytes())?;
     if text.bytes().any(|b| b == b'\n' || b == b'\r') {
         crate::attention_autoclear::disarm(node_id);
         // Routes through SessionLifecycle (issue #132) for the DB write +
@@ -272,6 +283,13 @@ fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, te
         super::events::emit(super::events::EventMsg::AttentionCleared {
             session_id: node_id,
         });
+    }
+    Ok(())
+}
+
+fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, text: &str) {
+    if let Err(e) = write_mobile_input(registry, node_id, text) {
+        tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
     }
 }
 

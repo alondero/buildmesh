@@ -882,6 +882,7 @@ enum Handler {
     CoordinatorLog,
     CoordinatorPrompt,
     NodesCreate,
+    NodesInput,
     PrCreate,
     PrMerge,
     ImportResume,
@@ -922,6 +923,7 @@ const ROUTES: &[Route] = &[
     Route { method: "GET", m: RouteMatch::OneId { prefix: "/nodes/", suffix: "/log" }, scope: auth::RequiredScope::CoordinatorRead, handler: Handler::CoordinatorLog },
     Route { method: "POST", m: RouteMatch::OneId { prefix: "/nodes/", suffix: "/prompt" }, scope: auth::RequiredScope::CoordinatorWrite, handler: Handler::CoordinatorPrompt },
     Route { method: "POST", m: RouteMatch::Exact("/api/nodes/create"), scope: auth::RequiredScope::Admin, handler: Handler::NodesCreate },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/nodes/", suffix: "/input" }, scope: auth::RequiredScope::Admin, handler: Handler::NodesInput },
     Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/pr" }, scope: auth::RequiredScope::Admin, handler: Handler::PrCreate },
     Route { method: "POST", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/pulls/", suffix: "/merge" }, scope: auth::RequiredScope::Admin, handler: Handler::PrMerge },
     Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/agent-nodes/import-and-resume" }, scope: auth::RequiredScope::Admin, handler: Handler::ImportResume },
@@ -976,6 +978,7 @@ async fn dispatch_route(
             routes::coordinator::prompt(lines, id0, content_length(headers)).await
         }
         Handler::NodesCreate => routes::nodes::create(lines, content_length(headers)).await,
+        Handler::NodesInput => routes::nodes::post_input(lines, id0, content_length(headers)).await,
         Handler::PrCreate => routes::pr::create(lines, id0, content_length(headers)).await,
         Handler::PrMerge => routes::pr::merge(lines, id0, id1, content_length(headers)).await,
         Handler::ImportResume => {
@@ -2736,6 +2739,7 @@ GET /nodes -> CoordinatorRead
 GET /nodes/{id}/log -> CoordinatorRead
 POST /nodes/{id}/prompt -> CoordinatorWrite
 POST /api/nodes/create -> Admin
+POST /api/nodes/{id}/input -> Admin
 POST /api/meshes/{id}/pr -> Admin
 POST /api/meshes/{mesh_id}/pulls/{pr_number}/merge -> Admin
 POST /api/meshes/{id}/agent-nodes/import-and-resume -> Admin

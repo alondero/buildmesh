@@ -19,6 +19,7 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
 // only (dy > SWIPE_DISMISS_PX and dy dominating dx) so an accidental
 // diagonal during horizontal chrome taps doesn't dismiss.
 const SWIPE_DISMISS_PX = 72;
+const SWIPE_DISMISS_OPACITY_FLOOR = 0.4;
 
 type Props = {
   node: AgentNode;
@@ -58,20 +59,73 @@ export default function TerminalScreen({
   const [copied, setCopied] = useState(false);
   const [draft, setDraft] = useState("");
 
-  // Touch anchor for the app bar swipe-down dismiss (issue #1377).
+  // Touch anchor + wrapper element for the app bar swipe-down dismiss
+  // (issue #1377, post-review). The wrapper element receives a CSS custom
+  // property `--appbar-translate` + `--appbar-opacity` driven directly by
+  // ref (no React re-renders during the drag) — see the JSX below for the
+  // `style={{ ... }}` attribute that reads them.
   const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const swipeWrapperRef = useRef<HTMLDivElement | null>(null);
+  const applySwipeVisual = (dy: number) => {
+    const el = swipeWrapperRef.current;
+    if (!el) return;
+    // Cap the translate at the screen height — anything larger is a
+    // glitch from an OS-level interruption, not a real drag. The
+    // opacity ramps from 1.0 at dy=0 down to OPACITY_FLOOR as the user
+    // pulls past the dismiss threshold, then bounces back to 1.0 if
+    // the gesture is cancelled below threshold.
+    const clamped = Math.max(0, Math.min(dy, 400));
+    el.style.setProperty("--appbar-translate", `${clamped}px`);
+    const ratio = Math.max(SWIPE_DISMISS_OPACITY_FLOOR, 1 - clamped / 400);
+    el.style.setProperty("--appbar-opacity", ratio.toFixed(2));
+  };
+  const resetSwipeVisual = () => {
+    const el = swipeWrapperRef.current;
+    if (!el) return;
+    el.style.setProperty("--appbar-translate", "0px");
+    el.style.setProperty("--appbar-opacity", "1");
+  };
   const onTouchStart = (e: TouchEvent) => {
     const t = e.touches[0];
     swipeStartRef.current = { x: t.clientX, y: t.clientY };
   };
+  const onTouchMove = (e: TouchEvent) => {
+    const start = swipeStartRef.current;
+    if (!start) return;
+    const t = e.touches[0];
+    const dy = t.clientY - start.y;
+    const dx = t.clientX - start.x;
+    // Horizontal swipe took over (e.g. user is on the xterm surface and
+    // starts panning). Drop the anchor so a later vertical drag from
+    // this same touch isn't mis-attributed to the original start point.
+    if (Math.abs(dx) > Math.abs(dy) * 1.5 && dy <= 0) {
+      swipeStartRef.current = null;
+      resetSwipeVisual();
+      return;
+    }
+    // Only translate on positive dy — upward strokes aren't a dismiss.
+    if (dy > 0) applySwipeVisual(dy);
+  };
   const onTouchEnd = (e: TouchEvent) => {
     const start = swipeStartRef.current;
     swipeStartRef.current = null;
-    if (!start) return;
+    if (!start) {
+      resetSwipeVisual();
+      return;
+    }
     const t = e.changedTouches[0];
     const dy = t.clientY - start.y;
     const dx = t.clientX - start.x;
-    if (dy > SWIPE_DISMISS_PX && dy > Math.abs(dx) * 1.5) onBack();
+    if (dy > SWIPE_DISMISS_PX && dy > Math.abs(dx) * 1.5) {
+      onBack();
+      // No need to reset the visual — `onBack` unmounts the screen.
+      return;
+    }
+    resetSwipeVisual();
+  };
+  const onTouchCancel = () => {
+    swipeStartRef.current = null;
+    resetSwipeVisual();
   };
 
   function sendToPty(data: string): boolean {
@@ -473,9 +527,21 @@ export default function TerminalScreen({
       {/* Swipe-down on the app bar dismisses back to the list (issue #1377).
           The wrapper owns the gesture so AppBar itself stays generic chrome. */}
       <div
+        ref={swipeWrapperRef}
         data-testid="terminal-appbar"
+        className="appbar-swipe"
+        style={{
+          transform: "translateY(var(--appbar-translate, 0px))",
+          opacity: "var(--appbar-opacity, 1)",
+          // `will-change` keeps the translate on the GPU compositor —
+          // the JS handler writes the CSS variable on every touchmove,
+          // so the visual update skips React entirely.
+          willChange: "transform, opacity",
+        }}
         onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
         onTouchEnd={onTouchEnd}
+        onTouchCancel={onTouchCancel}
       >
         <AppBar
           onBack={onBack}

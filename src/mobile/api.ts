@@ -497,60 +497,40 @@ export async function eventsWsUrl(): Promise<string> {
   return `${proto}//${host}/ws/events?ticket=${encodeURIComponent(ticket)}`;
 }
 
-/// Fire-and-forget a raw key sequence into a node's PTY (issue #1377). The
+/// Fire a raw keystroke sequence into a node's PTY (issue #1377). The
 /// triage deck's Approve/Reject chips use this to answer a permission prompt
-/// without opening the terminal: one WS ticket is minted for the node's
-/// terminal surface, the sequence goes out the moment the socket opens, and
-/// the socket closes again — the same input path `TerminalScreen` uses, so
-/// the server-side attention autoclear (a `\r` in the payload) flips the
-/// node out of `awaiting_input` exactly as a typed Enter would.
+/// without opening the terminal.
 ///
-/// Fails (rejects) when the mint 401s (callers handle via `isAuthError` as
-/// usual; a 429 that survives the mint helper's own back-off throws an
-/// `ApiError(429)` whose message reads as a normal "server busy" error), the
-/// socket never opens within `SEND_KEYS_TIMEOUT_MS`, or it errors/closes
-/// before the open — a "sent" verdict is only ever reported after a real
-/// `ws.send()` on an OPEN socket.
-const SEND_KEYS_TIMEOUT_MS = 5000;
-
+/// The previous implementation opened the full terminal WebSocket (which
+/// does snapshot generation, broadcast subscription, and write-task
+/// spawning) just to push two bytes (`"y\r"` / `"n\r"`) and closed it again.
+/// That meant every tap on Approve executed heavyweight machinery the call
+/// had no use for, AND raced the server's read loop with the client's
+/// immediate close — the `ws.send()` could land before the server entered
+/// its read loop, silently dropping the keystroke while the user saw a
+/// green "Sent ✓".
+///
+/// The HTTP `POST /api/nodes/{id}/input` route is the clean replacement:
+///   * one round-trip, no snapshot, no broadcast subscription, no spawned task
+///   * the 200 OK response IS the delivery proof — the bytes hit the PTY
+///     before the response is written
+///   * the server-side attention autoclear (a CR/LF in the payload) runs
+///     through the same code path the WS does, so `y\r` flips
+///     `awaiting_input` exactly as a typed Enter would
+///
+/// The auth path is the same HttpOnly `bm_session` cookie every other
+/// mobile API call rides, so `isAuthError` handles 401/403 the same way it
+/// does for `createPr` / `spawnFromIssue`. A 503 (PTY not running — process
+/// killed, spawn failed) bubbles up as `ApiError(503)` whose message is the
+/// toast the user sees; a 404 (node deleted mid-tap) is the same shape.
 export async function sendNodeKeys(nodeId: number, seq: string): Promise<void> {
-  const url = await terminalWsUrl(nodeId);
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const ws = new WebSocket(url);
-    const finish = (err?: Error) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timer);
-      ws.onopen = null;
-      ws.onerror = null;
-      ws.onclose = null;
-      try {
-        ws.close();
-      } catch {
-        /* already closed */
-      }
-      if (err) reject(err);
-      else resolve();
-    };
-    const timer = window.setTimeout(() => {
-      finish(new Error("Timed out contacting the node."));
-    }, SEND_KEYS_TIMEOUT_MS);
-    ws.onopen = () => {
-      try {
-        ws.send(seq);
-      } catch (e) {
-        finish(e instanceof Error ? e : new Error(String(e)));
-        return;
-      }
-      finish();
-    };
-    ws.onerror = () => {
-      finish(new Error("Could not reach the node."));
-    };
-    ws.onclose = () => {
-      finish(new Error("Could not reach the node."));
-    };
+  if (!seq) {
+    throw new Error("seq must be non-empty");
+  }
+  await apiFetch(`/api/nodes/${nodeId}/input`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ seq }),
   });
 }
 

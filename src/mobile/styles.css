@@ -226,7 +226,10 @@ button {
 
 /* Horizontal snap carousel: each card is ~86% of the viewport wide so the
    next card peeks at the edge — the visual affordance that the deck
-   swipes. The browser's scroll-snap handles the settle; no JS. */
+   swipes. The browser's scroll-snap handles the settle; no JS. The
+   `.deck-single` modifier is applied when there's only one card in the
+   deck so the lonely card fills the screen (otherwise the 14% peek-edge
+   padding is dead space — #1377 review feedback). */
 .deck {
   display: flex;
   gap: 8px;
@@ -248,6 +251,11 @@ button {
   border: 1px solid rgba(255, 152, 0, 0.4);
   border-radius: 12px;
   padding: 12px;
+}
+.deck-single .deck-card {
+  /* Single-card case: span the full viewport so the 14% peek gap doesn't
+     leave a dead strip on the right (#1377 review). */
+  flex-basis: calc(100% - 16px);
 }
 
 .deck-body {
@@ -302,6 +310,32 @@ button {
    (usePullToRefresh) owns the top-of-list downward drag (issue #1377). */
 .list-scroll {
   overscroll-behavior: contain;
+}
+
+/* Pull-to-refresh indicator (#1377, post-review).
+   `usePullToRefresh` mirrors the current pull distance into the
+   `--pull-translate` custom property at requestAnimationFrame cadence
+   — never into React state on every touchmove — so the indicator's
+   translation stays on the GPU compositor (no layout / no NodeList
+   re-render at 60-120 Hz).
+
+   `height: var(--pull-translate)` allocates the space the indicator
+   translates into (so the list below shifts down by the same amount
+   as the user's finger moves), and `overflow: hidden` keeps the
+   glyph centered as the box grows. The indicator glyph sits on top
+   via `transform: translateY(-50%)`, anchored to the BOTTOM of the
+   indicator box, so it appears to slide DOWN as the user pulls.
+
+   When the gesture ends, the rAF loop clears `--pull-translate` back
+   to 0px and React conditionally unmounts the node entirely (the
+   surrounding `{(pull > 0 || refreshing) && ...}` in NodeList). */
+.pull-indicator {
+  flex-shrink: 0;
+  height: var(--pull-translate, 0px);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* --- Screens ------------------------------------------------------------ */

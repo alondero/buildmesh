@@ -37,6 +37,13 @@ type Props = {
 // over the full `NodeStatus` union since `NodeRow` is a generic renderer.
 const ARCHIVED_STATUS_META = { hex: "#555555", label: "Archived" };
 
+// Module-scope type alias for the triage-deck chip action enum
+// (issue #1377). Hoisted so `AttentionCard`'s `sent?: SentAction` prop
+// doesn't have to repeat the literal union, and so the `useState<Map<...>>`
+// calls in NodeList can avoid the `.tsx` JSX-vs-generic ambiguity that
+// comes with back-to-back `<Map<...>>(...)` expressions.
+type SentAction = "approve" | "reject";
+
 function statusMeta(status: NodeStatus): { hex: string; label: string } {
   if (status === "archived") return ARCHIVED_STATUS_META;
   return STATUS_CONFIG[status];
@@ -76,13 +83,29 @@ export default function NodeList({
   const [lastPrompts, setLastPrompts] = useState<Map<number, string>>(
     new Map(),
   );
-  // Per-card quick-action state: which chip is in flight ("approve"/"reject")
-  // and which nodes have had a sequence delivered (chip flips to "Sent ✓"
-  // until the node's status actually leaves awaiting_input).
-  const [keyBusy, setKeyBusy] = useState<Map<number, "approve" | "reject">>(
+  // Per-card quick-action state (issue #1377, post-review rewrite).
+  // `keyBusy` = which chip is currently in flight ("approve"/"reject" maps
+  //   to the tap that opened the POST /api/nodes/{id}/input).
+  // `keySent` = the LAST action the user took on this node ("approve" /
+  //   "reject"). Tracking the action — not just a boolean — is what lets
+  //   the right chip keep its label ("Approved ✓" / "Rejected ✗") while the
+  //   *other* chip stays usable for a second-tap retraction… except the
+  //   agent already saw the CR/LF, so a retraction would be confusing.
+  //   The disable-after-send rule covers both chips with `sent !== undefined`
+  //   so a user can't double-fire. Cleared the same way `lastPrompts` is:
+  //   on any node reconciliation that drops the node out of
+  //   `awaiting_input` AND on a fresh `agent-lifecycle` /
+  //   `attention-cleared` event.
+  //
+  // The map types use the module-scope `SentAction` alias (see top of
+  // file) — the inline `Map<number, "approve" | "reject">` form tripped
+  // the `.tsx` parser when two adjacent `useState<Map<...>>` calls
+  // followed each other (the second `<Map` was mis-interpreted as a JSX
+  // element opening).
+  const [keyBusy, setKeyBusy] = useState<Map<number, SentAction>>(
     new Map(),
   );
-  const [keySent, setKeySent] = useState<Set<number>>(new Set());
+  const [keySent, setKeySent] = useState<Map<number, SentAction>>(new Map());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -174,26 +197,29 @@ export default function NodeList({
   const clearSentMarker = (nodeId: number) => {
     setKeySent((prev) => {
       if (!prev.has(nodeId)) return prev;
-      const next = new Set(prev);
+      const next = new Map(prev);
       next.delete(nodeId);
       return next;
     });
   };
 
-  // Triage card chips (issue #1377): answer a permission prompt without
-  // opening the terminal. `y\r` / `n\r` ride the node's terminal WS — the
-  // server treats the `\r` as user input and autoclears the attention state,
-  // so the card drops out of the deck as soon as the refetch lands.
+  // Triage card chips (issue #1377, post-review rewrite). The HTTP
+  // `/api/nodes/{id}/input` route returns 200 OK with `{"ok":true}` only
+  // after the bytes hit the PTY — so the await here is the delivery proof
+  // (no more "Sent ✓" lying about a race-loser keystroke). On success we
+  // record the action in `keySent` (which disables BOTH chips; see
+  // `AttentionCard` below) and fire a refetch so the status transition
+  // surfaces.
   const sendQuickAction = async (
     nodeId: number,
     action: "approve" | "reject",
   ) => {
-    if (keyBusy.has(nodeId)) return;
+    if (keyBusy.has(nodeId) || keySent.has(nodeId)) return;
     setKeyBusy((prev) => new Map(prev).set(nodeId, action));
     try {
       await sendNodeKeys(nodeId, action === "approve" ? "y\r" : "n\r");
       if (!mountedRef.current) return;
-      setKeySent((prev) => new Set(prev).add(nodeId));
+      setKeySent((prev) => new Map(prev).set(nodeId, action));
       void refresh(() => true);
     } catch (e) {
       if (!mountedRef.current) return;
@@ -255,6 +281,44 @@ export default function NodeList({
     .filter((n) => n.status === "awaiting_input")
     .sort((a, b) => a.id - b.id);
 
+  // Triage-deck zombie-state reconciliation (issue #1377, post-review):
+  // the WS handler clears `lastPrompts`/`keySent` on `agent-lifecycle`
+  // transitions and `attention-cleared` events, but a node can leave
+  // `awaiting_input` via plain polling too (reconnect, missed event,
+  // refetch on tab return). Without this sweep, a card for a node that's
+  // already `running` keeps its "Approved ✓" chip and prompt line until
+  // the next lifecycle event — and the next attention ask on that same
+  // node would inherit a stale prompt and a still-disabled chip.
+  //
+  // Runs as a `useEffect` keyed on the awaiting-id Set so it fires exactly
+  // when the reconciliation surface changes (initial render + every nodes
+  // refresh), never on unrelated re-renders. The functional `setState`
+  // returns the same `Map` reference when nothing changed, so React skips
+  // the re-render — no infinite loop.
+  const awaitingIds = new Set(attentionNodes.map((n) => n.id));
+  useEffect(() => {
+    setKeySent((prev) => {
+      let next: Map<number, "approve" | "reject"> | null = null;
+      for (const id of prev.keys()) {
+        if (!awaitingIds.has(id)) {
+          if (next === null) next = new Map(prev);
+          next.delete(id);
+        }
+      }
+      return next ?? prev;
+    });
+    setLastPrompts((prev) => {
+      let next: Map<number, string> | null = null;
+      for (const id of prev.keys()) {
+        if (!awaitingIds.has(id)) {
+          if (next === null) next = new Map(prev);
+          next.delete(id);
+        }
+      }
+      return next ?? prev;
+    });
+  }, [awaitingIds]);
+
   // Bucket the remaining nodes by mesh. Attention nodes are EXCLUDED here
   // because they're already rendered in the "Needs attention" section above;
   // including them too would render each awaiting-input node twice (once
@@ -286,15 +350,9 @@ export default function NodeList({
 
       {(pullToRefresh.pull > 0 || pullToRefresh.refreshing) && (
         <div
+          ref={pullToRefresh.bindIndicator}
           data-testid="pull-indicator"
-          style={{
-            flexShrink: 0,
-            height: pullToRefresh.refreshing ? 40 : pullToRefresh.pull,
-            overflow: "hidden",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
+          className="pull-indicator"
         >
           {pullToRefresh.refreshing ? (
             <PulseDots />
@@ -339,7 +397,10 @@ export default function NodeList({
               <SectionHeading color="var(--amber)">
                 Needs attention
               </SectionHeading>
-              <div className="deck" data-testid="attention-deck">
+              <div
+                className={`deck${attentionNodes.length === 1 ? " deck-single" : ""}`}
+                data-testid="attention-deck"
+              >
                 {attentionNodes.map((node) => (
                   <AttentionCard
                     key={`attn-${node.id}`}
@@ -348,7 +409,7 @@ export default function NodeList({
                     prompt={lastPrompts.get(node.id)}
                     providers={providers}
                     busy={keyBusy.get(node.id)}
-                    sent={keySent.has(node.id)}
+                    sent={keySent.get(node.id)}
                     onApprove={() => void sendQuickAction(node.id, "approve")}
                     onReject={() => void sendQuickAction(node.id, "reject")}
                     onFocus={() => onOpenNode(node)}
@@ -584,11 +645,24 @@ function SheetButton({
   );
 }
 
-// Triage deck card (issue #1377): one awaiting-input node with its context
-// (mesh/repo, branch, last prompt) and one-tap answers. The whole upper body
-// is the "Focus Terminal" tap target; Approve/Reject answer the prompt over
-// the node's terminal WS without ever opening it. Styled via styles.css —
-// press states and the carousel snap can't live in inline styles.
+// Triage deck card (issue #1377, post-review rewrite): one awaiting-input
+// node with its context (mesh/repo, branch, last prompt) and one-tap
+// answers. The whole upper body is the "Focus Terminal" tap target;
+// Approve/Reject answer the prompt via the dedicated `/api/nodes/{id}/input`
+// HTTP route without ever opening the terminal.
+//
+// State machine (review feedback): `sent` is the SPECIFIC action the user
+// took on this card — "approve" or "reject". When set, BOTH chips are
+// disabled (the agent already saw the CR/LF — a retraction would either be
+// ignored or worse, send an opposite prompt into a stream the agent has
+// already moved past). The chip whose action was sent shows the success
+// label; the other stays greyed out. `busy` (in-flight POST) still takes
+// precedence over `sent` so the "Sending…" feedback isn't lost.
+//
+// The previous design had a separate "Focus terminal" chip alongside the
+// card-body tap target — two competing buttons doing the same thing on a
+// 120px card, and they took width away from the action chips. Dropped; the
+// card body is the focus target.
 function AttentionCard({
   node,
   meshName,
@@ -604,8 +678,8 @@ function AttentionCard({
   meshName?: string;
   prompt?: string;
   providers?: Provider[];
-  busy?: "approve" | "reject";
-  sent?: boolean;
+  busy?: SentAction;
+  sent?: SentAction;
   onApprove: () => void;
   onReject: () => void;
   onFocus: () => void;
@@ -615,7 +689,24 @@ function AttentionCard({
   // deterministic raw-id fallback before it resolves.
   const providerMeta = providers?.find((p) => p.id === node.provider);
   const providerLabel = providerMeta?.label ?? node.provider;
-  const chipsDisabled = busy !== undefined;
+  // BOTH chips disable when an action was taken (or is in flight) on this
+  // card — see the state machine comment above. `sent` (enum) gives us the
+  // strict superset that the previous boolean `sent` couldn't: the
+  // disabled check is a one-liner, no separate per-chip sent state to
+  // reconcile.
+  const chipsDisabled = busy !== undefined || sent !== undefined;
+  const approveLabel =
+    busy === "approve"
+      ? "Sending…"
+      : sent === "approve"
+        ? "Approved ✓"
+        : "Approve (Y)";
+  const rejectLabel =
+    busy === "reject"
+      ? "Sending…"
+      : sent === "reject"
+        ? "Rejected ✗"
+        : "Reject (N)";
   return (
     <div className="deck-card" data-testid={`attn-card-${node.id}`}>
       <button
@@ -690,7 +781,7 @@ function AttentionCard({
           disabled={chipsDisabled}
           onClick={onApprove}
         >
-          {busy === "approve" ? "Sending…" : sent ? "Sent ✓" : "Approve (Y)"}
+          {approveLabel}
         </button>
         <button
           type="button"
@@ -699,15 +790,7 @@ function AttentionCard({
           disabled={chipsDisabled}
           onClick={onReject}
         >
-          {busy === "reject" ? "Sending…" : sent ? "Sent ✓" : "Reject (N)"}
-        </button>
-        <button
-          type="button"
-          className="deck-chip"
-          data-testid={`attn-focus-${node.id}`}
-          onClick={onFocus}
-        >
-          Focus terminal
+          {rejectLabel}
         </button>
       </div>
     </div>
