@@ -14,53 +14,99 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+// Issue #1386: `APP_DATA_DIR` and `CACHE` are process-global in production
+// (one app data dir per process) but per-TEST in tests, so concurrent
+// `cargo test` runs don't collide on each other's state. The split is
+// `cfg(test)`-gated so production binary size and behaviour is unchanged.
+
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
+#[cfg(not(test))]
 static APP_DATA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// In-process cache, refreshed on every write. Reads consult the file only if
 /// the cache is empty (first read).
+#[cfg(not(test))]
 static CACHE: Mutex<Option<AppPreferences>> = Mutex::new(None);
+
+// Per-test-thread cell (issue #1386). Every `cargo test` worker thread
+// gets its own `APP_DATA_DIR` and `CACHE` slot, so parallel tests each
+// point at their own unique temp dir + private cache. Single-thread
+// production keeps the global statics above.
+#[cfg(test)]
+thread_local! {
+    static APP_DATA_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+    static CACHE: std::cell::RefCell<Option<AppPreferences>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Serialises every test that mutates the process-global [`APP_DATA_DIR`]
-/// and [`CACHE`] statics via [`init_for_tests`] / [`reset_for_tests`].
-#[cfg(test)]
-pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
-
 pub fn init(app_data_dir: PathBuf) {
-    *APP_DATA_DIR.lock().unwrap_or_else(|p| p.into_inner()) = Some(app_data_dir);
+    set_app_data_dir(Some(app_data_dir));
 }
 
 #[cfg(test)]
 pub(crate) fn init_for_tests(app_data_dir: PathBuf) {
     init(app_data_dir);
-    *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    set_cache(None);
 }
 
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
-    *APP_DATA_DIR.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = None;
-}
-
-/// Test-side helper: serialises external test code (e.g. `services::provider_verification`)
-/// that mutates the same global statics via [`init_for_tests`] / [`reset_for_tests`].
-/// Lives next to the state it guards so production code never reaches into a
-/// test submodule.
-#[cfg(test)]
-pub(crate) fn test_state_guard() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    set_app_data_dir(None);
+    set_cache(None);
 }
 
 /// The app-data directory `init` was wired to, for sibling config files
 /// that live next to `preferences.json` (e.g. Autopilot's `finish.md`,
 /// issue #484). `None` before `init` runs (tests without a Tauri setup).
 pub fn app_data_dir() -> Option<PathBuf> {
+    read_app_data_dir()
+}
+
+#[cfg(test)]
+fn set_app_data_dir(value: Option<PathBuf>) {
+    APP_DATA_DIR.with(|d| *d.borrow_mut() = value);
+}
+
+#[cfg(not(test))]
+fn set_app_data_dir(value: Option<PathBuf>) {
+    *APP_DATA_DIR.lock().unwrap_or_else(|p| p.into_inner()) = value;
+}
+
+#[cfg(test)]
+fn read_app_data_dir() -> Option<PathBuf> {
+    APP_DATA_DIR.with(|d| d.borrow().clone())
+}
+
+#[cfg(not(test))]
+fn read_app_data_dir() -> Option<PathBuf> {
     APP_DATA_DIR
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone()
+}
+
+#[cfg(test)]
+fn set_cache(value: Option<AppPreferences>) {
+    CACHE.with(|c| *c.borrow_mut() = value);
+}
+
+#[cfg(not(test))]
+fn set_cache(value: Option<AppPreferences>) {
+    *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = value;
+}
+
+#[cfg(test)]
+fn with_cache_mut<R>(f: impl FnOnce(&mut Option<AppPreferences>) -> R) -> R {
+    CACHE.with(|c| f(&mut c.borrow_mut()))
+}
+
+#[cfg(not(test))]
+fn with_cache_mut<R>(f: impl FnOnce(&mut Option<AppPreferences>) -> R) -> R {
+    let mut g = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    f(&mut g)
 }
 
 fn preferences_path() -> Result<PathBuf, String> {
@@ -135,50 +181,65 @@ pub(crate) fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
 /// subsequent `load`/`save` and freeze the whole preferences surface;
 /// `into_inner()` lets the next caller decide whether to refresh
 /// from disk.
+///
+/// Issue #1386: in tests the cache lives in a `thread_local!` `RefCell`
+/// (one slot per `cargo test` worker thread) so parallel tests don't
+/// collide on the same in-memory value. Production keeps a process-
+/// global `Mutex` — there's exactly one app data dir per process, so
+/// global state is correct.
 pub fn load() -> Result<AppPreferences, String> {
-    let mut guard = match CACHE.lock() {
-        Ok(g) => g,
-        Err(poisoned) => {
-            tracing::warn!(
-                "preferences CACHE mutex was poisoned by a prior panic — recovering (issue #1224)"
-            );
-            poisoned.into_inner()
+    // Cold-cache populate, mutator, and cache publish all happen under the
+    // mutex — the same contract as the pre-issue-#1386 implementation,
+    // routed through the `with_cache_mut` cfg-divergent helper. The
+    // closure captures the result so we don't have to thread `?` through
+    // helper returns.
+    let result: Result<AppPreferences, String> = with_cache_mut(|guard| {
+        if let Some(cached) = guard.as_ref() {
+            return Ok(cached.clone());
         }
-    };
-    if let Some(cached) = guard.as_ref() {
-        return Ok(cached.clone());
-    }
-    let prefs = read_from_disk()?;
-    *guard = Some(prefs.clone());
-    Ok(prefs)
+        let prefs = read_from_disk()?;
+        *guard = Some(prefs.clone());
+        Ok(prefs)
+    });
+    result
 }
 
 /// Persist preferences to disk and refresh the cache.
 pub fn save(prefs: AppPreferences) -> Result<(), String> {
-    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     write_to_disk(&prefs)?;
-    *guard = Some(prefs);
+    set_cache(Some(prefs));
     Ok(())
 }
 
 /// Atomically mutate the latest cached preference value and persist it while
 /// serialising competing read-modify-write operations.
+///
+/// The mutex is held across the cold-cache populate, the mutator, the disk
+/// write, and the publish — same semantic as the pre-issue-#1386
+/// implementation, just routed through the `with_cache_mut` cfg-divergent
+/// helper. The mutex is also the "serialising competing RMWs" gate the
+/// docstring promises; releasing it between mutator and write would let two
+/// concurrent updaters both win the in-memory race against the on-disk one.
 pub fn update(mutator: impl FnOnce(&mut AppPreferences)) -> Result<AppPreferences, String> {
-    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.is_none() {
-        *guard = Some(read_from_disk()?);
-    }
-    let mut candidate = guard
-        .as_ref()
-        .expect("preferences cache was initialized")
-        .clone();
-    mutator(&mut candidate);
-    // Publish the new cached value only after the durable atomic replacement
-    // succeeds. A failed write must not manufacture an in-memory verification
-    // record that launch preflight could mistake for persisted proof.
-    write_to_disk(&candidate)?;
-    *guard = Some(candidate.clone());
-    Ok(candidate)
+    let result: Result<AppPreferences, String> = with_cache_mut(|guard| {
+        if guard.is_none() {
+            *guard = Some(read_from_disk()?);
+        }
+        let mut candidate = guard
+            .as_ref()
+            .expect("preferences cache was initialized")
+            .clone();
+        mutator(&mut candidate);
+        // Publish the new cached value only after the durable atomic
+        // replacement succeeds — the disk I/O is serialised by the
+        // outer-mutex hold AND by `WRITE_LOCK` inside `write_to_disk`. A
+        // failed write must not manufacture an in-memory verification
+        // record that launch preflight could mistake for persisted proof.
+        write_to_disk(&candidate)?;
+        *guard = Some(candidate.clone());
+        Ok(candidate)
+    });
+    result
 }
 
 /// Convenience: returns the app-wide default provider id, if any.

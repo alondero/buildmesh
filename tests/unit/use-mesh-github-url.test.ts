@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeshGitHubUrl } from '../../src/hooks/useMeshGitHubUrl';
 import { GIT_CHANGED } from '../../src/lib/events';
@@ -125,7 +125,14 @@ describe('useMeshGitHubUrl', () => {
     // does a path match — pass the path as the event payload so
     // `pathMatchesGitEvent` (tested separately in the primitive's
     // own tests) returns true.
-    handlerRef.current?.({ payload: { path: '/repos/demo' } });
+    //
+    // Issue #1386: wrap in `act` so React's state updates from the
+    // listener are flushed before the `waitFor` reads `result.current` —
+    // without it React prints "An update to TestComponent inside a test
+    // was not wrapped in act(...)" for every refetch.
+    await act(async () => {
+      handlerRef.current?.({ payload: { path: '/repos/demo' } });
+    });
 
     await waitFor(() => {
       expect(result.current.url).toBe('https://github.com/acme/demo');

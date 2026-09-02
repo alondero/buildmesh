@@ -783,8 +783,25 @@ mod tests {
     /// want a fresh value.
     #[test]
     fn get_mesh_git_static_caches_gh_auth_across_calls() {
+        // Issue #1386 round-3 review: `GH_AUTH_CACHE_MISSES` is a process-
+        // global AtomicU64 that any test driving `check_gh_auth_cached` can
+        // bump. PR #1478's first-cut snapshot-delta shape was unsafe — a
+        // concurrent test's `__reset_gh_auth_cache_for_tests()` could
+        // `store(0)` between our reset and our `misses_before` snapshot,
+        // and the subsequent `misses_after - misses_before` would underflow
+        // in debug builds (`attempt to subtract with overflow`) or wrap to
+        // `u64::MAX` in release. Lock against the per-cache test lock —
+        // same idiom as `PR_TEST_LOCK` / `RATE_LIMIT_TEST_LOCK` /
+        // `PREFS_TEST_LOCK` — so we have an exclusive window for reset,
+        // 5 calls, and the assertion.
+        let _guard = crate::commands::git::GH_AUTH_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
         // Force a known starting state: miss counter = 0, cache backdated
-        // so the next read is a miss.
+        // so the next read is a miss. The lock above prevents any sibling
+        // test from resetting or refreshing the counter during the window
+        // below, so we can use absolute `==` against the post-reset value.
         crate::commands::git::__reset_gh_auth_cache_for_tests();
 
         // Non-existent paths are fine — we just want to exercise the cache
@@ -813,6 +830,9 @@ mod tests {
         assert_eq!(r4.is_gh_authenticated, r5.is_gh_authenticated);
 
         // The headline assertion: 5 snapshot calls = 1 gh round-trip.
+        // Under `GH_AUTH_CACHE_TEST_LOCK` the counter is exclusively ours;
+        // the post-reset value is 0 and the 5 calls above produce exactly
+        // 1 miss (the first refreshes; the rest hit cache).
         assert_eq!(
             crate::commands::git::__gh_auth_cache_misses(),
             1,
@@ -873,6 +893,16 @@ mod tests {
     /// `default_branch` — not open the repo a second time (#431).
     #[test]
     fn get_mesh_git_static_reports_origin_head_branch_for_valid_repo() {
+        // `get_mesh_git_static_blocking` calls `check_gh_auth_cached`,
+        // which bumps `GH_AUTH_CACHE_MISSES`. Take the cache test lock so
+        // we don't race against `get_mesh_git_static_caches_gh_auth_across_calls`
+        // (round-3 review caught this — without the lock here, a
+        // concurrent `__reset_gh_auth_cache_for_tests()` between our
+        // `check_gh_auth_cached()` and the cache-counter assertion on the
+        // other test would silently bump the counter out from under it).
+        let _guard = crate::commands::git::GH_AUTH_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _repo = TempGitRepo::new();
         let _ = make_repo_with_origin_head(_repo.path(), "develop");
 
@@ -894,6 +924,12 @@ mod tests {
     /// non-repo contract (`is_git_repo = false`, `default_branch = "main"`).
     #[test]
     fn get_mesh_git_static_reports_main_fallback_for_non_repo() {
+        // Same lock as the sibling above — `get_mesh_git_static_blocking`
+        // drives the gh-auth cache and any reader/writer that doesn't
+        // acquire the lock would race against the cache counter test.
+        let _guard = crate::commands::git::GH_AUTH_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = TempGitRepo::new();
         fs::create_dir_all(dir.path()).unwrap();
 
