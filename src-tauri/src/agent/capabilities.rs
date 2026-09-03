@@ -673,11 +673,15 @@ mod tests {
 
         let dsh = dsh_caps();
         assert_eq!(dsh.harness_id, "dsh");
-        assert!(dsh.supports_resume);
-        assert!(dsh.auto_resume_on_startup);
+        // Issue #1365: `dsh` is a launcher with no validated profile
+        // — gates resume / model / attention / transcript / prefill
+        // to false. A maintainer flipping a profile in must flip
+        // these back, and update this row.
+        assert!(!dsh.supports_resume);
+        assert!(!dsh.auto_resume_on_startup);
         assert!(!dsh.requires_attention_hook);
         assert!(!dsh.produces_readable_transcript);
-        assert!(dsh.supports_model_override);
+        assert!(!dsh.supports_model_override);
         assert!(!dsh.supports_effort_override);
         assert!(dsh.supports_extra_args);
         assert!(!dsh.supports_prefill);
