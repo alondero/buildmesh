@@ -64,39 +64,13 @@ import { ArchivedNodesTab } from './ArchivedNodesTab';
 import { ScratchpadTab } from './ScratchpadTab';
 import { UsageTab } from './UsageTab';
 import {
-  ArchiveIcon,
-  AutopilotIcon,
-  CircuitsIcon,
   CompassIcon,
-  FilesIcon,
-  IssuesIcon,
-  NotesIcon,
-  PropertiesIcon,
-  PullsIcon,
-  ReviewIcon,
+  PROBE_TAB_ICONS,
   SearchIcon,
-  UsageIcon,
-  WorktreesIcon,
   type ProbeIcon,
 } from './probeIcons';
 
 type ProbeTabDef = ProbeTabDefinition & { tab: ProbeTab; icon: ProbeIcon };
-
-// Presentation owns icons; order and labels come from the explicit Probe
-// contract so a destination cannot ship without an ownership entry.
-const PROBE_TAB_ICONS: Record<ProbeTab, ProbeIcon> = {
-  files: FilesIcon,
-  review: ReviewIcon,
-  usage: UsageIcon,
-  worktrees: WorktreesIcon,
-  properties: PropertiesIcon,
-  autopilot: AutopilotIcon,
-  circuits: CircuitsIcon,
-  issues: IssuesIcon,
-  pulls: PullsIcon,
-  sessions: ArchiveIcon,
-  scratchpad: NotesIcon,
-};
 
 export const PROBE_TABS: readonly ProbeTabDef[] = PROBE_TAB_ORDER.map((tab) => ({
   tab,

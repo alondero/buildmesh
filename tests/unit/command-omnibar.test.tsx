@@ -23,6 +23,8 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { Mesh } from '../../src/types/generated/Mesh';
 import type { SpawnOption } from '../../src/lib/groups';
+import { TOOL_DISCOVERY_GROUPS } from '../../src/components/CommandOmnibar/toolDiscovery';
+import { PROBE_TAB_ORDER } from '../../src/lib/probeContext';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const { loadSpawnOptionsMock } = vi.hoisted(() => ({
@@ -232,14 +234,22 @@ describe('CommandOmnibar — WAI-ARIA combobox semantics', () => {
     expect(selected).toHaveLength(1);
   });
 
-  it('reports aria-expanded=false and shows the empty state for an empty files query', () => {
+  it('reports the discovery grid as the combobox popup for an empty files query', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     const input = screen.getByRole('combobox');
     expect((input as HTMLInputElement).value).toBe('');
-    expect(input.getAttribute('aria-expanded')).toBe('false');
-    expect(input.getAttribute('aria-activedescendant')).toBeNull();
-    expect(screen.getByTestId('command-omnibar-empty').textContent).toMatch(/no matching/i);
+    // The grid below the input is the popup: expanded + controls point at
+    // it, and the first tile is the active descendant. Focus itself stays
+    // in the input.
+    expect(input.getAttribute('aria-expanded')).toBe('true');
+    expect(input.getAttribute('aria-controls')).toBe('command-omnibar-tool-groups');
+    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-files');
+    expect(document.activeElement).toBe(input);
+    // First open is a discovery surface (Option A): the grouped tool
+    // shortcuts render instead of the old "No matching results" state.
+    expect(screen.getByTestId('command-omnibar-tool-groups')).toBeTruthy();
+    expect(screen.queryByTestId('command-omnibar-empty')).toBeNull();
   });
 
   it('narrows results per keystroke and keeps the highlight highlightable', () => {
@@ -698,5 +708,110 @@ describe('CommandOmnibar — quick spawn prompt mode (issue #1413)', () => {
     await waitFor(() => {
       expect(options().some((o) => (o.textContent ?? '').includes('Spawn Claude Code on buildmesh'))).toBe(true);
     });
+  });
+});
+
+describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
+  const TOOL_TABS = [
+    'files',
+    'review',
+    'usage',
+    'worktrees',
+    'properties',
+    'autopilot',
+    'circuits',
+    'issues',
+    'pulls',
+    'sessions',
+    'scratchpad',
+  ] as const;
+
+  it('shows every probe destination as a grouped shortcut on first open', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    expect(screen.getByTestId('command-omnibar-tool-groups')).toBeTruthy();
+    for (const tab of TOOL_TABS) {
+      expect(screen.getByTestId(`command-omnibar-tool-${tab}`)).toBeTruthy();
+    }
+  });
+
+  it('renders the discovery grid below the search input, which stays anchored on top', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const input = screen.getByRole('combobox');
+    const groups = screen.getByTestId('command-omnibar-tool-groups');
+    // Input precedes the grid in document order — typing swaps the grid
+    // for results in place instead of teleporting the input.
+    expect(input.compareDocumentPosition(groups) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('pairs GitHub Issues and Pull Requests in one group', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const github = screen.getByTestId('command-omnibar-tool-group-github');
+    expect(github.textContent).toMatch(/GitHub Issues/);
+    expect(github.textContent).toMatch(/Pull Requests/);
+  });
+
+  it('typing hides the groups and searches instead', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    expect(screen.getByTestId('command-omnibar-tool-groups')).toBeTruthy();
+    type('alpha');
+    expect(screen.queryByTestId('command-omnibar-tool-groups')).toBeNull();
+    expect(options().some((o) => (o.textContent ?? '').includes('alpha-node'))).toBe(true);
+  });
+
+  it('clicking a tool tile opens that probe destination and closes the palette', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    fireEvent.click(screen.getByTestId('command-omnibar-tool-issues'));
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().probeTab).toBe('issues');
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
+  });
+
+  it('covers every probe destination in exactly one group (exhaustiveness pin)', () => {
+    const grouped = TOOL_DISCOVERY_GROUPS.flatMap((g) => g.tiles.map((t) => t.tab));
+    expect([...grouped].sort()).toEqual([...PROBE_TAB_ORDER].sort());
+  });
+
+  it('ArrowDown highlights tiles without moving focus, and wraps around', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const input = screen.getByRole('combobox');
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    // Focus never leaves the input — the highlight is virtual.
+    expect(document.activeElement).toBe(input);
+    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-review');
+    expect(screen.getByTestId('command-omnibar-tool-review').getAttribute('data-active')).toBe('true');
+    // Wrap past the last tile (11 tiles) back to the first.
+    for (let i = 0; i < 10; i++) fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-files');
+    // ArrowUp from the first tile wraps to the last.
+    fireEvent.keyDown(input, { key: 'ArrowUp' });
+    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-usage');
+  });
+
+  it('Enter opens the highlighted tile and typing afterwards still works', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    // No keystrokes were lost to a focus move: typing searches as usual.
+    fireEvent.change(input, { target: { value: 'alpha' } });
+    expect(screen.queryByTestId('command-omnibar-tool-groups')).toBeNull();
+    expect(options().some((o) => (o.textContent ?? '').includes('alpha-node'))).toBe(true);
+  });
+
+  it('Enter on a highlighted tile opens that destination and closes the palette', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const input = screen.getByRole('combobox');
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().probeTab).toBe('review');
+    expect(useUIStore.getState().omnibarOpen).toBe(false);
   });
 });
