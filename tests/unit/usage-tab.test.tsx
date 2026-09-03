@@ -23,6 +23,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { UsageTab } from '../../src/components/Probe/UsageTab';
 import { PROVIDER_LIST_CHANGED_EVENT } from '../../src/hooks/useProviderListInvalidation';
+import { OPENCODE_CONSOLE_CHANGED_EVENT } from '../../src/hooks/useOpencodeAccountInvalidation';
 import type { ProviderMeters, ProviderAccount } from '../../src/lib/tauri';
 
 function builtinAccounts(): ProviderAccount[] {
@@ -407,8 +408,9 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
       // The IPC rejection drives `setError(...)` — we have to resolve the
       // pending promise BEFORE the indicator assertions can settle,
       // otherwise they race against the still-pending IPC. The error
-      // surfaces as a non-destructive toolbar alert (`role="status"`),
-      // not as a body-wide ErrorState (#1488 SWR-on-error rearchitect).
+      // surfaces as a `role="alert"` banner sibling to the toolbar
+      // (probe-ui-checklist.md §1.4 — outside the scroller), not as
+      // a body-wide ErrorState (#1488 review item #1).
       rejectRefresh(new Error('backend gone'));
       await screen.findByTestId('usage-refresh-error');
 
@@ -447,11 +449,16 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     }
   });
 
-  // True stale-while-revalidate (#1488 review follow-up): a refresh
-  // failure on a warm cache does NOT blank the rows. The prior cached
-  // data stays on screen and a non-destructive toolbar alert surfaces
-  // in the toolbar so the user keeps their view.
-  it('warm-cache refresh rejection keeps the rows visible and surfaces a non-destructive toolbar alert', async () => {
+  // Warm-cache refresh rejection (review item #1): the prior rows
+  // stay on screen and a `role="alert"` banner surfaces the failure
+  // *outside* the toolbar and outside the body's scroller — per
+  // probe-ui-checklist.md §1.4 ("Errors render in a role='alert'
+  // region that is shrink-0 and outside the scroller, so it can't
+  // scroll out of sight"). The previous design rendered the alert as
+  // a `role="status"` chip in the toolbar's count row, which
+  // competed with two other `shrink-0` chips for the dock's 240px
+  // narrow width and pushed the Refresh button off-panel.
+  it('warm-cache refresh rejection keeps the rows visible and surfaces a role="alert" banner outside the toolbar', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
     try {
       vi.setSystemTime(new Date('2026-07-17T14:23:00Z'));
@@ -476,35 +483,246 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
       rejectRefresh(new Error('backend gone'));
 
       // Wait for the rejection to settle, then advance past the in-flight
-      // refresh so the toolbar alert surfaces (the alert is suppressed
-      // during isRefreshing to avoid double signalling).
-      await screen.findByTestId('usage-refresh-error');
+      // refresh so the alert surfaces (it's suppressed during
+      // isRefreshing to avoid double signalling).
+      const alert = await screen.findByTestId('usage-refresh-error');
+      expect(alert.getAttribute('role')).toBe('alert');
+      expect(alert.textContent).toMatch(/Refresh failed/i);
+
+      // The IPC error text is rendered INLINE in the banner, NOT just
+      // trapped in the `title` attribute (review #1508 item #3 —
+      // touch users and screen readers can't see tooltips). The
+      // exact-text assertion pins the rendering path so a future
+      // regression that swaps it back to "in title only" fails here.
+      expect(alert.textContent).toContain('backend gone');
 
       // Prior rows are still on screen — the body is NOT replaced by
       // `<ErrorState>`. The user keeps their view of the meters.
       // (Anthropic / Claude and MiniMax are the two builtin providers
       // from mockBackend.)
       expect(screen.getByText('Anthropic / Claude')).toBeTruthy();
+      expect(screen.getByText('MiniMax')).toBeTruthy();
 
-      // The alert is non-destructive (role="status", not role="alert"),
-      // pinned alongside the Refresh button in the toolbar.
-      const alert = screen.getByTestId('usage-refresh-error');
-      expect(alert.getAttribute('role')).toBe('status');
-      expect(alert.textContent).toMatch(/Refresh failed/i);
+      // The alert sits OUTSIDE the toolbar. The toolbar carries
+      // `data-testid="probe-toolbar"`; the alert's nearest such
+      // ancestor must be null (otherwise the dock's 240px narrow-
+      // width contract is violated — probe-ui-checklist.md §2.1).
+      expect(
+        screen.getByTestId('usage-refresh-error').closest('[data-testid="probe-toolbar"]'),
+      ).toBeNull();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  // The mount-time IPC path now sets `isRefreshing` (via `loadMeters`'s
-  // own flag management, not just `handleRefresh`'s). The rows container
-  // is NOT mounted during the cold-cache first load (we render
-  // `<LoadingState>` instead), so the test asserts the affordance on
-  // a successful re-fetch path instead — clicking Refresh while the
-  // rows are visible carries the same dim/busy contract.
-  it('Refresh button shows aria-busy + spinner while the fetch is in flight, then clears', async () => {
-    // (Existing test for this is at the top of the file — this
-    // assertion is now covered by the wiring change to loadMeters.
-    // No additional test needed.)
+  // Request sequencing (review item #7). When an older loadMeters's
+  // IPC resolves after a newer one has already fired, only the newer
+  // resolve's state must commit. Otherwise the older result would
+  // overwrite the newer one (stale data) and `isRefreshing` could
+  // flip while the newer IPC is still in flight. The fix tags every
+  // in-flight call with a monotonic id and drops late settles whose
+  // tag no longer matches the latest id.
+  it('drops stale responses when a newer loadMeters call fired while an older one was in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      // Initial load resolves fast with a 42% Anthropic row.
+      vi.setSystemTime(new Date('2026-07-17T14:23:00Z'));
+      mockBackend();
+      // Capture event listeners so we can fire the
+      // opencode-console-changed event while a Refresh click is still
+      // in flight — that's the way to start a second `loadMeters(true)`
+      // without double-clicking a busy/disabled button (review item
+      // #7's race is exactly this case in practice).
+      const capturedListeners: Record<string, (e: { payload: unknown }) => void> = {};
+      vi.mocked(listen).mockImplementation((event, handler) => {
+        capturedListeners[event] = handler as (e: { payload: unknown }) => void;
+        return Promise.resolve(() => {});
+      });
+      render(<UsageTab />);
+      await screen.findByText('Anthropic / Claude');
+      expect(screen.getByText('42.0%')).toBeTruthy();
+
+      // Wire the next two force-refresh calls so:
+      //   - The OLDER one (`refresh1`, from the Refresh click) resolves LAST with 5%.
+      //   - The NEWER one (`refresh2`, from the opencode event) resolves FIRST with 90%.
+      // Without sequencing, the late `refresh1` resolve would clobber
+      // the newer 90% reading.
+      let resolveRefresh1!: (rows: ProviderMeters[]) => void;
+      let resolveRefresh2!: (rows: ProviderMeters[]) => void;
+      const refresh1 = new Promise<ProviderMeters[]>((res) => { resolveRefresh1 = res; });
+      const refresh2 = new Promise<ProviderMeters[]>((res) => { resolveRefresh2 = res; });
+      let forceCallCount = 0;
+
+      vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+        const a = args as { forceRefresh?: boolean } | undefined;
+        if (cmd === 'get_provider_meters') {
+          if (a?.forceRefresh === true) {
+            forceCallCount += 1;
+            if (forceCallCount === 1) return refresh1;
+            return refresh2;
+          }
+          return Promise.resolve([
+            { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, detail: null, error: null } },
+          ]);
+        }
+        if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
+        return Promise.resolve({});
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
+      // First Refresh click → forceCallCount=1, mapped to refresh1 (the older).
+      await user.click(screen.getByRole('button', { name: /refresh usage/i }));
+
+      // Fire the opencode-console-changed event while refresh1 is
+      // still pending. The hook's handler calls loadMeters(true),
+      // bumping forceCallCount to 2 (refresh2 — the newer).
+      await act(async () => {
+        capturedListeners[OPENCODE_CONSOLE_CHANGED_EVENT]?.({ payload: undefined });
+      });
+
+      // Resolve the NEWER one first (refresh2 → 90%). The user should
+      // see 90% on screen.
+      await act(async () => {
+        resolveRefresh2([
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 90, resetsAt: null }], balance: null, detail: null, error: null } },
+        ]);
+      });
+      await screen.findByText('90.0%');
+
+      // Now the OLDER one resolves LAST (refresh1 → 5%). The
+      // sequencing guard must drop this resolve — the 90% reading
+      // stays on screen. Without the guard, the test would see 5.0%
+      // and fail (the previous bug).
+      await act(async () => {
+        resolveRefresh1([
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 5, resetsAt: null }], balance: null, detail: null, error: null } },
+        ]);
+        // Let microtasks / state commits flush so any erroneous
+        // setState from the stale resolve would commit before the
+        // assertion. The screen must still show 90%.
+        await vi.advanceTimersByTimeAsync(50);
+      });
+
+      expect(screen.getByText('90.0%')).toBeTruthy();
+      expect(screen.queryByText('5.0%')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
+
+  // handleRefresh spinner-clearing race (review #1508 item #2).
+// The "drops stale responses" test above exercises the NEWER-
+// resolves-first ordering, which pins data-state correctness.
+// The OTHER ordering — OLDER resolves first, NEWER resolves last —
+// pins the LIFECYCLE correctness: `handleRefresh`'s `finally` must
+// NOT clear `isRefreshing` just because its load was dropped as
+// stale, because a newer load is still in flight under the hood.
+// Without `refreshIdRef`, the older call's finally would clear the
+// spinner mid-flight and the user would see "not refreshing" while
+// the newer IPC is still pending.
+it('keeps isRefreshing up when an older Refresh click is dropped as stale and a newer load is still in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      // Initial load resolves fast with 42% Anthropic.
+      vi.setSystemTime(new Date('2026-07-17T14:23:00Z'));
+      mockBackend();
+      const capturedListeners: Record<string, (e: { payload: unknown }) => void> = {};
+      vi.mocked(listen).mockImplementation((event, handler) => {
+        capturedListeners[event] = handler as (e: { payload: unknown }) => void;
+        return Promise.resolve(() => {});
+      });
+      render(<UsageTab />);
+      await screen.findByText('Anthropic / Claude');
+
+      let resolveRefresh1!: (rows: ProviderMeters[]) => void;
+      let resolveRefresh2!: (rows: ProviderMeters[]) => void;
+      const refresh1 = new Promise<ProviderMeters[]>((res) => { resolveRefresh1 = res; });
+      const refresh2 = new Promise<ProviderMeters[]>((res) => { resolveRefresh2 = res; });
+      let forceCallCount = 0;
+
+      vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+        const a = args as { forceRefresh?: boolean } | undefined;
+        if (cmd === 'get_provider_meters') {
+          if (a?.forceRefresh === true) {
+            forceCallCount += 1;
+            if (forceCallCount === 1) return refresh1;
+            return refresh2;
+          }
+          return Promise.resolve([
+            { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, detail: null, error: null } },
+          ]);
+        }
+        if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
+        return Promise.resolve({});
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
+      // First Refresh click → handleRefresh #1, forceCallCount=1, mapped to refresh1.
+      await user.click(screen.getByRole('button', { name: /refresh usage/i }));
+      // Pre-condition: spinner is on while the older refresh is in flight.
+      const btn = screen.getByRole('button', { name: /refresh usage/i });
+      await waitFor(() => {
+        expect(btn.getAttribute('aria-busy')).toBe('true');
+      });
+
+      // Fire the opencode-console-changed event → useOpencodeAccountInvalidation
+      // calls loadMeters(true) (handleRefresh #2 in effect, but routed
+      // through the invalidation path), bumping forceCallCount to 2
+      // (refresh2 — the newer).
+      await act(async () => {
+        capturedListeners[OPENCODE_CONSOLE_CHANGED_EVENT]?.({ payload: undefined });
+      });
+
+      // Resolve the OLDER call FIRST (refresh1 → 5%). Inside loadMeters
+      // the stale-guard sees requestId=1 !== requestIdRef.current=2, so
+      // no state commits. handleRefresh #1 awaits the resolution and
+      // enters its `finally` block — this is where the bug used to
+      // live: without `refreshIdRef`, it would `setIsRefreshing(false)`
+      // while refresh2 was still in flight.
+      await act(async () => {
+        resolveRefresh1([
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 5, resetsAt: null }], balance: null, detail: null, error: null } },
+        ]);
+        await vi.advanceTimersByTimeAsync(50);
+      });
+
+      // The spinner MUST stay on because refresh2 is still pending
+      // — that's the whole point of `refreshIdRef`. (The 5.0%
+      // reading must also NOT have appeared — that one was already
+      // covered by the "drops stale responses" test above, but it's
+      // cheap to assert here too.)
+      expect(btn.getAttribute('aria-busy')).toBe('true');
+      expect(screen.queryByText('5.0%')).toBeNull();
+
+      // Now resolve the NEWER call (refresh2 → 90%). The data
+      // commits, but no `handleRefresh` is awaiting this one (it's
+      // the invalidation path) — so `isRefreshing` stays true
+      // until… nothing clears it. Acceptable: a non-user load on
+      // this component doesn't own the spinner. Manual user action
+      // required to dismiss (close tab or click Refresh again).
+      // What we DO assert: data updates to 90% and the spinner is
+      // still up (we have no hook to clear it for the invalidation
+      // path; that's intentional).
+      await act(async () => {
+        resolveRefresh2([
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 90, resetsAt: null }], balance: null, detail: null, error: null } },
+        ]);
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      await screen.findByText('90.0%');
+      expect(btn.getAttribute('aria-busy')).toBe('true');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The mount-time IPC path no longer sets `isRefreshing` (review
+  // item #3 — the cold-cache `<LoadingState>` early-return wins
+  // before the toolbar/body is rendered, so the affordance would be
+  // invisible anyway). `handleRefresh` owns the flag now; the
+  // existing "Refresh button shows aria-busy + spinner while the
+  // fetch is in flight, then clears" test at the top of the file
+  // already pins the user-driven affordance.
 });
