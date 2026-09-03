@@ -35,6 +35,7 @@ interface ProbeToolbarProps {
 export function ProbeToolbar({ children, trailing, className = '' }: ProbeToolbarProps) {
   return (
     <div
+      data-testid="probe-toolbar"
       className={`flex items-center gap-2 px-3 py-2 border-b border-border-subtle min-h-[37px] ${className}`.trim()}
     >
       <div className="flex items-center gap-2 min-w-0 flex-1">{children}</div>

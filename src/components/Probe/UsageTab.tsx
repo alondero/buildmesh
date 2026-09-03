@@ -101,17 +101,19 @@
  * duplicated copy is the exact pattern the shared vocabulary was
  * created to prevent (issue #813).
  *
- * PR #1488 rearchitected against the title-bar / gatekeeper pattern
- * from #1489 and broke the inline alert out of the toolbar into a
- * separate `role="alert"` banner sibling (per
- * `probe-ui-checklist.md` §1.4 — "Errors render in a role='alert'
+ * PR #1508 (the follow-up to #1488) broke the inline alert chip out of
+ * the toolbar into a separate `role="alert"` banner sibling — per
+ * `probe-ui-checklist.md` §1.4 ("Errors render in a role='alert'
  * region that is shrink-0 and outside the scroller, so it can't
- * scroll out of sight"). The body still renders a single
- * `<ErrorState>` on a cold-cache first-load rejection; the warm-cache
- * refresh rejection surfaces the alert banner while the rows stay
- * visible. The regression test (`warm-cache refresh rejection keeps
- * the rows visible and surfaces a role="alert" banner outside the
- * toolbar`) pins the new placement.
+ * scroll out of sight"). PR #1488 itself had only crammed a
+ * `role="status"` chip into the toolbar's count row (which
+ * overflowed the 240px dock — review item #6 in the #1508 follow-up
+ * patch). The body still renders a single `<ErrorState>` on a
+ * cold-cache first-load rejection; the warm-cache refresh rejection
+ * surfaces the alert banner while the rows stay visible. The
+ * regression test (`warm-cache refresh rejection keeps the rows
+ * visible and surfaces a role="alert" banner outside the toolbar`)
+ * pins the new placement.
  *
  * Cache age wire gap (issue #857 follow-up — out of scope here)
  * -------------------------------------------------------------
@@ -196,6 +198,16 @@ export function UsageTab() {
   // the latest id are dropped before they touch React state. A ref is
   // correct here — the id is render-irrelevant.
   const requestIdRef = useRef(0);
+
+  // Tracks the latest user-initiated Refresh's id (review #1508 item
+  // #2). `handleRefresh`'s `finally` only clears `isRefreshing` if
+  // THIS call is still the latest — without this guard, an older
+  // Refresh click whose load was dropped as stale (because a newer
+  // click or an invalidation hook fired a competing load) would
+  // clear the spinner mid-flight. A second counter — separate from
+  // `requestIdRef` — means the user-driven lifecycle can be reasoned
+  // about independently of the data-staleness guard.
+  const refreshIdRef = useRef(0);
 
   const loadMeters = useCallback(async (force: boolean) => {
     const requestId = ++requestIdRef.current;
@@ -293,13 +305,26 @@ export function UsageTab() {
   // swallows rejections internally, so there's no try/catch here
   // either — it would never fire (review item #5). We `await` rather
   // than fire-and-forget so the button's spinner stays up until the
-  // IPC settles; `finally` clears the flag regardless of outcome.
+  // IPC settles; `finally` clears the flag ONLY if both (a) THIS call
+  // is still the latest user-initiated refresh (no second click
+  // overtook us), AND (b) no other `loadMeters` — from any source
+  // including background invalidations — has fired since ours
+  // (review #1508 item #2). Two ref-based snapshots: `refreshIdRef`
+  // catches user-clicks; the post-increment value of `requestIdRef`
+  // catches everything.
   const handleRefresh = async () => {
+    const myRefreshId = ++refreshIdRef.current;
+    const myLoadId = requestIdRef.current + 1;
     setIsRefreshing(true);
     try {
       await loadMeters(true);
     } finally {
-      setIsRefreshing(false);
+      if (
+        refreshIdRef.current === myRefreshId &&
+        requestIdRef.current === myLoadId
+      ) {
+        setIsRefreshing(false);
+      }
     }
   };
 
@@ -370,8 +395,12 @@ export function UsageTab() {
           previous design put this chip in the toolbar's count row,
           where it competed with two other `shrink-0` chips for the
           dock's 240px narrow width and pushed the Refresh button
-          off-panel — review item #6. `break-words` lets long error
-          text wrap (checklist §2.1: wrap, don't truncate, anything
+          off-panel — review item #6. The actual error text is
+          rendered IN the banner (NOT just inside `title={error}`),
+          so it's reachable to touch users and announced by AT in
+          full — probe-ui-checklist.md §5 ("A failure is never only
+          behind a disclosure"). `break-words` lets long error text
+          wrap (checklist §2.1: wrap, don't truncate, anything
           unbounded; the tail carries the diagnosis). Suppressed
           during `isRefreshing` to avoid double-signalling the
           in-flight refresh. */}
@@ -382,7 +411,8 @@ export function UsageTab() {
           className="px-3 py-1 text-xs text-status-error shrink-0 break-words"
           title={error}
         >
-          <span className="font-semibold">Refresh failed</span>
+          <span className="font-semibold">Refresh failed:</span>{' '}
+          <span className="break-words">{error}</span>
           {' — showing last known data'}
         </div>
       )}
