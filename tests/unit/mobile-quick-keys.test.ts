@@ -20,6 +20,11 @@ describe("QUICK_KEYS", () => {
     expect(byId["right"]).toBe("\x1b[C");
     expect(byId["enter"]).toBe("\r");
     expect(byId["ctrl-c"]).toBe("\x03");
+    // Issue #1377: yes/no keys for permission prompts. Bare letters — a
+    // hardware keyboard tap of `y` must not also press Enter; the composer
+    // (or the triage card's Approve/Reject chips) own the confirm.
+    expect(byId["y"]).toBe("y");
+    expect(byId["n"]).toBe("n");
   });
 
   it("has unique ids and labels", () => {

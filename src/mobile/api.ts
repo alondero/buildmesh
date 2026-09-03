@@ -497,6 +497,43 @@ export async function eventsWsUrl(): Promise<string> {
   return `${proto}//${host}/ws/events?ticket=${encodeURIComponent(ticket)}`;
 }
 
+/// Fire a raw keystroke sequence into a node's PTY (issue #1377). The
+/// triage deck's Approve/Reject chips use this to answer a permission prompt
+/// without opening the terminal.
+///
+/// The previous implementation opened the full terminal WebSocket (which
+/// does snapshot generation, broadcast subscription, and write-task
+/// spawning) just to push two bytes (`"y\r"` / `"n\r"`) and closed it again.
+/// That meant every tap on Approve executed heavyweight machinery the call
+/// had no use for, AND raced the server's read loop with the client's
+/// immediate close — the `ws.send()` could land before the server entered
+/// its read loop, silently dropping the keystroke while the user saw a
+/// green "Sent ✓".
+///
+/// The HTTP `POST /api/nodes/{id}/input` route is the clean replacement:
+///   * one round-trip, no snapshot, no broadcast subscription, no spawned task
+///   * the 200 OK response IS the delivery proof — the bytes hit the PTY
+///     before the response is written
+///   * the server-side attention autoclear (a CR/LF in the payload) runs
+///     through the same code path the WS does, so `y\r` flips
+///     `awaiting_input` exactly as a typed Enter would
+///
+/// The auth path is the same HttpOnly `bm_session` cookie every other
+/// mobile API call rides, so `isAuthError` handles 401/403 the same way it
+/// does for `createPr` / `spawnFromIssue`. A 503 (PTY not running — process
+/// killed, spawn failed) bubbles up as `ApiError(503)` whose message is the
+/// toast the user sees; a 404 (node deleted mid-tap) is the same shape.
+export async function sendNodeKeys(nodeId: number, seq: string): Promise<void> {
+  if (!seq) {
+    throw new Error("seq must be non-empty");
+  }
+  await apiFetch(`/api/nodes/${nodeId}/input`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ seq }),
+  });
+}
+
 // The wire shape is generated from the Rust `http::events::EventMsg` enum
 // (ts-rs) — never hand-declare it (CLAUDE.md shared-types rule).
 export type EventMsg = import("../types/generated/EventMsg").EventMsg;

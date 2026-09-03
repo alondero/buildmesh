@@ -2,7 +2,9 @@
 // arrows or Ctrl — yet agent CLIs are driven by exactly those keys (Esc to
 // interrupt, arrows + Enter for menus, Shift+Tab for Claude Code's mode
 // cycling). Sequences are the standard xterm encodings a hardware keyboard
-// would produce.
+// would produce. `y`/`n` round out the strip for the yes/no permission
+// prompts agent CLIs park on (issue #1377) — bare letters, no Enter, so a
+// mis-tap never confirms something the user meant to review first.
 
 export interface QuickKey {
   id: string;
@@ -20,4 +22,6 @@ export const QUICK_KEYS: QuickKey[] = [
   { id: "right", label: "→", seq: "\x1b[C" },
   { id: "enter", label: "⏎", seq: "\r" },
   { id: "ctrl-c", label: "^C", seq: "\x03" },
+  { id: "y", label: "y", seq: "y" },
+  { id: "n", label: "n", seq: "n" },
 ];
