@@ -129,13 +129,17 @@ pub(crate) fn codex_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<
     }
 }
 
-/// The host-accessible Command Code session directory for an agent environment.
-pub(crate) fn commandcode_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+/// The host-accessible Command Code projects root for an agent environment
+/// (`<home>/.commandcode/projects`). WSL homes are converted to host-readable
+/// paths by the shared environment path module. Per-project slug formatting
+/// lives with the transcript format (`transcript_reader::commandcode_project_slug`);
+/// this module only owns the environment boundary (home lookup + WSL translation).
+pub(crate) fn commandcode_projects_dir(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     let home = super::environment::commandcode_dir_for_env(env_type, spawn_path)?;
     match env_type {
-        EnvType::Windows => Some(home.join("sessions")),
+        EnvType::Windows => Some(home.join("projects")),
         EnvType::Wsl => Some(
-            PathBuf::from(to_host_path(&home.to_string_lossy())).join("sessions"),
+            PathBuf::from(to_host_path(&home.to_string_lossy())).join("projects"),
         ),
     }
 }
@@ -152,6 +156,59 @@ pub(crate) fn agy_brain_dir_for_env(env_type: EnvType, spawn_path: &str) -> Opti
             PathBuf::from(to_host_path(&home.to_string_lossy())).join("brain"),
         ),
     }
+}
+
+/// Normalize a raw path that may be a WSL UNC path (`\\wsl$\<distro>\...` or
+/// `//wsl$/<distro>/...`) into WSL spawn form (`/...`). Non-UNC paths are
+/// returned unchanged (borrowed — no allocation on the hot path).
+///
+/// Command Code runs inside WSL with cwd `/home/user/repo` and slugs that
+/// form, but Buildmesh may hold the same mesh as a Windows host UNC path.
+/// Slugging the UNC form would yield `wsl-ubuntu-home-user-repo` and silently
+/// match nothing; normalize before slugging (issue #1500).
+pub(crate) fn normalize_unc_to_wsl(path: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = path.as_bytes();
+    if bytes.len() < 8 {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    let sep = |b: u8| b == b'\\' || b == b'/';
+    if !sep(bytes[0]) || !sep(bytes[1]) {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    if !path.get(2..6).is_some_and(|s| s.eq_ignore_ascii_case("wsl$")) {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    if !sep(bytes[6]) {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    let rest = &path[7..];
+    let distro_end = rest.find(['\\', '/']).map(|i| i + 7).unwrap_or(path.len());
+    let after = if distro_end < path.len() {
+        &path[distro_end..]
+    } else {
+        ""
+    };
+    if after.is_empty() {
+        return std::borrow::Cow::Owned("/".to_string());
+    }
+    let mut out = String::with_capacity(after.len() + 1);
+    out.push('/');
+    let mut last_was_slash = true;
+    for c in after.chars() {
+        if c == '\\' || c == '/' {
+            if !last_was_slash {
+                out.push('/');
+                last_was_slash = true;
+            }
+        } else {
+            out.push(c);
+            last_was_slash = false;
+        }
+    }
+    while out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Compare CLI-recorded working directories across Windows, WSL, and native
@@ -354,4 +411,58 @@ pub fn active_node_branches(nodes: &[AgentNode]) -> Vec<String> {
         .filter(|n| n.status != SessionStatus::Archived)
         .map(|n| n.branch.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commandcode_projects_dir_resolves_base_without_slug() {
+        // The base carries no slug; slug formatting lives in transcript_reader
+        // (issue #1500 review). The composer test lives there too.
+        let dir = commandcode_projects_dir(
+            EnvType::Windows,
+            r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove",
+        )
+        .expect("windows projects dir should resolve");
+        let dir_str = dir.to_string_lossy().replace('\\', "/");
+        assert!(
+            dir_str.ends_with(".commandcode/projects"),
+            "projects base should end with .commandcode/projects, got {dir_str}"
+        );
+        assert!(
+            !dir_str.contains("saucy"),
+            "base must not contain a slug, got {dir_str}"
+        );
+    }
+
+    #[test]
+    fn normalize_unc_to_wsl_maps_host_unc_into_spawn_form() {
+        // Issue #1500 review: discovery may hold a Windows host UNC path for a
+        // WSL mesh; the CLI slugged the in-WSL cwd, so normalize first.
+        assert_eq!(
+            normalize_unc_to_wsl(r"\\wsl$\Ubuntu\home\user\repo"),
+            "/home/user/repo"
+        );
+        assert_eq!(
+            normalize_unc_to_wsl("//wsl$/Ubuntu/home/user/repo"),
+            "/home/user/repo"
+        );
+        assert_eq!(
+            normalize_unc_to_wsl(r"\\WSL$\ubuntu\HOME\user\repo\"),
+            "/HOME/user/repo"
+        );
+        assert_eq!(normalize_unc_to_wsl(r"\\wsl$\Ubuntu"), "/");
+        // Non-UNC paths pass through borrowed (no allocation).
+        assert!(matches!(
+            normalize_unc_to_wsl("/home/user/repo"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            normalize_unc_to_wsl(r"F:\src\buildmesh"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(normalize_unc_to_wsl(""), "");
+    }
 }

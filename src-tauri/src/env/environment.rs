@@ -440,7 +440,7 @@ pub fn grok_dir() -> PathBuf {
 }
 
 /// The Command Code CLI home directory — `<home>/.commandcode/`. Sessions land
-/// under `<home>/.commandcode/sessions/`.
+/// under `<home>/.commandcode/projects/<encoded-cwd>/` (issue #1500).
 pub fn commandcode_dir() -> PathBuf {
     match current_env() {
         Environment::Wsl => env::var("HOME")

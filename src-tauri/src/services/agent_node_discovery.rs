@@ -10,7 +10,8 @@ use crate::env;
 use crate::models::EnvType;
 use crate::services::commandcode_session;
 use crate::services::transcript_reader::{
-    cursor_workspace_slug, encode_path, first_text_block, is_synthetic_message, truncate,
+    commandcode_project_slug, cursor_workspace_slug, encode_path, first_text_block,
+    is_synthetic_message, truncate,
 };
 use serde::Serialize;
 use std::fs;
@@ -39,6 +40,23 @@ fn extract_worktree_name(dir_name: &str, base_prefix: &str) -> Option<String> {
     let suffix = dir_name.strip_prefix(base_prefix)?;
     let wt_marker = "--claude-worktrees-";
     suffix.strip_prefix(wt_marker).map(|s| s.to_string())
+}
+
+/// True when a Command Code project dir belongs to a mesh: exactly the mesh
+/// slug (root sessions) or `{slug}-claude-worktrees-...` (worktree sessions).
+/// Sibling repos sharing a slug prefix (`api` vs `api-gateway`) do not match,
+/// and an empty slug matches nothing (it would otherwise prefix-match every
+/// project dir on disk). Case-insensitive: slugs are lowercase but the host
+/// filesystem may not be.
+fn is_commandcode_project_dir_for_mesh(dir_name: &str, encoded_prefix: &str) -> bool {
+    if encoded_prefix.is_empty() {
+        return false;
+    }
+    let dir_lower = dir_name.to_lowercase();
+    if dir_lower == encoded_prefix {
+        return true;
+    }
+    dir_lower.starts_with(&format!("{encoded_prefix}-claude-worktrees-"))
 }
 
 /// Strip XML/HTML-like tags from a string for clean display.
@@ -198,15 +216,47 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
         &tracked_ids,
     ));
 
-    // Command Code stores flat session files under a home directory rather
-    // than a mesh-scoped project tree. The session header carries the cwd, so
-    // use it to associate mesh-root and worktree sessions with this mesh.
+    // Command Code stores sessions per-project under
+    // `<home>/.commandcode/projects/<encoded-cwd>/<uuid>.jsonl` (issue #1500).
+    // Walk the mesh root dir plus its `.claude/worktrees/<name>` dirs so
+    // mesh-root and worktree sessions are both found; the session header cwd
+    // determines the worktree. The match is anchored (exact root or
+    // `{prefix}-claude-worktrees-...`) so sibling repos sharing a slug prefix
+    // (e.g. `api` vs `api-gateway`) are never scanned.
     let env_type = EnvType::from(env::env_for_path(Path::new(mesh_path)));
-    sessions.extend(discover_commandcode_sessions_in(
-        env::commandcode_sessions_dir(env_type, mesh_path).as_deref(),
-        mesh_path,
-        &tracked_ids,
-    ));
+    // `to_spawn_path` is a no-op for already-spawn-form paths on a Windows
+    // host; the UNC mapping handles a host-form WSL mesh path
+    // (`\\wsl$\<distro>\home\user\repo`), which the CLI slugged as
+    // `/home/user/repo`. Drive-letter paths must NOT go through spawn
+    // translation for slugging: the Windows CLI slugged `C:\...` directly.
+    let spawn_mesh = env::to_spawn_path(Path::new(mesh_path))
+        .to_string_lossy()
+        .to_string();
+    let normalized_mesh = env::normalize_unc_to_wsl(&spawn_mesh);
+    if let Some(projects_dir) = env::commandcode_projects_dir(env_type, &normalized_mesh)
+    {
+        if projects_dir.is_dir() {
+            let encoded_prefix = commandcode_project_slug(&normalized_mesh);
+            if let Ok(entries) = fs::read_dir(&projects_dir) {
+                for entry in entries.flatten() {
+                    let dir_name = entry.file_name().to_string_lossy().to_string();
+                    if !is_commandcode_project_dir_for_mesh(&dir_name, &encoded_prefix)
+                    {
+                        continue;
+                    }
+                    let dir_path = entry.path();
+                    if !dir_path.is_dir() {
+                        continue;
+                    }
+                    sessions.extend(discover_commandcode_sessions_in(
+                        Some(dir_path.as_path()),
+                        mesh_path,
+                        &tracked_ids,
+                    ));
+                }
+            }
+        }
+    }
 
     // Antigravity (`agy`) stores every conversation globally under
     // `~/.gemini/antigravity-cli/brain/<conversation_id>/` (issue #1284).
@@ -321,9 +371,11 @@ fn discover_cursor_sessions_in(
     sessions
 }
 
-/// Discover Command Code's flat session files below an explicit sessions
-/// directory. The session header supplies the working directory and timestamp;
-/// the transcript supplies the first user message for the archive label.
+/// Discover Command Code's session files below an explicit project sessions
+/// directory (`<home>/.commandcode/projects/<encoded-cwd>/`). The session
+/// header supplies the working directory and timestamp; the transcript
+/// supplies the first user message for the archive label. Sidecars
+/// (`<id>.checkpoints.jsonl`, …) are skipped via `read_session_file`.
 fn discover_commandcode_sessions_in(
     sessions_dir: Option<&Path>,
     mesh_path: &str,
@@ -350,11 +402,17 @@ fn discover_commandcode_sessions_in(
             continue;
         }
 
-        let is_mesh_root = env::directories_match(&candidate.directory, mesh_path);
+        // `mesh_path` may be a Windows host UNC path for a WSL mesh while the
+        // CLI recorded its in-WSL cwd; match against both forms.
+        let normalized_mesh = env::normalize_unc_to_wsl(mesh_path);
+        let is_mesh_root = env::directories_match(&candidate.directory, mesh_path)
+            || env::directories_match(&candidate.directory, &normalized_mesh);
         let worktree_name = if is_mesh_root {
             None
         } else {
-            extract_worktree_name_from_path(&candidate.directory, mesh_path)
+            extract_worktree_name_from_path(&candidate.directory, mesh_path).or_else(|| {
+                extract_worktree_name_from_path(&candidate.directory, &normalized_mesh)
+            })
         };
         if !is_mesh_root && worktree_name.is_none() {
             continue;
@@ -974,6 +1032,83 @@ mod tests {
             .expect("worktree Command Code session should be discovered");
         assert_eq!(worktree.first_message, "Inspect the worktree");
         assert_eq!(worktree.worktree_name.as_deref(), Some("fancy-name"));
+    }
+
+    #[test]
+    fn commandcode_project_dir_match_is_anchored_not_prefix_greedy() {
+        // Issue #1500 review: `api` must not match `api-gateway` or `api-v2`;
+        // only the exact root slug and `{slug}-claude-worktrees-...` match.
+        let prefix = "home-user-api";
+        assert!(is_commandcode_project_dir_for_mesh(
+            "home-user-api",
+            prefix
+        ));
+        assert!(is_commandcode_project_dir_for_mesh(
+            "home-user-api-claude-worktrees-fancy-name",
+            prefix
+        ));
+        assert!(!is_commandcode_project_dir_for_mesh(
+            "home-user-api-gateway",
+            prefix
+        ));
+        assert!(!is_commandcode_project_dir_for_mesh(
+            "home-user-api-v2",
+            prefix
+        ));
+        assert!(!is_commandcode_project_dir_for_mesh(
+            "home-user-api-gateway-claude-worktrees-foo",
+            prefix
+        ));
+        assert!(!is_commandcode_project_dir_for_mesh(
+            "home-user-other",
+            prefix
+        ));
+        assert!(!is_commandcode_project_dir_for_mesh("home-user-api", ""));
+        assert!(!is_commandcode_project_dir_for_mesh("anything", ""));
+        // Case-insensitive for Windows filesystems.
+        assert!(is_commandcode_project_dir_for_mesh(
+            "HOME-USER-API-CLAUDE-WORKTREES-FOO",
+            prefix
+        ));
+    }
+
+    #[test]
+    fn commandcode_discovery_finds_uuid_sessions_and_skips_sidecars() {
+        // Issue #1500: v1.43.0 session IDs are UUIDs in
+        // `projects/<slug>/<uuid>.jsonl` with sidecars beside them.
+        let root = std::env::temp_dir().join(format!(
+            "buildmesh_commandcode_discovery_uuid_{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let id = "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9";
+        std::fs::write(
+            root.join(format!("{id}.jsonl")),
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-09-02T19:53:20.151Z\",\"cwd\":\"/Users/adam/src/buildmesh\"}}\n\
+                 {{\"type\":\"message\",\"id\":\"user-1\",\"message\":{{\"role\":\"user\",\"content\":\"Inspect the UUID workspace\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        // Sidecars must not surface as sessions.
+        std::fs::write(
+            root.join(format!("{id}.checkpoints.jsonl")),
+            r#"{"id":"4f729f43-46ed-4721-a885-3f16f26bff5f","turnNumber":1,"createdAt":"2026-09-02T19:53:40.567Z"}"#,
+        )
+        .unwrap();
+
+        let discovered = discover_commandcode_sessions_in(
+            Some(root.as_path()),
+            "/Users/adam/src/buildmesh",
+            &std::collections::HashSet::new(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].session_id, id);
+        assert_eq!(discovered[0].first_message, "Inspect the UUID workspace");
     }
 
     // --- AGY discovery (issue #1284) -----------------------------------

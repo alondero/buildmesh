@@ -14,15 +14,17 @@
 //! Command Code auto-assigns session IDs (`self_assigns_session_id() -> true`).
 //! While the CLI supports `--continue` for resuming the latest conversation in
 //! a directory, Buildmesh deliberately targets exact-ID resumption via
-//! `--session <id>` to guarantee strict node isolation and avoid cross-node
-//! session collisions.
+//! `--resume <id>` to guarantee strict node isolation and avoid cross-node
+//! session collisions (issue #1500). `--session` accepts a transcript path or
+//! id prefix, but `--resume` (`-r, --resume [id|name]`) is the documented
+//! exact-ID resumption flag, so Buildmesh uses it for node isolation.
 //!
 //! **Session capture**:
-//! Command Code mints `sess_...` IDs and writes structured JSONL transcripts to
-//! `~/.commandcode/sessions/<session_id>.jsonl`. Because it renders rich TUI
-//! output without printing standard UUID banners on stdout, PTY capture is
-//! disabled (`captures_session_id_from_pty: false`) and session IDs are
-//! captured via post-spawn directory polling (`after_fresh_spawn`).
+//! Command Code mints UUID IDs and writes structured JSONL transcripts to
+//! `~/.commandcode/projects/<encoded-cwd>/<session_id>.jsonl`. Because it
+//! renders rich TUI output without printing standard UUID banners on stdout,
+//! PTY capture is disabled (`captures_session_id_from_pty: false`) and session
+//! IDs are captured via post-spawn directory polling (`after_fresh_spawn`).
 //!
 //! **Permissions (`--yolo`, issue #1419)**:
 //! The recipe carries `--yolo` so spawned agents run with permission prompts
@@ -186,7 +188,7 @@ impl AgentProvider for CommandCodeAdapter {
     }
 
     fn resume_args(&self, id: &str) -> Vec<String> {
-        vec!["--session".into(), id.into()]
+        vec!["--resume".into(), id.into()]
     }
 
     fn session_assign_args(&self, _id: &str) -> Vec<String> {
@@ -303,8 +305,14 @@ mod tests {
 
     #[test]
     fn resume_args_format() {
-        let args = COMMANDCODE.resume_args("ses_cmdc_12345");
-        assert_eq!(args, vec!["--session", "ses_cmdc_12345"]);
+        let args = COMMANDCODE.resume_args("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9");
+        assert_eq!(
+            args,
+            vec![
+                "--resume",
+                "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9"
+            ]
+        );
     }
 
     #[test]
@@ -375,20 +383,20 @@ mod tests {
         let input = HarnessLaunchInput {
             platform: Platform::Windows,
             runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("ses_12345"),
+            session: SessionIdModeRef::Resume("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9"),
             config: &config,
             prefill: None,
             sandbox: false,
         };
         let prepared = default_prepare(&COMMANDCODE, input);
-        // `--yolo` is the always-on base flag (issue #1419); `--session <id>`
-        // is appended by `default_prepare` after the base recipe.
+        // `--yolo` is the always-on base flag (issue #1419); `--resume <id>`
+        // is appended by `default_prepare` after the base recipe (issue #1500).
         assert_eq!(
             prepared.recipe.base_args,
             vec![
                 "--yolo".to_string(),
-                "--session".to_string(),
-                "ses_12345".to_string()
+                "--resume".to_string(),
+                "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9".to_string()
             ]
         );
     }
@@ -418,6 +426,8 @@ mod tests {
         );
         assert_flag_followed_by_value(args, "--model", "taste-1");
         assert!(args.contains(&"refactor auth flow".to_string()));
-        assert!(!args.iter().any(|a| a == "--session" || a == "--session-id"));
+        assert!(!args
+            .iter()
+            .any(|a| a == "--session" || a == "--session-id" || a == "--resume"));
     }
 }
