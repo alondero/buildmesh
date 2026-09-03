@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<!-- PROTOTYPE — throwaway. Question: what should the command palette show on first open
+     so the 11 probe destinations are discoverable (no rail since #1489)?
+     Four variants of the palette open state, switchable via ?variant=A|B|C|D.
+     Double-click this file. Nothing persists. Delete or move to a throwaway
+     branch once a direction wins. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE — palette discovery (A/B/C/D)</title>
+<style>
+  :root{
+    --bg-base:#0a0a0e; --bg-surface:#111116; --bg-overlay:#15151c;
+    --bg-card:#16161d; --bg-hover:#1b1b23;
+    --text-primary:#e2e8f0; --text-secondary:#94a3b8; --text-muted:#7a8492;
+    --accent:#00d4ff; --border:rgba(255,255,255,.07); --border-subtle:rgba(255,255,255,.05);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Geist','Inter',-apple-system,'Segoe UI',sans-serif;font-size:13px;
+    color:var(--text-primary);background:var(--bg-base);min-height:100vh;
+    display:flex;align-items:flex-start;justify-content:center;padding:48px 16px 120px;}
+  /* fake workspace behind */
+  .workspace{position:fixed;inset:0;z-index:0;opacity:.5;pointer-events:none;
+    background:
+      radial-gradient(600px 200px at 20% 0%,rgba(0,212,255,.05),transparent),
+      var(--bg-base);}
+  .palette{position:relative;z-index:1;width:100%;max-width:640px;background:var(--bg-overlay);
+    border:1px solid var(--border);border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.5);
+    overflow:hidden;animation:pop .15s ease-out;}
+  @keyframes pop{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
+  .tools-above{padding:12px 16px 4px;border-bottom:1px solid var(--border-subtle);
+    background:rgba(0,212,255,.02);}
+  .tools-eyebrow{font-size:10px;letter-spacing:.12em;font-weight:600;color:var(--text-muted);
+    text-transform:uppercase;margin:0 0 8px;display:flex;align-items:center;gap:8px;}
+  .tools-eyebrow .count{margin-left:auto;font-weight:400;letter-spacing:0;text-transform:none;}
+  .searchrow{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border-subtle);}
+  .searchrow svg{flex:none;color:var(--text-muted)}
+  #search{flex:1;background:transparent;border:0;outline:0;color:var(--text-primary);font-size:15px;}
+  #search::placeholder{color:var(--text-muted)}
+  .results{max-height:300px;overflow:auto;padding:4px 0;}
+  .row{display:flex;align-items:center;gap:10px;padding:7px 16px;cursor:pointer;border:0;background:none;
+    width:100%;text-align:left;color:var(--text-primary);font:inherit;}
+  .row:hover,.row.active{background:var(--bg-card)}
+  .row .t{flex:1;min-width:0}
+  .row .l{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .s{font-size:10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .cat{font-size:10px;color:var(--text-muted);flex:none}
+  .empty{padding:20px 16px;color:var(--text-muted);font-size:13px}
+  .footer{display:flex;gap:12px;padding:8px 16px;border-top:1px solid var(--border-subtle);
+    font-size:10px;color:var(--text-muted);flex-wrap:wrap}
+  .footer kbd{border:1px solid var(--border);background:var(--bg-card);border-radius:4px;
+    padding:0 5px;font-family:monospace;font-size:10px;}
+  .state{padding:8px 16px;border-top:1px dashed var(--border);font-size:11px;color:var(--text-secondary);
+    background:var(--bg-card);}
+  .state b{color:var(--accent);font-weight:600}
+  /* shared tile bits */
+  .tile{display:flex;gap:8px;align-items:flex-start;text-align:left;border:1px solid var(--border);
+    background:var(--bg-card);border-radius:6px;padding:8px;cursor:pointer;color:var(--text-primary);font:inherit;}
+  .tile:hover{border-color:rgba(0,212,255,.4);background:var(--bg-hover)}
+  .tile.sel{border-color:var(--accent);box-shadow:0 0 0 1px rgba(0,212,255,.3);}
+  .glyph{flex:none;width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+    font-size:12px;font-weight:700;background:rgba(0,212,255,.1);color:var(--accent);}
+  .tile .tt{font-size:12px;font-weight:600;line-height:1.25}
+  .tile .td{font-size:10px;color:var(--text-muted);line-height:1.35;margin-top:1px}
+  .pill{display:inline-block;font-size:9px;border:1px solid var(--border);border-radius:999px;
+    padding:0 6px;margin-top:4px;color:var(--text-secondary);}
+  .pill.app{color:var(--accent);border-color:rgba(0,212,255,.4)}
+  .pill.agent{color:#c4b5fd;border-color:rgba(139,92,246,.4)}
+  .group-h{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--text-secondary);margin:10px 0 6px;}
+  .group-h:first-child{margin-top:0}
+  .group-h .n{color:var(--text-muted);font-weight:400}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  @media(max-width:560px){.grid2{grid-template-columns:1fr}}
+  /* variant D prefix buttons */
+  .prefixbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  .pfx{border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);
+    border-radius:6px;padding:5px 9px;font:inherit;font-size:11px;cursor:pointer;
+    display:flex;gap:6px;align-items:center;}
+  .pfx:hover{border-color:rgba(0,212,255,.4);color:var(--text-primary)}
+  .pfx.on{border-color:var(--accent);color:var(--accent)}
+  .pfx kbd{border:1px solid var(--border);border-radius:4px;padding:0 5px;font-family:monospace;
+    background:var(--bg-overlay);}
+  /* switcher */
+  #switcher{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:50;
+    display:flex;align-items:center;gap:8px;background:#000;border:1px solid rgba(0,212,255,.5);
+    color:#fff;border-radius:999px;padding:6px 8px;font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,.6);}
+  #switcher button{border-radius:999px;border:0;background:transparent;color:#fff;
+    padding:4px 10px;cursor:pointer;font-size:14px;}
+  #switcher button:hover{background:rgba(255,255,255,.12)}
+  #switcher .lab{text-align:center;min-width:250px;line-height:1.3}
+  #switcher .lab b{color:var(--accent)}
+  #switcher .lab span{display:block;font-size:10px;color:#94a3b8}
+  .proto-tag{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:50;font-size:11px;
+    color:#f59e0b;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.4);
+    padding:3px 12px;border-radius:999px;}
+  details.alltools{margin-top:8px}
+  details.alltools summary{cursor:pointer;font-size:11px;color:var(--text-secondary);padding:4px 0}
+  .suggest{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:4px}
+  @media(max-width:560px){.suggest{grid-template-columns:1fr}}
+  .suggest .tile{flex-direction:column;gap:6px;padding:10px}
+  .suggest .big{font-size:10px;color:var(--accent);font-weight:700;letter-spacing:.06em}
+</style>
+</head>
+<body>
+<div class="proto-tag">PROTOTYPE — throwaway, not production. Append ?variant=A|B|C|D</div>
+<div class="workspace"></div>
+
+<div class="palette" role="dialog" aria-modal="true" aria-label="Command palette prototype">
+  <div class="tools-above" id="toolsAbove"><!-- variant content --></div>
+  <div class="searchrow">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="search" role="combobox" aria-expanded="true" aria-label="Search commands, nodes, meshes and more"
+      placeholder="Type to search…  > commands  @ nodes  / spawn  # issues" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="results" id="results" role="listbox" aria-label="Results"></div>
+  <div class="empty" id="empty" hidden>No matching results</div>
+  <div class="footer">
+    <span><kbd>&gt;</kbd> Commands</span>
+    <span><kbd>@</kbd> Agent nodes</span>
+    <span><kbd>/</kbd><kbd>+</kbd> Spawning actions</span>
+    <span><kbd>#</kbd> GitHub issues and PRs</span>
+  </div>
+  <div class="state" id="state">Selected: <b>none</b> · Query: <b></b> · Action: <b>pick a tool above or type</b></div>
+</div>
+
+<div id="switcher" data-testid="palette-prototype-switcher">
+  <button id="prev" aria-label="Previous variant">&lt;</button>
+  <div class="lab"><b id="swTitle">A</b><span id="swHint"></span></div>
+  <button id="next" aria-label="Next variant">&gt;</button>
+</div>
+
+<script>
+"use strict";
+/* Tool catalogue — mirrors PROBE_TAB_DEFINITIONS + APP_COMMANDS probe-* labels. */
+const TOOLS = [
+  {tab:'files',      label:'Project Files',    desc:'Browse the project explorer',      scope:'project', scopeLabel:'This project', group:'code',     g:'\u25A4'},
+  {tab:'review',     label:'Agent Changes',    desc:'Review what your agent changed',    scope:'agent',   scopeLabel:'This agent',   group:'code',     g:'\u25D0'},
+  {tab:'worktrees',  label:'Worktree Manager', desc:'Switch branches and folders',       scope:'project', scopeLabel:'This project', group:'code',     g:'\u2442'},
+  {tab:'properties', label:'Project Settings', desc:'Configure the selected project',    scope:'project', scopeLabel:'This project', group:'code',     g:'\u2699'},
+  {tab:'issues',     label:'GitHub Issues',    desc:'Find work to pick up',              scope:'project', scopeLabel:'This project', group:'github',   g:'\u25CB'},
+  {tab:'pulls',      label:'Pull Requests',    desc:'See what is ready to merge',        scope:'project', scopeLabel:'This project', group:'github',   g:'\u2446'},
+  {tab:'autopilot',  label:'Autopilot',        desc:'Keep recurring work moving',        scope:'project', scopeLabel:'This project', group:'automate', g:'\u21BB'},
+  {tab:'circuits',   label:'Circuits',         desc:'Inspect connected automations',     scope:'project', scopeLabel:'This project', group:'automate', g:'\u25A3'},
+  {tab:'sessions',   label:'Agent History',    desc:'Return to previous agent work',     scope:'project', scopeLabel:'This project', group:'remember', g:'\u25D4'},
+  {tab:'scratchpad', label:'Notes',            desc:'Keep notes beside the work',        scope:'project', scopeLabel:'This project', group:'remember', g:'\u270E'},
+  {tab:'usage',      label:'Usage',            desc:'Provider usage and limits',         scope:'app',     scopeLabel:'App-wide',     group:'app',      g:'\u25D1'},
+];
+const MOCK_ROWS = [
+  {label:'atlas-web', sub:'main · buildmesh', cat:'node'},
+  {label:'buildmesh', sub:'F:\\src\\buildmesh · main', cat:'mesh'},
+  {label:'Spawn Claude Code on buildmesh', sub:'buildmesh', cat:'spawn'},
+  {label:'#248 Fix worktree name leak', sub:'buildmesh', cat:'issue'},
+];
+const VARIANTS = [
+  {id:'A', name:'Task groups',   hint:'4 task groups above search; GitHub paired'},
+  {id:'B', name:'Scope pills',   hint:'every tool carries its scope; groups are scopes'},
+  {id:'C', name:'Suggested + all', hint:'3 suggestions first; rest one click away'},
+  {id:'D', name:'Prefix coach',  hint:'buttons above teach > @ / # and filter'},
+];
+const GROUPS = [
+  {id:'code', name:'Work with code'},
+  {id:'github', name:'GitHub'},
+  {id:'automate', name:'Automate'},
+  {id:'remember', name:'Remember'},
+];
+let selected = null, activePrefix = '';
+
+function getVariant(){
+  const v = new URLSearchParams(location.search).get('variant');
+  return VARIANTS.some(x=>x.id===v) ? v : 'A';
+}
+function setVariant(v){
+  const u = new URL(location.href); u.searchParams.set('variant', v);
+  history.replaceState({}, '', u); render();
+  document.getElementById('search').focus();
+}
+function tileHTML(t, showPill){
+  return `<button class="tile${selected===t.tab?' sel':''}" data-tab="${t.tab}" type="button">`+
+    `<span class="glyph" aria-hidden="true">${t.g}</span>`+
+    `<span style="min-width:0"><span class="tt">${t.label}</span><span class="td" style="display:block">${t.desc}</span>`+
+    (showPill?`<span class="pill ${t.scope}">${t.scopeLabel}</span>`:'')+`</span></button>`;
+}
+function renderTools(v){
+  const el = document.getElementById('toolsAbove');
+  if(v==='A'){
+    let h = `<p class="tools-eyebrow">Tools <span class="count">11 destinations · click to open</span></p>`;
+    for(const g of GROUPS){
+      const items = TOOLS.filter(t=>t.group===g.id);
+      h += `<div class="group-h">${g.name} <span class="n">· ${items.map(t=>t.label).join(' · ')}</span></div>`;
+      h += `<div class="grid2">`+items.map(t=>tileHTML(t,false)).join('')+`</div>`;
+    }
+    const u = TOOLS.find(t=>t.tab==='usage');
+    h += `<div class="group-h">App-wide</div><div class="grid2">`+tileHTML(u,false)+
+      `<div style="font-size:10px;color:var(--text-muted);align-self:center;padding:0 4px">Usage ignores project selection — it meters the whole machine.</div></div>`;
+    el.innerHTML = h;
+  }
+  if(v==='B'){
+    let h = `<p class="tools-eyebrow">Tools by scope <span class="count">where does each tool act?</span></p>`;
+    const scopes = [
+      {id:'app', name:'App-wide — ignores project selection', items:TOOLS.filter(t=>t.scope==='app')},
+      {id:'agent', name:'This agent — follows the focused node', items:TOOLS.filter(t=>t.scope==='agent')},
+      {id:'project', name:'This project — follows the selected mesh', items:TOOLS.filter(t=>t.scope==='project')},
+    ];
+    for(const s of scopes){
+      h += `<div class="group-h">${s.name} <span class="n">(${s.items.length})</span></div>`;
+      h += `<div class="grid2">`+s.items.map(t=>tileHTML(t,true)).join('')+`</div>`;
+    }
+    h += `<div style="font-size:10px;color:var(--text-muted);margin-top:8px">Project Files shows the focused agent's working tree when the agent belongs to the project — otherwise the repo root.</div>`;
+    el.innerHTML = h;
+  }
+  if(v==='C'){
+    const sug = ['files','issues','usage'].map(tab=>TOOLS.find(t=>t.tab===tab));
+    const rest = TOOLS.filter(t=>!sug.includes(t));
+    let h = `<p class="tools-eyebrow">Suggested <span class="count">based on frequency</span></p><div class="suggest">`;
+    const why = {files:'Most opened', issues:'Pick up work', usage:'Daily glance'};
+    for(const t of sug) h += `<button class="tile${selected===t.tab?' sel':''}" data-tab="${t.tab}" type="button"><span class="big">${why[t.tab]}</span><span style="display:flex;gap:8px;align-items:center"><span class="glyph">${t.g}</span><span class="tt">${t.label}</span></span><span class="td">${t.desc}</span><span class="pill ${t.scope}">${t.scopeLabel}</span></button>`;
+    h += `</div><details class="alltools"><summary>All tools (11) — grouped: Code · GitHub (Issues + PRs) · Automate · Remember</summary><div class="grid2" style="margin-top:6px">`+
+      rest.map(t=>tileHTML(t,true)).join('')+`</div></details>`;
+    el.innerHTML = h;
+  }
+  if(v==='D'){
+    const pfx = [
+      {p:'>', name:'Commands', covers:'all 11 tools + actions'},
+      {p:'@', name:'Agent', covers:'nodes, Agent Changes'},
+      {p:'/', name:'Spawn', covers:'start an agent here'},
+      {p:'#', name:'GitHub', covers:'Issues + Pull Requests'},
+    ];
+    let h = `<p class="tools-eyebrow">Filter tools <span class="count">buttons type the prefix for you</span></p><div class="prefixbar">`+
+      pfx.map(f=>`<button class="pfx${activePrefix===f.p?' on':''}" data-pfx="${f.p}" type="button"><kbd>${f.p}</kbd> ${f.name}</button>`).join('')+`</div>`;
+    const shown = activePrefix==='#' ? TOOLS.filter(t=>['issues','pulls'].includes(t.tab))
+      : activePrefix==='>' ? TOOLS
+      : activePrefix==='@' ? TOOLS.filter(t=>t.tab==='review')
+      : activePrefix==='/' ? [] : TOOLS;
+    h += `<div style="font-size:10px;color:var(--text-muted);margin-bottom:6px">`+
+      (activePrefix==='#' ? `“#” spans <b>both</b> GitHub tools — Issues and Pull Requests live in one feed.`
+      : activePrefix==='>' ? `“&gt;” lists every tool plus view and app commands.`
+      : activePrefix==='@' ? `“@” scopes to the focused agent — nodes plus Agent Changes.`
+      : activePrefix==='/' ? `“/” lists spawn recipes — pick a harness, then a project.`
+      : `GitHub pairs <b>Issues + Pull Requests</b> under <kbd>#</kbd>. Pick a filter or type.`) + `</div>`;
+    h += `<div class="grid2">`+(shown.length?shown.map(t=>tileHTML(t,true)).join(''):`<div style="font-size:11px;color:var(--text-muted);padding:6px 2px">Spawn recipes appear here once a project loads — e.g. “Spawn Claude Code on buildmesh”.</div>`)+`</div>`;
+    el.innerHTML = h;
+  }
+  el.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{
+    selected = b.getAttribute('data-tab');
+    const t = TOOLS.find(x=>x.tab===selected);
+    setState(`openProbeTab('${selected}')`, `Open ${t.label} — ${t.scopeLabel.toLowerCase()}`);
+    render();
+  }));
+  el.querySelectorAll('[data-pfx]').forEach(b=>b.addEventListener('click',()=>{
+    const p = b.getAttribute('data-pfx');
+    activePrefix = (activePrefix===p) ? '' : p;
+    document.getElementById('search').value = activePrefix;
+    onQuery(); render();
+  }));
+}
+function setState(sel, action){
+  document.getElementById('state').innerHTML =
+    `Selected: <b>${sel}</b> · Query: <b>${escapeHTML(document.getElementById('search').value)}</b> · Action: <b>${escapeHTML(action)}</b>`;
+}
+function escapeHTML(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function onQuery(){
+  const q = document.getElementById('search').value.toLowerCase();
+  const res = document.getElementById('results'), empty = document.getElementById('empty');
+  const tools = TOOLS.filter(t=>(t.label+' '+t.desc+' '+t.tab).toLowerCase().includes(q.replace(/^[>@/#+]/,'')));
+  const mocks = MOCK_ROWS.filter(r=>(r.label+' '+r.sub).toLowerCase().includes(q.replace(/^[>@/#+]/,'')));
+  const showTools = q.trim()==='' ? TOOLS.slice(0,5) : tools;
+  let h = showTools.map(t=>`<button class="row" type="button" data-open="${t.tab}"><span class="t"><span class="l">Open ${t.label}</span><span class="s" style="display:block">${t.desc} · ${t.scopeLabel}</span></span><span class="cat">command</span></button>`).join('');
+  h += mocks.map(r=>`<div class="row"><span class="t"><span class="l">${escapeHTML(r.label)}</span><span class="s" style="display:block">${escapeHTML(r.sub)}</span></span><span class="cat">${r.cat}</span></div>`).join('');
+  res.innerHTML = h; empty.hidden = h!=='';
+  res.querySelectorAll('[data-open]').forEach(b=>b.addEventListener('click',()=>{
+    selected = b.getAttribute('data-open');
+    const t = TOOLS.find(x=>x.tab===selected);
+    setState(`openProbeTab('${selected}')`, `Open ${t.label}`);
+    renderTools(getVariant());
+  }));
+  if(q.trim()!=='') setState(selected?`openProbeTab('${selected}')`:'none', `${tools.length} tool(s) match`);
+}
+function render(){
+  const v = getVariant();
+  const meta = VARIANTS.find(x=>x.id===v);
+  document.getElementById('swTitle').textContent = v+' — '+meta.name;
+  document.getElementById('swHint').textContent = meta.hint+' · ←/→ to compare';
+  renderTools(v); onQuery();
+}
+document.getElementById('search').addEventListener('input', onQuery);
+document.getElementById('prev').addEventListener('click',()=>{
+  const v = getVariant(), i = VARIANTS.findIndex(x=>x.id===v);
+  setVariant(VARIANTS[(i-1+VARIANTS.length)%VARIANTS.length].id);
+});
+document.getElementById('next').addEventListener('click',()=>{
+  const v = getVariant(), i = VARIANTS.findIndex(x=>x.id===v);
+  setVariant(VARIANTS[(i+1)%VARIANTS.length].id);
+});
+window.addEventListener('keydown',e=>{
+  const t = e.target;
+  if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA')) return;
+  if(e.key==='ArrowLeft') document.getElementById('prev').click();
+  if(e.key==='ArrowRight') document.getElementById('next').click();
+});
+render();
+</script>
+</body>
+</html>
