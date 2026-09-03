@@ -36,6 +36,20 @@
  *   failed refresh leaves the previous timestamp in place so the label
  *   continues to refer to the last known-good moment.
  *
+ *   True stale-while-revalidate (rearchitect of #1488 against #1489):
+ *   when prior rows exist AND a refresh is in flight OR the latest
+ *   fetch rejected, the rows stay on screen and a non-destructive
+ *   `role="status"` alert ("Refresh failed — showing last known data")
+ *   surfaces in the toolbar alongside the Refresh button. The body
+ *   falls back to `<ErrorState>` ONLY when there are no prior rows to
+ *   keep (cold-cache first-load rejection). This prevents the
+ *   round-3 reviewer-flagged "I clicked Refresh and lost my view of
+ *   the meters" UX bug.
+ *
+ *   The mount-time revalidation path sets `isRefreshing` (so the rows
+ *   dim to 60% opacity with `aria-busy="true"`) for the same reason
+ *   the manual Refresh click does — `loadMeters` owns the flag.
+ *
  *   OPEN FOLLOW-UP (issue #857, deferred — see "Cache age wire gap"
  *   below): the indicator currently labels every successful read
  *   "Refreshed X ago" even when the Rust 5-minute cache served the
@@ -157,7 +171,8 @@ export function UsageTab() {
   // during the initial loading state and after a first-load rejection).
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
-  const loadMeters = useCallback(async (force: boolean) => {
+  const loadMeters = useCallback(async (force: boolean, opts: { silent?: boolean } = {}) => {
+    if (!opts.silent) setIsRefreshing(true);
     try {
       const [meterRows, accountRows] = await Promise.all([
         api.getProviderMeters(force),
@@ -166,9 +181,9 @@ export function UsageTab() {
       // Stamp the indicator FIRST so the timestamp describes the data
       // we're about to set. JS is single-threaded through the await
       // resolve + these setStates, so there is no race — either all
-      // three setStates commit (and the indicator correctly reflects
-      // them) or the `Promise.all` rejects and none of them do (and
-      // the previous timestamp stays in place).
+      // setStates commit (and the indicator correctly reflects them) or
+      // the `Promise.all` rejects and none of them do (and the previous
+      // timestamp stays in place).
       setLastRefreshedAt(new Date());
       setMeters(meterRows);
       setAccounts(accountRows);
@@ -177,14 +192,21 @@ export function UsageTab() {
       console.error('Failed to load usage:', e);
       setError(formatError(e));
     } finally {
+      // Always flip `attempted` after the first IPC settles, success
+      // OR failure — without this, a cold-cache first-load failure
+      // would leave `attempted === false` and the early-return below
+      // would render `<LoadingState>` forever, masking `<ErrorState>`
+      // and the Refresh button (#813 / #1481 regression guard).
       setAttempted(true);
+      if (!opts.silent) setIsRefreshing(false);
     }
   }, []);
 
-  // Initial load — non-forced read so the backend's 5-minute cache
-  // (#574) can short-circuit if another tab just refreshed.
+  // Initial load — non-forced, non-silent so the dim/busy affordance
+  // applies during the mount-time revalidation as well as the manual
+  // Refresh click.
   useAsyncEffect(() => {
-    loadMeters(false);
+    void loadMeters(false);
   }, [loadMeters]);
 
   // Cross-surface invalidation (issue #601 review): when the user enables,
@@ -247,16 +269,14 @@ export function UsageTab() {
   // CLAUDE.md "user.click swallows async onClick rejections": `loadMeters`
   // rejects on backend failure; safety-net catch lands any escaped
   // throw into the error banner instead of an unhandled rejection.
-  // `finally` resets `isRefreshing` so a rejected refresh can't leave
-  // the button stuck disabled.
+  // `loadMeters` itself owns the `isRefreshing` lifecycle now (so the
+  // mount-time revalidation shares the affordance); this handler just
+  // awaits and never touches the flag.
   const handleRefresh = async () => {
-    setIsRefreshing(true);
     try {
       await loadMeters(true);
     } catch {
       /* loadMeters already updates the error banner */
-    } finally {
-      setIsRefreshing(false);
     }
   };
 
@@ -273,6 +293,17 @@ export function UsageTab() {
     ? lastRefreshedAt.toLocaleTimeString()
     : null;
 
+  // True stale-while-revalidate: when prior rows exist AND a refresh
+  // is in flight OR the latest fetch rejected, keep the rows on
+  // screen. The toolbar surfaces the error / refreshing state without
+  // blanking the body. When no rows have ever loaded AND the latest
+  // fetch rejected, fall back to the body's `<ErrorState>` so the
+  // user sees something other than an empty placeholder. This
+  // prevents the "I clicked Refresh and lost my view of the meters"
+  // bug the round-3 review flagged on PR #1488.
+  const hasRows = rows.length > 0;
+  const showInlineError = !hasRows && error !== null;
+
   return (
     <div className="flex flex-col h-full">
       <ProbeToolbar
@@ -284,9 +315,23 @@ export function UsageTab() {
           />
         }
       >
-        {rows.length > 0 && (
+        {hasRows && (
           <span className="text-xs text-text-muted shrink-0">
             {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
+          </span>
+        )}
+        {/* Non-destructive refresh-failure alert. Pinned alongside the
+            Refresh button so the user keeps their view of the rows and
+            sees the failure in the same strip. Suppressed during the
+            in-flight state to avoid double signalling. */}
+        {error !== null && hasRows && !isRefreshing && (
+          <span
+            role="status"
+            data-testid="usage-refresh-error"
+            className="text-2xs text-status-error shrink-0"
+            title={error}
+          >
+            Refresh failed — showing last known data
           </span>
         )}
         {refreshedRelative !== null && (
@@ -309,15 +354,17 @@ export function UsageTab() {
       <ProbeTabBody
         data-testid="usage-rows"
         aria-busy={isRefreshing}
-        className={`space-y-3 transition-opacity ${isRefreshing ? 'opacity-60' : ''}`}
+        className={`space-y-3 transition-opacity ${
+          isRefreshing && hasRows ? 'opacity-60' : ''
+        }`}
       >
-        {rows.length === 0 && !error ? (
+        {showInlineError ? (
+          <ErrorState title="Failed to load usage" detail={error} />
+        ) : rows.length === 0 ? (
           <EmptyState
             label="No usage meters available."
             hint="Add credentials for a provider in Settings (API key for MiniMax/Kimi/OpenRouter, or log in to Claude/Codex/Antigravity's CLI) to see its quota or balance here."
           />
-        ) : error ? (
-          <ErrorState title="Failed to load usage" detail={error} />
         ) : (
           rows.map(({ meter, account }) => (
             <UsagePanel key={meter.provider} account={account} meter={meter} />
