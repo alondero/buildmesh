@@ -545,10 +545,21 @@ mod tests {
         assert_eq!(cursor.harness_id, "cursor");
         assert!(cursor.supports_resume);
         assert!(cursor.auto_resume_on_startup);
-        assert!(!cursor.requires_attention_hook);
-        // Issue #1364 §3 — Cursor hooks are a per-harness follow-up (#1368);
-        // no attention capability yet.
-        assert_eq!(cursor.attention_capability, AttentionCapability::None);
+        // Issue #1368 — Cursor now ships an attention hook at
+        // `<project>/.cursor/hooks.json` under `--force`. The
+        // descriptor mirrors AGY's skip-permissions shape: the only
+        // signal Cursor emits at a useful cadence is `Stop` (the
+        // `--force` flag suppresses permission prompts by
+        // construction).
+        assert!(cursor.requires_attention_hook);
+        assert!(matches!(
+            cursor.attention_capability,
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::SkipPermissions,
+                min_version: Some(ref v),
+                ..
+            } if v == crate::agent::provider::adapters::cursor::CURSOR_MIN_HOOK_VERSION
+        ));
         assert!(cursor.produces_readable_transcript);
         assert!(cursor.supports_model_override);
         assert!(!cursor.supports_effort_override);

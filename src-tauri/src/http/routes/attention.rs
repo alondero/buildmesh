@@ -46,12 +46,19 @@ const MAX_HOOK_BODY: usize = 64 * 1024;
 /// `modelName`, `executionNum`, `error`. All aliases accept both camelCase
 /// and snake_case forms; a payload that mixes casings also parses.
 ///
+/// Cursor Agent (issue #1368) documents `conversation_id` (snake_case)
+/// as the canonical session id field on its hook stdin JSON, distinct
+/// from Claude's `session_id` and AGY's `conversationId` (camelCase).
+/// The route parser accepts all three casings via stacked aliases so a
+/// Cursor hook payload with `{"conversation_id": "...", "hook_event_name":
+/// "stop"}` flows through the same parser as Claude/AGY/Grok callbacks.
+///
 /// Note: fields like `execution_num`, `workspace_paths`, `artifact_directory_path`,
 /// `model_name`, and `error` are parsed for telemetry, diagnostics, and forward
 /// compatibility with future AGY revisions, but are not decision inputs in `decide()`.
 #[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 struct HookPayload {
-    #[serde(alias = "sessionId", alias = "conversationId")]
+    #[serde(alias = "sessionId", alias = "conversationId", alias = "conversation_id")]
     session_id: Option<String>,
     #[serde(alias = "hookEventName", alias = "hook_event_name")]
     hook_event_name: Option<String>,
@@ -1619,5 +1626,134 @@ fn verify_attention_token_truth_table() {
     assert!(!verify_attention_token("grok", Some("token=grok_token"), None));
     assert!(!verify_attention_token("grok", None, None));
 }
+
+    // -------------------------------------------------------------------
+    // Cursor Agent (issue #1368) — snake_case `conversation_id` +
+    // `hook_event_name: "stop"` envelope. The route parser accepts
+    // Cursor's documented casing via stacked `#[serde(alias)]` on
+    // `session_id` (Claude's `session_id`, AGY's `conversationId`,
+    // Cursor's `conversation_id`).
+    // -------------------------------------------------------------------
+
+    /// Cursor documents `conversation_id` (snake_case) as the canonical
+    /// session id field. The route must extract the UUID from this
+    /// key just like it does from Claude's `session_id` / AGY's
+    /// `conversationId` / Grok's `sessionId`. Pinned via the alias
+    /// on `HookPayload::session_id`.
+    #[test]
+    fn hook_session_id_reads_cursor_conversation_id_snake_case() {
+        let body = serde_json::json!({
+            "conversation_id": "C1234567-89AB-CDEF-0123-456789ABCDEF",
+            "hook_event_name": "stop",
+            "transcript_path": "/tmp/session.jsonl",
+        })
+        .to_string();
+        assert_eq!(
+            hook_session_id(body.as_bytes()).as_deref(),
+            Some("c1234567-89ab-cdef-0123-456789abcdef")
+        );
+    }
+
+    /// Cursor's `Stop` is a clean turn completion → Ready (issue
+    /// #1364). The route's transcript-scan path runs the same way it
+    /// does for Claude's `Stop` — Cursor ships a transcript path the
+    /// route converts to host form via `to_host_path` and scans for
+    /// pending tasks.
+    #[test]
+    fn cursor_stop_event_with_no_pending_tasks_is_ready() {
+        let body = serde_json::json!({
+            "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+            "hook_event_name": "stop",
+            "transcript_path": "/tmp/session.jsonl",
+        })
+        .to_string();
+        assert_eq!(classify_decision(body.as_bytes(), |_| Some(0)), Decision::Ready);
+    }
+
+    /// Cursor's `Stop` with launched-but-unfinished background tasks
+    /// suppresses (the false-yield pattern from issue #878). Same
+    /// transcript-scan gate as Claude's `Stop`.
+    #[test]
+    fn cursor_stop_event_with_pending_tasks_suppresses() {
+        let body = serde_json::json!({
+            "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+            "hook_event_name": "stop",
+            "transcript_path": "/tmp/session.jsonl",
+        })
+        .to_string();
+        assert_eq!(
+            classify_decision(body.as_bytes(), |_| Some(2)),
+            Decision::SuppressPendingBackground
+        );
+    }
+
+    /// Cursor's `Stop` with no transcript path is Ready (clean turn
+    /// completion). Mirrors the Claude/Codex/Grok shape — without a
+    /// transcript the route can't prove pending work, so the turn is
+    /// treated as completed and the node lands in `Ready`, never in
+    /// `AwaitingInput` (issue #1364).
+    #[test]
+    fn cursor_stop_event_without_transcript_path_is_ready() {
+        let body = serde_json::json!({
+            "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+            "hook_event_name": "stop",
+        })
+        .to_string();
+        assert_eq!(
+            classify_decision(body.as_bytes(), |_| Some(3)),
+            Decision::Ready
+        );
+    }
+
+    /// Provider envelope preservation: the classified detail captures
+    /// `provider_event = "stop"` and `provider_session_id = "<UUID>"`
+    /// (lowercased) so the lifecycle event surfaces Cursor's own
+    /// classification alongside the shared lifecycle kind.
+    #[test]
+    fn cursor_stop_envelope_preserves_provider_event_and_session_id() {
+        let body = serde_json::json!({
+            "conversation_id": "550E8400-E29B-41D4-A716-446655440000",
+            "hook_event_name": "stop",
+            "transcript_path": "/tmp/session.jsonl",
+        })
+        .to_string();
+        let classified = classify(body.as_bytes(), |_| Some(0));
+        assert_eq!(classified.decision, Decision::Ready);
+        assert_eq!(classified.detail.provider_event.as_deref(), Some("stop"));
+        assert_eq!(
+            classified.detail.provider_session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    /// A full Cursor fixture: hook stdin JSON with all documented
+    /// fields. Mirrors the AGY `agy_full_release_fixture_parses_all_fields`
+    /// precedent. Verifies the payload shape parses end-to-end and
+    /// classifies as Ready.
+    #[test]
+    fn cursor_full_release_fixture_parses_all_fields() {
+        let json_body = serde_json::json!({
+            "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+            "hook_event_name": "stop",
+            "transcript_path": "/Users/dev/project/.cursor/session.jsonl",
+            "cwd": "/Users/dev/project",
+        });
+        let body = json_body.to_string().into_bytes();
+
+        let parsed = serde_json::from_slice::<HookPayload>(&body)
+            .expect("must parse full Cursor fixture");
+        assert_eq!(parsed.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(parsed.hook_event_name.as_deref(), Some("stop"));
+        assert_eq!(
+            parsed.transcript_path.as_deref(),
+            Some("/Users/dev/project/.cursor/session.jsonl")
+        );
+
+        assert_eq!(
+            hook_session_id(&body).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
+    }
 
 }
