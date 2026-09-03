@@ -1,14 +1,18 @@
 //! Command Code session-ID capture from local session transcripts.
 //!
-//! Command Code self-assigns session IDs of the form `sess_<alphanumeric>`
-//! (e.g. `sess_01j6...`) and writes structured transcript records to
-//! `%USERPROFILE%/.commandcode/sessions/<session_id>.jsonl` (Windows) or
-//! `~/.commandcode/sessions/<session_id>.jsonl` (macOS/Linux/WSL).
+//! Command Code self-assigns session IDs as standard UUIDs
+//! (e.g. `3fadada6-e0a3-44a2-ab68-ce1ecf7207a9`; `sess_…` is accepted for
+//! backward compatibility) and writes structured transcript records to
+//! `%USERPROFILE%/.commandcode/projects/<encoded-cwd>/<session_id>.jsonl`
+//! (Windows) or `~/.commandcode/projects/<encoded-cwd>/<session_id>.jsonl`
+//! (macOS/Linux/WSL) — issue #1500.
 //!
 //! Because Command Code prints rich TUI output rather than standard UUID
-//! banners, PTY UUID capture cannot extract `sess_…` IDs. A bounded
-//! post-spawn poller inspects `~/.commandcode/sessions/` and reads the session
-//! header record to associate the node with its exact session.
+//! banners, PTY UUID capture cannot extract IDs. A bounded
+//! post-spawn poller inspects `~/.commandcode/projects/<encoded-cwd>/` and
+//! reads the session header record (`{"type":"session","id":"<uuid>",
+//! "timestamp":"...","cwd":"..."}`) to associate the node with its exact
+//! session.
 //!
 //! Matching both the working directory and the fresh spawn time ensures an
 //! older conversation is never resumed by mistake.
@@ -43,9 +47,27 @@ pub struct Candidate {
     pub timestamp_ms: i64,
 }
 
-/// Command Code session IDs start with `sess_`.
+/// Command Code session IDs are standard UUIDs (v1.43.0). `sess_…` IDs are
+/// accepted for backward compatibility with older transcripts.
 pub fn is_commandcode_session_id(id: &str) -> bool {
-    id.starts_with("sess_") && id.len() > 5
+    if id.starts_with("sess_") && id.len() > 5 {
+        return true;
+    }
+    uuid::Uuid::parse_str(id).is_ok()
+}
+
+/// True when `path` looks like a session transcript (`<id>.jsonl`) rather
+/// than a sidecar (`<id>.checkpoints.jsonl`, `<id>.prompts.jsonl`, …).
+/// Session IDs (UUID or `sess_…`) contain no dots, so any dot in the stem
+/// means a sidecar — this single rule covers all current and future sidecars.
+fn is_session_transcript_file(path: &Path) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return false;
+    }
+    match path.file_stem().and_then(|stem| stem.to_str()) {
+        Some(stem) => !stem.contains('.'),
+        None => false,
+    }
 }
 
 /// Parse timestamp from either ISO 8601 string, integer epoch ms, or integer epoch seconds.
@@ -78,7 +100,13 @@ fn parse_timestamp_ms(val: &serde_json::Value) -> Option<i64> {
 }
 
 /// Read candidate metadata from a `.jsonl` session file.
+///
+/// Sidecar files (`<id>.checkpoints.jsonl`, …) are rejected by filename so a
+/// checkpoint UUID is never mistaken for a session ID (issue #1500).
 pub fn read_session_file(path: &Path) -> Option<Candidate> {
+    if !is_session_transcript_file(path) {
+        return None;
+    }
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let mut first_line = String::new();
@@ -138,7 +166,9 @@ pub fn select_id_for_directory<'a>(
         .map(|c| c.id.as_str())
 }
 
-/// Scan `sessions_dir` for all `.jsonl` files and find the newest valid candidate.
+/// Scan `sessions_dir` (`<home>/.commandcode/projects/<encoded-cwd>/`) for all
+/// session transcripts and find the newest valid candidate. Sidecars
+/// (`<id>.checkpoints.jsonl`, …) are skipped via [`read_session_file`].
 pub fn find_fresh_id_for_directory_in(
     sessions_dir: &Path,
     spawn_directory: &str,
@@ -151,7 +181,7 @@ pub fn find_fresh_id_for_directory_in(
     let mut candidates = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        if !is_session_transcript_file(&path) {
             continue;
         }
         if let Some(candidate) = read_session_file(&path) {
@@ -259,11 +289,20 @@ mod tests {
 
     #[test]
     fn validates_commandcode_session_id_format() {
+        // Legacy `sess_…` IDs stay valid for backward compatibility.
         assert!(is_commandcode_session_id("sess_01j6xyz890"));
         assert!(is_commandcode_session_id("sess_abc123"));
         assert!(!is_commandcode_session_id("sess_"));
-        assert!(!is_commandcode_session_id("01a024d2-7cd6-7ea2-b907-531b0d261be7"));
+        // Issue #1500: Command Code v1.43.0 mints standard UUIDs.
+        assert!(is_commandcode_session_id(
+            "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9"
+        ));
+        assert!(is_commandcode_session_id(
+            "01a024d2-7cd6-7ea2-b907-531b0d261be7"
+        ));
         assert!(!is_commandcode_session_id("ses_opencode123"));
+        assert!(!is_commandcode_session_id("not-a-uuid"));
+        assert!(!is_commandcode_session_id(""));
     }
 
     #[test]
@@ -332,5 +371,63 @@ mod tests {
             1_787_830_400_000,
         );
         assert_eq!(found, Some("sess_01j6target".to_string()));
+    }
+
+    #[test]
+    fn reads_v143_uuid_session_header() {
+        // Exact v1.43.0 header shape from issue #1500.
+        let temp = tempfile::TempDir::new().unwrap();
+        let id = "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9";
+        let file_path = temp.path().join(format!("{id}.jsonl"));
+        fs::write(
+            &file_path,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-09-02T19:53:20.151Z\",\"cwd\":\"F:\\\\src\\\\buildmesh\\\\.claude\\\\worktrees\\\\saucy-thunderous-cove\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let c = read_session_file(&file_path).expect("should parse UUID candidate");
+        assert_eq!(c.id, id);
+        assert_eq!(
+            c.directory,
+            r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove"
+        );
+        assert!(c.timestamp_ms > 0);
+
+        let found = find_fresh_id_for_directory_in(
+            temp.path(),
+            r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove",
+            c.timestamp_ms - 1,
+        );
+        assert_eq!(found, Some(id.to_string()));
+    }
+
+    #[test]
+    fn rejects_checkpoint_sidecars() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let session_id = "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9";
+        fs::write(
+            temp.path().join(format!("{session_id}.jsonl")),
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{session_id}\",\"timestamp\":\"2026-09-02T19:53:20.151Z\",\"cwd\":\"/tmp/wt\"}}\n"
+            ),
+        )
+        .unwrap();
+        // Checkpoint sidecar carries its own checkpoint UUID — must never be
+        // mistaken for a session.
+        let checkpoint_path = temp
+            .path()
+            .join(format!("{session_id}.checkpoints.jsonl"));
+        fs::write(
+            &checkpoint_path,
+            r#"{"id":"4f729f43-46ed-4721-a885-3f16f26bff5f","messageId":"4f729f43-46ed-4721-a885-3f16f26bff5f","turnNumber":1,"createdAt":"2026-09-02T19:53:40.567Z"}"#,
+        )
+        .unwrap();
+
+        assert!(read_session_file(&checkpoint_path).is_none());
+        let found =
+            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 0);
+        assert_eq!(found, Some(session_id.to_string()));
     }
 }

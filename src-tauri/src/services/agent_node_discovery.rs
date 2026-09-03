@@ -198,15 +198,34 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
         &tracked_ids,
     ));
 
-    // Command Code stores flat session files under a home directory rather
-    // than a mesh-scoped project tree. The session header carries the cwd, so
-    // use it to associate mesh-root and worktree sessions with this mesh.
+    // Command Code stores sessions per-project under
+    // `<home>/.commandcode/projects/<encoded-cwd>/<uuid>.jsonl` (issue #1500).
+    // Walk every `<encoded-mesh>*` project dir so mesh-root and worktree
+    // sessions are both found; the session header cwd determines the worktree.
     let env_type = EnvType::from(env::env_for_path(Path::new(mesh_path)));
-    sessions.extend(discover_commandcode_sessions_in(
-        env::commandcode_sessions_dir(env_type, mesh_path).as_deref(),
-        mesh_path,
-        &tracked_ids,
-    ));
+    if let Some(projects_dir) = env::commandcode_projects_dir(env_type, mesh_path) {
+        if projects_dir.is_dir() {
+            // Slugs are lowercased; compare case-insensitively for Windows.
+            let encoded_prefix = env::commandcode_project_slug(mesh_path).to_lowercase();
+            if let Ok(entries) = fs::read_dir(&projects_dir) {
+                for entry in entries.flatten() {
+                    let dir_name = entry.file_name().to_string_lossy().to_string();
+                    if !dir_name.to_lowercase().starts_with(&encoded_prefix) {
+                        continue;
+                    }
+                    let dir_path = entry.path();
+                    if !dir_path.is_dir() {
+                        continue;
+                    }
+                    sessions.extend(discover_commandcode_sessions_in(
+                        Some(dir_path.as_path()),
+                        mesh_path,
+                        &tracked_ids,
+                    ));
+                }
+            }
+        }
+    }
 
     // Antigravity (`agy`) stores every conversation globally under
     // `~/.gemini/antigravity-cli/brain/<conversation_id>/` (issue #1284).
@@ -321,9 +340,11 @@ fn discover_cursor_sessions_in(
     sessions
 }
 
-/// Discover Command Code's flat session files below an explicit sessions
-/// directory. The session header supplies the working directory and timestamp;
-/// the transcript supplies the first user message for the archive label.
+/// Discover Command Code's session files below an explicit project sessions
+/// directory (`<home>/.commandcode/projects/<encoded-cwd>/`). The session
+/// header supplies the working directory and timestamp; the transcript
+/// supplies the first user message for the archive label. Sidecars
+/// (`<id>.checkpoints.jsonl`, …) are skipped via `read_session_file`.
 fn discover_commandcode_sessions_in(
     sessions_dir: Option<&Path>,
     mesh_path: &str,
@@ -974,6 +995,45 @@ mod tests {
             .expect("worktree Command Code session should be discovered");
         assert_eq!(worktree.first_message, "Inspect the worktree");
         assert_eq!(worktree.worktree_name.as_deref(), Some("fancy-name"));
+    }
+
+    #[test]
+    fn commandcode_discovery_finds_uuid_sessions_and_skips_sidecars() {
+        // Issue #1500: v1.43.0 session IDs are UUIDs in
+        // `projects/<slug>/<uuid>.jsonl` with sidecars beside them.
+        let root = std::env::temp_dir().join(format!(
+            "buildmesh_commandcode_discovery_uuid_{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let id = "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9";
+        std::fs::write(
+            root.join(format!("{id}.jsonl")),
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-09-02T19:53:20.151Z\",\"cwd\":\"/Users/adam/src/buildmesh\"}}\n\
+                 {{\"type\":\"message\",\"id\":\"user-1\",\"message\":{{\"role\":\"user\",\"content\":\"Inspect the UUID workspace\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        // Sidecars must not surface as sessions.
+        std::fs::write(
+            root.join(format!("{id}.checkpoints.jsonl")),
+            r#"{"id":"4f729f43-46ed-4721-a885-3f16f26bff5f","turnNumber":1,"createdAt":"2026-09-02T19:53:40.567Z"}"#,
+        )
+        .unwrap();
+
+        let discovered = discover_commandcode_sessions_in(
+            Some(root.as_path()),
+            "/Users/adam/src/buildmesh",
+            &std::collections::HashSet::new(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].session_id, id);
+        assert_eq!(discovered[0].first_message, "Inspect the UUID workspace");
     }
 
     // --- AGY discovery (issue #1284) -----------------------------------

@@ -129,13 +129,44 @@ pub(crate) fn codex_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<
     }
 }
 
-/// The host-accessible Command Code session directory for an agent environment.
-pub(crate) fn commandcode_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+/// Encode a filesystem path the way Command Code does for its
+/// `~/.commandcode/projects/<slug>` directory names: lowercase, replace every
+/// non-alphanumeric character with `-`, collapse consecutive `-` runs, and
+/// trim leading/trailing `-`.
+///
+/// For example `F:\src\buildmesh\.claude\worktrees\foo` becomes
+/// `f-src-buildmesh-claude-worktrees-foo`, and `/home/user/project` becomes
+/// `home-user-project` (leading `/` collapses then trims). This matches the
+/// on-disk layout observed in Command Code v1.43.0
+/// (`~/.commandcode/projects/f-src-buildmesh-claude-worktrees-<name>/<uuid>.jsonl`)
+/// and the `c-users-user` / `home-...` slugs reported upstream.
+pub(crate) fn commandcode_project_slug(path: &str) -> String {
+    let lower = path.to_lowercase();
+    let mut slug = String::with_capacity(lower.len());
+    let mut last_was_dash = false;
+    for c in lower.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+            last_was_dash = false;
+        } else {
+            if !last_was_dash {
+                slug.push('-');
+            }
+            last_was_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// The host-accessible Command Code projects root for an agent environment
+/// (`<home>/.commandcode/projects`). WSL homes are converted to host-readable
+/// paths by the shared environment path module.
+pub(crate) fn commandcode_projects_dir(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     let home = super::environment::commandcode_dir_for_env(env_type, spawn_path)?;
     match env_type {
-        EnvType::Windows => Some(home.join("sessions")),
+        EnvType::Windows => Some(home.join("projects")),
         EnvType::Wsl => Some(
-            PathBuf::from(to_host_path(&home.to_string_lossy())).join("sessions"),
+            PathBuf::from(to_host_path(&home.to_string_lossy())).join("projects"),
         ),
     }
 }
@@ -152,6 +183,21 @@ pub(crate) fn agy_brain_dir_for_env(env_type: EnvType, spawn_path: &str) -> Opti
             PathBuf::from(to_host_path(&home.to_string_lossy())).join("brain"),
         ),
     }
+}
+
+/// The host-accessible Command Code session directory for an agent environment.
+///
+/// Command Code (v1.43.0) writes project sessions to
+/// `<home>/.commandcode/projects/<encoded-cwd>/<uuid>.jsonl` — not
+/// `<home>/.commandcode/sessions/`. The `<encoded-cwd>` slug follows
+/// [`commandcode_project_slug`].
+pub(crate) fn commandcode_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    let projects = commandcode_projects_dir(env_type, spawn_path)?;
+    let slug = commandcode_project_slug(spawn_path);
+    if slug.is_empty() {
+        return None;
+    }
+    Some(projects.join(slug))
 }
 
 /// Compare CLI-recorded working directories across Windows, WSL, and native
@@ -354,4 +400,61 @@ pub fn active_node_branches(nodes: &[AgentNode]) -> Vec<String> {
         .filter(|n| n.status != SessionStatus::Archived)
         .map(|n| n.branch.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commandcode_slug_matches_v143_layout() {
+        // Observed on-disk layout in Command Code v1.43.0 (issue #1500).
+        assert_eq!(
+            commandcode_project_slug(
+                r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove"
+            ),
+            "f-src-buildmesh-claude-worktrees-saucy-thunderous-cove"
+        );
+        assert_eq!(
+            commandcode_project_slug(
+                r"F:\src\buildmesh\.claude\worktrees\gh1377-mobile-mobile-companion-quick-action-triage"
+            ),
+            "f-src-buildmesh-claude-worktrees-gh1377-mobile-mobile-companion-quick-action-triage"
+        );
+        // Drive colon + separator collapse to a single dash.
+        assert_eq!(commandcode_project_slug(r"C:\Users\User"), "c-users-user");
+        // Leading slash trims (WSL `/home/...` has no leading dash on disk).
+        assert_eq!(
+            commandcode_project_slug("/home/user/project"),
+            "home-user-project"
+        );
+        // Double dashes in the worktree name collapse.
+        assert_eq!(
+            commandcode_project_slug(
+                r"F:\src\buildmesh\.claude\worktrees\gh1376-ui-design-system--surface-elevation-typogra"
+            ),
+            "f-src-buildmesh-claude-worktrees-gh1376-ui-design-system-surface-elevation-typogra"
+        );
+        assert_eq!(commandcode_project_slug(""), "");
+    }
+
+    #[test]
+    fn commandcode_sessions_dir_resolves_under_projects() {
+        let dir = commandcode_sessions_dir(
+            EnvType::Windows,
+            r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove",
+        )
+        .expect("windows sessions dir should resolve");
+        let dir_str = dir.to_string_lossy().replace('\\', "/");
+        assert!(
+            dir_str.ends_with(
+                "projects/f-src-buildmesh-claude-worktrees-saucy-thunderous-cove"
+            ),
+            "sessions dir should be projects/<slug>, got {dir_str}"
+        );
+        assert!(
+            !dir_str.contains("sessions"),
+            "must not use the legacy sessions dir, got {dir_str}"
+        );
+    }
 }

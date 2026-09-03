@@ -11,8 +11,9 @@
 //! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
 //! #885), Antigravity's per-conversation JSONL, Grok Code's
 //! `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl, updates.jsonl}`
-//! (issue #1281), and Command Code's `~/.commandcode/sessions/<session>.jsonl`
-//! (issue #1407). All map onto the same [`Turn`]/[`ToolCall`] wire shape, so
+//! (issue #1281), and Command Code's
+//! `~/.commandcode/projects/<encoded-cwd>/<session>.jsonl` (issues #1407,
+//! #1500). All map onto the same [`Turn`]/[`ToolCall`] wire shape, so
 //! the Coordinator never learns which harness wrote the file.
 //!
 //! **All transcript-format brittleness is quarantined here.** Both this reader
@@ -63,7 +64,7 @@ pub enum TranscriptFormat {
     Cursor,
     Codex,
     /// Command Code writes one structured message event per JSONL line under
-    /// `~/.commandcode/sessions/<session-id>.jsonl`.
+    /// `~/.commandcode/projects/<encoded-cwd>/<session-id>.jsonl` (issue #1500).
     CommandCode,
     /// Antigravity CLI (issue #1283). Persisted at
     /// `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
@@ -347,10 +348,11 @@ pub(crate) fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<Path
     None
 }
 
-/// Find the flat Command Code session transcript for the node's runtime
+/// Find the Command Code session transcript for the node's runtime
 /// environment. Command Code stores one file per session under
-/// `<commandcode-home>/sessions/<session-id>.jsonl`; WSL homes are converted to
-/// host-readable paths by the shared environment path module.
+/// `<commandcode-home>/projects/<encoded-cwd>/<session-id>.jsonl` (issue
+/// #1500); WSL homes are converted to host-readable paths by the shared
+/// environment path module.
 fn find_commandcode_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
     let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
     let sessions_dir = env::commandcode_sessions_dir(env_type, node_path)?;
@@ -2247,13 +2249,19 @@ mod tests {
 
     #[test]
     fn commandcode_transcript_path_uses_session_id_under_sessions_root() {
+        // Issue #1500: the sessions root is the per-project
+        // `projects/<encoded-cwd>/` dir; the pure locator just joins the id.
         let path = commandcode_transcript_path_in(
-            Path::new(r"C:\Users\adam\.commandcode\sessions"),
-            "sess-commandcode-123",
+            Path::new(
+                r"C:\Users\adam\.commandcode\projects\f-src-buildmesh-claude-worktrees-saucy-thunderous-cove",
+            ),
+            "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9",
         );
         assert_eq!(
             path,
-            PathBuf::from(r"C:\Users\adam\.commandcode\sessions\sess-commandcode-123.jsonl")
+            PathBuf::from(
+                r"C:\Users\adam\.commandcode\projects\f-src-buildmesh-claude-worktrees-saucy-thunderous-cove\3fadada6-e0a3-44a2-ab68-ce1ecf7207a9.jsonl"
+            )
         );
     }
 
