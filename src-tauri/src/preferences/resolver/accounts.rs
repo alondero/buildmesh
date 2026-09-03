@@ -18,8 +18,13 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
             return default_provider_accounts();
         }
     };
+    let legacy_minimax_key = prefs
+        .minimax_api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .map(str::to_string);
     let merged = merge_provider_accounts(default_provider_accounts(), prefs.provider_accounts.clone());
-    let (migrated, changed) = migrate_kimi_companion(merged);
+    let (mut migrated, changed) = migrate_kimi_companion(merged);
     // One-shot persistence: if a PR #1044 `kimi-via-claude` row was carried
     // over to the first-class `kimi` row, write the cleaned list back so the
     // stale row stops haunting subsequent reads. Subsequent reads see no
@@ -28,6 +33,16 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
         prefs.provider_accounts = migrated.clone();
         if let Err(e) = save(prefs) {
             tracing::warn!("preferences::provider_accounts migration save failed: {}", e);
+        }
+    }
+    // Fold the deprecated MiniMax field into the effective in-memory account
+    // snapshot without persisting it as a second account-level copy. Usage
+    // polling can now resolve every keyed provider from this one snapshot.
+    if let Some(legacy_key) = legacy_minimax_key {
+        if let Some(minimax) = migrated.iter_mut().find(|account| account.id == "minimax") {
+            if minimax.api_key.as_deref().is_none_or(str::is_empty) {
+                minimax.api_key = Some(legacy_key);
+            }
         }
     }
     migrated
@@ -99,59 +114,6 @@ pub fn minimax_api_key_resolved() -> Option<String> {
         .find(|a| a.id == "minimax")
         .and_then(|a| a.api_key);
     non_empty(from_account).or_else(|| non_empty(prefs.minimax_api_key))
-}
-
-/// Resolve the effective Kimi API key from the merged provider-accounts list.
-/// Kimi has no legacy flat field (unlike MiniMax's `minimax_api_key`) so this
-/// is a straight lookup, but lives here as the single seam so a future legacy
-/// fallback (e.g. a pre-config.json migration) can be added in one place
-/// without touching `commands::usage::cached_or_fetch`. Empty strings are
-/// treated as absent.
-pub fn kimi_api_key_resolved() -> Option<String> {
-    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
-        .into_iter()
-        .find(|a| a.id == "kimi")
-        .and_then(|a| a.api_key)
-        .filter(|v| !v.is_empty())
-}
-
-/// Resolve the effective OpenRouter API key from the merged provider-accounts
-/// list. Brand-new id (post-#570 land) — no legacy flat field, identical
-/// lookup shape to [`kimi_api_key_resolved`] but kept as a separate symbol so
-/// each provider's single seam stays explicit.
-pub fn openrouter_api_key_resolved() -> Option<String> {
-    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
-        .into_iter()
-        .find(|a| a.id == "openrouter")
-        .and_then(|a| a.api_key)
-        .filter(|v| !v.is_empty())
-}
-
-/// Resolve the effective OpenAI Platform API key from the merged provider-
-/// accounts list (issue #1109, ADR-0026). New keyed id — no legacy flat
-/// field; identical lookup shape to [`kimi_api_key_resolved`] but kept
-/// separate so the future legacy-fallback seam stays one symbol per
-/// provider. Empty strings collapse to `None` so a half-cleared config
-/// doesn't surface as a logged-out row.
-pub fn openai_api_key_resolved() -> Option<String> {
-    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
-        .into_iter()
-        .find(|a| a.id == "openai")
-        .and_then(|a| a.api_key)
-        .filter(|v| !v.is_empty())
-}
-
-/// Resolve the effective DeepSeek API key from the merged provider-accounts
-/// list (issue #1127). Brand-new keyed id — no legacy flat field; identical
-/// lookup shape to [`openai_api_key_resolved`] so each provider's single seam
-/// stays explicit. Empty strings collapse to `None` so a half-cleared config
-/// doesn't surface as a logged-out row in the Usage panel.
-pub fn deepseek_api_key_resolved() -> Option<String> {
-    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
-        .into_iter()
-        .find(|a| a.id == "deepseek")
-        .and_then(|a| a.api_key)
-        .filter(|v| !v.is_empty())
 }
 
 /// Upsert a provider account into `prefs` (by `id`). Pure: mutates the passed

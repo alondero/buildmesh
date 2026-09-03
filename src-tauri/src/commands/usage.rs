@@ -3,49 +3,8 @@
 use crate::preferences::{self, HarnessProfile, ProviderAccount};
 use crate::services::usage::{self, ProviderMeters, ProviderUsage};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tauri::command;
-
-/// Provider ids Buildmesh can actually fetch usage for. A visible account whose
-/// id isn't here — a **Generic Model Provider** (custom endpoint) — is
-/// configurable but has no usage endpoint, so it renders an explicit "usage not
-/// tracked" state instead.
-///
-/// `openai` joins the keyed tracked set per issue #1109 / ADR-0026: the
-/// Organization Costs API is admin-scoped, so a `sk-proj-…` key degrades
-/// gracefully (logged-in, detail explains) rather than failing the row.
-/// `deepseek` joins in issue #1127 — its `/user/balance` endpoint is keyed
-/// (user-supplied DeepSeek API key), PayAsYouGo, and returns a
-/// `BillingBalance` (no usage windows). The no-credential gate in
-/// [`assemble_meters`] drops the row until the user stores a key, matching
-/// the user contract for keyed providers.
-const FETCHABLE: [&str; 13] = [
-    "anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "commandcode", "openai", "deepseek", "freebuff",
-];
-
-/// Map a self-authenticating **native** provider account to the harness whose
-/// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
-/// id `anthropic`), `codex`↔Codex, `cursor`↔Cursor, `agy`↔Antigravity, `opencode`↔OpenCode. A keyed provider
-/// (MiniMax/Kimi/OpenRouter/custom Claude-compatible) returns `None` — it's
-/// gated on the user enabling it, not on a detected binary. The Kimi Code CLI
-/// Agent Harness itself is registered separately in `HarnessProfile` /
-/// `Provider::Kimi` / `KIMI` adapter; the `kimi` row here is the
-/// First-class Model Provider for the Moonshot Kimi LLM endpoint.
-fn native_harness_for(account_id: &str) -> Option<&'static str> {
-    match account_id {
-        "anthropic" => Some("anthropic"),
-        "codex" => Some("codex"),
-        "cursor" => Some("cursor"),
-        "agy" => Some("agy"),
-        "grok" => Some("grok"),
-        "opencode" => Some("opencode"),
-        "commandcode" => Some("commandcode"),
-        // Freebuff self-authenticates via `~/.config/manicode/credentials.json`
-        // (issue #1438). Its native Agent Harness carries the same id, so the
-        // usage card follows the standard detection-gated native path.
-        "freebuff" => Some("freebuff"),
-        _ => None,
-    }
-}
 
 /// Whether a harness backing `harness_id` was detected on the host. Startup
 /// detection appends one [`HarnessProfile`] per installed tool with its legacy
@@ -71,7 +30,7 @@ fn harness_detected(harness_id: &str, profiles: &[HarnessProfile]) -> bool {
 /// it back on — `enabled` gates polling (see [`poll_ids`]), not the card. Pure
 /// (no disk/network) so it's the unit-test seam.
 fn account_visible(account: &ProviderAccount, profiles: &[HarnessProfile]) -> bool {
-    match native_harness_for(&account.id) {
+    match usage::catalog::native_harness(&account.id) {
         Some(harness) => harness_detected(harness, profiles),
         None => true,
     }
@@ -80,7 +39,7 @@ fn account_visible(account: &ProviderAccount, profiles: &[HarnessProfile]) -> bo
 /// Whether Buildmesh ships a usage fetcher for this provider id. `false` for a
 /// **Generic Model Provider** — surfaces as "usage not tracked".
 fn usage_tracked(account_id: &str) -> bool {
-    FETCHABLE.contains(&account_id)
+    usage::catalog::contains(account_id)
 }
 
 /// The provider ids to actually poll: enabled, visible accounts whose usage
@@ -96,48 +55,12 @@ fn poll_ids(accounts: &[ProviderAccount], profiles: &[HarnessProfile]) -> Vec<St
         .collect()
 }
 
-/// The keyed provider ids that have a non-empty resolved API key configured
-/// (account-level, with the legacy `prefs.minimax_api_key` fallback for
-/// MiniMax). Read once per `get_provider_meters` call and threaded into
+/// The keyed first-class provider ids that have a non-empty resolved API key.
+/// Read once per `get_provider_meters` call and threaded into
 /// [`assemble_meters`] so the gate can distinguish "credential configured"
-/// (keep the row, even if the API rejected the key) from "no credential at
-/// all" (drop the row). Reading the legacy fields and `*_api_key_resolved()`
-/// helpers here keeps `assemble_meters` pure for unit tests — callers pass
-/// the resolved set in.
+/// from "credential rejected" while keeping assembly pure for unit tests.
 fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
-    let mut configured = HashSet::new();
-    let has_key = |id: &str| -> bool {
-        match id {
-            "minimax" => preferences::minimax_api_key_resolved().is_some_and(|k| !k.is_empty()),
-            "kimi" => preferences::kimi_api_key_resolved().is_some_and(|k| !k.is_empty()),
-            "openrouter" => preferences::openrouter_api_key_resolved().is_some_and(|k| !k.is_empty()),
-            "openai" => preferences::openai_api_key_resolved().is_some_and(|k| !k.is_empty()),
-            // DeepSeek joins the keyed tracked set in issue #1127 — its
-            // `/user/balance` fetcher is keyed (no legacy flat field).
-            "deepseek" => preferences::deepseek_api_key_resolved().is_some_and(|k| !k.is_empty()),
-            // Custom (Generic) Claude-compatible providers store the key on
-            // the account itself — no legacy flat field.
-            other => accounts
-                .iter()
-                .find(|a| a.id == other)
-                .and_then(|a| a.api_key.as_deref())
-                .is_some_and(|k| !k.is_empty()),
-        }
-    };
-    for id in ["minimax", "kimi", "openrouter", "openai", "deepseek"] {
-        if has_key(id) {
-            configured.insert(id.to_string());
-        }
-    }
-    // Custom Generic providers keyed on the api_key field.
-    for account in accounts {
-        if !FETCHABLE.contains(&account.id.as_str())
-            && account.api_key.as_deref().is_some_and(|k| !k.is_empty())
-        {
-            configured.insert(account.id.clone());
-        }
-    }
-    configured
+    usage::catalog::configured_keyed_provider_ids(accounts)
 }
 
 /// Build the Providers-page rows from the gated account set and a map of
@@ -232,77 +155,6 @@ fn assemble_meters(
         .collect()
 }
 
-/// Fetches a single provider's usage, serving a fresh cache entry unless
-/// `force_refresh` is set, and caching whatever it fetches.
-fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
-    if !force_refresh {
-        if let Some(cached) = usage::get_cached_usage(provider) {
-            return cached;
-        }
-    }
-
-    let result = match provider {
-        "anthropic" => usage::anthropic_usage(),
-        "codex" => usage::codex_usage(),
-        "cursor" => usage::cursor_usage(),
-        // `minimax_api_key_resolved` already reads the account key then the legacy
-        // flat field, so it's the single source of truth here.
-        "minimax" => usage::minimax_usage(
-            preferences::minimax_api_key_resolved().as_deref().unwrap_or(""),
-        ),
-        "agy" => usage::agy_usage(),
-        // Kimi has no legacy flat field today, but resolving through
-        // `kimi_api_key_resolved()` mirrors `minimax_api_key_resolved()` so a
-        // future legacy fallback lands in preferences.rs (single seam) rather
-        // than this dispatch file. Empty string lets `kimi_usage` surface its
-        // own "No API key configured" message.
-        "kimi" => usage::kimi_usage(
-            preferences::kimi_api_key_resolved()
-                .as_deref()
-                .unwrap_or(""),
-        ),
-        // OpenRouter — identical seam pattern: account key only, no legacy flat
-        // field. Empty string lets `openrouter_usage` surface its own "No API
-        // key configured" message and renders as `usage_tracked` with a logged-
-        // out card until the user adds a key.
-        "openrouter" => usage::openrouter_usage(
-            preferences::openrouter_api_key_resolved()
-                .as_deref()
-                .unwrap_or(""),
-        ),
-        "grok" => usage::grok_usage(),
-        "opencode" => usage::opencode_usage(),
-        "commandcode" => usage::commandcode_usage(),
-        // Freebuff self-authenticates via CLI-managed credentials.json
-        // (issue #1438); no key resolution is needed.
-        "freebuff" => usage::freebuff_usage(),
-        // OpenAI — keyed, no legacy flat field. Empty string lets
-        // `openai_usage` surface its own "No API key configured" message
-        // (mirrors Kimi/OpenRouter). The configured-key gate in
-        // `assemble_meters` then drops the row so a fresh user doesn't see a
-        // "Not logged in" card before they've added a key.
-        "openai" => usage::openai_usage(
-            preferences::openai_api_key_resolved()
-                .as_deref()
-                .unwrap_or(""),
-        ),
-        // DeepSeek — keyed, no legacy flat field. Mirrors Kimi/OpenRouter:
-        // empty string lets `deepseek_usage` surface its own "No API key
-        // configured" message and renders as `usage_tracked` with a
-        // logged-out card until the user adds a key. The balance endpoint
-        // is queried through `usage::deepseek_usage` (issue #1127).
-        "deepseek" => usage::deepseek_usage(
-            preferences::deepseek_api_key_resolved()
-                .as_deref()
-                .unwrap_or(""),
-        ),
-        other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
-    };
-
-    usage::set_cached_usage(provider, result.clone());
-    result
-}
-
 /// Returns the detection-gated Providers-page rows: one [`ProviderMeters`] per
 /// provider relevant to this host (issue #574). Native subscription meters appear
 /// only for installed harnesses; keyed providers only when enabled; Generic
@@ -312,11 +164,10 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
     let (profiles, accounts, ids, configured_keys) =
         crate::commands::run_blocking("get_provider_meters_ids", || {
             let profiles = preferences::harness_profiles();
-            let accounts = preferences::provider_accounts();
+            let accounts = Arc::new(preferences::provider_accounts());
             let ids = poll_ids(&accounts, &profiles);
-            // Resolve once which keyed providers have a credential configured —
-            // threaded into the gate so a 401/403 from Kimi/OpenRouter doesn't
-            // silently hide the row (see `assemble_meters` docstring).
+            // Derive credential presence from the same effective account
+            // snapshot the fetch workers receive. No worker reloads preferences.
             let configured_keys = configured_keyed_providers(&accounts);
             Ok((profiles, accounts, ids, configured_keys))
         })
@@ -328,22 +179,31 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
     let handles: Vec<_> = ids
         .into_iter()
         .map(|id| {
+            let accounts = Arc::clone(&accounts);
             tauri::async_runtime::spawn_blocking(move || {
-                let usage = cached_or_fetch(&id, force_refresh);
-                (id, usage)
+                match usage::catalog::cached_or_fetch(&id, force_refresh, accounts.as_ref()) {
+                    Some(usage) => Ok((id, usage)),
+                    None => Err(format!("usage catalog lost registered provider: {id}")),
+                }
             })
         })
         .collect();
 
     let mut usages: HashMap<String, ProviderUsage> = HashMap::new();
     for handle in handles {
-        let (id, usage) = handle
+        let result = handle
             .await
             .map_err(|e| format!("usage fetch task failed: {}", e))?;
+        let (id, usage) = result?;
         usages.insert(id, usage);
     }
 
-    Ok(assemble_meters(&accounts, &profiles, &usages, &configured_keys))
+    Ok(assemble_meters(
+        accounts.as_ref(),
+        &profiles,
+        &usages,
+        &configured_keys,
+    ))
 }
 
 #[command]
@@ -431,13 +291,10 @@ mod tests {
     }
 
     #[test]
-    fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "cursor", "minimax", "agy", "kimi", "openrouter", "grok", "opencode", "commandcode", "openai", "deepseek", "freebuff"] {
-            assert!(usage_tracked(id), "{id} should be tracked");
-        }
-        // Any Generic provider is untracked.
-        let id = "glm";
-        assert!(!usage_tracked(id), "{id} should not be tracked");
+    fn usage_tracked_recognizes_registered_kinds_and_rejects_generic_provider() {
+        assert!(usage_tracked("anthropic"), "representative native meter");
+        assert!(usage_tracked("minimax"), "representative keyed meter");
+        assert!(!usage_tracked("glm"), "unregistered Generic provider");
     }
 
     #[test]
@@ -479,7 +336,7 @@ mod tests {
         let claude = vec![profile("claude", "anthropic")];
         let accounts = vec![
             account("anthropic", true),
-            account("codex", true),    // undetected harness → excluded entirely (AC1)
+            account("codex", true), // undetected harness → excluded entirely (AC1)
             account("minimax", true),
             // A *true* Generic provider (custom id, no first-class fetcher)
             // — included with `usage_tracked = false` (AC4). `glm` stands in
@@ -527,7 +384,10 @@ mod tests {
         // Usage follows the credential, not the harness pairing (AC3): the same
         // Anthropic account reachable via two harness profiles still yields a
         // single row — there's one account, so it's counted once.
-        let profiles = vec![profile("claude", "anthropic"), profile("claude-alt", "anthropic")];
+        let profiles = vec![
+            profile("claude", "anthropic"),
+            profile("claude-alt", "anthropic"),
+        ];
         let accounts = vec![account("anthropic", true)];
         // The no-credential gate now requires a logged-in usage entry for
         // the row to surface; an empty usages map would drop it (matching

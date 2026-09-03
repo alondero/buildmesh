@@ -3,6 +3,8 @@
 //! Endpoints are undocumented / reverse-engineered; treat non-200 responses or
 //! shape mismatches as "usage unavailable", never as hard errors.
 
+pub(crate) mod catalog;
+
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 // `Datelike` powers the month-start computation in
@@ -1012,9 +1014,8 @@ fn current_month_start_epoch() -> i64 {
     month_start.and_utc().timestamp().max(0)
 }
 
-/// Public OpenAI fetcher. Wired into `commands::usage::cached_or_fetch` so
-/// the keyed-provider panel polls it on the same cadence as the other keyed
-/// fetchers.
+/// Public OpenAI fetcher. Registered in [`catalog`] so the keyed-provider
+/// panel polls it on the same cadence as the other keyed fetchers.
 pub fn openai_usage(api_key: &str) -> ProviderUsage {
     openai_usage_with_base_url(api_key, "https://api.openai.com/v1")
 }
@@ -1343,9 +1344,8 @@ fn parse_deepseek_response(body: &str) -> Result<BillingBalance, UsageError> {
 
 /// Public DeepSeek fetcher. Reads the user's DeepSeek API key from the
 /// provider account, hits `https://api.deepseek.com/user/balance`, and
-/// reports the wire contract. Wired into
-/// `commands::usage::cached_or_fetch` so the keyed-provider panel polls it
-/// on the same cadence as Kimi / OpenRouter. Thin wrapper around
+/// reports the wire contract. Registered in [`catalog`] so the keyed-provider
+/// panel polls it on the same cadence as Kimi / OpenRouter. Thin wrapper around
 /// [`deepseek_usage_with_url`] with the production endpoint pinned — the
 /// test seam keeps the loopback HTTP integration tests (issue #971
 /// pattern) runnable without hitting the real DeepSeek API.
@@ -3073,13 +3073,10 @@ pub fn cursor_usage_with_sources(
 // Freebuff (`freebuff`) implementation lives in `services::freebuff_usage`
 // (issue #1438 review). The Freebuff code sits in its own top-level service
 // module to keep this 6,200-line god-file from growing further; the public
-// fetcher is re-exported below so the existing call site
-// (`commands::usage.rs`, `cached_or_fetch`) does not need to learn the new
-// module path.
+// fetcher is re-exported below so the sibling usage catalog does not need to
+// learn the top-level service module path.
 //
-// Detection-gating wiring lives in `commands/usage.rs`
-// (`native_harness_for("freebuff") = Some("freebuff")` + the new
-// `FETCHABLE` arm).
+// Detection-gating and dispatch wiring live in `services::usage::catalog`.
 pub use crate::services::freebuff_usage::freebuff_usage;
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
@@ -3117,8 +3114,8 @@ pub fn get_cached_usage(provider: &str) -> Option<ProviderUsage> {
 //      call"; `Some(_)` means "served from the in-process cache at that instant".
 //   2. Change this function's signature to also expose the cache instant, e.g.
 //      `Option<(ProviderUsage, Instant)>`, so callers can stamp `cached_at`.
-//   3. Have [`commands::usage::cached_or_fetch`] (commands/usage.rs:205) thread
-//      the Optional instant through to `assemble_meters`, which sets
+//   3. Have [`catalog::cached_or_fetch`] thread the Optional instant through
+//      the command's `assemble_meters`, which sets
 //      `cached_at` per row in the returned [`ProviderMeters`].
 //   4. Run `cargo test` to regenerate `src/types/generated/ProviderMeters.ts`
 //      (the project's ts-rs gate; CLAUDE.md hard rule on wire-type drift).

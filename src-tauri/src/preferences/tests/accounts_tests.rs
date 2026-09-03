@@ -136,6 +136,31 @@ fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
 }
 
 #[test]
+fn provider_accounts_folds_legacy_minimax_key_into_effective_snapshot() {
+    with_temp_dir(|_| {
+        super::super::storage::update(|prefs| {
+            prefs.minimax_api_key = Some("legacy".to_string());
+            prefs.provider_accounts.push(ProviderAccount {
+                id: "minimax".to_string(),
+                name: "MiniMax".to_string(),
+                enabled: true,
+                billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: None,
+            });
+        })
+        .unwrap();
+
+        let accounts = crate::preferences::provider_accounts();
+        let minimax = accounts
+            .iter()
+            .find(|account| account.id == "minimax")
+            .expect("materialized MiniMax account");
+        assert_eq!(minimax.api_key.as_deref(), Some("legacy"));
+    });
+}
+
+#[test]
 fn upsert_account_stores_it_without_a_paired_profile() {
     let mut prefs = AppPreferences::default();
     crate::preferences::upsert_provider_account(

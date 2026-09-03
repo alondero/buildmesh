@@ -56,12 +56,11 @@ pub(crate) use storage::ensure_default_provider_normalized;
 
 #[allow(unused_imports)]
 pub use resolver::{
-    compatible_providers_for_harness, deepseek_api_key_resolved, default_harness_profiles,
-    default_provider_accounts, effective_provider_pairings, endpoint_model_descriptor,
-    first_class_surfaces, harness_capabilities_for, harness_order, harness_profiles,
-    harness_surface, is_claude_compatible_id, is_known_harness_id, kimi_api_key_resolved,
-    keyed_first_class_catalog, merge_detected_profiles, minimax_api_key_resolved,
-    openai_api_key_resolved, openrouter_api_key_resolved, pairing_compatibility, pairing_for,
+    compatible_providers_for_harness, default_harness_profiles, default_provider_accounts,
+    effective_provider_pairings, endpoint_model_descriptor, first_class_surfaces,
+    harness_capabilities_for, harness_order, harness_profiles, harness_surface,
+    is_claude_compatible_id, is_known_harness_id, keyed_first_class_catalog,
+    merge_detected_profiles, minimax_api_key_resolved, pairing_compatibility, pairing_for,
     provider_accounts, provider_pairings, provider_surfaces, proxied_order_for,
     proxied_provider_order, remove_provider_account, remove_provider_pairing,
     resolve_default_provider, resolve_harness_provider, resolve_stored_pairing_and_account,

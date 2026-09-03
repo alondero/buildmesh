@@ -42,13 +42,14 @@ rows in `BUILTIN_PROVIDER_ACCOUNTS` — they live in
 rows only (ADR-0025: no auto-derived Claude pairing on key alone). Endpoint
 URL + model tiers live on the pairing (Harnesses page), not the account.
 
-**The two registries are independent.** The brand string may coincide across
+**The registries are independent.** The brand string may coincide across
 namespaces, but each registry is the single source of its own kind:
 
 | Registry | What it carries | Example for Kimi |
 |---|---|---|
-| `BUILTIN_PROVIDER_ACCOUNTS` (`src-tauri/src/preferences.rs`) | One row per credential/billing identity. Self-auth rows always appear via `default_provider_accounts`; keyed first-class (`self_auth: false`) are catalog-only until added (`keyed_first_class_catalog`) — credentials + Usage Meter only. | `id: "kimi", self_auth: false` (endpoint on pairing / `first_class_surfaces`) |
+| `BUILTIN_PROVIDER_ACCOUNTS` (`src-tauri/src/preferences/resolver/catalog.rs`) | One row per credential/billing identity. Self-auth rows always appear via `default_provider_accounts`; keyed first-class (`self_auth: false`) are catalog-only until added (`keyed_first_class_catalog`) — credentials + Usage Meter only. | `id: "kimi", self_auth: false` (endpoint on pairing / `first_class_surfaces`) |
 | `HarnessProfile` + `Provider::Kimi` enum variant + `KIMI` adapter | The Kimi Code CLI Agent Harness — uses `~/.kimi/config.toml` for its own auth; Buildmesh doesn't manage the credential. | `HarnessProfile { id: "kimi", harness: "kimi", binaries: &["kimi"] }` + `KimiAdapter` |
+| `src-tauri/src/services/usage/catalog.rs` | One row per fetchable Usage Meter: provider id, native-harness visibility gate or account-key lookup, and fetch adapter. Add a meter here instead of creating parallel lists or dispatch matches in `commands/usage.rs`. | `UsageMeterDefinition::keyed("kimi", usage::kimi_usage)` |
 
 The string `"kimi"` appearing in both is fine because the namespaces are
 different (`ProviderAccount.id` vs `HarnessProfile.id` / `Provider` enum).
@@ -56,7 +57,7 @@ What is **never** fine is two rows in `BUILTIN_PROVIDER_ACCOUNTS` for the same
 credential — that produces two cards, two fetcher paths, and confusing UI.
 
 **Pinned by tests** (regression net):
-- `builtin_provider_accounts_have_no_via_substring_in_id` (`preferences.rs` tests) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
+- `builtin_provider_accounts_have_no_via_substring_in_id` (`src-tauri/src/preferences/tests/catalog_tests.rs`) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
 - `kimi_via_claude_id_does_not_exist_in_default_provider_accounts` — the literal dual-id bug.
 - `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — catalog + `first_class_surfaces` shape (not in defaults).
 - `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi` — one-time migration for users who picked up PR #1044.
