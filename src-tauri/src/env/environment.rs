@@ -377,10 +377,12 @@ pub fn agy_brain_dir() -> PathBuf {
 }
 
 /// The Antigravity CLI home for an agent environment, expressed in that
-/// environment's native path syntax. Mirrors [`codex_dir_for_env`]: the WSL
-/// home is derived from the spawn path's `/home/<user>` prefix instead of
-/// launching a WSL shell (issue #1499 — the capture poller needs the brain
-/// dir for the node's own environment, not the host's `current_env()`).
+/// environment's native path syntax. Shaped like [`codex_dir_for_env`] but
+/// without its `USERNAME` fallback: the WSL home is derived solely from the
+/// spawn path's `/home/<user>` prefix (plus absolute-path overrides), since
+/// a Windows account name is not necessarily the distro username (issue
+/// #1499 review — the capture poller needs the brain dir for the node's own
+/// environment, not the host's `current_env()`, and never a guessed one).
 pub(crate) fn agy_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     match env_type {
         EnvType::Windows => Some(agy_dir()),
@@ -405,12 +407,12 @@ pub(crate) fn agy_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<Pat
                     );
                 }
             }
-            let user = env::var("USERNAME")
-                .ok()
-                .or_else(|| env::var("USER").ok())?;
-            Some(PathBuf::from(format!(
-                "/home/{user}/.gemini/antigravity-cli"
-            )))
+            // No `USERNAME`/`USER` fallback: on a Windows host `USERNAME` is
+            // the Windows account name (possibly containing spaces), which is
+            // not necessarily the WSL distro username. Guessing produces a
+            // wrong user's brain directory; returning `None` skips capture
+            // cleanly (the `Stop`-hook path still rescues the session).
+            None
         }
     }
 }

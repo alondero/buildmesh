@@ -8,8 +8,8 @@
 #[cfg(test)]
 mod tests {
     use crate::db::{
-        agy_legacy_session_backfill_completed_inner, clear_cli_session_id_inner,
-        codex_legacy_session_backfill_completed_inner, mark_agy_legacy_session_backfill_completed_inner,
+        clear_cli_session_id_inner, cli_session_id_present_inner,
+        codex_legacy_session_backfill_completed_inner,
         mark_codex_legacy_session_backfill_completed_inner, update_agent_node_status_if_inner,
         update_agent_node_status_inner as update_unconditional_inner,
         update_agent_node_status_unless_in_inner,
@@ -94,15 +94,26 @@ mod tests {
         assert!(codex_legacy_session_backfill_completed_inner(&conn).unwrap());
     }
 
-    /// Issue #1499: the AGY one-time backfill flag round-trips independently
-    /// of the Codex flag so pre-fix suspended AGY rows are repaired exactly
-    /// once without re-scanning on every startup.
+    /// Issue #1499: the poller's lean presence check mirrors
+    /// `set_cli_session_id_if_missing_inner`'s write guard — NULL and empty
+    /// read as absent (a write would proceed), any stored id reads present.
     #[test]
-    fn agy_legacy_session_backfill_completion_is_persisted() {
+    fn cli_session_id_present_mirrors_conditional_write_guard() {
         let conn = conn_with_agent_nodes();
-        assert!(!agy_legacy_session_backfill_completed_inner(&conn).unwrap());
-        mark_agy_legacy_session_backfill_completed_inner(&conn).unwrap();
-        assert!(agy_legacy_session_backfill_completed_inner(&conn).unwrap());
+        let missing = insert_node(&conn, "idle");
+        assert!(!cli_session_id_present_inner(&conn, missing).unwrap());
+        conn.execute(
+            "UPDATE agent_nodes SET cli_session_id = '' WHERE id = ?1",
+            params![missing],
+        )
+        .unwrap();
+        assert!(!cli_session_id_present_inner(&conn, missing).unwrap());
+        conn.execute(
+            "UPDATE agent_nodes SET cli_session_id = '550e8400-e29b-41d4-a716-446655440000' WHERE id = ?1",
+            params![missing],
+        )
+        .unwrap();
+        assert!(cli_session_id_present_inner(&conn, missing).unwrap());
     }
 
     /// Happy path: when `expected` matches the current row status, the new

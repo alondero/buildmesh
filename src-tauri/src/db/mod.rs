@@ -3239,54 +3239,24 @@ pub(crate) fn mark_codex_legacy_session_backfill_completed_inner(
     Ok(())
 }
 
-const AGY_LEGACY_SESSION_BACKFILL_KEY: &str = "agy_legacy_session_backfill_v1";
-
-pub fn list_suspended_agy_nodes_without_cli_session_id() -> SqlResult<Vec<AgentNode>> {
+/// Lean existence check for a node's CLI session id (issue #1499). The
+/// capture pollers run this on every retry; selecting the full
+/// `AGENT_NODE_COLUMNS` projection plus an `AgentNode` allocation (as
+/// `get_agent_node_by_id` does) on a hot loop is wasteful. The predicate
+/// mirrors `set_cli_session_id_if_missing_inner`'s write guard exactly —
+/// present here means a conditional write would be a no-op there.
+pub fn cli_session_id_present(id: i64) -> SqlResult<bool> {
     let db = read_conn();
-    list_suspended_agy_nodes_without_cli_session_id_inner(&db)
+    cli_session_id_present_inner(&db, id)
 }
 
-pub(crate) fn list_suspended_agy_nodes_without_cli_session_id_inner(
-    conn: &Connection,
-) -> SqlResult<Vec<AgentNode>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {} FROM agent_nodes WHERE status = 'suspended' \
-         AND (cli_session_id IS NULL OR cli_session_id = '') \
-         AND (provider = 'agy' OR provider LIKE 'agy:%')",
-        AGENT_NODE_COLUMNS
-    ))?;
-    let rows = stmt.query_map([], map_agent_node_row)?;
-    rows.collect()
-}
-
-pub fn agy_legacy_session_backfill_completed() -> SqlResult<bool> {
-    let db = read_conn();
-    agy_legacy_session_backfill_completed_inner(&db)
-}
-
-pub(crate) fn agy_legacy_session_backfill_completed_inner(
-    conn: &Connection,
-) -> SqlResult<bool> {
+pub(crate) fn cli_session_id_present_inner(conn: &Connection, id: i64) -> SqlResult<bool> {
     conn.query_row(
-        "SELECT COUNT(*) FROM app_settings WHERE key = ?1",
-        params![AGY_LEGACY_SESSION_BACKFILL_KEY],
-        |row| row.get::<_, i64>(0).map(|count| count > 0),
+        "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE id = ?1 \
+         AND cli_session_id IS NOT NULL AND cli_session_id != '')",
+        params![id],
+        |row| row.get(0),
     )
-}
-
-pub fn mark_agy_legacy_session_backfill_completed() -> SqlResult<()> {
-    let db = write_conn();
-    mark_agy_legacy_session_backfill_completed_inner(&db)
-}
-
-pub(crate) fn mark_agy_legacy_session_backfill_completed_inner(
-    conn: &Connection,
-) -> SqlResult<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
-        params![AGY_LEGACY_SESSION_BACKFILL_KEY],
-    )?;
-    Ok(())
 }
 
 // --- Pending worktree removal queue ---

@@ -5,36 +5,72 @@
 //! <conversation-id>/.system_generated/logs/transcript.jsonl` (issue #1283).
 //! The interactive TUI does **not** print that UUID to stdout, so the PTY
 //! UUID regex in `session_capture` can never match it (issue #1499). After a
-//! fresh spawn we scan the brain directory for a conversation directory
-//! created in this spawn's time window whose transcript workspace matches the
-//! node's spawn path, then persist it with
-//! `db::set_cli_session_id_if_missing` so `auto_resume_agent_nodes` and manual
-//! "Resume" (`agy --conversation <uuid>`) keep working across app restarts.
+//! fresh spawn we scan the brain directory for the conversation this spawn
+//! minted, then persist it with `db::set_cli_session_id_if_missing` so
+//! `auto_resume_agent_nodes` and manual "Resume"
+//! (`agy --conversation <uuid>`) keep working across app restarts.
 //!
-//! Matching both the Node Working Directory and the fresh spawn time prevents
-//! an older conversation being resumed by mistake. The `Stop` attention hook
-//! (`conversationId` extraction in `http/routes/attention.rs`) stays as a
-//! resilient secondary capture path.
+//! How a conversation is recognised as ours (all grounded in on-disk shapes
+//! observed in real transcripts, not assumed fields):
+//!
+//! - **Creation time, not mtime.** Step 0 carries `created_at` (the moment
+//!   the conversation started). A resumed or long-running conversation keeps
+//!   its original step-0 timestamp, so filtering on it — rather than the
+//!   transcript's modification time — means a freshly spawned node can never
+//!   steal the UUID of another active session that just wrote a step. mtime
+//!   is used only as a cheap prefilter before opening a file (creation can
+//!   never be newer than modification, so the gate cannot exclude a genuinely
+//!   fresh conversation) to avoid parsing hundreds of stale transcripts.
+//! - **Workspace anchor when provable.** Model steps carry
+//!   `tool_calls[].args.Cwd` (e.g. `"Cwd":"\"F:/src/repo\""` — note the
+//!   embedded quotes). When a candidate carries a `Cwd`, it must match the
+//!   node's spawn path or the candidate is excluded. Step 0 itself has no
+//!   `tool_calls`, so a transcript that has not made a tool call yet has an
+//!   *unknown* workspace and is judged on timing alone.
+//! - **Single-fresh binding.** A candidate created inside this spawn's time
+//!   window is bound only when it is the single viable candidate: an
+//!   anchored match wins outright, otherwise exactly one viable (anchored or
+//!   unknown) candidate binds. Two viable fresh conversations — two nodes
+//!   spawning at once, or the user running `agy` standalone — bind nothing;
+//!   the `Stop` attention hook (`conversationId` extraction in
+//!   `http/routes/attention.rs`) stays as the secondary capture path for
+//!   those cases.
+//!
+//! There is deliberately no historic backfill: without a tight spawn window
+//! no brain conversation can be proven to belong to a suspended node, and
+//! guessing risks cross-project session corruption. Pre-fix `NULL` rows stay
+//! suspended for the user to re-spawn.
 //!
 //! Select/match helpers are pure so the rules are unit-tested without a live
-//! `agy` binary. Filesystem scanning is tested against temp brain roots.
+//! `agy` binary. Filesystem scanning is tested against temp brain roots built
+//! with the real step shape (`step_index`/`source`/`type`/`status`/
+//! `created_at`/`content`/`tool_calls`).
 
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::models::EnvType;
 
 pub const CAPTURE_SKEW_MS: i64 = 2_000;
-const RETRY_DELAYS_MS: &[u64] = &[500, 1_000, 2_000, 4_000, 6_000];
+const RETRY_DELAYS_MS: &[u64] = &[500, 1_000, 2_000, 4_000];
+/// Transcript lines scanned per candidate. Step 0 carries the creation
+/// timestamp and the first tool calls (with `Cwd`) appear within the opening
+/// steps; bounding the read keeps a huge resumed transcript from stalling the
+/// poller on every retry.
+const SCAN_LINE_BUDGET: usize = 25;
 
 /// One Antigravity conversation candidate found under the brain root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub id: String,
-    pub directory: String,
-    pub timestamp_ms: i64,
+    /// Step-0 `created_at` as epoch ms — the conversation's true start.
+    pub created_ms: i64,
+    /// Workspace from `tool_calls[].args.Cwd` when any scanned step carried
+    /// one; `None` means unknown (e.g. no tool call yet), not "matches
+    /// anywhere".
+    pub workspace: Option<String>,
 }
 
 /// Antigravity conversation IDs are UUIDs (the same UUID the `Stop` hook
@@ -44,62 +80,18 @@ pub fn is_agy_conversation_id(id: &str) -> bool {
     uuid::Uuid::parse_str(id).is_ok()
 }
 
-/// Resolve the transcript for a conversation dir: the token-efficient
-/// `transcript.jsonl` first, falling back to `transcript_full.jsonl` when the
-/// short variant is missing (issue #1283 shape, shared with
-/// `services::transcript_reader::agy_locator_in`).
-fn transcript_path_in(conv_dir: &Path) -> Option<PathBuf> {
-    let logs = conv_dir.join(".system_generated").join("logs");
-    let short = logs.join("transcript.jsonl");
-    if short.is_file() {
-        return Some(short);
-    }
-    let full = logs.join("transcript_full.jsonl");
-    if full.is_file() {
-        return Some(full);
-    }
-    None
-}
-
-/// Pull the workspace/cwd out of an AGY transcript step, trying the field
-/// names the CLI has been observed to use. Mirrors
-/// `services::agent_node_discovery::extract_agy_workspace_path` (same key
-/// order, same `metadata` nesting) so the poller and the archive scanner
-/// agree on "where the conversation started".
-fn extract_workspace_from_step(val: &serde_json::Value) -> Option<String> {
-    const KEYS: &[&str] = &[
-        "workspace_path",
-        "working_directory",
-        "cwd",
-        "workspace",
-        "project_path",
-    ];
-    for key in KEYS {
-        if let Some(s) = val.get(*key).and_then(|v| v.as_str()) {
-            if !s.trim().is_empty() {
-                return Some(s.to_string());
-            }
-        }
-    }
-    if let Some(meta) = val.get("metadata") {
-        for key in KEYS {
-            if let Some(s) = meta.get(*key).and_then(|v| v.as_str()) {
-                if !s.trim().is_empty() {
-                    return Some(s.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Read the workspace path from the first transcript step that carries one.
-/// Scans up to the first 50 non-empty lines — the workspace anchor is always
-/// in the opening steps; bounding the read keeps a huge resumed transcript
-/// from stalling the poller on every retry.
-pub fn read_workspace_from_transcript(path: &Path) -> Option<String> {
+/// Metadata read from a conversation transcript in a single bounded pass:
+/// the step-0 creation timestamp plus the first `tool_calls[].args.Cwd`
+/// workspace anchor, if any scanned step carried one.
+///
+/// Returns `None` when no scanned line yields a parsable creation timestamp —
+/// without proof of *when* the conversation started, freshness cannot be
+/// established and the candidate is skipped rather than guessed at.
+fn read_conversation_meta(path: &Path) -> Option<(i64, Option<String>)> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
+    let mut created_ms: Option<i64> = None;
+    let mut workspace: Option<String> = None;
     let mut scanned = 0usize;
     for line in reader.lines() {
         let Ok(line) = line else { continue };
@@ -107,18 +99,56 @@ pub fn read_workspace_from_transcript(path: &Path) -> Option<String> {
             continue;
         }
         scanned += 1;
-        if scanned > 50 {
+        if scanned > SCAN_LINE_BUDGET {
             break;
         }
         let val: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(workspace) = extract_workspace_from_step(&val) {
-            return Some(workspace);
+        if created_ms.is_none() {
+            created_ms = val
+                .get("created_at")
+                .or_else(|| val.get("timestamp"))
+                .and_then(|v| v.as_str())
+                .and_then(parse_rfc3339_ms);
+        }
+        if workspace.is_none() {
+            workspace = extract_cwd_anchor(&val);
+        }
+        if created_ms.is_some() && workspace.is_some() {
+            break;
+        }
+    }
+    created_ms.map(|ms| (ms, workspace))
+}
+
+/// Pull the workspace anchor out of a transcript step's tool calls. Observed
+/// on real transcripts as `tool_calls: [{name: "run_command", args:
+/// {Cwd: "\"F:/src/repo\"", ...}}]` — the value arrives wrapped in an extra
+/// layer of quotes, which is stripped here. Only the observed `Cwd` key (plus
+/// its lowercase variant) is read; anything else would be guessing at an
+/// undocumented schema.
+fn extract_cwd_anchor(val: &serde_json::Value) -> Option<String> {
+    let calls = val.get("tool_calls")?.as_array()?;
+    for call in calls {
+        let args = call.get("args")?;
+        for key in ["Cwd", "cwd"] {
+            if let Some(raw) = args.get(key).and_then(|v| v.as_str()) {
+                let cleaned = raw.trim().trim_matches('"').trim().to_string();
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
+                }
+            }
         }
     }
     None
+}
+
+fn parse_rfc3339_ms(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
 
 fn transcript_mtime_ms(path: &Path) -> Option<i64> {
@@ -131,67 +161,94 @@ fn transcript_mtime_ms(path: &Path) -> Option<i64> {
         .map(|d| d.as_millis() as i64)
 }
 
-/// Build a candidate from a conversation directory: the directory name is the
-/// conversation ID, the transcript supplies the workspace, and the transcript
-/// mtime is the freshness/order anchor. Returns `None` when the directory is
-/// not a conversation (non-UUID name, no transcript) so callers skip it.
-fn read_conversation_candidate(conv_dir: &Path, conv_id: &str) -> Option<Candidate> {
+/// Build a candidate from a conversation directory. Returns `None` for
+/// anything that cannot be proven fresh: non-UUID names, missing transcripts,
+/// transcripts untouched since before this spawn's window (cheap mtime gate —
+/// creation never postdates modification), and transcripts with no parsable
+/// creation timestamp.
+fn read_conversation_candidate(
+    brain_dir: &Path,
+    conv_dir: &Path,
+    conv_id: &str,
+    created_not_before_ms: i64,
+) -> Option<Candidate> {
     if !is_agy_conversation_id(conv_id) {
         return None;
     }
-    let transcript = transcript_path_in(conv_dir)?;
-    let mtime_ms = transcript_mtime_ms(&transcript)?;
-    // A transcript without a workspace anchor can't prove which node it
-    // belongs to — but the freshness window below is tight (spawn ± 2s
-    // skew + 13.5s poll), so an anchor-less transcript created in this
-    // spawn's window is still almost certainly ours. Record an empty
-    // directory so `select_id_for_directory` can accept it as a fallback
-    // when nothing with a matching workspace exists.
-    let directory = read_workspace_from_transcript(&transcript).unwrap_or_default();
+    // Shared with the transcript reader so the layout never drifts between
+    // the two (`transcript.jsonl` first, `transcript_full.jsonl` fallback).
+    let transcript =
+        crate::services::transcript_reader::agy_locator_in(brain_dir, conv_id)?;
+    debug_assert!(
+        transcript.starts_with(conv_dir),
+        "locator resolved outside the scanned conversation dir"
+    );
+    // Cheap gate first: a transcript last written before the spawn window
+    // necessarily started before it too, so it can be skipped without
+    // opening or parsing a single line.
+    if transcript_mtime_ms(&transcript)? < created_not_before_ms {
+        return None;
+    }
+    let (created_ms, workspace) = read_conversation_meta(&transcript)?;
+    if created_ms < created_not_before_ms {
+        return None;
+    }
     Some(Candidate {
         id: conv_id.to_string(),
-        directory,
-        timestamp_ms: mtime_ms,
+        created_ms,
+        workspace,
     })
 }
 
 /// Pick the conversation ID to store for a freshly spawned node.
 ///
-/// Only candidates created at or after `created_not_before_ms` are eligible.
-/// A candidate with a workspace anchor must match `spawn_directory`; a
-/// candidate without one (empty `directory`) is accepted as a fallback so a
-/// transcript shape that omits the workspace field doesn't permanently wedge
-/// capture — the tight time window is the safety net there. Prefers a
-/// workspace-matched candidate over an anchor-less one; newest wins within
-/// each tier. Never falls back to an older row outside the window.
+/// Candidates passed in must already be proven fresh (creation inside the
+/// spawn window). A candidate whose `Cwd` anchor provably belongs elsewhere
+/// is excluded. An anchored match for `spawn_directory` wins outright;
+/// otherwise binding requires exactly one viable candidate — two viable
+/// fresh conversations (a sibling spawn, a standalone `agy` run) bind
+/// nothing rather than risk cross-wiring sessions.
 pub fn select_id_for_directory<'a>(
     candidates: &'a [Candidate],
     spawn_directory: &str,
-    created_not_before_ms: i64,
 ) -> Option<&'a str> {
-    let fresh: Vec<&Candidate> = candidates
+    // A candidate with a non-empty, non-matching workspace provably belongs
+    // elsewhere and is excluded. Unknown workspaces stay viable.
+    let viable: Vec<&Candidate> = candidates
         .iter()
         .filter(|c| is_agy_conversation_id(&c.id))
-        .filter(|c| c.timestamp_ms >= created_not_before_ms)
+        .filter(|c| match &c.workspace {
+            Some(dir) if !dir.trim().is_empty() => {
+                crate::env::directories_match(dir, spawn_directory)
+            }
+            _ => true,
+        })
         .collect();
-    // Tier 1: workspace-anchored match (the precise case).
-    if let Some(best) = fresh
+    // A proven anchor for this directory wins outright — unless two different
+    // conversations both claim it, in which case nothing binds.
+    let claims: Vec<&Candidate> = viable
         .iter()
-        .filter(|c| !c.directory.trim().is_empty())
-        .filter(|c| crate::env::directories_match(&c.directory, spawn_directory))
-        .max_by_key(|c| c.timestamp_ms)
-    {
-        return Some(best.id.as_str());
+        .filter(|c| {
+            c.workspace
+                .as_deref()
+                .is_some_and(|dir| crate::env::directories_match(dir, spawn_directory))
+        })
+        .copied()
+        .collect();
+    if claims.len() == 1 {
+        return Some(claims[0].id.as_str());
     }
-    // Tier 2: anchor-less transcript created in this spawn's window.
-    fresh
-        .iter()
-        .filter(|c| c.directory.trim().is_empty())
-        .max_by_key(|c| c.timestamp_ms)
-        .map(|c| c.id.as_str())
+    if !claims.is_empty() {
+        return None;
+    }
+    // No proven anchor: bind only a single viable candidate.
+    if viable.len() == 1 {
+        return Some(viable[0].id.as_str());
+    }
+    None
 }
 
-fn collect_candidates(brain_dir: &Path) -> Vec<Candidate> {
+fn collect_candidates(brain_dir: &Path, created_not_before_ms: i64) -> Vec<Candidate> {
     let Ok(entries) = fs::read_dir(brain_dir) else {
         return Vec::new();
     };
@@ -202,16 +259,18 @@ fn collect_candidates(brain_dir: &Path) -> Vec<Candidate> {
             continue;
         }
         let conv_id = entry.file_name().to_string_lossy().to_string();
-        if let Some(candidate) = read_conversation_candidate(&conv_dir, &conv_id) {
+        if let Some(candidate) =
+            read_conversation_candidate(brain_dir, &conv_dir, &conv_id, created_not_before_ms)
+        {
             out.push(candidate);
         }
     }
     out
 }
 
-/// Scan `brain_dir` for the newest conversation created in this spawn's time
-/// window. Workspace-anchored matches win; anchor-less transcripts in the
-/// window are a fallback (see `select_id_for_directory`).
+/// Scan `brain_dir` for the conversation this spawn minted: proven fresh by
+/// step-0 creation time inside the spawn window, bound only when it is the
+/// single viable candidate (see `select_id_for_directory`).
 pub fn find_fresh_id_for_directory_in(
     brain_dir: &Path,
     spawn_directory: &str,
@@ -220,39 +279,8 @@ pub fn find_fresh_id_for_directory_in(
     if !brain_dir.is_dir() {
         return None;
     }
-    let candidates = collect_candidates(brain_dir);
-    select_id_for_directory(&candidates, spawn_directory, created_not_before_ms)
-        .map(str::to_string)
-}
-
-/// Find an unambiguous historic conversation for a suspended node. The caller
-/// only uses this to repair rows created before live capture existed;
-/// differing matching conversation IDs are intentionally left suspended for
-/// the user (mirrors `codex_session::find_unique_id_for_directory_in`).
-pub fn find_unique_id_for_directory_in(
-    brain_dir: &Path,
-    spawn_directory: &str,
-    created_not_before_ms: i64,
-) -> Option<String> {
-    if !brain_dir.is_dir() {
-        return None;
-    }
-    let candidates = collect_candidates(brain_dir);
-    let mut ids: Vec<String> = candidates
-        .iter()
-        .filter(|c| c.timestamp_ms >= created_not_before_ms)
-        .filter(|c| {
-            if c.directory.trim().is_empty() {
-                true
-            } else {
-                crate::env::directories_match(&c.directory, spawn_directory)
-            }
-        })
-        .map(|c| c.id.clone())
-        .collect();
-    ids.sort();
-    ids.dedup();
-    (ids.len() == 1).then(|| ids.pop().unwrap())
+    let candidates = collect_candidates(brain_dir, created_not_before_ms);
+    select_id_for_directory(&candidates, spawn_directory).map(str::to_string)
 }
 
 enum CaptureAttempt {
@@ -263,7 +291,9 @@ enum CaptureAttempt {
 
 /// Poll briefly for Antigravity's brain-directory conversation, then fill an
 /// otherwise empty `cli_session_id`. The hook path may win first; the DB
-/// predicate keeps this delayed fallback from overwriting it.
+/// predicate keeps this delayed fallback from overwriting it. Creation-time
+/// gating (not mtime) makes late retries safe: an old conversation that
+/// writes mid-poll can never look fresh.
 pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: EnvType) {
     let spawn_epoch_ms = chrono::Utc::now().timestamp_millis();
     tauri::async_runtime::spawn(async move {
@@ -286,7 +316,9 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             // retry needlessly thrashes the blocking pool and widens the race
             // window between finding a conversation and claiming the row.
             let captured = crate::blocking::run_blocking("agy_capture", move || {
-                if node_has_cli_session_id(node_id) {
+                if crate::db::cli_session_id_present(node_id)
+                    .map_err(|error| error.to_string())?
+                {
                     return Ok(CaptureAttempt::AlreadyStored);
                 }
                 let Some(id) =
@@ -328,184 +360,55 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
     });
 }
 
-fn node_has_cli_session_id(node_id: i64) -> bool {
-    crate::db::get_agent_node_by_id(node_id)
-        .ok()
-        .and_then(|node| node.cli_session_id)
-        .is_some_and(|id| !id.trim().is_empty())
-}
-
-/// Restore a missing pre-capture Antigravity identity for an existing
-/// suspended node. This only accepts a single matching conversation ID, so
-/// ambiguity remains visible and never causes a surprise resume.
-pub async fn backfill_suspended_node(
-    node_id: i64,
-    node_directory: String,
-    env_type: EnvType,
-    created_at_ms: i64,
-) -> bool {
-    let Some(brain_dir) = crate::env::agy_brain_dir_for_env(env_type, &node_directory)
-    else {
-        return false;
-    };
-    let not_before = created_at_ms.saturating_sub(CAPTURE_SKEW_MS);
-    let stored = crate::blocking::run_blocking("agy_backfill", move || {
-        let Some(id) =
-            find_unique_id_for_directory_in(&brain_dir, &node_directory, not_before)
-        else {
-            return Ok(None);
-        };
-        match crate::db::set_cli_session_id_if_missing(node_id, &id) {
-            Ok(true) => Ok(Some(id)),
-            Ok(false) => Ok(None),
-            Err(error) => Err(error.to_string()),
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        tracing::warn!("agy session capture: backfill failed for node {node_id}: {error}");
-        None
-    });
-    if let Some(id) = stored {
-        tracing::info!("agy session capture: backfilled {id} for suspended node {node_id}");
-        true
-    } else {
-        false
-    }
-}
-
-/// One-time recovery for rows created before Antigravity brain capture
-/// existed (issue #1499). Mirrors
-/// `codex_session::backfill_legacy_suspended_nodes_once`.
-pub async fn backfill_legacy_suspended_nodes_once() -> Result<(), String> {
-    let nodes = crate::blocking::run_blocking("agy_backfill_list_nodes", || {
-        if crate::db::agy_legacy_session_backfill_completed().map_err(|error| error.to_string())? {
-            return Ok(None);
-        }
-        crate::db::list_suspended_agy_nodes_without_cli_session_id()
-            .map(Some)
-            .map_err(|error| error.to_string())
-    })
-    .await?;
-    let Some(nodes) = nodes else {
-        return Ok(());
-    };
-    let mut inspected_all_sources = true;
-    for node in nodes {
-        let spawn_path = crate::env::node_working_path(&node).spawn_path;
-        if crate::env::agy_brain_dir_for_env(node.env, &spawn_path).is_none() {
-            inspected_all_sources = false;
-            continue;
-        }
-        let _ = backfill_suspended_node(
-            node.id,
-            spawn_path,
-            node.env,
-            node.created_at.timestamp_millis(),
-        )
-        .await;
-    }
-    if !inspected_all_sources {
-        return Ok(());
-    }
-    crate::db::mark_agy_legacy_session_backfill_completed().map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
 
-    fn cand(id: &str, dir: &str, timestamp_ms: i64) -> Candidate {
-        Candidate {
-            id: id.into(),
-            directory: dir.into(),
-            timestamp_ms,
-        }
-    }
-
     const UUID_A: &str = "550e8400-e29b-41d4-a716-446655440000";
     const UUID_B: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
-    #[test]
-    fn validates_agy_conversation_id_as_uuid() {
-        assert!(is_agy_conversation_id(UUID_A));
-        assert!(is_agy_conversation_id(UUID_B));
-        assert!(!is_agy_conversation_id("conv-aaaa-1111"));
-        assert!(!is_agy_conversation_id("sess_01j6xyz890"));
-        assert!(!is_agy_conversation_id(""));
-        assert!(!is_agy_conversation_id("not-a-uuid"));
+    fn cand(id: &str, created_ms: i64, workspace: Option<&str>) -> Candidate {
+        Candidate {
+            id: id.into(),
+            created_ms,
+            workspace: workspace.map(str::to_string),
+        }
     }
 
-    #[test]
-    fn select_prefers_workspace_match_over_anchor_less_fallback() {
-        let candidates = vec![
-            cand(UUID_A, "", 300),
-            cand(UUID_B, "/tmp/wt", 200),
-        ];
-        assert_eq!(
-            select_id_for_directory(&candidates, "/tmp/wt", 100),
-            Some(UUID_B)
-        );
+    /// Real step shape (see `tests/fixtures/agy_transcript.jsonl`): flat
+    /// keys, `created_at` on every step, tool `Cwd` with embedded quotes.
+    fn user_step(created_at: &str, content: &str) -> String {
+        serde_json::json!({
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "created_at": created_at,
+            "content": content,
+            "thinking": null,
+            "tool_calls": [],
+            "truncated_fields": [],
+        })
+        .to_string()
     }
 
-    #[test]
-    fn select_falls_back_to_anchor_less_transcript_in_window() {
-        // Older transcript shapes (or fixtures) omit the workspace field.
-        // A tight time window is the safety net — accept the newest
-        // anchor-less candidate rather than wedging capture at NULL.
-        let candidates = vec![cand(UUID_A, "", 200)];
-        assert_eq!(
-            select_id_for_directory(&candidates, "/tmp/wt", 100),
-            Some(UUID_A)
-        );
+    fn tool_step(created_at: &str, cwd: &str) -> String {
+        serde_json::json!({
+            "step_index": 3,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "created_at": created_at,
+            "tool_calls": [{
+                "name": "run_command",
+                "args": {"CommandLine": "ls", "Cwd": format!("\"{cwd}\"")},
+            }],
+        })
+        .to_string()
     }
 
-    #[test]
-    fn select_does_not_fall_back_to_historical_row_outside_window() {
-        let candidates = vec![cand(UUID_A, "/tmp/wt", 100)];
-        assert_eq!(
-            select_id_for_directory(&candidates, "/tmp/wt", 9_000_000_000_000),
-            None,
-            "empty time window must not bind a brand-new node to last week's session"
-        );
-        let anchor_less = vec![cand(UUID_A, "", 100)];
-        assert_eq!(
-            select_id_for_directory(&anchor_less, "/tmp/wt", 9_000_000_000_000),
-            None
-        );
-    }
-
-    #[test]
-    fn select_ignores_other_directories() {
-        let candidates = vec![cand(UUID_A, "/tmp/other", 200)];
-        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt", 100), None);
-    }
-
-    #[test]
-    fn select_rejects_non_uuid_ids() {
-        let candidates = vec![cand("conv-aaaa-1111", "/tmp/wt", 200)];
-        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt", 100), None);
-    }
-
-    #[test]
-    fn select_matches_windows_directory_slash_and_case() {
-        let candidates = vec![cand(
-            UUID_A,
-            r"F:\src\buildmesh\.claude\worktrees\agy-test",
-            200,
-        )];
-        assert_eq!(
-            select_id_for_directory(
-                &candidates,
-                "f:/src/buildmesh/.claude/worktrees/agy-test",
-                100
-            ),
-            Some(UUID_A)
-        );
-    }
-
-    fn write_conv(brain: &Path, conv_id: &str, body: &str) -> PathBuf {
+    fn write_conv(brain: &Path, conv_id: &str, body: &str) -> std::path::PathBuf {
         let logs = brain
             .join(conv_id)
             .join(".system_generated")
@@ -519,32 +422,149 @@ mod tests {
     }
 
     #[test]
-    fn finds_fresh_session_matching_worktree() {
-        let temp = tempfile::TempDir::new().unwrap();
-        write_conv(
-            temp.path(),
-            UUID_A,
-            r#"{"step_type":"USER_INPUT","text":"other","workspace_path":"/tmp/other","created_at":"2026-08-30T10:00:00Z"}"#,
-        );
-        write_conv(
-            temp.path(),
-            UUID_B,
-            r#"{"step_type":"USER_INPUT","text":"wanted","workspace_path":"/tmp/wt","created_at":"2026-08-30T10:00:01Z"}"#,
-        );
-        let found = find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 0);
-        assert_eq!(found, Some(UUID_B.to_string()));
+    fn validates_agy_conversation_id_as_uuid() {
+        assert!(is_agy_conversation_id(UUID_A));
+        assert!(is_agy_conversation_id(UUID_B));
+        assert!(!is_agy_conversation_id("conv-aaaa-1111"));
+        assert!(!is_agy_conversation_id("sess_01j6xyz890"));
+        assert!(!is_agy_conversation_id(""));
     }
 
     #[test]
-    fn ignores_conversation_from_before_this_fresh_spawn() {
+    fn single_fresh_candidate_binds_without_workspace_anchor() {
+        // Step 0 carries no tool_calls on a just-spawned session; timing
+        // alone binds it when nothing else is fresh.
+        let candidates = vec![cand(UUID_A, 200, None)];
+        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), Some(UUID_A));
+    }
+
+    #[test]
+    fn anchored_match_wins_over_unknown_candidate() {
+        let candidates = vec![
+            cand(UUID_A, 300, None),
+            cand(UUID_B, 200, Some("/tmp/wt")),
+        ];
+        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), Some(UUID_B));
+    }
+
+    #[test]
+    fn anchored_foreign_candidate_is_excluded_leaving_single_viable() {
+        // Proven to belong elsewhere; the remaining unknown candidate binds.
+        let candidates = vec![
+            cand(UUID_A, 300, Some("/tmp/other")),
+            cand(UUID_B, 200, None),
+        ];
+        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), Some(UUID_B));
+    }
+
+    #[test]
+    fn two_viable_fresh_candidates_bind_nothing() {
+        // Sibling spawn or standalone `agy` run: never cross-wire.
+        let candidates = vec![
+            cand(UUID_A, 200, None),
+            cand(UUID_B, 250, None),
+        ];
+        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), None);
+    }
+
+    #[test]
+    fn two_claims_on_same_directory_bind_nothing() {
+        let candidates = vec![
+            cand(UUID_A, 200, Some("/tmp/wt")),
+            cand(UUID_B, 250, Some("/tmp/wt")),
+        ];
+        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), None);
+    }
+
+    #[test]
+    fn rejects_non_uuid_ids() {
+        let candidates = vec![cand("conv-aaaa-1111", 200, None)];
+        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), None);
+    }
+
+    #[test]
+    fn anchored_match_accepts_windows_slash_and_case() {
+        let candidates = vec![cand(
+            UUID_A,
+            200,
+            Some(r"F:\src\buildmesh\.claude\worktrees\agy-test"),
+        )];
+        assert_eq!(
+            select_id_for_directory(
+                &candidates,
+                "f:/src/buildmesh/.claude/worktrees/agy-test"
+            ),
+            Some(UUID_A)
+        );
+    }
+
+    #[test]
+    fn finds_single_fresh_session_with_real_shape() {
         let temp = tempfile::TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
         write_conv(
             temp.path(),
             UUID_A,
-            r#"{"step_type":"USER_INPUT","text":"old","workspace_path":"/tmp/wt"}"#,
+            &format!(
+                "{}\n{}",
+                user_step(&fresh, "do the thing"),
+                tool_step(&fresh, "/tmp/wt"),
+            ),
         );
         assert_eq!(
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 9_000_000_000_000),
+            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
+            Some(UUID_A.to_string())
+        );
+    }
+
+    #[test]
+    fn stale_creation_is_rejected_despite_fresh_mtime() {
+        // The steal-a-live-session regression: file written NOW, but step-0
+        // creation is old. mtime freshness must not bind it.
+        let temp = tempfile::TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
+        write_conv(
+            temp.path(),
+            UUID_A,
+            &user_step("2020-01-01T00:00:00Z", "old conversation, touched today"),
+        );
+        assert_eq!(
+            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
+            None
+        );
+    }
+
+    #[test]
+    fn untouched_transcript_is_skipped_without_parsing() {
+        // mtime gate: transcript last written before the window never binds,
+        // however fresh its content claims to be.
+        let temp = tempfile::TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        write_conv(temp.path(), UUID_A, &user_step(&fresh, "hi"));
+        let future = (now + chrono::Duration::seconds(3600)).timestamp_millis();
+        assert_eq!(
+            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", future),
+            None
+        );
+    }
+
+    #[test]
+    fn transcript_without_creation_timestamp_is_skipped() {
+        // No proof of when it started: skip rather than guess.
+        let temp = tempfile::TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
+        write_conv(
+            temp.path(),
+            UUID_A,
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"no clock"}"#,
+        );
+        assert_eq!(
+            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
             None
         );
     }
@@ -554,70 +574,61 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(temp.path().join("conv-aaaa-1111")).unwrap();
         fs::create_dir_all(temp.path().join(UUID_A)).unwrap();
-        assert_eq!(find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 0), None);
-    }
-
-    #[test]
-    fn reads_metadata_nested_workspace() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let logs = temp.path().join("conv").join(".system_generated").join("logs");
-        fs::create_dir_all(&logs).unwrap();
-        let path = logs.join("transcript.jsonl");
-        fs::write(
-            &path,
-            r#"{"type":"USER_INPUT","metadata":{"cwd":"/tmp/nested"}}"#,
-        )
-        .unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
         assert_eq!(
-            read_workspace_from_transcript(&path).as_deref(),
-            Some("/tmp/nested")
+            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", now - 60_000),
+            None
         );
     }
 
     #[test]
     fn transcript_full_fallback_resolves_when_short_missing() {
         let temp = tempfile::TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
         let conv = temp.path().join(UUID_A);
         let logs = conv.join(".system_generated").join("logs");
         fs::create_dir_all(&logs).unwrap();
-        fs::write(
-            logs.join("transcript_full.jsonl"),
-            r#"{"step_type":"USER_INPUT","text":"hi","workspace_path":"/tmp/wt"}"#,
-        )
-        .unwrap();
-        let found = find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 0);
-        assert_eq!(found, Some(UUID_A.to_string()));
-    }
-
-    #[test]
-    fn historic_backfill_rejects_ambiguous_matching_conversations() {
-        let temp = tempfile::TempDir::new().unwrap();
-        write_conv(
-            temp.path(),
-            UUID_A,
-            r#"{"step_type":"USER_INPUT","text":"first","workspace_path":"/tmp/wt"}"#,
-        );
-        // Ensure distinct mtimes so both are "fresh" relative to epoch 0.
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        write_conv(
-            temp.path(),
-            UUID_B,
-            r#"{"step_type":"USER_INPUT","text":"second","workspace_path":"/tmp/wt"}"#,
-        );
-        assert_eq!(find_unique_id_for_directory_in(temp.path(), "/tmp/wt", 0), None);
-    }
-
-    #[test]
-    fn historic_backfill_accepts_single_match() {
-        let temp = tempfile::TempDir::new().unwrap();
-        write_conv(
-            temp.path(),
-            UUID_A,
-            r#"{"step_type":"USER_INPUT","text":"only","workspace_path":"/tmp/wt"}"#,
-        );
+        fs::write(logs.join("transcript_full.jsonl"), user_step(&fresh, "hi")).unwrap();
         assert_eq!(
-            find_unique_id_for_directory_in(temp.path(), "/tmp/wt", 0),
+            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
             Some(UUID_A.to_string())
+        );
+    }
+
+    #[test]
+    fn embedded_quotes_in_cwd_anchor_are_stripped() {
+        // Real `Cwd` values arrive double-wrapped: `"\"F:/repo\""`.
+        let val = serde_json::json!({
+            "tool_calls": [{"name": "run_command", "args": {"Cwd": "\"F:/src/repo\""}}],
+        });
+        assert_eq!(
+            extract_cwd_anchor(&val).as_deref(),
+            Some("F:/src/repo")
+        );
+    }
+
+    #[test]
+    fn wsl_brain_dir_derives_from_spawn_path_user() {
+        let dir = crate::env::agy_dir_for_env(
+            crate::models::EnvType::Wsl,
+            "/home/alice/src/repo",
+        )
+        .expect("derivable from /home/ prefix");
+        assert_eq!(
+            dir.join("brain"),
+            std::path::PathBuf::from("/home/alice/.gemini/antigravity-cli/brain")
+        );
+    }
+
+    #[test]
+    fn wsl_brain_dir_without_home_prefix_is_none() {
+        // Never guess a username: an underivable home yields no directory
+        // rather than a wrong user's brain.
+        assert!(
+            crate::env::agy_dir_for_env(crate::models::EnvType::Wsl, "/mnt/c/src/repo")
+                .is_none()
         );
     }
 }
