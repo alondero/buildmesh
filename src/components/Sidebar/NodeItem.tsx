@@ -4,11 +4,15 @@ import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
 import { canResumeSuspendedNode } from '../../lib/suspended';
-import type { SessionStatus } from '../../types/generated/SessionStatus';
 import { getMeshColor } from '../../lib/meshColors';
 import type { SpawnOption } from '../../lib/groups';
-import { groupByHarness } from '../../lib/groups';
+import {
+  REGENERATE_DISABLED_STATUSES,
+  splitRegenerateTargets,
+  hasRegenerateTargets as hasRegenerateTargetsHelper,
+} from '../../lib/regenerate';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { RegenerateProviderMenu } from '../Providers/RegenerateProviderMenu';
 import { InlineEditableText } from '../shared/InlineEditableText';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useClickOutside } from '../../hooks/useClickOutside';
@@ -27,11 +31,10 @@ import { formatError } from '../../lib/errorUtils';
 // + `cli_session_id` → resume; else fresh), and the orchestrator
 // branches on `should_skip_kill_for_regenerate` to avoid the
 // unconditional `on_idle` tail clobbering Suspended→Idle.
-const REGENERATE_DISABLED_STATUSES: readonly SessionStatus[] = [
-  'spawning',
-  'pending',
-  'archived',
-];
+//
+// Issue #1502 — the disabled-status list now lives in
+// `src/lib/regenerate.ts` (shared with `GridNodeHeader`'s toolbar/kebab
+// affordances) so both surfaces stay in lockstep.
 
 // Focus a menuitem without scrolling overflow ancestors. Nested inside
 // the sidebar list, `.focus()` scrolled that ancestor to the item's
@@ -47,8 +50,9 @@ interface NodeItemProps {
   isActive: boolean;
   /**
    * Issue #774 / ticket 03 — the Spawn Options available on this mesh.
-   * The Regenerate submenu renders this list (minus the node's current
-   * provider) as the picker; absent or empty means the submenu has
+   * Issue #1502 — the Regenerate submenu renders this list INCLUDING
+   * the node's current provider (pinned on top as `Current (<label>)`
+   * for in-place kick-start); absent or empty means the submenu has
    * nothing to offer and the parent Regenerate row stays visible but
    * greyed-out (the user can still see the affordance exists).
    */
@@ -118,25 +122,23 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   const [submenuOpen, setSubmenuOpen] = useState(false);
   const submenuRef = useRef<HTMLDivElement>(null);
   const submenuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  // Issue #774 — Regenerate's submenu lists every Spawn Option EXCEPT
-  // the node's current provider. Regenerating to the same provider is
-  // a restart (the inline ↻ button already covers that for `error`
-  // nodes); including the current provider in the picker would invite
-  // accidental no-ops. Grouped by `group_key` so the harness-header
-  // render stays consistent with `ProviderDropdown` and `ArchivedNodesTab`
-  // (issue #583 centralisation, ADR-0016).
-  const regenerateTargets = useMemo(
-    () => (providerList ?? []).filter((p) => p.id !== node.provider),
+  // Issue #1502 — in-place regeneration (kick-start): the picker now
+  // INCLUDES the node's current provider, pinned to the top as
+  // `Current (<label>)`, followed by every other provider grouped by
+  // `group_key` (consistent with `ProviderDropdown` and
+  // `ArchivedNodesTab`, issue #583 centralisation, ADR-0016). The
+  // backend's `decide_resume` already handles `same_harness == true`
+  // cleanly, so regenerating onto the same setup kills the process
+  // and starts a fresh agent session in the same worktree. Partitioning
+  // lives in `src/lib/regenerate.ts` (shared with `GridNodeHeader`).
+  const { current: currentTarget, others: alternateTargets } = useMemo(
+    () => splitRegenerateTargets(providerList, node.provider),
     [providerList, node.provider],
   );
-  const regenerateGroups = useMemo(
-    () => groupByHarness(regenerateTargets),
-    [regenerateTargets],
-  );
-  // Total number of submenu items across all groups. Used by the
+  // Total number of submenu items (current + alternates). Used by the
   // keyboard-nav handler so ArrowDown/Up inside the submenu wraps
   // around the full picker, not the per-group slice.
-  const submenuItemCount = regenerateTargets.length;
+  const submenuItemCount = (currentTarget ? 1 : 0) + alternateTargets.length;
 
   type ContextMenuAction = 'regenerate' | 'startFresh' | 'pin';
   const menuActions: ContextMenuAction[] = useMemo(
@@ -153,13 +155,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   }, []);
 
   const isRegenerateDisabled = REGENERATE_DISABLED_STATUSES.includes(node.status);
-  // Issue #774 — the submenu has nothing to offer when every
-  // available provider is the node's current one (the picker
-  // excludes the current provider). The Regenerate row stays
-  // visible but greyed-out — discoverable for "I want to swap
-  // providers" with a tooltip that explains the lack, not hidden
-  // (mirrors the status-gating pattern above).
-  const hasAlternateProviders = regenerateTargets.length > 0;
+  // Issue #1502 — the picker now includes the current provider
+  // (in-place kick-start), so the trigger is enabled whenever the mesh
+  // offers ANY provider — even if that is only the current one. Empty
+  // (no providers at all) stays greyed-out with a tooltip explaining
+  // the lack, not hidden (mirrors the status-gating pattern above).
+  const hasRegenerateTargets = hasRegenerateTargetsHelper(providerList);
 
   // Close and return focus to the row that opened the menu. Used by
   // Escape and any menuitem click so the user's focus stays
@@ -210,7 +211,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // name interpolated into the dialog message so the user sees exactly
   // which Model Provider they're switching to.
   const pickProvider = (providerId: string, providerLabel: string) => {
-    if (isRegenerateDisabled || !hasAlternateProviders) return;
+    if (isRegenerateDisabled || !hasRegenerateTargets) return;
     closeContextMenu();
     if (node.status === 'running') {
       setPendingRegenerate({ providerId, providerLabel });
@@ -566,19 +567,19 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           >
             <button
               // Roving tabindex — only the active item is in the Tab
-              // order. The Regenerate item is disabled for the four
+              // order. The Regenerate item is disabled for the
               // "race-the-spawn / backend-rejects" statuses (see
               // `REGENERATE_DISABLED_STATUSES`) AND when the picker
-              // has no alternate providers to offer. The click handler
+              // has no providers at all to offer. The click handler
               // short-circuits as a second guard so a programmatic
               // .click() can't bypass the disabled state.
               role="menuitem"
               aria-haspopup="menu"
               aria-expanded={submenuOpen}
               tabIndex={menuActions[activeIndex] === 'regenerate' ? 0 : -1}
-              disabled={isRegenerateDisabled || !hasAlternateProviders}
+              disabled={isRegenerateDisabled || !hasRegenerateTargets}
               onClick={() => {
-                if (isRegenerateDisabled || !hasAlternateProviders) return;
+                if (isRegenerateDisabled || !hasRegenerateTargets) return;
                 // Always open — never toggle. The submenu also opens
                 // on hover via the wrapper's `onMouseEnter`; toggling
                 // here would close the picker the moment a real user
@@ -593,11 +594,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                   // so the tooltip stays lowercase and consistent with the
                   // other machine status names (e.g. "while suspended").
                   ? `Regenerate unavailable while ${node.status}`
-                  : !hasAlternateProviders
-                    ? 'No other providers are available on this mesh'
+                  : !hasRegenerateTargets
+                    ? 'No providers are available on this mesh'
                     : submenuOpen
                       ? 'Hide provider picker'
-                      : 'Pick a different Model Provider for this node'
+                      : 'Pick a Model Provider for this node (including current to kick-start)'
               }
               data-testid="regenerate-trigger"
               className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
@@ -624,7 +625,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                 row carries `role="menuitem"` + an `id` matching the
                 pattern the existing v1 menu uses (the keyboard-nav
                 handler scans `submenuItemRefs.current` in render
-                order, so the id pattern is just for tests). */}
+                order, so the id pattern is just for tests).
+                Issue #1502 — rows render via the shared
+                `RegenerateProviderMenu` (current pinned on top for
+                in-place kick-start, then alternates grouped by
+                harness) so the sidebar and `GridNodeHeader`
+                pickers never drift. */}
             {submenuOpen && (
               <div
                 // Refresh the submenu item refs every time the
@@ -663,55 +669,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                 // fires.
                 onMouseDown={(e) => e.stopPropagation()}
               >
-                {regenerateGroups.length === 0 ? (
-                  <div
-                    data-testid="regenerate-submenu-empty"
-                    className="px-3 py-1.5 text-xs text-text-muted"
-                  >
-                    No other providers available
-                  </div>
-                ) : (
-                  regenerateGroups.map(([groupKey, options]) => {
-                    const native = options.find((o) => !o.is_proxied);
-                    const proxied = options.filter((o) => o.is_proxied);
-                    return (
-                      <div
-                        key={groupKey}
-                        data-spawn-group={groupKey}
-                        className="border-b border-border-subtle last:border-b-0"
-                      >
-                        {native && (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            data-spawn-id={native.id}
-                            data-spawn-harness={native.harness_id}
-                            onClick={() => pickProvider(native.id, native.label)}
-                            className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium hover:bg-bg-card flex items-center gap-2"
-                          >
-                            <ProviderIcon providerId={native.id} className="h-3.5 w-3.5 shrink-0" />
-                            <span className="flex-1 truncate">{native.label}</span>
-                            <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>
-                          </button>
-                        )}
-                        {proxied.map((child) => (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            key={child.id}
-                            data-spawn-id={child.id}
-                            data-spawn-harness={child.harness_id}
-                            onClick={() => pickProvider(child.id, child.label)}
-                            className="w-full text-left pl-7 pr-3 py-1 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-                          >
-                            <ProviderIcon providerId={child.id} className="h-3.5 w-3.5 shrink-0" />
-                            <span className="flex-1 truncate">{child.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    );
-                  })
-                )}
+                <RegenerateProviderMenu
+                  providers={providerList ?? []}
+                  currentProviderId={node.provider}
+                  onPick={pickProvider}
+                />
               </div>
             )}
           </div>

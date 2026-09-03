@@ -417,25 +417,30 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       prMock.mockReturnValue(null);
     });
 
-    it('opens on click and reveals Reveal + Pin + Maximize + Close items', () => {
+    it('opens on click and reveals Regenerate + Reveal + Pin + Maximize + Close items (issue #1502)', () => {
       // The actions are rendered inline above the kebab threshold; below
-      // it, all four fold into the menu so the title isn't squeezed out.
-      // Kebab item order by DOM position: Open in file explorer (0),
-      // Pin/Unpin (1, wayfinder #982 / #985), Maximize/Restore (2),
-      // Close (3). The manual Finish item (#484) was removed — wrap-up
-      // is an autopilot-only concern — so the kebab now mirrors the
-      // four inline actions without a Finish slot.
+      // it, all fold into the menu so the title isn't squeezed out.
+      // Kebab item order by DOM position: Regenerate (0, issue #1502 —
+      // mirrors the sidebar context-menu order for discoverability),
+      // Open in file explorer (1), Pin/Unpin (2, wayfinder #982 / #985),
+      // Maximize/Restore (3), Close (4). The manual Finish item (#484)
+      // was removed — wrap-up is an autopilot-only concern.
       const { root } = renderHeader(200);
       const trigger = screen.getByLabelText('Agent node actions');
       fireEvent.click(trigger);
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu).toBeTruthy();
-      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
-      const items = menu.querySelectorAll('[role="menuitem"]');
-      expect(items[0].textContent).toContain('Open in file explorer');
-      expect(items[1].textContent).toContain('Pin node');
-      expect(items[2].textContent!.toLowerCase()).toMatch(/maximize|restore grid/);
-      expect(items[3].textContent).toContain('Close agent node');
+      // Query only the TOP-LEVEL menuitems (the Regenerate submenu renders
+      // its own nested `[role="menu"]` when open — closed here, but guard
+      // against future hover-open flakiness by scoping to direct children
+      // of the kebab menu root).
+      const topLevel = Array.from(menu.querySelectorAll(':scope > [role="menuitem"], :scope > div > [role="menuitem"]'));
+      expect(topLevel).toHaveLength(5);
+      expect(topLevel[0].textContent).toContain('Regenerate');
+      expect(topLevel[1].textContent).toContain('Open in file explorer');
+      expect(topLevel[2].textContent).toContain('Pin node');
+      expect(topLevel[3].textContent!.toLowerCase()).toMatch(/maximize|restore grid/);
+      expect(topLevel[4].textContent).toContain('Close agent node');
       // sanity: the trigger is in the DOM and the menu is its descendant tree
       expect(root.contains(trigger)).toBe(true);
     });
@@ -455,9 +460,11 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       fireResize(screen.getByTestId('grid-node-header'), 200);
       fireEvent.click(screen.getByLabelText('Agent node actions'));
       const menu = document.querySelector('[role="menu"]')!;
+      // Issue #1502 — Regenerate is now the first row, so Reveal shifts to index 1.
       const items = menu.querySelectorAll('[role="menuitem"]');
-      // Reveal is the first item in the kebab, mirroring the inline layout.
-      fireEvent.click(items[0]);
+      // Find Reveal by label (robust to the Regenerate row shifting indices).
+      const reveal = Array.from(items).find((el) => /Open in file explorer/.test(el.textContent ?? '')) as HTMLElement;
+      fireEvent.click(reveal);
       expect(openInFileManagerMock).toHaveBeenCalledWith('/repo/.claude/worktrees/kebab-feat');
     });
 
@@ -539,12 +546,13 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu.textContent?.toLowerCase()).toMatch(/restore grid/);
       expect(menu.textContent?.toLowerCase()).not.toMatch(/^.*maximize/);
-      // Still a menu of four actions: Reveal + Pin + Maximize/Restore +
-      // Close. The inline buttons fold into the kebab at this tier too,
-      // so the count lives here as well as on the inline path. (Finish
-      // was removed — autopilot-only concern — so the kebab mirrors the
-      // four remaining inline actions.)
-      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
+      // Still a menu of five actions: Regenerate + Reveal + Pin +
+      // Maximize/Restore + Close (issue #1502 adds Regenerate first).
+      // The inline buttons fold into the kebab at this tier too, so the
+      // count lives here as well as on the inline path. (Finish was
+      // removed — autopilot-only concern.)
+      const topLevel = menu.querySelectorAll(':scope > [role="menuitem"], :scope > div > [role="menuitem"]');
+      expect(topLevel).toHaveLength(5);
       // Sanity: render did not unmount.
       expect(root.isConnected).toBe(true);
     });
