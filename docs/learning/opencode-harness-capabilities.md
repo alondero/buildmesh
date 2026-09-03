@@ -117,7 +117,7 @@ TUI `validateSession` decodes the ID then `session.get({ throwOnError: true })` 
 | **Prefill** | Yes — TUI `--prompt` | **Yes** | Autopilot still blocked on attention. |
 | **Attention / Node Turn** | Plugin `session.idle` / `permission.asked`; SSE `/event` | **No** | Follow-up: inject a plugin. |
 | **Readable transcript** | Export JSON, HTTP messages, SQLite | **No** | Follow-up: `TranscriptFormat::OpenCode`. |
-| **Auto-approve** | `--auto` | Unmodeled | Follow-up. |
+| **Auto-approve** | `--auto` | **Yes** | Baked into `spawn_recipe()` `base_args`. |
 | **Agent selection** | `--agent` | Unmodeled | No trait flag today. |
 | **ACP / serve** | `opencode acp`, `serve` / `web` / `attach` | Unmodeled | Not a PTY harness; attach could help capture. |
 
@@ -162,9 +162,10 @@ prefill_args: ["--prompt", text]
 effort_control: None
 requires_attention_hook: false
 produces_readable_transcript: false
+spawn_recipe base_args: ["--auto"]      // issue #1297 — auto-approve non-denied perms
 ```
 
-Closest siblings: **Kimi** (`-S` / `--session`, self-assign, model yes) plus **mcode** prefill. OpenCode is Kimi + `--prompt`.
+Closest siblings: **Kimi** (`-S` / `--session`, self-assign, model yes) plus **mcode** prefill. OpenCode is Kimi + `--prompt` + `--auto`.
 
 ---
 
@@ -173,7 +174,9 @@ Closest siblings: **Kimi** (`-S` / `--session`, self-assign, model yes) plus **m
 - Harden capture further: plugin `session.created` or `--port` + HTTP. SQLite polling still cannot distinguish two Root Nodes in the same directory.
 - Attention plugin (`session.idle` / `permission.asked`) so Autopilot can run.
 - Transcript reader (`opencode export` JSON) so the archive picker and coordinator rich layer work.
-- Remaining CLI: `--auto`, `--agent`, `--fork`, `run --variant`.
+- `--fork` regenerate-same-harness wire-up: add a `ResumeCause::Regenerate` variant and route `default_prepare` to append `--fork` after `--session <id>` when that cause is set. The CLI shape is settled; the call site is the next slice.
+- `--agent <name>` Mesh / app-default slot: add `agent` to `HarnessConfigValue` + `ResolvedAgentConfig`, plus a capability gate. The CLI shape is settled; the slot is the next slice.
+- `run --variant` does not exist on the TUI recipe; the TUI is `EffortControlKind::None` and the capability-coherence test (`agent::spawn::command_tests::capability_recipe_coherence`) confirms Buildmesh never forwards a synthetic `--effort` to OpenCode.
 
 ---
 
