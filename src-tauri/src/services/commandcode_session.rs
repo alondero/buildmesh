@@ -30,13 +30,25 @@ pub const CAPTURE_SKEW_MS: i64 = 2_000;
 const RETRY_DELAYS_MS: &[u64] = &[400, 800, 1_600, 2_500, 4_000, 6_000];
 
 /// Session header JSON record at line 1 of `<session_id>.jsonl`.
+///
+/// Observed v1.43.0 shape: `{"type":"session","version":3,"id":"<uuid>",
+/// "timestamp":"...","cwd":"..."}`. `session_id`/`directory`/`created_at`
+/// aliases cover older transcripts that used those names; the camelCase
+/// guesses (`sessionId`, `project_path`, `workspace`, `time_created`,
+/// `createdAt`) are deliberately not accepted — `createdAt` is a checkpoint
+/// field, and accepting it is what let checkpoint turns masquerade as
+/// sessions (issue #1500 review).
 #[derive(Debug, Default, Deserialize)]
 struct SessionHeader {
-    #[serde(alias = "id", alias = "sessionId")]
+    /// Record discriminator. Real session headers carry `"session"`;
+    /// checkpoint/message records carry something else (or nothing at all).
+    #[serde(rename = "type")]
+    record_type: Option<String>,
+    #[serde(alias = "id")]
     session_id: Option<String>,
-    #[serde(alias = "directory", alias = "project_path", alias = "workspace")]
+    #[serde(alias = "directory")]
     cwd: Option<String>,
-    #[serde(alias = "created_at", alias = "time_created", alias = "createdAt")]
+    #[serde(alias = "created_at")]
     timestamp: Option<serde_json::Value>,
 }
 
@@ -54,20 +66,6 @@ pub fn is_commandcode_session_id(id: &str) -> bool {
         return true;
     }
     uuid::Uuid::parse_str(id).is_ok()
-}
-
-/// True when `path` looks like a session transcript (`<id>.jsonl`) rather
-/// than a sidecar (`<id>.checkpoints.jsonl`, `<id>.prompts.jsonl`, …).
-/// Session IDs (UUID or `sess_…`) contain no dots, so any dot in the stem
-/// means a sidecar — this single rule covers all current and future sidecars.
-fn is_session_transcript_file(path: &Path) -> bool {
-    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-        return false;
-    }
-    match path.file_stem().and_then(|stem| stem.to_str()) {
-        Some(stem) => !stem.contains('.'),
-        None => false,
-    }
 }
 
 /// Parse timestamp from either ISO 8601 string, integer epoch ms, or integer epoch seconds.
@@ -101,10 +99,22 @@ fn parse_timestamp_ms(val: &serde_json::Value) -> Option<i64> {
 
 /// Read candidate metadata from a `.jsonl` session file.
 ///
-/// Sidecar files (`<id>.checkpoints.jsonl`, …) are rejected by filename so a
-/// checkpoint UUID is never mistaken for a session ID (issue #1500).
+/// Root-cause validation (issue #1500 review), cheapest check first:
+/// 1. the extension must be `.jsonl`;
+/// 2. the filename stem must itself be a session ID (`<uuid>.jsonl`) — this
+///    rejects sidecars (`<id>.checkpoints.jsonl`), auxiliary files
+///    (`history.jsonl`, `index.jsonl`), and anything else the CLI did not
+///    name after a session, without opening the file;
+/// 3. line 1 must parse, and when it carries a `"type"` discriminator it must
+///    be `"session"` (checkpoint/message records are rejected here);
+/// 4. the header ID (when present and valid) must equal the stem — a mismatch
+///    means the file is inconsistent and is never silently preferred.
 pub fn read_session_file(path: &Path) -> Option<Candidate> {
-    if !is_session_transcript_file(path) {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return None;
+    }
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if !is_commandcode_session_id(stem) {
         return None;
     }
     let file = fs::File::open(path).ok()?;
@@ -116,17 +126,18 @@ pub fn read_session_file(path: &Path) -> Option<Candidate> {
     }
 
     let header: SessionHeader = serde_json::from_str(&first_line).ok()?;
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let id = header
-        .session_id
-        .filter(|s| is_commandcode_session_id(s))
-        .or_else(|| {
-            if is_commandcode_session_id(stem) {
-                Some(stem.to_string())
-            } else {
-                None
-            }
-        })?;
+    if header
+        .record_type
+        .as_deref()
+        .is_some_and(|kind| kind != "session")
+    {
+        return None;
+    }
+    let header_id = header.session_id.filter(|s| is_commandcode_session_id(s));
+    if header_id.as_deref().is_some_and(|id| id != stem) {
+        return None;
+    }
+    let id = header_id.unwrap_or_else(|| stem.to_string());
 
     let directory = header.cwd.unwrap_or_default();
     let timestamp_ms = header
@@ -152,6 +163,9 @@ pub fn read_session_file(path: &Path) -> Option<Candidate> {
 }
 
 /// Pick the newest session candidate matching the spawn directory created at or after `created_not_before_ms`.
+///
+/// Every candidate produced by [`read_session_file`] already carries a valid
+/// session ID, so this filters only on directory and spawn window.
 pub fn select_id_for_directory<'a>(
     candidates: &'a [Candidate],
     spawn_directory: &str,
@@ -159,7 +173,6 @@ pub fn select_id_for_directory<'a>(
 ) -> Option<&'a str> {
     candidates
         .iter()
-        .filter(|c| is_commandcode_session_id(&c.id))
         .filter(|c| crate::env::directories_match(&c.directory, spawn_directory))
         .filter(|c| c.timestamp_ms >= created_not_before_ms)
         .max_by_key(|c| c.timestamp_ms)
@@ -167,8 +180,9 @@ pub fn select_id_for_directory<'a>(
 }
 
 /// Scan `sessions_dir` (`<home>/.commandcode/projects/<encoded-cwd>/`) for all
-/// session transcripts and find the newest valid candidate. Sidecars
-/// (`<id>.checkpoints.jsonl`, …) are skipped via [`read_session_file`].
+/// session transcripts and find the newest valid candidate. [`read_session_file`]
+/// is the single authority on what counts as a transcript (stem + header
+/// validation); non-transcripts yield `None` there and are skipped here.
 pub fn find_fresh_id_for_directory_in(
     sessions_dir: &Path,
     spawn_directory: &str,
@@ -180,11 +194,7 @@ pub fn find_fresh_id_for_directory_in(
     let entries = fs::read_dir(sessions_dir).ok()?;
     let mut candidates = Vec::new();
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !is_session_transcript_file(&path) {
-            continue;
-        }
-        if let Some(candidate) = read_session_file(&path) {
+        if let Some(candidate) = read_session_file(&entry.path()) {
             candidates.push(candidate);
         }
     }
@@ -202,7 +212,9 @@ pub fn start_capture_poller(
     let spawn_epoch_ms = chrono::Utc::now().timestamp_millis();
     tauri::async_runtime::spawn(async move {
         let not_before = spawn_epoch_ms.saturating_sub(CAPTURE_SKEW_MS);
-        let Some(sessions_dir) = crate::env::commandcode_sessions_dir(env_type, &spawn_directory) else {
+        let Some(sessions_dir) =
+            crate::services::transcript_reader::commandcode_sessions_dir(env_type, &spawn_directory)
+        else {
             tracing::warn!("commandcode session capture: no sessions dir for env {env_type:?}");
             return;
         };
@@ -429,5 +441,41 @@ mod tests {
         let found =
             find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 0);
         assert_eq!(found, Some(session_id.to_string()));
+    }
+
+    #[test]
+    fn rejects_auxiliary_files_and_wrong_types_and_mismatched_ids() {
+        // Issue #1500 review: sidecar detection must be schema validation,
+        // not filename guessing. Auxiliary files (`history.jsonl`,
+        // `index.jsonl`) have non-ID stems; message/checkpoint records carry a
+        // non-`session` type; a stem/header mismatch is inconsistent.
+        let temp = tempfile::TempDir::new().unwrap();
+        for name in ["history.jsonl", "index.jsonl", "active.jsonl"] {
+            fs::write(
+                temp.path().join(name),
+                r#"{"type":"session","id":"3fadada6-e0a3-44a2-ab68-ce1ecf7207a9","cwd":"/tmp/wt","timestamp":"2026-09-02T19:53:20.151Z"}"#,
+            )
+            .unwrap();
+            assert!(
+                read_session_file(&temp.path().join(name)).is_none(),
+                "{name} must not parse as a session"
+            );
+        }
+
+        let typed = temp.path().join("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9.jsonl");
+        fs::write(
+            &typed,
+            r#"{"type":"message","id":"3fadada6-e0a3-44a2-ab68-ce1ecf7207a9","cwd":"/tmp/wt","timestamp":"2026-09-02T19:53:20.151Z"}"#,
+        )
+        .unwrap();
+        assert!(read_session_file(&typed).is_none());
+
+        let mismatched = temp.path().join("aaaaaaaa-1111-2222-3333-444444444444.jsonl");
+        fs::write(
+            &mismatched,
+            r#"{"type":"session","id":"bbbbbbbb-1111-2222-3333-444444444444","cwd":"/tmp/wt","timestamp":"2026-09-02T19:53:20.151Z"}"#,
+        )
+        .unwrap();
+        assert!(read_session_file(&mismatched).is_none());
     }
 }

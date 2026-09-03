@@ -15,9 +15,9 @@
 //! While the CLI supports `--continue` for resuming the latest conversation in
 //! a directory, Buildmesh deliberately targets exact-ID resumption via
 //! `--resume <id>` to guarantee strict node isolation and avoid cross-node
-//! session collisions (issue #1500). `--session <path|id>` also resumes, but
-//! `--resume` is the documented id-or-name resumption flag (`-r, --resume
-//! [id|name]`) and the form the CLI help advertises for this purpose.
+//! session collisions (issue #1500). `--session` accepts a transcript path or
+//! id prefix, but `--resume` (`-r, --resume [id|name]`) is the documented
+//! exact-ID resumption flag, so Buildmesh uses it for node isolation.
 //!
 //! **Session capture**:
 //! Command Code mints UUID IDs and writes structured JSONL transcripts to

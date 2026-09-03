@@ -114,6 +114,34 @@ pub(crate) fn encode_path(path: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
+/// Encode a filesystem path the way Command Code does for its
+/// `~/.commandcode/projects/<slug>` directory names: lowercase, replace every
+/// non-alphanumeric character with `-`, collapse consecutive `-` runs, and
+/// trim leading/trailing `-` (issue #1500).
+///
+/// For example `F:\src\buildmesh\.claude\worktrees\foo` becomes
+/// `f-src-buildmesh-claude-worktrees-foo`, and `/home/user/project` becomes
+/// `home-user-project`. This matches the on-disk layout observed in Command
+/// Code v1.43.0 and the `c-users-user` / `home-...` slugs reported upstream.
+/// Pass the CLI cwd form; for raw paths that may be WSL UNC
+/// (`\\wsl$\...`), normalize with `env::normalize_unc_to_wsl` first.
+pub(crate) fn commandcode_project_slug(path: &str) -> String {
+    let mut slug = String::with_capacity(path.len());
+    let mut last_was_dash = false;
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
 /// True when raw message text is a synthetic Claude Code injection rather than
 /// genuine user input (e.g. the `local-command-caveat` wrapper). Such lines are
 /// not real turns and must be skipped.
@@ -348,6 +376,26 @@ pub(crate) fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<Path
     None
 }
 
+/// The host-accessible Command Code session directory for an agent
+/// environment: `<home>/.commandcode/projects/<encoded-cwd>/` (issue #1500).
+/// Mirrors [`transcript_path`] (Claude Code): the transcript-format module
+/// composes the slug, while `env` owns the host-accessible projects base
+/// (including WSL translation). `spawn_path` is the CLI cwd form; raw WSL UNC
+/// paths are normalized first so `\\wsl$\<distro>\home\user\repo` resolves to
+/// the same slug the in-WSL CLI wrote (`home-user-repo`).
+pub(crate) fn commandcode_sessions_dir(
+    env_type: EnvType,
+    spawn_path: &str,
+) -> Option<PathBuf> {
+    let normalized = env::normalize_unc_to_wsl(spawn_path);
+    let projects = env::commandcode_projects_dir(env_type, &normalized)?;
+    let slug = commandcode_project_slug(&normalized);
+    if slug.is_empty() {
+        return None;
+    }
+    Some(projects.join(slug))
+}
+
 /// Find the Command Code session transcript for the node's runtime
 /// environment. Command Code stores one file per session under
 /// `<commandcode-home>/projects/<encoded-cwd>/<session-id>.jsonl` (issue
@@ -355,7 +403,7 @@ pub(crate) fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<Path
 /// environment path module.
 fn find_commandcode_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
     let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
-    let sessions_dir = env::commandcode_sessions_dir(env_type, node_path)?;
+    let sessions_dir = commandcode_sessions_dir(env_type, node_path)?;
     let path = commandcode_transcript_path_in(&sessions_dir, session_id);
     path.exists().then_some(path)
 }
@@ -2245,6 +2293,60 @@ mod tests {
         for id in ["anthropic", "claude", "opencode", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
         }
+    }
+
+    #[test]
+    fn commandcode_slug_matches_v143_layout() {
+        // Observed on-disk layout in Command Code v1.43.0 (issue #1500).
+        assert_eq!(
+            commandcode_project_slug(
+                r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove"
+            ),
+            "f-src-buildmesh-claude-worktrees-saucy-thunderous-cove"
+        );
+        assert_eq!(
+            commandcode_project_slug(
+                r"F:\src\buildmesh\.claude\worktrees\gh1377-mobile-mobile-companion-quick-action-triage"
+            ),
+            "f-src-buildmesh-claude-worktrees-gh1377-mobile-mobile-companion-quick-action-triage"
+        );
+        assert_eq!(commandcode_project_slug(r"C:\Users\User"), "c-users-user");
+        assert_eq!(
+            commandcode_project_slug("/home/user/project"),
+            "home-user-project"
+        );
+        assert_eq!(
+            commandcode_project_slug(
+                r"F:\src\buildmesh\.claude\worktrees\gh1376-ui-design-system--surface-elevation-typogra"
+            ),
+            "f-src-buildmesh-claude-worktrees-gh1376-ui-design-system-surface-elevation-typogra"
+        );
+        assert_eq!(commandcode_project_slug(""), "");
+        assert_eq!(commandcode_project_slug("///"), "");
+    }
+
+    #[test]
+    fn commandcode_sessions_dir_resolves_under_projects() {
+        let dir = commandcode_sessions_dir(
+            EnvType::Windows,
+            r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove",
+        )
+        .expect("windows sessions dir should resolve");
+        let dir_str = dir.to_string_lossy().replace('\\', "/");
+        assert!(
+            dir_str.ends_with(
+                "projects/f-src-buildmesh-claude-worktrees-saucy-thunderous-cove"
+            ),
+            "sessions dir should be projects/<slug>, got {dir_str}"
+        );
+        assert!(
+            !dir_str.contains("sessions"),
+            "must not use the legacy sessions dir, got {dir_str}"
+        );
+        assert!(
+            commandcode_sessions_dir(EnvType::Windows, "").is_none(),
+            "empty slug must not resolve"
+        );
     }
 
     #[test]

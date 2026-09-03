@@ -201,8 +201,9 @@ pub fn start_for_session(
     env_type: EnvType,
     app: &AppHandle,
 ) -> Result<(), String> {
-    let sessions_dir = crate::env::commandcode_sessions_dir(env_type, spawn_path)
-        .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
+    let sessions_dir =
+        crate::services::transcript_reader::commandcode_sessions_dir(env_type, spawn_path)
+            .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
     let transcript_path = sessions_dir.join(format!("{session_id}.jsonl"));
     start(node_id, session_id, transcript_path, app, None)
 }
@@ -218,8 +219,9 @@ pub fn start_for_resumed_session(
     env_type: EnvType,
     app: &AppHandle,
 ) -> Result<(), String> {
-    let sessions_dir = crate::env::commandcode_sessions_dir(env_type, spawn_path)
-        .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
+    let sessions_dir =
+        crate::services::transcript_reader::commandcode_sessions_dir(env_type, spawn_path)
+            .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
     let transcript_path = sessions_dir.join(format!("{session_id}.jsonl"));
     let offset = std::fs::metadata(&transcript_path)
         .map_err(|e| format!("stat {}: {e}", transcript_path.display()))?
