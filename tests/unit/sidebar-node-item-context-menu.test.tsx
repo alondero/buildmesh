@@ -569,10 +569,10 @@ describe('NodeItem context menu (issue #776)', () => {
       return screen.getByTestId('regenerate-submenu');
     }
 
-    it('renders one row per non-current provider, grouped by harness', async () => {
+    it('renders the current provider pinned on top plus alternates grouped by harness (issue #1502)', async () => {
       const node = makeNode({ provider: 'anthropic' });
       await openSubmenu(node, [
-        // current — must be excluded from the picker
+        // current — pinned on top as `Current (<label>)` for in-place kick-start
         makeProvider('anthropic', { label: 'Anthropic', group_key: 'anthropic', harness_id: 'anthropic' }),
         // a sibling harness with native + proxied children
         makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
@@ -586,15 +586,19 @@ describe('NodeItem context menu (issue #776)', () => {
       ]);
 
       const submenu = screen.getByTestId('regenerate-submenu');
-      // Three harness groups (anthropic excluded).
+      // Current section pinned on top (in-place kick-start).
+      const currentSection = submenu.querySelector('[data-regenerate-section="current"]')!;
+      expect(currentSection).toBeTruthy();
+      expect(currentSection.querySelector('[data-spawn-id="anthropic"]')).toBeTruthy();
+      expect(currentSection.textContent).toMatch(/Current \(Anthropic\)/);
+      expect(currentSection.querySelector('[data-is-current="true"]')).toBeTruthy();
+      // Two harness groups for alternates (anthropic lives in the current section, not grouped).
       expect(submenu.querySelectorAll('[data-spawn-group]')).toHaveLength(2);
       // claude group carries its harness header + proxied child.
       const claudeGroup = submenu.querySelector('[data-spawn-group="claude"]')!;
       expect(claudeGroup.querySelectorAll('[data-spawn-id]')).toHaveLength(2);
-      // Total picker rows = 3 (claude + claude-minimax + kimi).
-      expect(submenu.querySelectorAll('[role="menuitem"]')).toHaveLength(3);
-      // Current provider MUST NOT appear in the picker.
-      expect(submenu.querySelector('[data-spawn-id="anthropic"]')).toBeNull();
+      // Total picker rows = 4 (current + claude + claude-minimax + kimi).
+      expect(submenu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
     });
 
     it('clicking a picker row invokes regenerateAgentNode(nodeId, providerId) and closes the menu', async () => {
@@ -652,28 +656,35 @@ describe('NodeItem context menu (issue #776)', () => {
       expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(411, 'claude');
     });
 
-    it('renders an empty-state message when no other providers are available', async () => {
+    it('renders an empty-state message when no providers are available at all (issue #1502)', async () => {
       const node = makeNode({ provider: 'anthropic' });
-      await openSubmenu(node, [
-        // Only the current provider — nothing to offer.
-        makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
-      ]);
+      await openSubmenu(node, []);
       const empty = screen.getByTestId('regenerate-submenu-empty');
       expect(empty).toBeTruthy();
-      expect(empty.textContent).toMatch(/no other providers/i);
-      expect(screen.queryByRole('menuitem', { name: /anthropic/i })).toBeNull();
+      expect(empty.textContent).toMatch(/no providers available/i);
+    });
+
+    it('renders the current provider alone when it is the only option (in-place kick-start, issue #1502)', async () => {
+      const node = makeNode({ provider: 'anthropic' });
+      await openSubmenu(node, [
+        makeProvider('anthropic', { label: 'Anthropic', group_key: 'anthropic', harness_id: 'anthropic' }),
+      ]);
+      // No empty state — the current row IS the picker.
+      expect(screen.queryByTestId('regenerate-submenu-empty')).toBeNull();
+      const current = screen.getByTestId('regenerate-submenu-current');
+      expect(current).toBeTruthy();
+      expect(current.textContent).toMatch(/Current \(Anthropic\)/);
+      expect(screen.getByTestId('regenerate-submenu').querySelectorAll('[role="menuitem"]')).toHaveLength(1);
     });
 
     it('disables the trigger when providerList is empty', () => {
-      // The picker would have nothing to offer (every provider IS the
-      // current one), so the trigger is disabled and a click does
-      // nothing — covered by the "no alternate providers" test above,
-      // but pinned here too for the empty-list edge case.
+      // The picker would have nothing to offer, so the trigger is
+      // disabled and a click does nothing.
       renderNode(makeNode(), []);
       openContextMenu();
       const trigger = screen.getByText(/Regenerate/).closest('button')!;
       expect(trigger.hasAttribute('disabled')).toBe(true);
-      expect(trigger.getAttribute('title')).toMatch(/no other providers/i);
+      expect(trigger.getAttribute('title')).toMatch(/no providers/i);
     });
 
     it('keeps the picker closed until the trigger is hovered or clicked', () => {
@@ -708,27 +719,26 @@ describe('NodeItem context menu (issue #776)', () => {
       expect(useAgentNodeStore.getState().regenerateAgentNode).not.toHaveBeenCalled();
     });
 
-    it('greys out the trigger when the mesh has no alternate providers (#774)', () => {
-      // The picker excludes the node's current provider, so a mesh
-      // whose only option is the current one would render an empty
-      // submenu — the trigger must be disabled instead so the user
-      // sees the affordance exists with a tooltip explaining why.
+    it('keeps the trigger enabled when the mesh offers only the current provider (in-place kick-start, issue #1502)', () => {
+      // Pre-#1502 the picker excluded the current provider, so a mesh
+      // whose only option was the current one disabled the trigger.
+      // Post-#1502 the current provider alone enables in-place
+      // regeneration (kick-start a wonky harness).
       const node = makeNode({ provider: 'anthropic' });
       renderNode(node, [
         makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
       ]);
       openContextMenu();
       const trigger = screen.getByText(/Regenerate/).closest('button')!;
-      expect(trigger.hasAttribute('disabled')).toBe(true);
-      expect(trigger.getAttribute('title')).toMatch(/no other providers/i);
+      expect(trigger.hasAttribute('disabled')).toBe(false);
     });
 
-    describe('keyboard navigation (#774)', () => {
-      it('ArrowRight on the trigger opens the picker and focuses the first provider', async () => {
+    describe('keyboard navigation (#774, #1502)', () => {
+      it('ArrowRight on the trigger opens the picker and focuses the current provider first', async () => {
         renderNode(
           makeNode({ provider: 'anthropic' }),
           [
-            makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+            makeProvider('anthropic', { label: 'Anthropic', group_key: 'anthropic', harness_id: 'anthropic' }),
             makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
             makeProvider('kimi', { label: 'Kimi', group_key: 'kimi', harness_id: 'kimi' }),
           ],
@@ -742,12 +752,10 @@ describe('NodeItem context menu (issue #776)', () => {
         await waitFor(() => {
           expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
         });
-        // First provider row (the claude group is rendered first
-        // since `groupByHarness` walks the input order — anthropic is
-        // excluded, claude comes next).
+        // First row is the in-place current provider (issue #1502 pins
+        // it on top); alternates follow in input order.
         await waitFor(() => {
-          const firstItem = screen.getByTestId('regenerate-submenu')
-            .querySelector<HTMLButtonElement>('[role="menuitem"]');
+          const firstItem = screen.getByTestId('regenerate-submenu-current');
           expect(document.activeElement).toBe(firstItem);
         });
       });
@@ -777,11 +785,11 @@ describe('NodeItem context menu (issue #776)', () => {
         });
       });
 
-      it('ArrowDown inside the picker advances through the flat provider list with wrap', async () => {
+      it('ArrowDown inside the picker advances through current + alternates with wrap (issue #1502)', async () => {
         renderNode(
           makeNode({ provider: 'anthropic' }),
           [
-            makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+            makeProvider('anthropic', { label: 'Anthropic', group_key: 'anthropic', harness_id: 'anthropic' }),
             makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
             makeProvider('kimi', { label: 'Kimi', group_key: 'kimi', harness_id: 'kimi' }),
           ],
@@ -792,15 +800,19 @@ describe('NodeItem context menu (issue #776)', () => {
           expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
         });
 
-        // claude → kimi → wrap back to claude
+        // current → claude → kimi → wrap back to current
         const items = () => Array.from(
           screen.getByTestId('regenerate-submenu').querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
         );
+        expect(items()).toHaveLength(3);
         expect(document.activeElement).toBe(items()[0]);
+        expect(items()[0].getAttribute('data-testid')).toBe('regenerate-submenu-current');
         fireEvent.keyDown(document, { key: 'ArrowDown' });
         expect(document.activeElement).toBe(items()[1]);
         fireEvent.keyDown(document, { key: 'ArrowDown' });
-        // Wrap-around: kimi → claude.
+        expect(document.activeElement).toBe(items()[2]);
+        fireEvent.keyDown(document, { key: 'ArrowDown' });
+        // Wrap-around: kimi → current.
         expect(document.activeElement).toBe(items()[0]);
       });
     });
