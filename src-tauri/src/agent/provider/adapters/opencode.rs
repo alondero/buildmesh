@@ -31,6 +31,13 @@
 //! Windows still wraps with `cmd.exe /c` (`.cmd` shim); `--prompt` therefore
 //! flattens CR/LF to spaces so a multi-line handover cannot split the
 //! `cmd.exe` command line.
+//!
+//! **Permission policy**: `--auto` is baked into the base recipe. Mirrors
+//! how AGY's `--dangerously-skip-permissions` is wired — a session-wide
+//! policy the harness applies for the whole invocation, not a per-call
+//! toggle. The orchestrator's outer sandbox (macOS Seatbelt, Windows
+//! restricted-token, mesh-level toggle) is the independent OS-level
+//! containment layer.
 
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
@@ -62,7 +69,7 @@ impl AgentProvider for OpenCodeAdapter {
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         SpawnRecipe {
             binary: "opencode",
-            base_args: vec![],
+            base_args: vec!["--auto".into()],
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
@@ -166,7 +173,7 @@ mod tests {
     fn spawn_recipe_direct_on_macos() {
         let recipe = OPENCODE.spawn_recipe(Platform::Macos, EnvType::Windows);
         assert_eq!(recipe.binary, "opencode");
-        assert!(recipe.base_args.is_empty());
+        assert_eq!(recipe.base_args, vec!["--auto".to_string()]);
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Direct),
             "macOS must use WindowsShell::Direct — got {:?}",
@@ -178,7 +185,7 @@ mod tests {
     fn spawn_recipe_direct_on_linux() {
         let recipe = OPENCODE.spawn_recipe(Platform::Linux, EnvType::Windows);
         assert_eq!(recipe.binary, "opencode");
-        assert!(recipe.base_args.is_empty());
+        assert_eq!(recipe.base_args, vec!["--auto".to_string()]);
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Direct),
             "Linux must use WindowsShell::Direct — got {:?}",
@@ -194,6 +201,7 @@ mod tests {
     fn spawn_recipe_cmd_on_windows() {
         let recipe = OPENCODE.spawn_recipe(Platform::Windows, EnvType::Windows);
         assert_eq!(recipe.binary, "opencode");
+        assert_eq!(recipe.base_args, vec!["--auto".to_string()]);
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Cmd),
             "Windows must use WindowsShell::Cmd for the .cmd shim — got {:?}",
@@ -284,6 +292,23 @@ mod tests {
         assert_eq!(args, vec!["--model", "anthropic/claude-sonnet-4-5"]);
     }
 
+    /// `--auto` is the OpenCode analogue of AGY's
+    /// `--dangerously-skip-permissions` — see the module docstring. This
+    /// test pins the exact argv so a future edit that smuggles an extra
+    /// flag in (e.g. `--auto --garbage`) trips here, not at runtime.
+    #[test]
+    fn spawn_recipe_carries_auto_flag_on_every_platform() {
+        for platform in [Platform::Windows, Platform::Linux, Platform::Macos] {
+            let recipe = OPENCODE.spawn_recipe(platform, EnvType::Windows);
+            assert_eq!(
+                recipe.base_args,
+                vec!["--auto".to_string()],
+                "OpenCode base recipe must be exactly `[\"--auto\"]` on {platform:?}; got {:?}",
+                recipe.base_args
+            );
+        }
+    }
+
     #[test]
     fn supports_resume_model_and_prefill_but_no_attention_hook() {
         assert!(OPENCODE.supports_resume());
@@ -312,7 +337,10 @@ mod tests {
         );
     }
 
-    /// Resume recipe is `opencode --session <id>` (flag, not a subcommand).
+    /// Resume recipe is `opencode --auto --session <id>` — the base
+    /// recipe's `--auto` (issue #1297) survives the `default_prepare`
+    /// composition, and the resume adds `--session <id>` (flag, not
+    /// subcommand) on top.
     #[test]
     fn resume_recipe_carries_session_flag() {
         use crate::agent::capabilities::ResolvedAgentConfig;
@@ -331,7 +359,11 @@ mod tests {
         let args = &prepared.recipe.base_args;
         assert_eq!(
             args,
-            &["--session".to_string(), "ses_fc52ccfb9ffek1jl23ZwpRuSP7".to_string()]
+            &[
+                "--auto".to_string(),
+                "--session".to_string(),
+                "ses_fc52ccfb9ffek1jl23ZwpRuSP7".to_string()
+            ]
         );
         assert!(
             !args.iter().any(|a| a == "--resume" || a == "--session-id"),
@@ -339,12 +371,14 @@ mod tests {
         );
     }
 
-    /// Fresh spawn with model + prefill: `--model provider/model --prompt text`.
-    /// No session-assign flag (self-assign).
+    /// Fresh spawn argv order: `--auto` (base recipe) → `--model <id>` →
+    /// `--prompt <text>`. No session-assign flag (self-assign). Pin the
+    /// exact vector so a future reorder that pushes `--auto` past
+    /// `--model` (or drops it) trips here, not in production.
     #[test]
     fn fresh_recipe_forwards_model_and_prompt_without_session_id() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
 
         let config = ResolvedAgentConfig {
             model: Some("anthropic/claude-sonnet-4-5".to_string()),
@@ -360,12 +394,22 @@ mod tests {
             sandbox: false,
         };
         let prepared = default_prepare(&OPENCODE, input);
-        let args = &prepared.recipe.base_args;
-        assert_flag_followed_by_value(args, "--model", "anthropic/claude-sonnet-4-5");
-        assert_flag_followed_by_value(args, "--prompt", "fix the auth bug");
+        assert_eq!(
+            prepared.recipe.base_args,
+            vec![
+                "--auto".to_string(),
+                "--model".to_string(),
+                "anthropic/claude-sonnet-4-5".to_string(),
+                "--prompt".to_string(),
+                "fix the auth bug".to_string(),
+            ]
+        );
         assert!(
-            !args.iter().any(|a| a == "--session" || a == "--session-id" || a == "--prefill"),
-            "fresh spawn must not assign a session id or emit --prefill; got {args:?}"
+            !prepared.recipe.base_args.iter().any(|a| a == "--session"
+                || a == "--session-id"
+                || a == "--prefill"),
+            "fresh spawn must not assign a session id or emit --prefill; got {:?}",
+            prepared.recipe.base_args
         );
     }
 }
