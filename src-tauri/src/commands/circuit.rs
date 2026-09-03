@@ -7,7 +7,7 @@
 //! Rust — the throwaway Probe-tab authoring only sends a name and a
 //! prompt.
 
-use tauri::command;
+use tauri::{command, AppHandle, Emitter};
 
 use crate::autopilot::circuit::model::{
     trigger_kind_to_node_kind, validate_circuit_request, CircuitGraph,
@@ -32,12 +32,33 @@ pub enum CircuitTriggerKind {
     GithubPrLabel,
 }
 
+/// User-requested adjacent movement in the pending Circuit Run queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitQueueDirection.ts")]
+#[serde(rename_all = "lowercase")]
+pub enum CircuitQueueDirection {
+    Up,
+    Down,
+}
+
 /// One run plus its step ledger, for the Probe tab's run list.
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitRunDetail.ts")]
 pub struct CircuitRunDetail {
     pub run: AutopilotCircuitRun,
     pub steps: Vec<AutopilotCircuitRunStep>,
+}
+
+/// One pending Circuit Run in the mesh-wide admission queue. `queue_rank` is
+/// presentation-friendly (1 = next to start); the mutable storage position
+/// stays private to the database.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitQueueEntry.ts")]
+pub struct CircuitQueueEntry {
+    pub run: AutopilotCircuitRun,
+    pub circuit_name: String,
+    #[ts(as = "i32")]
+    pub queue_rank: i64,
 }
 
 /// Identifies the circuit run currently or historically owning a visible
@@ -84,7 +105,7 @@ pub fn get_circuit(circuit_id: i64) -> Result<AutopilotCircuit, String> {
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))
 }
 
-/// One circuit plus its recent run ledger — the Probe tab's load unit.
+/// One circuit plus its visible run ledger — the Probe tab's load unit.
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitWithRuns.ts")]
 pub struct CircuitWithRuns {
@@ -92,9 +113,10 @@ pub struct CircuitWithRuns {
     pub runs: Vec<CircuitRunDetail>,
 }
 
-/// Batched single-IPC load for the Circuits Probe tab: every circuit on
-/// the mesh with up to `limit` newest runs each (steps included), one
-/// command instead of N+1 round-trips.
+/// Batched single-IPC load for the Circuits Probe tab: every circuit on the
+/// mesh with every running/paused run and up to `limit` newest terminal runs
+/// (steps included), one command instead of N+1 round-trips. Pending runs are
+/// returned by `list_circuit_queue` so none are hidden behind this limit.
 #[command]
 pub fn list_circuits_with_runs(
     mesh_id: i64,
@@ -114,6 +136,22 @@ pub fn list_circuits_with_runs(
                 .collect()
         })
         .map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn list_circuit_queue(mesh_id: i64) -> Result<Vec<CircuitQueueEntry>, String> {
+    crate::db::list_queued_circuit_runs(mesh_id)
+        .map(|rows| {
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, (run, circuit_name))| CircuitQueueEntry {
+                    run,
+                    circuit_name,
+                    queue_rank: index as i64 + 1,
+                })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
 }
 
 /// Create a circuit with the canonical blueprint.
@@ -240,8 +278,81 @@ pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), S
     Ok(())
 }
 
+fn retire_cancelled_agents_with(
+    agent_ids: Vec<i64>,
+    mut retire: impl FnMut(i64) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for agent_id in agent_ids {
+        if let Err(error) = retire(agent_id) {
+            failures.push(format!("agent node {}: {}", agent_id, error));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("run was cancelled, but cleanup failed for {}", failures.join("; ")))
+    }
+}
+
+fn retire_cancelled_agents(agent_ids: Vec<i64>) -> Result<(), String> {
+    retire_cancelled_agents_with(agent_ids, |agent_id| {
+        match crate::db::get_agent_node_by_id(agent_id) {
+            Ok(_) => crate::services::agent_node::delete(agent_id, true)
+                .map_err(|error| error.to_string()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+            Err(error) => Err(format!("lookup failed: {}", error)),
+        }
+    })
+}
+
+fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
+    let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(|error| error.to_string())?;
+    let cleanup = retire_cancelled_agents(agent_ids);
+    let state = crate::db::get_circuit_run(run_id)
+        .map_err(|error| error.to_string())?
+        .map(|run| run.state)
+        .unwrap_or_else(|| "cancelled".to_string());
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id, state },
+    );
+    cleanup
+}
+
 #[command]
-pub fn delete_circuit(circuit_id: i64) -> Result<(), String> {
+pub fn cancel_circuit_run(app: AppHandle, run_id: i64) -> Result<(), String> {
+    cancel_run_and_cleanup(&app, run_id)
+}
+
+#[command]
+pub fn move_circuit_run(run_id: i64, direction: CircuitQueueDirection) -> Result<(), String> {
+    let toward_front = match direction {
+        CircuitQueueDirection::Up => true,
+        CircuitQueueDirection::Down => false,
+    };
+    crate::db::move_queued_circuit_run(run_id, toward_front)
+        .map_err(|error| error.to_string())?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    Ok(())
+}
+
+#[command]
+pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
+    crate::db::get_autopilot_circuit(circuit_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
+
+    // Stop fresh trigger ingestion before terminalising existing runs. The
+    // worker re-checks terminal state before spawning, closing the race with a
+    // pass that already loaded this circuit.
+    crate::db::set_autopilot_circuit_enabled(circuit_id, false)
+        .map_err(|error| error.to_string())?;
+    let run_ids = crate::db::list_circuit_run_ids_for_cleanup(circuit_id)
+        .map_err(|error| error.to_string())?;
+    for run_id in run_ids {
+        cancel_run_and_cleanup(&app, run_id)?;
+    }
     crate::db::delete_autopilot_circuit(circuit_id).map_err(|e| e.to_string())
 }
 
@@ -324,7 +435,11 @@ pub fn pause_circuit_run(run_id: i64) -> Result<(), String> {
     if run.state != "running" {
         return Err(format!("only running runs can be paused (run {} is {})", run_id, run.state));
     }
-    crate::db::set_circuit_run_state(run_id, "paused").map_err(|e| e.to_string())?;
+    if !crate::db::transition_circuit_run_state(run_id, "running", "paused")
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!("run {} changed state before it could be paused", run_id));
+    }
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: run {} paused", run_id);
     Ok(())
@@ -339,7 +454,11 @@ pub fn resume_circuit_run(run_id: i64) -> Result<(), String> {
     if run.state != "paused" {
         return Err(format!("only paused runs can be resumed (run {} is {})", run_id, run.state));
     }
-    crate::db::set_circuit_run_state(run_id, "running").map_err(|e| e.to_string())?;
+    if !crate::db::transition_circuit_run_state(run_id, "paused", "running")
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!("run {} changed state before it could be resumed", run_id));
+    }
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: run {} resumed", run_id);
     Ok(())
@@ -361,4 +480,26 @@ pub fn approve_circuit_step(run_id: i64, node_id: String) -> Result<(), String> 
     }
     crate::services::circuit_worker::request_circuit_approval(run_id, node_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retire_cancelled_agents_with;
+
+    #[test]
+    fn cancellation_retirement_attempts_every_agent_and_reports_partial_failure() {
+        let mut attempted = Vec::new();
+        let error = retire_cancelled_agents_with(vec![11, 12, 13], |agent_id| {
+            attempted.push(agent_id);
+            if agent_id == 12 {
+                Err("worktree busy".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(attempted, vec![11, 12, 13]);
+        assert!(error.contains("agent node 12: worktree busy"));
+    }
 }

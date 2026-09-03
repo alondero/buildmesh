@@ -1438,11 +1438,15 @@ import type { AutopilotCircuit } from '../types/generated/AutopilotCircuit';
 import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwnership';
 import type { CircuitRunDetail } from '../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../types/generated/CircuitWithRuns';
+import type { CircuitQueueDirection } from '../types/generated/CircuitQueueDirection';
+import type { CircuitQueueEntry } from '../types/generated/CircuitQueueEntry';
 // Milestone 4 (#1209): the canvas editor consumes the blueprint AST, so
 // the graph wire types ride the same sanctioned surface.
 export type {
   AutopilotCircuit,
   CircuitAgentOwnership,
+  CircuitQueueDirection,
+  CircuitQueueEntry,
   CircuitRunDetail,
   CircuitWithRuns,
 };
@@ -1466,10 +1470,13 @@ export const listCircuitAgentOwnerships = () =>
 export const getCircuit = (circuitId: number) =>
   _invoke<AutopilotCircuit>('get_circuit', { circuitId });
 
-/** Batched single-IPC load for the Probe tab: every circuit on the mesh
- *  with up to `limit` newest runs each (steps included). */
+/** Batched single-IPC load for the Probe tab: every circuit on the mesh with
+ *  all active runs plus up to `limit` newest terminal runs (steps included). */
 export const listCircuitsWithRuns = (meshId: number, limit?: number) =>
   _invoke<CircuitWithRuns[]>('list_circuits_with_runs', { meshId, limit });
+
+export const listCircuitQueue = (meshId: number) =>
+  _invoke<CircuitQueueEntry[]>('list_circuit_queue', { meshId });
 
 /** Creates a circuit with the canonical server-side blueprint:
  *  <trigger> → SpawnAgentNode (fresh) → InjectPty(prompt) → Notify.
@@ -1512,6 +1519,12 @@ export const updateCircuitGraph = (circuitId: number, graphJson: string) =>
 
 export const deleteCircuit = (circuitId: number) =>
   _invoke<void>('delete_circuit', { circuitId });
+
+export const cancelCircuitRun = (runId: number) =>
+  _invoke<void>('cancel_circuit_run', { runId });
+
+export const moveCircuitRun = (runId: number, direction: CircuitQueueDirection) =>
+  _invoke<void>('move_circuit_run', { runId, direction });
 
 export const triggerCircuitNow = (circuitId: number) =>
   _invoke<number>('trigger_circuit_now', { circuitId });

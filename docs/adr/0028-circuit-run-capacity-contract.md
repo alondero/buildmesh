@@ -19,14 +19,14 @@ until the multi-run scheduler milestone", and `docs/specs/prd-autopilot-mode.md:
 defined `autopilot_concurrency_limit` as a per-mesh agent cap. Issue #1467
 is that "multi-run scheduler milestone".
 
-A circuit run is a graph of nodes (spawn / inject / notify / gate / close);
-each `SpawnAgentNode` consumes a mesh-level **agent slot** for as long as
-the spawned agent node is referenced by a running or paused step. Review
-blueprints (issue-driven Autopilot review) keep the implementation agent
-attached throughout the PR-review cycle so they can receive targeted
-feedback. Two overlapping review runs therefore saturate the per-mesh
-agent cap with implementation agents alone, leaving no room for the
-reviewer spawn.
+A circuit run is a graph of nodes (spawn / inject / notify / gate / close).
+The legacy mesh agent budget admits a run's first `SpawnAgentNode`; after
+admission, the circuit's own running-step budget governs its downstream
+agent fan-out. Review blueprints (issue-driven Autopilot review) keep the
+implementation agent attached throughout the PR-review cycle so it can
+receive targeted feedback. Treating each retained agent as a new admission
+charge lets two overlapping review runs saturate the legacy budget with
+implementation agents alone, leaving no room for either reviewer spawn.
 
 The `autopilot_circuits.concurrency_limit` column, currently defaulting
 to 1, is a **per-circuit running-step budget**, not a run cap. It bounds
@@ -87,9 +87,11 @@ the next pass. The run stays `pending` in the DB — no separate queued
 table is needed. The worker has a mesh-id cache so a mesh with N
 pending runs but only 1 row read is the common case.
 
-**Fairness.** `db::list_active_circuit_runs()` orders results by
-`r.id` (auto-incrementing), which is FIFO by insertion. A later
-implementation run cannot starve an earlier reviewer step because:
+**Fairness.** Pending runs carry a persisted, per-mesh `queue_position`
+(schema v37). `db::list_active_circuit_runs()` orders pending rows by that
+position, then id, so insertion is FIFO until a user explicitly moves a run
+up or down. A later implementation run cannot starve an earlier reviewer
+step because:
 (a) the gate is per-mesh (cap bounds the mesh, not the circuit),
 (b) iteration order is FIFO, (c) the cap is exact (not weighted).
 A paused run **retains** its slot per the user-chosen semantics in the
@@ -99,9 +101,13 @@ resume continues cleanly, matching the pre-existing
 
 **Backward compatibility.** `meshes.autopilot_concurrency_limit` is
 UNCHANGED. The legacy Autopilot poller (`services::autopilot.rs:326`)
-keeps reading it via `effective_capacity`. The circuit worker stops
-reading it for run admission; it continues reading it only to feed
-`mesh_agent_free_slots` — the existing agent-slot backstop. The
+keeps reading it via `effective_capacity`. For Circuits, the worker uses it
+as a first-agent admission backstop: a run with no attached Agent Node needs
+a free mesh agent slot before its first spawn, while a run that already owns
+an agent may fan out under the circuit running-step budget. Counting every
+retained agent against every later spawn recreates the deadlock this ADR is
+meant to remove: two retained implementers fill both mesh slots, so neither
+run can spawn its reviewer. The
 breakdown is documented in `docs/knowledge-primer.md`'s Autopilot
 section so future contributors don't re-merge the two semantics.
 
@@ -144,9 +150,12 @@ can't clobber the user's autopilot policy.
   `circuit_run_capacity = 2`, two PR-review runs can each spawn their
   implementation + reviewer agents without reviewer admission depending
   on the other run's agent-node count.
+- The mesh agent limit gates a Circuit Run's first Agent Node, not every
+  later fan-out step. Per-circuit running-step capacity still bounds fan-out.
 - A third run on the same mesh is held at the circuit-run boundary
-  while two are admitted. It stays `pending` and is admitted FIFO when
-  the first run reaches a terminal state.
+  while two are admitted. It stays `pending` and is admitted in persisted
+  queue order when the first run reaches a terminal state; the Probe can
+  move or cancel pending entries.
 - Capacity is released exactly once when a run reaches a terminal
   state (including failure and crash-recovery paths through
   `release_circuit_run`).
@@ -163,7 +172,7 @@ can't clobber the user's autopilot policy.
 
 - Renaming `pending_slot` to a more descriptive string (load-bearing
   vocabulary across 5 files; separate concern).
-- Sub-run priority / weighted round-robin across circuits (no fairness
-  UX signal today; FIFO by insertion is what #1467 asks for).
+- Weighted priority / round-robin across circuits. Queue movement is an
+  explicit adjacent swap, not a continuously evaluated priority policy.
 - Per-circuit mutable `concurrency_limit` IPC (the value stays a
   create-time-only field per the existing API contract).

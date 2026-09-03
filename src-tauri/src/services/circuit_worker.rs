@@ -1247,6 +1247,13 @@ fn execute_effects(
 ) -> Result<(), String> {
     use crate::autopilot::circuit::stepper::Effect;
     for effect in effects {
+        if !run_accepts_effects(active.run.id)? {
+            tracing::info!(
+                "circuits: stopped effects for terminal/deleted run {}",
+                active.run.id
+            );
+            return Ok(());
+        }
         match effect {
             Effect::SpawnAgentNode { node_id } => {
                 spawn_step_agent(app, active.run.id, active.run.mesh_id, view, node_id)?;
@@ -1370,6 +1377,17 @@ fn execute_effects(
         }
     }
     Ok(())
+}
+
+/// Cancellation commits the terminal run state before retiring external
+/// resources. Every effect rechecks that durable state so a worker pass that
+/// observed the run just before cancellation cannot continue spawning,
+/// injecting, notifying, or mutating GitHub afterward.
+fn run_accepts_effects(run_id: i64) -> Result<bool, String> {
+    Ok(matches!(
+        db::get_circuit_run(run_id).map_err(|error| error.to_string())?,
+        Some(run) if matches!(run.state.as_str(), "pending" | "running" | "paused")
+    ))
 }
 
 /// Pure seam of [`spawn_step_agent`] — translates a
@@ -1558,6 +1576,10 @@ fn spawn_step_agent(
     node_id: &str,
 ) -> Result<(), String> {
     use crate::agent::spawn::WorktreePolicy;
+    if !run_accepts_effects(run_id)? {
+        tracing::info!("circuits: skipped spawn for terminal/deleted run {}", run_id);
+        return Ok(());
+    }
     let kind = view
         .graph
         .node(node_id)
@@ -1650,15 +1672,26 @@ fn spawn_step_agent(
             )
             .map_err(|e| e.to_string())?;
 
-            crate::agent::session_lifecycle::on_created(
+            if let Err(error) = crate::agent::session_lifecycle::on_created(
                 &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
                 new_node.id,
-            )
-            .map_err(|e| e.to_string())?;
+            ) {
+                let _ = crate::services::agent_node::delete(new_node.id, true);
+                return Err(error.to_string());
+            }
 
-            db::set_circuit_step_agent_node(run_id, node_id, new_node.id)
-                .map_err(|e| format!("could not attach new agent to step: {}", e))?;
+            if let Err(error) = db::set_circuit_step_agent_node(run_id, node_id, new_node.id) {
+                // Deletion can win the race after create_pending. If its
+                // cascade removed the run, retire the unattached node instead
+                // of leaking a process/worktree outside the circuit ledger.
+                let _ = crate::services::agent_node::delete(new_node.id, true);
+                return Err(format!("could not attach new agent to step: {}", error));
+            }
             view.attach_agent_node(node_id, new_node.id);
+            if !run_accepts_effects(run_id)? {
+                let _ = crate::services::agent_node::delete(new_node.id, true);
+                return Ok(());
+            }
             crate::autopilot::evaluator::register_circuit(new_node.id);
             crate::autopilot::evaluator::note_turn_start(new_node.id);
             let _ = app.emit(
@@ -1693,15 +1726,23 @@ fn spawn_step_agent(
     )
     .map_err(|e| e.to_string())?;
 
-    crate::agent::session_lifecycle::on_created(
+    if let Err(error) = crate::agent::session_lifecycle::on_created(
         &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
         node.id,
-    )
-    .map_err(|e| e.to_string())?;
+    ) {
+        let _ = crate::services::agent_node::delete(node.id, true);
+        return Err(error.to_string());
+    }
 
-    db::set_circuit_step_agent_node(run_id, node_id, node.id)
-        .map_err(|e| format!("could not attach agent to step: {}", e))?;
+    if let Err(error) = db::set_circuit_step_agent_node(run_id, node_id, node.id) {
+        let _ = crate::services::agent_node::delete(node.id, true);
+        return Err(format!("could not attach agent to step: {}", error));
+    }
     view.attach_agent_node(node_id, node.id);
+    if !run_accepts_effects(run_id)? {
+        let _ = crate::services::agent_node::delete(node.id, true);
+        return Ok(());
+    }
 
     // Track output times for this piloted node (the PTY submit watcher
     // and future classifiers read them).
@@ -2112,16 +2153,15 @@ mod tests {
     fn may_admit_run_pending_saturated_mesh_defers() {
         let path = init_temp_db_at("may_admit_defer");
         let mesh = crate::db::create_mesh("may-admit-defer", "/tmp/may-admit-defer").unwrap();
-        // Tighten cap to 1 so a single admitted run saturates the mesh
-        // — without this the default cap=2 would admit the second
-        // pending run alongside the first, defeating the test.
-        crate::db::set_mesh_circuit_run_capacity(mesh.id, 1).unwrap();
+        // Two admitted runs saturate the expected review-flow capacity.
+        crate::db::set_mesh_circuit_run_capacity(mesh.id, 2).unwrap();
         let c1 = crate::db::create_autopilot_circuit(mesh.id, "c1", "", 4, "{}").unwrap();
         let c2 = crate::db::create_autopilot_circuit(mesh.id, "c2", "", 4, "{}").unwrap();
+        let c3 = crate::db::create_autopilot_circuit(mesh.id, "c3", "", 4, "{}").unwrap();
 
         let mesh_row = crate::db::get_mesh_by_id(mesh.id).unwrap();
 
-        // Mesh starts with cap=1 and zero admitted runs — admits.
+        // Mesh starts below cap and admits the first run.
         let pending_run = crate::db::create_circuit_run(c1.id, mesh.id, "", "{}").unwrap();
         let pending_row = crate::db::list_active_circuit_runs().unwrap().into_iter()
             .find(|r| r.run.id == pending_run)
@@ -2131,41 +2171,49 @@ mod tests {
             "below cap — must admit",
         );
 
-        // Saturate the mesh: flip the first run to `running` (it
-        // now holds the only slot), then mint a second run that
-        // stays `pending` — the gate must defer it.
+        // Admit the second run, then verify the third stays pending.
         crate::db::set_circuit_run_state(pending_run, "running").unwrap();
         let pending_run_2 = crate::db::create_circuit_run(c2.id, mesh.id, "", "{}").unwrap();
         let pending_row_2 = crate::db::list_active_circuit_runs().unwrap().into_iter()
             .find(|r| r.run.id == pending_run_2)
             .expect("second pending run must be in the active list");
 
+        assert!(
+            may_admit_run(&pending_row_2, &mesh_row),
+            "the second run must admit below cap 2"
+        );
+        crate::db::set_circuit_run_state(pending_run_2, "running").unwrap();
+        let pending_run_3 = crate::db::create_circuit_run(c3.id, mesh.id, "", "{}").unwrap();
+        let pending_row_3 = crate::db::list_active_circuit_runs().unwrap().into_iter()
+            .find(|r| r.run.id == pending_run_3)
+            .expect("third pending run must be in the active list");
+
         assert_eq!(
             crate::db::count_active_circuit_runs(mesh.id).unwrap(),
-            1,
-            "sanity: the running run counts; the second pending does not (gate input shape)"
+            2,
+            "two running runs consume both run-admission slots"
         );
         assert_eq!(
-            mesh_row.circuit_run_capacity, 1,
-            "sanity: cap is 1, so 1 admitted run fills it"
+            mesh_row.circuit_run_capacity, 2,
+            "sanity: cap is 2, so two admitted runs fill it"
         );
         assert!(
-            !may_admit_run(&pending_row_2, &mesh_row),
+            !may_admit_run(&pending_row_3, &mesh_row),
             "at cap — must defer to next pass (FIFO)",
         );
 
         // Terminal the running run via `commit_circuit_advance`'s
-        // idempotent terminal-state branch — the second pending
+        // idempotent terminal-state branch — the third pending run
         // now admits on the next observation pass.
         crate::db::commit_circuit_advance(pending_run, Some("completed"), None, &[]).unwrap();
         assert_eq!(
             crate::db::count_active_circuit_runs(mesh.id).unwrap(),
-            0,
-            "terminal commit frees the only admitted run"
+            1,
+            "terminal commit frees one admitted-run slot"
         );
         assert!(
-            may_admit_run(&pending_row_2, &mesh_row),
-            "after terminal — second pending must admit (FIFO promotion)",
+            may_admit_run(&pending_row_3, &mesh_row),
+            "after terminal — third pending must admit (FIFO promotion)",
         );
 
         std::fs::remove_file(&path).ok();

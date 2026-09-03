@@ -20,11 +20,13 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';
+import type { CircuitQueueEntry } from '../../src/types/generated/CircuitQueueEntry';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { openProbeDestination } from './helpers/openProbeDestination';
 // Direct wrapper access for the IPC-contract block below.
 import {
   listCircuitsWithRuns,
+  listCircuitQueue,
   createCircuit,
   setCircuitEnabled,
   deleteCircuit,
@@ -32,6 +34,8 @@ import {
   listCircuitRuns,
   pauseCircuitRun,
   resumeCircuitRun,
+  cancelCircuitRun,
+  moveCircuitRun,
   approveCircuitStep,
   getCircuit,
   updateCircuitGraph,
@@ -104,15 +108,31 @@ const RUN_RUNNING: CircuitRunDetail = {
   steps: [],
 };
 
+const QUEUE: CircuitQueueEntry[] = [
+  {
+    run: { ...RUN_DONE.run, id: 21, state: 'pending', trigger_identity: 'issue:21:run' },
+    circuit_name: 'nightly-sweep',
+    queue_rank: 1,
+  },
+  {
+    run: { ...RUN_DONE.run, id: 22, state: 'pending', trigger_identity: 'issue:22:run' },
+    circuit_name: 'nightly-sweep',
+    queue_rank: 2,
+  },
+];
+
 function mockBackend(overrides: {
   circuits?: AutopilotCircuit[];
   runs?: CircuitRunDetail[];
+  queue?: CircuitQueueEntry[];
 } = {}) {
   const circuits = overrides.circuits ?? [CIRCUIT];
   const runs = overrides.runs ?? [RUN_DONE, RUN_RUNNING];
+  const queue = overrides.queue ?? [];
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'list_circuits') return Promise.resolve(circuits);
     if (cmd === 'list_circuit_runs') return Promise.resolve(runs);
+    if (cmd === 'list_circuit_queue') return Promise.resolve(queue);
     if (cmd === 'list_circuits_with_runs') {
       return Promise.resolve(
         circuits.map((circuit) => ({
@@ -124,7 +144,12 @@ function mockBackend(overrides: {
     if (
       cmd === 'create_circuit' ||
       cmd === 'set_circuit_enabled' ||
-      cmd === 'delete_circuit'
+      cmd === 'delete_circuit' ||
+      cmd === 'pause_circuit_run' ||
+      cmd === 'resume_circuit_run' ||
+      cmd === 'cancel_circuit_run' ||
+      cmd === 'move_circuit_run' ||
+      cmd === 'approve_circuit_step'
     ) {
       return Promise.resolve(args && cmd === 'create_circuit' ? CIRCUIT : undefined);
     }
@@ -162,8 +187,9 @@ describe('CircuitsProbeTab', () => {
     expect(screen.getByTestId('run-card-11').getAttribute('data-run-state')).toBe('completed');
     // Steps are a vertical timeline, not a joined one-line string (#1468).
     expect(screen.queryByText(/trigger:completed/)).toBeNull();
-    // The load pass is ONE batched IPC with camelCase args.
+    // The ledger and complete mesh queue load together.
     expect(invoke).toHaveBeenCalledWith('list_circuits_with_runs', { meshId: 42, limit: 10 });
+    expect(invoke).toHaveBeenCalledWith('list_circuit_queue', { meshId: 42 });
   });
 
   it('New Circuit creates the skeleton and opens the canvas editor (#1209)', async () => {
@@ -292,14 +318,42 @@ describe('CircuitsProbeTab', () => {
     });
   });
 
-  it('deletes a circuit', async () => {
+  it('confirms before deleting a circuit', async () => {
     mockBackend();
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
     await user.click(await screen.findByTestId('circuit-delete-7'));
+    expect(invoke).not.toHaveBeenCalledWith('delete_circuit', { circuitId: 7 });
+    await user.click(screen.getByTestId('circuit-confirm-delete-7'));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('delete_circuit', { circuitId: 7 });
+    });
+  });
+
+  it('shows the complete queue nearest-first with reorder and cancel controls', async () => {
+    mockBackend({ queue: QUEUE });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    const queue = await screen.findByTestId('circuit-queue');
+    expect(
+      Array.from(queue.querySelectorAll('[data-testid^="queue-run-"]')).map((row) =>
+        row.getAttribute('data-testid')
+      )
+    ).toEqual(['queue-run-21', 'queue-run-22']);
+    expect(queue.textContent).toContain('Next to start first');
+
+    await user.click(screen.getByLabelText('Move run 22 up'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('move_circuit_run', { runId: 22, direction: 'up' });
+    });
+    await waitFor(() => {
+      expect((screen.getByLabelText('Cancel run 21') as HTMLButtonElement).disabled).toBe(false);
+    });
+    await user.click(screen.getByLabelText('Cancel run 21'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('cancel_circuit_run', { runId: 21 });
     });
   });
 
@@ -346,7 +400,7 @@ describe('CircuitsProbeTab', () => {
     });
   });
 
-  it('offers Pause on a running run and Resume on a paused one', async () => {
+  it('offers Pause, Resume, and Cancel on live runs', async () => {
     const RUN_PAUSED: CircuitRunDetail = {
       run: { ...RUN_DONE.run, id: 16, state: 'paused' },
       steps: [],
@@ -363,6 +417,14 @@ describe('CircuitsProbeTab', () => {
     await user.click(screen.getByTestId('run-resume-16'));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('resume_circuit_run', { runId: 16 });
+    });
+
+    await waitFor(() => {
+      expect((screen.getByTestId('run-cancel-12') as HTMLButtonElement).disabled).toBe(false);
+    });
+    await user.click(screen.getByTestId('run-cancel-12'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('cancel_circuit_run', { runId: 12 });
     });
   });
 });
@@ -728,6 +790,9 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
     await listCircuitsWithRuns(42, 10);
     expect(invoke).toHaveBeenLastCalledWith('list_circuits_with_runs', { meshId: 42, limit: 10 });
 
+    await listCircuitQueue(42);
+    expect(invoke).toHaveBeenLastCalledWith('list_circuit_queue', { meshId: 42 });
+
     await createCircuit(42, 'n', 'd', 2, 'p');
     expect(invoke).toHaveBeenLastCalledWith('create_circuit', {
       meshId: 42,
@@ -775,6 +840,15 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
 
     await resumeCircuitRun(11);
     expect(invoke).toHaveBeenLastCalledWith('resume_circuit_run', { runId: 11 });
+
+    await cancelCircuitRun(11);
+    expect(invoke).toHaveBeenLastCalledWith('cancel_circuit_run', { runId: 11 });
+
+    await moveCircuitRun(11, 'up');
+    expect(invoke).toHaveBeenLastCalledWith('move_circuit_run', {
+      runId: 11,
+      direction: 'up',
+    });
 
     await approveCircuitStep(11, 'gate');
     expect(invoke).toHaveBeenLastCalledWith('approve_circuit_step', { runId: 11, nodeId: 'gate' });

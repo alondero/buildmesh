@@ -107,6 +107,7 @@ function mockBackend() {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'list_circuits') return Promise.resolve([CIRCUIT]);
     if (cmd === 'list_circuit_runs') return Promise.resolve([RUN_DONE]);
+    if (cmd === 'list_circuit_queue') return Promise.resolve([]);
     if (cmd === 'list_circuits_with_runs') {
       return Promise.resolve([{ circuit: CIRCUIT, runs: [RUN_DONE] }]);
     }

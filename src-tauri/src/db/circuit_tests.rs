@@ -276,6 +276,158 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
 }
 
 #[test]
+fn pending_run_queue_is_oldest_first_and_can_be_reordered() {
+    let path = init_temp_db("queue_order");
+    let mesh = create_mesh("circuit-queue-mesh", "/tmp/circuit-queue").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "queue", "", 2, &sample_graph_json()).unwrap();
+
+    let first = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let second = create_circuit_run(circuit.id, mesh.id, "manual:2", "{}").unwrap();
+    let third = create_circuit_run(circuit.id, mesh.id, "manual:3", "{}").unwrap();
+
+    let ids = list_queued_circuit_runs(mesh.id)
+        .unwrap()
+        .into_iter()
+        .map(|(run, _)| run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![first, second, third]);
+
+    move_queued_circuit_run(third, true).unwrap();
+    let ids = list_queued_circuit_runs(mesh.id)
+        .unwrap()
+        .into_iter()
+        .map(|(run, _)| run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![first, third, second]);
+
+    move_queued_circuit_run(third, true).unwrap();
+    let ids = list_queued_circuit_runs(mesh.id)
+        .unwrap()
+        .into_iter()
+        .map(|(run, _)| run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![third, first, second]);
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
+    let path = init_temp_db("ledger_active_outside_history");
+    let mesh = create_mesh("circuit-active-ledger", "/tmp/circuit-active-ledger").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "active ledger", "", 2, &sample_graph_json()).unwrap();
+
+    let older_active = create_circuit_run(circuit.id, mesh.id, "active", "{}").unwrap();
+    set_circuit_run_state(older_active, "running").unwrap();
+    let mut terminal_ids = Vec::new();
+    for index in 0..11 {
+        let run_id = create_circuit_run(
+            circuit.id,
+            mesh.id,
+            &format!("terminal:{}", index),
+            "{}",
+        )
+        .unwrap();
+        commit_circuit_advance(run_id, Some("completed"), None, &[]).unwrap();
+        terminal_ids.push(run_id);
+    }
+
+    let rows = list_circuits_with_recent_runs(mesh.id, 10).unwrap();
+    let visible_ids = rows[0]
+        .1
+        .iter()
+        .map(|ledger| ledger.run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(visible_ids.len(), 11, "one active plus ten terminal rows");
+    assert!(visible_ids.contains(&older_active));
+    assert!(!visible_ids.contains(&terminal_ids[0]), "oldest terminal row is bounded out");
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
+    let path = init_temp_db("cancel_run");
+    let mesh = create_mesh("circuit-cancel-mesh", "/tmp/circuit-cancel").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "cancel", "", 2, &sample_graph_json()).unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "manual:cancel", "{}").unwrap();
+    set_circuit_run_state(run_id, "running").unwrap();
+    commit_circuit_advance(
+        run_id,
+        None,
+        None,
+        &[CircuitStepOp {
+            node_id: "spawn".into(),
+            status: "completed".into(),
+            outcome: Some(Some("completed".into())),
+            error: None,
+            agent_node_id: Some(991),
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+
+    let agents = cancel_circuit_run(run_id).unwrap();
+    assert_eq!(agents, vec![991]);
+    assert_eq!(get_circuit_run(run_id).unwrap().unwrap().state, "cancelled");
+    assert_eq!(count_active_circuit_runs(mesh.id).unwrap(), 0);
+    assert_eq!(
+        cancel_circuit_run(run_id).unwrap(),
+        vec![991],
+        "cleanup retries must retain the ledger's attached agents"
+    );
+    assert_eq!(
+        list_circuit_run_ids_for_cleanup(circuit.id).unwrap(),
+        vec![run_id]
+    );
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn stale_worker_and_pause_writes_cannot_resurrect_a_cancelled_run() {
+    let path = init_temp_db("cancel_run_stale_commit");
+    let mesh = create_mesh("circuit-cancel-race", "/tmp/circuit-cancel-race").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "cancel race", "", 2, &sample_graph_json()).unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "manual:cancel-race", "{}").unwrap();
+
+    cancel_circuit_run(run_id).unwrap();
+    commit_circuit_advance(
+        run_id,
+        Some("running"),
+        Some(r#"{"stale":true}"#),
+        &[CircuitStepOp {
+            node_id: "spawn".into(),
+            status: "running".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+    set_circuit_run_state(run_id, "paused").unwrap();
+
+    let run = get_circuit_run(run_id).unwrap().unwrap();
+    assert_eq!(run.state, "cancelled");
+    assert_eq!(run.context_json, "{}");
+    assert!(list_circuit_run_steps(run_id).unwrap().is_empty());
+    assert!(!transition_circuit_run_state(run_id, "running", "paused").unwrap());
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn circuit_agent_ownership_comes_from_the_step_ledger() {
     let path = init_temp_db("agent_ownership");
     let mesh = create_mesh("circuit-owner-mesh", "/tmp/circuit-owner").unwrap();
@@ -323,7 +475,13 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
     );
 
     clear_circuit_step_agent_node(run_id, "spawn").unwrap();
-    assert!(list_circuit_agent_ownerships().unwrap().is_empty());
+    assert!(
+        list_circuit_agent_ownerships()
+            .unwrap()
+            .iter()
+            .all(|(owned_agent_id, ..)| *owned_agent_id != agent.id),
+        "clearing this step removes this agent's ownership without assuming other parallel tests are idle"
+    );
 
     let _ = get();
     std::fs::remove_file(&path).ok();

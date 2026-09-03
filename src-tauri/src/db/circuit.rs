@@ -16,7 +16,7 @@ use super::{params, SqlResult};
 use crate::models::{
     AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 // ---------------------------------------------------------------------------
 // Circuits — CRUD for the blueprint rows.
@@ -137,9 +137,10 @@ pub struct CircuitRunLedger {
     pub steps: Vec<AutopilotCircuitRunStep>,
 }
 
-/// A mesh's circuits WITH their recent run ledgers, in ONE mutex
-/// acquisition — the Probe tab's single-IPC-load shape (a circuit per
-/// row plus up to `runs_per_circuit` newest runs each, newest first).
+/// A mesh's circuits WITH every running/paused ledger plus bounded terminal
+/// history, in ONE mutex acquisition. Pending runs have their own complete
+/// mesh queue; excluding them here prevents the queue and ledger from
+/// presenting the same run twice.
 pub fn list_circuits_with_recent_runs(
     mesh_id: i64,
     runs_per_circuit: i64,
@@ -180,10 +181,20 @@ pub fn list_circuits_with_recent_runs(
 
     let mut out = Vec::with_capacity(circuits.len());
     for circuit in circuits {
+        let history_limit = runs_per_circuit.max(0) as usize;
+        let mut history_count = 0;
         let runs: Vec<AutopilotCircuitRun> = all_runs
             .iter()
-            .filter(|r| r.circuit_id == circuit.id)
-            .take(runs_per_circuit.max(0) as usize)
+            .filter(|run| run.circuit_id == circuit.id)
+            .filter(|run| match run.state.as_str() {
+                "running" | "paused" => true,
+                "pending" => false,
+                _ if history_count < history_limit => {
+                    history_count += 1;
+                    true
+                }
+                _ => false,
+            })
             .cloned()
             .collect();
         let mut ledgers = Vec::with_capacity(runs.len());
@@ -282,19 +293,154 @@ pub fn create_circuit_run(
     trigger_identity: &str,
     context_json: &str,
 ) -> SqlResult<i64> {
-    let db = super::write_conn();
-    db.execute(
-        "INSERT OR IGNORE INTO autopilot_circuit_runs \
-             (circuit_id, mesh_id, trigger_identity, context_json) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![circuit_id, mesh_id, trigger_identity, context_json],
+    let mut db = super::write_conn();
+    let tx = db.transaction()?;
+    let next_position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM autopilot_circuit_runs WHERE mesh_id = ?1",
+        params![mesh_id],
+        |row| row.get(0),
     )?;
-    db.query_row(
+    tx.execute(
+        "INSERT OR IGNORE INTO autopilot_circuit_runs \
+             (circuit_id, mesh_id, trigger_identity, context_json, queue_position) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![circuit_id, mesh_id, trigger_identity, context_json, next_position],
+    )?;
+    let id = tx.query_row(
         "SELECT id FROM autopilot_circuit_runs \
          WHERE circuit_id = ?1 AND trigger_identity = ?2",
         params![circuit_id, trigger_identity],
         |row| row.get(0),
-    )
+    )?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Pending Circuit Runs on one mesh in worker-admission order. The circuit
+/// name rides beside the canonical run row for the Probe's global queue.
+pub fn list_queued_circuit_runs(
+    mesh_id: i64,
+) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
+    let db = super::read_conn();
+    let mut stmt = db.prepare(
+        "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
+                r.context_json, r.created_at, r.updated_at, c.name \
+         FROM autopilot_circuit_runs r \
+         JOIN autopilot_circuits c ON c.id = r.circuit_id \
+         WHERE r.mesh_id = ?1 AND r.state = 'pending' \
+         ORDER BY r.queue_position, r.id",
+    )?;
+    let rows = stmt.query_map(params![mesh_id], |row| {
+        Ok((
+            AutopilotCircuitRun {
+                id: row.get(0)?,
+                circuit_id: row.get(1)?,
+                mesh_id: row.get(2)?,
+                trigger_identity: row.get(3)?,
+                state: row.get(4)?,
+                context_json: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            },
+            row.get(8)?,
+        ))
+    })?;
+    rows.collect()
+}
+
+/// Swap one pending run with its adjacent queue neighbour. Returns false at
+/// the front/back boundary. Running and terminal rows cannot be reordered.
+pub fn move_queued_circuit_run(run_id: i64, toward_front: bool) -> SqlResult<bool> {
+    let mut db = super::write_conn();
+    let tx = db.transaction()?;
+    let (mesh_id, position): (i64, i64) = tx.query_row(
+        "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
+         WHERE id = ?1 AND state = 'pending'",
+        params![run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let neighbour = if toward_front {
+        tx.query_row(
+            "SELECT id, queue_position FROM autopilot_circuit_runs \
+             WHERE mesh_id = ?1 AND state = 'pending' AND queue_position < ?2 \
+             ORDER BY queue_position DESC, id DESC LIMIT 1",
+            params![mesh_id, position],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+    } else {
+        tx.query_row(
+            "SELECT id, queue_position FROM autopilot_circuit_runs \
+             WHERE mesh_id = ?1 AND state = 'pending' AND queue_position > ?2 \
+             ORDER BY queue_position, id LIMIT 1",
+            params![mesh_id, position],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+    };
+    let Some((neighbour_id, neighbour_position)) = neighbour else {
+        return Ok(false);
+    };
+    tx.execute(
+        "UPDATE autopilot_circuit_runs \
+         SET queue_position = CASE id WHEN ?1 THEN ?4 WHEN ?2 THEN ?3 END \
+         WHERE id IN (?1, ?2)",
+        params![run_id, neighbour_id, position, neighbour_position],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Atomically terminalise one active run and return its attached Agent Nodes
+/// so the command layer can retire their processes/worktrees after the DB
+/// stops the worker from driving the run.
+pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
+    let mut db = super::write_conn();
+    let tx = db.transaction()?;
+    let state: String = tx.query_row(
+        "SELECT state FROM autopilot_circuit_runs WHERE id = ?1",
+        params![run_id],
+        |row| row.get(0),
+    )?;
+    if matches!(state.as_str(), "completed" | "failed") {
+        return Ok(Vec::new());
+    }
+    let agents = {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT agent_node_id FROM autopilot_circuit_run_steps \
+             WHERE run_id = ?1 AND agent_node_id IS NOT NULL ORDER BY agent_node_id",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id], |row| row.get(0))?
+            .collect::<SqlResult<Vec<i64>>>()?;
+        rows
+    };
+    if state != "cancelled" {
+        tx.execute(
+            "UPDATE autopilot_circuit_runs SET state = 'cancelled', updated_at = datetime('now') \
+             WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
+            params![run_id],
+        )?;
+    }
+    tx.commit()?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    Ok(agents)
+}
+
+/// Runs whose attached agents may still need retiring while a circuit is
+/// deleted. Cancelled rows are included so a deletion can be retried after a
+/// transient process/worktree cleanup failure without orphaning the agents.
+pub fn list_circuit_run_ids_for_cleanup(circuit_id: i64) -> SqlResult<Vec<i64>> {
+    let db = super::read_conn();
+    let mut stmt = db.prepare(
+        "SELECT id FROM autopilot_circuit_runs \
+         WHERE circuit_id = ?1 AND state IN ('pending', 'running', 'paused', 'cancelled') \
+         ORDER BY id",
+    )?;
+    let ids = stmt
+        .query_map(params![circuit_id], |row| row.get(0))?
+        .collect();
+    ids
 }
 
 /// One active (pending/running) run joined with the fields its worker
@@ -317,7 +463,7 @@ pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
          FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          WHERE r.state IN ('pending', 'running', 'paused') \
-         ORDER BY r.id",
+         ORDER BY CASE WHEN r.state = 'pending' THEN 1 ELSE 0 END, r.queue_position, r.id",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(ActiveCircuitRun {
@@ -363,16 +509,34 @@ pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<Autopilot
     rows.collect()
 }
 
-/// Persist a run-state transition from outside the stepper's own pass —
-/// pause/resume (#1207) and the effect-failure path. The worker wakes on
-/// the condvar afterwards; the next pass reads the new state.
+/// Test helper for direct live-state setup. Production pause/resume uses the
+/// compare-and-set transition below.
+#[cfg(test)]
 pub fn set_circuit_run_state(run_id: i64, state: &str) -> SqlResult<()> {
     let db = super::write_conn();
     db.execute(
-        "UPDATE autopilot_circuit_runs SET state = ?2, updated_at = datetime('now') WHERE id = ?1",
+        "UPDATE autopilot_circuit_runs SET state = ?2, updated_at = datetime('now') \
+         WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
         params![run_id, state],
     )?;
     Ok(())
+}
+
+/// Compare-and-set a live run state. Pause/resume commands use this instead
+/// of a read followed by an unconditional write, so cancellation cannot win
+/// between those operations and then be overwritten by the stale command.
+pub fn transition_circuit_run_state(
+    run_id: i64,
+    expected_state: &str,
+    next_state: &str,
+) -> SqlResult<bool> {
+    let db = super::write_conn();
+    let updated = db.execute(
+        "UPDATE autopilot_circuit_runs SET state = ?3, updated_at = datetime('now') \
+         WHERE id = ?1 AND state = ?2 AND state IN ('pending', 'running', 'paused')",
+        params![run_id, expected_state, next_state],
+    )?;
+    Ok(updated > 0)
 }
 
 /// Is this DB string a terminal run state? The three terminal values
@@ -491,6 +655,24 @@ pub fn commit_circuit_advance(
 ) -> SqlResult<()> {
     let mut db = super::write_conn();
     let tx = db.transaction()?;
+    let durable_state = tx
+        .query_row(
+            "SELECT state FROM autopilot_circuit_runs WHERE id = ?1",
+            params![run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    // A worker may have loaded this run just before cancellation or circuit
+    // deletion. The first transaction to acquire the writer lock wins: once
+    // terminal (or deleted), stale context/step writes are discarded together
+    // and can never resurrect the run.
+    if durable_state
+        .as_deref()
+        .map(is_terminal_run_state)
+        .unwrap_or(true)
+    {
+        return Ok(());
+    }
     let mut terminal_woke = false;
     match (run_state, context_json) {
         (Some(state), ctx) => {
@@ -578,12 +760,16 @@ pub fn set_circuit_step_agent_node(
     agent_node_id: i64,
 ) -> SqlResult<()> {
     let db = super::write_conn();
-    db.execute(
+    let updated = db.execute(
         "UPDATE autopilot_circuit_run_steps SET agent_node_id = ?3 \
          WHERE run_id = ?1 AND node_id = ?2",
         params![run_id, node_id, agent_node_id],
     )?;
-    Ok(())
+    if updated == 0 {
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    } else {
+        Ok(())
+    }
 }
 
 /// Clear an agent association after a CloseAgentNode effect succeeds. The

@@ -54,6 +54,7 @@ interface CircuitRunCardProps {
   busy: boolean;
   onPause: () => void;
   onResume: () => void;
+  onCancel: () => void;
   onApprove: (nodeId: string) => void;
 }
 
@@ -66,6 +67,7 @@ export function CircuitRunCard({
   busy,
   onPause,
   onResume,
+  onCancel,
   onApprove,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
@@ -156,7 +158,10 @@ export function CircuitRunCard({
 
       {/* Controls. Outside the disclosure button — nesting a button inside
           a button is invalid HTML and breaks keyboard semantics. */}
-      {(run.state === 'running' || run.state === 'paused' || blockedSteps.length > 0) && (
+      {(run.state === 'pending' ||
+        run.state === 'running' ||
+        run.state === 'paused' ||
+        blockedSteps.length > 0) && (
         <div className="px-2 pb-1.5 flex items-center gap-1 flex-wrap">
           {run.state === 'running' && (
             <button
@@ -178,6 +183,17 @@ export function CircuitRunCard({
               className="px-1.5 py-0.5 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
             >
               Resume
+            </button>
+          )}
+          {(run.state === 'pending' || run.state === 'running' || run.state === 'paused') && (
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={busy}
+              data-testid={`run-cancel-${run.id}`}
+              className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
+            >
+              Cancel
             </button>
           )}
           {blockedSteps.map((s) => (

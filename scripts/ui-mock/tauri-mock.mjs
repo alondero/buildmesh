@@ -110,17 +110,64 @@ const circuitsWithRuns = [
   },
 ];
 
+const circuitQueue = [
+  {
+    run: {
+      id: 1002,
+      circuit_id: 101,
+      mesh_id: 1,
+      trigger_identity: 'issue:1501:buildmesh:run',
+      state: 'pending',
+      context_json: '{}',
+      created_at: '2026-01-01T00:03:00Z',
+      updated_at: '2026-01-01T00:03:00Z',
+    },
+    circuit_name: 'Issue review loop',
+    queue_rank: 1,
+  },
+  {
+    run: {
+      id: 1003,
+      circuit_id: 101,
+      mesh_id: 1,
+      trigger_identity: 'issue:1502:buildmesh:run',
+      state: 'pending',
+      context_json: '{}',
+      created_at: '2026-01-01T00:04:00Z',
+      updated_at: '2026-01-01T00:04:00Z',
+    },
+    circuit_name: 'Issue review loop',
+    queue_rank: 2,
+  },
+];
+
 export const defaultFixtures = {
   list_meshes: meshes,
   list_agent_nodes: agentNodes,
   get_default_provider: 'anthropic',
   list_providers: [
-    { id: 'anthropic', name: 'Claude', description: 'Anthropic Claude Code', icon: null, available: true, kind: 'cwrap' },
+    {
+      id: 'anthropic',
+      label: 'Claude Code',
+      color: '#d97757',
+      icon: 'claude',
+      resumable: true,
+      harness_id: 'anthropic',
+      provider_id: null,
+      is_proxied: false,
+      group_key: 'anthropic',
+      capabilities: {
+        supports_model_override: true,
+        supports_effort_override: false,
+        effort_control: null,
+      },
+    },
   ],
   list_autopilot_runs: [],
   list_circuit_agent_ownerships: [],
   list_semantic_turns: [],
   list_circuits_with_runs: circuitsWithRuns,
+  list_circuit_queue: circuitQueue,
   get_github_url_for_mesh: null,
   get_git_branch_status: null,
   get_git_summary: null,

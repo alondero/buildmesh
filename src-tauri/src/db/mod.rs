@@ -598,6 +598,7 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             trigger_identity TEXT NOT NULL DEFAULT '',
             state TEXT NOT NULL DEFAULT 'pending',
             context_json TEXT NOT NULL DEFAULT '{}',
+            queue_position INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE (circuit_id, trigger_identity)

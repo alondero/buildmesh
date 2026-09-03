@@ -985,7 +985,7 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
     /// (legacy `<mesh>/.claude/worktrees/<name>` fallback) and the narrow
     /// writers round-trip.
     #[test]
-    fn evolve_to_adds_v37_worktree_directory_columns() {
+    fn evolve_v37_to_v38_backfills_circuit_queue_in_fifo_order() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -1023,6 +1023,36 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             INSERT INTO meshes (name, path) VALUES ('m', '/repo/m');
             INSERT INTO agent_nodes (mesh_id, name, path, worktree_name, created_at)
                 VALUES (1, 'n', '/repo/m', 'n', '2020-01-01T00:00:00Z');
+            INSERT INTO app_settings (key, value) VALUES ('schema_version', '36');
+
+            CREATE TABLE autopilot_circuits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 0,
+                concurrency_limit INTEGER NOT NULL DEFAULT 1,
+                graph_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE autopilot_circuit_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                circuit_id INTEGER NOT NULL REFERENCES autopilot_circuits(id) ON DELETE CASCADE,
+                mesh_id INTEGER NOT NULL,
+                trigger_identity TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending',
+                context_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (circuit_id, trigger_identity)
+            );
+            INSERT INTO autopilot_circuits
+                (id, mesh_id, name, graph_json)
+                VALUES (1, 7, 'legacy queue', '{\"version\":1,\"nodes\":[],\"edges\":[]}');
+            INSERT INTO autopilot_circuit_runs
+                (id, circuit_id, mesh_id, trigger_identity)
+                VALUES (4, 1, 7, 'oldest'), (9, 1, 7, 'newest');
             ",
         )
         .unwrap();
@@ -1100,6 +1130,27 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         );
 
         // Idempotent.
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT id, queue_position FROM autopilot_circuit_runs ORDER BY id")
+            .unwrap();
+        let positions = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert_eq!(positions, vec![(4, 4), (9, 9)]);
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            crate::db::migrations::SCHEMA_VERSION.to_string()
+        );
+
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 }

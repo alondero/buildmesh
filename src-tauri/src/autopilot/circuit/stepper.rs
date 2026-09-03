@@ -19,11 +19,14 @@
 //!   whose fan-in rule is satisfied by ANY completed parent. Trigger
 //!   roots have no incoming edges.
 //! - Triggers auto-complete at run start — they fired to create the run.
-//! - `SpawnAgentNode` needs BOTH a free per-circuit step slot and a free
-//!   mesh agent slot; otherwise the step parks in `Queued`
+//! - A run's first `SpawnAgentNode` needs BOTH a free per-circuit step slot
+//!   and a free mesh agent slot; otherwise the step parks in `Queued`
 //!   (`pending_slot` in the ledger) and promotes FIFO by insertion order
-//!   on a later `Tick`. Non-agent steps never wait on agent slots (they
-//!   still respect the per-circuit limit). Known milestone-1 scope note:
+//!   on a later `Tick`. Once that admitted run owns an agent, downstream
+//!   fan-out (notably its reviewer) is governed by the circuit step budget
+//!   rather than blocked behind retained agents from peer runs. Non-agent
+//!   steps never wait on agent slots (they still respect the per-circuit
+//!   limit). Known milestone-1 scope note:
 //!   FIFO ordering is per-run — cross-run ordering on one circuit is
 //!   tick order until the multi-run scheduler milestone.
 //! - `InjectPty` waits for `AgentReady` (the spawned agent's process is
@@ -1174,8 +1177,7 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
             if run.state != RunState::Running {
                 break;
             }
-            let already_has_agent = run.step(&node_id).and_then(|s| s.agent_node_id).is_some();
-            let needs_agent_slot = consumes_agent_slot(&kind) && !already_has_agent;
+            let needs_agent_slot = requires_mesh_agent_admission(run, &node_id, &kind);
             let agent_fits = !needs_agent_slot || mesh_agent_free > 0;
             if circuit_free <= 0 || !agent_fits {
                 set_step(run, t, &node_id, StepStatus::Queued);
@@ -1234,6 +1236,20 @@ fn collect_eligible(run: &RunView) -> Vec<(String, CircuitNodeKind)> {
         .collect()
 }
 
+/// The legacy mesh agent budget is an admission backstop for a Circuit Run,
+/// not a charge on every agent the admitted graph later needs. An attached
+/// agent on this step is a retry; an agent on any other step proves that the
+/// run has already crossed the admission boundary.
+fn requires_mesh_agent_admission(
+    run: &RunView,
+    node_id: &str,
+    kind: &CircuitNodeKind,
+) -> bool {
+    consumes_agent_slot(kind)
+        && run.step(node_id).and_then(|step| step.agent_node_id).is_none()
+        && !run.steps.iter().any(|step| step.agent_node_id.is_some())
+}
+
 /// Attempt FIFO promotion of one queued step. Returns true when the step
 /// left the queue.
 fn try_start(
@@ -1244,8 +1260,7 @@ fn try_start(
     circuit_free: &mut i64,
     mesh_agent_free: &mut i64,
 ) -> bool {
-    let already_has_agent = run.step(node_id).and_then(|s| s.agent_node_id).is_some();
-    let needs_agent_slot = consumes_agent_slot(kind) && !already_has_agent;
+    let needs_agent_slot = requires_mesh_agent_admission(run, node_id, kind);
     let agent_fits = !needs_agent_slot || *mesh_agent_free > 0;
     if *circuit_free <= 0 || !agent_fits {
         return false;
@@ -3662,6 +3677,41 @@ mod tests {
             "PR success must NOT fan out a Notify (complete is gated on retry exhaustion)"
         );
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+    }
+
+    #[test]
+    fn two_issue_review_runs_spawn_reviewers_while_retaining_implementers() {
+        let mut runs = [issue_review_run(), issue_review_run()];
+        for run in &mut runs {
+            issue_review_to_open_pr(run);
+            assert_eq!(run.step("implementer").and_then(|step| step.agent_node_id), Some(700));
+            advance(
+                run,
+                &CircuitEvent::GithubActionResult {
+                    node_id: "open_pr".into(),
+                    success: true,
+                    pr_number: Some(314),
+                    pr_url: Some("https://github.com/example/repo/pull/314".into()),
+                    pr_head_ref: Some("gh42".into()),
+                    pr_title: Some("Improve the widget".into()),
+                    error: None,
+                },
+            );
+        }
+
+        // Both admitted runs see zero free legacy agent slots because their
+        // implementation agents are retained. Each must still fan out to its
+        // reviewer; the run-admission test pins the third run at the boundary.
+        for run in &mut runs {
+            let transition = advance(run, &tick(8, 0));
+            assert_eq!(status_of(run, "reviewer"), StepStatus::Running);
+            assert_eq!(
+                transition.effects,
+                vec![Effect::SpawnAgentNode {
+                    node_id: "reviewer".into(),
+                }]
+            );
+        }
     }
 
     /// The reviewer's classifier output lands in `node.<id>.output` for
