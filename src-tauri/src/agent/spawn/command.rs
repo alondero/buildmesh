@@ -141,6 +141,20 @@ pub fn build_spawn_command_prepared(
     if let Some(key) = apply_codex_proxy_credential(&mut cmd, routing, provider_enum) {
         command_wsl_env.push(key);
     }
+
+    // Inject the adapter-declared per-node hook env vars (issue
+    // #1369). Kimi's adapter returns `KIMI_CODE_HOME=<per-node home>`
+    // here so the child loads its `config.toml` from the
+    // Buildmesh-owned worktree subdirectory rather than the user's
+    // global `~/.kimi/config.toml`. Set AFTER `apply_routing_env` so
+    // it doesn't clobber a routing-layer override; the adapter
+    // itself also gates against an explicit user-set
+    // `KIMI_CODE_HOME` in the inherited environment (see
+    // `KimiAdapter::hook_env_vars`).
+    for (k, v) in adapter.hook_env_vars(&resolved, &routing.launch_runtime(), session_id) {
+        cmd.env(&k, &v);
+    }
+
     spawn_environment::apply_wsl_env(
         &mut cmd,
         resolved.env_type,

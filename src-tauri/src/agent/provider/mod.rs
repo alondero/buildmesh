@@ -396,6 +396,26 @@ pub trait AgentProvider: Send + Sync {
         &[]
     }
 
+    /// Per-node env vars the spawn command layer must export on the
+    /// child process. The default is empty (no extra vars). Adapters
+    /// that own a per-node configuration root (e.g. Kimi's
+    /// `KIMI_CODE_HOME`, computed in `provision_attention_hooks`)
+    /// override this and return the env-var name + path the spawned
+    /// harness should see. Set on the cmd AFTER `provision_attention_hooks`
+    /// runs, so the directory is guaranteed to exist when the child
+    /// reads its config.
+    ///
+    /// The spawn path must NOT add WSL bridging here — that is
+    /// `wsl_passthrough_env`'s job. Plain env vars only.
+    fn hook_env_vars(
+        &self,
+        _resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+        _node_id: i64,
+    ) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Whether this provider writes a transcript the coordinator read API can
     /// parse into a Node Digest's rich layer (ADR-0008). The Claude-backed
     /// `anthropic` adapter runs real Claude Code (with a swapped backend for

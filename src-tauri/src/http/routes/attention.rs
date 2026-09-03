@@ -431,16 +431,25 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
 ///
 /// | provider      | minted       | query token   | result |
 /// |---------------|--------------|---------------|--------|
-/// | != `"grok"`  | (any)        | (any)         | accept |  sibling harnesses bypass entirely
-/// | `"grok"`     | `None`       | (any)         | reject |  no Buildmesh runtime owns this
-/// | `"grok"`     | `Some(m)`    | matches `m`   | accept |
-/// | `"grok"`     | `Some(m)`    | differs/missing | reject |
+/// | != `"grok"`/!`"kimi"` | (any) | (any)         | accept |  sibling harnesses bypass entirely
+/// | `"grok"`/ `"kimi"` | `None` | (any)         | reject |  no Buildmesh runtime owns this
+/// | `"grok"`/ `"kimi"` | `Some(m)` | matches `m` | accept |
+/// | `"grok"`/ `"kimi"` | `Some(m)` | differs/missing | reject |
+///
+/// The set of token-gated providers (those whose per-node hooks
+/// live in shared/global config locations — see issue #1366 for
+/// Grok and issue #1369 for Kimi) lives in `TOKEN_GATED_PROVIDERS`
+/// below. Adding a future provider to the gate is a one-line
+/// constant edit; sibling providers (Claude, Codex, AGY, …) keep
+/// their unauthenticated POST contract.
+const TOKEN_GATED_PROVIDERS: &[&str] = &["grok", "kimi"];
+
 fn verify_attention_token(
     provider: &str,
     query_string: Option<&str>,
     minted: Option<&str>,
 ) -> bool {
-    if provider != "grok" {
+    if !TOKEN_GATED_PROVIDERS.contains(&provider) {
         return true;
     }
     let Some(minted) = minted else {
@@ -1582,42 +1591,65 @@ fn runtime_token_validator_three_cases() {
 ///
 /// Calls the production `verify_attention_token` helper directly
 /// so a refactor that flips the comparator semantics or that
-/// drops the per-provider discrimination fails here. The truth
-/// table (minted `Some("grok_token")`, query varies):
+/// drops the per-provider discrimination fails here. Truth table
+/// (minted `Some("kimi_token")`, query varies):
 ///
-///   provider="claude", no query  → accept (sibling bypass)
-///   provider="claude", any token → accept (sibling bypass)
-///   provider="grok",   no query  → reject (no token)
-///   provider="grok",   wrong     → reject
-///   provider="grok",   match     → accept
-///   provider="grok",   minted=None, any → reject (defence in depth)
+///   provider="claude",  no query  → accept (sibling bypass)
+///   provider="claude",  any token → accept (sibling bypass)
+///   provider="codex",   no query  → accept (sibling bypass)
+///   provider="agy",     no query  → accept (sibling bypass)
+///   provider="kimi",    no query  → reject (no token)
+///   provider="kimi",    wrong     → reject
+///   provider="kimi",    match     → accept
+///   provider="grok",    no query  → reject
+///   provider="grok",    wrong     → reject
+///   provider="grok",    match     → accept
+///   provider="grok",    minted=None, any → reject (defence in depth)
+///   provider="kimi",    minted=None, any → reject (defence in depth)
 #[test]
 fn verify_attention_token_truth_table() {
-    let minted = Some("grok_token");
+    let minted = Some("kimi_token");
 
     // Sibling harnesses — bypass entirely even when a token is
     // minted. Their hook URLs never carry `?token=`, but more
     // importantly the per-provider lookup classifies them as
-    // non-Grok so the comparator never runs.
+    // non-token-gated so the comparator never runs.
     assert!(verify_attention_token("claude", None, minted));
     assert!(verify_attention_token("claude", Some("anything"), minted));
     assert!(verify_attention_token("codex", None, minted));
     assert!(verify_attention_token("agy", Some("token=z"), minted));
     // Empty provider string ("default anthropic" sentinel) is
-    // also non-Grok — still bypass.
+    // also non-token-gated — still bypass.
     assert!(verify_attention_token("", None, minted));
 
-    // Grok callbacks — token required.
-    assert!(!verify_attention_token("grok", None, minted));
-    assert!(!verify_attention_token("grok", Some("token="), minted));
-    assert!(!verify_attention_token("grok", Some("token=wrong"), minted));
-    assert!(verify_attention_token("grok", Some("token=grok_token"), minted));
+    // Grok callbacks — token required (issue #1366 register).
+    // Their minted value is independent of Kimi's in production
+    // (each adapter that requires a token gates its own mint).
+    // The minted param is one of the truth-table inputs, so
+    // pass a value that "matches" some garbled Grok token to
+    // assert the positive case without mint collisions.
+    let grok_token = Some("grok-minted-token-xyz");
+    assert!(!verify_attention_token("grok", None, grok_token));
+    assert!(!verify_attention_token("grok", Some("token="), grok_token));
+    assert!(!verify_attention_token("grok", Some("token=wrong"), grok_token));
+    assert!(verify_attention_token("grok", Some("token=grok-minted-token-xyz"), grok_token));
     // No minted token yet (no Grok spawn in this runtime) AND a
-    // Grok callback arrives — refuse. This is the defensive 403
-    // that catches a Buildmesh instance whose own Grok spawn
-    // never ran but the file system somehow has a hook caller.
-    assert!(!verify_attention_token("grok", Some("token=grok_token"), None));
+    // Grok callback arrives — refuse.
+    assert!(!verify_attention_token("grok", Some("token=grok-minted-token-xyz"), None));
     assert!(!verify_attention_token("grok", None, None));
+
+    // Kimi callbacks — token required (issue #1369 register).
+    // Kimi's hooks live in `KIMI_CODE_HOME` (per-node, but the
+    // file is still on the box), so they share the same-box
+    // exposure as Grok's `~/.grok/hooks/` and need the same
+    // token gate.
+    assert!(!verify_attention_token("kimi", None, minted));
+    assert!(!verify_attention_token("kimi", Some("token="), minted));
+    assert!(!verify_attention_token("kimi", Some("token=wrong"), minted));
+    assert!(verify_attention_token("kimi", Some("token=kimi_token"), minted));
+    // No minted token yet AND a Kimi callback arrives — refuse.
+    assert!(!verify_attention_token("kimi", Some("token=kimi_token"), None));
+    assert!(!verify_attention_token("kimi", None, None));
 }
 
 }
