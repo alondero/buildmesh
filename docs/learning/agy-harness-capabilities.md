@@ -22,7 +22,7 @@ Review of Antigravity CLI (`agy`) integration with Buildmesh, covering lifecycle
 | **Background Yield** | **Active** | `fullyIdle: false` signals background task running -> `Decision::SuppressPendingBackground` |
 | **Permission Gating** | **Skipped by Design** | `--dangerously-skip-permissions` active; `PreToolUse` omitted to prevent synchronous blocking tool execution gates |
 | **Workspace Trust** | **Pre-provisioned** | `ensure_trusted` populates `~/.gemini/antigravity-cli/settings.json` before spawn |
-| **Session Resume** | **Active** | `--conversation <uuid>`; self-assigned UUIDv4 persisted from hook/PTY capture |
+| **Session Resume** | **Active (#1499)** | `--conversation <uuid>`; self-assigned UUIDv4 captured by the brain-directory poller (`services::agy_session`, primary — PTY capture is disabled, the TUI prints no UUID), `Stop`-hook `conversationId` as secondary |
 | **Reasoning Effort** | **Active (#1286)** | Closed vocabulary `low`, `medium`, `high` via `--effort` |
 | **Native Sandbox** | **Active (#1287)** | Forwarded via `--sandbox` when mesh sandbox toggle is on |
 | **Transcript Reader** | **Active (#1283)** | `TranscriptFormat::Agy` reads `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl` |

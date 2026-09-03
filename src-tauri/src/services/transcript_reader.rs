@@ -326,10 +326,12 @@ fn find_agy_transcript(session_id: &str) -> Option<PathBuf> {
 
 /// Pure AGY locator — split from [`find_agy_transcript`] so the contract
 /// test drives the resolve against a temp brain root instead of touching
-/// `~/.gemini`. The path it returns (when both files exist) is
+/// `~/.gemini`. `pub(crate)` so the AGY capture poller
+/// (`services::agy_session`) resolves the same path rather than duplicating
+/// the layout. The path it returns (when both files exist) is
 /// `transcript.jsonl` first, falling back to `transcript_full.jsonl` when
 /// the short variant is missing — issue #1283 acceptance criterion #2.
-fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<PathBuf> {
     let logs = brain_root
         .join(session_id)
         .join(".system_generated")

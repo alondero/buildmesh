@@ -140,6 +140,20 @@ pub(crate) fn commandcode_sessions_dir(env_type: EnvType, spawn_path: &str) -> O
     }
 }
 
+/// The host-accessible Antigravity brain directory for an agent environment
+/// (`<agy-home>/brain`, one subdirectory per conversation). CLI-home
+/// selection belongs to `environment`; this module owns the WSL path
+/// conversion needed before the host reads that directory (issue #1499).
+pub(crate) fn agy_brain_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    let home = super::environment::agy_dir_for_env(env_type, spawn_path)?;
+    match env_type {
+        EnvType::Windows => Some(home.join("brain")),
+        EnvType::Wsl => Some(
+            PathBuf::from(to_host_path(&home.to_string_lossy())).join("brain"),
+        ),
+    }
+}
+
 /// Compare CLI-recorded working directories across Windows, WSL, and native
 /// Unix path syntax. APFS/HFS+ is usually case-insensitive too.
 pub fn directories_match(recorded: &str, spawn: &str) -> bool {

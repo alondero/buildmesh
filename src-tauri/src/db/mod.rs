@@ -3239,6 +3239,26 @@ pub(crate) fn mark_codex_legacy_session_backfill_completed_inner(
     Ok(())
 }
 
+/// Lean existence check for a node's CLI session id (issue #1499). The
+/// capture pollers run this on every retry; selecting the full
+/// `AGENT_NODE_COLUMNS` projection plus an `AgentNode` allocation (as
+/// `get_agent_node_by_id` does) on a hot loop is wasteful. The predicate
+/// mirrors `set_cli_session_id_if_missing_inner`'s write guard exactly —
+/// present here means a conditional write would be a no-op there.
+pub fn cli_session_id_present(id: i64) -> SqlResult<bool> {
+    let db = read_conn();
+    cli_session_id_present_inner(&db, id)
+}
+
+pub(crate) fn cli_session_id_present_inner(conn: &Connection, id: i64) -> SqlResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE id = ?1 \
+         AND cli_session_id IS NOT NULL AND cli_session_id != '')",
+        params![id],
+        |row| row.get(0),
+    )
+}
+
 // --- Pending worktree removal queue ---
 //
 // Closing a node deletes its row immediately so the UI can drop it at once, but

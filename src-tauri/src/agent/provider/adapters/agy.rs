@@ -197,6 +197,33 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
+    /// The `agy` TUI does not print its conversation UUID to stdout, so the
+    /// PTY UUID regex can never match it (issue #1499). Capture runs from
+    /// [`Self::after_fresh_spawn`] via the brain-directory poller instead —
+    /// same shape as OpenCode (`ses_…`) and CommandCode (`sess_…`). Leaving
+    /// this `true` would also risk binding a stray UUID from tool output.
+    fn captures_session_id_from_pty(&self) -> bool {
+        false
+    }
+
+    /// Start the brain-directory capture poller so `cli_session_id` is
+    /// populated within ~1-2s of spawn. Without this, every AGY node keeps
+    /// `cli_session_id = NULL` and is permanently skipped by
+    /// `auto_resume_agent_nodes` (issue #1499).
+    fn after_fresh_spawn(
+        &self,
+        node_id: i64,
+        spawn_path: &str,
+        env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
+        crate::services::agy_session::start_capture_poller(
+            node_id,
+            spawn_path.to_string(),
+            env_type,
+        );
+    }
+
     fn resume_args(&self, id: &str) -> Vec<String> {
         vec!["--conversation".into(), id.into()]
     }
@@ -598,6 +625,23 @@ mod tests {
         assert!(
             attention.get("Notification").is_none(),
             "Notification is a Claude/Grok concept; AGY uses Stop"
+        );
+    }
+
+    /// Issue #1499: AGY self-assigns a UUID conversation ID but the TUI never
+    /// prints it, so the PTY UUID regex can never capture it. Capture runs
+    /// from `after_fresh_spawn` (brain-directory poller, same shape as
+    /// OpenCode/CommandCode) — the PTY path must stay off so a stray UUID
+    /// from tool output can't bind the wrong session.
+    #[test]
+    fn self_assigns_but_does_not_capture_from_pty() {
+        assert!(
+            AGY.self_assigns_session_id(),
+            "AGY mints its own conversation UUID"
+        );
+        assert!(
+            !AGY.captures_session_id_from_pty(),
+            "AGY UUIDs are not PTY banners; capture is after_fresh_spawn (issue #1499)"
         );
     }
 }
