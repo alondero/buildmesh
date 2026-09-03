@@ -20,7 +20,8 @@ import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeSto
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 import { __resetProviderCachesForTests } from '../../src/lib/tauri';
-import { splitRegenerateTargets, hasRegenerateTargets } from '../../src/lib/regenerate';
+import { __resetSharedProviderListForTests } from '../../src/hooks/useProviderList';
+import { splitRegenerateTargets } from '../../src/lib/regenerate';
 import { RegenerateProviderMenu } from '../../src/components/Providers/RegenerateProviderMenu';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 import type { SpawnOption } from '../../src/lib/groups';
@@ -145,6 +146,7 @@ beforeEach(() => {
   roCallbacks.clear();
   vi.stubGlobal('ResizeObserver', FakeResizeObserver);
   __resetProviderCachesForTests();
+  __resetSharedProviderListForTests();
   vi.mocked(invoke).mockReset();
   addToastMock.mockClear();
   useAgentNodeStore.setState({ nodesById: {}, nodeIds: [], activeNodeId: null });
@@ -184,11 +186,6 @@ describe('lib/regenerate helpers (issue #1502)', () => {
     const { current, others } = splitRegenerateTargets([makeSpawnOption('codex')], 'claude');
     expect(current).toBeUndefined();
     expect(others.map((o) => o.id)).toEqual(['codex']);
-  });
-  it('hasRegenerateTargets is true for current-only, false for empty', () => {
-    expect(hasRegenerateTargets([makeSpawnOption('claude')])).toBe(true);
-    expect(hasRegenerateTargets([])).toBe(false);
-    expect(hasRegenerateTargets(undefined)).toBe(false);
   });
 });
 

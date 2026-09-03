@@ -1,7 +1,6 @@
-import { useMemo, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import type { SpawnOption } from '../../lib/groups';
-import { splitRegenerateTargets } from '../../lib/regenerate';
 import { RegenerateProviderMenu } from '../Providers/RegenerateProviderMenu';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
@@ -47,11 +46,9 @@ export function GridRegenerateButton({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const { current, others } = useMemo(
-    () => splitRegenerateTargets(providerList, node.provider),
-    [providerList, node.provider],
-  );
-  const itemCount = (current ? 1 : 0) + others.length;
+  // One row per provider (current pinned on top inside the menu) — a
+  // plain length, no partition needed.
+  const itemCount = providerList.length;
 
   const disabled = isDisabled || !hasTargets;
 

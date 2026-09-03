@@ -1,10 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore, useAllAgentNodes } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
-import { listProviders } from '../../lib/tauri';
-import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useProviderList } from '../../hooks/useProviderList';
 import { MeshCreateModal } from '../Mesh/MeshCreateModal';
 import { defaultMeshColor } from '../../lib/meshColors';
 import {
@@ -21,36 +20,21 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { MeshItem } from './MeshItem';
-import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
 
 export function Sidebar() {
   const { width, isResizing, handleMouseDown } = useSidebarResize();
-  const [providerData, setProviderData] = useState<SpawnOption[]>([]);
-
-  // Fetch available providers from the backend. Platform filtering (e.g. macOS-only
+  // Single shared Spawn Option snapshot (issue #1502 — one fetch + one
+  // `provider-list-changed` subscription for the whole app, no matter
+  // how many headers mount). Platform filtering (e.g. macOS-only
   // Anthropic) is decided server-side via AgentProvider::available_on().
-  // Refetchable so the spawn menu picks up providers added in App Settings
-  // without an app restart — the settings modal emits `provider-list-changed`
-  // on upsert/remove (the tauri.ts cache bust alone doesn't reach us, since
-  // we hold our own local snapshot), and this hook re-fetches on the signal.
-  const refreshProviders = useCallback(() => {
-    listProviders()
-      // Issue #575 / ADR-0016 — preserve the full Spawn Option shape so
-      // `ProviderDropdown` can group by `group_key` and render the
-      // harness header vs Proxied child rows. The backend already orders
-      // rows by `(is_terminal, rank_of(harness_id))`, so the flat list
-      // carries both the order and the grouping data — the frontend is
-      // a pure render. The 8-field projection lives in
-      // `mapBackendProviders` (issue #583 cleanup).
-      .then(backendProviders => setProviderData(mapBackendProviders(backendProviders)))
-      .catch(err => console.error('listProviders failed:', err));
-  }, []);
-
-  useEffect(() => { refreshProviders(); }, [refreshProviders]);
-  useProviderListInvalidation(refreshProviders);
+  // The backend already orders rows by `(is_terminal,
+  // rank_of(harness_id))` with the full `mapBackendProviders` shape, so
+  // `ProviderDropdown` grouping renders as-is (issues #575 / #583,
+  // ADR-0016).
+  const providerData = useProviderList();
 
   const meshes = useMeshStore(state => state.meshes);
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);

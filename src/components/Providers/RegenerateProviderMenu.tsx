@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type { SpawnOption } from '../../lib/groups';
 import { groupByHarness } from '../../lib/groups';
-import { splitRegenerateTargets, formatCurrentProviderLabel } from '../../lib/regenerate';
+import { splitRegenerateTargets } from '../../lib/regenerate';
 import { ProviderIcon } from './ProviderIcon';
 
 export interface RegenerateProviderMenuProps {
@@ -13,13 +13,11 @@ export interface RegenerateProviderMenuProps {
   onPick: (providerId: string, providerLabel: string) => void;
   /** Test id for the menu root. Defaults to `regenerate-submenu`. */
   submenuTestId?: string;
-  /** Test id for the empty state. Defaults to `${submenuTestId}-empty`. */
-  emptyTestId?: string;
   /**
    * Roving tabindex position (flat index across current + alternates in
    * render order). When omitted, every row stays in the natural Tab order
-   * (the sidebar `NodeItem` submenu manages focus itself via its own
-   * ArrowRight/ArrowDown handler and doesn't need roving tabindex). When
+   * (the sidebar `NodeItem` submenu manages focus itself via the shared
+   * `useSubmenu` hook and doesn't need roving tabindex). When
    * provided (the `GridNodeHeader` inline dropdown via `useAriaMenu`),
    * only the active row gets `tabIndex=0` so Tab leaves the menu cleanly.
    */
@@ -48,10 +46,9 @@ export function RegenerateProviderMenu({
   currentProviderId,
   onPick,
   submenuTestId = 'regenerate-submenu',
-  emptyTestId,
   activeIndex,
 }: RegenerateProviderMenuProps) {
-  const resolvedEmptyTestId = emptyTestId ?? `${submenuTestId}-empty`;
+  const emptyTestId = `${submenuTestId}-empty`;
   const { current, others } = useMemo(
     () => splitRegenerateTargets(providers, currentProviderId),
     [providers, currentProviderId],
@@ -81,7 +78,7 @@ export function RegenerateProviderMenu({
 
   if (providers.length === 0) {
     return (
-      <div data-testid={resolvedEmptyTestId} className="px-3 py-1.5 text-xs text-text-muted">
+      <div data-testid={emptyTestId} className="px-3 py-1.5 text-xs text-text-muted">
         No providers available
       </div>
     );
@@ -90,7 +87,12 @@ export function RegenerateProviderMenu({
   return (
     <>
       {current && (
-        <div data-regenerate-section="current" className="border-b border-border-subtle">
+        // `role="presentation"` — a `role="menu"` may only own
+        // `menuitem`s; the plain grouping div must not appear in the
+        // accessibility tree (same rule as the harness-group divs
+        // below and the submenu trigger wrappers in `NodeItem` /
+        // `KebabActions`).
+        <div role="presentation" data-regenerate-section="current" className="border-b border-border-subtle">
           <button
             type="button"
             role="menuitem"
@@ -104,24 +106,30 @@ export function RegenerateProviderMenu({
             className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium hover:bg-bg-card flex items-center gap-2"
           >
             <ProviderIcon providerId={current.id} className="h-3.5 w-3.5 shrink-0" />
-            <span className="flex-1 truncate">{formatCurrentProviderLabel(current.label)}</span>
+            <span className="flex-1 truncate">{`Current (${current.label})`}</span>
             <span className="text-2xs uppercase tracking-wider text-accent-cyan">current</span>
           </button>
         </div>
       )}
       {otherGroups.length === 0 ? (
         current ? null : (
-          <div data-testid={resolvedEmptyTestId} className="px-3 py-1.5 text-xs text-text-muted">
+          <div data-testid={emptyTestId} className="px-3 py-1.5 text-xs text-text-muted">
             No providers available
           </div>
         )
       ) : (
         otherGroups.map(([groupKey, options]) => {
+          // One native row per harness group by wire contract
+          // (`group_key == harness_id`, a single harness profile per
+          // group; proxied rows carry the same key with
+          // `is_proxied: true`). `find` is intentional, not a drop —
+          // see `GroupedProviderMenu`'s identical shape.
           const native = options.find((o) => !o.is_proxied);
           const proxied = options.filter((o) => o.is_proxied);
           return (
             <div
               key={groupKey}
+              role="presentation"
               data-spawn-group={groupKey}
               className="border-b border-border-subtle last:border-b-0"
             >

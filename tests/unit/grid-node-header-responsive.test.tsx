@@ -430,11 +430,13 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       fireEvent.click(trigger);
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu).toBeTruthy();
-      // Query only the TOP-LEVEL menuitems (the Regenerate submenu renders
-      // its own nested `[role="menu"]` when open — closed here, but guard
-      // against future hover-open flakiness by scoping to direct children
-      // of the kebab menu root).
-      const topLevel = Array.from(menu.querySelectorAll(':scope > [role="menuitem"], :scope > div > [role="menuitem"]'));
+      // Top-level rows only: the Regenerate submenu renders its own
+      // nested `[role="menu"]` when open (closed here), so scope by
+      // ownership — a row belongs to the menu whose subtree it is in.
+      // Same idiom as `NodeItem.getParentMenuItems`.
+      const topLevel = Array.from(menu.querySelectorAll('[role="menuitem"]')).filter(
+        (el) => el.closest('[role="menu"]') === menu,
+      );
       expect(topLevel).toHaveLength(5);
       expect(topLevel[0].textContent).toContain('Regenerate');
       expect(topLevel[1].textContent).toContain('Open in file explorer');
@@ -551,7 +553,9 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       // The inline buttons fold into the kebab at this tier too, so the
       // count lives here as well as on the inline path. (Finish was
       // removed — autopilot-only concern.)
-      const topLevel = menu.querySelectorAll(':scope > [role="menuitem"], :scope > div > [role="menuitem"]');
+      const topLevel = Array.from(menu.querySelectorAll('[role="menuitem"]')).filter(
+        (el) => el.closest('[role="menu"]') === menu,
+      );
       expect(topLevel).toHaveLength(5);
       // Sanity: render did not unmount.
       expect(root.isConnected).toBe(true);

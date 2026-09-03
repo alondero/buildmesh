@@ -4,20 +4,15 @@ import type { SpawnOption } from './groups';
 /**
  * Issue #1502 — shared Regenerate helpers (in-place kick-start).
  *
- * Previously `NodeItem.tsx` owned both the disabled-status list and the
- * "exclude the current provider" filter inline. #1502 lifts both here so
- * the sidebar context menu AND the new `GridNodeHeader` toolbar/kebab
- * affordances stay in lockstep:
+ * The disabled-status list and the current/alternates partition live
+ * here so the sidebar context menu AND the `GridNodeHeader`
+ * toolbar/kebab affordances stay in lockstep (-consumed via the
+ * `useRegenerateAction` hook, which is the single owner of the
+ * confirm state machine and IPC dispatch).
  *
- * - `REGENERATE_DISABLED_STATUSES` — statuses where a fresh
- *   `regenerate_agent_node` IPC would race the in-flight spawn
- *   (`spawning`, `pending`) or the backend would reject it
- *   (`archived`). Greyed-out (not hidden) for discoverability.
- * - `splitRegenerateTargets` — partition the full Spawn Option list into
- *   the node's current provider (for in-place kick-start) + every other
- *   provider. The backend's `decide_resume` already handles
- *   `same_harness == true` cleanly (same harness + `cli_session_id` →
- *   resume, else fresh), so including the current provider is safe.
+ * Deliberately NOT here: one-line call-site expressions. `Current
+ * (${label})` and `(providerList ?? []).length > 0` read better inline
+ * than behind an exported helper with a five-line doc block.
  */
 
 export const REGENERATE_DISABLED_STATUSES: readonly SessionStatus[] = [
@@ -46,26 +41,4 @@ export function splitRegenerateTargets(
   const current = list.find((p) => p.id === currentProviderId);
   const others = list.filter((p) => p.id !== currentProviderId);
   return { current, others };
-}
-
-/**
- * True when the Regenerate picker has anything to offer — any provider at
- * all, including just the current one (in-place kick-start).
- *
- * Pre-#1502 this was "has alternate providers" (current excluded), so a
- * mesh whose only option was the current provider rendered a disabled
- * trigger. Post-#1502 the current provider alone is enough to enable the
- * action.
- */
-export function hasRegenerateTargets(
-  providerList: SpawnOption[] | undefined,
-): boolean {
-  return (providerList ?? []).length > 0;
-}
-
-/**
- * Human-readable label for the in-place row: `Current (<provider label>)`.
- */
-export function formatCurrentProviderLabel(label: string): string {
-  return `Current (${label})`;
 }

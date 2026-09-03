@@ -376,13 +376,15 @@ beforeEach(async () => {
   // top-level import would cause `platform.ts` to be cached with the
   // real `navigator.platform` value, defeating the test files that
   // mock it to force `isWindows = true` (issue #354 follow-up).
-  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }] =
+  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }] =
     await Promise.all([
       import('../../src/lib/pathInvalidatedCache'),
       import('../../src/lib/providerCache'),
+      import('../../src/hooks/useProviderList'),
     ]);
   resetPathInvalidatedCacheForTests();
   resetProviderCachesForTests();
+  __resetSharedProviderListForTests();
 });
 
 // React Testing Library does not auto-unmount rendered components between

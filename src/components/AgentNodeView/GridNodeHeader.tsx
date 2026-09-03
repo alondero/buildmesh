@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useEffect, useLayoutEffect, useCallback } from 'react';
+import { useMemo, useRef, useState, useEffect, useLayoutEffect } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -8,10 +8,13 @@ import { useGitSummary } from '../../hooks/useGitSummary';
 import { useOpenPr } from '../../hooks/useOpenPr';
 import { useResizeWidth } from '../../hooks/useResizeWidth';
 import { useClickOutside } from '../../hooks/useClickOutside';
-import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useProviderList } from '../../hooks/useProviderList';
+import { useRegenerateAction } from '../../hooks/useRegenerateAction';
+import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { canResumeSuspendedNode } from '../../lib/suspended';
+import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
 import { ProviderIcon } from '../Providers/ProviderIcon';
@@ -20,15 +23,7 @@ import { InlineEditableText } from '../shared/InlineEditableText';
 import { FolderOpenIcon } from '../shared/FolderOpenIcon';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { openInFileManager, listProviders } from '../../lib/tauri';
-import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
-import {
-  REGENERATE_DISABLED_STATUSES,
-  hasRegenerateTargets as hasRegenerateTargetsHelper,
-  splitRegenerateTargets,
-} from '../../lib/regenerate';
-import { addToast } from '../../stores/toastStore';
-import { formatError } from '../../lib/errorUtils';
+import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 import { CircuitsIcon } from '../Probe/probeIcons';
 
@@ -178,40 +173,25 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   const autopilotState = useAgentNodeStore((s) => s.autopilotStates[nodeId]);
   const circuitOwnership = useAgentNodeStore((s) => s.circuitOwnerships[nodeId]);
   const meshesById = useMeshStore(state => state.meshesById);
-  // Issue #1502 — the header needs the Spawn Option list for its
-  // Regenerate picker (toolbar dropdown + kebab submenu). Mirrors the
-  // Sidebar's fetch (`Sidebar.tsx:refreshProviders`): `listProviders`
-  // is module-cached in `lib/tauri`, so N headers share one IPC, and
-  // `useProviderListInvalidation` re-reads when App Settings mutates
-  // the list. A failed fetch resolves to `[]` (same contract as
-  // `loadSpawnOptions`) so the picker simply disables instead of
-  // crashing the header.
-  const [providerList, setProviderList] = useState<SpawnOption[]>([]);
-  const refreshProviders = useCallback(() => {
-    listProviders()
-      .then((backend) => setProviderList(mapBackendProviders(backend)))
-      .catch(() => setProviderList([]));
-  }, []);
-  useEffect(() => {
-    refreshProviders();
-  }, [refreshProviders]);
-  useProviderListInvalidation(refreshProviders);
-  // Issue #1502 / #778 — in-flight confirmation for running-node
-  // Regenerate (same contract as the sidebar `NodeItem` picker: running
-  // opens a dialog, idle/awaiting_input/error/suspended/completed fire
-  // immediately). `null` means no dialog open. Must live BEFORE the
-  // early-return (Rules of Hooks) even though it is only consumed after
-  // the node is known to exist.
-  const [pendingRegenerate, setPendingRegenerate] = useState<{
-    providerId: string;
-    providerLabel: string;
-  } | null>(null);
-  // Issue #1502 — store action for Regenerate. Subscribed BEFORE the
-  // early-return (Rules of Hooks): placing it after `if (!node)` would
-  // render fewer hooks on the teardown pass where the node was just
-  // deleted, tripping React's hook-count assertion (same trap the
-  // git-summary hooks above document).
-  const regenerateAgentNode = useAgentNodeStore((s) => s.regenerateAgentNode);
+  // Issue #1502 — the Regenerate picker reads the single shared Spawn
+  // Option snapshot (`useProviderList`: one fetch + one
+  // `provider-list-changed` subscription app-wide). The header itself
+  // owns no provider state.
+  const providerList = useProviderList();
+  // Shared Regenerate action (issue #778 contract): status gate, confirm
+  // state machine, IPC dispatch. Called unconditionally with the
+  // possibly-not-yet-loaded node — the hook guards `undefined`
+  // internally (Rules of Hooks: no hook may sit below the early
+  // return).
+  const regen = useRegenerateAction(node, providerList);
+  const {
+    pendingRegenerate,
+    isRegenerateDisabled,
+    hasRegenerateTargets,
+    pickRegenerateProvider,
+    confirmRegenerate,
+    cancelRegenerate,
+  } = regen;
 
   // Issue #736 — measure the rendered header width and bucket it into a tier
   // that decides which chips render and whether the close/max buttons live
@@ -295,41 +275,6 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   // lockstep (a Suspended OpenCode node shows the Resume affordance
   // in both places, never just one).
   const canResume = canResumeSuspendedNode(node);
-
-  // Issue #1502 — Regenerate gating (shared with the sidebar via
-  // `src/lib/regenerate.ts`). Disabled for race-the-spawn /
-  // backend-rejects statuses; otherwise enabled whenever ANY provider
-  // exists — including just the current one (in-place kick-start).
-  // (`regenerateAgentNode` itself is subscribed BEFORE the early-return
-  // above — see the Rules-of-Hooks comment there.)
-  const isRegenerateDisabled = REGENERATE_DISABLED_STATUSES.includes(node.status);
-  const hasRegenerateTargets = hasRegenerateTargetsHelper(providerList);
-
-  // Issue #1502 / #778 — picker-row activation. Centralised so the
-  // inline toolbar dropdown and the kebab submenu share error handling
-  // and the running-node confirm gate. Running opens a dialog (the
-  // regenerate would drop in-flight PTY output); every other eligible
-  // status fires immediately. Failures surface through the shared toast
-  // pipeline (mirrors `NodeItem.pickProvider`).
-  const pickRegenerateProvider = (providerId: string, providerLabel: string) => {
-    if (isRegenerateDisabled || !hasRegenerateTargets) return;
-    if (node.status === 'running') {
-      setPendingRegenerate({ providerId, providerLabel });
-      return;
-    }
-    regenerateAgentNode(node.id, providerId).catch((err) => {
-      addToast('Regenerate failed', formatError(err), 'error');
-    });
-  };
-  const cancelRegenerate = () => setPendingRegenerate(null);
-  const confirmRegenerate = () => {
-    if (!pendingRegenerate) return;
-    const { providerId } = pendingRegenerate;
-    setPendingRegenerate(null);
-    regenerateAgentNode(node.id, providerId).catch((err) => {
-      addToast('Regenerate failed', formatError(err), 'error');
-    });
-  };
 
   // Silent on failure — worktree rows can go stale between renders and a
   // toast storm on every click is worse UX than a quiet console line.
@@ -716,13 +661,15 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  // Issue #1502 — Regenerate submenu state (mirrors the sidebar
-  // `NodeItem` hover/click pattern). Separate refs from the parent
-  // kebab items so ArrowDown/Up in the picker wraps across providers,
-  // not across the parent menu.
-  const [regenSubmenuOpen, setRegenSubmenuOpen] = useState(false);
-  const regenSubmenuRef = useRef<HTMLDivElement>(null);
-  const regenSubmenuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  // Issue #1502 — Regenerate picker submenu via the shared `useSubmenu`
+  // hook (same hook drives the sidebar `NodeItem` picker): hover/click
+  // opens, ArrowRight opens-and-focuses, ArrowLeft closes, ArrowDown/Up
+  // wraps. No local submenu state, refs, or modulo loops.
+  const regenSubmenu = useSubmenu({
+    disabled: isRegenerateDisabled,
+    itemCount: (providerList ?? []).length,
+  });
+  const regenDisabled = isRegenerateDisabled || !hasRegenerateTargets;
   // Stable id linking the trigger to the menu for the WAI-ARIA
   // disclosure pattern (aria-controls). Each header instance owns one
   // kebab, so a module-scoped counter is enough.
@@ -741,31 +688,23 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
   // ArrowDown at the bottom doesn't focus a phantom slot whose ref was
   // never assigned.
   const itemCount = (canResume ? 6 : 5);
-  const regenTargets = splitRegenerateTargets(providerList, node.provider);
-  const regenSubmenuItemCount =
-    (regenTargets.current ? 1 : 0) + regenTargets.others.length;
-  const regenDisabled = isRegenerateDisabled || !hasRegenerateTargets;
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
-    setRegenSubmenuOpen(false);
+    regenSubmenu.closeSubmenu();
     setOpen(false);
     requestAnimationFrame(() => trigger?.focus());
   };
 
   const handleToggle = (e: React.MouseEvent) => {
     e.stopPropagation();
-    setRegenSubmenuOpen(false);
+    regenSubmenu.closeSubmenu();
     setOpen((o) => !o);
   };
 
   const handleRegenPick = (providerId: string, providerLabel: string) => {
-    setRegenSubmenuOpen(false);
+    regenSubmenu.closeSubmenu();
     closeAndReturnFocus();
     onPickRegenerate(providerId, providerLabel);
-  };
-
-  const focusWithoutScroll = (el: HTMLElement | null | undefined) => {
-    el?.focus({ preventScroll: true });
   };
 
   // Issue #814 — converged on the shared `useClickOutside` hook
@@ -777,18 +716,18 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
   // subtree count as "inside" (mirrors `NodeItem`'s parent+submenu
   // scoping, issue #814).
   useClickOutside<string>(open ? menuId : null, () => {
-    setRegenSubmenuOpen(false);
+    regenSubmenu.closeSubmenu();
     setOpen(false);
   });
 
   // Outside click + Escape close. Same `document`-vs-`window` jsdom
   // caveat as `MeshItem` (issue #735): tests dispatch on `document`,
   // not `window`, because in jsdom the two are independent targets.
-  // Issue #1502 — extended with the sidebar `NodeItem` submenu
-  // contract: ArrowRight on the Regenerate trigger opens the picker
-  // and focuses its first provider; ArrowLeft in the picker closes it
-  // and returns focus to the trigger; ArrowDown/Up inside the picker
-  // wraps across providers.
+  // Submenu arrows delegate to the shared `useSubmenu` hook (same as
+  // `NodeItem`); only the parent-menu traversal below is kebab-local.
+  // The listener attaches once per open: submenu state lives in the
+  // hook behind stable callbacks, so hovering the picker never churns
+  // this subscription.
   useEffect(() => {
     if (!open) return;
     // Issue #1502 — skip disabled rows (the Regenerate trigger is
@@ -807,10 +746,9 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
     };
     const onKeyDown = (e: KeyboardEvent) => {
       const menu = menuRef.current;
-      const submenu = regenSubmenuRef.current;
       const active = document.activeElement;
       const inMenu = menu && active instanceof Node && menu.contains(active);
-      const inSubmenu = submenu && active instanceof Node && submenu.contains(active);
+      const inSubmenu = regenSubmenu.submenuContainsFocus();
       if (!inMenu && !inSubmenu) return;
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -821,21 +759,22 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
         // Non-modal popover (matches MeshItem, #735): Tab leaves the
         // menu and closes it; the browser moves focus to the next
         // tabbable element naturally.
-        setRegenSubmenuOpen(false);
+        regenSubmenu.closeSubmenu();
         setOpen(false);
         return;
       }
       if (e.key === 'ArrowRight' && inMenu && !inSubmenu) {
         if (active?.getAttribute('aria-haspopup') !== 'menu') return;
         e.preventDefault();
-        if (regenSubmenuItemCount === 0 || regenDisabled) return;
-        setRegenSubmenuOpen(true);
-        queueMicrotask(() => focusWithoutScroll(regenSubmenuItemRefs.current[0]));
+        regenSubmenu.openSubmenuViaKeyboard();
         return;
       }
-      if (e.key === 'ArrowLeft' && (inSubmenu || (inMenu && regenSubmenuOpen))) {
+      if (
+        e.key === 'ArrowLeft' &&
+        (inSubmenu || (inMenu && active?.getAttribute('aria-haspopup') === 'menu'))
+      ) {
         e.preventDefault();
-        setRegenSubmenuOpen(false);
+        regenSubmenu.closeSubmenu();
         const trigger = menu?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
         if (trigger) focusWithoutScroll(trigger);
         return;
@@ -843,10 +782,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         if (inSubmenu) {
-          const current = regenSubmenuItemRefs.current.findIndex((el) => el === active);
-          const start = current === -1 ? 0 : current;
-          const next = (start + 1) % Math.max(1, regenSubmenuItemRefs.current.length);
-          focusWithoutScroll(regenSubmenuItemRefs.current[next]);
+          regenSubmenu.stepSubmenuFocus(1);
         } else {
           const items = menuItemRefs.current;
           const activeIdx = items.findIndex((el) => el === document.activeElement);
@@ -857,11 +793,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         if (inSubmenu) {
-          const current = regenSubmenuItemRefs.current.findIndex((el) => el === active);
-          const start = current === -1 ? regenSubmenuItemRefs.current.length - 1 : current;
-          const len = Math.max(1, regenSubmenuItemRefs.current.length);
-          const next = (start - 1 + len) % len;
-          focusWithoutScroll(regenSubmenuItemRefs.current[next]);
+          regenSubmenu.stepSubmenuFocus(-1);
         } else {
           const items = menuItemRefs.current;
           const activeIdx = items.findIndex((el) => el === document.activeElement);
@@ -874,7 +806,12 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
     return () => {
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [open, regenSubmenuOpen, regenSubmenuItemCount, regenDisabled, itemCount]);
+    // `itemCount` is constant while open (`canResume` can't flip
+    // mid-menu); everything submenu-shaped comes from the hook's stable
+    // callbacks — hence no `regenSubmenuOpen` dep and no listener churn
+    // on hover.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, itemCount]);
 
   // Anchor + viewport-clamp in a single layout pass: read the trigger
   // rect, place the menu's right edge under the trigger's right edge,
@@ -962,21 +899,22 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
               viewport. Same `data-dropdown-for` scoping as the parent so
               `useClickOutside` treats both as "inside". */}
           <div
+            role="presentation"
             className="relative"
             onMouseEnter={() => {
-              if (!regenDisabled) setRegenSubmenuOpen(true);
+              if (!regenDisabled) regenSubmenu.setSubmenuOpen(true);
             }}
-            onMouseLeave={() => setRegenSubmenuOpen(false)}
+            onMouseLeave={() => regenSubmenu.closeSubmenu()}
           >
             <button
               ref={(el) => { menuItemRefs.current[0] = el; }}
               role="menuitem"
               aria-haspopup="menu"
-              aria-expanded={regenSubmenuOpen}
+              aria-expanded={regenSubmenu.submenuOpen}
               disabled={regenDisabled}
               onClick={() => {
                 if (regenDisabled) return;
-                setRegenSubmenuOpen(true);
+                regenSubmenu.setSubmenuOpen(true);
               }}
               title={
                 isRegenerateDisabled
@@ -997,18 +935,9 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
               Regenerate
               <span aria-hidden="true" className="ml-auto">▸</span>
             </button>
-            {regenSubmenuOpen && (
+            {regenSubmenu.submenuOpen && (
               <div
-                ref={(el) => {
-                  regenSubmenuRef.current = el;
-                  if (el) {
-                    regenSubmenuItemRefs.current = Array.from(
-                      el.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]'),
-                    );
-                  } else {
-                    regenSubmenuItemRefs.current = [];
-                  }
-                }}
+                ref={regenSubmenu.submenuRef}
                 role="menu"
                 aria-label="Pick target provider"
                 data-testid="grid-regenerate-submenu"
