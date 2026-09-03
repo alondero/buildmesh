@@ -36,19 +36,27 @@
  *   failed refresh leaves the previous timestamp in place so the label
  *   continues to refer to the last known-good moment.
  *
- *   True stale-while-revalidate (rearchitect of #1488 against #1489):
- *   when prior rows exist AND a refresh is in flight OR the latest
- *   fetch rejected, the rows stay on screen and a non-destructive
- *   `role="status"` alert ("Refresh failed — showing last known data")
- *   surfaces in the toolbar alongside the Refresh button. The body
- *   falls back to `<ErrorState>` ONLY when there are no prior rows to
- *   keep (cold-cache first-load rejection). This prevents the
- *   round-3 reviewer-flagged "I clicked Refresh and lost my view of
- *   the meters" UX bug.
+ *   Warm-cache refresh rejection keeps the rows (PR #1488 review
+ *   follow-ups, items 1–7): when prior rows are loaded and a refresh
+ *   fails, the rows stay on screen and a `role="alert"` banner
+ *   surfaces the failure *outside* the toolbar — see
+ *   `probe-ui-checklist.md` §1.4 ("Errors render in a role='alert'
+ *   region that is shrink-0 and outside the scroller"). The toolbar
+ *   used to carry an inline `role="status"` chip in the count row,
+ *   which competed with two other `shrink-0` chips for the dock's
+ *   240px narrow width and pushed the Refresh button off-panel. The
+ *   body falls back to `<ErrorState>` ONLY when no rows have ever
+ *   loaded (cold-cache first-load rejection).
  *
- *   The mount-time revalidation path sets `isRefreshing` (so the rows
- *   dim to 60% opacity with `aria-busy="true"`) for the same reason
- *   the manual Refresh click does — `loadMeters` owns the flag.
+ *   Request sequencing (review item #7): `loadMeters` tags each
+ *   in-flight call with a monotonic id and drops stale resolves /
+ *   rejections. Without this, a Refresh click racing an invalidation
+ *   re-fetch could overwrite newer state with older data and clear
+ *   the spinner mid-flight.
+ *
+ *   `isRefreshing` is owned by `handleRefresh` only — the mount-time
+ *   and invalidation paths don't flip it (the cold-cache early-return
+ *   hides the toolbar/body anyway, and invalidations are background).
  *
  *   OPEN FOLLOW-UP (issue #857, deferred — see "Cache age wire gap"
  *   below): the indicator currently labels every successful read
@@ -85,20 +93,25 @@
  *      so its i-icon pairs with `LoadingState` and `ErrorState`
  *      exactly like the Git Issues/PRs/Archive tabs.
  *
- * Issue #857 — fetch-failure error UI de-duplication
- * --------------------------------------------------
- * Pre-#857 the tab rendered the IPC error message in *two* places when
+ * Issue #857 — fetch-failure error UI de-duplication (revised by #1488)
+ * ---------------------------------------------------------------------
+ * The pre-#857 tab rendered the IPC error message in *two* places when
  * `loadMeters` rejected after rows had loaded: the inline red alert
  * banner above the rows region AND the body's `<ErrorState>`. The
  * duplicated copy is the exact pattern the shared vocabulary was
- * created to prevent (issue #813). The fix drops the inline banner
- * entirely so the body renders a single `<ErrorState>` — matching
- * GitIssuesTab / GitPullRequestsTab / ArchivedNodesTab. The
- * previously-existing test had to use `findAllByText` + an explicit
- * "presence-not-uniqueness" comment to dodge the duplication; that
- * test now uses `findByText` (uniqueness) and is pinned by a new
- * regression test (`renders exactly one error element on a forced-
- * refresh rejection after rows have loaded`).
+ * created to prevent (issue #813).
+ *
+ * PR #1488 rearchitected against the title-bar / gatekeeper pattern
+ * from #1489 and broke the inline alert out of the toolbar into a
+ * separate `role="alert"` banner sibling (per
+ * `probe-ui-checklist.md` §1.4 — "Errors render in a role='alert'
+ * region that is shrink-0 and outside the scroller, so it can't
+ * scroll out of sight"). The body still renders a single
+ * `<ErrorState>` on a cold-cache first-load rejection; the warm-cache
+ * refresh rejection surfaces the alert banner while the rows stay
+ * visible. The regression test (`warm-cache refresh rejection keeps
+ * the rows visible and surfaces a role="alert" banner outside the
+ * toolbar`) pins the new placement.
  *
  * Cache age wire gap (issue #857 follow-up — out of scope here)
  * -------------------------------------------------------------
@@ -131,7 +144,7 @@
  */
 
 import { formatError } from '../../lib/errorUtils';
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import * as api from '../../lib/tauri';
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
@@ -159,9 +172,13 @@ export function UsageTab() {
   // leaving the user staring at a spinner even though `loadMeters`
   // had already populated `error`. Issue #813 review caught this.
   const [attempted, setAttempted] = useState(false);
-  // Reset in `finally` so a rejected fetch can't leave the button stuck
-  // disabled. The flag is set synchronously before the await so React
-  // renders the busy state before the IPC roundtrip.
+  // Owned by `handleRefresh` only (review item #3 — the previous
+  // "mount-time wiring" of this flag was a placebo; the cold-cache
+  // `<LoadingState>` early-return wins before the toolbar / body is
+  // ever rendered). Set synchronously before the await so React
+  // renders the busy state before the IPC roundtrip; cleared in
+  // `handleRefresh`'s `finally` so a rejected fetch can't leave
+  // the button stuck disabled.
   const [isRefreshing, setIsRefreshing] = useState(false);
   // Wall-clock timestamp of the last successful load. Updated only when
   // `loadMeters` resolves without throwing — a failed refresh leaves the
@@ -171,40 +188,44 @@ export function UsageTab() {
   // during the initial loading state and after a first-load rejection).
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
-  const loadMeters = useCallback(async (force: boolean, opts: { silent?: boolean } = {}) => {
-    if (!opts.silent) setIsRefreshing(true);
+  // Request sequencing (#1488 review item #7). When a Refresh click
+  // races an invalidation hook, the older promise resolving last
+  // would otherwise overwrite newer state with stale data and clear
+  // `isRefreshing` mid-flight. Each in-flight call tags itself with a
+  // monotonic id; resolves / rejections whose tag no longer matches
+  // the latest id are dropped before they touch React state. A ref is
+  // correct here — the id is render-irrelevant.
+  const requestIdRef = useRef(0);
+
+  const loadMeters = useCallback(async (force: boolean) => {
+    const requestId = ++requestIdRef.current;
     try {
       const [meterRows, accountRows] = await Promise.all([
         api.getProviderMeters(force),
         api.getProviderAccounts(),
       ]);
-      // Stamp the indicator FIRST so the timestamp describes the data
-      // we're about to set. JS is single-threaded through the await
-      // resolve + these setStates, so there is no race — either all
-      // setStates commit (and the indicator correctly reflects them) or
-      // the `Promise.all` rejects and none of them do (and the previous
-      // timestamp stays in place).
+      // Idempotent — first settled request flips `attempted` for good;
+      // later stale settles can't un-flip it. Sequencing below prevents
+      // a stale resolve from overwriting newer state.
+      setAttempted(true);
+      if (requestId !== requestIdRef.current) return;
       setLastRefreshedAt(new Date());
       setMeters(meterRows);
       setAccounts(accountRows);
       setError(null);
     } catch (e) {
+      setAttempted(true);
+      if (requestId !== requestIdRef.current) return;
       console.error('Failed to load usage:', e);
       setError(formatError(e));
-    } finally {
-      // Always flip `attempted` after the first IPC settles, success
-      // OR failure — without this, a cold-cache first-load failure
-      // would leave `attempted === false` and the early-return below
-      // would render `<LoadingState>` forever, masking `<ErrorState>`
-      // and the Refresh button (#813 / #1481 regression guard).
-      setAttempted(true);
-      if (!opts.silent) setIsRefreshing(false);
     }
   }, []);
 
-  // Initial load — non-forced, non-silent so the dim/busy affordance
-  // applies during the mount-time revalidation as well as the manual
-  // Refresh click.
+  // Initial load — non-forced. The cold-cache first load renders
+  // `<LoadingState>` (see the early-return below); `isRefreshing` is
+  // intentionally NOT flipped here because nothing on screen carries
+  // the affordance until the early-return is gone (review item #3 —
+  // the previous "mount-time wiring" was a placebo).
   useAsyncEffect(() => {
     void loadMeters(false);
   }, [loadMeters]);
@@ -266,17 +287,19 @@ export function UsageTab() {
         )
     : [];
 
-  // CLAUDE.md "user.click swallows async onClick rejections": `loadMeters`
-  // rejects on backend failure; safety-net catch lands any escaped
-  // throw into the error banner instead of an unhandled rejection.
-  // `loadMeters` itself owns the `isRefreshing` lifecycle now (so the
-  // mount-time revalidation shares the affordance); this handler just
-  // awaits and never touches the flag.
+  // User-driven Refresh. Owns the `isRefreshing` lifecycle (the mount
+  // and invalidation paths don't flip it — the cold-cache early-return
+  // hides the surface, and invalidations are background). `loadMeters`
+  // swallows rejections internally, so there's no try/catch here
+  // either — it would never fire (review item #5). We `await` rather
+  // than fire-and-forget so the button's spinner stays up until the
+  // IPC settles; `finally` clears the flag regardless of outcome.
   const handleRefresh = async () => {
+    setIsRefreshing(true);
     try {
       await loadMeters(true);
-    } catch {
-      /* loadMeters already updates the error banner */
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -293,14 +316,17 @@ export function UsageTab() {
     ? lastRefreshedAt.toLocaleTimeString()
     : null;
 
-  // True stale-while-revalidate: when prior rows exist AND a refresh
-  // is in flight OR the latest fetch rejected, keep the rows on
-  // screen. The toolbar surfaces the error / refreshing state without
-  // blanking the body. When no rows have ever loaded AND the latest
-  // fetch rejected, fall back to the body's `<ErrorState>` so the
-  // user sees something other than an empty placeholder. This
-  // prevents the "I clicked Refresh and lost my view of the meters"
-  // bug the round-3 review flagged on PR #1488.
+  // Warm-cache refresh rejection keeps the rows. When prior rows exist
+  // AND the latest fetch rejected, keep the rows on screen — the
+  // alert banner below surfaces the failure without blanking the
+  // body. When no rows have ever loaded AND the latest fetch
+  // rejected, fall back to the body's `<ErrorState>` so the user sees
+  // something other than an empty placeholder. The toolbar stays a
+  // count / refresh / staleness strip; the alert lives in its own
+  // row outside the scroller (probe-ui-checklist.md §1.4), which
+  // fixes the previous design's 240px dock overflow (review item #6
+  // — four `shrink-0` chips in the toolbar were pushing the Refresh
+  // button off-panel at the narrowest dock width).
   const hasRows = rows.length > 0;
   const showInlineError = !hasRows && error !== null;
 
@@ -320,20 +346,6 @@ export function UsageTab() {
             {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
           </span>
         )}
-        {/* Non-destructive refresh-failure alert. Pinned alongside the
-            Refresh button so the user keeps their view of the rows and
-            sees the failure in the same strip. Suppressed during the
-            in-flight state to avoid double signalling. */}
-        {error !== null && hasRows && !isRefreshing && (
-          <span
-            role="status"
-            data-testid="usage-refresh-error"
-            className="text-2xs text-status-error shrink-0"
-            title={error}
-          >
-            Refresh failed — showing last known data
-          </span>
-        )}
         {refreshedRelative !== null && (
           <span
             className="text-2xs text-text-muted/80 shrink-0"
@@ -350,6 +362,30 @@ export function UsageTab() {
           </span>
         )}
       </ProbeToolbar>
+
+      {/* Refresh-failure alert. Lives OUTSIDE the toolbar and OUTSIDE
+          the body's scroller (probe-ui-checklist.md §1.4: "Errors
+          render in a role='alert' region that is shrink-0 and outside
+          the scroller, so it can't scroll out of sight"). The
+          previous design put this chip in the toolbar's count row,
+          where it competed with two other `shrink-0` chips for the
+          dock's 240px narrow width and pushed the Refresh button
+          off-panel — review item #6. `break-words` lets long error
+          text wrap (checklist §2.1: wrap, don't truncate, anything
+          unbounded; the tail carries the diagnosis). Suppressed
+          during `isRefreshing` to avoid double-signalling the
+          in-flight refresh. */}
+      {error !== null && hasRows && !isRefreshing && (
+        <div
+          role="alert"
+          data-testid="usage-refresh-error"
+          className="px-3 py-1 text-xs text-status-error shrink-0 break-words"
+          title={error}
+        >
+          <span className="font-semibold">Refresh failed</span>
+          {' — showing last known data'}
+        </div>
+      )}
 
       <ProbeTabBody
         data-testid="usage-rows"
