@@ -771,7 +771,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
       }
       if (
         e.key === 'ArrowLeft' &&
-        (inSubmenu || (inMenu && active?.getAttribute('aria-haspopup') === 'menu'))
+        (inSubmenu || (inMenu && regenSubmenu.isSubmenuOpen()))
       ) {
         e.preventDefault();
         regenSubmenu.closeSubmenu();

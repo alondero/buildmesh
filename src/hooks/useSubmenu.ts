@@ -70,6 +70,12 @@ export function useSubmenu(opts: { disabled: boolean; itemCount: number }) {
     setSubmenuOpen(false);
   }, []);
 
+  // Live open-state read for key handlers. The boolean itself can't sit
+  // in a document-listener dep list (hover toggles would churn the
+  // subscription); this stable callback reads the ref instead, so
+  // ArrowLeft can check "is the picker actually open" for free.
+  const isSubmenuOpen = useCallback((): boolean => openRef.current, []);
+
   const stepSubmenuFocus = useCallback((dir: 1 | -1) => {
     const items = liveItems(submenuRef.current);
     if (items.length === 0) return;
@@ -93,6 +99,7 @@ export function useSubmenu(opts: { disabled: boolean; itemCount: number }) {
     submenuOpen,
     setSubmenuOpen,
     closeSubmenu,
+    isSubmenuOpen,
     openSubmenuViaKeyboard,
     submenuRef,
     stepSubmenuFocus,

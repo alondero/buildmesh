@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { listProviders } from '../lib/tauri';
 import { mapBackendProviders, type SpawnOption } from '../lib/groups';
@@ -18,29 +18,42 @@ import { PROVIDER_LIST_CHANGED_EVENT } from './useProviderListInvalidation';
  * App Settings busts the `tauri.ts` cache on upsert/remove and emits the
  * event, so this hook drops its snapshot and reloads).
  *
+ * Readers subscribe via `useSyncExternalStore` (tearing-safe, zero mount
+ * re-renders) rather than a hand-rolled `useState` + `useEffect` pub-sub.
+ *
  * A failed fetch resolves to `[]` (same contract as `loadSpawnOptions`
  * in `omnibarActions.ts`) so pickers simply disable instead of crashing
  * their surface.
  */
 let cached: SpawnOption[] | null = null;
 let inflight: Promise<SpawnOption[]> | null = null;
-const subscribers = new Set<(list: SpawnOption[]) => void>();
+const subscribers = new Set<() => void>();
 let listening = false;
+
+const EMPTY: SpawnOption[] = [];
 
 function publish(list: SpawnOption[]): void {
   cached = list;
-  for (const notify of subscribers) notify(list);
+  for (const notify of subscribers) notify();
 }
 
 function load(): void {
-  if (!inflight) {
-    inflight = listProviders()
-      .then((backend) => mapBackendProviders(backend ?? []))
-      .catch(() => [] as SpawnOption[]);
-    // Fan out to every mounted reader. React bails out when the
-    // reference is unchanged, so re-publishing the same array is free.
-    inflight.then(publish);
-  }
+  if (inflight) return;
+  const request = listProviders()
+    .then((backend) => mapBackendProviders(backend ?? []))
+    .catch(() => [] as SpawnOption[]);
+  inflight = request;
+  // Clear the single-flight slot on completion so a failed (or stale)
+  // fetch never pins future callers to its result forever. The identity
+  // check drops a superseded response: if an invalidation reload started
+  // while this request was in flight, its rows lose and the newer fetch
+  // owns the publish.
+  void request.then((list) => {
+    if (inflight === request) {
+      inflight = null;
+      publish(list);
+    }
+  });
 }
 
 function ensureListening(): void {
@@ -53,25 +66,17 @@ function ensureListening(): void {
   });
 }
 
+function subscribe(onStoreChange: () => void): () => void {
+  ensureListening();
+  subscribers.add(onStoreChange);
+  if (!cached && !inflight) load();
+  return () => {
+    subscribers.delete(onStoreChange);
+  };
+}
+
 export function useProviderList(): SpawnOption[] {
-  const [list, setList] = useState<SpawnOption[]>(() => cached ?? []);
-  useEffect(() => {
-    ensureListening();
-    subscribers.add(setList);
-    if (cached) {
-      setList(cached);
-    } else {
-      // `load` publishes to all subscribers on resolve, which includes
-      // this `setList` — no per-mount `.then` needed, and unmounting
-      // before resolve is safe (the subscriber is removed below, and
-      // React 18+ no longer warns on post-unmount sets anyway).
-      load();
-    }
-    return () => {
-      subscribers.delete(setList);
-    };
-  }, []);
-  return list;
+  return useSyncExternalStore(subscribe, () => cached ?? EMPTY, () => EMPTY);
 }
 
 /** Test-only: reset the module snapshot between cases. Wired into

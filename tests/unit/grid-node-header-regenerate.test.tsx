@@ -2,20 +2,25 @@
  * Issue #1502 — in-place node regeneration + Regenerate action on the Node toolbar.
  *
  * Pins:
- *  - shared `splitRegenerateTargets` / `hasRegenerateTargets` partition the
- *    full provider list into current (kick-start) + alternates;
+ *  - shared `splitRegenerateTargets` partition of the full provider list
+ *    into current (kick-start) + alternates;
  *  - the shared `RegenerateProviderMenu` pins `Current (<label>)` on top;
  *  - `GridNodeHeader` renders an inline Regenerate toolbar button at
  *    wide/xl/medium tiers whose picker includes the current provider;
  *  - at slim/compact the same picker collapses into the kebab overflow menu;
  *  - picking the current provider fires `regenerateAgentNode(nodeId,
- *    currentProviderId)` (idle) or opens the running-node confirm dialog.
+ *    currentProviderId)` (idle) or opens the running-node confirm dialog;
+ *  - ArrowLeft on a closed submenu trigger is a no-op (never steals the key);
+ *  - the shared provider snapshot recovers after a failed fetch once the
+ *    list changes.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { act } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
+import { PROVIDER_LIST_CHANGED_EVENT } from '../../src/hooks/useProviderListInvalidation';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
@@ -287,5 +292,46 @@ describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
     fireResize(screen.getByTestId('grid-node-header'), 600);
     const btn = await screen.findByTestId('grid-regenerate-button');
     expect(btn.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('ArrowLeft on the closed kebab Regenerate trigger does not consume the key', async () => {
+    // Review nit: ArrowLeft must only fire when the picker is actually
+    // open. `fireEvent.keyDown` returns false when nothing calls
+    // preventDefault — the pin for "not stolen".
+    mockProviders();
+    setupState();
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireResize(screen.getByTestId('grid-node-header'), 300);
+    fireEvent.click(screen.getByLabelText('Agent node actions'));
+    const trigger = await screen.findByTestId('grid-regenerate-trigger');
+    await waitFor(() => expect(trigger.hasAttribute('disabled')).toBe(false));
+    // Focus the trigger explicitly: kebab autofocus intentionally does not
+    // yank focus when the provider list lands mid-open.
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+    // Submenu is closed: the key must pass through untouched and the
+    // kebab must stay open.
+    expect(fireEvent.keyDown(document, { key: 'ArrowLeft' })).toBe(true);
+    expect(document.querySelector('[role="menu"]')).toBeTruthy();
+  });
+
+  it('recovers after a failed provider fetch once the list changes', async () => {
+    // The single-flight slot must not pin future callers to a failed
+    // result forever: after `provider-list-changed`, the hook refetches
+    // and the picker enables.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'list_providers') return Promise.reject(new Error('backend booting'));
+      return Promise.resolve({});
+    });
+    setupState();
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireResize(screen.getByTestId('grid-node-header'), 600);
+    const btn = await screen.findByTestId('grid-regenerate-button');
+    await waitFor(() => expect(btn.hasAttribute('disabled')).toBe(true));
+    mockProviders();
+    await act(async () => {
+      await emit(PROVIDER_LIST_CHANGED_EVENT);
+    });
+    await waitFor(() => expect(btn.hasAttribute('disabled')).toBe(false));
   });
 });
