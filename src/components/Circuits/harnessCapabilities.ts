@@ -206,13 +206,23 @@ const CURSOR_CAPS: HarnessCapabilities = {
   available_on: ['windows', 'macos', 'linux'],
 };
 
-// Kimi — interactive TUI like Grok/Anthropic, model yes, no effort, no prefill
+// Kimi — interactive TUI like Grok/Anthropic, model yes, no effort, no prefill.
+// Issue #1369: Kimi now ships native attention hooks via the user's global
+// `~/.kimi/config.toml` (`[[hooks]]` array). The descriptor advertises the
+// four-event surface (Stop, Notification with task matcher, PermissionRequest,
+// SessionStart) routed under `permission_ask` (Kimi's default interactive mode).
 const KIMI_CAPS: HarnessCapabilities = {
   harness_id: 'kimi',
   supports_resume: true,
   auto_resume_on_startup: true,
-  requires_attention_hook: false,
-  attention_capability: { kind: 'none' },
+  requires_attention_hook: true,
+  attention_capability: {
+    kind: 'hook',
+    events: ['turn_completed', 'input_required', 'permission_requested'],
+    launch_mode: 'permission_ask',
+    trust: 'global hook file',
+    min_version: '1.0.0',
+  },
   supports_passive_turn_watcher: false,
   produces_readable_transcript: false,
   supports_model_override: true,

@@ -1469,9 +1469,15 @@ mod tests {
         // — its adapter declares resume + model override, no prefill, no
         // Claude-style attention hook. Pin the matrix so a future adapter
         // refactor that drops Kimi from the resume path trips this test.
+        // Issue #1369: Kimi Code now ships native attention hooks
+        // (`[[hooks]]` in `~/.kimi/config.toml`). Resume + model
+        // override stay advertised; the attention-hook flag is now
+        // `true` so the autopilot gate fires. Pin the matrix so a
+        // future adapter refactor that drops Kimi from either path
+        // trips this test.
         assert!(Provider::Kimi.adapter().supports_resume());
         assert!(Provider::Kimi.adapter().supports_model_override());
-        assert!(!Provider::Kimi.adapter().requires_attention_hook());
+        assert!(Provider::Kimi.adapter().requires_attention_hook());
         assert!(Provider::Mcode.adapter().supports_resume());
         // Issue #1179: mcode's interactive TUI rejects `--model`, so the
         // override is no longer advertised.

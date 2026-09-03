@@ -138,6 +138,13 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   });
 
   // Kimi — model yes, no effort, no prefill (issue #918 / #911).
+  // Issue #1369: Kimi now ships native attention hooks
+  // (`[[hooks]]` array in `~/.kimi/config.toml`). Pin the
+  // structured hook descriptor so a refactor that flips
+  // `requires_attention_hook` to false, drops `min_version`,
+  // or changes the launch_mode trips this row — mirroring the
+  // Grok pin (#1366) so vitest catches a flip-back, not just
+  // tsc's presence check.
   it('Kimi matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.kimi;
     expect(c.harness_id).toBe('kimi');
@@ -146,6 +153,18 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.supports_extra_args).toBe(true);
     expect(c.supports_prefill).toBe(false);
     expect(c.effort_control.kind).toBe('none');
+    expect(c.requires_attention_hook, 'issue #1369: Kimi now ships native attention hooks').toBe(true);
+    expect(c.attention_capability).toEqual({
+      kind: 'hook',
+      events: expect.arrayContaining([
+        'turn_completed',
+        'input_required',
+        'permission_requested',
+      ]),
+      launch_mode: 'permission_ask',
+      trust: 'global hook file',
+      min_version: '1.0.0',
+    });
   });
 
   // mcode — interaction TUI; model OFF (issue #1179), effort OFF, prefill yes.

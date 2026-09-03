@@ -611,14 +611,31 @@ mod tests {
         assert_eq!(terminal.effort_control, EffortControlKind::None);
 
         // Kimi Code is the remaining interactive TUI without prefill
-        // (positional prompt is a Grok / Cursor / mcode shape). No
-        // effort, no attention hook (issue #886).
+        // (positional prompt is a Grok / Cursor / mcode shape).
+        // Issue #1369 — Kimi now ships native `[[hooks]]` attention
+        // integration (Stop + Notification with matcher + PermissionRequest
+        // + SessionStart) routed through the user's global
+        // `~/.kimi/config.toml`. Pin the structured hook descriptor
+        // here so a refactor that flips events / launch_mode /
+        // min_version trips this row, not just the per-adapter test.
         let kimi = kimi_caps();
         assert!(kimi.supports_model_override);
         assert!(!kimi.supports_effort_override);
         assert!(kimi.supports_extra_args);
         assert!(!kimi.supports_prefill);
         assert_eq!(kimi.effort_control, EffortControlKind::None);
+        assert!(
+            kimi.requires_attention_hook,
+            "issue #1369: Kimi now ships native attention hooks"
+        );
+        assert!(matches!(
+            kimi.attention_capability,
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::PermissionAsk,
+                min_version: Some(ref v),
+                ..
+            } if v == crate::agent::provider::adapters::kimi::KIMI_MIN_HOOK_VERSION
+        ));
 
         let grok = grok_caps();
         assert!(grok.supports_resume);
