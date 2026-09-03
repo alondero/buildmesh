@@ -1,5 +1,7 @@
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
 use portable_pty::{CommandBuilder, PtyPair};
+use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -74,21 +76,46 @@ pub(super) fn sandbox_spawn(
 /// attention endpoint. Idempotent: re-runs no-op once the config matches, and
 /// migrate an older `idle_prompt`-only config on the next spawn.
 ///
+/// **Additive merge** (issue #1370). The pre-#1370 implementation did
+/// `settings["hooks"] = expected_hooks` and so wiped any pre-existing
+/// `Notification` / `Stop` / `PermissionRequest` / `UserPromptSubmit` /
+/// `PreToolUse` matcher groups the user had authored. The merge now:
+///
+/// * iterates per event (`Notification`, `Stop`),
+/// * locates a Buildmesh-owned handler via a canonical-anchor marker
+///   predicate (the `command` field carries
+///   `BUILDMESH_PORT` + `BUILDMESH_SESSION_ID` + `/api/attention/` — the
+///   same anchors Codex/Grok use),
+/// * updates the Buildmesh entry in place when the shape drifts, OR
+/// * appends a fresh matcher group when none exists yet.
+///
+/// User-authored matcher groups, sibling handlers, and other events
+/// (`PreToolUse`, `UserPromptSubmit`, …) survive byte-for-byte across the
+/// merge. Repeated injection adds no duplicates. Writes are atomic via
+/// `NamedTempFile` + `sync_all` + `persist`; a malformed existing file
+/// returns `Err` rather than silently overwriting the user's data.
+///
+/// **PermissionRequest is intentionally absent.** The adapter advertises
+/// `AttentionLaunchMode::SkipPermissions` (`--dangerously-skip-permissions`),
+/// so Claude Code never raises a permission prompt and a `PermissionRequest`
+/// hook entry would be misleading by construction (issue #1370 §2). The
+/// `Notification` catch-all still fires on `permission_prompt` notifications
+/// if a future launch flips the mode; under today's SkipPermissions the
+/// signal is `idle_prompt` and MCP-elicitations only.
+///
 /// This is the Claude-harness implementation behind
 /// `AnthropicAdapter::provision_attention_hooks` (issue #886); the mesh commands
 /// also call it directly to pre-provision the default harness's hook at mesh
-/// creation, before any node/provider exists.
-pub fn inject_attention_hook(project_path: &std::path::Path) -> Result<(), String> {
+/// creation, before any node/provider exists. The spawn path surfaces the
+/// `Err` as a `SignalHealth::Unavailable` lifecycle event (see
+/// `spawn::provision::run_provider_provisioning`), so a malformed
+/// settings.local.json is never silently masked.
+pub fn inject_attention_hook(project_path: &Path) -> Result<(), String> {
     let claude_dir = project_path.join(".claude");
     std::fs::create_dir_all(&claude_dir)
         .map_err(|e| format!("failed to create .claude dir: {e}"))?;
 
     let settings_path = claude_dir.join("settings.local.json");
-    let mut settings: serde_json::Value = match std::fs::read_to_string(&settings_path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({})),
-        Err(_) => serde_json::json!({}),
-    };
-
     // Resolve the port from $BUILDMESH_PORT at hook-run time (set per-agent in
     // spawn_environment) rather than baking a literal. This keeps the hook
     // correct across the 1992→1994 fallback and routes a dev-profile agent's
@@ -97,44 +124,154 @@ pub fn inject_attention_hook(project_path: &std::path::Path) -> Result<(), Strin
     // transcript_path, …}) as the POST body (issue #878). The backend uses it
     // to tell "turn ended, user needed" from "turn ended, waiting on
     // background tasks"; an empty body degrades to always-mark.
-    let hook_command =
-        "curl -sf -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"
-            .to_string();
-
-    // We register two hooks so the user is told the *instant* their input is
-    // needed, not just when the agent goes idle:
-    //   - Notification with an empty (catch-all) matcher fires on every
-    //     notification type — crucially `permission_prompt` (the agent is asking
-    //     to run a tool / answer a question) as well as `idle_prompt`. Matching
-    //     only `idle_prompt` (the old behaviour) missed every permission prompt,
-    //     so the user was never alerted when an agent paused to ask something.
-    //   - Stop fires the moment the agent finishes a turn, so "agent is waiting
-    //     for you" lands immediately instead of after Claude Code's idle timer.
-    // Both POST to the same attention endpoint; `mark_attention` is idempotent.
-    let notification_hook = serde_json::json!({
+    let hook_command = serde_json::json!({
         "type": "command",
-        "command": hook_command
+        "command": "curl -sf -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true",
     });
-    let expected_hooks = serde_json::json!({
-        "Notification": [{
-            "matcher": "",
-            "hooks": [notification_hook.clone()]
-        }],
-        "Stop": [{
-            "hooks": [notification_hook]
-        }]
-    });
+    ensure_hooks_json(&settings_path, &hook_command)
+}
 
-    if settings.get("hooks") == Some(&expected_hooks) {
+/// Marker predicate: a Claude Code hook handler is Buildmesh-owned when its
+/// `command` carries the canonical attention anchors. The `command` field
+/// is the only documented Claude hook-handler payload (mirrors the Codex
+/// precedent at `codex.rs:986-996`), and its `BUILDMESH_PORT` +
+/// `BUILDMESH_SESSION_ID` + `/api/attention/` substring set is the
+/// guaranteed-preserved token triple. Substring (not equality) match so a
+/// future URL refactor (adding `?token=…`, swapping `localhost` for
+/// `127.0.0.1`) keeps the merge stable — only the canonical anchors
+/// matter.
+pub(super) fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
+    handler
+        .get("command")
+        .and_then(|v| v.as_str())
+        .is_some_and(|command| {
+            command.contains("BUILDMESH_PORT")
+                && command.contains("BUILDMESH_SESSION_ID")
+                && command.contains("/api/attention/")
+        })
+}
+
+/// Add or update the Buildmesh-owned handler in a single event's
+/// matcher-group array. `extra_fields` are merged into the freshly-appended
+/// matcher group (e.g. `Notification` requires the documented `matcher: ""`
+/// catch-all field; `Stop` does not). Returns `true` when something
+/// changed (caller decides whether to rewrite the document).
+fn merge_buildmesh_handler(
+    groups: &mut Vec<serde_json::Value>,
+    new_handler: &serde_json::Value,
+    extra_fields: &[(&str, &serde_json::Value)],
+) -> bool {
+    for group in groups.iter_mut() {
+        let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        if let Some(index) = handlers.iter().position(is_buildmesh_handler) {
+            if handlers[index] != *new_handler {
+                handlers[index] = new_handler.clone();
+                return true;
+            }
+            // Already correct → no-op. Caller skips the rewrite.
+            return false;
+        }
+    }
+    // No Buildmesh entry yet → append a fresh matcher group. Claude Code
+    // requires `Notification` entries to carry a `matcher` field (the docs
+    // note that matcher "" is the documented catch-all form); `Stop`
+    // entries do not — matchers on Stop are ignored with a warning, so
+    // omitting the field keeps the merge shape minimal.
+    let mut group = serde_json::Map::new();
+    for (key, value) in extra_fields {
+        group.insert((*key).to_string(), (*value).clone());
+    }
+    group.insert("hooks".to_string(), serde_json::json!([new_handler.clone()]));
+    groups.push(serde_json::Value::Object(group));
+    true
+}
+
+/// Atomically persist `content` to `path` via `tempfile::NamedTempFile +
+/// persist`. Mirrors the Codex pattern at `codex.rs:998-1007` and the
+/// Grok pattern at `grok.rs:133-140`. A crash mid-rename or pre-rename
+/// leaves the canonical file untouched and the orphan `.tmp` is the
+/// only residue — visible at `dir.parent().join("name.*.tmp")` until the
+/// OS reclaims it.
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
+/// Write the Buildmesh attention hooks into
+/// `{project}/.claude/settings.local.json`, additive-merging any existing
+/// user-authored matcher groups under `Notification` and `Stop`.
+///
+/// The merge refuses to silently overwrite a malformed user-authored file
+/// (trailing comma, partial edit, …) — the Codex/Grok pattern treats
+/// parse failure as an explicit `Err` so the spawn path surfaces a
+/// provision error and the user's data survives intact (issue #1370
+/// §1). A missing file is the happy path (fresh install); only an
+/// existing-but-unparseable file is the failure case.
+fn ensure_hooks_json(path: &Path, new_handler: &serde_json::Value) -> Result<(), String> {
+    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "refusing to overwrite malformed {path:?}: {e}. \
+                 Repair or remove the file and retry"
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("failed to read {path:?}: {e}")),
+    };
+    if !settings.is_object() {
+        return Err(format!(
+            "{path:?}: top-level value must be a JSON object"
+        ));
+    }
+
+    let settings_obj = settings
+        .as_object_mut()
+        .expect("settings coerced to object above");
+    let hooks = settings_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_obj = hooks
+        .as_object_mut()
+        .ok_or_else(|| "settings.local.json `hooks` value must be an object".to_string())?;
+
+    // The empty matcher is Claude Code's documented "match-all" form for
+    // `Notification` (a matcher on `idle_prompt` alone misses every
+    // permission prompt). Build it as a `serde_json::Value` once so the
+    // merge appends the same literal the pre-#1370 tests pin.
+    let matcher_all = serde_json::Value::String(String::new());
+
+    let mut changed = false;
+    let notification_groups = hooks_obj
+        .entry("Notification")
+        .or_insert_with(|| serde_json::json!([]));
+    let notification_groups_array = notification_groups
+        .as_array_mut()
+        .ok_or_else(|| "settings.local.json event `Notification` must be an array".to_string())?;
+    changed =
+        merge_buildmesh_handler(notification_groups_array, new_handler, &[("matcher", &matcher_all)])
+            || changed;
+
+    let stop_groups = hooks_obj
+        .entry("Stop")
+        .or_insert_with(|| serde_json::json!([]));
+    let stop_groups_array = stop_groups
+        .as_array_mut()
+        .ok_or_else(|| "settings.local.json event `Stop` must be an array".to_string())?;
+    changed = merge_buildmesh_handler(stop_groups_array, new_handler, &[]) || changed;
+
+    if !changed {
         return Ok(());
     }
 
-    settings["hooks"] = expected_hooks;
-
     let content =
         serde_json::to_string_pretty(&settings).map_err(|e| format!("serialize failed: {e}"))?;
-    std::fs::write(&settings_path, content).map_err(|e| format!("failed to write: {e}"))?;
-    tracing::info!("inject_attention_hook: wrote hook at {:?}", settings_path);
+    write_atomic(path, &content).map_err(|e| format!("failed to write settings.local.json: {e}"))?;
+    tracing::info!("inject_attention_hook: wrote hook at {:?}", path);
     Ok(())
 }
 
