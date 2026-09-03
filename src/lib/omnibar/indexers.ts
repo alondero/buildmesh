@@ -145,8 +145,12 @@ export interface AppCommand {
  * (PR #1489 review #1B). The flat `APP_COMMANDS` array below merges
  * non-probe entries with `Object.values` of this map; consumers stay
  * ignorant of the split.
+ *
+ * Exported (not just spread into `APP_COMMANDS`) so the palette's tool
+ * discovery screen can read the same labels instead of re-declaring copy
+ * — one catalog, two readers.
  */
-const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand> = {
+export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand> = {
   'probe-files': {
     id: 'probe-files',
     label: 'Open Files',

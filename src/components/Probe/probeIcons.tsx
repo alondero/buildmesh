@@ -22,6 +22,7 @@
  */
 
 import type { ComponentType } from 'react';
+import type { ProbeTab } from '../../stores/uiStore';
 
 export type ProbeIcon = ComponentType<{ className?: string }>;
 
@@ -193,3 +194,23 @@ export function SearchIcon({ className }: IconProps) {
     </Svg>
   );
 }
+
+/**
+ * One icon per inspector destination. The map lives here (not in
+ * `ProbePanel`) so other surfaces — e.g. the command palette's tool
+ * discovery start screen — can render the same destination glyphs without
+ * importing the full inspector body and its tab implementations.
+ */
+export const PROBE_TAB_ICONS: Record<ProbeTab, ProbeIcon> = {
+  files: FilesIcon,
+  review: ReviewIcon,
+  usage: UsageIcon,
+  worktrees: WorktreesIcon,
+  properties: PropertiesIcon,
+  autopilot: AutopilotIcon,
+  circuits: CircuitsIcon,
+  issues: IssuesIcon,
+  pulls: PullsIcon,
+  sessions: ArchiveIcon,
+  scratchpad: NotesIcon,
+};
