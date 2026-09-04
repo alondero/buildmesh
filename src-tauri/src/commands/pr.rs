@@ -3,7 +3,7 @@
 use crate::db;
 use crate::env;
 use crate::models::SessionStatus;
-use crate::services::github::{self, GitHubClient, GitHubError, PullRequest, PullRequestSummarySource};
+use crate::services::github::{self, GitHubClient, GitHubError, PullRequest};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 use tauri::command;
@@ -447,44 +447,72 @@ pub(crate) fn get_prs_mergeability_blocking(
         }
     };
 
-    // ONE token resolution, ONE summary query (O(pages)): fetch the open
-    // summaries once, index by number, and map every requested PR through
-    // the map. Missing numbers (closed since the list loaded, or a partial
-    // page) become the per-PR error sentinel — never a whole-batch failure.
-    // A second closed-summaries fetch covers callers that pass closed PR
-    // numbers (the desktop panel never does — it skips enrichment on the
-    // Closed filter — but older/mobile callers might).
+    // ONE token resolution, then cheapest-first lookups: open summaries
+    // (O(pages)), closed summaries for stragglers, then one REST detail
+    // request per STILL-missing PR (e.g. older than the 100-row summary
+    // cap). A missing entry never fails the batch — see
+    // [`mergeability_entries`] for the per-PR sentinel.
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
 
+    mergeability_from_summaries(&client, &owner, &repo, pr_numbers).map_err(|e| e.to_string())
+}
+
+/// Resolve a batch of PR numbers to mergeability entries without a DB or
+/// mesh lookup, so the lookup strategy is unit-testable against a fake
+/// server (issue #1529): open summaries first, closed summaries for numbers
+/// still missing, then the single-PR REST detail endpoint per remaining
+/// number (correct past the 100-row summary cap, where a summaries-only
+/// lookup would falsely report "not found"). Whole-query transport failures
+/// propagate as `Err`; per-PR detail failures become the `"error: ..."`
+/// sentinel via [`mergeability_entries`].
+pub(crate) fn mergeability_from_summaries(
+    client: &GitHubClient,
+    owner: &str,
+    repo: &str,
+    pr_numbers: Vec<i64>,
+) -> Result<Vec<PrMergeabilityEntry>, GitHubError> {
     let mut by_number: std::collections::HashMap<i64, (Option<bool>, String)> =
         std::collections::HashMap::new();
-    let open = client
-        .list_pr_summaries(&owner, &repo, "open")
-        .map_err(|e| e.to_string())?;
-    for s in open {
+    for s in client.list_pr_summaries(owner, repo, "open")? {
         by_number.insert(s.number, (s.mergeable, s.mergeable_state));
     }
-    let missing: Vec<i64> = pr_numbers
+    let mut missing: Vec<i64> = pr_numbers
         .iter()
         .copied()
         .filter(|n| !by_number.contains_key(n))
         .collect();
     if !missing.is_empty() {
-        match client.list_pr_summaries(&owner, &repo, "closed") {
+        match client.list_pr_summaries(owner, repo, "closed") {
             Ok(closed) => {
                 for s in closed {
                     by_number.insert(s.number, (s.mergeable, s.mergeable_state));
                 }
+                missing.retain(|n| !by_number.contains_key(n));
             }
             Err(e) => {
                 tracing::warn!(
-                    "get_prs_mergeability: closed-summaries fetch failed: {} — missing PRs stay in error sentinel",
+                    "get_prs_mergeability: closed-summaries fetch failed: {} — falling back to per-PR detail",
                     e
                 );
             }
         }
     }
 
+    // Whatever is still missing (older than the summary cap, or a partial
+    // page) gets one direct detail request each — the pre-#1529 endpoint,
+    // now only a fallback rather than the loop. Failures stay per-PR.
+    if !missing.is_empty() {
+        for entry in mergeability_entries(missing, |n| {
+            client.pull_request_mergeability(owner, repo, n)
+        }) {
+            by_number.insert(entry.number, (entry.mergeable, entry.mergeable_state));
+        }
+    }
+
+    // Request order out: every requested number resolves through the map
+    // now (summaries hit or detail fallback/sentinel), so a missing key
+    // here is unreachable — the debug_assert documents the invariant for
+    // test builds without changing release behaviour.
     Ok(pr_numbers
         .into_iter()
         .map(|n| match by_number.remove(&n) {
@@ -494,14 +522,11 @@ pub(crate) fn get_prs_mergeability_blocking(
                 mergeable_state,
             },
             None => {
-                tracing::warn!(
-                    "get_prs_mergeability: PR #{} not in summary results — row will stay in 'Checking…' until next reload",
-                    n
-                );
+                debug_assert!(false, "mergeability map must cover every requested PR");
                 PrMergeabilityEntry {
                     number: n,
                     mergeable: None,
-                    mergeable_state: format!("error: PR #{} not in summary results", n),
+                    mergeable_state: format!("error: PR #{} has no mergeability result", n),
                 }
             }
         })
@@ -511,16 +536,15 @@ pub(crate) fn get_prs_mergeability_blocking(
 /// Pure per-PR iterator that maps a list of PR numbers onto
 /// `PrMergeabilityEntry` values, threading each through a probe closure.
 ///
-/// Historical seam for the pre-#1529 detail loop. The live
-/// `get_prs_mergeability` path no longer calls this (it serves the batch
-/// from one GraphQL summaries fetch); kept because its unit tests pin the
-/// per-PR error-sentinel mapping the new path preserves.
+/// Since #1529 this is the per-PR REST-detail fallback inside
+/// [`mergeability_from_summaries`] (numbers older than the summary cap),
+/// not the loop it used to be; its unit tests pin the per-PR
+/// error-sentinel mapping the fallback preserves.
 /// The closure indirection is the test seam: without a trait on
 /// `GitHubClient`, a unit test can't easily stub
 /// `pull_request_mergeability`. The closure accepts the per-PR probe
 /// function as data, so a test passes its own closure and asserts on
 /// the helper's mapping logic in isolation.
-#[allow(dead_code)]
 fn mergeability_entries<F>(
     pr_numbers: Vec<i64>,
     probe: F,
@@ -1352,6 +1376,37 @@ mod tests {
             entries[0].mergeable_state.starts_with("error: "),
             "NoToken must surface as 'error: ...' so the panel keeps the row in 'Checking…'"
         );
+    }
+
+    /// `mergeability_from_summaries` serves hits from the summary pages and
+    /// falls back to one direct detail request per number the pages miss
+    /// (older than the 100-row cap). Script: open page carries #1 only,
+    /// closed page is empty, then one REST detail answers #2. Cost is 3
+    /// requests for 2 PRs — O(pages) for the hits, one extra each only for
+    /// genuine misses — and request order is preserved.
+    #[test]
+    fn mergeability_from_summaries_falls_back_to_detail_past_the_cap() {
+        use crate::services::github::tests::{fake_node, fake_server, Scripted};
+        use std::sync::atomic::Ordering;
+
+        let open = serde_json::Value::Array(vec![fake_node(1)]);
+        let closed = serde_json::Value::Array(vec![]);
+        let (base, count, handle) = fake_server(vec![
+            Scripted::Page(open, false, None),
+            Scripted::Page(closed, false, None),
+            Scripted::Detail,
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let entries = mergeability_from_summaries(&client, "acme", "demo", vec![1, 2])
+            .expect("batch must not fail on a miss");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].number, 1);
+        assert_eq!(entries[0].mergeable, Some(true), "summary hit");
+        assert_eq!(entries[1].number, 2);
+        assert_eq!(entries[1].mergeable, Some(true), "detail fallback hit");
+        assert_eq!(entries[1].mergeable_state, "clean");
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), 3);
     }
 
     /// Build a `TempGitRepo` and an `AgentNode` that uses a branched worktree

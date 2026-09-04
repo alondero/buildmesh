@@ -12,10 +12,17 @@
  * inline via the backend's GraphQL PR-summaries connection — one HTTP
  * request per page, not one per PR. The panel never orchestrates per-row
  * enrichment calls. A draft PR is flagged without consulting mergeability.
- * `mergeable: null` (GitHub still computing / `UNKNOWN`) renders as
- * "Checking…"; a `mergeable_state` starting with `"error:"` (per-PR partial
- * failure preserved from the old batched endpoint) renders as a distinct
- * retryable "Check failed" state — never an indefinite "Checking…".
+ *
+ * Re-poll on `mergeable: null` (issue #419, preserved through #1529)
+ * ------------------------------------------------------------------
+ * GitHub computes mergeability asynchronously, so a fresh/updated PR can
+ * arrive as `mergeable: null` (`UNKNOWN`). The load effect schedules ONE
+ * shared timer that refetches the whole list (still a single IPC /
+ * GraphQL page per attempt — the O(pages) contract holds on the retry
+ * path too): first retry after 1.5s, then 3s, 4.5s, giving up after 3
+ * re-polls (~9s total, mirroring the old per-PR budget). Past that the
+ * row renders "Unknown" with an inline retry instead of sitting on
+ * "Checking…" forever; the retry re-arms the budget and refetches.
  * Whole-list transport failures (rate limit, network) surface as the
  * panel-level error with manual retry. Stale list responses are dropped via
  * the `useAsyncEffect` abort signal when the mesh/filter changes.
@@ -54,7 +61,7 @@
  */
 
 import { formatError } from '../../lib/errorUtils';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   getRepoPulls,
   mergePr,
@@ -94,7 +101,7 @@ type MergeStatus =
   | { kind: 'checking' }
   | { kind: 'mergeable' }
   | { kind: 'blocked'; label: string }
-  | { kind: 'error'; message: string };
+  | { kind: 'unknown' };
 
 // Flag wording for a non-mergeable PR, keyed by GitHub's `mergeable_state`
 // (lowercase REST vocabulary mapped from GraphQL `mergeStateStatus`).
@@ -105,6 +112,14 @@ const BLOCKED_WORDING: Record<string, string> = {
   behind: 'Behind',
   unstable: 'Unstable',
 };
+
+// Re-poll budget for `mergeable: null` rows (issue #419 via #1529): at most
+// this many list refetches after the initial load, spaced BASE_POLL_DELAY_MS
+// * attempt (1.5s, 3s, 4.5s — ~9s total, mirroring the old per-PR budget).
+// Each attempt is one list IPC / GraphQL page, so the retry path stays
+// O(pages). Module-level so the load effect and the tests share them.
+const MAX_POLL_ATTEMPTS = 3;
+const BASE_POLL_DELAY_MS = 1500;
 
 // --- Icon components ------------------------------------------------------
 // Tiny inline SVG icons used by the row's action buttons. The previous
@@ -201,25 +216,33 @@ function XIcon({ className }: { className?: string }) {
 
 /**
  * Turn a PR with inline mergeability (issue #1529) into a display status.
- * `draft` short-circuits to blocked. A `mergeable_state` starting with
- * `"error:"` (per-PR partial failure preserved from the old batched
- * endpoint) is a distinct retryable error — never an indefinite
- * "Checking…". `mergeable: null` (GitHub `UNKNOWN`, still computing) is
- * "checking", visually distinct from both conflict and transport failure.
+ * `draft` short-circuits to blocked. `mergeable: null` (GitHub `UNKNOWN`,
+ * still computing) is "checking" while the bounded re-poll below still has
+ * budget, and "unknown" (with an inline retry) once it is exhausted — both
+ * visually distinct from conflict and from the panel-level transport error.
+ *
+ * `mergeable` answers only "does the tree merge cleanly". When it is true
+ * but `mergeStateStatus` reports a policy gate (`blocked`: required checks
+ * / approvals missing, `behind`: branch out of date, `dirty`: conflicts
+ * reported after all), the merge API would reject the squash — so the row
+ * shows the gate instead of a Merge button that cannot succeed.
  */
-function deriveMergeStatus(pr: GitHubPullRequest): MergeStatus {
+function deriveMergeStatus(pr: GitHubPullRequest, pollExhausted: boolean): MergeStatus {
   if (pr.draft) return { kind: 'blocked', label: 'Draft' };
   // `??` covers old cached payloads missing the #1529 fields (the wire
   // defaults them, but a stale renderer could still see `undefined`).
   const state = pr.mergeable_state ?? 'unknown';
   const mergeable = pr.mergeable ?? null;
-  if (state.startsWith('error:')) {
-    return { kind: 'error', message: state.slice('error:'.length).trim() || state };
+  if (mergeable === null) return pollExhausted ? { kind: 'unknown' } : { kind: 'checking' };
+  if (mergeable === false) {
+    // mergeable === false — word the flag from GitHub's mergeable_state.
+    return { kind: 'blocked', label: BLOCKED_WORDING[state] ?? 'Conflicts' };
   }
-  if (mergeable === null) return { kind: 'checking' };
-  if (mergeable === true) return { kind: 'mergeable' };
-  // mergeable === false — word the flag from GitHub's mergeable_state.
-  return { kind: 'blocked', label: BLOCKED_WORDING[state] ?? 'Conflicts' };
+  // mergeable === true with a policy gate still shows the gate.
+  if (state === 'blocked' || state === 'behind' || state === 'dirty') {
+    return { kind: 'blocked', label: BLOCKED_WORDING[state] ?? 'Conflicts' };
+  }
+  return { kind: 'mergeable' };
 }
 
 export function GitPullRequestsTab() {
@@ -260,6 +283,14 @@ export function GitPullRequestsTab() {
   // refetch; #813 surfaced Refresh to the user). `useAsyncEffect`
   // aborts the previous effect's signal on dep change.
   const [reloadKey, setReloadKey] = useState(0);
+  // Bounded re-poll budget for `mergeable: null` rows (issue #419, kept
+  // through #1529). `pollAttempts` survives reloadKey bumps (the re-poll's
+  // own refetches must consume budget, not reset it) and resets only when
+  // the scope changes (mesh/filter effect below) or the list resolves with
+  // no nulls left. `pollExhausted` flips the null rows from "Checking…" to
+  // the "Unknown" retry state the status derives from.
+  const pollAttempts = useRef(0);
+  const [pollExhausted, setPollExhausted] = useState(false);
   // "View on GitHub" header button — resolves the active mesh's
   // `origin` to a `https://github.com/{owner}/{repo}/pulls` URL.
   // Mirror of GitIssuesTab's hook call; both tabs share the same
@@ -267,6 +298,21 @@ export function GitPullRequestsTab() {
   // between the two probes on the same mesh.
   const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
   const pullsListUrl = githubUrl ? `${githubUrl}/pulls` : '';
+
+  // Re-arm the re-poll budget and refetch — the shared handler behind the
+  // toolbar Refresh and every row's "Unknown" retry button.
+  const retryListLoad = useCallback(() => {
+    pollAttempts.current = 0;
+    setPollExhausted(false);
+    setReloadKey((k) => k + 1);
+  }, []);
+
+  // Fresh scope, fresh budget: declared before the load effect so the reset
+  // runs first on mesh/filter changes (effects fire in declaration order).
+  useAsyncEffect(() => {
+    pollAttempts.current = 0;
+    setPollExhausted(false);
+  }, [activeMeshId, stateFilter]);
 
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
@@ -276,12 +322,37 @@ export function GitPullRequestsTab() {
     setMergeError({});
     // PR numbers don't carry across mesh/filter changes (issue #461).
     expanded.clear();
+    // One shared re-poll timer per load (issue #419 via #1529: a single
+    // list refetch, not one timer per stuck PR). Owned by this effect run;
+    // cleanup clears it so unmount/mesh/filter/reload never leaks a retry.
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
     (async () => {
       try {
         const result = await getRepoPulls(activeMeshId, stateFilter);
         // The mesh / filter could have changed mid-flight — drop a stale result.
         if (signal.aborted) return;
         setPrs(result);
+        // Closed PRs show no merge control, so unknown mergeability there
+        // needs no resolution. Drafts render "Draft" without consulting it.
+        const stillNull =
+          stateFilter === 'open' &&
+          result.some((pr) => !pr.draft && (pr.mergeable ?? null) === null);
+        if (!stillNull) {
+          pollAttempts.current = 0;
+          setPollExhausted(false);
+          return;
+        }
+        if (pollAttempts.current >= MAX_POLL_ATTEMPTS) {
+          setPollExhausted(true);
+          return;
+        }
+        const delay = BASE_POLL_DELAY_MS * (pollAttempts.current + 1);
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          if (signal.aborted) return;
+          pollAttempts.current += 1;
+          setReloadKey((k) => k + 1);
+        }, delay);
       } catch (e) {
         if (signal.aborted) return;
         console.error('Failed to load pull requests:', e);
@@ -290,6 +361,10 @@ export function GitPullRequestsTab() {
         if (!signal.aborted) setLoading(false);
       }
     })();
+
+    return () => {
+      if (pollTimer !== null) clearTimeout(pollTimer);
+    };
   }, [activeMeshId, stateFilter, reloadKey]);
 
   // Fetch the provider list once at mount (issue #420, mirrors
@@ -511,7 +586,7 @@ export function GitPullRequestsTab() {
         }
       >
         <RefreshControl
-          onRefresh={() => setReloadKey((k) => k + 1)}
+          onRefresh={retryListLoad}
           isRefreshing={loading && prs.length > 0}
           ariaLabel="Refresh pull requests"
         />
@@ -528,7 +603,7 @@ export function GitPullRequestsTab() {
         ) : (
           <div className="space-y-1">
             {prs.map((pr) => {
-              const status = deriveMergeStatus(pr);
+              const status = deriveMergeStatus(pr, pollExhausted);
               const isMerging = merging === pr.number;
               const isConfirming = confirming === pr.number;
               const rowError = mergeError[pr.number];
@@ -609,16 +684,16 @@ export function GitPullRequestsTab() {
                               <GitMergeIcon className="w-3.5 h-3.5" />
                             </button>
                           ) : status.kind === 'checking' ? (
-                            <span className="px-2 py-1 text-2xs text-text-muted animate-pulse" title="GitHub hasn't computed mergeability yet — Refresh to retry">Checking…</span>
-                          ) : status.kind === 'error' ? (
+                            <span className="px-2 py-1 text-2xs text-text-muted animate-pulse" title="GitHub hasn't computed mergeability yet — retrying automatically">Checking…</span>
+                          ) : status.kind === 'unknown' ? (
                             <button
                               type="button"
-                              onClick={() => setReloadKey((k) => k + 1)}
+                              onClick={retryListLoad}
                               aria-label={`Retry mergeability check for pull request #${pr.number}`}
-                              title={status.message ? `Mergeability check failed: ${status.message} — click to retry` : 'Mergeability check failed — click to retry'}
-                              className="px-2 py-1 text-2xs rounded bg-status-error/10 text-status-error hover:bg-status-error/20 transition-colors"
+                              title="GitHub hasn't reported mergeability — click to retry"
+                              className="px-2 py-1 text-2xs rounded border border-dashed border-border-subtle text-text-muted hover:text-accent-cyan hover:border-accent-cyan/40 transition-colors"
                             >
-                              Check failed
+                              Unknown
                             </button>
                           ) : (
                             <span className="px-2 py-1 text-2xs rounded bg-bg-card text-text-muted" title="This pull request can't be merged">{/* allow-bare-rounded */}

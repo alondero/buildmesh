@@ -4,10 +4,17 @@ Learned while pinning issue #1529's O(pages) contract in `src-tauri/src/services
 
 To assert HTTP cost (not just mapping), spin a raw `std::net::TcpListener`
 on `127.0.0.1:0` in the test, count requests with
-`Arc<AtomicUsize>`, and serve scripted pages (`(nodes_json, has_next,
-cursor)` triples — one `accept()` per expected request). The server thread
-`join()`s at the end, so an over-eager client (N+1 regression) blocks the
-join and fails loudly instead of passing silently.
+`Arc<AtomicUsize>`, and serve a scripted interaction list in the exact
+expected order (GraphQL pages plus, where the fallback is under test, REST
+detail responses). Socket lifecycle, stated precisely:
+- The guard serves exactly `script.len()` connections, then exits. An
+  over-eager client (N+1 regression) gets connection-refused on the extra
+  request, so its call returns `Err` and the test fails fast.
+- An under-eager client leaves the guard parked in `accept()`; that is
+  harmless because every test asserts on payload length / counts BEFORE
+  joining, so a short client fails on assertions first and never reaches
+  `join`. The parked thread dies with the test process.
+- A request of an unexpected kind panics the guard with the request line.
 
 Why raw TCP and not `tiny_http`/`wiremock`: the repo avoids extra deps for
 trivial work (`percent_encode_path_component` precedent), and the request

@@ -1451,38 +1451,54 @@ impl GitHubClient {
         }
 
         let parsed: GraphQLResponse = resp.json().map_err(GitHubError::Http)?;
-        if let Some(errors) = &parsed.errors {
-            let msg = errors
-                .iter()
-                .map(|e| e.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            match &parsed.data {
-                Some(_) => {
-                    // Partial data with errors: keep the usable rows (the
-                    // panel renders them; the missing rows surface as
-                    // unknown/error on the next reload). Rate-limit errors
-                    // still surface when there is NO data (below).
+        // Join a non-empty `errors` array once — it is the error below
+        // whenever there is no usable repository to read.
+        let joined_errors: Option<String> = parsed.errors.as_ref().and_then(|errors| {
+            if errors.is_empty() {
+                None
+            } else {
+                Some(
+                    errors
+                        .iter()
+                        .map(|e| e.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            }
+        });
+        let data = parsed.data.ok_or_else(|| {
+            GitHubError::Api(
+                status.as_u16(),
+                joined_errors
+                    .clone()
+                    .unwrap_or_else(|| "GitHub GraphQL returned no data".to_string()),
+            )
+        })?;
+        match (data.repository, joined_errors) {
+            (Some(repo_data), errors) => {
+                // Partial data with errors: keep the usable rows and log the
+                // rest. A null node inside `nodes` is skipped per-row below,
+                // so one bad PR never fails its page.
+                if let Some(msg) = errors {
                     tracing::warn!("GitHub GraphQL partial errors: {}", msg);
                 }
-                None => {
-                    return Err(GitHubError::Api(status.as_u16(), msg));
+                let conn = repo_data.pull_requests;
+                let page_info = conn.page_info;
+                let mut out = Vec::with_capacity(conn.nodes.len());
+                for node in conn.nodes.into_iter().flatten() {
+                    out.push(PullRequestSummary::from_graphql_node(node));
                 }
+                Ok((out, page_info))
             }
+            // `repository: null` WITH errors is the error itself (rate limit,
+            // SAML enforcement, missing permission) — never a 404. Only an
+            // error-free null repository means "no such repo".
+            (None, Some(msg)) => Err(GitHubError::Api(status.as_u16(), msg)),
+            (None, None) => Err(GitHubError::Api(
+                404,
+                format!("repository {}/{} not found", owner, repo),
+            )),
         }
-        let data = parsed.data.ok_or_else(|| {
-            GitHubError::Api(status.as_u16(), "GitHub GraphQL returned no data".to_string())
-        })?;
-        let repo_data = data.repository.ok_or_else(|| {
-            GitHubError::Api(404, format!("repository {}/{} not found", owner, repo))
-        })?;
-        let conn = repo_data.pull_requests;
-        let page_info = conn.page_info;
-        let mut out = Vec::with_capacity(conn.nodes.len());
-        for node in conn.nodes.into_iter().flatten() {
-            out.push(PullRequestSummary::from_graphql_node(node));
-        }
-        Ok((out, page_info))
     }
 }
 
@@ -1499,7 +1515,7 @@ struct PageInfo {
 
 /// Cohesive PR summary: the REST `/pulls` list fields PLUS mergeability.
 ///
-/// Returned by the [`PullRequestSummarySource`] seam in O(pages) GraphQL
+/// Returned by [`GitHubClient::list_pr_summaries`] in O(pages) GraphQL
 /// requests. The UI consumes this single shape and never orchestrates
 /// per-row enrichment calls.
 #[derive(Debug, Clone)]
@@ -1526,22 +1542,13 @@ pub struct PullRequestSummary {
     pub mergeable_state: String,
 }
 
-/// The cohesive PR-summary query seam (issue #1529).
+/// Cohesive PR-summary query (issue #1529).
 ///
 /// Cost is proportional to pages, not PR count: one GraphQL connection
 /// request per page of up to 100 PRs. The UI calls this through
 /// `get_repo_pulls` and never issues per-PR detail requests.
-pub trait PullRequestSummarySource {
-    fn list_pr_summaries(
-        &self,
-        owner: &str,
-        repo: &str,
-        state: &str,
-    ) -> Result<Vec<PullRequestSummary>, GitHubError>;
-}
-
-impl PullRequestSummarySource for GitHubClient {
-    fn list_pr_summaries(
+impl GitHubClient {
+    pub fn list_pr_summaries(
         &self,
         owner: &str,
         repo: &str,
@@ -1957,7 +1964,7 @@ pub fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Regression for the overnight-freeze bug: a GitHub probe against a
@@ -3398,13 +3405,41 @@ This issue is related to #481 in a narrative sense.
         assert_eq!(s.mergeable_state, "dirty");
     }
 
-    /// Spin a fake GitHub GraphQL server that counts POST /graphql requests
-    /// and serves `pages` (each a `(nodes_json, has_next, cursor)` triple).
-    /// Returns `(base_url, request_count, _server_guard)`. The guard thread
-    /// serves exactly `pages.len()` requests then exits; the client must not
-    /// issue more (O(pages) assertion) or the test's `recv` would block.
+    /// One scripted interaction for the fake server, in the exact order the
+    /// client is expected to issue it. `Page` answers `POST /graphql` with
+    /// one connection page; `Detail` answers `GET /repos/.../pulls/{n}`
+    /// with a clean/mergeable detail (the per-PR fallback path).
+    ///
+    /// `pub(crate)` so `commands::pr` tests can script the same fake for
+    /// the summaries-then-detail fallback without a second server.
+    pub(crate) enum Scripted {
+        Page(serde_json::Value, bool, Option<String>),
+        Detail,
+    }
+
+    /// Spin a fake GitHub server that counts requests and serves `script` in
+    /// order. Returns `(base_url, request_count, server_guard)`. Socket
+    /// lifecycle, stated precisely so future editors don't misread it:
+    /// - The guard serves exactly `script.len()` connections, then exits and
+    ///   drops the listener. An over-eager client (N+1 regression) gets
+    ///   connection-refused on the extra request, so its call returns `Err`
+    ///   and the test fails fast — the counter is the assertion, not the
+    ///   join.
+    /// - An under-eager client leaves the guard parked in `accept()`; that
+    ///   is harmless because every test asserts on payload length / counts
+    ///   BEFORE joining, so a short client fails on assertions first and
+    ///   never reaches `join`. The parked thread dies with the test process.
+    /// - A request of an unexpected kind (POST where Detail was scripted or
+    ///   vice versa) panics the guard with the request line, failing loudly.
     fn fake_graphql_server(
         pages: Vec<(serde_json::Value, bool, Option<String>)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
+        fake_server(pages.into_iter().map(|(n, h, c)| Scripted::Page(n, h, c)).collect())
+    }
+
+    /// Same fake with an explicit script (pages + REST details in order).
+    pub(crate) fn fake_server(
+        script: Vec<Scripted>,
     ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
@@ -3416,11 +3451,13 @@ This issue is related to #481 in a narrative sense.
         let count = Arc::new(AtomicUsize::new(0));
         let count_clone = Arc::clone(&count);
         let handle = std::thread::spawn(move || {
-            for (nodes, has_next, cursor) in pages {
+            for step in script {
                 let (mut sock, _) = listener.accept().expect("accept");
                 count_clone.fetch_add(1, Ordering::SeqCst);
                 // Read request line + headers, then body per Content-Length.
                 let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).expect("read request line");
                 let mut content_length: usize = 0;
                 loop {
                     let mut line = String::new();
@@ -3439,19 +3476,39 @@ This issue is related to #481 in a narrative sense.
                     let mut body = vec![0u8; content_length];
                     reader.read_exact(&mut body).expect("read body");
                 }
-                let resp_body = serde_json::json!({
-                    "data": {
-                        "repository": {
-                            "pullRequests": {
-                                "nodes": nodes,
-                                "pageInfo": {
-                                    "hasNextPage": has_next,
-                                    "endCursor": cursor,
+                let resp_body = match step {
+                    Scripted::Page(nodes, has_next, cursor) => {
+                        assert!(
+                            request_line.starts_with("POST "),
+                            "scripted a GraphQL page but client sent: {}",
+                            request_line.trim()
+                        );
+                        serde_json::json!({
+                            "data": {
+                                "repository": {
+                                    "pullRequests": {
+                                        "nodes": nodes,
+                                        "pageInfo": {
+                                            "hasNextPage": has_next,
+                                            "endCursor": cursor,
+                                        }
+                                    }
                                 }
                             }
-                        }
+                        })
                     }
-                });
+                    Scripted::Detail => {
+                        assert!(
+                            request_line.starts_with("GET /repos/"),
+                            "scripted a REST detail but client sent: {}",
+                            request_line.trim()
+                        );
+                        serde_json::json!({
+                            "mergeable": true,
+                            "mergeable_state": "clean"
+                        })
+                    }
+                };
                 let resp_str = serde_json::to_string(&resp_body).expect("serialise");
                 let http = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3466,7 +3523,7 @@ This issue is related to #481 in a narrative sense.
 
     /// Build one GraphQL node JSON value with a numeric suffix so N PRs are
     /// distinguishable by number/title.
-    fn fake_node(n: i64) -> serde_json::Value {
+    pub(crate) fn fake_node(n: i64) -> serde_json::Value {
         serde_json::json!({
             "number": n,
             "title": format!("PR {}", n),
@@ -3626,6 +3683,92 @@ This issue is related to #481 in a narrative sense.
         match err {
             GitHubError::Api(403, msg) => assert!(msg.contains("rate limit")),
             other => panic!("expected Api(403), got {:?}", other),
+        }
+        handle.join().expect("server");
+    }
+
+    /// Serve one connection with a literal HTTP status + JSON body, for
+    /// GraphQL error-envelope shapes the scripted fake cannot express.
+    fn fake_graphql_raw_server(
+        status_line: &str,
+        raw_json: &str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let status_line = status_line.to_string();
+        let raw_json = raw_json.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+            let mut content_length: usize = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("header");
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = line.trim().strip_prefix("Content-Length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            if content_length > 0 {
+                let mut buf = vec![0u8; content_length];
+                reader.read_exact(&mut buf).expect("body");
+            }
+            let http = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status_line,
+                raw_json.len(),
+                raw_json
+            );
+            sock.write_all(http.as_bytes()).expect("write");
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    #[test]
+    fn list_pr_summaries_reports_graphql_field_errors_not_404() {
+        // Regression: GraphQL field errors (rate limit, SAML, permissions)
+        // arrive as HTTP 200 with `{"data": {"repository": null}, "errors":
+        // [...]}`. A null repository WITH errors is the error itself — it
+        // must propagate verbatim, never collapse to a fake 404 "not found".
+        let (base, handle) = fake_graphql_raw_server(
+            "200 OK",
+            r#"{"data": {"repository": null}, "errors": [{"message": "API rate limit exceeded for user ID 123."}]}"#,
+        );
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let err = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect_err("field error must propagate");
+        match err {
+            GitHubError::Api(status, msg) => {
+                assert_ne!(status, 404, "rate-limit error must not become 404");
+                assert!(msg.contains("rate limit"), "got: {}", msg);
+            }
+            other => panic!("expected Api error, got {:?}", other),
+        }
+        handle.join().expect("server");
+    }
+
+    #[test]
+    fn list_pr_summaries_reports_missing_repo_as_404_only_without_errors() {
+        // The 404 is reserved for a genuinely absent repository: null with
+        // an EMPTY errors array. (No errors key at all parses the same way
+        // via #[serde(default)].)
+        let (base, handle) = fake_graphql_raw_server(
+            "200 OK",
+            r#"{"data": {"repository": null}, "errors": []}"#,
+        );
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let err = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect_err("missing repo must error");
+        match err {
+            GitHubError::Api(404, msg) => assert!(msg.contains("acme/demo"), "got: {}", msg),
+            other => panic!("expected Api(404), got {:?}", other),
         }
         handle.join().expect("server");
     }

@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, cleanup, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { GitPullRequestsTab } from '../../src/components/Probe/GitPullRequestsTab';
@@ -506,43 +506,175 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    // PR 204 carries inline mergeable: null (UNKNOWN) — renders checking,
-    // visually distinct from conflict ("Conflicts") and transport failure
-    // ("Check failed"). No second IPC fires.
+    // PR 204 carries inline mergeable: null (UNKNOWN) — renders checking
+    // while the bounded re-poll below still has budget, visually distinct
+    // from conflict ("Conflicts"). No second IPC fires for the render.
     expect(await screen.findByText('Fresh PR')).toBeTruthy();
     expect(await screen.findByText('Checking…')).toBeTruthy();
     expect(invoke).not.toHaveBeenCalledWith('get_prs_mergeability', expect.anything());
   });
 
-  /// Issue #1529: a per-PR `"error: …"` sentinel (partial failure preserved
-  /// from the old batched endpoint) must render as a distinct retryable
-  /// "Check failed" state — visually distinct from "Checking…" (unknown)
-  /// and "Conflicts" (false/dirty), never an indefinite check.
-  it('renders a per-PR error sentinel as a distinct retryable Check failed state', async () => {
-    // Issue #1529: `mergeable: null` + `mergeable_state: "error: …"` (partial
-    // failure preserved from the old batched endpoint) must render as
-    // "Check failed" with a retry — visually distinct from "Checking…"
-    // (unknown) and "Conflicts" (false/dirty), never an indefinite check.
-    const openWithError: GitHubPullRequest[] = OPEN_PRS.map((pr) =>
-      pr.number === 204
-        ? { ...pr, mergeable: null, mergeable_state: 'error: GitHub API error (503): Service Unavailable' }
-        : pr,
-    );
-    mockBackend({ open: openWithError });
+  /// Issues #419 (via #1529): a list arriving with `mergeable: null`
+  /// (GitHub still computing) must re-poll — not leave the row stuck on
+  /// "Checking…" forever. The retry path refetches the whole list (one IPC
+  /// / GraphQL page per attempt, so O(pages) holds on retries too), not one
+  /// call per stuck PR. Fake timers make the shared `setTimeout`
+  /// deterministic; render + advances are wrapped in `act(async …)` so
+  /// React state updates and vitest microtasks drain together.
+  it('re-polls the list when it returns mergeable: null for a PR', async () => {
+    vi.useFakeTimers();
+    try {
+      let pullsCalls = 0;
+      vi.mocked(invoke).mockImplementation((cmd: string) => {
+        if (cmd === 'get_repo_pulls') {
+          pullsCalls += 1;
+          // First load: PR 204 unknown; the re-poll sees it resolved.
+          return Promise.resolve(
+            OPEN_PRS.map((pr) =>
+              pr.number === 204 && pullsCalls > 1
+                ? { ...pr, mergeable: true, mergeable_state: 'clean' }
+                : pr,
+            ),
+          );
+        }
+        return Promise.resolve({});
+      });
+
+      await act(async () => {
+        render(<GitPullRequestsTab />);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(screen.getAllByText('Checking…').length).toBeGreaterThanOrEqual(1);
+      expect(pullsCalls).toBe(1);
+
+      // Past the first retry delay (1.5s): one list refetch, and PR 204's
+      // row flips from Checking… to a Merge button.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1500);
+      });
+
+      const mergeButtons = screen.getAllByRole('button', { name: /merge pull request #/i });
+      expect(mergeButtons.length).toBeGreaterThanOrEqual(2);
+      expect(screen.queryByText('Checking…')).toBeNull();
+      expect(pullsCalls).toBe(2);
+      // The retry is a single cohesive list call — never per-PR enrichment.
+      expect(invoke).not.toHaveBeenCalledWith('get_prs_mergeability', expect.anything());
+      expect(invoke).not.toHaveBeenCalledWith('get_pr_mergeability', expect.anything());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /// When the component unmounts with a re-poll pending, the load effect's
+  /// cleanup must clear the shared timer — no refetch fires after unmount.
+  it('clears the pending re-poll timer when the component unmounts', async () => {
+    vi.useFakeTimers();
+    try {
+      let pullsCalls = 0;
+      vi.mocked(invoke).mockImplementation((cmd: string) => {
+        if (cmd === 'get_repo_pulls') {
+          pullsCalls += 1;
+          return Promise.resolve(OPEN_PRS);
+        }
+        return Promise.resolve({});
+      });
+
+      await act(async () => {
+        render(<GitPullRequestsTab />);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // Initial list landed with PR 204 unknown, so a re-poll is scheduled.
+      expect(pullsCalls).toBe(1);
+
+      await act(async () => {
+        cleanup();
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(pullsCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /// Every re-poll still sees `mergeable: null`: after 1 initial + 3
+  /// refetches the row leaves "Checking…" for "Unknown" with an inline
+  /// retry (no false "Conflicts", no fourth auto-refetch). Clicking retry
+  /// re-arms the budget and refetches the list.
+  it('shows Unknown with inline retry after the re-poll budget is exhausted', async () => {
+    vi.useFakeTimers();
+    try {
+      mockBackend(); // OPEN_PRS keeps PR 204 unknown on every load.
+      await act(async () => {
+        render(<GitPullRequestsTab />);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getAllByText('Checking…').length).toBeGreaterThanOrEqual(1);
+
+      // Past the full budget in steps (1.5s + 3s + 4.5s): initial + 3
+      // refetches. Stepped (not one 10s jump) so each reloadKey bump's
+      // render + effect + fetch cycle flushes before the next window.
+      const pullsCount = () =>
+        vi.mocked(invoke).mock.calls.filter(([c]) => c === 'get_repo_pulls').length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pullsCount()).toBe(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000);
+      });
+      expect(pullsCount()).toBe(3);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      const pulls = pullsCount();
+      expect(pulls).toBe(4);
+      expect(screen.queryByText('Checking…')).toBeNull();
+      const retryBtn = screen.getByRole('button', { name: /retry mergeability check for pull request #204/i });
+      expect(retryBtn.textContent).toMatch(/Unknown/);
+      // Conflict rows keep their own state — exhaustion changes nothing else.
+      expect(screen.getByText('Conflicts')).toBeTruthy();
+
+      await act(async () => {
+        fireEvent.click(retryBtn);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const pullsAfter = vi.mocked(invoke).mock.calls.filter(([c]) => c === 'get_repo_pulls');
+      expect(pullsAfter.length).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flags a clean-tree but policy-blocked PR as Blocked (no merge button)', async () => {
+    // mergeable: true answers only "the tree merges"; mergeStateStatus
+    // "blocked" means required checks/approvals are missing, so the merge
+    // API would reject the squash — the row must show the gate, not Merge.
+    mockBackend({
+      open: OPEN_PRS.map((pr) =>
+        pr.number === 201 ? { ...pr, mergeable_state: 'blocked' } : pr,
+      ),
+    });
     render(<GitPullRequestsTab />);
 
-    expect(await screen.findByText('Fresh PR')).toBeTruthy();
-    const failedBtn = await screen.findByRole('button', { name: /retry mergeability check for pull request #204/i });
-    expect(failedBtn.textContent).toMatch(/Check failed/);
-    // Unknown and conflict rows keep their own distinct states.
-    expect(screen.getByText('Conflicts')).toBeTruthy();
-    // Clicking retry refetches the single cohesive list.
-    const pullsBefore = vi.mocked(invoke).mock.calls.filter(([c]) => c === 'get_repo_pulls').length;
-    await userEvent.click(failedBtn);
-    await waitFor(() => {
-      const pullsAfter = vi.mocked(invoke).mock.calls.filter(([c]) => c === 'get_repo_pulls').length;
-      expect(pullsAfter).toBeGreaterThan(pullsBefore);
+    expect(await screen.findByText('Add widget')).toBeTruthy();
+    expect(screen.getByText('Blocked')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Merge pull request #201' })).toBeNull();
+  });
+
+  it('flags a behind PR as Behind even when the tree merges cleanly', async () => {
+    mockBackend({
+      open: OPEN_PRS.map((pr) =>
+        pr.number === 201 ? { ...pr, mergeable_state: 'behind' } : pr,
+      ),
     });
+    render(<GitPullRequestsTab />);
+
+    expect(await screen.findByText('Add widget')).toBeTruthy();
+    expect(screen.getByText('Behind')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Merge pull request #201' })).toBeNull();
   });
 
   it('ignores a stale list response when the mesh changes mid-flight (issue #1529 cancellation)', async () => {
