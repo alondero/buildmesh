@@ -401,6 +401,33 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
     let conn = open_writer(&db_path)?;
     apply_connection_pragmas(&conn, false)?;
 
+    init_schema(&conn)?;
+
+    // Silently treat "already initialized" as success: production calls
+    // `init` exactly once at startup (the new `Connection` is dropped
+    // here, so the existing one stays), and test files that share a
+    // single `cargo test` process can each call `init` to set up
+    // their own temp DB without coordinating order. The
+    // `InvalidParameterName` error variant was originally intended to
+    // surface a production double-init bug, but it was strictly
+    // overzealous in tests where multiple files legitimately need to
+    // share the global `DB` once it's set. See
+    // `commands::agent::tests::ensure_pr_db` and `db::mesh_tests` for
+    // the two consumer call sites that this unblocks.
+    let readers = ReaderPool::open(&db_path)?;
+    let _ = DB.set(Database {
+        writer: Mutex::new(conn),
+        readers,
+    });
+    Ok(())
+}
+
+/// Bring one SQLite connection to the current Buildmesh schema.
+///
+/// This is the schema module's test seam: it owns baseline table creation,
+/// evolution, and canonical index creation, but not connection lifecycle or
+/// installation of the process-global database singleton.
+pub(crate) fn init_schema(conn: &Connection) -> SqlResult<()> {
     // Ensure app_settings exists first (needed by evolve_to to probe
     // schema_version).
     conn.execute_batch(
@@ -412,9 +439,9 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
         "
     )?;
 
-    // Create schema (all tables + indexes, IF NOT EXISTS so they're
-    // idempotent). For fresh DBs this creates the tables; for existing
-    // DBs it's a no-op. MUST run before `evolve_to` so the runner's
+    // Create the baseline tables (IF NOT EXISTS so they're idempotent). For
+    // fresh DBs this creates the tables; for existing DBs it's a no-op. MUST
+    // run before `evolve_to` so the runner's
     // always-run column walk can find the tables and add missing
     // columns (e.g. `use_worktree`, `pre_spawn_pool_size`, etc., that
     // the v6-shape inline CREATE doesn't include).
@@ -499,8 +526,6 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (node_id, idempotency_key)
         );
-        CREATE INDEX IF NOT EXISTS idx_coordinator_drive_prompts_created_at
-            ON coordinator_drive_prompts(created_at);
 
         -- Pre-spawn Worktree Pool (issue #609, PRD #608). One row per
         -- detached-HEAD worktree the background worker has pre-warmed under
@@ -527,11 +552,6 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
-        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
-
-        CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
-
         -- Autopilot runs (issue #482, PRD #480). One row per auto-spawned
         -- Agent Node, keyed by the node so close/delete cascades. Kept as a
         -- satellite table (not an agent_nodes column) so the positional
@@ -557,11 +577,9 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
-
         -- Autopilot Circuits (spec #1205 / walking skeleton #1206, schema
         -- v34/v38). The three ledger tables plus a durable run-agent lease
-        -- table and the composite queue index:
+        -- table. Canonical indexes are installed after schema evolution:
         --   * autopilot_circuits — the blueprint rows. `graph_json` holds
         --     the serialised Graph Blueprint AST (see
         --     autopilot::circuit::model); no per-node-kind migration — the
@@ -593,8 +611,6 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id);
-
         CREATE TABLE IF NOT EXISTS autopilot_circuit_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             circuit_id INTEGER NOT NULL REFERENCES autopilot_circuits(id) ON DELETE CASCADE,
@@ -607,13 +623,6 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE (circuit_id, trigger_identity)
         );
-        CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
-        CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
-        -- The queue index is installed by the post-migration
-        -- EnsureAutopilotCircuitsTables safety net. An existing pre-v38
-        -- table is not changed by CREATE TABLE IF NOT EXISTS, so creating
-        -- this index here would reference its not-yet-migrated column.
-
         CREATE TABLE IF NOT EXISTS autopilot_circuit_run_agent_leases (
             run_id INTEGER PRIMARY KEY REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
             slots INTEGER NOT NULL CHECK (slots > 0),
@@ -633,7 +642,6 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             completed_at TEXT,
             UNIQUE (run_id, node_id)
         );
-        CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
         "
     )?;
 
@@ -646,25 +654,33 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
     // any missing columns (e.g. `use_worktree`, `pre_spawn_pool_size`
     // — the inline CREATE above is a v6-shape snapshot and the v8+
     // columns live in the registry's `all_column_specs`).
-    migrations::evolve_to(migrations::SCHEMA_VERSION, &conn)?;
-
-    // Silently treat "already initialized" as success: production calls
-    // `init` exactly once at startup (the new `Connection` is dropped
-    // here, so the existing one stays), and test files that share a
-    // single `cargo test` process can each call `init` to set up
-    // their own temp DB without coordinating order. The
-    // `InvalidParameterName` error variant was originally intended to
-    // surface a production double-init bug, but it was strictly
-    // overzealous in tests where multiple files legitimately need to
-    // share the global `DB` once it's set. See
-    // `commands::agent::tests::ensure_pr_db` and `db::mesh_tests` for
-    // the two consumer call sites that this unblocks.
-    let readers = ReaderPool::open(&db_path)?;
-    let _ = DB.set(Database {
-        writer: Mutex::new(conn),
-        readers,
-    });
+    migrations::evolve_to(migrations::SCHEMA_VERSION, conn)?;
+    ensure_schema_indexes(conn)?;
     Ok(())
+}
+
+/// Create every canonical index only after [`init_schema`] has evolved table
+/// columns. This keeps index ordering independent of when a column entered
+/// the schema history.
+fn ensure_schema_indexes(conn: &Connection) -> SqlResult<()> {
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_coordinator_drive_prompts_created_at
+            ON coordinator_drive_prompts(created_at);
+        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
+        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
+        CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
+        CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id);
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit
+            ON autopilot_circuit_runs(circuit_id);
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state
+            ON autopilot_circuit_runs(state);
+        CREATE INDEX IF NOT EXISTS idx_circuit_runs_mesh_queue
+            ON autopilot_circuit_runs(mesh_id, state, queue_position);
+        CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
+        ",
+    )
 }
 
 // `migrate_if_needed` removed (issue #249). The single entry point is
@@ -706,10 +722,7 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
 // `ensure_coordinator_drive_prompt_claim_columns` (v32, issue #750) moved to `db::migrations`.
 
 // `ensure_coordinator_drive_prompt_created_at_index` (v32, issue #750
-// item 3) — the inline CREATE INDEX in init() handles this for fresh
-// DBs; the helper was an idempotent safety-net re-run that is no
-// longer needed once the inline `CREATE INDEX IF NOT EXISTS` is the
-// canonical schema. The inline CREATE is still in init().
+// item 3) moved into `init_schema`'s post-evolution canonical index pass.
 
 // `ensure_mesh_columns` (v8 user-tunable columns) moved to `db::migrations`.
 

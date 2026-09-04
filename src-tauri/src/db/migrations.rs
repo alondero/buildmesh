@@ -255,18 +255,15 @@ pub(crate) enum AlwaysStep {
     /// Idempotent: a SHA-256 hex is 64 chars, a raw token is 32, so
     /// the length distinguishes the two.
     HashCoordinatorTokens,
-    /// CREATE TABLE IF NOT EXISTS warm_worktrees (v21). The table
-    /// backs the pre-spawn Worktree Pool (issue #609). Fresh DBs
-    /// create it via the inline CREATE in `init()`; this safety net
-    /// covers v6+ DBs whose `schema_version` was bumped past 21 by a
-    /// build that didn't yet include the inline CREATE. Idempotent
-    /// via `IF NOT EXISTS`.
+    /// Recovery CREATE TABLE IF NOT EXISTS for warm_worktrees (v21).
+    /// `db::init_schema` creates the canonical fresh schema; this step
+    /// supports direct [`evolve_to`] callers and DBs whose version marker
+    /// was advanced by a build that lacked the baseline DDL.
     EnsureWarmWorktreesTable,
-    /// CREATE TABLE IF NOT EXISTS for the Autopilot Circuits ledger tables,
-    /// the v38 queue index, and durable agent leases (spec #1205). Same rationale as
-    /// [`AlwaysStep::EnsureWarmWorktreesTable`]: fresh DBs get them from
-    /// the inline CREATE in `init()`; this safety net covers any DB that
-    /// reached v34+ without them. Idempotent via `IF NOT EXISTS`.
+    /// Recovery CREATE TABLE IF NOT EXISTS for the Autopilot Circuits ledger,
+    /// its indexes, and durable agent leases (spec #1205). `db::init_schema`
+    /// owns fresh-schema construction and canonical indexes; this step keeps
+    /// direct [`evolve_to`] callers and partially-created legacy DBs healthy.
     EnsureAutopilotCircuitsTables,
     /// Upgrade the original Issue Driven Autopilot graph shape once its
     /// persisted first-turn injections are no longer needed.
@@ -896,11 +893,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
         }
         AlwaysStep::EnsureAutopilotCircuitsTables => {
             // v34/v38 — Autopilot Circuits ledger (spec #1205) plus the
-            // queue index and durable agent-lease table. Mirrors the inline
-            // table DDL in `db::init`; the queue index intentionally lives
-            // here so it is created only after the v38 column walk. Keeping
-            // these idempotent safety nets here upgrades databases whose
-            // version flag already passed the original circuit migration.
+            // queue index and durable agent-lease table. This is recovery
+            // for direct `evolve_to` callers and databases whose version flag
+            // already passed the original circuit migration; app startup owns
+            // canonical fresh-schema tables and post-evolution indexes.
             conn.execute_batch(
                 "
                 CREATE TABLE IF NOT EXISTS autopilot_circuits (

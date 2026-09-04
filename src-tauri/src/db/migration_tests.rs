@@ -1157,32 +1157,10 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
     }
 
     #[test]
-    fn init_upgrades_legacy_circuit_runs_before_creating_the_queue_index() {
-        // `init` owns the ordering that failed in the shipped macOS build.
-        // Run the actual check in a child test process so this test cannot be
-        // bypassed when another parallel test has initialized the global DB.
-        const CHILD_ENV: &str = "BUILDMESH_INIT_QUEUE_MIGRATION_CHILD";
-        if std::env::var_os(CHILD_ENV).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .env(CHILD_ENV, "1")
-                .args([
-                    "--exact",
-                    "db::migration_tests::tests::init_upgrades_legacy_circuit_runs_before_creating_the_queue_index",
-                    "--test-threads=1",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated startup migration test failed:\n{}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            return;
-        }
-
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("legacy-v37.sqlite");
-        let conn = Connection::open(&path).unwrap();
+    fn init_schema_upgrades_legacy_circuit_runs_before_creating_the_queue_index() {
+        // This is the production schema sequence without the process-global
+        // database lifecycle, so it is safe to exercise in parallel tests.
+        let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -1214,11 +1192,7 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             ",
         )
         .unwrap();
-        drop(conn);
-
-        super::super::init(&path).unwrap();
-
-        let conn = Connection::open(&path).unwrap();
+        super::super::init_schema(&conn).unwrap();
         let has_queue_column: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('autopilot_circuit_runs') WHERE name = 'queue_position'",
@@ -1245,5 +1219,34 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             )
             .unwrap();
         assert!(has_queue_index);
+    }
+
+    #[test]
+    fn init_schema_creates_canonical_indexes_after_evolution() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        super::super::init_schema(&conn).unwrap();
+
+        for index in [
+            "idx_coordinator_drive_prompts_created_at",
+            "idx_warm_worktrees_mesh",
+            "idx_warm_worktrees_status",
+            "idx_agent_nodes_mesh",
+            "idx_autopilot_runs_mesh",
+            "idx_autopilot_circuits_mesh",
+            "idx_autopilot_circuit_runs_circuit",
+            "idx_autopilot_circuit_runs_state",
+            "idx_circuit_runs_mesh_queue",
+            "idx_circuit_steps_run",
+        ] {
+            let present: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(present, "{index} must exist after schema initialization");
+        }
     }
 }
