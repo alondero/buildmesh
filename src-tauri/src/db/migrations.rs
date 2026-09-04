@@ -139,7 +139,12 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// pending rows can swap positions through the queue controls.
 /// The queue column is v38 because v37 is occupied by worktree-directory
 /// configuration in the current schema.
-pub(crate) const SCHEMA_VERSION: u32 = 38;
+///
+/// v39 — Durable fresh-spawn generation anchor for historic session recovery
+/// (issue #1555): adds nullable `agent_nodes.session_started_at`. This keeps
+/// per-node lifecycle state with the node and lets recovery use one conditional
+/// UPDATE without an app-settings EAV key or a correlated subquery.
+pub(crate) const SCHEMA_VERSION: u32 = 39;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -266,6 +271,10 @@ pub(crate) enum AlwaysStep {
     /// Upgrade the original Issue Driven Autopilot graph shape once its
     /// persisted first-turn injections are no longer needed.
     UpgradeIssueReviewFirstTurns,
+    /// Remove the temporary per-node session-generation keys written by the
+    /// pre-v39 recovery implementation after their values have been copied to
+    /// `agent_nodes.session_started_at`.
+    DropLegacySessionRecoveryKeys,
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +438,10 @@ const SPECS: &[ColumnSpec] = &[
     // (issue #1519). NULL = legacy `<mesh>/.claude/worktrees/<name>`
     // fallback (pre-#1519 rows + Root Nodes).
     ColumnSpec { version: 37, table: "agent_nodes", column: "worktree_path", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    // v39 — Fresh-spawn generation anchor used by historic session recovery.
+    // NULL means the node predates this field or has never been deliberately
+    // reset to a fresh conversation.
+    ColumnSpec { version: 39, table: "agent_nodes", column: "session_started_at", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // autopilot_runs
@@ -570,6 +583,14 @@ const ONE_SHOT_BACKFILLS: &[OneShotBackfill] = &[
         params: &[],
         sql: "UPDATE autopilot_circuit_runs SET queue_position = id WHERE queue_position = 0",
     },
+    // v39 — migrate the short-lived pre-release app-settings generation keys
+    // into the node row before the cleanup AlwaysStep removes them.
+    OneShotBackfill {
+        version: 39,
+        flag: "agent_node_session_started_at_backfill_v39",
+        params: &[],
+        sql: "UPDATE agent_nodes SET session_started_at = (SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = 'session_started_at:' || agent_nodes.id) WHERE session_started_at IS NULL AND EXISTS (SELECT 1 FROM app_settings WHERE key = 'session_started_at:' || agent_nodes.id)",
+    },
 ];
 
 /// The v33 one-shot backfill SQL. Mirrored as the `OneShotBackfill`
@@ -598,6 +619,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::RewriteAgentNodeProviderId,
     AlwaysStep::HashCoordinatorTokens,
     AlwaysStep::EnforceCircuitRunCapacityRange,
+    AlwaysStep::DropLegacySessionRecoveryKeys,
 ];
 
 // ---------------------------------------------------------------------------
@@ -914,6 +936,17 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                  BEGIN \
                      SELECT RAISE(ABORT, 'meshes.circuit_run_capacity must be in 1..=8'); \
                  END;",
+                [],
+            )?;
+        }
+        AlwaysStep::DropLegacySessionRecoveryKeys => {
+            // v39 — cleanup for the pre-release implementation that stored a
+            // node's generation as `session_started_at:<id>` in app_settings.
+            // The one-shot backfill above runs first on an upgrade, and this
+            // idempotent delete prevents stale keys from surviving a later
+            // node deletion or a partial upgrade.
+            conn.execute(
+                "DELETE FROM app_settings WHERE key LIKE 'session_started_at:%'",
                 [],
             )?;
         }

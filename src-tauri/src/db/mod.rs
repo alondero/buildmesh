@@ -475,6 +475,7 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             provider TEXT NOT NULL DEFAULT 'anthropic',
             status TEXT NOT NULL DEFAULT 'idle',
             cli_session_id TEXT,
+            session_started_at INTEGER,
             worktree_name TEXT,
             use_worktree INTEGER NOT NULL DEFAULT 1,
             is_pinned INTEGER NOT NULL DEFAULT 0,
@@ -3241,10 +3242,18 @@ pub fn clear_cli_session_id(id: i64) -> SqlResult<()> {
 
 pub(crate) fn clear_cli_session_id_inner(conn: &Connection, id: i64) -> SqlResult<()> {
     conn.execute(
-        "UPDATE agent_nodes SET cli_session_id = NULL WHERE id = ?1",
-        params![id],
+        "UPDATE agent_nodes SET cli_session_id = NULL, session_started_at = ?1 WHERE id = ?2",
+        params![chrono::Utc::now().timestamp_millis(), id],
     )?;
     Ok(())
+}
+
+pub fn session_started_at_ms(id: i64) -> SqlResult<Option<i64>> {
+    use rusqlite::OptionalExtension;
+    let conn = read_conn();
+    conn.query_row("SELECT session_started_at FROM agent_nodes WHERE id = ?1",
+        params![id], |row| row.get(0))
+        .optional()
 }
 
 /// Persist a provider-assigned session id without overwriting an id captured
@@ -3295,61 +3304,36 @@ pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
 
 pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
     let db = read_conn();
+    list_suspended_nodes_inner(&db)
+}
+
+pub(crate) fn list_suspended_nodes_inner(db: &Connection) -> SqlResult<Vec<AgentNode>> {
     let mut stmt = db.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE status = 'suspended' AND cli_session_id IS NOT NULL", AGENT_NODE_COLUMNS)
+        &format!("SELECT {} FROM agent_nodes WHERE status = 'suspended'", AGENT_NODE_COLUMNS)
     )?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
 }
 
-const CODEX_LEGACY_SESSION_BACKFILL_KEY: &str = "codex_legacy_session_backfill_v1";
-
-pub fn list_suspended_codex_nodes_without_cli_session_id() -> SqlResult<Vec<AgentNode>> {
-    let db = read_conn();
-    list_suspended_codex_nodes_without_cli_session_id_inner(&db)
+pub fn recover_suspended_cli_session_id(node: &AgentNode, cli_id: &str, generation: Option<i64>) -> SqlResult<bool> {
+    let conn = write_conn();
+    recover_suspended_cli_session_id_inner(&conn, node, cli_id, generation)
 }
 
-pub(crate) fn list_suspended_codex_nodes_without_cli_session_id_inner(
-    conn: &Connection,
-) -> SqlResult<Vec<AgentNode>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {} FROM agent_nodes WHERE status = 'suspended' \
-         AND (cli_session_id IS NULL OR cli_session_id = '') \
-         AND (provider = 'codex' OR provider LIKE 'codex:%')",
-        AGENT_NODE_COLUMNS
-    ))?;
-    let rows = stmt.query_map([], map_agent_node_row)?;
-    rows.collect()
-}
-
-pub fn codex_legacy_session_backfill_completed() -> SqlResult<bool> {
-    let db = read_conn();
-    codex_legacy_session_backfill_completed_inner(&db)
-}
-
-pub(crate) fn codex_legacy_session_backfill_completed_inner(
-    conn: &Connection,
+pub(crate) fn recover_suspended_cli_session_id_inner(
+    conn: &Connection, node: &AgentNode, cli_id: &str, generation: Option<i64>,
 ) -> SqlResult<bool> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM app_settings WHERE key = ?1",
-        params![CODEX_LEGACY_SESSION_BACKFILL_KEY],
-        |row| row.get::<_, i64>(0).map(|count| count > 0),
-    )
-}
-
-pub fn mark_codex_legacy_session_backfill_completed() -> SqlResult<()> {
-    let db = write_conn();
-    mark_codex_legacy_session_backfill_completed_inner(&db)
-}
-
-pub(crate) fn mark_codex_legacy_session_backfill_completed_inner(
-    conn: &Connection,
-) -> SqlResult<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
-        params![CODEX_LEGACY_SESSION_BACKFILL_KEY],
-    )?;
-    Ok(())
+    // The disk scan runs without a DB lock. A user may have launched,
+    // regenerated, or deleted the node meanwhile; never write into that run.
+    let changed = conn.execute("UPDATE agent_nodes SET cli_session_id = ?1
+        WHERE id = ?2 AND status = 'suspended' AND provider = ?3 AND path = ?4
+        AND worktree_name IS ?5 AND worktree_path IS ?6
+        AND session_started_at IS ?7
+        AND (cli_session_id IS NULL OR cli_session_id = '')
+        AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
+        params![cli_id, node.id, node.provider, node.path, node.worktree_name, node.worktree_path,
+            generation])?;
+    Ok(changed > 0)
 }
 
 /// Lean existence check for a node's CLI session id (issue #1499). The

@@ -13,7 +13,8 @@ import { useRegenerateAction } from '../../hooks/useRegenerateAction';
 import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
-import { canResumeSuspendedNode } from '../../lib/suspended';
+import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
+import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
@@ -143,6 +144,7 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   const setViewMode = useUIStore(state => state.setViewMode);
   const exitSingleMode = useUIStore(state => state.exitSingleMode);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
+  const isAutopilotNode = useAgentNodeStore(state => state.autopilotStates[nodeId] != null);
   // Pin toggle (wayfinder #982 / #985) — the shared store action is the
   // sole mutation path. Its optimistic patch flips `node.is_pinned` in
   // place, so this header re-renders via the existing `node` prop with no
@@ -331,6 +333,7 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
           </span>
         )}
         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${getStatusConfig(node.status).bgColor}`} />
+        {hasLostConversation(node, isAutopilotNode) && <MissingSessionIdBadge />}
         {/* Issue #1364 §3 — node-level hook-health warning. Layered on top
             of the status, never a status: the node may be running fine while
             its attention hook is broken, and the user must be able to tell

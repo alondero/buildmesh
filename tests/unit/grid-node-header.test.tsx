@@ -842,6 +842,15 @@ describe('GridNodeHeader resume affordance', () => {
     openUrlMock.mockClear();
   });
 
+  it('shows a lost-conversation badge for missing identity outside Autopilot', () => {
+    const node = { ...NODE, status: 'suspended' as const, cli_session_id: '' };
+    seedAgentNodes([node], node.id);
+    useAgentNodeStore.setState({ autopilotStates: {} });
+    const { getByText, queryByTestId } = render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />);
+    expect(getByText('Missing session ID')).toBeTruthy();
+    expect(queryByTestId('grid-resume-button')).toBeNull();
+  });
+
   it('renders an inline Resume button when Suspended AND cli_session_id is set', () => {
     const node = {
       ...NODE,

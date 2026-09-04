@@ -164,7 +164,7 @@ fn decide_startup_resume_startup_with_session_id_and_adapter_accepts_proceeds() 
 /// after the last phase. Binding it as `_claim` (or returning it from
 /// prepare as a tuple a match can ignore) reopens the #650 race.
 #[test]
-fn spawn_agent_inner_holds_named_claim_across_phases() {
+fn spawn_intent_holds_named_claim_before_identity_mutation_and_across_phases() {
     let src = include_str!("orchestrator.rs");
     assert!(
         src.contains("let Some(claim) = SpawnInFlightClaim::try_claim"),
@@ -178,6 +178,8 @@ fn spawn_agent_inner_holds_named_claim_across_phases() {
         src.contains("drop(claim)"),
         "claim must stay live until after the last phase (explicit drop is the use)"
     );
+    assert!(src.find("SpawnInFlightClaim::try_claim(node_id)").unwrap()
+        < src.find("db::clear_cli_session_id(node_id)").unwrap());
 }
 
 /// spawn_with_intent is the sole owner of terminal spawn-failure reporting.

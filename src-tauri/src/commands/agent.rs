@@ -730,20 +730,10 @@ pub async fn spawn_handover_agent(
     Ok(node)
 }
 
-/// Auto-resume all suspended nodes that have a stored CLI session ID.
+/// Recover missing harness identities, then auto-resume suspended nodes.
 /// Called by the frontend on startup after event listeners are ready.
-///
-/// Nodes whose `cli_session_id` is missing OR empty are skipped (marked
-/// `Idle` via the SessionLifecycle sink). The SQL `IS NOT NULL` filter in
-/// `list_suspended_nodes` only catches NULL; the empty-string case still
-/// has to be defended against here because legacy writes could leave an
-/// empty string behind.
 #[command]
 pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String> {
-    if let Err(error) = crate::services::codex_session::backfill_legacy_suspended_nodes_once().await {
-        tracing::warn!("auto_resume_agent_nodes: legacy Codex session migration failed: {error}");
-    }
-
     let nodes = crate::commands::run_blocking("auto_resume_agent_nodes", || {
         db::list_suspended_nodes().map_err(|e| e.to_string())
     })
@@ -756,6 +746,25 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 
     tracing::info!("auto_resume_agent_nodes: resuming {} nodes", nodes.len());
     let mut resumed: Vec<i64> = Vec::new();
+
+    // Recovery is filesystem/SQLite work and each provider scans a different
+    // store. Run those independent scans together so one slow Codex rollout
+    // directory cannot hold every other node on the startup critical path.
+    let recovery_tasks = nodes.iter().cloned().map(|node| {
+        tauri::async_runtime::spawn(async move {
+            let node_id = node.id;
+            (node_id, crate::services::session_recovery::recover_suspended_node(node).await)
+        })
+    }).collect::<Vec<_>>();
+    for task in recovery_tasks {
+        match task.await {
+            Ok((node_id, Err(error))) => {
+                tracing::warn!("auto_resume_agent_nodes: identity recovery failed for {node_id}: {error}");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!("auto_resume_agent_nodes: identity recovery task failed: {error}"),
+        }
+    }
 
     for node in &nodes {
         match spawn_with_intent(

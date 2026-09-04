@@ -317,7 +317,12 @@ mod tests {
         });
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         stream.set_nodelay(true).ok();
-        stream.write_all(body).await.unwrap();
+        // Oversized Content-Length is rejected before a body read. Sending an
+        // unread body anyway can make Windows reset the socket on server close
+        // and discard the 413 response. A missing cap would still hang this test.
+        if content_length <= INPUT_BODY_MAX_BYTES {
+            stream.write_all(body).await.unwrap();
+        }
         let mut resp = Vec::new();
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(2),

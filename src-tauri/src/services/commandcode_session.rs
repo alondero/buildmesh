@@ -201,6 +201,43 @@ pub fn find_fresh_id_for_directory_in(
     select_id_for_directory(&candidates, spawn_directory, created_not_before_ms).map(str::to_string)
 }
 
+/// Historic startup recovery entry point used by the Command Code adapter.
+/// Transcript validation and directory matching stay in this provider module;
+/// the shared service applies the common time and ambiguity rules.
+pub(crate) fn find_historic_id_for_directory(
+    env_type: EnvType,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let sessions_dir =
+        crate::services::transcript_reader::commandcode_sessions_dir(env_type, spawn_directory)?;
+    find_historic_id_for_directory_in(
+        &sessions_dir,
+        spawn_directory,
+        anchor_ms,
+        recorded_start,
+    )
+}
+
+pub(crate) fn find_historic_id_for_directory_in(
+    sessions_dir: &Path,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let entries = fs::read_dir(sessions_dir).ok()?;
+    let candidates = entries
+        .flatten()
+        .filter_map(|entry| read_session_file(&entry.path()))
+        .filter(|candidate| crate::env::directories_match(&candidate.directory, spawn_directory));
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.map(|candidate| (candidate.id, candidate.timestamp_ms)),
+        anchor_ms,
+        recorded_start,
+    )
+}
+
 /// Background poller: read Command Code's session directory until a fresh session
 /// created in this node's spawn window appears, then save `cli_session_id`.
 pub fn start_capture_poller(
@@ -477,5 +514,73 @@ mod tests {
         )
         .unwrap();
         assert!(read_session_file(&mismatched).is_none());
+    }
+
+    #[test]
+    fn historic_recovery_accepts_a_transcript_flushed_after_the_poller_expired() {
+        const ID: &str = "01a067ef-81ab-7141-a6b4-208e32df59bf";
+        const CREATED: i64 = 1_787_830_399_000;
+        const TIMESTAMP: &str = "2026-08-27T11:33:19.986Z";
+        let temp = tempfile::TempDir::new().unwrap();
+        fs::write(
+            temp.path().join(format!("{ID}.jsonl")),
+            serde_json::json!({
+                "type": "session",
+                "id": ID,
+                "cwd": "F:/repo",
+                "timestamp": TIMESTAMP,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_historic_id_for_directory_in(
+                temp.path(),
+                "F:/repo",
+                CREATED - 30_000,
+                true,
+            ),
+            Some(ID.to_string())
+        );
+    }
+
+    #[test]
+    fn fresh_start_anchor_selects_new_conversation_in_an_old_node_directory() {
+        const OLD_ID: &str = "01a067ef-81ab-7141-a6b4-208e32df59bf";
+        const NEW_ID: &str = "01a067ec-e952-7830-b3a6-bc16bc79f327";
+        const CREATED: i64 = 1_787_830_399_000;
+        let temp = tempfile::TempDir::new().unwrap();
+        for (id, timestamp) in [
+            (OLD_ID, "2026-08-27T10:33:19.986Z"),
+            (NEW_ID, "2026-08-27T11:33:19.986Z"),
+        ] {
+            fs::write(
+                temp.path().join(format!("{id}.jsonl")),
+                serde_json::json!({
+                    "type": "session",
+                    "id": id,
+                    "cwd": "F:/repo",
+                    "timestamp": timestamp,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED, true),
+            Some(NEW_ID.to_string())
+        );
+        assert_eq!(
+            find_historic_id_for_directory_in(
+                temp.path(),
+                "F:/repo",
+                CREATED - 3_600_000,
+                false,
+            ),
+            None,
+            "legacy nodes with two historic conversations must not revive one by guessing",
+        );
     }
 }

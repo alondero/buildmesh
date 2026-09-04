@@ -269,6 +269,18 @@ impl AgentProvider for OpenCodeAdapter {
         );
     }
 
+    fn recover_suspended_session_id(
+        &self,
+        spawn_path: &str,
+        env_type: EnvType,
+        anchor_ms: i64,
+        recorded_start: bool,
+    ) -> Option<String> {
+        crate::services::opencode_session::find_historic_id_for_directory(
+            env_type, spawn_path, anchor_ms, recorded_start,
+        )
+    }
+
     fn resume_args(&self, id: &str) -> Vec<String> {
         vec!["--session".into(), id.into()]
     }

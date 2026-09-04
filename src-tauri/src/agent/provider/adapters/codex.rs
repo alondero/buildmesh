@@ -1189,6 +1189,18 @@ impl AgentProvider for CodexAdapter {
         );
     }
 
+    fn recover_suspended_session_id(
+        &self,
+        spawn_path: &str,
+        env_type: EnvType,
+        anchor_ms: i64,
+        recorded_start: bool,
+    ) -> Option<String> {
+        crate::services::codex_session::find_historic_id_for_directory(
+            env_type, spawn_path, anchor_ms, recorded_start,
+        )
+    }
+
     fn session_assign_args(&self, _id: &str) -> Vec<String> {
         vec![]
     }

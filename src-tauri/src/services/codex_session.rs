@@ -29,16 +29,18 @@ struct RolloutRecord {
 #[derive(Debug, Default, Deserialize)]
 struct RolloutMetadata {
     session_id: Option<String>,
+    id: Option<String>,
     timestamp: Option<String>,
     cwd: Option<String>,
     #[serde(default)]
     thread_source: Option<String>,
+    source: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
-struct Candidate {
-    id: String,
-    timestamp_ms: i64,
+pub(crate) struct Candidate {
+    pub id: String,
+    pub timestamp_ms: i64,
 }
 
 enum CaptureAttempt {
@@ -79,24 +81,7 @@ fn find_fresh_id_for_directory_in(
     .map(|candidate| candidate.id)
 }
 
-/// Find an unambiguous historic rollout for a suspended node. The caller only
-/// uses this to repair rows created before live capture existed; differing
-/// matching conversation IDs are intentionally left suspended for the user.
-pub fn find_unique_id_for_directory_in(
-    sessions_dir: &Path,
-    spawn_directory: &str,
-    created_not_before_ms: i64,
-) -> Option<String> {
-    let mut ids = find_candidates(sessions_dir, spawn_directory, created_not_before_ms, None)
-        .into_iter()
-        .map(|candidate| candidate.id)
-        .collect::<Vec<_>>();
-    ids.sort();
-    ids.dedup();
-    (ids.len() == 1).then(|| ids.pop().unwrap())
-}
-
-fn find_candidates(
+pub(crate) fn find_candidates(
     sessions_dir: &Path,
     spawn_directory: &str,
     created_not_before_ms: i64,
@@ -123,6 +108,39 @@ fn find_candidates(
         }
     }
     candidates
+}
+
+/// Historic startup recovery entry point used by the Codex adapter. The
+/// adapter owns the Codex rollout layout; the shared recovery service owns
+/// only the time-window and ambiguity policy.
+pub(crate) fn find_historic_id_for_directory(
+    env_type: EnvType,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let sessions_dir = crate::env::codex_sessions_dir(env_type, spawn_directory)?;
+    find_historic_id_for_directory_in(
+        &sessions_dir,
+        spawn_directory,
+        anchor_ms,
+        recorded_start,
+    )
+}
+
+pub(crate) fn find_historic_id_for_directory_in(
+    sessions_dir: &Path,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
+    let candidates = find_candidates(&sessions_dir, spawn_directory, cutoff, None);
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.into_iter().map(|candidate| (candidate.id, candidate.timestamp_ms)),
+        anchor_ms,
+        recorded_start,
+    )
 }
 
 fn was_written_since(path: &Path, not_before_ms: i64) -> bool {
@@ -182,7 +200,10 @@ fn read_session_meta(path: &Path, spawn_directory: &str) -> Option<Candidate> {
     {
         return None;
     }
-    let id = uuid::Uuid::parse_str(record.payload.session_id.as_deref()?)
+    if record.payload.source.as_ref().is_some_and(|source| source.get("subagent").is_some()) {
+        return None;
+    }
+    let id = uuid::Uuid::parse_str(record.payload.session_id.as_deref().or(record.payload.id.as_deref())?)
         .ok()?
         .to_string();
     let cwd = record.payload.cwd?;
@@ -263,77 +284,6 @@ fn node_has_cli_session_id(node_id: i64) -> bool {
         .is_some_and(|id| !id.trim().is_empty())
 }
 
-/// Restore a missing pre-capture Codex identity for an existing suspended
-/// node. This only accepts a single matching conversation ID, so ambiguity
-/// remains visible and never causes a surprise resume.
-pub async fn backfill_suspended_node(
-    node_id: i64,
-    node_directory: String,
-    env_type: EnvType,
-    created_at_ms: i64,
-) -> bool {
-    let Some(sessions_dir) = crate::env::codex_sessions_dir(env_type, &node_directory) else {
-        return false;
-    };
-    let not_before = created_at_ms.saturating_sub(CAPTURE_SKEW_MS);
-    let stored = crate::blocking::run_blocking("codex_backfill", move || {
-        let Some(id) = find_unique_id_for_directory_in(&sessions_dir, &node_directory, not_before) else {
-            return Ok(None);
-        };
-        match crate::db::set_cli_session_id_if_missing(node_id, &id) {
-            Ok(true) => Ok(Some(id)),
-            Ok(false) => Ok(None),
-            Err(error) => Err(error.to_string()),
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        tracing::warn!("codex session capture: backfill failed for node {node_id}: {error}");
-        None
-    });
-    if let Some(id) = stored {
-        tracing::info!("codex session capture: backfilled {id} for suspended node {node_id}");
-        true
-    } else {
-        false
-    }
-}
-
-/// One-time recovery for rows created before Codex rollout capture existed.
-pub async fn backfill_legacy_suspended_nodes_once() -> Result<(), String> {
-    let nodes = crate::blocking::run_blocking("codex_backfill_list_nodes", || {
-        if crate::db::codex_legacy_session_backfill_completed().map_err(|error| error.to_string())? {
-            return Ok(None);
-        }
-        crate::db::list_suspended_codex_nodes_without_cli_session_id()
-            .map(Some)
-            .map_err(|error| error.to_string())
-    })
-    .await?;
-    let Some(nodes) = nodes else {
-        return Ok(());
-    };
-    let mut inspected_all_sources = true;
-    for node in nodes {
-        let spawn_path = crate::env::node_working_path(&node).spawn_path;
-        if crate::env::codex_sessions_dir(node.env, &spawn_path).is_none() {
-            inspected_all_sources = false;
-            continue;
-        }
-        let _ = backfill_suspended_node(
-            node.id,
-            spawn_path,
-            node.env,
-            node.created_at.timestamp_millis(),
-        )
-        .await;
-    }
-    if !inspected_all_sources {
-        return Ok(());
-    }
-    crate::db::mark_codex_legacy_session_backfill_completed().map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,31 +344,6 @@ mod tests {
                 "F:/src/buildmesh/.claude/worktrees/rumpled-covert-typhoon",
                 1_787_830_400_000,
             ),
-            None
-        );
-    }
-
-    #[test]
-    fn historic_backfill_rejects_ambiguous_matching_conversations() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let directory = "F:/src/buildmesh/.claude/worktrees/rumpled-covert-typhoon";
-        write_rollout(
-            temp.path(),
-            "rollout-first.jsonl",
-            "01a042fe-e7e2-79a2-96bd-a15140478a58",
-            directory,
-            "2026-08-27T11:33:17.010Z",
-        );
-        write_rollout(
-            temp.path(),
-            "rollout-second.jsonl",
-            "01a04330-f9a2-7c62-9474-347cd72a5e20",
-            directory,
-            "2026-08-27T12:27:58.367Z",
-        );
-
-        assert_eq!(
-            find_unique_id_for_directory_in(temp.path(), directory, 1_787_830_000_000),
             None
         );
     }
@@ -495,6 +420,55 @@ mod tests {
         assert_eq!(
             find_fresh_id_for_directory_in(temp.path(), directory, 1_787_830_399_000),
             Some(parent.to_string())
+        );
+    }
+
+    #[test]
+    fn historic_recovery_reads_metadata_without_banner_and_excludes_child_threads() {
+        const ID: &str = "01a067ef-81ab-7141-a6b4-208e32df59bf";
+        const CREATED: i64 = 1_787_830_399_000;
+        const TIMESTAMP: &str = "2026-08-27T11:33:19.986Z";
+        let temp = tempfile::TempDir::new().unwrap();
+        let day = temp.path().join("2026/08/27");
+        fs::create_dir_all(&day).unwrap();
+        for (file, payload) in [
+            (
+                "root.jsonl",
+                serde_json::json!({
+                    "id": ID,
+                    "cwd": "F:\\repo",
+                    "timestamp": TIMESTAMP,
+                    "thread_source": "user"
+                }),
+            ),
+            (
+                "child.jsonl",
+                serde_json::json!({
+                    "id": "01a067ec-e952-7830-b3a6-bc16bc79f327",
+                    "cwd": "F:\\repo",
+                    "timestamp": TIMESTAMP,
+                    "source": {"subagent": {}}
+                }),
+            ),
+        ] {
+            fs::write(
+                day.join(file),
+                serde_json::json!({"type": "session_meta", "payload": payload}).to_string(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "f:/repo", CREATED, true),
+            Some(ID.to_string())
+        );
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "f:/other", CREATED, true),
+            None
+        );
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "f:/repo", CREATED + 10_000, true),
+            None
         );
     }
 }
