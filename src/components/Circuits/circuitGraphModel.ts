@@ -801,7 +801,7 @@ export function sourceOutcomes(kind: CircuitNodeKind): StepOutcome[] | null {
     case 'review_verdict':
       return ['completed', 'blocked', 'working'];
     case 'await_agent_turn':
-      return ['completed'];
+      return ['completed', 'blocked'];
     case 'deterministic_verification':
       return ['green', 'red'];
     default:

@@ -1092,6 +1092,8 @@ pub struct AutopilotCircuit {
     pub graph_json: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Built-in execution preset, hidden from user-authored Circuit lists.
+    pub is_preset: bool,
 }
 
 /// One Circuit Run — a single execution instance of a circuit.
@@ -1104,6 +1106,10 @@ pub struct AutopilotCircuitRun {
     pub circuit_id: i64,
     #[ts(as = "i32")]
     pub mesh_id: i64,
+    /// Borrowed Agent Node that triggered this run, when launched from a
+    /// title bar. Kept relational so ownership queries stay indexable.
+    #[ts(as = "Option<i32>")]
+    pub source_agent_node_id: Option<i64>,
     /// Dedupe identity of what fired this run (e.g. `manual:<unix-ms>`;
     /// GitHub triggers use `<issue|pr>:<number>:<label>` in later
     /// milestones). Scoped per-circuit so two circuits may process the

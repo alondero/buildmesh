@@ -22,16 +22,18 @@ use rusqlite::{Connection, OptionalExtension};
 // Circuits — CRUD for the blueprint rows.
 // ---------------------------------------------------------------------------
 
-/// Atomically claim a source agent and create its review run. Source ids live
-/// in context, never in the owned-agent step column used by cleanup.
+/// Atomically claim a source agent and create its review run. The source id is
+/// stored relationally on the run; the context copy remains for graph
+/// template expansion and backwards-compatible diagnostics.
 pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, max_rounds: i32) -> Result<i64, String> {
     let mut db = super::write_conn();
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let node = super::get_agent_node_by_id_inner(&tx, node_id).map_err(|e| e.to_string())?;
     let existing: Option<i64> = tx.query_row(
-        "SELECT id FROM autopilot_circuit_runs WHERE state IN ('pending','running','paused') \
-         AND json_extract(context_json, '$.\"source.agent_id\"') = ?1 LIMIT 1",
-        params![node_id.to_string()], |row| row.get(0),
+        "SELECT id FROM autopilot_circuit_runs
+         WHERE source_agent_node_id = ?1 AND state IN ('pending','running','paused')
+         LIMIT 1",
+        params![node_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(id) = existing { return Ok(id); }
     let owned: bool = tx.query_row(
@@ -46,6 +48,15 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
     if !matches!(node.status, crate::models::SessionStatus::Running | crate::models::SessionStatus::AwaitingInput | crate::models::SessionStatus::Completed | crate::models::SessionStatus::Ready) {
         return Err("Resume the agent before starting a review.".into());
     }
+    let review_config: Option<(Option<String>, Option<String>)> = if selected_circuit_id.is_none() {
+        Some(tx.query_row(
+            "SELECT NULLIF(TRIM(model), ''), NULLIF(TRIM(effort), '') FROM meshes WHERE id = ?1",
+            params![node.mesh_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
     let (circuit_id, name) = if let Some(id) = selected_circuit_id {
         let circuit = get_autopilot_circuit_inner(&tx, id).map_err(|e| e.to_string())?
             .ok_or("Circuit no longer exists")?;
@@ -57,15 +68,34 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
         }
         (id, circuit.name)
     } else {
-        let graph = crate::autopilot::circuit::model::CircuitGraph::agent_review(&node.provider, max_rounds);
+        let (review_model, review_effort) = review_config.clone().unwrap_or_default();
+        let graph = crate::autopilot::circuit::model::CircuitGraph::agent_review(
+            &node.provider,
+            review_model.clone(),
+            review_effort.clone(),
+            max_rounds,
+        );
         graph.validate()?;
         let name = format!("Review agent {}", node_id);
-        tx.execute(
-        "INSERT INTO autopilot_circuits (mesh_id, name, description, enabled, concurrency_limit, graph_json) \
-         VALUES (?1, ?2, 'Review an existing agent and return findings until approved', 0, 2, ?3)",
-        params![node.mesh_id, name, graph.to_json()?],
-        ).map_err(|e| e.to_string())?;
-        (tx.last_insert_rowid(), name)
+        let description = "Review an existing agent and return findings until approved";
+        let existing: Option<(i64, String)> = tx.query_row(
+            "SELECT id, name FROM autopilot_circuits
+             WHERE mesh_id = ?1 AND is_preset = 1
+             ORDER BY id LIMIT 1",
+            params![node.mesh_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(|e| e.to_string())?;
+        if let Some((id, existing_name)) = existing {
+            (id, existing_name)
+        } else {
+            tx.execute(
+                "INSERT INTO autopilot_circuits
+                 (mesh_id, name, description, enabled, concurrency_limit, graph_json, is_preset)
+                 VALUES (?1, ?2, ?3, 0, 2, ?4, 1)",
+                params![node.mesh_id, name, description, graph.to_json()?],
+            ).map_err(|e| e.to_string())?;
+            (tx.last_insert_rowid(), name)
+        }
     };
     let mut context = crate::autopilot::circuit::context::CircuitContext::new();
     context.with_circuit(circuit_id, &name, node.mesh_id);
@@ -75,12 +105,33 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
     let base_ref: String = tx.query_row("SELECT base_ref FROM meshes WHERE id = ?1", params![node.mesh_id], |r| r.get(0))
         .map_err(|e| e.to_string())?;
     context.set("source.base_ref", base_ref);
+    if selected_circuit_id.is_none() {
+        context.set("source.review_preset", "1");
+        context.set("source.provider", &node.provider);
+        context.set(
+            "source.model",
+            review_config
+                .as_ref()
+                .and_then(|(model, _)| model.as_deref())
+                .unwrap_or(""),
+        );
+        context.set(
+            "source.effort",
+            review_config
+                .as_ref()
+                .and_then(|(_, effort)| effort.as_deref())
+                .unwrap_or(""),
+        );
+    }
     context.set("retry.attempt", "1");
     context.set("retry.max_retries", max_rounds.to_string());
     tx.execute(
-        "INSERT INTO autopilot_circuit_runs (circuit_id, mesh_id, trigger_identity, context_json, queue_position) \
-         VALUES (?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(queue_position),0)+1 FROM autopilot_circuit_runs WHERE mesh_id=?2))",
-        params![circuit_id, node.mesh_id, format!("manual:agent:{node_id}:{}", uuid::Uuid::new_v4()), context.to_json()?],
+        "INSERT INTO autopilot_circuit_runs
+         (circuit_id, mesh_id, trigger_identity, context_json, queue_position, source_agent_node_id)
+         VALUES (?1, ?2, ?3, ?4,
+                 (SELECT COALESCE(MAX(queue_position),0)+1 FROM autopilot_circuit_runs WHERE mesh_id=?2),
+                 ?5)",
+        params![circuit_id, node.mesh_id, format!("manual:agent:{node_id}:{}", uuid::Uuid::new_v4()), context.to_json()?, node_id],
     ).map_err(|e| e.to_string())?;
     let run_id = tx.last_insert_rowid();
     tx.commit().map_err(|e| e.to_string())?;
@@ -116,7 +167,7 @@ fn get_autopilot_circuit_inner(
 ) -> SqlResult<Option<AutopilotCircuit>> {
     let mut stmt = conn.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
-                graph_json, created_at, updated_at \
+                graph_json, created_at, updated_at, is_preset \
          FROM autopilot_circuits WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], map_circuit_row)?;
@@ -139,6 +190,7 @@ fn map_circuit_row(row: &rusqlite::Row<'_>) -> SqlResult<AutopilotCircuit> {
         graph_json: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        is_preset: row.get::<_, i64>(9)? != 0,
     })
 }
 
@@ -146,8 +198,8 @@ pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>>
     let db = super::read_conn();
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
-                graph_json, created_at, updated_at \
-         FROM autopilot_circuits WHERE mesh_id = ?1 ORDER BY id",
+                graph_json, created_at, updated_at, is_preset \
+         FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 0 ORDER BY id",
     )?;
     let rows = stmt.query_map(params![mesh_id], map_circuit_row)?;
     rows.collect()
@@ -161,8 +213,8 @@ pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
     let db = super::read_conn();
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
-                graph_json, created_at, updated_at \
-         FROM autopilot_circuits WHERE enabled = 1 ORDER BY id",
+                graph_json, created_at, updated_at, is_preset \
+         FROM autopilot_circuits WHERE enabled = 1 AND is_preset = 0 ORDER BY id",
     )?;
     let rows = stmt.query_map([], map_circuit_row)?;
     rows.collect()
@@ -202,10 +254,10 @@ pub struct CircuitRunLedger {
     pub steps: Vec<AutopilotCircuitRunStep>,
 }
 
-/// A mesh's circuits WITH every running/paused ledger plus bounded terminal
-/// history, in ONE mutex acquisition. Pending runs have their own complete
-/// mesh queue; excluding them here prevents the queue and ledger from
-/// presenting the same run twice.
+/// A mesh's user-authored circuits (plus any active built-in preset) WITH
+/// every running/paused ledger plus bounded terminal history, in ONE mutex
+/// acquisition. Pending runs have their own complete mesh queue; excluding
+/// them here prevents the queue and ledger from presenting the same run twice.
 pub fn list_circuits_with_recent_runs(
     mesh_id: i64,
     runs_per_circuit: i64,
@@ -221,8 +273,15 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
 ) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
-                graph_json, created_at, updated_at \
-         FROM autopilot_circuits WHERE mesh_id = ?1 ORDER BY id",
+                graph_json, created_at, updated_at, is_preset \
+         FROM autopilot_circuits
+         WHERE mesh_id = ?1
+           AND (is_preset = 0 OR EXISTS (
+             SELECT 1 FROM autopilot_circuit_runs r
+             WHERE r.circuit_id = autopilot_circuits.id
+               AND r.state IN ('pending', 'running', 'paused')
+           ))
+         ORDER BY id",
     )?;
     let circuits: Vec<AutopilotCircuit> =
         stmt.query_map(params![mesh_id], map_circuit_row)?.collect::<SqlResult<_>>()?;
@@ -237,23 +296,23 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
     let mut stmt = db.prepare(&format!(
         "WITH terminal AS ( \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                    context_json, created_at, updated_at, \
+                    context_json, source_agent_node_id, created_at, updated_at, \
                     ROW_NUMBER() OVER (PARTITION BY circuit_id ORDER BY id DESC) AS history_rank \
              FROM autopilot_circuit_runs \
              WHERE circuit_id IN ({}) \
                AND state NOT IN ('pending', 'running', 'paused') \
          ), visible AS ( \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                    context_json, created_at, updated_at \
+                    context_json, source_agent_node_id, created_at, updated_at \
              FROM autopilot_circuit_runs \
              WHERE circuit_id IN ({}) AND state IN ('running', 'paused') \
              UNION ALL \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                    context_json, created_at, updated_at \
+                    context_json, source_agent_node_id, created_at, updated_at \
              FROM terminal WHERE history_rank <= ?1 \
          ) \
          SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                context_json, created_at, updated_at \
+                context_json, source_agent_node_id, created_at, updated_at \
          FROM visible ORDER BY circuit_id, id DESC",
         ids.join(","),
         ids.join(",")
@@ -267,8 +326,9 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
                 trigger_identity: row.get(3)?,
                 state: row.get(4)?,
                 context_json: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                source_agent_node_id: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })?
         .collect::<SqlResult<_>>()?;
@@ -426,7 +486,7 @@ pub(crate) fn list_queued_circuit_runs_inner(
 ) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
-                r.context_json, r.created_at, r.updated_at, c.name \
+                r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, c.name \
          FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          WHERE r.mesh_id = ?1 AND r.state = 'pending' \
@@ -441,10 +501,11 @@ pub(crate) fn list_queued_circuit_runs_inner(
                 trigger_identity: row.get(3)?,
                 state: row.get(4)?,
                 context_json: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                source_agent_node_id: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             },
-            row.get(8)?,
+            row.get(9)?,
         ))
     })?;
     rows.collect()
@@ -592,7 +653,7 @@ pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
     let db = super::read_conn();
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
-                r.context_json, r.created_at, r.updated_at, \
+                r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, \
                 c.enabled, c.concurrency_limit, c.graph_json, c.name \
          FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
@@ -608,13 +669,14 @@ pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
                 trigger_identity: row.get(3)?,
                 state: row.get(4)?,
                 context_json: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                source_agent_node_id: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             },
-            circuit_enabled: row.get::<_, i64>(8)? != 0,
-            circuit_concurrency_limit: row.get(9)?,
-            circuit_graph_json: row.get(10)?,
-            circuit_name: row.get(11)?,
+            circuit_enabled: row.get::<_, i64>(9)? != 0,
+            circuit_concurrency_limit: row.get(10)?,
+            circuit_graph_json: row.get(11)?,
+            circuit_name: row.get(12)?,
         })
     })?;
     rows.collect()
@@ -624,7 +686,7 @@ pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<Autopilot
     let db = super::read_conn();
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                context_json, created_at, updated_at \
+                context_json, source_agent_node_id, created_at, updated_at \
          FROM autopilot_circuit_runs WHERE circuit_id = ?1 \
          ORDER BY id DESC LIMIT ?2",
     )?;
@@ -636,8 +698,9 @@ pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<Autopilot
             trigger_identity: row.get(3)?,
             state: row.get(4)?,
             context_json: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
+            source_agent_node_id: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     })?;
     rows.collect()
@@ -687,7 +750,7 @@ pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
     let db = super::read_conn();
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                context_json, created_at, updated_at \
+                context_json, source_agent_node_id, created_at, updated_at \
          FROM autopilot_circuit_runs WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![run_id], |row| {
@@ -698,8 +761,9 @@ pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
             trigger_identity: row.get(3)?,
             state: row.get(4)?,
             context_json: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
+            source_agent_node_id: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     })?;
     rows.next().transpose()
@@ -1015,10 +1079,10 @@ pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64
 /// association lives in the circuit step ledger (not on `agent_nodes`), so
 /// the header can identify automated nodes without weakening the satellite-
 /// table invariant used by legacy Autopilot.
-pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String)>> {
+pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String, String)>> {
     let db = super::read_conn();
     let mut stmt = db.prepare(
-        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name \
+        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name, r.state \
          FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
@@ -1031,17 +1095,17 @@ pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String)>
          ORDER BY s.agent_node_id",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
     })?;
-    let mut ownerships: Vec<(i64, i64, i64, String)> = rows.collect::<SqlResult<_>>()?;
+    let mut ownerships: Vec<(i64, i64, i64, String, String)> = rows.collect::<SqlResult<_>>()?;
     let mut sources = db.prepare(
-        "SELECT a.id, r.id, c.id, c.name FROM autopilot_circuit_runs r \
+        "SELECT a.id, r.id, c.id, c.name, r.state FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
-         JOIN agent_nodes a ON CAST(a.id AS TEXT) = json_extract(r.context_json, '$.\"source.agent_id\"') \
+         JOIN agent_nodes a ON a.id = r.source_agent_node_id \
          WHERE a.status != 'archived' AND r.state IN ('pending','running','paused')",
     )?;
-    for row in sources.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))? {
-        let source: (i64, i64, i64, String) = row?;
+    for row in sources.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))? {
+        let source: (i64, i64, i64, String, String) = row?;
         ownerships.retain(|owned| owned.0 != source.0);
         ownerships.push(source);
     }

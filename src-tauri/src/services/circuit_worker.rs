@@ -545,7 +545,7 @@ fn drive_run(
         steps: load_steps(active.run.id)?,
     };
 
-    if let Some(source) = view.context.source_agent_id() {
+    if let Some(source) = active.run.source_agent_node_id {
         let lost = db::get_agent_node_by_id(source).map(|n|
             matches!(n.status, SessionStatus::Archived | SessionStatus::Error)
         ).unwrap_or(true);
@@ -675,7 +675,7 @@ let ops = failed
         }
     }
     if matches!(view.state, RunState::Completed | RunState::Failed) {
-        if let Some(source) = view.context.source_agent_id() {
+        if let Some(source) = active.run.source_agent_node_id {
             crate::autopilot::evaluator::unregister(source);
         }
     }
@@ -1521,9 +1521,13 @@ fn execute_effects(
     effects: &[crate::autopilot::circuit::stepper::Effect],
 ) -> Result<(), String> {
     use crate::autopilot::circuit::stepper::Effect;
+    let run_state = db::get_circuit_run(active.run.id)
+        .map_err(|e| e.to_string())?
+        .map(|run| run.state);
     for effect in effects {
-        let accepts_effect = db::get_circuit_run(active.run.id).map_err(|e| e.to_string())?
-            .is_some_and(|run| effect_allowed_in_state(&run.state, view.state == RunState::Completed, effect));
+        let accepts_effect = run_state.as_deref().is_some_and(|state| {
+            effect_allowed_in_state(state, view.state == RunState::Completed, effect)
+        });
         if !accepts_effect {
             tracing::info!(
                 "circuits: stopped effects for terminal/deleted run {}",
@@ -1645,6 +1649,7 @@ fn execute_effects(
                     CircuitNotificationPayload {
                         run_id: active.run.id,
                         message: message.clone(),
+                        severity: notification_severity(message),
                     },
                 );
             }
@@ -1657,17 +1662,18 @@ fn execute_effects(
 }
 
 /// Cancellation commits the terminal run state before retiring external
-/// resources. Every effect rechecks that durable state so a worker pass that
-/// observed the run just before cancellation cannot continue spawning,
-/// injecting, notifying, or mutating GitHub afterward.
+/// resources. The transition's effects take one durable-state snapshot before
+/// execution; terminal transitions retain only their synchronous cleanup and
+/// notification effects, while InjectPty is never allowed after completion.
 fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &crate::autopilot::circuit::stepper::Effect) -> bool {
     use crate::autopilot::circuit::stepper::Effect;
     matches!(state, "pending" | "running" | "paused")
         // Synchronous terminal actions are emitted by the same transition
         // that completes the run, and must survive its commit-before-effects.
+        // InjectPty is intentionally absent: it starts new work after the
+        // run has durably finished and would leave an untracked command.
         || (state == "completed" && completing_transition && matches!(effect,
-            Effect::Notify { .. } | Effect::CloseAgentNode { .. }
-                | Effect::InjectPty { .. } | Effect::SetNodeStatus { .. }))
+            Effect::Notify { .. } | Effect::SetNodeStatus { .. } | Effect::CloseAgentNode { .. }))
 }
 
 fn run_accepts_effects(run_id: i64) -> Result<bool, String> {
@@ -1943,9 +1949,33 @@ fn spawn_step_agent(
     let ResolvedCircuitSpawn {
         prompt,
         name,
-        provider_str,
-        explicit,
+        mut provider_str,
+        mut explicit,
     } = resolve_circuit_spawn_inputs(&kind)?;
+
+    // The built-in review graph is shared by all node-started runs in a mesh.
+    // Resolve the source's provider/model/effort from this run's context so a
+    // later invocation cannot inherit configuration from the run that first
+    // created the canonical preset row.
+    if view.context.get("source.review_preset") == Some("1") {
+        if let Some(provider) = view
+            .context
+            .get("source.provider")
+            .and_then(non_empty_trim)
+        {
+            provider_str = Some(provider.to_string());
+        }
+        explicit.model = view
+            .context
+            .get("source.model")
+            .and_then(non_empty_trim)
+            .map(str::to_string);
+        explicit.effort = view
+            .context
+            .get("source.effort")
+            .and_then(non_empty_trim)
+            .map(str::to_string);
+    }
 
     let resolved_prompt = view.context.resolve(&prompt);
     let source_issue = view
@@ -1958,7 +1988,9 @@ fn spawn_step_agent(
         .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
     let prompt_delivery =
         crate::autopilot::launch::initial_prompt_delivery(&provider, &resolved_prompt);
-    let worktree_policy = if source_issue.is_some() || view.context.get("source.agent_id").is_some() {
+    let worktree_policy = if source_issue.is_some()
+        || view.context.get("source.review_preset") == Some("1")
+    {
         WorktreePolicy::ForceBranched
     } else {
         WorktreePolicy::RespectMesh
@@ -2469,6 +2501,28 @@ pub struct CircuitNotificationPayload {
     #[ts(as = "i32")]
     pub run_id: i64,
     pub message: String,
+    /// `success` for approval, `warning` for blocked/limit notices, and
+    /// `info` for ordinary workflow updates.
+    pub severity: String,
+}
+
+fn notification_severity(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("not approved")
+        || lower.contains("not been approved")
+        || lower.contains("rejected")
+    {
+        "warning".into()
+    } else if lower.contains("approved for") {
+        "success".into()
+    } else if lower.contains("attention")
+        || lower.contains("limit")
+        || lower.contains("failed")
+    {
+        "warning".into()
+    } else {
+        "info".into()
+    }
 }
 
 #[cfg(test)]
@@ -2480,14 +2534,20 @@ mod tests {
     fn circuit_completion_allows_its_terminal_actions_but_not_stale_effects_or_spawns() {
         use crate::autopilot::circuit::stepper::Effect;
         let notify = Effect::Notify { message: "approved".into() };
+        let set_status = Effect::SetNodeStatus {
+            node_id: "source-status".into(),
+            status: "completed".into(),
+            target_node_id: Some("$source".into()),
+        };
         let close = Effect::CloseAgentNode { node_id: "close".into(), target_node_id: Some("reviewer".into()) };
         let spawn = Effect::SpawnAgentNode { node_id: "reviewer".into() };
         let inject = Effect::InjectPty { node_id: "feedback".into(), target_node_id: Some("$source".into()), prompt: "fix".into() };
         assert!(effect_allowed_in_state("completed", true, &notify));
+        assert!(effect_allowed_in_state("completed", true, &set_status));
         assert!(effect_allowed_in_state("completed", true, &close));
         assert!(!effect_allowed_in_state("completed", true, &spawn));
-        assert!(effect_allowed_in_state("completed", true, &inject));
-        for effect in [notify, close, spawn, inject] {
+        assert!(!effect_allowed_in_state("completed", true, &inject));
+        for effect in [notify, set_status, close, spawn, inject] {
             assert!(!effect_allowed_in_state("completed", false, &effect));
             assert!(!effect_allowed_in_state("cancelled", true, &effect));
             assert!(!effect_allowed_in_state("failed", true, &effect));
@@ -2495,9 +2555,20 @@ mod tests {
     }
 
     #[test]
+    fn notification_severity_does_not_call_unapproved_findings_success() {
+        assert_eq!(notification_severity("Review approved for Fix parser"), "success");
+        assert_eq!(
+            notification_severity("Latest fixes have not been approved; inspect the report"),
+            "warning"
+        );
+        assert_eq!(notification_severity("Review not approved for Fix parser"), "warning");
+        assert_eq!(notification_severity("Review needs attention"), "warning");
+    }
+
+    #[test]
     fn circuit_old_close_cannot_retire_next_review_round() {
         let view = RunView {
-            run_id: 1, graph: CircuitGraph::agent_review("claude", 3), state: RunState::Running,
+            run_id: 1, graph: CircuitGraph::agent_review("claude", None, None, 3), state: RunState::Running,
             context: CircuitContext::new(), steps: vec![
                 StepView { node_id: "reviewer".into(), agent_node_id: Some(101), attempt: 2,
                     status: StepStatus::Running, outcome: None, error: None },
@@ -2688,6 +2759,7 @@ mod tests {
                 id: run_id,
                 circuit_id: 1,
                 mesh_id,
+                source_agent_node_id: None,
                 trigger_identity: String::new(),
                 state: state.to_string(),
                 context_json: "{}".to_string(),
@@ -3130,6 +3202,7 @@ mod tests {
                 id,
                 circuit_id: 0,
                 mesh_id: 0,
+                source_agent_node_id: None,
                 trigger_identity: String::new(),
                 state: String::new(),
                 context_json: String::new(),

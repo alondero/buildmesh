@@ -7,7 +7,12 @@ impl CircuitGraph {
     /// A borrowed source stays outside the owned-agent ledger. The reviewer
     /// reads its working directory, including uncommitted changes, from its
     /// own workspace and never writes to the source tree.
-    pub fn agent_review(provider: &str, max_rounds: i32) -> Self {
+    pub fn agent_review(
+        provider: &str,
+        model: Option<String>,
+        effort: Option<String>,
+        max_rounds: i32,
+    ) -> Self {
         let target = || Some("$source".to_string());
         let reviewer = || Some("reviewer".to_string());
         let nodes = vec![
@@ -28,7 +33,7 @@ impl CircuitGraph {
                     "the blocker. This is review round {{retry.attempt}} of {{retry.max_retries}}."
                 ).into(),
                 name: Some("Code reviewer".into()), provider: Some(provider.into()),
-                model: None, effort: None, extra_args: None,
+                model, effort, extra_args: None,
             }),
             ("verdict", K::ReviewVerdict { target_node_id: reviewer() }),
             ("feedback", K::InjectPty {
@@ -115,7 +120,7 @@ mod tests {
     }
 
     fn reviewing(rounds: i32) -> RunView {
-        let graph = CircuitGraph::agent_review("claude", rounds);
+        let graph = CircuitGraph::agent_review("claude", None, None, rounds);
         graph.validate().unwrap();
         let mut context = CircuitContext::new();
         context.set("source.agent_id", "42");

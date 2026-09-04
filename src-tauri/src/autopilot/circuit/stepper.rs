@@ -1444,7 +1444,17 @@ fn start_effects_and_completion(
             }
         }
         CircuitNodeKind::RetryLimit { max_retries } => {
-            execute_retry_limit(run, t, node_id, *max_retries);
+            // Node-started review runs carry their per-run round limit in
+            // context so the shared preset can be reused safely by multiple
+            // runs with different limits. Ordinary authored circuits still
+            // use the value from the graph when no override is present.
+            let max_retries = run
+                .context
+                .get("retry.max_retries")
+                .and_then(|value| value.parse::<i32>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(*max_retries);
+            execute_retry_limit(run, t, node_id, max_retries);
         }
         // Triggers never normally reach here (auto-completed at trigger
         // time), but a re-tick racing the trigger write must not wedge.

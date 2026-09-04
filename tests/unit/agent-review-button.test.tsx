@@ -57,12 +57,25 @@ describe('agent workflow title-bar control', () => {
   });
 
   it('opens the active run instead of starting a duplicate', () => {
-    useAgentNodeStore.setState({ circuitOwnerships: { 42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review' } } });
+    useAgentNodeStore.setState({ circuitOwnerships: { 42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review', state: 'running' } } });
     render(<AgentReviewButton node={node} />);
     fireEvent.click(screen.getByRole('button', { name: 'Start agent workflow' }));
     fireEvent.click(screen.getByRole('button', { name: 'View circuit run #91' }));
     expect(trigger).not.toHaveBeenCalled();
     expect(useUIStore.getState().probeTab).toBe('circuits');
+  });
+
+  it('offers cancellation instead of a competing form for an active run', async () => {
+    useAgentNodeStore.setState({ circuitOwnerships: { 42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review', state: 'paused' } } });
+    const { cancelCircuitRun } = await import('../../src/lib/tauri');
+    const cancel = vi.spyOn(await import('../../src/lib/tauri'), 'cancelCircuitRun').mockResolvedValue();
+    render(<AgentReviewButton node={node} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent workflow' }));
+    expect(screen.queryByRole('button', { name: 'Start review' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel active workflow' }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith(91));
+    cancel.mockRestore();
+    void cancelCircuitRun;
   });
 
   it.each(['suspended', 'archived', 'error'])('disables starting for %s agents', status => {

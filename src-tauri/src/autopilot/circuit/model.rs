@@ -425,6 +425,11 @@ impl CircuitGraph {
                 return Err(format!("duplicate node id '{}'", node.id));
             }
         }
+        if self.requires_source_agent()
+            && self.roots().iter().any(|root| !matches!(root.kind, CircuitNodeKind::Manual))
+        {
+            return Err("Circuits using $source must have only Manual root triggers".into());
+        }
         for edge in &self.edges {
             if !ids.contains(edge.from.as_str()) {
                 return Err(format!(
@@ -1291,6 +1296,20 @@ mod tests {
             }],
         };
         assert!(g.validate().unwrap_err().contains("connects to itself"));
+    }
+
+    #[test]
+    fn validate_rejects_source_bindings_on_automatic_roots() {
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![
+                node("trigger", CircuitNodeKind::Interval { interval_seconds: 60 }),
+                node("gate", CircuitNodeKind::AwaitAgentTurn { target_node_id: Some("$source".into()) }),
+            ],
+            edges: vec![always("trigger", "gate")],
+        };
+        assert!(g.validate().unwrap_err().contains("Manual root"));
     }
 
     #[test]

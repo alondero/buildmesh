@@ -18,7 +18,7 @@ const KEY_MESSAGE_MAX = 200;
 // errors). 'warning' = a non-blocking heads-up (sync drift, worktree cleanup
 // retry, resume hiccups). The distinction drives the toast's colour and label
 // so a benign sync notice no longer shouts "ERROR" in red.
-export type ToastSeverity = 'error' | 'warning';
+export type ToastSeverity = 'error' | 'warning' | 'success' | 'info';
 
 export interface Toast {
   id: number;

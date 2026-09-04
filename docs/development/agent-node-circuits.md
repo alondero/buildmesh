@@ -13,8 +13,9 @@ the latest fixes remain unapproved. An unclear reviewer verdict stops for
 attention. When the source's completion cannot be read or classified, a visible
 approval step lets the user confirm completion before review begins.
 
-The reviewer uses the source agent's provider and receives its working
-directory, Mesh base ref, name, and latest completion report. It is instructed
+The reviewer uses the source agent's provider plus the Mesh's configured model
+and effort tier, and receives its working directory, Mesh base ref, name, and
+latest completion report. It is instructed
 to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
 no commit, push, or PR is required for this workflow.
@@ -47,8 +48,12 @@ outcomes, not agent lifecycle statuses. Both gates reuse the existing Autopilot
 classification backend configuration.
 
 The implementation lives in `autopilot/circuit/node_review.rs`, the pure
-stepper, and the existing Circuit worker. Source bindings are persisted in
-`context_json`; only reviewers occupy owned `agent_node_id` step associations.
-The reviewer footprint reserves one additional automated-agent slot. Startup
-reconciliation and lost-turn recovery resolve borrowed targets through the
-same run context as normal execution.
+stepper, and the existing Circuit worker. The built-in review graph is a
+per-Mesh preset row (`is_preset = 1`) reused by every invocation and excluded
+from user-authored blueprint lists; old duplicate preset rows are collapsed by
+the schema migration. Each run stores its borrowed source in the indexed
+`source_agent_node_id` foreign key (with the context copy retained for
+templates), while only reviewers occupy owned `agent_node_id` step
+associations. The reviewer footprint reserves one additional automated-agent
+slot. Startup reconciliation and lost-turn recovery use the relational source
+binding and the same run context for template expansion.

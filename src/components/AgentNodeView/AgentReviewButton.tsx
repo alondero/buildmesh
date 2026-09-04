@@ -4,7 +4,7 @@ import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
-import { listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
+import { cancelCircuitRun, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
 import type { AutopilotCircuit } from '../../types/generated/AutopilotCircuit';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import { Modal } from '../shared/Modal';
@@ -18,6 +18,9 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
   const [circuits, setCircuits] = useState<AutopilotCircuit[]>([]);
   const [circuitId, setCircuitId] = useState<number | null>(null);
   const ownership = useAgentNodeStore(s => s.circuitOwnerships[node.id]);
+  const activeOwnership = ownership && ['pending', 'running', 'paused'].includes(ownership.state)
+    ? ownership
+    : null;
   const eligible = node.provider !== 'terminal'
     && ['running', 'ready', 'awaiting_input', 'completed'].includes(node.status);
 
@@ -57,6 +60,20 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
     }
   }
 
+  async function cancelActive() {
+    if (!activeOwnership) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await cancelCircuitRun(activeOwnership.run_id);
+      setOpen(false);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return <>
     <button type="button"
       aria-label="Start agent workflow"
@@ -68,10 +85,19 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
     {open && createPortal(
       <Modal onClose={() => { if (!busy) setOpen(false); }} ariaLabel="Start agent workflow" maxWidth="max-w-sm">
         <h2 className="text-sm font-semibold mb-2">Workflow for {node.name}</h2>
-        {ownership && <button type="button" className="text-xs text-accent-violet mb-3"
-          onClick={() => { setOpen(false); showRun(); }}>
-          View circuit run #{ownership.run_id}
-        </button>}
+        {activeOwnership ? <>
+          <p className="text-xs text-text-secondary mb-3">
+            This agent is already controlled by Circuit #{activeOwnership.run_id} ({activeOwnership.state}).
+          </p>
+          <button type="button" className="text-xs text-accent-violet mb-3"
+            onClick={() => { setOpen(false); showRun(); }}>
+            View circuit run #{activeOwnership.run_id}
+          </button>
+          <button type="button" disabled={busy} onClick={() => void cancelActive()}
+            className="block text-xs text-status-error mb-4 disabled:opacity-40">
+            Cancel active workflow
+          </button>
+        </> : <>
         <label className="text-xs block mb-4">Workflow
           <select value={circuitId ?? ''} onChange={e => setCircuitId(e.target.value ? Number(e.target.value) : null)}
             className="block w-full mt-1 bg-surface-raised border border-border-subtle rounded-md px-2 py-1">
@@ -93,13 +119,16 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
           Start this Circuit with {node.name} as its triggering agent. Its configured steps control when work starts.
           You can pause or cancel in Circuits.
         </p>}
+        </>}
         {error && <p role="alert" className="text-xs text-status-error break-words mb-3">{error}</p>}
         <div className="flex justify-end gap-2">
           <button type="button" disabled={busy} onClick={() => setOpen(false)} className="px-3 py-1.5 text-xs">Cancel</button>
+          {!activeOwnership && (
           <button type="button" disabled={busy || !Number.isInteger(rounds) || rounds < 1 || rounds > 10}
             onClick={() => void start()}
             className="px-3 py-1.5 text-xs rounded-md bg-accent-violet/20 text-accent-violet disabled:opacity-40"
           >{busy ? 'Starting…' : circuitId === null ? 'Start review' : 'Start Circuit'}</button>
+          )}
         </div>
       </Modal>, document.body)}
   </>;

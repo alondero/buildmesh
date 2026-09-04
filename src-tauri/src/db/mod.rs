@@ -618,7 +618,8 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             concurrency_limit INTEGER NOT NULL DEFAULT 1,
             graph_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            is_preset INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS autopilot_circuit_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -628,6 +629,7 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             state TEXT NOT NULL DEFAULT 'pending',
             context_json TEXT NOT NULL DEFAULT '{}',
             queue_position INTEGER NOT NULL DEFAULT 0,
+            source_agent_node_id INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE (circuit_id, trigger_identity)
@@ -679,6 +681,9 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id);
+        CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_preset_mesh ON autopilot_circuits(mesh_id, is_preset);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_autopilot_circuits_preset_mesh
+            ON autopilot_circuits(mesh_id) WHERE is_preset = 1;
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit
             ON autopilot_circuit_runs(circuit_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state
@@ -686,6 +691,7 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
         CREATE INDEX IF NOT EXISTS idx_circuit_runs_mesh_queue
             ON autopilot_circuit_runs(mesh_id, state, queue_position);
         CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
+        CREATE INDEX IF NOT EXISTS idx_circuit_runs_source_agent ON autopilot_circuit_runs(source_agent_node_id);
         ",
     )
 }

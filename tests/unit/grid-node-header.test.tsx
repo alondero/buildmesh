@@ -740,6 +740,7 @@ describe('GridNodeHeader autopilot pill', () => {
           run_id: 2,
           circuit_id: 9,
           circuit_name: 'Issue-driven Autopilot + PR review',
+          state: 'running',
         },
       },
     });

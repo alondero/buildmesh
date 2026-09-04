@@ -126,6 +126,7 @@ describe('useAgentNodeStore', () => {
               run_id: 2,
               circuit_id: 9,
               circuit_name: 'Issue-driven review',
+              state: 'running',
             },
           ]);
         }
@@ -139,6 +140,7 @@ describe('useAgentNodeStore', () => {
         run_id: 2,
         circuit_id: 9,
         circuit_name: 'Issue-driven review',
+        state: 'running',
       });
     });
 

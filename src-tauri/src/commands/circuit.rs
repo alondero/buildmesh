@@ -74,6 +74,7 @@ pub struct CircuitAgentOwnership {
     #[ts(as = "i32")]
     pub circuit_id: i64,
     pub circuit_name: String,
+    pub state: String,
 }
 
 #[command]
@@ -81,11 +82,12 @@ pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, Str
     crate::db::list_circuit_agent_ownerships()
         .map(|rows| {
             rows.into_iter()
-                .map(|(node_id, run_id, circuit_id, circuit_name)| CircuitAgentOwnership {
+                .map(|(node_id, run_id, circuit_id, circuit_name, state)| CircuitAgentOwnership {
                     node_id,
                     run_id,
                     circuit_id,
                     circuit_name,
+                    state,
                 })
                 .collect()
         })
@@ -150,10 +152,11 @@ fn map_queue_rows(
         .collect()
 }
 
-/// Batched single-IPC load for the Circuits Probe tab: every circuit on the
-/// mesh with every running/paused run and up to `limit` newest terminal runs
-/// (steps included), one command instead of N+1 round-trips. Pending runs are
-/// returned by `list_circuit_queue` so none are hidden behind this limit.
+/// Batched single-IPC load for the Circuits Probe tab: every user-authored
+/// circuit (and any active built-in preset) on the mesh with every
+/// running/paused run and up to `limit` newest terminal runs (steps included),
+/// one command instead of N+1 round-trips. Pending runs are returned by
+/// `list_circuit_queue` so none are hidden behind this limit.
 #[command]
 pub fn list_circuits_with_runs(
     mesh_id: i64,
@@ -339,8 +342,7 @@ fn retire_cancelled_agents(agent_ids: Vec<i64>) -> Result<(), String> {
 
 fn release_circuit_source(run_id: i64) {
     if let Some(source) = crate::db::get_circuit_run(run_id).ok().flatten()
-        .and_then(|r| crate::autopilot::circuit::context::CircuitContext::from_json(&r.context_json).ok())
-        .and_then(|ctx| ctx.source_agent_id()) {
+        .and_then(|run| run.source_agent_node_id) {
         crate::autopilot::evaluator::unregister(source);
     }
 }
@@ -518,8 +520,12 @@ pub fn trigger_circuit_from_node(app: AppHandle, node_id: i64, circuit_id: Optio
     }
     let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds)?;
     crate::autopilot::evaluator::register_circuit(node_id);
+    let state = crate::db::get_circuit_run(run_id)
+        .map_err(|e| e.to_string())?
+        .map(|run| run.state)
+        .unwrap_or_else(|| "pending".into());
     let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload {
-        run_id, state: "pending".into(),
+        run_id, state,
     });
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(run_id)

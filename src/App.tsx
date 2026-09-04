@@ -522,7 +522,10 @@ function App() {
 
   useEffect(() => {
     const unlisten = listen<CircuitNotificationPayload>('circuit-notification', ({ payload }) => {
-      addToast(`Circuit #${payload.run_id}`, payload.message, 'warning');
+      const severity = payload.severity === 'success' || payload.severity === 'info'
+        ? payload.severity
+        : payload.severity === 'error' ? 'error' : 'warning';
+      addToast(`Circuit #${payload.run_id}`, payload.message, severity);
     });
     return () => { void unlisten.then(fn => fn()); };
   }, []);
@@ -690,18 +693,20 @@ function App() {
       <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">
         {toasts.map((toast) => {
           const isWarning = toast.severity === 'warning';
+          const isSuccess = toast.severity === 'success';
+          const isInfo = toast.severity === 'info';
           return (
             <div
               key={toast.id}
               role="status"
               className={`animate-slide-in-right bg-bg-surface border px-4 py-3 rounded-md flex items-start gap-2 min-w-[280px] max-w-[420px] shadow-md ${
-                isWarning ? 'border-status-warning/50' : 'border-status-error/50'
+                isWarning ? 'border-status-warning/50' : isSuccess ? 'border-status-success/50' : isInfo ? 'border-accent-cyan/50' : 'border-status-error/50'
               }`}
             >
               <div className="flex-1 min-w-0">
                 <div
                   className={`text-2xs font-bold uppercase ${
-                    isWarning ? 'text-status-warning' : 'text-status-error'
+                    isWarning ? 'text-status-warning' : isSuccess ? 'text-status-success' : isInfo ? 'text-accent-cyan' : 'text-status-error'
                   }`}
                 >
                   {toast.provider}

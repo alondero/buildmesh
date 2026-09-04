@@ -5,6 +5,11 @@
  */
 export type AutopilotCircuitRun = { id: number, circuit_id: number, mesh_id: number, 
 /**
+ * Borrowed Agent Node that triggered this run, when launched from a
+ * title bar. Kept relational so ownership queries stay indexable.
+ */
+source_agent_node_id: number | null, 
+/**
  * Dedupe identity of what fired this run (e.g. `manual:<unix-ms>`;
  * GitHub triggers use `<issue|pr>:<number>:<label>` in later
  * milestones). Scoped per-circuit so two circuits may process the
