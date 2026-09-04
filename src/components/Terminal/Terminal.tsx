@@ -549,7 +549,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
             onClick={handleClear}
             className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
-            Clear Terminal <span className="float-right text-text-muted">{isMac ? '⌘K' : 'Ctrl+Shift+K'}</span>
+            Clear Terminal <span className="float-right text-text-muted">{isMac ? '⌘+Shift+K' : 'Ctrl+Shift+L'}</span>
           </button>
         </div>
       )}

@@ -35,24 +35,32 @@
 //! - the read-side `COALESCE` defaults (via [`ColumnSpec::read_default`]
 //!   and [`mesh_columns_projection`]),
 //! - the `schema_version` probe and the post-migration bump,
-//! - the post-migration verification (always-run idempotent safety nets).
+//! - baseline-table materialisation before columns are evolved, and
+//! - canonical-index installation after every migrated column exists.
 //!
 //! A new column becomes "add a [`ColumnSpec`] entry to
 //! [`all_column_specs`] and you're done" — one place, not three.
 //!
 //! ## The shape of `evolve_to`
 //!
-//! The runner does two passes:
+//! The runner has one ordered schema pipeline:
 //!
-//! 1. **Version-gated pass** — runs only if `current_version <
+//! 1. **Baseline tables** — materialises the current table definitions with
+//!    `CREATE TABLE IF NOT EXISTS`. This is harmless for an existing database
+//!    and gives direct [`evolve_to`] callers the same starting point as app
+//!    startup.
+//! 2. **Version-gated pass** — runs only if `current_version <
 //!    target_version`. Walks [`all_column_specs`] in order and
 //!    `ALTER`s every column whose `version > current_version`. Runs any
 //!    [`OneShotBackfill`] entries whose `version > current_version`.
 //!    Bumps `schema_version` to `target_version` on success.
-//! 2. **Always-run pass** — re-runs the entire column list (the
+//! 3. **Always-run pass** — re-runs the entire column list (the
 //!    `pragma_table_info` check makes the loop a no-op on present
 //!    columns; the bug-class regression lives here), then runs every
 //!    [`AlwaysStep`] (idempotent data migrations + DROP IF EXISTS).
+//! 4. **Canonical indexes** — creates every index once, after the column
+//!    passes complete. An index can therefore safely depend on a column added
+//!    in any schema version.
 //!
 //! The two passes share the column registry, so the bug class
 //! "migration adds the column, safety net doesn't, vN-1 → vN upgrade
@@ -131,7 +139,12 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// pending rows can swap positions through the queue controls.
 /// The queue column is v38 because v37 is occupied by worktree-directory
 /// configuration in the current schema.
-pub(crate) const SCHEMA_VERSION: u32 = 38;
+///
+/// v39 — Durable fresh-spawn generation anchor for historic session recovery
+/// (issue #1555): adds nullable `agent_nodes.session_started_at`. This keeps
+/// per-node lifecycle state with the node and lets recovery use one conditional
+/// UPDATE without an app-settings EAV key or a correlated subquery.
+pub(crate) const SCHEMA_VERSION: u32 = 39;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -255,22 +268,13 @@ pub(crate) enum AlwaysStep {
     /// Idempotent: a SHA-256 hex is 64 chars, a raw token is 32, so
     /// the length distinguishes the two.
     HashCoordinatorTokens,
-    /// CREATE TABLE IF NOT EXISTS warm_worktrees (v21). The table
-    /// backs the pre-spawn Worktree Pool (issue #609). Fresh DBs
-    /// create it via the inline CREATE in `init()`; this safety net
-    /// covers v6+ DBs whose `schema_version` was bumped past 21 by a
-    /// build that didn't yet include the inline CREATE. Idempotent
-    /// via `IF NOT EXISTS`.
-    EnsureWarmWorktreesTable,
-    /// CREATE TABLE IF NOT EXISTS for the Autopilot Circuits ledger tables,
-    /// the v38 queue index, and durable agent leases (spec #1205). Same rationale as
-    /// [`AlwaysStep::EnsureWarmWorktreesTable`]: fresh DBs get them from
-    /// the inline CREATE in `init()`; this safety net covers any DB that
-    /// reached v34+ without them. Idempotent via `IF NOT EXISTS`.
-    EnsureAutopilotCircuitsTables,
     /// Upgrade the original Issue Driven Autopilot graph shape once its
     /// persisted first-turn injections are no longer needed.
     UpgradeIssueReviewFirstTurns,
+    /// Remove the temporary per-node session-generation keys written by the
+    /// pre-v39 recovery implementation after their values have been copied to
+    /// `agent_nodes.session_started_at`.
+    DropLegacySessionRecoveryKeys,
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +438,10 @@ const SPECS: &[ColumnSpec] = &[
     // (issue #1519). NULL = legacy `<mesh>/.claude/worktrees/<name>`
     // fallback (pre-#1519 rows + Root Nodes).
     ColumnSpec { version: 37, table: "agent_nodes", column: "worktree_path", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    // v39 — Fresh-spawn generation anchor used by historic session recovery.
+    // NULL means the node predates this field or has never been deliberately
+    // reset to a fresh conversation.
+    ColumnSpec { version: 39, table: "agent_nodes", column: "session_started_at", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // autopilot_runs
@@ -575,6 +583,14 @@ const ONE_SHOT_BACKFILLS: &[OneShotBackfill] = &[
         params: &[],
         sql: "UPDATE autopilot_circuit_runs SET queue_position = id WHERE queue_position = 0",
     },
+    // v39 — migrate the short-lived pre-release app-settings generation keys
+    // into the node row before the cleanup AlwaysStep removes them.
+    OneShotBackfill {
+        version: 39,
+        flag: "agent_node_session_started_at_backfill_v39",
+        params: &[],
+        sql: "UPDATE agent_nodes SET session_started_at = (SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = 'session_started_at:' || agent_nodes.id) WHERE session_started_at IS NULL AND EXISTS (SELECT 1 FROM app_settings WHERE key = 'session_started_at:' || agent_nodes.id)",
+    },
 ];
 
 /// The v33 one-shot backfill SQL. Mirrored as the `OneShotBackfill`
@@ -599,12 +615,11 @@ pub(crate) const V33_BACKFILL_SQL: &str = "UPDATE meshes \
 /// Always-run idempotent steps. See [`AlwaysStep`].
 const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::DropCheckpoints,
-    AlwaysStep::EnsureWarmWorktreesTable,
-    AlwaysStep::EnsureAutopilotCircuitsTables,
     AlwaysStep::UpgradeIssueReviewFirstTurns,
     AlwaysStep::RewriteAgentNodeProviderId,
     AlwaysStep::HashCoordinatorTokens,
     AlwaysStep::EnforceCircuitRunCapacityRange,
+    AlwaysStep::DropLegacySessionRecoveryKeys,
 ];
 
 // ---------------------------------------------------------------------------
@@ -659,6 +674,7 @@ fn bump_version(conn: &Connection, target: u32) -> SqlResult<()> {
 /// A new column becomes "add a [`ColumnSpec`] entry to
 /// [`all_column_specs`]" — one place, not three.
 pub(crate) fn evolve_to(target_version: u32, conn: &Connection) -> SqlResult<()> {
+    crate::db::ensure_baseline_tables(conn)?;
     let v = current_version(conn);
     if v < target_version as i32 {
         tracing::info!(
@@ -711,6 +727,7 @@ pub(crate) fn evolve_to(target_version: u32, conn: &Connection) -> SqlResult<()>
     for step in ALWAYS_STEPS {
         run_always(conn, *step)?;
     }
+    crate::db::create_canonical_indexes_after_evolution(conn)?;
     Ok(())
 }
 
@@ -868,93 +885,6 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 }
             }
         }
-        AlwaysStep::EnsureWarmWorktreesTable => {
-            // v21 — Pre-spawn Worktree Pool (issue #609). Fresh DBs
-            // create the table via the inline CREATE in `init()`;
-            // this safety net covers v6+ DBs whose `schema_version`
-            // was bumped past 21 by a build that didn't yet include
-            // the inline CREATE. `CREATE TABLE IF NOT EXISTS` is a
-            // no-op on healthy v21+ DBs. The table-exists guard in
-            // `add_column_if_missing` skips the pool's columns on a
-            // pre-v21 DB until this step runs.
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS warm_worktrees (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
-                    path TEXT NOT NULL UNIQUE,
-                    preassigned_name TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'filling',
-                    base_sha TEXT,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-                CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
-                CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
-                ",
-            )?;
-        }
-        AlwaysStep::EnsureAutopilotCircuitsTables => {
-            // v34/v38 — Autopilot Circuits ledger (spec #1205) plus the
-            // queue index and durable agent-lease table. Mirrors the inline
-            // CREATE in `db::init` verbatim; see that comment for the column
-            // semantics. Keeping these idempotent safety nets here upgrades
-            // databases whose version flag already passed the original
-            // circuit migration.
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS autopilot_circuits (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
-                    name TEXT NOT NULL,
-                    description TEXT NOT NULL DEFAULT '',
-                    enabled INTEGER NOT NULL DEFAULT 0,
-                    concurrency_limit INTEGER NOT NULL DEFAULT 1,
-                    graph_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-                CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id);
-
-                CREATE TABLE IF NOT EXISTS autopilot_circuit_runs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    circuit_id INTEGER NOT NULL REFERENCES autopilot_circuits(id) ON DELETE CASCADE,
-                    mesh_id INTEGER NOT NULL,
-                    trigger_identity TEXT NOT NULL DEFAULT '',
-                    state TEXT NOT NULL DEFAULT 'pending',
-                    context_json TEXT NOT NULL DEFAULT '{}',
-                    queue_position INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    UNIQUE (circuit_id, trigger_identity)
-                );
-                CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
-                CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
-                CREATE INDEX IF NOT EXISTS idx_circuit_runs_mesh_queue ON autopilot_circuit_runs(mesh_id, state, queue_position);
-
-                CREATE TABLE IF NOT EXISTS autopilot_circuit_run_agent_leases (
-                    run_id INTEGER PRIMARY KEY REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
-                    slots INTEGER NOT NULL CHECK (slots > 0),
-                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-
-                CREATE TABLE IF NOT EXISTS autopilot_circuit_run_steps (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
-                    node_id TEXT NOT NULL,
-                    agent_node_id INTEGER,
-                    status TEXT NOT NULL DEFAULT 'pending_slot',
-                    attempt INTEGER NOT NULL DEFAULT 0,
-                    outcome TEXT,
-                    error_message TEXT,
-                    started_at TEXT,
-                    completed_at TEXT,
-                    UNIQUE (run_id, node_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
-                ",
-            )?;
-        }
         AlwaysStep::EnforceCircuitRunCapacityRange => {
             // v36 — Defense-in-depth bound check on `meshes.circuit_run_capacity`.
             // The IPC layer (`commands::mesh_properties::update_mesh_circuit_run_capacity`)
@@ -1006,6 +936,17 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                  BEGIN \
                      SELECT RAISE(ABORT, 'meshes.circuit_run_capacity must be in 1..=8'); \
                  END;",
+                [],
+            )?;
+        }
+        AlwaysStep::DropLegacySessionRecoveryKeys => {
+            // v39 — cleanup for the pre-release implementation that stored a
+            // node's generation as `session_started_at:<id>` in app_settings.
+            // The one-shot backfill above runs first on an upgrade, and this
+            // idempotent delete prevents stale keys from surviving a later
+            // node deletion or a partial upgrade.
+            conn.execute(
+                "DELETE FROM app_settings WHERE key LIKE 'session_started_at:%'",
                 [],
             )?;
         }

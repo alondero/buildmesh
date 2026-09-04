@@ -2,7 +2,7 @@
 //!
 //! `spawn_with_intent` is the public seam and the sole owner of
 //! `node-spawn-failed` / session-lifecycle Error (so Resume can call
-//! `on_resume_failed`). `spawn_agent_inner` acquires the in-flight claim,
+//! `on_resume_failed`). `spawn_with_intent` acquires the in-flight claim,
 //! then coordinates prepare → provision → launch → streams. Prepare
 //! returns workspace params and launch params separately; provision
 //! never sees PTY size or cascade overrides. Command construction,
@@ -29,10 +29,8 @@ pub(crate) use super::prepare::SpawnOptions;
 /// call inside the Skip arms fails review by virtue of the decision
 /// being a single enum variant.
 ///
-/// Empty-string defense: legacy writes can leave an empty string in
-/// `agent_nodes.cli_session_id`. `db::list_suspended_nodes`'s SQL
-/// `IS NOT NULL` filter only catches NULL, so the empty case is
-/// defended here.
+/// Startup discovery includes missing identities for recovery. If recovery
+/// cannot find one, keep the node Suspended for explicit Regenerate.
 pub(crate) fn decide_startup_resume(
     cli_session_id: Option<&str>,
     cause: ResumeCause,
@@ -118,7 +116,18 @@ pub(crate) async fn spawn_with_intent(
     // count as a use). The value flows through to `SpawnOptions` below;
     // the annotation is the only thing this line adds.
     let explicit: ExplicitSpawnOverrides = explicit;
+    // Claim before reading/clearing identity: a duplicate Fresh request must
+    // not erase the winner's identity or move its recovery timestamp.
+    let Some(claim) = SpawnInFlightClaim::try_claim(node_id) else {
+        let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+        return Ok(SpawnOutcome::Skipped(node));
+    };
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if matches!(intent, SpawnIntent::Resume { cause: ResumeCause::Startup })
+        && node.status != crate::models::SessionStatus::Suspended
+    {
+        return Ok(SpawnOutcome::Skipped(node));
+    }
     let provider = crate::preferences::resolve_harness_provider(&node.provider);
     let adapter = provider.adapter();
     let is_resume_intent = matches!(intent, SpawnIntent::Resume { .. });
@@ -215,6 +224,7 @@ pub(crate) async fn spawn_with_intent(
 
     let result = spawn_agent_inner(
         app,
+        &claim,
         SpawnOptions {
             session_id: node_id,
             provider,
@@ -241,7 +251,7 @@ pub(crate) async fn spawn_with_intent(
     )
     .await;
 
-    match result {
+    let outcome = match result {
         Ok(()) => {
             let refreshed = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
             let _ = app.emit(
@@ -266,7 +276,9 @@ pub(crate) async fn spawn_with_intent(
             );
             Err(error)
         }
-    }
+    };
+    drop(claim);
+    outcome
 }
 
 /// Whether this request intentionally discards the node's prior conversation.
@@ -277,12 +289,13 @@ pub(super) fn intent_replaces_conversation(intent: &SpawnIntent) -> bool {
 }
 
 /// Transitional implementation retained while transport callers migrate to
-/// [`spawn_with_intent`]. It acquires the in-flight claim, then sequences
+/// [`spawn_with_intent`]. It borrows the caller's in-flight claim and sequences
 /// the four spawn phases. Phase modules return `Result` and do not emit
 /// `node-spawn-failed` or write session-lifecycle Error — that stays here
 /// via [`spawn_with_intent`].
 pub(crate) async fn spawn_agent_inner(
     app: &tauri::AppHandle,
+    _claim: &SpawnInFlightClaim,
     opts: SpawnOptions,
 ) -> Result<(), String> {
     tracing::info!(
@@ -296,18 +309,6 @@ pub(crate) async fn spawn_agent_inner(
 
     let timer = SpawnTimer::new(opts.session_id);
 
-    // Named local, held across every phase. Binding this as `_claim` (or
-    // returning it from prepare as a tuple item a match can ignore) would
-    // let a future refactor drop the RAII guard at the prepare seam and
-    // reopen the #650 concurrent-spawn race.
-    let Some(claim) = SpawnInFlightClaim::try_claim(opts.session_id) else {
-        tracing::info!(
-            "spawn_agent_inner: spawn already in flight for session {}, skipping duplicate call",
-            opts.session_id
-        );
-        return Ok(());
-    };
-
     match prepare_context(app, opts, &timer).await? {
         PrepareOutcome::Skipped => {}
         PrepareOutcome::Ready(phases) => {
@@ -319,6 +320,5 @@ pub(crate) async fn spawn_agent_inner(
 
     tracing::info!("spawn_agent_inner: complete");
     timer.total();
-    drop(claim);
     Ok(())
 }

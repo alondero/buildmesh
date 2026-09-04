@@ -465,6 +465,20 @@ pub trait AgentProvider: Send + Sync {
     ) {
     }
 
+    /// Recover a missing identity for a suspended node from the provider's
+    /// durable transcript store. Each adapter owns its on-disk format and
+    /// lookup rules; the startup service only supplies the common workspace
+    /// and time anchor and conditionally persists the returned ID.
+    fn recover_suspended_session_id(
+        &self,
+        _spawn_path: &str,
+        _env_type: EnvType,
+        _anchor_ms: i64,
+        _recorded_start: bool,
+    ) -> Option<String> {
+        None
+    }
+
     /// Hook immediately before an existing CLI session is resumed. A harness
     /// can snapshot transcript state and attach session-scoped services here,
     /// before the child gets a chance to write its first resumed turn.

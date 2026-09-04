@@ -32,7 +32,7 @@ pub(super) static SPAWNS_IN_FLIGHT: once_cell::sync::Lazy<
 /// RAII claim on a session id in [`SPAWNS_IN_FLIGHT`]. Dropping releases
 /// the claim on every exit path, including a cancelled async task.
 ///
-/// `spawn_agent_inner` acquires this *before* the phase calls and binds
+/// `spawn_with_intent` acquires this before identity mutation and binds
 /// it as a named local (`claim`, never `_claim`) so a future match cannot
 /// drop it at the prepare seam and reopen the #650 race.
 #[must_use = "dropping the claim releases the in-flight spawn slot"]
@@ -173,7 +173,8 @@ pub(crate) fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Optio
 }
 
 /// Load the node, resolve worktree policy and paths. The orchestrator
-/// must already hold [`SpawnInFlightClaim`] for `opts.session_id`.
+/// The caller (`spawn_with_intent`) must already hold [`SpawnInFlightClaim`]
+/// for `opts.session_id`.
 pub(super) async fn prepare_context(
     app: &tauri::AppHandle,
     opts: SpawnOptions,
@@ -181,7 +182,7 @@ pub(super) async fn prepare_context(
 ) -> Result<PrepareOutcome, String> {
     debug_assert!(
         SPAWNS_IN_FLIGHT.lock().contains(&opts.session_id),
-        "prepare_context requires spawn_agent_inner to hold SpawnInFlightClaim"
+        "prepare_context requires spawn_with_intent to hold SpawnInFlightClaim"
     );
 
     let SpawnOptions {

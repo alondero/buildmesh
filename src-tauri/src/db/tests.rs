@@ -12,6 +12,83 @@
 
 use std::collections::HashSet;
 
+fn suspended_recovery_schema() -> rusqlite::Connection {
+    let conn = pending_removal_schema();
+    conn.execute_batch("ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER DEFAULT 1;
+        ALTER TABLE agent_nodes ADD COLUMN is_pinned INTEGER DEFAULT 0;
+        ALTER TABLE agent_nodes ADD COLUMN position INTEGER DEFAULT 0;
+        ALTER TABLE agent_nodes ADD COLUMN source_pr INTEGER;
+        ALTER TABLE agent_nodes ADD COLUMN head_repo_owner TEXT;
+        ALTER TABLE agent_nodes ADD COLUMN head_repo_clone_url TEXT;
+        ALTER TABLE agent_nodes ADD COLUMN source_pr_pinned_sha TEXT;
+        ALTER TABLE agent_nodes ADD COLUMN signal_health TEXT DEFAULT 'healthy';
+        ALTER TABLE agent_nodes ADD COLUMN worktree_path TEXT;
+        ALTER TABLE agent_nodes ADD COLUMN session_started_at INTEGER;
+        UPDATE agent_nodes SET status = 'suspended';
+        INSERT INTO agent_nodes (id, mesh_id, name, path, status, cli_session_id)
+        VALUES (43, 1, 'empty', '/repo', 'suspended', ''),
+               (44, 1, 'known', '/repo', 'suspended', 'known'),
+               (45, 1, 'archived', '/repo', 'archived', NULL);").unwrap();
+    conn.execute("INSERT INTO app_settings VALUES ('codex_legacy_session_backfill_v1', '1')", []).unwrap();
+    conn
+}
+
+#[test]
+fn startup_resume_lists_missing_and_empty_identities_after_legacy_migration() {
+    let conn = suspended_recovery_schema();
+    let mut ids = super::list_suspended_nodes_inner(&conn).unwrap()
+        .into_iter().map(|node| node.id).collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(ids, vec![42, 43, 44]);
+}
+
+#[test]
+fn recovery_does_not_overwrite_or_share_an_identity_or_revive_a_changed_node() {
+    let conn = suspended_recovery_schema();
+    let nodes = super::list_suspended_nodes_inner(&conn).unwrap();
+    let node = nodes.iter().find(|node| node.id == 42).unwrap();
+    let sibling = nodes.iter().find(|node| node.id == 43).unwrap();
+    assert!(!super::recover_suspended_cli_session_id_inner(&conn, node, "known", None).unwrap());
+    conn.execute("UPDATE agent_nodes SET status = 'running' WHERE id = 42", []).unwrap();
+    assert!(!super::recover_suspended_cli_session_id_inner(&conn, node, "recovered", None).unwrap());
+    conn.execute("UPDATE agent_nodes SET status = 'suspended', provider = 'agy' WHERE id = 42", []).unwrap();
+    assert!(!super::recover_suspended_cli_session_id_inner(&conn, node, "recovered", None).unwrap());
+    assert!(super::recover_suspended_cli_session_id_inner(&conn, sibling, "recovered", None).unwrap());
+    assert!(!super::recover_suspended_cli_session_id_inner(&conn, sibling, "replacement", None).unwrap());
+    conn.execute("UPDATE agent_nodes SET cli_session_id = NULL WHERE id = 43", []).unwrap();
+    conn.execute("UPDATE agent_nodes SET session_started_at = 1234 WHERE id = 43", []).unwrap();
+    assert!(!super::recover_suspended_cli_session_id_inner(&conn, sibling, "old-generation", None).unwrap());
+    assert!(super::recover_suspended_cli_session_id_inner(&conn, sibling, "new-generation", Some(1234)).unwrap());
+}
+
+#[test]
+fn v39_migrates_legacy_session_generation_keys_into_agent_nodes() {
+    let conn = suspended_recovery_schema();
+    conn.execute(
+        "INSERT INTO app_settings VALUES ('session_started_at:43', '1234')",
+        [],
+    )
+    .unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+    let started: Option<i64> = conn
+        .query_row(
+            "SELECT session_started_at FROM agent_nodes WHERE id = 43",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(started, Some(1234));
+    let old_key_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_settings WHERE key = 'session_started_at:43'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_key_count, 0);
+}
+
 #[test]
 fn hook_session_capture_only_fills_a_missing_cli_session_id() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();

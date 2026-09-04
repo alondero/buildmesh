@@ -19,6 +19,7 @@ pub mod opencode_oauth;
 pub mod opencode_session;
 pub mod pool_worker;
 pub mod provider_verification;
+pub mod session_recovery;
 pub mod sync_lock;
 pub mod transcript_reader;
 pub mod usage;

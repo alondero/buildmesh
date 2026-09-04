@@ -4,6 +4,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { GridRegenerateButton } from './GridRegenerateButton';
+import { PrPill } from './PrPill';
 import { useGitSummary } from '../../hooks/useGitSummary';
 import { useOpenPr } from '../../hooks/useOpenPr';
 import { useResizeWidth } from '../../hooks/useResizeWidth';
@@ -13,7 +14,8 @@ import { useRegenerateAction } from '../../hooks/useRegenerateAction';
 import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
-import { canResumeSuspendedNode } from '../../lib/suspended';
+import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
+import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
@@ -22,7 +24,6 @@ import { RegenerateProviderMenu } from '../Providers/RegenerateProviderMenu';
 import { InlineEditableText } from '../shared/InlineEditableText';
 import { FolderOpenIcon } from '../shared/FolderOpenIcon';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
-import { openUrl } from '@tauri-apps/plugin-opener';
 import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 import { CircuitsIcon } from '../Probe/probeIcons';
@@ -143,6 +144,7 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
   const setViewMode = useUIStore(state => state.setViewMode);
   const exitSingleMode = useUIStore(state => state.exitSingleMode);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
+  const isAutopilotNode = useAgentNodeStore(state => state.autopilotStates[nodeId] != null);
   // Pin toggle (wayfinder #982 / #985) — the shared store action is the
   // sole mutation path. Its optimistic patch flips `node.is_pinned` in
   // place, so this header re-renders via the existing `node` prop with no
@@ -331,6 +333,7 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
           </span>
         )}
         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${getStatusConfig(node.status).bgColor}`} />
+        {hasLostConversation(node, isAutopilotNode) && <MissingSessionIdBadge />}
         {/* Issue #1364 §3 — node-level hook-health warning. Layered on top
             of the status, never a status: the node may be running fine while
             its attention hook is broken, and the user must be able to tell
@@ -428,23 +431,15 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
             </span>
           </span>
         )}
-        {/* Open PR chip — surfaces a clickable link to the PR for the branch
-            this node is working on. Hidden when no PR is open (useOpenPr
-            returns null for the common cases: no auth, no PR, non-GitHub
-            origin, unborn branch). Tooltip carries the PR title; if the PR
-            is a draft, the tooltip is suffixed so the user knows. */}
+        {/* Open PR pill — clicking opens a menu with Open on GitHub +
+            Merge (squash & delete branch) behind an inline confirm (same
+            contract as the Probe Pull Requests tab). Hidden when no PR is
+            open (useOpenPr returns null for the common cases: no auth, no
+            PR, non-GitHub origin, unborn branch). Tooltip carries the PR
+            title; if the PR is a draft, the tooltip is suffixed and merge
+            is disabled. */}
         {showPr && openPr && (
-          <span
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              openUrl(openPr.url).catch(console.error);
-            }}
-            title={openPr.draft ? `Draft · ${openPr.title}` : openPr.title}
-            className="text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 drop-shadow-sm hover:brightness-125 transition-colors flex-shrink-0"
-          >
-            PR #{openPr.number}
-          </span>
+          <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} />
         )}
       </div>
       <div className="flex items-center gap-1.5 flex-shrink-0" onPointerDown={(e) => e.stopPropagation()}>

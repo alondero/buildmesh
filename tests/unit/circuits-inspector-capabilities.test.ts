@@ -126,6 +126,12 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
 });
 
   // Cursor — model yes, effort no, prefill yes (issue #1143).
+  // Issue #1368 round-2: Cursor now ships an attention hook under
+  // `--force`, mirroring AGY's skip-permissions shape. The vitest pin
+  // catches a flip-back to `requires_attention_hook: false` (round-2
+  // review N1 pattern from Grok issue #1366) AND the `trust` field
+  // must be `null` — Cursor under `--force` does not require an
+  // explicit workspace-trust entry (review point 2).
   it('Cursor matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.cursor;
     expect(c.harness_id).toBe('cursor');
@@ -133,6 +139,17 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
     expect(c.supports_prefill).toBe(true);
+    expect(c.requires_attention_hook).toBe(true);
+    expect(c.attention_capability).toEqual({
+      kind: 'hook',
+      events: expect.arrayContaining([
+        'turn_completed',
+        'background_running',
+      ]),
+      launch_mode: 'skip_permissions',
+      trust: null,
+      min_version: '1.0.0',
+    });
     expect(c.effort_control.kind).toBe('none');
     expect(effortAllowedFor(c)).toEqual([]);
   });

@@ -45,6 +45,21 @@ const ALLOWED_BARE_ROUNDED = [
     ],
     escape: "allow-bare-rounded",
   },
+  {
+    file: "Probe/GitPullRequestsTab.tsx",
+    // 2xs retry control — preserve the existing bare radius for this
+    // deliberately compact probe action.
+    requiredClasses: [
+      "px-2",
+      "py-1",
+      "text-2xs",
+      "rounded",
+      "border",
+      "border-dashed",
+      "border-border-subtle",
+    ],
+    escape: "allow-bare-rounded",
+  },
 ];
 
 // Classes that are already token-bound and never need flagging.
@@ -118,12 +133,14 @@ function matchesAllowlist(
   relPath: string,
   line: string,
 ): { matched: boolean; missingEscape: boolean } {
-  const entry = ALLOWED_BARE_ROUNDED.find((e) => e.file === relPath);
-  if (!entry) return { matched: false, missingEscape: false };
   const tokens = tokensOf(line);
-  const hasAll = entry.requiredClasses.every((c) => tokens.has(c));
-  if (!hasAll) return { matched: false, missingEscape: false };
-  return { matched: true, missingEscape: !line.includes(entry.escape) };
+  const entries = ALLOWED_BARE_ROUNDED.filter((e) => e.file === relPath);
+  for (const entry of entries) {
+    if (entry.requiredClasses.every((c) => tokens.has(c))) {
+      return { matched: true, missingEscape: !line.includes(entry.escape) };
+    }
+  }
+  return { matched: false, missingEscape: false };
 }
 
 describe("radii audit — no stray bare `rounded` in src/components (#733)", () => {
@@ -185,7 +202,7 @@ describe("radii audit — no stray bare `rounded` in src/components (#733)", () 
   });
 
   it("ALLOWED_BARE_ROUNDED is itself minimal (regression: don't silently grow the list)", () => {
-    // Two intentional decorative chips: a 9px Badge and a 10px "can't merge" pill.
-    expect(ALLOWED_BARE_ROUNDED.length).toBe(2);
+    // Two intentional decorative chips plus the compact retry control.
+    expect(ALLOWED_BARE_ROUNDED.length).toBe(3);
   });
 });

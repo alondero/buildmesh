@@ -36,10 +36,9 @@
 //!   `http/routes/attention.rs`) stays as the secondary capture path for
 //!   those cases.
 //!
-//! There is deliberately no historic backfill: without a tight spawn window
-//! no brain conversation can be proven to belong to a suspended node, and
-//! guessing risks cross-project session corruption. Pre-fix `NULL` rows stay
-//! suspended for the user to re-spawn.
+//! Historic recovery lives in `session_recovery`: it requires a matching
+//! workspace anchor and a bounded launch window. Unknown workspaces that are
+//! eligible for live capture are deliberately ineligible for historic recovery.
 //!
 //! Select/match helpers are pure so the rules are unit-tested without a live
 //! `agy` binary. Filesystem scanning is tested against temp brain roots built
@@ -132,10 +131,17 @@ fn read_conversation_meta(path: &Path) -> Option<(i64, Option<String>)> {
 fn extract_cwd_anchor(val: &serde_json::Value) -> Option<String> {
     let calls = val.get("tool_calls")?.as_array()?;
     for call in calls {
-        let args = call.get("args")?;
+        let Some(args) = call.get("args") else { continue; };
         for key in ["Cwd", "cwd"] {
             if let Some(raw) = args.get(key).and_then(|v| v.as_str()) {
-                let cleaned = raw.trim().trim_matches('"').trim().to_string();
+                // Some transcripts JSON-encode the entire argument, including
+                // Windows backslashes. JSON decoding already removes the
+                // enclosing quotes and escape sequences; plain text is kept as
+                // written when decoding is not applicable.
+                let cleaned = serde_json::from_str::<String>(raw)
+                    .unwrap_or_else(|_| raw.to_owned())
+                    .trim()
+                    .to_owned();
                 if !cleaned.is_empty() {
                     return Some(cleaned);
                 }
@@ -248,7 +254,7 @@ pub fn select_id_for_directory<'a>(
     None
 }
 
-fn collect_candidates(brain_dir: &Path, created_not_before_ms: i64) -> Vec<Candidate> {
+pub(crate) fn collect_candidates(brain_dir: &Path, created_not_before_ms: i64) -> Vec<Candidate> {
     let Ok(entries) = fs::read_dir(brain_dir) else {
         return Vec::new();
     };
@@ -266,6 +272,46 @@ fn collect_candidates(brain_dir: &Path, created_not_before_ms: i64) -> Vec<Candi
         }
     }
     out
+}
+
+/// Historic startup recovery entry point used by the AGY adapter. Workspace
+/// matching remains provider-owned because AGY records it inside tool-call
+/// metadata rather than in the conversation directory name.
+pub(crate) fn find_historic_id_for_directory(
+    env_type: EnvType,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let brain_dir = crate::env::agy_brain_dir_for_env(env_type, spawn_directory)?;
+    find_historic_id_for_directory_in(
+        &brain_dir,
+        spawn_directory,
+        anchor_ms,
+        recorded_start,
+    )
+}
+
+pub(crate) fn find_historic_id_for_directory_in(
+    brain_dir: &Path,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
+    let candidates = collect_candidates(&brain_dir, cutoff)
+        .into_iter()
+        .filter(|candidate| {
+            candidate
+                .workspace
+                .as_deref()
+                .is_some_and(|cwd| crate::env::directories_match(cwd, spawn_directory))
+        });
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.map(|candidate| (candidate.id, candidate.created_ms)),
+        anchor_ms,
+        recorded_start,
+    )
 }
 
 /// Scan `brain_dir` for the conversation this spawn minted: proven fresh by
@@ -516,6 +562,41 @@ mod tests {
         assert_eq!(
             find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
             Some(UUID_A.to_string())
+        );
+    }
+
+    #[test]
+    fn historic_recovery_uses_json_encoded_windows_workspace_anchor() {
+        const CREATED: i64 = 1_787_830_399_000;
+        const TIMESTAMP: &str = "2026-08-27T11:33:19.986Z";
+        let temp = tempfile::TempDir::new().unwrap();
+        let transcript = write_conv(
+            temp.path(),
+            UUID_A,
+            &serde_json::json!({
+                "created_at": TIMESTAMP,
+                "tool_calls": [{
+                    "args": {"Cwd": serde_json::to_string(r"F:\repo").unwrap()}
+                }]
+            })
+            .to_string(),
+        )
+        .join(".system_generated/logs/transcript.jsonl");
+
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED, true),
+            Some(UUID_A.to_string())
+        );
+
+        fs::write(
+            transcript,
+            serde_json::json!({"created_at": TIMESTAMP}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED, true),
+            None,
+            "an AGY transcript without a workspace anchor must not be bound during historic recovery",
         );
     }
 

@@ -39,7 +39,7 @@ describe('resolveKeyAction', () => {
       expect(resolveKeyAction(makeState({ isMac: true, metaKey: true, key: 'f' }))).toBe('find');
     });
 
-    it('Cmd+Shift+K → clear', () => {
+    it('Cmd+Shift+K → clear (issue #1409 — ⌘+K freed for the Omnibar)', () => {
       expect(resolveKeyAction(makeState({ isMac: true, metaKey: true, shiftKey: true, key: 'k' }))).toBe('clear');
     });
 
@@ -109,8 +109,18 @@ describe('resolveKeyAction', () => {
       expect(resolveKeyAction(makeState({ ctrlKey: true, key: 'f' }))).toBe('passthrough');
     });
 
-    it('Ctrl+Shift+K → clear', () => {
-      expect(resolveKeyAction(makeState({ ctrlKey: true, shiftKey: true, key: 'k' }))).toBe('clear');
+    // Regression for issue #1568 — xterm must NOT claim Ctrl+Shift+K
+    // because the Omnibar's Tauri global-shortcut (App.tsx:146) owns that
+    // chord on Win/Linux. Per the primer rule (knowledge-primer.md:133)
+    // the terminal-side gesture remapped to Ctrl+Shift+L rather than
+    // being deleted.
+    it('Ctrl+Shift+K → passthrough (Omnibar owns the chord, issue #1568)', () => {
+      expect(resolveKeyAction(makeState({ ctrlKey: true, shiftKey: true, key: 'k' }))).toBe('passthrough');
+    });
+
+    // Issue #1568 — terminal clear moved off the omnibar chord.
+    it('Ctrl+Shift+L → clear (terminal-clear remap, issue #1568)', () => {
+      expect(resolveKeyAction(makeState({ ctrlKey: true, shiftKey: true, key: 'l' }))).toBe('clear');
     });
 
     it('Ctrl+K (no Shift) → passthrough (readline kill-to-end)', () => {

@@ -9,8 +9,7 @@
 mod tests {
     use crate::db::{
         clear_cli_session_id_inner, cli_session_id_present_inner,
-        codex_legacy_session_backfill_completed_inner,
-        mark_codex_legacy_session_backfill_completed_inner, update_agent_node_status_if_inner,
+        update_agent_node_status_if_inner,
         update_agent_node_status_inner as update_unconditional_inner,
         update_agent_node_status_unless_in_inner,
     };
@@ -26,6 +25,7 @@ mod tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 status TEXT NOT NULL DEFAULT 'idle',
                 cli_session_id TEXT,
+                session_started_at INTEGER,
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE TABLE app_settings (
@@ -84,14 +84,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session_id, None);
+        let started: i64 = conn.query_row(
+            "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
+            params![id], |row| row.get(0),
+        ).unwrap();
+        assert!(started > 0);
     }
 
     #[test]
-    fn codex_legacy_session_backfill_completion_is_persisted() {
+    fn fresh_identity_and_recovery_timestamp_are_written_together() {
         let conn = conn_with_agent_nodes();
-        assert!(!codex_legacy_session_backfill_completed_inner(&conn).unwrap());
-        mark_codex_legacy_session_backfill_completed_inner(&conn).unwrap();
-        assert!(codex_legacy_session_backfill_completed_inner(&conn).unwrap());
+        let id = insert_node(&conn, "suspended");
+        conn.execute("UPDATE agent_nodes SET cli_session_id = 'old' WHERE id = ?1", [id]).unwrap();
+        clear_cli_session_id_inner(&conn, id).unwrap();
+        let (identity, started): (Option<String>, Option<i64>) = conn.query_row(
+            "SELECT cli_session_id, session_started_at FROM agent_nodes WHERE id = ?1",
+            [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(identity, None);
+        assert!(started.is_some());
     }
 
     /// Issue #1499: the poller's lean presence check mirrors

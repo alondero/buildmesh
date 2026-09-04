@@ -282,6 +282,30 @@ mod tests {
     /// Drive `post_input` over a real TCP socket and return the response
     /// bytes. `node_id = 0` exercises the 404 path without DB seeding
     /// (the per-test DB has no row 0).
+    ///
+    /// Round-2 review fix (issue #1368): the previous driver hit a
+    /// Windows-specific WSAECONNRESET in the `rejects_oversized_body`
+    /// case. The server's `read_body_with_cap` short-circuits on
+    /// `content_length > max_bytes` BEFORE reading any body bytes,
+    /// writes a 413, then drops its BufStream. The client meanwhile
+    /// had written the full body via `stream.write_all(body)`. When
+    /// the server's BufStream drops with unread bytes in its recv
+    /// buffer, Windows sends RST (WSAECONNRESET) instead of a clean
+    /// FIN — the kernel refuses to deliver buffered-then-discarded
+    /// bytes and resets the connection. The client's `read_to_end`
+    /// then returns `Err(ConnectionReset)` with an empty buffer.
+    ///
+    /// The fix: for the cap-short-circuit case, the server doesn't
+    /// read anything, so the client shouldn't send anything either.
+    /// `drive_oversized` sends no body — `content_length` is what
+    /// trips the cap check, not the actual bytes. `drive` keeps the
+    /// old shape (write the body, expect the server to read it) for
+    /// the malformed / empty / unknown-node paths where the server
+    /// DOES read. Both helpers disable Nagle (`set_nodelay(true)`) so
+    /// the 413 / 400 / 404 response lands immediately rather than
+    /// waiting for a small-packet batch flush. The client does NOT
+    /// call `stream.shutdown()` — the server's BufStream drop is the
+    /// correct connection-closer.
     async fn drive(body: &[u8], node_id: i64) -> Vec<u8> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -292,8 +316,13 @@ mod tests {
             post_input(&mut lines, node_id, content_length).await;
         });
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        stream.write_all(body).await.unwrap();
-        stream.shutdown().await.unwrap();
+        stream.set_nodelay(true).ok();
+        // Oversized Content-Length is rejected before a body read. Sending an
+        // unread body anyway can make Windows reset the socket on server close
+        // and discard the 413 response. A missing cap would still hang this test.
+        if content_length <= INPUT_BODY_MAX_BYTES {
+            stream.write_all(body).await.unwrap();
+        }
         let mut resp = Vec::new();
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -301,6 +330,39 @@ mod tests {
         )
         .await
         .expect("server hung");
+        drop(stream);
+        let _ = server.await;
+        resp
+    }
+
+    /// Variant of `drive` for the cap-short-circuit path. The server
+    /// never reads the body — it inspects `content_length` first —
+    /// so the client must not write anything either. Otherwise the
+    /// server's BufStream drop closes the socket with unread bytes
+    /// in its recv buffer, and Windows sends RST instead of FIN.
+    /// Same Nagle-disable + no-shutdown conventions as `drive`.
+    async fn drive_oversized(node_id: i64) -> Vec<u8> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The body sent on the wire is empty — `content_length` is
+        // what the cap check trips on. 2058 is just past the 1024
+        // cap; the server sees the cap fire without reading.
+        let content_length = 2058;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut lines = tokio::io::BufStream::new(crate::http::MaybeTls::Plain(stream));
+            post_input(&mut lines, node_id, content_length).await;
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.set_nodelay(true).ok();
+        let mut resp = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_to_end(&mut resp),
+        )
+        .await
+        .expect("server hung");
+        drop(stream);
         let _ = server.await;
         resp
     }
@@ -352,14 +414,16 @@ mod tests {
     /// 413 BEFORE the JSON parser runs. A regression that drops the cap
     /// (or moves it past the read) would let a malformed 10MB body
     /// pin a tokio worker for the full upload window.
+    ///
+    /// Round-2 review note: uses `drive_oversized` (not `drive`) —
+    /// the cap short-circuit fires before any I/O, so the client
+    /// must not write the body either. Otherwise the server's
+    /// BufStream drop closes the socket with unread bytes in its
+    /// recv buffer and Windows sends RST (WSAECONNRESET) instead of
+    /// FIN, which `read_to_end` reports as an empty response.
     #[tokio::test]
     async fn rejects_oversized_body() {
-        let mut body = br#"{"seq":""#.to_vec();
-        // Pad past the 1024-byte cap with `a` chars — still parseable
-        // JSON if it slipped through, but the cap rejects first.
-        body.extend(std::iter::repeat(b'a').take(2048));
-        body.extend_from_slice(br#""}"#);
-        let resp = drive(&body, 0).await;
+        let resp = drive_oversized(0).await;
         let s = status_line(&resp);
         assert!(
             s.starts_with("HTTP/1.1 413"),
