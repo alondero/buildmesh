@@ -1555,7 +1555,14 @@ mod tests {
             "AGY must advertise produces_readable_transcript=true so the \
              archived-node resume picker surfaces it (#1283)",
         );
-        assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
+        // Issue #1296: OpenCode's local `opencode.db` is read by
+        // TranscriptFormat::OpenCode, so the archive resume picker and the
+        // Coordinator rich layer include OpenCode nodes.
+        assert!(
+            Provider::OpenCode.adapter().produces_readable_transcript(),
+            "OpenCode must advertise produces_readable_transcript=true so the \
+             archived-node resume picker surfaces it (#1296)",
+        );
         assert!(!Provider::Terminal.adapter().produces_readable_transcript());
         // Issue #1437: Freebuff does not write a transcript the coordinator can parse.
         assert!(!Provider::Freebuff.adapter().produces_readable_transcript());

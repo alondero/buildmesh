@@ -158,10 +158,12 @@ mod tests {
 
     /// An unsupported provider degrades to `Unsupported` without reading disk —
     /// distinct from a supported-but-unstarted node, so a Coordinator can tell
-    /// "never has a transcript" from "hasn't captured a session yet".
+    /// "never has a transcript" from "hasn't captured a session yet". Uses
+    /// `Provider::Freebuff` here because it is still transcript-less (#1437);
+    /// OpenCode was the prior example but flipped to true in #1296.
     #[test]
     fn unsupported_provider_degrades_without_disk() {
-        let tail = transcript_tail(&node(Provider::OpenCode, None, true), 10);
+        let tail = transcript_tail(&node(Provider::Freebuff, None, true), 10);
         assert_eq!(
             tail,
             TranscriptTail::Unavailable {
@@ -186,10 +188,12 @@ mod tests {
     /// `digest_enrichment` maps an unsupported provider to `None` (the signal
     /// `node_digest::layered` reads as "unsupported"), keeping the digest core
     /// provider-agnostic — while a supported-no-session node stays `Some` so the
-    /// digest flags it distinctly.
+    /// digest flags it distinctly. Uses `Provider::Freebuff` for the same
+    /// reason as the `unsupported_provider_degrades_without_disk` test:
+    /// OpenCode flipped to true in #1296.
     #[test]
     fn digest_enrichment_maps_unsupported_to_none_but_keeps_no_session() {
-        assert!(digest_enrichment(&node(Provider::OpenCode, None, true)).is_none());
+        assert!(digest_enrichment(&node(Provider::Freebuff, None, true)).is_none());
         assert_eq!(
             digest_enrichment(&node(Provider::Anthropic, None, true)),
             Some(TranscriptTail::Unavailable {

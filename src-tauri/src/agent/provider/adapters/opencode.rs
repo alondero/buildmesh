@@ -218,6 +218,14 @@ impl AgentProvider for OpenCodeAdapter {
         inject_opencode_attention_plugin(std::path::Path::new(&resolved.host_path))
     }
 
+    /// OpenCode stores session messages in its local SQLite DB; the
+    /// transcript reader (`services::transcript_reader::OpenCode`) parses
+    /// them into the shared wire shape, so the Coordinator rich layer and
+    /// the archive-resume picker can include OpenCode nodes (#1296).
+    fn produces_readable_transcript(&self) -> bool {
+        true
+    }
+
     fn supports_model_override(&self) -> bool {
         true
     }
@@ -441,14 +449,17 @@ mod tests {
     }
 
     #[test]
-    fn supports_resume_model_prefill_and_attention_hook() {
+    fn supports_resume_model_prefill_attention_hook_and_readable_transcript() {
         assert!(OPENCODE.supports_resume());
         assert!(OPENCODE.auto_resume_on_startup());
         assert!(OPENCODE.supports_model_override());
         assert!(OPENCODE.supports_prefill());
         // Issue #1295: plugin hook unblocks the Autopilot gate.
         assert!(OPENCODE.requires_attention_hook());
-        assert!(!OPENCODE.produces_readable_transcript());
+        // Issue #1296: OpenCode's local SQLite messages are now read by the
+        // transcript reader, so the archive-resume picker and the Coordinator
+        // rich layer can include OpenCode nodes.
+        assert!(OPENCODE.produces_readable_transcript());
     }
 
     #[test]
@@ -462,7 +473,8 @@ mod tests {
         assert!(!caps.supports_effort_override);
         // Issue #1295: descriptor must mirror the adapter's `requires_attention_hook`.
         assert!(caps.requires_attention_hook);
-        assert!(!caps.produces_readable_transcript);
+        // Issue #1296: descriptor must mirror the adapter's `produces_readable_transcript`.
+        assert!(caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(
             caps.effort_control,
