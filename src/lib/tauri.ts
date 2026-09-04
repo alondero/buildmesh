@@ -1438,6 +1438,7 @@ import type { AutopilotCircuit } from '../types/generated/AutopilotCircuit';
 import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwnership';
 import type { CircuitRunDetail } from '../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../types/generated/CircuitWithRuns';
+import type { CircuitProbeSnapshot } from '../types/generated/CircuitProbeSnapshot';
 import type { CircuitQueueDirection } from '../types/generated/CircuitQueueDirection';
 import type { CircuitQueueEntry } from '../types/generated/CircuitQueueEntry';
 // Milestone 4 (#1209): the canvas editor consumes the blueprint AST, so
@@ -1449,6 +1450,7 @@ export type {
   CircuitQueueEntry,
   CircuitRunDetail,
   CircuitWithRuns,
+  CircuitProbeSnapshot,
 };
 export type { CircuitGraph } from '../types/generated/CircuitGraph';
 export type { CircuitNode } from '../types/generated/CircuitNode';
@@ -1474,6 +1476,10 @@ export const getCircuit = (circuitId: number) =>
  *  all active runs plus up to `limit` newest terminal runs (steps included). */
 export const listCircuitsWithRuns = (meshId: number, limit?: number) =>
   _invoke<CircuitWithRuns[]>('list_circuits_with_runs', { meshId, limit });
+
+/** Single-IPC hydration for the Circuits Probe ledger and mesh queue. */
+export const listCircuitProbe = (meshId: number, limit?: number) =>
+  _invoke<CircuitProbeSnapshot>('list_circuit_probe', { meshId, limit });
 
 export const listCircuitQueue = (meshId: number) =>
   _invoke<CircuitQueueEntry[]>('list_circuit_queue', { meshId });

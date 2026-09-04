@@ -39,8 +39,7 @@ import {
   cancelCircuitRun,
   createCircuit,
   deleteCircuit,
-  listCircuitQueue,
-  listCircuitsWithRuns,
+  listCircuitProbe,
   moveCircuitRun,
   pauseCircuitRun,
   resumeCircuitRun,
@@ -105,13 +104,10 @@ export function CircuitsProbeTab() {
       return;
     }
     try {
-      // Load the recent ledger cards and complete queue together.
-      const [rows, queue] = await Promise.all([
-        listCircuitsWithRuns(activeMeshId, 10),
-        listCircuitQueue(activeMeshId),
-      ]);
-      setRows(rows);
-      setQueue(queue);
+      // Ledger cards and the complete queue hydrate through one IPC payload.
+      const snapshot = await listCircuitProbe(activeMeshId, 10);
+      setRows(snapshot.circuits);
+      setQueue(snapshot.queue);
       setLoadError(null);
     } catch (err) {
       console.error('Failed to load circuits:', err);
@@ -323,7 +319,7 @@ export function CircuitsProbeTab() {
                   className="rounded-md border border-border-subtle bg-bg-card/40 p-1.5"
                   data-testid={`queue-run-${entry.run.id}`}
                 >
-                  <div className="flex items-center gap-1.5 min-w-0">
+                  <div className="flex items-start gap-1.5 min-w-0">
                     <span className="text-2xs font-mono text-accent-cyan shrink-0">
                       {entry.queue_rank}
                     </span>
@@ -331,6 +327,8 @@ export function CircuitsProbeTab() {
                       {entry.circuit_name}{' '}
                       <span className="font-mono text-text-muted">#{entry.run.id}</span>
                     </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1 pl-4">
                     <button
                       type="button"
                       onClick={() => runAction(() => moveCircuitRun(entry.run.id, 'up'))}
@@ -359,7 +357,7 @@ export function CircuitsProbeTab() {
                       Cancel
                     </button>
                   </div>
-                  <p className="mt-0.5 text-2xs font-mono text-text-muted break-all">
+                  <p className="mt-1 text-2xs font-mono text-text-muted break-all pl-4">
                     {entry.run.trigger_identity}
                   </p>
                 </li>
@@ -401,7 +399,7 @@ export function CircuitsProbeTab() {
                       {circuit.name}
                     </span>
                   </label>
-                  <span className="flex items-center gap-1 flex-wrap">
+                  <div className="flex items-center gap-1 flex-wrap">
                     <button
                       type="button"
                       onClick={() => openCircuitEditor(circuit.id)}
@@ -451,12 +449,12 @@ export function CircuitsProbeTab() {
                         disabled={busy}
                         aria-label={`Delete ${circuit.name}`}
                         data-testid={`circuit-delete-${circuit.id}`}
-                        className="px-1.5 py-0.5 rounded-md text-text-muted hover:text-status-error"
+                        className="px-1.5 py-0.5 rounded-md text-text-muted hover:text-status-error disabled:opacity-40"
                       >
                         Delete
                       </button>
                     )}
-                  </span>
+                  </div>
                 </div>
 
                 {/* Run ledger — one expandable diagnostic card per run

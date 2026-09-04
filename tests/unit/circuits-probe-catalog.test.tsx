@@ -108,6 +108,12 @@ function mockBackend() {
     if (cmd === 'list_circuits') return Promise.resolve([CIRCUIT]);
     if (cmd === 'list_circuit_runs') return Promise.resolve([RUN_DONE]);
     if (cmd === 'list_circuit_queue') return Promise.resolve([]);
+    if (cmd === 'list_circuit_probe') {
+      return Promise.resolve({
+        circuits: [{ circuit: CIRCUIT, runs: [RUN_DONE] }],
+        queue: [],
+      });
+    }
     if (cmd === 'list_circuits_with_runs') {
       return Promise.resolve([{ circuit: CIRCUIT, runs: [RUN_DONE] }]);
     }

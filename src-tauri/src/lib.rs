@@ -533,6 +533,7 @@ pub fn run() {
             commands::circuit::get_circuit,
             commands::circuit::list_circuits_with_runs,
             commands::circuit::list_circuit_queue,
+            commands::circuit::list_circuit_probe,
             commands::circuit::create_circuit,
             commands::circuit::set_circuit_enabled,
             commands::circuit::update_circuit_graph,

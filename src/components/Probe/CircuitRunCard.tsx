@@ -158,8 +158,7 @@ export function CircuitRunCard({
 
       {/* Controls. Outside the disclosure button — nesting a button inside
           a button is invalid HTML and breaks keyboard semantics. */}
-      {(run.state === 'pending' ||
-        run.state === 'running' ||
+      {(run.state === 'running' ||
         run.state === 'paused' ||
         blockedSteps.length > 0) && (
         <div className="px-2 pb-1.5 flex items-center gap-1 flex-wrap">
@@ -185,7 +184,7 @@ export function CircuitRunCard({
               Resume
             </button>
           )}
-          {(run.state === 'pending' || run.state === 'running' || run.state === 'paused') && (
+          {(run.state === 'running' || run.state === 'paused') && (
             <button
               type="button"
               onClick={onCancel}

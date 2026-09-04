@@ -146,6 +146,14 @@ pub fn list_circuits_with_recent_runs(
     runs_per_circuit: i64,
 ) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
     let db = super::read_conn();
+    list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)
+}
+
+pub(crate) fn list_circuits_with_recent_runs_inner(
+    db: &Connection,
+    mesh_id: i64,
+    runs_per_circuit: i64,
+) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at \
@@ -157,15 +165,36 @@ pub fn list_circuits_with_recent_runs(
         return Ok(vec![]);
     }
     let ids: Vec<String> = circuits.iter().map(|c| c.id.to_string()).collect();
+    // Keep the history bound in SQLite. The old implementation selected the
+    // entire ledger and filtered it in Rust, which made every Probe render
+    // grow with the lifetime of the database. Active runs are always visible;
+    // only terminal history is ranked and bounded per circuit.
     let mut stmt = db.prepare(&format!(
-        "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
+        "WITH terminal AS ( \
+             SELECT id, circuit_id, mesh_id, trigger_identity, state, \
+                    context_json, created_at, updated_at, \
+                    ROW_NUMBER() OVER (PARTITION BY circuit_id ORDER BY id DESC) AS history_rank \
+             FROM autopilot_circuit_runs \
+             WHERE circuit_id IN ({}) \
+               AND state NOT IN ('pending', 'running', 'paused') \
+         ), visible AS ( \
+             SELECT id, circuit_id, mesh_id, trigger_identity, state, \
+                    context_json, created_at, updated_at \
+             FROM autopilot_circuit_runs \
+             WHERE circuit_id IN ({}) AND state IN ('running', 'paused') \
+             UNION ALL \
+             SELECT id, circuit_id, mesh_id, trigger_identity, state, \
+                    context_json, created_at, updated_at \
+             FROM terminal WHERE history_rank <= ?1 \
+         ) \
+         SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, created_at, updated_at \
-         FROM autopilot_circuit_runs WHERE circuit_id IN ({}) \
-         ORDER BY circuit_id, id DESC",
+         FROM visible ORDER BY circuit_id, id DESC",
+        ids.join(","),
         ids.join(",")
     ))?;
-    let all_runs: Vec<AutopilotCircuitRun> = stmt
-        .query_map([], |row| {
+    let visible_runs: Vec<AutopilotCircuitRun> = stmt
+        .query_map(params![runs_per_circuit.max(0)], |row| {
             Ok(AutopilotCircuitRun {
                 id: row.get(0)?,
                 circuit_id: row.get(1)?,
@@ -179,24 +208,15 @@ pub fn list_circuits_with_recent_runs(
         })?
         .collect::<SqlResult<_>>()?;
 
+    let mut runs_by_circuit: std::collections::HashMap<i64, Vec<AutopilotCircuitRun>> =
+        std::collections::HashMap::new();
+    for run in visible_runs {
+        runs_by_circuit.entry(run.circuit_id).or_default().push(run);
+    }
+
     let mut out = Vec::with_capacity(circuits.len());
     for circuit in circuits {
-        let history_limit = runs_per_circuit.max(0) as usize;
-        let mut history_count = 0;
-        let runs: Vec<AutopilotCircuitRun> = all_runs
-            .iter()
-            .filter(|run| run.circuit_id == circuit.id)
-            .filter(|run| match run.state.as_str() {
-                "running" | "paused" => true,
-                "pending" => false,
-                _ if history_count < history_limit => {
-                    history_count += 1;
-                    true
-                }
-                _ => false,
-            })
-            .cloned()
-            .collect();
+        let runs = runs_by_circuit.remove(&circuit.id).unwrap_or_default();
         let mut ledgers = Vec::with_capacity(runs.len());
         for run in runs {
             let mut stmt = db.prepare(
@@ -254,6 +274,11 @@ pub fn delete_autopilot_circuit(id: i64) -> SqlResult<()> {
              (SELECT id FROM autopilot_circuit_runs WHERE circuit_id = ?1)",
         params![id],
     )?;
+    tx.execute(
+        "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id IN \
+             (SELECT id FROM autopilot_circuit_runs WHERE circuit_id = ?1)",
+        params![id],
+    )?;
     tx.execute("DELETE FROM autopilot_circuit_runs WHERE circuit_id = ?1", params![id])?;
     tx.execute("DELETE FROM autopilot_circuits WHERE id = ?1", params![id])?;
     tx.commit()
@@ -265,6 +290,11 @@ pub fn delete_autopilot_circuit(id: i64) -> SqlResult<()> {
 pub(crate) fn delete_circuits_for_mesh_inner(conn: &Connection, mesh_id: i64) -> SqlResult<()> {
     conn.execute(
         "DELETE FROM autopilot_circuit_run_steps WHERE run_id IN \
+             (SELECT id FROM autopilot_circuit_runs WHERE mesh_id = ?1)",
+        params![mesh_id],
+    )?;
+    conn.execute(
+        "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id IN \
              (SELECT id FROM autopilot_circuit_runs WHERE mesh_id = ?1)",
         params![mesh_id],
     )?;
@@ -322,6 +352,13 @@ pub fn list_queued_circuit_runs(
     mesh_id: i64,
 ) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
     let db = super::read_conn();
+    list_queued_circuit_runs_inner(&db, mesh_id)
+}
+
+pub(crate) fn list_queued_circuit_runs_inner(
+    db: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
                 r.context_json, r.created_at, r.updated_at, c.name \
@@ -348,17 +385,37 @@ pub fn list_queued_circuit_runs(
     rows.collect()
 }
 
+/// Hydrate the Circuits Probe's ledger and queue from one read connection so
+/// both views observe the same database snapshot.
+pub fn list_circuit_probe(
+    mesh_id: i64,
+    runs_per_circuit: i64,
+) -> SqlResult<(
+    Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>,
+    Vec<(AutopilotCircuitRun, String)>,
+)> {
+    let db = super::read_conn();
+    let circuits = list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)?;
+    let queue = list_queued_circuit_runs_inner(&db, mesh_id)?;
+    Ok((circuits, queue))
+}
+
 /// Swap one pending run with its adjacent queue neighbour. Returns false at
 /// the front/back boundary. Running and terminal rows cannot be reordered.
 pub fn move_queued_circuit_run(run_id: i64, toward_front: bool) -> SqlResult<bool> {
     let mut db = super::write_conn();
     let tx = db.transaction()?;
-    let (mesh_id, position): (i64, i64) = tx.query_row(
+    let Some((mesh_id, position)): Option<(i64, i64)> = tx.query_row(
         "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
          WHERE id = ?1 AND state = 'pending'",
         params![run_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    ).optional()? else {
+        // The worker may promote or cancel the row between the UI render and
+        // this command. A stale reorder is a harmless no-op, not a raw
+        // QueryReturnedNoRows error at the IPC boundary.
+        return Ok(false);
+    };
     let neighbour = if toward_front {
         tx.query_row(
             "SELECT id, queue_position FROM autopilot_circuit_runs \
@@ -402,9 +459,6 @@ pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
         params![run_id],
         |row| row.get(0),
     )?;
-    if matches!(state.as_str(), "completed" | "failed") {
-        return Ok(Vec::new());
-    }
     let agents = {
         let mut stmt = tx.prepare(
             "SELECT DISTINCT agent_node_id FROM autopilot_circuit_run_steps \
@@ -415,26 +469,41 @@ pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
             .collect::<SqlResult<Vec<i64>>>()?;
         rows
     };
-    if state != "cancelled" {
+    if matches!(state.as_str(), "pending" | "running" | "paused") {
         tx.execute(
             "UPDATE autopilot_circuit_runs SET state = 'cancelled', updated_at = datetime('now') \
              WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
             params![run_id],
         )?;
     }
+    // Terminalise the ledger in the same transaction as the run state. A
+    // stale worker commit is rejected after this point, so incomplete steps
+    // must not remain frozen as `running`/`queued` in the audit UI.
+    if !matches!(state.as_str(), "completed" | "failed") {
+        tx.execute(
+            "UPDATE autopilot_circuit_run_steps \
+             SET status = 'cancelled', outcome = 'cancelled', completed_at = datetime('now') \
+             WHERE run_id = ?1 AND status IN ('pending_slot', 'queued', 'running', 'blocked')",
+            params![run_id],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
+        params![run_id],
+    )?;
     tx.commit()?;
-    crate::services::circuit_worker::wake_circuit_worker();
     Ok(agents)
 }
 
 /// Runs whose attached agents may still need retiring while a circuit is
-/// deleted. Cancelled rows are included so a deletion can be retried after a
-/// transient process/worktree cleanup failure without orphaning the agents.
+/// deleted. Terminal rows are included so a deletion can be retried after a
+/// transient process/worktree cleanup failure without orphaning retained
+/// agents from a completed or failed run.
 pub fn list_circuit_run_ids_for_cleanup(circuit_id: i64) -> SqlResult<Vec<i64>> {
     let db = super::read_conn();
     let mut stmt = db.prepare(
         "SELECT id FROM autopilot_circuit_runs \
-         WHERE circuit_id = ?1 AND state IN ('pending', 'running', 'paused', 'cancelled') \
+         WHERE circuit_id = ?1 AND state IN ('pending', 'running', 'paused', 'completed', 'failed', 'cancelled') \
          ORDER BY id",
     )?;
     let ids = stmt
@@ -463,7 +532,7 @@ pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
          FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          WHERE r.state IN ('pending', 'running', 'paused') \
-         ORDER BY CASE WHEN r.state = 'pending' THEN 1 ELSE 0 END, r.queue_position, r.id",
+         ORDER BY r.mesh_id, CASE WHEN r.state = 'pending' THEN 1 ELSE 0 END, r.queue_position, r.id",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(ActiveCircuitRun {
@@ -671,6 +740,15 @@ pub fn commit_circuit_advance(
         .map(is_terminal_run_state)
         .unwrap_or(true)
     {
+        // A crash or an older worker may have left a lease row behind after
+        // the run became terminal. It is no longer counted for admission, but
+        // remove the durable record while this writer transaction is already
+        // holding the run lock.
+        tx.execute(
+            "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
+            params![run_id],
+        )?;
+        tx.commit()?;
         return Ok(());
     }
     let mut terminal_woke = false;
@@ -745,6 +823,12 @@ pub fn commit_circuit_advance(
             ],
         )?;
     }
+    if terminal_woke {
+        tx.execute(
+            "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
+            params![run_id],
+        )?;
+    }
     tx.commit()?;
     if terminal_woke {
         crate::services::circuit_worker::wake_circuit_worker();
@@ -758,18 +842,82 @@ pub fn set_circuit_step_agent_node(
     run_id: i64,
     node_id: &str,
     agent_node_id: i64,
-) -> SqlResult<()> {
+) -> SqlResult<bool> {
     let db = super::write_conn();
     let updated = db.execute(
         "UPDATE autopilot_circuit_run_steps SET agent_node_id = ?3 \
          WHERE run_id = ?1 AND node_id = ?2",
         params![run_id, node_id, agent_node_id],
     )?;
-    if updated == 0 {
-        Err(rusqlite::Error::QueryReturnedNoRows)
-    } else {
-        Ok(())
+    Ok(updated > 0)
+}
+
+/// Reserve the number of agent slots a circuit blueprint may need while its
+/// run is admitted. The lease is durable and keyed by run, so admission is
+/// not inferred from whichever child agent happens to be attached today.
+/// Repeated calls are idempotent and may repair a pre-lease active run after
+/// an upgrade.
+pub fn reserve_circuit_agent_slots(run_id: i64, slots: i64) -> SqlResult<bool> {
+    if slots <= 0 {
+        return Ok(true);
     }
+    let mut db = super::write_conn();
+    let tx = db.transaction()?;
+    let live: Option<String> = tx
+        .query_row(
+            "SELECT state FROM autopilot_circuit_runs WHERE id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !matches!(live.as_deref(), Some("pending" | "running" | "paused")) {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO autopilot_circuit_run_agent_leases (run_id, slots) VALUES (?1, ?2) \
+         ON CONFLICT(run_id) DO UPDATE SET slots = MAX(slots, excluded.slots)",
+        params![run_id, slots],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn circuit_agent_slots_reserved(run_id: i64) -> SqlResult<i64> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT slots FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
+        params![run_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|v| v.unwrap_or(0))
+}
+
+/// Reserved slots held by live or pending runs on one mesh. Pending leases
+/// survive a worker restart and therefore remain part of the admission
+/// accounting until cancellation or promotion consumes them.
+pub fn count_reserved_circuit_agent_slots(mesh_id: i64) -> SqlResult<i64> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT COALESCE(SUM(l.slots), 0) \
+         FROM autopilot_circuit_run_agent_leases l \
+         JOIN autopilot_circuit_runs r ON r.id = l.run_id \
+         WHERE r.mesh_id = ?1 AND r.state IN ('pending', 'running', 'paused')",
+        params![mesh_id],
+        |row| row.get(0),
+    )
+}
+
+pub fn count_reserved_circuit_agent_slots_total() -> SqlResult<i64> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT COALESCE(SUM(l.slots), 0) \
+         FROM autopilot_circuit_run_agent_leases l \
+         JOIN autopilot_circuit_runs r ON r.id = l.run_id \
+         WHERE r.state IN ('pending', 'running', 'paused')",
+        [],
+        |row| row.get(0),
+    )
 }
 
 /// Clear an agent association after a CloseAgentNode effect succeeds. The
@@ -781,6 +929,19 @@ pub fn clear_circuit_step_agent_node(run_id: i64, node_id: &str) -> SqlResult<()
         "UPDATE autopilot_circuit_run_steps SET agent_node_id = NULL \
          WHERE run_id = ?1 AND node_id = ?2",
         params![run_id, node_id],
+    )?;
+    Ok(())
+}
+
+/// Clear an association by the newly-created Agent Node id. This is the
+/// abort seam for an async spawn that loses a cancellation/delete race after
+/// the worker has attached the node but before the task has launched it.
+pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64) -> SqlResult<()> {
+    let db = super::write_conn();
+    db.execute(
+        "UPDATE autopilot_circuit_run_steps SET agent_node_id = NULL \
+         WHERE run_id = ?1 AND agent_node_id = ?2",
+        params![run_id, agent_node_id],
     )?;
     Ok(())
 }
@@ -833,7 +994,8 @@ pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
 /// auto-spawned-agent cap). NULL agent ids don't count. Paused runs count
 /// (see [`count_running_circuit_steps`]); completed spawn steps remain
 /// attached while a later review/feedback step is active so the original
-/// implementation agent still consumes capacity.
+/// implementation agent still consumes capacity. Agents retained by terminal
+/// runs are counted separately by [`count_retained_circuit_agent_nodes`].
 pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
     let db = super::read_conn();
     db.query_row(
@@ -846,8 +1008,27 @@ pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
     )
 }
 
+/// Distinct circuit agents retained by terminal runs. A completed review can
+/// intentionally leave its implementation PTY available for inspection; it
+/// no longer owns a run lease, but the process still consumes host resources
+/// and therefore remains part of mesh/global agent-cap accounting until it is
+/// archived or deleted.
+pub fn count_retained_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
+         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+         JOIN agent_nodes a ON a.id = s.agent_node_id \
+         WHERE r.mesh_id = ?1 AND r.state IN ('completed', 'failed', 'cancelled') \
+           AND s.agent_node_id IS NOT NULL AND a.status != 'archived'",
+        params![mesh_id],
+        |row| row.get(0),
+    )
+}
+
 /// Distinct piloted agent nodes across all active circuit runs. The legacy
 /// Autopilot pool is app-wide, so the circuit worker combines this count with
+/// [`count_retained_circuit_agent_nodes_total`] and
 /// [`crate::db::count_active_autopilot_nodes_total`] before admitting a new
 /// circuit agent.
 pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
@@ -858,6 +1039,32 @@ pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
          WHERE r.state IN ('running', 'paused') \
            AND s.agent_node_id IS NOT NULL",
         [],
+        |row| row.get(0),
+    )
+}
+
+pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
+         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+         JOIN agent_nodes a ON a.id = s.agent_node_id \
+         WHERE r.state IN ('completed', 'failed', 'cancelled') \
+           AND s.agent_node_id IS NOT NULL AND a.status != 'archived'",
+        [],
+        |row| row.get(0),
+    )
+}
+
+pub fn count_active_circuit_agent_nodes_for_run(run_id: i64) -> SqlResult<i64> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT COUNT(DISTINCT s.agent_node_id) \
+         FROM autopilot_circuit_run_steps s \
+         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+         WHERE r.id = ?1 AND r.state IN ('running', 'paused') \
+           AND s.agent_node_id IS NOT NULL",
+        params![run_id],
         |row| row.get(0),
     )
 }

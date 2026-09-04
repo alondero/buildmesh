@@ -984,8 +984,10 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
     /// `agent_nodes.worktree_path`; existing rows read back as `None`
     /// (legacy `<mesh>/.claude/worktrees/<name>` fallback) and the narrow
     /// writers round-trip.
+    /// The same upgrade also adds v38 queue positions and backfills existing
+    /// rows in FIFO order.
     #[test]
-    fn evolve_v37_to_v38_backfills_circuit_queue_in_fifo_order() {
+    fn evolve_v37_to_v38_preserves_worktree_columns_and_backfills_queue() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "

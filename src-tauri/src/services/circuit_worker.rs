@@ -39,9 +39,9 @@
 //! recovers quiet piloted nodes whose turn webhook was missed so
 //! multi-hour runs self-heal.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use tauri::{AppHandle, Emitter};
@@ -70,6 +70,102 @@ const STARTUP_DELAY: Duration = Duration::from_secs(5);
 /// its fast tick. Milestone 2 (#1207): PTY yields also notify (reactive
 /// gate evaluation), as do collaborator approvals.
 static WAKE: Lazy<(Mutex<()>, Condvar)> = Lazy::new(|| (Mutex::new(()), Condvar::new()));
+
+/// Stage-2 circuit spawns are asynchronous, while cancellation and circuit
+/// deletion are synchronous commands. This barrier closes the small window in
+/// which a command could snapshot the run's attached agents, delete the
+/// ledger, and then observe a process created by a spawn that was already in
+/// flight. The permit is held from stage-1 row creation through stage-2
+/// teardown; commands take the barrier before terminalising/deleting runs.
+static CIRCUIT_SPAWNS: Lazy<(Mutex<HashMap<i64, usize>>, Condvar)> =
+    Lazy::new(|| (Mutex::new(HashMap::new()), Condvar::new()));
+const CIRCUIT_SPAWN_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct CircuitSpawnPermit {
+    run_id: i64,
+}
+
+impl Drop for CircuitSpawnPermit {
+    fn drop(&mut self) {
+        let (lock, wake) = &*CIRCUIT_SPAWNS;
+        let mut active = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = active.get_mut(&self.run_id) {
+            if *count <= 1 {
+                active.remove(&self.run_id);
+            } else {
+                *count -= 1;
+            }
+        }
+        wake.notify_all();
+    }
+}
+
+/// Reserve the spawn barrier while checking the durable run state. The check
+/// and insertion share the mutex with command-side quiescence, so a delete
+/// that has acquired the barrier cannot be followed by a late stage-1 spawn.
+fn begin_circuit_spawn(run_id: i64) -> Result<Option<CircuitSpawnPermit>, String> {
+    let (lock, _) = &*CIRCUIT_SPAWNS;
+    let mut active = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !run_accepts_effects(run_id)? {
+        return Ok(None);
+    }
+    *active.entry(run_id).or_insert(0) += 1;
+    Ok(Some(CircuitSpawnPermit { run_id }))
+}
+
+fn wait_for_spawn_set_to_empty<'a>(
+    mut active: std::sync::MutexGuard<'a, HashMap<i64, usize>>,
+    run_ids: &[i64],
+) -> (std::sync::MutexGuard<'a, HashMap<i64, usize>>, bool) {
+    let (_, wake) = &*CIRCUIT_SPAWNS;
+    let deadline = Instant::now() + CIRCUIT_SPAWN_QUIESCE_TIMEOUT;
+    while run_ids.iter().any(|run_id| active.contains_key(run_id)) {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return (active, false);
+        };
+        let (next, result) = wake
+            .wait_timeout(active, remaining)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active = next;
+        if result.timed_out() {
+            return (active, false);
+        }
+    }
+    (active, true)
+}
+
+/// Run a synchronous command while no spawn for this run is in flight. The
+/// closure executes while the barrier is held, preventing a worker pass that
+/// already loaded the run from starting a new stage-1 spawn after the ledger
+/// has been terminalised.
+pub fn with_circuit_run_spawns_quiesced<T>(run_id: i64, f: impl FnOnce() -> T) -> Result<T, String> {
+    let (lock, _) = &*CIRCUIT_SPAWNS;
+    let active = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_active, quiesced) = wait_for_spawn_set_to_empty(active, &[run_id]);
+    if !quiesced {
+        return Err(format!("circuit run {} still has a spawn in flight", run_id));
+    }
+    Ok(f())
+}
+
+/// Same barrier for deleting a whole circuit. The caller must disable new
+/// trigger ingestion before entering this function; existing worker passes
+/// are covered by the mutex and late spawns fail their durable-state check.
+pub fn with_circuit_spawns_quiesced<T>(circuit_id: i64, f: impl FnOnce() -> T) -> Result<T, String> {
+    let (lock, _) = &*CIRCUIT_SPAWNS;
+    let active = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Snapshot run ids only after taking the same mutex used by stage-1
+    // spawn admission. A trigger that raced the caller's disable write cannot
+    // slip into the protected deletion window between a query and lock
+    // acquisition.
+    let run_ids = db::list_circuit_run_ids_for_cleanup(circuit_id)
+        .map_err(|error| error.to_string())?;
+    let (_active, quiesced) = wait_for_spawn_set_to_empty(active, &run_ids);
+    if !quiesced {
+        return Err(format!("circuit {} still has a spawn in flight", circuit_id));
+    }
+    Ok(f())
+}
 
 /// Pending collaborator approvals (#1207): `(run_id, node_id)` pairs the
 /// user approved via IPC while the gate step parks in `blocked`. Drained
@@ -267,6 +363,50 @@ fn may_admit_run(
     false
 }
 
+/// Number of agent process slots declared by a blueprint. This conservative
+/// reservation is derived from the durable graph, not transient child
+/// associations: a completed implementation step can still retain a live
+/// process while a reviewer is spawned.
+fn required_agent_slots(active: &db::ActiveCircuitRun) -> i64 {
+    CircuitGraph::from_json(&active.circuit_graph_json)
+        .map(|graph| {
+            graph
+                .nodes
+                .iter()
+                .filter(|node| crate::autopilot::circuit::model::consumes_agent_slot(&node.kind))
+                .count() as i64
+        })
+        .unwrap_or(0)
+}
+
+fn agent_reservation_fits(
+    mesh: &crate::models::Mesh,
+    required: i64,
+    mesh_reserved: i64,
+    global_reserved: i64,
+    nonleased_mesh_active: i64,
+    nonleased_total: i64,
+    global_pool: Option<u32>,
+) -> bool {
+    if required <= 0 {
+        return true;
+    }
+    let mesh_free = i64::from(mesh.autopilot_concurrency_limit)
+        .saturating_sub(nonleased_mesh_active)
+        .saturating_sub(mesh_reserved);
+    if mesh_free < required {
+        return false;
+    }
+    global_pool
+        .map(|pool| {
+            i64::from(pool)
+                .saturating_sub(nonleased_total)
+                .saturating_sub(global_reserved)
+                >= required
+        })
+        .unwrap_or(true)
+}
+
 /// One full pass over every active circuit run. Per-run failures are
 /// logged and isolated — one broken run must not starve the others.
 fn run_pass(app: &AppHandle) {
@@ -293,6 +433,27 @@ fn run_pass(app: &AppHandle) {
     // admission sweep clears it.
     use std::collections::HashMap;
     let mut mesh_cache: HashMap<i64, Option<crate::models::Mesh>> = HashMap::new();
+    let mut reserved_by_mesh: HashMap<i64, i64> = HashMap::new();
+    // Repair leases for active runs created before the reservation table was
+    // introduced. This is idempotent and keeps restarts from losing a claim.
+    for active in &runs {
+        if matches!(active.run.state.as_str(), "running" | "paused") {
+            let required = required_agent_slots(active);
+            if required > 0 && db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0) < required {
+                let _ = db::reserve_circuit_agent_slots(active.run.id, required);
+            }
+        }
+    }
+    let global_pool = crate::preferences::autopilot_pool_size();
+    // Active circuit runs are represented by their lease. Terminal runs do
+    // not hold a lease, but retained implementation PTYs still consume host
+    // capacity until their agent rows are archived/deleted; include those
+    // non-leased agents in the admission baseline.
+    let retained_total = db::count_retained_circuit_agent_nodes_total().unwrap_or(i64::MAX);
+    let legacy_total = db::count_active_autopilot_nodes_total()
+        .unwrap_or(i64::MAX)
+        .saturating_add(retained_total);
+    let mut global_reserved = db::count_reserved_circuit_agent_slots_total().unwrap_or(i64::MAX);
     for active in runs {
         // Pending runs that the gate deferred re-appear next pass;
         // running/paused runs always proceed (they already hold a slot).
@@ -315,7 +476,49 @@ fn run_pass(app: &AppHandle) {
             }
         }
         if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
-            continue; // disabled mid-flight: park auto runs until re-enabled
+            continue;
+        }
+        if active.run.state == "pending" {
+            if let Some(mesh) = mesh_cache.get(&active.run.mesh_id).and_then(|m| m.as_ref()) {
+                let required = required_agent_slots(&active);
+                if required > 0 {
+                    let existing = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
+                    let additional = required.saturating_sub(existing);
+                    let mesh_reserved = *reserved_by_mesh
+                        .entry(active.run.mesh_id)
+                        .or_insert_with(|| db::count_reserved_circuit_agent_slots(active.run.mesh_id).unwrap_or(i64::MAX));
+                    let retained_mesh_active = db::count_retained_circuit_agent_nodes(active.run.mesh_id).unwrap_or(i64::MAX);
+                    let legacy_mesh_active = db::count_active_autopilot_nodes(active.run.mesh_id)
+                        .unwrap_or(i64::MAX)
+                        .saturating_add(retained_mesh_active);
+                    if additional > 0
+                        && !agent_reservation_fits(
+                            mesh,
+                            additional,
+                            mesh_reserved,
+                            global_reserved,
+                            legacy_mesh_active,
+                            legacy_total,
+                            global_pool,
+                        )
+                    {
+                        tracing::info!(
+                            "circuits: mesh {} held — run {} needs {} reserved agent slot(s)",
+                            active.run.mesh_id, active.run.id, required
+                        );
+                        continue;
+                    }
+                    if additional > 0 {
+                        match db::reserve_circuit_agent_slots(active.run.id, required) {
+                            Ok(true) => {
+                                *reserved_by_mesh.get_mut(&active.run.mesh_id).unwrap() += additional;
+                                global_reserved = global_reserved.saturating_add(additional);
+                            }
+                            Ok(false) | Err(_) => continue,
+                        }
+                    }
+                }
+            }
         }
         if let Err(e) = drive_run(app, &active) {
             tracing::warn!("circuits: run {} pass failed: {}", active.run.id, e);
@@ -714,17 +917,30 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
             tracing::warn!("circuits: active-agent count failed, failing closed: {}", e);
             i64::MAX
         });
-    let mesh_active = legacy_mesh_active.saturating_add(circuit_mesh_active);
+    let retained_mesh_active =
+        db::count_retained_circuit_agent_nodes(active.run.mesh_id).unwrap_or_else(|e| {
+            tracing::warn!(
+                "circuits: retained-agent count failed, failing closed: {}",
+                e
+            );
+            i64::MAX
+        });
+    let mesh_active = legacy_mesh_active
+        .saturating_add(circuit_mesh_active)
+        .saturating_add(retained_mesh_active);
     let global_free_slots = match crate::preferences::autopilot_pool_size() {
         None => i64::MAX,
         Some(pool) => {
             let legacy_total = db::count_active_autopilot_nodes_total();
             let circuit_total = db::count_active_circuit_agent_nodes_total();
-            match (legacy_total, circuit_total) {
-                (Ok(legacy), Ok(circuits)) => {
-                    i64::from(pool).saturating_sub(legacy.saturating_add(circuits))
+            let retained_total = db::count_retained_circuit_agent_nodes_total();
+            match (legacy_total, circuit_total, retained_total) {
+                (Ok(legacy), Ok(circuits), Ok(retained)) => {
+                    i64::from(pool).saturating_sub(
+                        legacy.saturating_add(circuits).saturating_add(retained),
+                    )
                 }
-                (Err(e), _) | (_, Err(e)) => {
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                     tracing::warn!(
                         "circuits: global Autopilot pool count failed, failing closed: {}",
                         e
@@ -734,9 +950,14 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
             }
         }
     };
+    let reserved_for_run = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
+    let owned_by_run = db::count_active_circuit_agent_nodes_for_run(active.run.id).unwrap_or(0);
+    let lease_free = reserved_for_run.saturating_sub(owned_by_run);
     events.push(CircuitEvent::Tick(Capacity {
         circuit_free_slots: active.circuit_concurrency_limit - circuit_running,
-        mesh_agent_free_slots: (mesh_limit - mesh_active).min(global_free_slots),
+        mesh_agent_free_slots: (mesh_limit - mesh_active)
+            .min(global_free_slots)
+            .min(lease_free),
     }));
 
     events
@@ -1542,9 +1763,22 @@ fn schedule_circuit_initial_prompt(
     }
 }
 
+async fn run_accepts_effects_async(run_id: i64) -> bool {
+    tauri::async_runtime::spawn_blocking(move || run_accepts_effects(run_id).unwrap_or(false))
+        .await
+        .unwrap_or(false)
+}
+
+async fn abort_circuit_spawn_async(run_id: i64, node_id: i64) {
+    let _ = tauri::async_runtime::spawn_blocking(move || abort_circuit_spawn(run_id, node_id))
+        .await;
+}
+
 fn spawn_circuit_agent_in_background(
     app: &AppHandle,
+    run_id: i64,
     node_id: i64,
+    permit: CircuitSpawnPermit,
     explicit: ExplicitSpawnOverrides,
     worktree_policy: crate::agent::spawn::WorktreePolicy,
     prompt: String,
@@ -1552,6 +1786,18 @@ fn spawn_circuit_agent_in_background(
 ) {
     let app_for_spawn = app.clone();
     tauri::async_runtime::spawn(async move {
+        // Keep the permit alive until every post-launch cancellation check
+        // and compensation path has completed. Merely accepting it as an
+        // unused parameter would drop it when this function returns.
+        let _permit = permit;
+        // The node is attached before this task is queued. Re-check the
+        // durable run state inside the task as well as in the worker effect
+        // loop: cancellation may have won while the task was waiting for a
+        // runtime worker. A cancelled run must never start a new process.
+        if !run_accepts_effects_async(run_id).await {
+            abort_circuit_spawn_async(run_id, node_id).await;
+            return;
+        }
         let intent = circuit_spawn_intent(delivery, &prompt);
         if let Err(error) = crate::agent::spawn::spawn_with_intent(
             &app_for_spawn,
@@ -1561,11 +1807,53 @@ fn spawn_circuit_agent_in_background(
         )
         .await
         {
+            if !run_accepts_effects_async(run_id).await {
+                abort_circuit_spawn_async(run_id, node_id).await;
+            }
             tracing::error!("circuits: agent node {} failed: {}", node_id, error);
+            return;
+        }
+        // Cancellation can race with the process launch itself. Retire the
+        // process and clear the step association after the launch completes
+        // if the durable state flipped while the async spawn was in flight.
+        // This compensating check also handles a ledger deletion that raced
+        // before the task acquired the DB row.
+        if !run_accepts_effects_async(run_id).await {
+            abort_circuit_spawn_async(run_id, node_id).await;
+            return;
+        }
+        schedule_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
+        if !run_accepts_effects_async(run_id).await {
+            abort_circuit_spawn_async(run_id, node_id).await;
             return;
         }
         deliver_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
     });
+}
+
+/// Retire a circuit spawn that lost a cancellation/delete race. The row may
+/// already have been removed by the command layer, so process-registry cleanup
+/// is deliberately attempted even when the normal Agent Node delete cannot
+/// reload the row.
+fn abort_circuit_spawn(run_id: i64, node_id: i64) {
+    crate::agent::process::PROCESS_REGISTRY.kill_session(node_id);
+    crate::agent::process::PROCESS_REGISTRY.remove(&node_id);
+    let retired = match db::get_agent_node_by_id(node_id) {
+        Ok(_) => crate::services::agent_node::delete(node_id, true)
+            .map_err(|error| error.to_string()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    };
+    if let Err(error) = retired {
+        // Keep the step association intact: the command-side cleanup retry
+        // needs this durable owner id if an OS/worktree lock is transient.
+        tracing::warn!(
+            "circuits: could not retire aborted spawn {} for run {}: {}",
+            node_id, run_id, error
+        );
+        return;
+    }
+    let _ = db::clear_circuit_step_agent_node_by_agent_id(run_id, node_id);
 }
 
 fn spawn_step_agent(
@@ -1576,10 +1864,6 @@ fn spawn_step_agent(
     node_id: &str,
 ) -> Result<(), String> {
     use crate::agent::spawn::WorktreePolicy;
-    if !run_accepts_effects(run_id)? {
-        tracing::info!("circuits: skipped spawn for terminal/deleted run {}", run_id);
-        return Ok(());
-    }
     let kind = view
         .graph
         .node(node_id)
@@ -1661,6 +1945,9 @@ fn spawn_step_agent(
                 node_id,
                 old_node.path
             );
+            let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
+                return Ok(());
+            };
             let new_node = crate::services::agent_node::create_pending_with_worktree_override(
                 mesh_id,
                 &old_node.path,
@@ -1680,16 +1967,19 @@ fn spawn_step_agent(
                 return Err(error.to_string());
             }
 
-            if let Err(error) = db::set_circuit_step_agent_node(run_id, node_id, new_node.id) {
+            if !db::set_circuit_step_agent_node(run_id, node_id, new_node.id)
+                .map_err(|error| format!("could not attach new agent to step: {}", error))?
+            {
                 // Deletion can win the race after create_pending. If its
                 // cascade removed the run, retire the unattached node instead
                 // of leaking a process/worktree outside the circuit ledger.
                 let _ = crate::services::agent_node::delete(new_node.id, true);
-                return Err(format!("could not attach new agent to step: {}", error));
+                return Err("could not attach new agent to step: step row no longer exists".to_string());
             }
             view.attach_agent_node(node_id, new_node.id);
             if !run_accepts_effects(run_id)? {
-                let _ = crate::services::agent_node::delete(new_node.id, true);
+                view.step_mut(node_id).map(|step| step.agent_node_id = None);
+                abort_circuit_spawn(run_id, new_node.id);
                 return Ok(());
             }
             crate::autopilot::evaluator::register_circuit(new_node.id);
@@ -1698,10 +1988,11 @@ fn spawn_step_agent(
                 "node-created",
                 crate::commands::agent::NodeCreatedPayload { id: new_node.id },
             );
-            schedule_circuit_initial_prompt(app, new_node.id, &resolved_prompt, prompt_delivery);
             spawn_circuit_agent_in_background(
                 app,
+                run_id,
                 new_node.id,
+                spawn_permit,
                 explicit,
                 worktree_policy,
                 resolved_prompt,
@@ -1714,6 +2005,9 @@ fn spawn_step_agent(
     let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
         .unwrap_or_else(|_| "main".to_string());
 
+    let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
+        return Ok(());
+    };
     let node = crate::services::agent_node::create_pending_with_worktree_override(
         mesh.id,
         &mesh.path,
@@ -1734,13 +2028,16 @@ fn spawn_step_agent(
         return Err(error.to_string());
     }
 
-    if let Err(error) = db::set_circuit_step_agent_node(run_id, node_id, node.id) {
+    if !db::set_circuit_step_agent_node(run_id, node_id, node.id)
+        .map_err(|error| format!("could not attach agent to step: {}", error))?
+    {
         let _ = crate::services::agent_node::delete(node.id, true);
-        return Err(format!("could not attach agent to step: {}", error));
+        return Err("could not attach agent to step: step row no longer exists".to_string());
     }
     view.attach_agent_node(node_id, node.id);
     if !run_accepts_effects(run_id)? {
-        let _ = crate::services::agent_node::delete(node.id, true);
+        view.step_mut(node_id).map(|step| step.agent_node_id = None);
+        abort_circuit_spawn(run_id, node.id);
         return Ok(());
     }
 
@@ -1760,8 +2057,6 @@ fn spawn_step_agent(
         node_id
     );
 
-    schedule_circuit_initial_prompt(app, node.id, &resolved_prompt, prompt_delivery);
-
     // Stage-2 in the background — same two-stage contract as every
     // other spawn path. An empty prompt starts fresh; a non-empty prompt
     // uses prefill when supported and otherwise is injected after spawn.
@@ -1769,7 +2064,9 @@ fn spawn_step_agent(
     // layer through to `spawn_with_intent`, where capability masking occurs.
     spawn_circuit_agent_in_background(
         app,
+        run_id,
         node.id,
+        spawn_permit,
         explicit,
         worktree_policy,
         resolved_prompt,
@@ -2246,6 +2543,26 @@ mod tests {
         let run = active_row_with_state(1, 2, "running");
         let mesh = zero_test_mesh();
         assert!(may_admit_run(&run, &mesh));
+    }
+
+    #[test]
+    fn agent_reservation_keeps_the_host_cap_hard_for_downstream_spawns() {
+        let mesh = crate::models::Mesh {
+            autopilot_concurrency_limit: 2,
+            ..zero_test_mesh()
+        };
+
+        // A two-agent blueprint can claim both mesh slots when no other
+        // process or run lease is using them.
+        assert!(agent_reservation_fits(&mesh, 2, 0, 0, 0, 0, Some(2)));
+        // A peer run's reservation consumes capacity even before its second
+        // process has been created, so retained agents cannot fan out past
+        // the configured host limit.
+        assert!(!agent_reservation_fits(&mesh, 2, 1, 0, 0, 0, Some(2)));
+        assert!(!agent_reservation_fits(&mesh, 1, 0, 1, 0, 0, Some(1)));
+        // Legacy (non-circuit) agents remain part of both host and global
+        // accounting while leases cover circuit agents.
+        assert!(!agent_reservation_fits(&mesh, 1, 0, 0, 2, 0, Some(2)));
     }
 
     /// Test helper: an `ActiveCircuitRun` with only `mesh_id`, `id`,

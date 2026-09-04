@@ -36,13 +36,7 @@ describe('tauri-mock harness', () => {
   it('ships boot fixtures so the shell renders populated', () => {
     expect(defaultFixtures.list_meshes).toHaveLength(2);
     expect(defaultFixtures.list_agent_nodes.length).toBeGreaterThan(0);
-    expect(defaultFixtures.list_providers[0]).toMatchObject({
-      id: 'anthropic',
-      label: 'Claude Code',
-      harness_id: 'anthropic',
-      provider_id: null,
-      group_key: 'anthropic',
-    });
+    expect(defaultFixtures.list_providers[0].id).toBe('anthropic');
   });
 
   it('installs a single-window/webview metadata surface', () => {

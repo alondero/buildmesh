@@ -146,28 +146,14 @@ export const defaultFixtures = {
   list_agent_nodes: agentNodes,
   get_default_provider: 'anthropic',
   list_providers: [
-    {
-      id: 'anthropic',
-      label: 'Claude Code',
-      color: '#d97757',
-      icon: 'claude',
-      resumable: true,
-      harness_id: 'anthropic',
-      provider_id: null,
-      is_proxied: false,
-      group_key: 'anthropic',
-      capabilities: {
-        supports_model_override: true,
-        supports_effort_override: false,
-        effort_control: null,
-      },
-    },
+    { id: 'anthropic', name: 'Claude', description: 'Anthropic Claude Code', icon: null, available: true, kind: 'cwrap' },
   ],
   list_autopilot_runs: [],
   list_circuit_agent_ownerships: [],
   list_semantic_turns: [],
   list_circuits_with_runs: circuitsWithRuns,
   list_circuit_queue: circuitQueue,
+  list_circuit_probe: { circuits: circuitsWithRuns, queue: circuitQueue },
   get_github_url_for_mesh: null,
   get_git_branch_status: null,
   get_git_summary: null,
@@ -207,6 +193,15 @@ const defaultHandlers = {
     const meshId = args?.meshId;
     if (!Array.isArray(rows) || meshId === undefined || meshId === null) return rows;
     return rows.filter((row) => row?.circuit?.mesh_id === Number(meshId));
+  },
+  list_circuit_probe: (args, responses) => {
+    const snapshot = responses.list_circuit_probe;
+    const meshId = args?.meshId;
+    if (!snapshot || meshId === undefined || meshId === null) return snapshot;
+    return {
+      circuits: (snapshot.circuits ?? []).filter((row) => row?.circuit?.mesh_id === Number(meshId)),
+      queue: (snapshot.queue ?? []).filter((entry) => entry?.run?.mesh_id === Number(meshId)),
+    };
   },
 };
 

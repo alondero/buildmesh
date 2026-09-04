@@ -113,6 +113,43 @@ pub struct CircuitWithRuns {
     pub runs: Vec<CircuitRunDetail>,
 }
 
+/// The complete Circuits Probe hydration payload. Keeping the ledger and the
+/// mesh queue in one response preserves the Probe's single-IPC load contract
+/// while retaining the standalone commands for older clients.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitProbeSnapshot.ts")]
+pub struct CircuitProbeSnapshot {
+    pub circuits: Vec<CircuitWithRuns>,
+    pub queue: Vec<CircuitQueueEntry>,
+}
+
+fn map_circuit_rows(
+    rows: Vec<(crate::models::AutopilotCircuit, Vec<crate::db::CircuitRunLedger>)>,
+) -> Vec<CircuitWithRuns> {
+    rows.into_iter()
+        .map(|(circuit, ledgers)| CircuitWithRuns {
+            circuit,
+            runs: ledgers
+                .into_iter()
+                .map(|ledger| CircuitRunDetail { run: ledger.run, steps: ledger.steps })
+                .collect(),
+        })
+        .collect()
+}
+
+fn map_queue_rows(
+    rows: Vec<(crate::models::AutopilotCircuitRun, String)>,
+) -> Vec<CircuitQueueEntry> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, (run, circuit_name))| CircuitQueueEntry {
+            run,
+            circuit_name,
+            queue_rank: index as i64 + 1,
+        })
+        .collect()
+}
+
 /// Batched single-IPC load for the Circuits Probe tab: every circuit on the
 /// mesh with every running/paused run and up to `limit` newest terminal runs
 /// (steps included), one command instead of N+1 round-trips. Pending runs are
@@ -124,34 +161,28 @@ pub fn list_circuits_with_runs(
 ) -> Result<Vec<CircuitWithRuns>, String> {
     let limit = limit.unwrap_or(10).clamp(1, 100);
     crate::db::list_circuits_with_recent_runs(mesh_id, limit)
-        .map(|rows| {
-            rows.into_iter()
-                .map(|(circuit, ledgers)| CircuitWithRuns {
-                    circuit,
-                    runs: ledgers
-                        .into_iter()
-                        .map(|l| CircuitRunDetail { run: l.run, steps: l.steps })
-                        .collect(),
-                })
-                .collect()
-        })
+        .map(map_circuit_rows)
         .map_err(|e| e.to_string())
 }
 
 #[command]
 pub fn list_circuit_queue(mesh_id: i64) -> Result<Vec<CircuitQueueEntry>, String> {
     crate::db::list_queued_circuit_runs(mesh_id)
-        .map(|rows| {
-            rows.into_iter()
-                .enumerate()
-                .map(|(index, (run, circuit_name))| CircuitQueueEntry {
-                    run,
-                    circuit_name,
-                    queue_rank: index as i64 + 1,
-                })
-                .collect()
-        })
+        .map(map_queue_rows)
         .map_err(|error| error.to_string())
+}
+
+#[command]
+pub fn list_circuit_probe(
+    mesh_id: i64,
+    limit: Option<i64>,
+) -> Result<CircuitProbeSnapshot, String> {
+    let limit = limit.unwrap_or(10).clamp(1, 100);
+    let (circuits, queue) = crate::db::list_circuit_probe(mesh_id, limit)
+        .map_err(|e| e.to_string())?;
+    let circuits = map_circuit_rows(circuits);
+    let queue = map_queue_rows(queue);
+    Ok(CircuitProbeSnapshot { circuits, queue })
 }
 
 /// Create a circuit with the canonical blueprint.
@@ -306,8 +337,9 @@ fn retire_cancelled_agents(agent_ids: Vec<i64>) -> Result<(), String> {
     })
 }
 
-fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
+fn cancel_run_and_cleanup_inner(app: &AppHandle, run_id: i64) -> Result<(), String> {
     let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(|error| error.to_string())?;
+    crate::services::circuit_worker::wake_circuit_worker();
     let cleanup = retire_cancelled_agents(agent_ids);
     let state = crate::db::get_circuit_run(run_id)
         .map_err(|error| error.to_string())?
@@ -318,6 +350,23 @@ fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
         crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id, state },
     );
     cleanup
+}
+
+fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
+    match crate::services::circuit_worker::with_circuit_run_spawns_quiesced(run_id, || {
+        cancel_run_and_cleanup_inner(app, run_id)
+    }) {
+        Ok(result) => result,
+        Err(wait_error) => {
+            // Stop future effects even if a stage-2 spawn exceeded the
+            // quiescence window. The spawn's post-launch compensation will
+            // retire itself; retaining the terminal ledger makes a retry
+            // possible if that OS cleanup is transiently locked.
+            let _ = crate::db::cancel_circuit_run(run_id);
+            crate::services::circuit_worker::wake_circuit_worker();
+            Err(wait_error)
+        }
+    }
 }
 
 #[command]
@@ -348,12 +397,49 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
     // pass that already loaded this circuit.
     crate::db::set_autopilot_circuit_enabled(circuit_id, false)
         .map_err(|error| error.to_string())?;
-    let run_ids = crate::db::list_circuit_run_ids_for_cleanup(circuit_id)
-        .map_err(|error| error.to_string())?;
-    for run_id in run_ids {
-        cancel_run_and_cleanup(&app, run_id)?;
+    let result = crate::services::circuit_worker::with_circuit_spawns_quiesced(circuit_id, || {
+        let run_ids = crate::db::list_circuit_run_ids_for_cleanup(circuit_id)
+            .map_err(|error| error.to_string())?;
+        let mut cleanup_errors = Vec::new();
+        for run_id in run_ids {
+            if let Err(error) = cancel_run_and_cleanup_inner(&app, run_id) {
+                cleanup_errors.push(format!("run {}: {}", run_id, error));
+            }
+        }
+        // Keep the ledger as the retry anchor when any external retirement
+        // fails. Deleting it here would erase the agent IDs needed by a
+        // subsequent retry and could orphan a retained PTY/worktree
+        // permanently. The circuit is already disabled and every run has
+        // been terminalised, so retrying is safe and exhaustive.
+        if !cleanup_errors.is_empty() {
+            return Err(format!(
+                "circuit cleanup incomplete; ledger retained for retry: {}",
+                cleanup_errors.join("; ")
+            ));
+        }
+        // Ledger deletion stays inside the barrier: a worker pass that had
+        // already loaded this circuit cannot begin a late stage-1 spawn after
+        // the final cleanup snapshot.
+        crate::db::delete_autopilot_circuit(circuit_id).map_err(|e| e.to_string())
+    });
+    match result {
+        Ok(result) => result,
+        Err(wait_error) => {
+            // Terminalise every known run even when a spawn refuses to quiesce
+            // within the bounded wait. Keep the disabled ledger for the next
+            // retry, which will re-snapshot all attached agents.
+            if let Ok(run_ids) = crate::db::list_circuit_run_ids_for_cleanup(circuit_id) {
+                for run_id in run_ids {
+                    let _ = crate::db::cancel_circuit_run(run_id);
+                }
+            }
+            crate::services::circuit_worker::wake_circuit_worker();
+            Err(format!(
+                "circuit cleanup incomplete; ledger retained for retry: {}",
+                wait_error
+            ))
+        }
     }
-    crate::db::delete_autopilot_circuit(circuit_id).map_err(|e| e.to_string())
 }
 
 /// Trigger Now: mint a fresh `pending` run with a `manual:<unix-ms>`

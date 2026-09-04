@@ -242,6 +242,9 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     assert!(spawn_step.completed_at.is_none(), "non-terminal step has no completed_at");
     assert_eq!(spawn_step.attempt, 1);
 
+    // A stale worker association is a harmless no-op, not a rusqlite
+    // QueryReturnedNoRows sentinel from an UPDATE with zero matches.
+    assert!(!set_circuit_step_agent_node(run_id, "missing", 899).unwrap());
     // Attach the spawned agent node, then finish the step.
     set_circuit_step_agent_node(run_id, "spawn", 900).unwrap();
     commit_circuit_advance(
@@ -363,8 +366,8 @@ fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
         None,
         &[CircuitStepOp {
             node_id: "spawn".into(),
-            status: "completed".into(),
-            outcome: Some(Some("completed".into())),
+            status: "running".into(),
+            outcome: None,
             error: None,
             agent_node_id: Some(991),
             attempt: 1,
@@ -373,10 +376,17 @@ fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
     )
     .unwrap();
 
+    assert!(reserve_circuit_agent_slots(run_id, 2).unwrap());
+    assert_eq!(circuit_agent_slots_reserved(run_id).unwrap(), 2);
+
     let agents = cancel_circuit_run(run_id).unwrap();
     assert_eq!(agents, vec![991]);
     assert_eq!(get_circuit_run(run_id).unwrap().unwrap().state, "cancelled");
+    let cancelled_step = list_circuit_run_steps(run_id).unwrap();
+    assert_eq!(cancelled_step[0].status, "cancelled");
+    assert_eq!(cancelled_step[0].outcome.as_deref(), Some("cancelled"));
     assert_eq!(count_active_circuit_runs(mesh.id).unwrap(), 0);
+    assert_eq!(circuit_agent_slots_reserved(run_id).unwrap(), 0);
     assert_eq!(
         cancel_circuit_run(run_id).unwrap(),
         vec![991],
@@ -469,6 +479,17 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
     .unwrap();
     set_circuit_step_agent_node(run_id, "spawn", agent.id).unwrap();
 
+    assert_eq!(count_active_circuit_agent_nodes(mesh.id).unwrap(), 1);
+    assert_eq!(count_active_circuit_agent_nodes_total().unwrap(), 1);
+    commit_circuit_advance(run_id, Some("completed"), None, &[]).unwrap();
+    assert_eq!(count_active_circuit_agent_nodes(mesh.id).unwrap(), 0);
+    assert_eq!(
+        count_retained_circuit_agent_nodes(mesh.id).unwrap(),
+        1,
+        "terminal runs still account for retained agent processes"
+    );
+    assert_eq!(count_retained_circuit_agent_nodes_total().unwrap(), 1);
+
     assert_eq!(
         list_circuit_agent_ownerships().unwrap(),
         vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string())]
@@ -482,6 +503,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
             .all(|(owned_agent_id, ..)| *owned_agent_id != agent.id),
         "clearing this step removes this agent's ownership without assuming other parallel tests are idle"
     );
+    assert_eq!(count_retained_circuit_agent_nodes(mesh.id).unwrap(), 0);
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -991,7 +1013,7 @@ fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn evolve_to_v34_creates_the_three_circuit_tables_from_a_v33_db() {
+fn evolve_to_v34_creates_circuit_tables_and_queue_index_from_a_v33_db() {
     let conn = Connection::open_in_memory().unwrap();
     // Hand-rolled v33-shape DB: app_settings pinned at version 33 plus
     // just enough of meshes for the column walk to find its tables. No
@@ -1018,6 +1040,7 @@ fn evolve_to_v34_creates_the_three_circuit_tables_from_a_v33_db() {
         "autopilot_circuits",
         "autopilot_circuit_runs",
         "autopilot_circuit_run_steps",
+        "autopilot_circuit_run_agent_leases",
     ] {
         let present: bool = conn
             .query_row(
@@ -1026,7 +1049,7 @@ fn evolve_to_v34_creates_the_three_circuit_tables_from_a_v33_db() {
                 |row| row.get::<_, i64>(0).map(|c| c > 0),
             )
             .unwrap();
-        assert!(present, "table {table} must exist after evolve_to(34)");
+        assert!(present, "table {table} must exist after schema evolution");
     }
 
     // The UNIQUE(run_id, node_id) constraint is load-bearing for the
@@ -1052,6 +1075,15 @@ fn evolve_to_v34_creates_the_three_circuit_tables_from_a_v33_db() {
         dupes_rejected,
         "a second (run_id, node_id) row must violate the UNIQUE constraint"
     );
+
+    let queue_index: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_circuit_runs_mesh_queue'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap();
+    assert!(queue_index, "queue ordering must have a composite mesh/state/position index");
 
     // Idempotent: re-running the migration must not error or duplicate.
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();

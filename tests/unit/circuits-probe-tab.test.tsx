@@ -27,6 +27,7 @@ import { openProbeDestination } from './helpers/openProbeDestination';
 import {
   listCircuitsWithRuns,
   listCircuitQueue,
+  listCircuitProbe,
   createCircuit,
   setCircuitEnabled,
   deleteCircuit,
@@ -133,6 +134,15 @@ function mockBackend(overrides: {
     if (cmd === 'list_circuits') return Promise.resolve(circuits);
     if (cmd === 'list_circuit_runs') return Promise.resolve(runs);
     if (cmd === 'list_circuit_queue') return Promise.resolve(queue);
+    if (cmd === 'list_circuit_probe') {
+      return Promise.resolve({
+        circuits: circuits.map((circuit) => ({
+          circuit,
+          runs: runs.filter((r) => r.run.circuit_id === circuit.id),
+        })),
+        queue,
+      });
+    }
     if (cmd === 'list_circuits_with_runs') {
       return Promise.resolve(
         circuits.map((circuit) => ({
@@ -187,9 +197,8 @@ describe('CircuitsProbeTab', () => {
     expect(screen.getByTestId('run-card-11').getAttribute('data-run-state')).toBe('completed');
     // Steps are a vertical timeline, not a joined one-line string (#1468).
     expect(screen.queryByText(/trigger:completed/)).toBeNull();
-    // The ledger and complete mesh queue load together.
-    expect(invoke).toHaveBeenCalledWith('list_circuits_with_runs', { meshId: 42, limit: 10 });
-    expect(invoke).toHaveBeenCalledWith('list_circuit_queue', { meshId: 42 });
+    // The ledger and complete mesh queue load through one IPC payload.
+    expect(invoke).toHaveBeenCalledWith('list_circuit_probe', { meshId: 42, limit: 10 });
   });
 
   it('New Circuit creates the skeleton and opens the canvas editor (#1209)', async () => {
@@ -792,6 +801,9 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
 
     await listCircuitQueue(42);
     expect(invoke).toHaveBeenLastCalledWith('list_circuit_queue', { meshId: 42 });
+
+    await listCircuitProbe(42, 10);
+    expect(invoke).toHaveBeenLastCalledWith('list_circuit_probe', { meshId: 42, limit: 10 });
 
     await createCircuit(42, 'n', 'd', 2, 'p');
     expect(invoke).toHaveBeenLastCalledWith('create_circuit', {

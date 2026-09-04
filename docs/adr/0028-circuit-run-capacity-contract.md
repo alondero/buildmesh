@@ -20,13 +20,12 @@ defined `autopilot_concurrency_limit` as a per-mesh agent cap. Issue #1467
 is that "multi-run scheduler milestone".
 
 A circuit run is a graph of nodes (spawn / inject / notify / gate / close).
-The legacy mesh agent budget admits a run's first `SpawnAgentNode`; after
-admission, the circuit's own running-step budget governs its downstream
-agent fan-out. Review blueprints (issue-driven Autopilot review) keep the
-implementation agent attached throughout the PR-review cycle so it can
-receive targeted feedback. Treating each retained agent as a new admission
-charge lets two overlapping review runs saturate the legacy budget with
-implementation agents alone, leaving no room for either reviewer spawn.
+Admission and agent leases are separate concepts. Before a run crosses the
+admission boundary, the worker reserves the number of `SpawnAgentNode`s in its
+durable blueprint. Every spawn then consumes a slot from that lease and the
+legacy mesh/global process limits remain hard backstops. This prevents a
+retained implementation agent from being mistaken for run authorization while
+also preventing a peer run from stealing capacity needed by a reviewer.
 
 The `autopilot_circuits.concurrency_limit` column, currently defaulting
 to 1, is a **per-circuit running-step budget**, not a run cap. It bounds
@@ -88,7 +87,7 @@ table is needed. The worker has a mesh-id cache so a mesh with N
 pending runs but only 1 row read is the common case.
 
 **Fairness.** Pending runs carry a persisted, per-mesh `queue_position`
-(schema v37). `db::list_active_circuit_runs()` orders pending rows by that
+(schema v38). `db::list_active_circuit_runs()` orders pending rows by that
 position, then id, so insertion is FIFO until a user explicitly moves a run
 up or down. A later implementation run cannot starve an earlier reviewer
 step because:
@@ -101,15 +100,10 @@ resume continues cleanly, matching the pre-existing
 
 **Backward compatibility.** `meshes.autopilot_concurrency_limit` is
 UNCHANGED. The legacy Autopilot poller (`services::autopilot.rs:326`)
-keeps reading it via `effective_capacity`. For Circuits, the worker uses it
-as a first-agent admission backstop: a run with no attached Agent Node needs
-a free mesh agent slot before its first spawn, while a run that already owns
-an agent may fan out under the circuit running-step budget. Counting every
-retained agent against every later spawn recreates the deadlock this ADR is
-meant to remove: two retained implementers fill both mesh slots, so neither
-run can spawn its reviewer. The
-breakdown is documented in `docs/knowledge-primer.md`'s Autopilot
-section so future contributors don't re-merge the two semantics.
+keeps reading it via `effective_capacity`. Circuit runs use a durable
+blueprint-wide lease as well as that hard process cap; no downstream spawn is
+exempt merely because another step has an attached agent. If the host cap
+cannot satisfy a run's declared lease, the run remains pending in the queue.
 
 **Single-release idempotency** lives at the canonical state-change
 site — `db::commit_circuit_advance`'s run-state branch. When `run_state`
@@ -145,13 +139,13 @@ can't clobber the user's autopilot policy.
 
 ## Consequences
 
-- Two-overlap PR-review flows (the deadlock scenario) no longer park
-  reviewer steps in `pending_slot` indefinitely. With
-  `circuit_run_capacity = 2`, two PR-review runs can each spawn their
-  implementation + reviewer agents without reviewer admission depending
-  on the other run's agent-node count.
-- The mesh agent limit gates a Circuit Run's first Agent Node, not every
-  later fan-out step. Per-circuit running-step capacity still bounds fan-out.
+- PR-review flows no longer park reviewer steps behind retained implementers.
+  A run reserves its complete declared agent footprint before starting, and
+  every spawn remains subject to the host process cap. If two runs together
+  cannot fit that cap, the later run stays pending rather than deadlocking
+  after partial admission.
+- The mesh agent limit remains a hard process-safety backstop for every agent;
+  the per-circuit running-step capacity separately bounds graph fan-out.
 - A third run on the same mesh is held at the circuit-run boundary
   while two are admitted. It stays `pending` and is admitted in persisted
   queue order when the first run reaches a terminal state; the Probe can
@@ -159,6 +153,10 @@ can't clobber the user's autopilot policy.
 - Capacity is released exactly once when a run reaches a terminal
   state (including failure and crash-recovery paths through
   `release_circuit_run`).
+- Cancellation and circuit deletion quiesce in-flight two-stage spawns under
+  the worker barrier. An aborted spawn keeps its step ownership until process
+  and worktree retirement succeeds, so a transient OS cleanup failure leaves
+  a retryable ledger instead of an orphaned agent.
 - `pending_slot` retains its existing vocabulary meaning — a *step*
   status, not a *run* status. A *run* sitting at the run-admission
   gate has its `state = 'pending'` (the row's state column, NOT

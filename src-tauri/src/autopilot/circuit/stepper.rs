@@ -19,14 +19,14 @@
 //!   whose fan-in rule is satisfied by ANY completed parent. Trigger
 //!   roots have no incoming edges.
 //! - Triggers auto-complete at run start — they fired to create the run.
-//! - A run's first `SpawnAgentNode` needs BOTH a free per-circuit step slot
-//!   and a free mesh agent slot; otherwise the step parks in `Queued`
-//!   (`pending_slot` in the ledger) and promotes FIFO by insertion order
-//!   on a later `Tick`. Once that admitted run owns an agent, downstream
-//!   fan-out (notably its reviewer) is governed by the circuit step budget
-//!   rather than blocked behind retained agents from peer runs. Non-agent
-//!   steps never wait on agent slots (they still respect the per-circuit
-//!   limit). Known milestone-1 scope note:
+//! - Every `SpawnAgentNode` needs BOTH a free per-circuit step slot and a
+//!   free slot in its run's durable agent lease; otherwise the step parks in
+//!   `Queued` (`pending_slot` in the ledger) and promotes FIFO on a later
+//!   `Tick`. The worker reserves the blueprint's declared spawn slots before
+//!   admitting a run, so retained agents never bypass the host safety cap and
+//!   peer runs cannot steal capacity needed by a downstream reviewer. Non-
+//!   agent steps never wait on agent slots (they still respect the per-
+//!   circuit limit). Known milestone-1 scope note:
 //!   FIFO ordering is per-run — cross-run ordering on one circuit is
 //!   tick order until the multi-run scheduler milestone.
 //! - `InjectPty` waits for `AgentReady` (the spawned agent's process is
@@ -364,8 +364,8 @@ fn spawn_node_for_agent(run: &RunView, classifier_node_id: &str) -> Option<Strin
 pub struct Capacity {
     /// Free per-circuit step slots (`concurrency_limit - running steps`).
     pub circuit_free_slots: i64,
-    /// Free mesh-wide auto-spawned-agent slots
-    /// (`meshes.autopilot_concurrency_limit - active circuit agents`).
+    /// Free slots in this run's durable agent lease, additionally bounded by
+    /// the mesh/global process safety counters.
     pub mesh_agent_free_slots: i64,
 }
 
@@ -1177,7 +1177,7 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
             if run.state != RunState::Running {
                 break;
             }
-            let needs_agent_slot = requires_mesh_agent_admission(run, &node_id, &kind);
+            let needs_agent_slot = consumes_agent_slot(&kind);
             let agent_fits = !needs_agent_slot || mesh_agent_free > 0;
             if circuit_free <= 0 || !agent_fits {
                 set_step(run, t, &node_id, StepStatus::Queued);
@@ -1236,20 +1236,6 @@ fn collect_eligible(run: &RunView) -> Vec<(String, CircuitNodeKind)> {
         .collect()
 }
 
-/// The legacy mesh agent budget is an admission backstop for a Circuit Run,
-/// not a charge on every agent the admitted graph later needs. An attached
-/// agent on this step is a retry; an agent on any other step proves that the
-/// run has already crossed the admission boundary.
-fn requires_mesh_agent_admission(
-    run: &RunView,
-    node_id: &str,
-    kind: &CircuitNodeKind,
-) -> bool {
-    consumes_agent_slot(kind)
-        && run.step(node_id).and_then(|step| step.agent_node_id).is_none()
-        && !run.steps.iter().any(|step| step.agent_node_id.is_some())
-}
-
 /// Attempt FIFO promotion of one queued step. Returns true when the step
 /// left the queue.
 fn try_start(
@@ -1260,7 +1246,7 @@ fn try_start(
     circuit_free: &mut i64,
     mesh_agent_free: &mut i64,
 ) -> bool {
-    let needs_agent_slot = requires_mesh_agent_admission(run, node_id, kind);
+    let needs_agent_slot = consumes_agent_slot(kind);
     let agent_fits = !needs_agent_slot || *mesh_agent_free > 0;
     if *circuit_free <= 0 || !agent_fits {
         return false;
@@ -3699,11 +3685,11 @@ mod tests {
             );
         }
 
-        // Both admitted runs see zero free legacy agent slots because their
-        // implementation agents are retained. Each must still fan out to its
-        // reviewer; the run-admission test pins the third run at the boundary.
+        // Each run receives the remaining slot from its durable lease. The
+        // worker reserves the complete blueprint before admission, so peer
+        // runs cannot consume capacity needed by this reviewer.
         for run in &mut runs {
-            let transition = advance(run, &tick(8, 0));
+            let transition = advance(run, &tick(8, 1));
             assert_eq!(status_of(run, "reviewer"), StepStatus::Running);
             assert_eq!(
                 transition.effects,

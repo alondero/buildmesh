@@ -560,7 +560,8 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
         CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
 
         -- Autopilot Circuits (spec #1205 / walking skeleton #1206, schema
-        -- v34). Three tables:
+        -- v34/v38). The three ledger tables plus a durable run-agent lease
+        -- table and the composite queue index:
         --   * autopilot_circuits — the blueprint rows. `graph_json` holds
         --     the serialised Graph Blueprint AST (see
         --     autopilot::circuit::model); no per-node-kind migration — the
@@ -576,8 +577,11 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
         --     state. UNIQUE (run_id, node_id) backs the engine's upsert
         --     commit (`db::circuit::commit_circuit_advance`).
         --     `status = 'pending_slot'` marks a step parked on a
-        --     concurrency/agent-slot limit; it promotes FIFO by id when
-        --     slots free up.
+        --     concurrency/agent-slot limit; it promotes by queue_position
+        --     when slots free up.
+        --   * autopilot_circuit_run_agent_leases — one durable reservation
+        --     per live run; its slots keep host-cap accounting independent
+        --     of transient step/agent associations.
         CREATE TABLE IF NOT EXISTS autopilot_circuits (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
@@ -605,6 +609,13 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
+        CREATE INDEX IF NOT EXISTS idx_circuit_runs_mesh_queue ON autopilot_circuit_runs(mesh_id, state, queue_position);
+
+        CREATE TABLE IF NOT EXISTS autopilot_circuit_run_agent_leases (
+            run_id INTEGER PRIMARY KEY REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            slots INTEGER NOT NULL CHECK (slots > 0),
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
 
         CREATE TABLE IF NOT EXISTS autopilot_circuit_run_steps (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

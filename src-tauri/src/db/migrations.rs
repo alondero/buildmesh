@@ -129,6 +129,8 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// `autopilot_circuit_runs.queue_position`, backfilled from the run id so
 /// existing FIFO order is preserved. New runs append within their mesh and
 /// pending rows can swap positions through the queue controls.
+/// The queue column is v38 because v37 is occupied by worktree-directory
+/// configuration in the current schema.
 pub(crate) const SCHEMA_VERSION: u32 = 38;
 
 // ---------------------------------------------------------------------------
@@ -260,8 +262,8 @@ pub(crate) enum AlwaysStep {
     /// build that didn't yet include the inline CREATE. Idempotent
     /// via `IF NOT EXISTS`.
     EnsureWarmWorktreesTable,
-    /// CREATE TABLE IF NOT EXISTS for the three Autopilot Circuits
-    /// ledger tables (v34, spec #1205). Same rationale as
+    /// CREATE TABLE IF NOT EXISTS for the Autopilot Circuits ledger tables,
+    /// the v38 queue index, and durable agent leases (spec #1205). Same rationale as
     /// [`AlwaysStep::EnsureWarmWorktreesTable`]: fresh DBs get them from
     /// the inline CREATE in `init()`; this safety net covers any DB that
     /// reached v34+ without them. Idempotent via `IF NOT EXISTS`.
@@ -453,7 +455,7 @@ const SPECS: &[ColumnSpec] = &[
     // ============================================================
     // autopilot_circuit_runs
     // ============================================================
-    // v37: global per-mesh Circuit Run queue order. Kept off the run wire
+    // v38: global per-mesh Circuit Run queue order. Kept off the run wire
     // model: the queue DTO exposes a 1-based rank instead of this storage key.
     ColumnSpec { version: 38, table: "autopilot_circuit_runs", column: "queue_position", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
 
@@ -893,9 +895,12 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             )?;
         }
         AlwaysStep::EnsureAutopilotCircuitsTables => {
-            // v34 — Autopilot Circuits ledger (spec #1205). Mirrors the
-            // inline CREATE in `db::init` verbatim; see that comment for
-            // the column semantics.
+            // v34/v38 — Autopilot Circuits ledger (spec #1205) plus the
+            // queue index and durable agent-lease table. Mirrors the inline
+            // CREATE in `db::init` verbatim; see that comment for the column
+            // semantics. Keeping these idempotent safety nets here upgrades
+            // databases whose version flag already passed the original
+            // circuit migration.
             conn.execute_batch(
                 "
                 CREATE TABLE IF NOT EXISTS autopilot_circuits (
@@ -925,6 +930,13 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
                 CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
+                CREATE INDEX IF NOT EXISTS idx_circuit_runs_mesh_queue ON autopilot_circuit_runs(mesh_id, state, queue_position);
+
+                CREATE TABLE IF NOT EXISTS autopilot_circuit_run_agent_leases (
+                    run_id INTEGER PRIMARY KEY REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+                    slots INTEGER NOT NULL CHECK (slots > 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
 
                 CREATE TABLE IF NOT EXISTS autopilot_circuit_run_steps (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
