@@ -11,7 +11,7 @@
  *   - Failures keep the menu open with the error, which survives
  *     close/reopen until the next merge attempt.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const { openUrlMock, mergePrMock, invalidateMock } = vi.hoisted(() => ({
@@ -54,17 +54,11 @@ function armConfirm() {
 
 describe('PrPill merge menu', () => {
   beforeEach(() => {
-    vi.stubGlobal('ResizeObserver', class {
-      observe() {}
-      disconnect() {}
-    });
     openUrlMock.mockClear();
     mergePrMock.mockClear();
     mergePrMock.mockResolvedValue('Merged');
     invalidateMock.mockClear();
   });
-
-  afterEach(() => vi.unstubAllGlobals());
 
   it('keeps the menu outside the clipping title and treats portaled clicks as inside', () => {
     const { container } = render(
