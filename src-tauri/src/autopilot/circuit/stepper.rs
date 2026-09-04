@@ -1658,7 +1658,16 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
     }
     let any_completed = run.steps.iter().any(|s| s.status == StepStatus::Completed);
     let has_eligible = !collect_eligible(run).is_empty();
-    if any_completed && !has_eligible {
+    // AgentReady transitions complete an InjectPty step and may cascade
+    // instant successors, but their PTY write still has to execute while
+    // the durable run is active. Defer the final run-state write until the
+    // next tick so execute_effects cannot mistake the injection for a stale
+    // post-completion command. Other terminal effects remain safe to run on
+    // the same completing transition.
+    let has_pending_injection = t.effects.iter().any(|effect| {
+        matches!(effect, Effect::InjectPty { .. })
+    });
+    if any_completed && !has_eligible && !has_pending_injection {
         run.state = RunState::Completed;
         t.run_state_changed = true;
     }
@@ -1928,6 +1937,13 @@ mod tests {
         );
         assert_eq!(status_of(&run, "inject"), StepStatus::Completed);
         assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Running, "PTY injection must execute before terminalising the run");
+
+        // The next worker tick observes that the injection transition has
+        // no remaining work and records the terminal run state. No PTY
+        // effect is emitted from this completion-only transition.
+        let completion = advance(&mut run, &tick(1, 1));
+        assert!(completion.effects.is_empty());
         assert_eq!(run.state, RunState::Completed);
     }
 
