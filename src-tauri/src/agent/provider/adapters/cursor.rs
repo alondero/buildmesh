@@ -93,16 +93,26 @@ const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
 /// best-effort telemetry — it must never fail-block the agent. Same
 /// shape as `agent::spawn::process::hook_command` (issue #878, line
 /// 101: `... || true`).
+///
+/// Round-3 review (PR #1511, issue #1368): Windows cmd syntax is
+/// ONLY correct when the *target* runtime is Windows — and
+/// `EnvType::Windows` is the default for native macOS and Linux
+/// projects too (`host_path.rs:295-303` defaults non-WSL native
+/// paths to `EnvType::Windows`). A naive `match env_type` would
+/// write `curl.exe`/`%VAR%`/`>nul` into `.cursor/hooks.json` on
+/// macOS and Linux, where `curl.exe` doesn't exist, POSIX shells
+/// don't expand `%VAR%`, and `>nul` creates literal files named
+/// `nul` and `2>nul` in the user's project. Gate cmd syntax on
+/// `cfg!(target_os = "windows") && env_type == EnvType::Windows`
+/// (cross-compile safe — the `cfg!` is the *target* triple) so a
+/// macOS or Linux build never emits cmd syntax.
 fn hook_command(env_type: EnvType) -> String {
-    match env_type {
-        EnvType::Windows => {
-            "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul || exit 0"
-                .to_string()
-        }
-        EnvType::Wsl => {
-            "curl -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID >/dev/null 2>/dev/null || true"
-                .to_string()
-        }
+    if cfg!(target_os = "windows") && env_type == EnvType::Windows {
+        "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul || exit 0"
+            .to_string()
+    } else {
+        "curl -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID >/dev/null 2>/dev/null || true"
+            .to_string()
     }
 }
 
@@ -956,26 +966,39 @@ mod tests {
         project.to_string_lossy().into_owned()
     }
 
-    /// The Windows hook command uses cmd environment syntax (`%VAR%`)
-    /// and is a bare command because Cursor supplies the shell. Unix
-    /// uses `$VAR` syntax and likewise does not add a nested shell
-    /// wrapper. The Windows command must end in `|| exit 0`; the
-    /// Unix command must end in `|| true` (round-2 review, point 5).
+    /// The hook-command syntax follows the host target, not just the
+    /// `EnvType`. Round-3 review (PR #1511): `EnvType::Windows` is
+    /// the default for native macOS and Linux projects too
+    /// (`host_path.rs:295-303`), so a `match env_type { Windows => …,
+    /// Wsl => … }` writes cmd syntax on Mac/Linux, where `curl.exe`
+    /// doesn't exist and POSIX shells don't expand `%VAR%`. Gate cmd
+    /// syntax on `cfg!(target_os = "windows") && env_type ==
+    /// EnvType::Windows` (round-3 fix); the WSL path stays POSIX
+    /// regardless of host.
+    ///
+    /// The Windows command must end in `|| exit 0`; the POSIX
+    /// command must end in `|| true`. Both must be bare commands
+    /// (no `cmd.exe /c` / `sh -c` wrapper) because Cursor invokes
+    /// hook commands through its own shell.
     #[test]
     fn hook_command_uses_env_type_specific_syntax_with_fail_safe() {
-        let win = hook_command(EnvType::Windows);
-        assert!(win.starts_with("curl.exe "), "win: {win}");
-        assert!(!win.contains("cmd.exe /c"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_SESSION_ID%"), "win: {win}");
-        // Fail-safe: a curl failure (port dropped, Buildmesh restarting)
-        // must not surface as a hook exit error. cmd's `|| exit 0` is
-        // the analogue of POSIX `|| true`.
-        assert!(
-            win.trim_end().ends_with("|| exit 0"),
-            "win command must end with `|| exit 0`: {win}"
-        );
+        // Windows host + Windows target → cmd syntax. The only path
+        // that emits `curl.exe` / `%VAR%` / `>nul` / `|| exit 0`.
+        if cfg!(target_os = "windows") {
+            let win = hook_command(EnvType::Windows);
+            assert!(win.starts_with("curl.exe "), "win: {win}");
+            assert!(!win.contains("cmd.exe /c"), "win: {win}");
+            assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
+            assert!(win.contains("%BUILDMESH_SESSION_ID%"), "win: {win}");
+            assert!(
+                win.trim_end().ends_with("|| exit 0"),
+                "win command must end with `|| exit 0`: {win}"
+            );
+        }
 
+        // WSL target → POSIX regardless of host. A Windows host
+        // running a WSL Cursor gets bash; a Mac/Linux build with a
+        // WSL Cursor (uncommon but possible) also gets bash.
         let unix = hook_command(EnvType::Wsl);
         assert!(unix.starts_with("curl "), "unix: {unix}");
         assert!(!unix.contains("sh -c"), "unix: {unix}");
@@ -985,6 +1008,36 @@ mod tests {
             unix.trim_end().ends_with("|| true"),
             "unix command must end with `|| true`: {unix}"
         );
+
+        // `EnvType::Windows` on a Mac/Linux build must NOT emit cmd
+        // syntax. This is the regression class the round-3 review
+        // caught: a naive `match env_type` would write `curl.exe`
+        // and `%VAR%` into a Mac/Linux `.cursor/hooks.json`. Pin
+        // the contract so a refactor that drops the
+        // `cfg!(target_os = "windows")` guard fails here before
+        // it ships a dead hook on Mac/Linux.
+        if !cfg!(target_os = "windows") {
+            let mac = hook_command(EnvType::Windows);
+            assert!(
+                mac.starts_with("curl "),
+                "EnvType::Windows on a non-Windows host must emit POSIX `curl`, \
+                 not `curl.exe`: {mac}"
+            );
+            assert!(
+                !mac.contains("%BUILDMESH_PORT%"),
+                "EnvType::Windows on a non-Windows host must NOT use cmd `%VAR%` \
+                 (POSIX shells don't expand it): {mac}"
+            );
+            assert!(
+                !mac.contains(">nul"),
+                "EnvType::Windows on a non-Windows host must NOT use cmd `>nul` \
+                 (POSIX would create a literal file named `nul`): {mac}"
+            );
+            assert!(
+                mac.contains("$BUILDMESH_PORT"),
+                "non-Windows target must use POSIX `$VAR` syntax: {mac}"
+            );
+        }
     }
 
     /// Round-2 review point 3: a Windows host_path with a WSL Cursor
