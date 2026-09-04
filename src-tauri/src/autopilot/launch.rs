@@ -327,7 +327,7 @@ mod tests {
         // like `SpawnIntent::Loop`. Routing through the source of truth
         // keeps the marker test honest if anyone changes the wording.
         let issue_prefill = crate::agent::spawn::SpawnIntent::Issue(
-            crate::agent::spawn::GitHubWorkContext {
+            crate::agent::spawn::IssueContext {
                 owner: "alondero".into(),
                 repo: "buildmesh".into(),
                 number: 358,

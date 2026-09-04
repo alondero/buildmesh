@@ -138,7 +138,9 @@ const PR_DRAFT = {
   source_pr_pinned_sha: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1',
   position: 0,
   created_at: '2026-01-01',
-  prefill: 'Please review pull request #201 — Add widget\nhttps://github.com/acme/demo/pull/201',
+  // PR prefill intentionally omits title (grumpy persona, PR #1560).
+  prefill:
+    'Review PR #201 as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture\nhttps://github.com/acme/demo/pull/201',
 };
 
 /**
