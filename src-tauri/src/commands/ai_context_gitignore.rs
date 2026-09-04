@@ -57,6 +57,7 @@ GROK.local.md\n\
 .cursor/tasks/\n\
 .cursor/transcripts/\n\
 .cursor/worktrees/\n\
+.cursor/hooks.json\n\
 .cursor-tutor/\n\
 CURSOR.local.md\n\
 .aider*\n\
