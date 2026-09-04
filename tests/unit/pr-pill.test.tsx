@@ -60,6 +60,20 @@ describe('PrPill merge menu', () => {
     invalidateMock.mockClear();
   });
 
+  it('keeps the menu outside the clipping title and treats portaled clicks as inside', () => {
+    const { container } = render(
+      <div style={{ overflow: 'hidden', height: 24 }}>
+        <PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />
+      </div>,
+    );
+    openPillMenu();
+    const menu = screen.getByRole('menu');
+    expect(container.contains(menu)).toBe(false);
+    expect(menu.parentElement).toBe(document.body);
+    fireEvent.mouseDown(screen.getByRole('menuitem', { name: 'Merge pull request #123', exact: true }));
+    expect(screen.getByRole('menu')).toBe(menu);
+  });
+
   it('renders the PR number pill', () => {
     render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
     expect(screen.getByText('PR #123')).toBeTruthy();

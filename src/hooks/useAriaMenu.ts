@@ -43,10 +43,11 @@
  * Out of scope
  * ------------
  * The outside-mousedown close path is already shared via `useClickOutside`
- * (#492). The viewport-clamping `useLayoutEffect` lives in `useViewportClamp`.
- * `KebabActions` in `GridNodeHeader.tsx` has a different keyboard shape
- * (no Home/End, no wrap) and a different anchor model (trigger rect +
- * flip-up rather than `translateY`), so it's intentionally left out —
+ * (#492). Viewport-clamping for CSS-anchored menus lives in
+ * `useViewportClamp`; trigger-relative fixed menus use
+ * `useAnchoredPosition`. `KebabActions` in `GridNodeHeader.tsx` has a
+ * different keyboard shape (no Home/End, no wrap), so it's intentionally
+ * left out —
  * the issue's "third instance is the threshold" rule hasn't been met
  * by a fourth menu yet.
  */

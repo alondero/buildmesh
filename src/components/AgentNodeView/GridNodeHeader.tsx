@@ -12,6 +12,7 @@ import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderList } from '../../hooks/useProviderList';
 import { useRegenerateAction } from '../../hooks/useRegenerateAction';
 import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
+import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
@@ -649,7 +650,6 @@ interface KebabActionsProps {
 }
 
 const KEBAB_MIN_WIDTH = 160;
-const KEBAB_GAP = 4;
 
 function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer, canResume, onResume, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
@@ -808,36 +808,9 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, itemCount]);
 
-  // Anchor + viewport-clamp in a single layout pass: read the trigger
-  // rect, place the menu's right edge under the trigger's right edge,
-  // then nudge back inside the viewport if it overflows. No `pos`
-  // state — every layout effect re-reads the live rect, which keeps a
-  // re-render (e.g. node name edit) from briefly flashing the menu at
-  // a stale anchored position.
-  useLayoutEffect(() => {
-    if (!open) return;
-    const menu = menuRef.current;
-    const trigger = triggerRef.current;
-    if (!menu || !trigger) return;
-    const r = trigger.getBoundingClientRect();
-    const top = r.bottom + KEBAB_GAP;
-    const left = r.right - KEBAB_MIN_WIDTH;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const MARGIN = 4;
-    const clampedLeft = Math.max(MARGIN, Math.min(left, vw - KEBAB_MIN_WIDTH - MARGIN));
-    const clampedTop = Math.max(MARGIN, top);
-    menu.style.top = `${clampedTop}px`;
-    menu.style.left = `${clampedLeft}px`;
-    // If the menu's rendered height would push it off the bottom, raise
-    // it above the trigger instead. `vh - clampedTop` is the room left
-    // below; if the menu's `offsetHeight` exceeds that, flip up.
-    const roomBelow = vh - clampedTop - MARGIN;
-    if (menu.offsetHeight > roomBelow) {
-      const aboveTop = r.top - KEBAB_GAP - menu.offsetHeight;
-      if (aboveTop >= MARGIN) menu.style.top = `${aboveTop}px`;
-    }
-  }, [open]);
+  // Fixed-menu anchoring, viewport clamping, and scroll tracking are shared
+  // with the PR pill so both title-bar menus follow the same positioning rules.
+  useAnchoredPosition(triggerRef, menuRef, open, { align: 'end' });
 
   // Autofocus the first ENABLED menuitem on open (WAI-ARIA menu contract).
   // Issue #1502 — the first row is now Regenerate, which is disabled when

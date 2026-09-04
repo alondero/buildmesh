@@ -40,9 +40,10 @@
  * adjusts `contextMenu.x/y`, not a `transform`) because the menu is
  * anchored at the click point rather than a trigger. The issue
  * explicitly leaves MeshItem's anchor mechanism out of scope.
- * `KebabActions` in `GridNodeHeader.tsx` does trigger-anchored
- * positioning + flip-up (different model — it sets `style.top/left`
- * rather than a transform). Both are out of scope for this hook.
+ * `KebabActions` and the portaled PR pill use `useAnchoredPosition` for
+ * trigger-relative fixed coordinates; this hook remains for menus whose
+ * existing anchor is already expressed in CSS and only needs vertical
+ * clamping.
  */
 import { useLayoutEffect, type RefObject } from 'react';
 
