@@ -59,7 +59,7 @@ pub static OPENCODE: OpenCodeAdapter = OpenCodeAdapter;
 /// shape — see `mod.rs:367-374` ("each adapter owns its harness's config
 /// format"). The orphan `process::inject_attention_hook` predates the
 /// modularisation and is the only legacy exception.
-pub const OPENCODE_ATTENTION_PLUGIN: &str = include_str!("opencode_attention_plugin.js");
+const OPENCODE_ATTENTION_PLUGIN: &str = include_str!("opencode_attention_plugin.js");
 
 /// Counter for unique `.tmp` filenames in [`atomic_write`]. Without a
 /// counter, two concurrent provisions racing on the same path would
@@ -120,7 +120,7 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 /// disk, etc.). The spawn caller treats this as best-effort: a failure
 /// is logged, the spawn proceeds, and the attention callback is the
 /// only casualty.
-pub fn inject_opencode_attention_plugin(project_path: &Path) -> Result<(), String> {
+fn inject_opencode_attention_plugin(project_path: &Path) -> Result<(), String> {
     let plugins_dir = project_path.join(".opencode").join("plugins");
     std::fs::create_dir_all(&plugins_dir)
         .map_err(|e| format!("failed to create .opencode/plugins dir: {e}"))?;

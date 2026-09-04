@@ -173,7 +173,7 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
 
     let permission_event = matches!(
         payload.hook_event_name.as_deref(),
-        Some("PermissionRequest") | Some("PreToolUse")
+        Some("PermissionRequest") | Some("PreToolUse") | Some("permission.asked")
     ) || payload.notification_type.as_deref() == Some("permission_prompt")
     ;
 
@@ -776,6 +776,30 @@ mod tests {
         );
 
         assert_eq!(semantic_turn(&HookPayload::default()), None);
+    }
+
+    /// Issue #1295 (round-2 review): `permission.asked` must round-trip
+    /// through `semantic_turn` so the route can extract a description.
+    /// Without this branch, `extract_semantic_turn` returns None and the
+    /// downstream Node Turn collapses `PermissionRequest → InputRequired`
+    /// (issue #1364 §1 — never silently downgrade a permission to a
+    /// bare input request). Mirrors the Codex `PermissionRequest` arm.
+    #[test]
+    fn semantic_turn_recognizes_opencode_permission_asked() {
+        let permission: HookPayload = serde_json::from_value(serde_json::json!({
+            "hook_event_name": "permission.asked",
+            "notification_type": "permission_prompt",
+            "tool_name": "Bash",
+            "message": "OpenCode is asking for permission: Bash",
+        }))
+        .unwrap();
+        let turn = semantic_turn(&permission).expect("permission.asked must yield a SemanticTurn");
+        assert_eq!(turn.kind, SemanticTurnKind::PermissionRequest);
+        assert!(
+            turn.description.contains("Bash"),
+            "tool name must surface in the description; got {:?}",
+            turn.description
+        );
     }
 
     /// A representative Stop-hook stdin payload.

@@ -29,9 +29,10 @@ function buildmeshUrl() {
 
 // Forward the permission event's tool info when OpenCode provides it.
 // Upstream shape varies across plugin-event versions; we tolerate `tool`
-// or `toolName` at the top level or under `properties` and silently
-// pass through whatever is present so the classifier can extract a
-// semantic turn description (issue #1364 §1).
+// or `toolName` at the top level or under `properties`, and accept
+// either a bare string or a `{ name | id }` object, so the classifier
+// can extract a semantic turn description (issue #1364 §1) regardless
+// of which payload shape OpenCode ships today.
 function pickToolInfo(event) {
   const candidates = [
     event.tool,
@@ -41,6 +42,10 @@ function pickToolInfo(event) {
   ];
   for (const c of candidates) {
     if (typeof c === "string" && c.length > 0) return c;
+    if (c && typeof c === "object") {
+      if (typeof c.name === "string" && c.name.length > 0) return c.name;
+      if (typeof c.id === "string" && c.id.length > 0) return c.id;
+    }
   }
   return undefined;
 }
