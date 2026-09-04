@@ -149,6 +149,8 @@ function makePullRequest(overrides: Partial<GitHubPullRequest> = {}): GitHubPull
     head_repo_owner: 'alice',
     head_repo_clone_url: '',
     head_sha: '',
+    mergeable: true,
+    mergeable_state: 'clean',
     ...overrides,
   };
 }

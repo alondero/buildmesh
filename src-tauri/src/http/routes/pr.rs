@@ -35,10 +35,11 @@ pub async fn list_pulls(
     }
 }
 
-/// `GET /api/meshes/{id}/pulls/{n}/mergeability` — per-PR mergeability
-/// enrichment. The list endpoint omits `mergeable`, so the panel calls
-/// this once per PR after the list loads; `mergeable` is `null` while
-/// GitHub is still computing (mirrors the desktop wire shape).
+/// `GET /api/meshes/{id}/pulls/{n}/mergeability` — per-PR mergeability.
+/// Survives for mobile/older clients. The desktop panel no longer calls this:
+/// issue #1529 returns `mergeable` inline on the list (`GET .../pulls`) via
+/// the GraphQL summaries connection. `mergeable` is `null` while GitHub is
+/// still computing (mirrors the desktop wire shape).
 pub async fn get_mergeability(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
