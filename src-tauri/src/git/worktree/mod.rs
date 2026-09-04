@@ -178,8 +178,87 @@ pub fn create_git_worktree(
     }
 
     apply_worktree_include(project_root, host_path);
+    if let Some(container) = host_path.parent() {
+        ensure_container_excluded(project_root, &container.to_string_lossy());
+    }
 
     Ok(())
+}
+
+/// Keep the parent repository's `git status` clean when the worktree
+/// container lives inside it (issue #1519).
+///
+/// Linked worktrees are NOT auto-ignored by git: a relative container like
+/// `custom-wt/` shows up as an untracked directory, `primitives::is_dirty`
+/// flips true, spawn-time auto-sync aborts, and health reports permanently
+/// dirty. (The legacy `.claude/worktrees/` container never hit this because
+/// `.claude/` is git-ignored in Buildmesh repos.) Appending `<rel>/` to the
+/// repo-local `.git/info/exclude` — never the committed `.gitignore` — keeps
+/// the user's ignore rules untouched while restoring the legacy invariant.
+///
+/// `container_host_path` is the HOST-form container dir itself (not a worktree
+/// path — callers pass the parent). No-op when the container is the root
+/// itself, outside the root (absolute custom dirs), or when `.git` is
+/// missing/not a directory (non-repo mesh, submodule-style `.git` file).
+/// Idempotent: an existing matching line is never duplicated. Best-effort
+/// like `apply_worktree_include` — filesystem errors log and return so a
+/// strict exclude write can never fail a spawn.
+pub(crate) fn ensure_container_excluded(project_root: &str, container_host_path: &str) {
+    fn squash(p: &str) -> String {
+        let mut n = p.replace('\\', "/");
+        while n.len() > 1 && n.ends_with('/') {
+            n.pop();
+        }
+        n
+    }
+    let root = squash(&crate::env::to_host_path(project_root));
+    let container = squash(container_host_path);
+    // Prefix check is case-insensitive on Windows (case-insensitive FS);
+    // the written pattern keeps its original case (git honors
+    // core.ignorecase there, and exact case is required elsewhere).
+    let under_root = container.len() > root.len()
+        && container.as_bytes().get(root.len()) == Some(&b'/')
+        && if cfg!(target_os = "windows") {
+            container[..root.len()].eq_ignore_ascii_case(&root)
+        } else {
+            container.starts_with(root.as_str())
+        };
+    if !under_root {
+        return;
+    }
+    let rel = container[root.len() + 1..].to_string();
+    if rel.is_empty() {
+        return;
+    }
+    let git_dir = std::path::Path::new(&crate::env::to_host_path(project_root)).join(".git");
+    if !git_dir.is_dir() {
+        return;
+    }
+    let exclude = git_dir.join("info").join("exclude");
+    let pattern = format!("{rel}/");
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == pattern) {
+        return;
+    }
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("# buildmesh: worktree container (issue #1519)\n");
+    out.push_str(&pattern);
+    out.push('\n');
+    if let Some(parent) = exclude.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&exclude, out) {
+        tracing::warn!(
+            "ensure_worktree_container_excluded: failed to update {}: {}",
+            exclude.to_string_lossy(),
+            e
+        );
+    }
 }
 
 /// Copy the files listed in `<project_root>/.worktreeinclude` into a freshly
@@ -790,6 +869,83 @@ mod tests {
         )
         .expect("worktree creation must succeed");
         wt
+    }
+
+    // ── container exclusion (issue #1519) ───────────────────────────────────
+
+    #[test]
+    fn container_exclude_appends_relative_container_idempotently() {
+        let td = TestDir::new("exclude_relative");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let root = td.path().to_string_lossy().to_string();
+
+        ensure_container_excluded(&root, &format!("{root}/custom-wt"));
+        let exclude = td.path().join(".git").join("info").join("exclude");
+        let body = fs::read_to_string(&exclude).expect("exclude must exist");
+        assert!(
+            body.lines().any(|l| l.trim() == "custom-wt/"),
+            "container pattern must be appended, got:\n{body}"
+        );
+        // Idempotent: no duplicate line on repeat.
+        ensure_container_excluded(&root, &format!("{root}/custom-wt"));
+        let body2 = fs::read_to_string(&exclude).unwrap();
+        assert_eq!(
+            body2.lines().filter(|l| l.trim() == "custom-wt/").count(),
+            1,
+            "pattern must not duplicate"
+        );
+        // A nested container relativizes against the root.
+        ensure_container_excluded(&root, &format!("{root}/custom-wt/nested"));
+        let body3 = fs::read_to_string(&exclude).unwrap();
+        assert!(
+            body3.lines().any(|l| l.trim() == "custom-wt/nested/"),
+            "nested container must relativize, got:\n{body3}"
+        );
+    }
+
+    #[test]
+    fn container_exclude_ignores_outside_root_and_missing_git() {
+        let td = TestDir::new("exclude_outside");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let root = td.path().to_string_lossy().to_string();
+
+        // Absolute container elsewhere: nothing to ignore in this repo.
+        ensure_container_excluded(&root, "/tmp/elsewhere-wt");
+        assert!(
+            !td.path().join(".git").join("info").join("exclude").exists()
+                || !fs::read_to_string(td.path().join(".git/info/exclude"))
+                    .unwrap_or_default()
+                    .contains("elsewhere"),
+            "outside-root container must not touch this repo's exclude"
+        );
+
+        // Non-repo mesh root: must not fabricate a `.git` directory.
+        let bare = TestDir::new("exclude_bare");
+        let bare_root = bare.path().to_string_lossy().to_string();
+        ensure_container_excluded(&bare_root, &format!("{bare_root}/custom-wt"));
+        assert!(
+            !bare.path().join(".git").exists(),
+            "must not create .git for a non-repo root"
+        );
+    }
+
+    #[test]
+    fn create_cuts_excluded_container_for_custom_relative_dir() {
+        // End-to-end: a cold create under a custom relative container leaves
+        // the container ignored, so the parent repo does not report dirty
+        // purely from the worktree's presence (issue #1519 §3).
+        let td = TestDir::new("exclude_e2e");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let root = td.path().to_string_lossy().to_string();
+        let wt = format!("{root}/custom-wt/e2e-node");
+        create_git_worktree(&root, &wt, "e2e-node", "detached", "HEAD")
+            .expect("create must succeed");
+        let exclude = td.path().join(".git").join("info").join("exclude");
+        let body = fs::read_to_string(&exclude).expect("exclude must exist");
+        assert!(
+            body.lines().any(|l| l.trim() == "custom-wt/"),
+            "cold create must exclude its container, got:\n{body}"
+        );
     }
 
     // End-to-end: time the *production* `create_git_worktree` (now a git-CLI

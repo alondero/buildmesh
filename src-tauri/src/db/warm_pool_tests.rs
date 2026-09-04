@@ -1191,7 +1191,11 @@ mod tests {
                 -- list_worktree_enabled_meshes_for_warm_inner finds the
                 -- column. Real DBs get the column via
                 -- `ensure_mesh_pre_spawn_pool_size` (see db::init).
-                pre_spawn_pool_size INTEGER NOT NULL DEFAULT 0
+                pre_spawn_pool_size INTEGER NOT NULL DEFAULT 0,
+                -- v37 (issue #1519): per-mesh worktree container override.
+                -- Listed here (not grown via evolve_to) for the same
+                -- reason: the projection under test must find it.
+                worktree_directory TEXT
             );
             INSERT INTO meshes (name, path, use_worktree) VALUES ('enabled', '/r/enabled', 1);
             INSERT INTO meshes (name, path, use_worktree) VALUES ('disabled', '/r/disabled', 0);

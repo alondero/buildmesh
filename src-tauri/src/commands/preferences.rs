@@ -70,29 +70,33 @@ pub fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String> {
 pub fn set_app_worktree_directory(app: AppHandle, directory: Option<String>) -> Result<(), String> {
     use crate::env::normalize_worktree_directory;
     let cleaned = normalize_worktree_directory(directory.as_deref());
-    if let Some(ref dir) = cleaned {
-        if crate::env::is_absolute_worktree_path(dir) {
-            return Err(format!(
-                "worktree directory '{}' is absolute, but the application default spans meshes in both environments (native/Windows versus WSL) — \
-                 use a relative path like 'worktrees' resolved from each mesh root, or set this absolute path as a per-Mesh override in Project Settings → Worktrees",
-                dir
-            ));
+    let cleaned = match cleaned {
+        None => None,
+        Some(dir) => {
+            if crate::env::is_absolute_worktree_path(&dir)
+                || crate::env::is_drive_relative_worktree_path(&dir)
+            {
+                return Err(format!(
+                    "worktree directory '{dir}' is not a plain relative path, but the application default spans meshes in both environments (native/Windows versus WSL) — \
+                     use a relative path like 'worktrees' resolved from each mesh root, or set this path as a per-Mesh override in Project Settings → Worktrees"
+                ));
+            }
+            Some(crate::env::normalize_relative_worktree_dir(&dir)?)
         }
-    }
+    };
     let mut prefs = preferences::load()?;
     prefs.worktree_directory = cleaned.clone();
     preferences::save(prefs)?;
-    // Rebuild idle inventory for inheriting meshes (those with no
-    // per-Mesh override) on a background thread — `git worktree remove`
-    // + `git worktree add` are blocking syscalls that must not park the
-    // IPC worker (same pattern as `update_mesh_pool_size`).
-    let app_clone = app.clone();
-    std::thread::spawn(move || {
-        crate::services::warm_pool::rebuild_pools_for_worktree_dir_change(
-            &app_clone,
-            None,
-        );
-    });
+    // Notify first (`None` = every inheriting mesh may have moved), then
+    // enqueue the rebuild — both read the committed preferences.
+    let _ = app.emit(
+        crate::commands::mesh_properties::WORKTREE_DIR_CHANGED_EVENT,
+        Option::<i64>::None,
+    );
+    // Enqueues a debounced, fill-lock-serialized rebuild for inheriting
+    // meshes and returns immediately (the function owns its background
+    // thread — see `rebuild_pools_for_worktree_dir_change`).
+    crate::services::warm_pool::rebuild_pools_for_worktree_dir_change(&app, None);
     Ok(())
 }
 

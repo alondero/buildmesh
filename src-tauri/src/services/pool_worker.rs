@@ -190,6 +190,21 @@ pub fn is_idle_enough(idle: Duration, min_silence: Duration) -> bool {
     idle >= min_silence
 }
 
+/// Run `f` under the global fill lock, BLOCKING until it is free (issue
+/// #1519 — directory-change rebuilds). Unlike [`try_with_fill_lock`] (which
+/// skips on contention so a burst of high-frequency triggers collapses to
+/// one fill), a rebuild is a rare explicit user action that must converge
+/// promptly: skipping it would leave stale-location inventory until the
+/// next idle tick. Call ONLY from a dedicated background thread — never the
+/// IPC worker or any hot path. Poison-recovers like its sibling: the
+/// guarded unit carries no state to corrupt.
+pub fn with_fill_lock_blocking(f: impl FnOnce()) {
+    let _guard = FILL_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f();
+}
+
 /// Run `f` under the global fill lock IFF no other background pool mutation is
 /// in progress (issue #613 AC4 — serialized execution). Returns `true` when
 /// `f` ran, `false` when the lock was already held and `f` was skipped.

@@ -426,7 +426,8 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             path TEXT NOT NULL UNIQUE,
             layout TEXT NOT NULL DEFAULT 'grid',
             position INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            worktree_directory TEXT
         );
 
         CREATE TABLE IF NOT EXISTS agent_nodes (
@@ -4192,28 +4193,6 @@ pub fn list_worktree_enabled_meshes_for_warm() -> SqlResult<Vec<WarmPoolMeshRow>
 pub(crate) fn list_worktree_enabled_meshes_for_warm_inner(
     conn: &Connection,
 ) -> SqlResult<Vec<WarmPoolMeshRow>> {
-    // Issue #1519: pre-v37 DBs (and hand-rolled v22 test fixtures) lack the
-    // `worktree_directory` column. Try the new projection first; on
-    // `no such column` fall back to the legacy projection with `None`
-    // (inherit) so old schemas keep reading instead of erroring the pool.
-    let has_col: bool = conn
-        .prepare("SELECT worktree_directory FROM meshes LIMIT 0")
-        .is_ok();
-    if !has_col {
-        let mut stmt = conn.prepare(
-            "SELECT id, path, base_ref, pre_spawn_pool_size FROM meshes WHERE use_worktree = 1",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(WarmPoolMeshRow {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                base_ref: row.get(2)?,
-                pre_spawn_pool_size: row.get(3)?,
-                worktree_directory: None,
-            })
-        })?;
-        return rows.collect();
-    }
     let mut stmt = conn.prepare(
         "SELECT id, path, base_ref, pre_spawn_pool_size, COALESCE(worktree_directory, '') FROM meshes WHERE use_worktree = 1",
     )?;

@@ -458,6 +458,37 @@ pub fn drain_stale_location_entries(
     Ok(dropped)
 }
 
+/// Pending directory-change rebuild work. `all` (from an application-default
+/// change) subsumes per-mesh requests; per-mesh ids accumulate.
+#[derive(Debug, Default)]
+struct RebuildPending {
+    all: bool,
+    meshes: Vec<i64>,
+}
+
+/// Pure merge for [`rebuild_pools_for_worktree_dir_change`]'s queue.
+/// `None` (rebuild everything) wins over any queued mesh id; mesh ids
+/// accumulate deduplicated. Pulled out so rapid save-correct-save bursts
+/// collapse deterministically without standing up threads in tests.
+fn merge_rebuild_request(pending: &mut RebuildPending, mesh_id: Option<i64>) {
+    match mesh_id {
+        None => {
+            pending.all = true;
+            pending.meshes.clear();
+        }
+        Some(id) => {
+            if !pending.all && !pending.meshes.contains(&id) {
+                pending.meshes.push(id);
+            }
+        }
+    }
+}
+
+static REBUILD_PENDING: once_cell::sync::Lazy<parking_lot::Mutex<RebuildPending>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(RebuildPending::default()));
+static REBUILD_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Rebuild idle warm-pool inventory after a `worktree_directory` setting
 /// changes (issue #1519). `mesh_id = Some(id)` rebuilds one Mesh (per-Mesh
 /// override change); `None` rebuilds every worktree-enabled Mesh whose
@@ -466,7 +497,67 @@ pub fn drain_stale_location_entries(
 /// locations is idempotent so rebuilding all is safe and simpler).
 /// Never moves running Agent Nodes — only droppable (`!= claimed`) pool
 /// rows are drained, then each affected mesh refills to target.
+///
+/// Serialized + debounced: rapid successive saves (type → correct → save)
+/// merge into one pending request served by a single runner thread under
+/// the blocking fill lock — never two threads issuing `git worktree add`
+/// against the same repo concurrently (which fails on `.git/config.lock`
+/// and orphans rows). Safe to call from IPC handlers: it only enqueues
+/// and returns immediately.
 pub fn rebuild_pools_for_worktree_dir_change(app: &tauri::AppHandle, mesh_id: Option<i64>) {
+    merge_rebuild_request(&mut REBUILD_PENDING.lock(), mesh_id);
+    if !REBUILD_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let app = app.clone();
+        std::thread::spawn(move || rebuild_runner(app));
+    }
+}
+
+/// Single runner for the [`rebuild_pools_for_worktree_dir_change`] queue.
+/// Drains the merged request, runs it under the blocking fill lock (so no
+/// idle-tick fill, freshness pass, or sibling rebuild can interleave git
+/// mutations), and loops while newer requests arrived mid-pass. The
+/// take-then-recheck shutdown Rochambeau guarantees no merged request is
+/// ever lost while keeping at most one runner alive.
+fn rebuild_runner(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    loop {
+        let req = {
+            let mut pending = REBUILD_PENDING.lock();
+            if pending.all || !pending.meshes.is_empty() {
+                std::mem::take(&mut *pending)
+            } else {
+                RebuildPending::default()
+            }
+        };
+        if !req.all && req.meshes.is_empty() {
+            REBUILD_RUNNING.store(false, Ordering::SeqCst);
+            if !REBUILD_PENDING.lock().all
+                && REBUILD_PENDING.lock().meshes.is_empty()
+            {
+                return;
+            }
+            if REBUILD_RUNNING
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return;
+            }
+            continue;
+        }
+        let wanted_all = req.all;
+        let wanted_meshes = req.meshes;
+        crate::services::pool_worker::with_fill_lock_blocking(|| {
+            run_rebuild_pass(&app, wanted_all, &wanted_meshes);
+        });
+    }
+}
+
+/// One serialized rebuild pass over the requested meshes: ensure the new
+/// container is git-ignored, drain stale-location entries, refill to
+/// target. Drain-before-fill ordering mirrors `reconcile_on_startup`:
+/// stale-location entries must go even when the count is at target (the
+/// excess drain alone would no-op).
+fn run_rebuild_pass(app: &tauri::AppHandle, all: bool, meshes_wanted: &[i64]) {
     let meshes = match db::list_worktree_enabled_meshes_for_warm() {
         Ok(rows) => rows,
         Err(e) => {
@@ -477,14 +568,19 @@ pub fn rebuild_pools_for_worktree_dir_change(app: &tauri::AppHandle, mesh_id: Op
             return;
         }
     };
-    let targets: Vec<db::WarmPoolMeshRow> = match mesh_id {
-        Some(id) => meshes.into_iter().filter(|m| m.id == id).collect(),
-        None => meshes,
+    let targets: Vec<db::WarmPoolMeshRow> = if all {
+        meshes
+    } else {
+        meshes
+            .into_iter()
+            .filter(|m| meshes_wanted.contains(&m.id))
+            .collect()
     };
     for mesh in targets {
-        // Drain-before-fill ordering mirrors `reconcile_on_startup`:
-        // stale-location entries must go even when the count is at
-        // target (the excess drain alone would no-op).
+        crate::git::worktree::ensure_container_excluded(
+            &mesh.path,
+            &effective_host_dir_for_mesh(&mesh),
+        );
         if let Err(e) = drain_stale_location_entries(app, &mesh) {
             tracing::warn!(
                 "warm_pool: stale-location drain failed for mesh {} ({}): {}",
@@ -1467,6 +1563,26 @@ mod tests {
         // Slug trimmed so a padded preassigned name never creates a spaced dir.
         let p = warm_worktree_host_path_in_dir("/repo/mesh/custom-wt/", "  my-node  ");
         assert_eq!(p.replace('\\', "/"), "/repo/mesh/custom-wt/my-node");
+    }
+
+    #[test]
+    fn merge_rebuild_request_collapses_rapid_saves() {
+        // Issue #1519 review: type → correct → save bursts must not spawn a
+        // thread per keystroke-save. `None` (rebuild all) subsumes mesh ids;
+        // mesh ids accumulate deduplicated.
+        let mut pending = super::RebuildPending::default();
+        super::merge_rebuild_request(&mut pending, Some(1));
+        super::merge_rebuild_request(&mut pending, Some(1));
+        super::merge_rebuild_request(&mut pending, Some(2));
+        assert!(!pending.all);
+        assert_eq!(pending.meshes, vec![1, 2]);
+        super::merge_rebuild_request(&mut pending, None);
+        assert!(pending.all);
+        assert!(pending.meshes.is_empty());
+        // Once `all`, further mesh ids are absorbed silently.
+        super::merge_rebuild_request(&mut pending, Some(3));
+        assert!(pending.all);
+        assert!(pending.meshes.is_empty());
     }
 
     #[test]
