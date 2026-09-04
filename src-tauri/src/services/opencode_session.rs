@@ -57,8 +57,8 @@ pub fn select_id_for_directory<'a>(
 /// `pub(crate)` so the transcript reader (`services::transcript_reader`) can
 /// share the same gate without duplicating the prefix check — both modules
 /// live inside the private `services` tree, so crate-private visibility is
-/// the right seam for a sibling call (mirrors the `opencode_db_path`
-/// narrowing, issue #1296).
+/// the right seam for a sibling call (the two readers, transcript + session-id
+/// capture poller, must agree on what an OpenCode session id looks like).
 pub(crate) fn is_opencode_session_id(id: &str) -> bool {
     id.starts_with("ses_") && id.len() > 4
 }

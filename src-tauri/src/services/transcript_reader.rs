@@ -365,7 +365,13 @@ fn locate_transcript(
         TranscriptFormat::Agy => find_agy_transcript(session_id),
         TranscriptFormat::Grok => find_grok_transcript(session_id, node_path),
         TranscriptFormat::CommandCode => find_commandcode_transcript(session_id, node_path),
-        _ => None,
+        // OpenCode's per-session data lives in a shared SQLite DB
+        // rather than a transcript file (issue #1296), so `read_tail` /
+        // `read_last_assistant_message` short-circuit before this
+        // dispatch runs. Explicit arm so a future file-based variant
+        // added to `TranscriptFormat` triggers a compile error here
+        // and forces the map to be updated.
+        TranscriptFormat::OpenCode => None,
     }
 }
 
@@ -560,10 +566,20 @@ const OPENCODE_TURN_TO_MESSAGE_FACTOR: usize = 3;
 
 /// SQLite busy_timeout the OpenCode reader applies on every open: lets a
 /// concurrent writer (the live OpenCode CLI) hold the lock briefly instead
-/// of returning `SQLITE_BUSY` to a Coordinator poll. 500 ms is generous
-/// enough for a single write transaction and short enough that a stuck
-/// writer doesn't stall the digest path.
-const OPENCODE_READER_BUSY_TIMEOUT_MS: u64 = 500;
+/// of returning `SQLITE_BUSY` to a Coordinator poll. **Bounded to 100 ms**
+/// so a `GET /nodes` poll over N OpenCode nodes cannot park a Tokio worker
+/// thread for longer than `100 ms × N` if every node hits a writer-held
+/// lock — the same worst-case bound every other adapter already accepts
+/// from `cwrap` / Claude-Code JSONL reads on the Tokio pool (issue #1380).
+///
+/// **Future project-wide fix.** A `run_blocking` wrapper around the sync
+/// SQLite I/O would offload this from the Tokio pool to the blocking
+/// worker pool, eliminating the per-poll stall entirely. The Coordinator
+/// already offloads `commands::pr` / `commands::github` / `commands::preferences`
+/// via the same pattern; applying it to all transcript readers (including
+/// the file-based ones) is the right scope — OpenCode-only would diverge
+/// the API without solving the wider exposure. Tracked as a follow-up.
+const OPENCODE_READER_BUSY_TIMEOUT_MS: u64 = 100;
 
 /// Read the row tail of an OpenCode session's `message` table. Returns the
 /// up-to-`row_budget` newest rows in chronological order (oldest → newest),
@@ -638,25 +654,31 @@ pub(crate) fn read_opencode_tail_from_messages(
 /// digest consumer's bounded-memory optimisation holds for OpenCode
 /// (issue #1296 review finding A — a pre-review implementation
 /// returned `Vec<Turn>` from this path and broke the digest contract).
-/// `last_assistant_message` comes from the parser's whole-stream
-/// tracker; a session with no surviving turns degrades as `Empty` /
-/// `ShapeChanged`.
+///
+/// **The degrade gate is on `turns.is_empty()`, NOT on
+/// `last_assistant_message.is_none()`.** A node that has only user
+/// turns (no assistant reply yet — actively running, or the user
+/// repeatedly typed prompts) must NOT degrade as `Empty`: that would
+/// mask an `awaiting_input` or in-flight node from the Coordinator
+/// digest. The digest returns `Available { turns: Vec::new(),
+/// last_assistant_message: None }` for an actively-working node and the
+/// Coordinator renders the spine fields (status, needs_feedback)
+/// regardless of the digest content.
 pub(crate) fn read_opencode_digest_from_messages(
     messages: &[serde_json::Value],
 ) -> TranscriptTail {
     let parsed = parse_opencode_messages(messages, 1);
-    // The digest's contract: only return `Available` when the window
-    // contained at least one assistant message — the Coordinator polls
-    // many nodes and `last_assistant_message: None` is indistinguishable
-    // from "node hasn't spoken yet". A session of only user prompts
-    // degrades as `Empty`; an all-malformed window degrades as
-    // `ShapeChanged`.
-    let Some(last) = parsed.last_assistant_message else {
+    // Only degrade when the parser saw no turns at all — i.e., empty
+    // window (brand-new session before the user's first prompt) or
+    // every line was malformed (ShapeChanged). An active node with
+    // `parsed.turns = [user turn]` is fine: the digest records `None`
+    // for `last_assistant_message` until the agent speaks.
+    if parsed.turns.is_empty() {
         return TranscriptTail::unavailable(empty_or_shape_changed(parsed.saw_malformed));
-    };
+    }
     TranscriptTail::Available {
         turns: Vec::new(),
-        last_assistant_message: Some(last),
+        last_assistant_message: parsed.last_assistant_message,
     }
 }
 
@@ -671,11 +693,9 @@ pub(crate) fn read_opencode_tail(
     node_path: &str,
     tail: usize,
 ) -> TranscriptTail {
-    let _session_id = session_id;
-    let Some((db_path, session_id)) = opencode_resolve(session_id, node_path) else {
-        return TranscriptTail::unavailable(opencode_unavailable_reason(
-            _session_id.filter(|s| !s.is_empty()).map(str::to_string),
-        ));
+    let (db_path, session_id) = match opencode_resolve(session_id, node_path) {
+        Ok(pair) => pair,
+        Err(reason) => return TranscriptTail::unavailable(reason),
     };
     let row_budget = effective_tail(tail).saturating_mul(OPENCODE_TURN_TO_MESSAGE_FACTOR);
     let Some(messages) = read_opencode_messages(&db_path, &session_id, row_budget) else {
@@ -694,11 +714,9 @@ pub(crate) fn read_opencode_digest(
     session_id: Option<&str>,
     node_path: &str,
 ) -> TranscriptTail {
-    let _session_id = session_id;
-    let Some((db_path, session_id)) = opencode_resolve(session_id, node_path) else {
-        return TranscriptTail::unavailable(opencode_unavailable_reason(
-            _session_id.filter(|s| !s.is_empty()).map(str::to_string),
-        ));
+    let (db_path, session_id) = match opencode_resolve(session_id, node_path) {
+        Ok(pair) => pair,
+        Err(reason) => return TranscriptTail::unavailable(reason),
     };
     let Some(messages) =
         read_opencode_messages(&db_path, &session_id, OPENCODE_DIGEST_WINDOW)
@@ -713,39 +731,29 @@ pub(crate) fn read_opencode_digest(
 /// NoTranscript, with `session_id: None` on the error path so the caller
 /// can map back to the right [`UnavailableReason`] via
 /// [`opencode_unavailable_reason`].
-fn opencode_resolve(
-    session_id: Option<&str>,
+fn opencode_resolve<'a>(
+    session_id: Option<&'a str>,
     node_path: &str,
-) -> Option<(PathBuf, String)> {
-    let session_id = session_id.filter(|s| !s.is_empty())?.to_string();
-    if !crate::services::opencode_session::is_opencode_session_id(&session_id) {
-        // A non-`ses_` id cannot match any OpenCode row. Degrade quietly
+) -> Result<(PathBuf, &'a str), UnavailableReason> {
+    let session_id = session_id
+        .filter(|s| !s.is_empty())
+        .ok_or(UnavailableReason::NoSession)?;
+    if !crate::services::opencode_session::is_opencode_session_id(session_id) {
+        // A non-`ses_` id cannot match any OpenCode row; degrade quietly
         // rather than opening the DB to find nothing. The gate is shared
         // with `services::opencode_session::is_opencode_session_id` so
         // the two readers (transcript + capture poller) cannot drift on
         // what an OpenCode session id looks like.
-        return None;
+        return Err(UnavailableReason::NoTranscript);
     }
     let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
-    let db_path = crate::services::opencode_session::opencode_db_path(env_type)?;
+    let db_path = crate::services::opencode_session::opencode_db_path(env_type)
+        .ok_or(UnavailableReason::NoTranscript)?;
     if !db_path.exists() {
-        return None;
+        return Err(UnavailableReason::NoTranscript);
     }
-    Some((db_path, session_id))
+    Ok((db_path, session_id))
 }
-
-/// Map a missing-input outcome from [`opencode_resolve`] back to the
-/// right [`UnavailableReason`]. `Some(id)` means the session id was
-/// present (and `OpenCode`-shaped) but the DB path was missing →
-/// `NoTranscript`. `None` means the session id was absent →
-/// `NoSession`.
-fn opencode_unavailable_reason(session_id: Option<String>) -> UnavailableReason {
-    match session_id {
-        Some(_) => UnavailableReason::NoTranscript,
-        None => UnavailableReason::NoSession,
-    }
-}
-
 /// Parse a slice of OpenCode message envelopes into the shared [`Parsed`]
 /// contract: rolling `keep`-bounded turn window, whole-stream
 /// last-assistant-message tracking, malformed-flag so a renamed-field
@@ -992,7 +1000,12 @@ fn parse_transcript(
         TranscriptFormat::Agy => parse_agy_turns(lines, keep),
         TranscriptFormat::Grok => parse_grok_turns(lines, keep),
         TranscriptFormat::CommandCode => parse_commandcode_turns(lines, keep),
-        _ => Parsed {
+        // OpenCode short-circuits before `read_tail_from_file` is
+        // reached (issue #1296) — every other adapter is JSONL-backed
+        // and parses line-shaped input. Explicit arm keeps the match
+        // exhaustive; a future file-based harness added to the enum
+        // will trigger a compile error here.
+        TranscriptFormat::OpenCode => Parsed {
             turns: Vec::new(),
             last_assistant_message: None,
             saw_malformed: false,
@@ -3705,16 +3718,20 @@ mod tests {
         );
     }
 
-    /// The digest also handles the "no assistant message in the window" case
-    /// — degrades as `Empty`, not `ShapeChanged` or `Unreadable`. A busy
-    /// node that has only seen user prompts must not flip to a structural
-    /// break degrade.
+    /// **Pin for issue #1296 review finding B (digest contract):** the
+    /// digest must NOT degrade as `Empty` when the window contains user
+    /// turns but the agent hasn't responded yet. An actively-working
+    /// node (user typed a prompt, agent is mid-thinking or
+    /// `awaiting_input`) must be reported as `Available` so the
+    /// Coordinator's spine fields (status, needs_feedback) can show
+    /// the activity. `last_assistant_message: None` simply means
+    /// "agent hasn't spoken yet in the polled window."
     #[test]
-    fn opencode_digest_no_assistant_message_degrades_to_empty() {
+    fn opencode_digest_only_user_turns_returns_available_with_none() {
         let messages: Vec<serde_json::Value> = vec![
             serde_json::json!({
                 "info": { "role": "user" },
-                "parts": [{ "type": "text", "text": "hi" }]
+                "parts": [{ "type": "text", "text": "fix the login redirect" }]
             }),
             serde_json::json!({
                 "info": { "role": "user" },
@@ -3722,19 +3739,32 @@ mod tests {
             }),
         ];
         let tail = read_opencode_digest_from_messages(&messages);
-        assert_eq!(
-            tail,
-            TranscriptTail::unavailable(UnavailableReason::Empty),
-            "a session with no assistant turns is a quiet session, not a structural break"
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!(
+                "digest must remain Available when the agent hasn't spoken yet — \r
+                 the Coordinator renders spine fields regardless of digest content; \r
+                 got {tail:?}"
+            );
+        };
+        assert!(turns.is_empty(), "digest path must return turns: Vec::new()");
+        assert!(
+            last_assistant_message.is_none(),
+            "no assistant message in the window —> last_assistant_message: None"
         );
     }
 
-    /// The digest path excludes reasoning-only assistant turns from
-    /// `last_assistant_message` — reasoning is transport plumbing, not
-    /// Coordinator dialogue. A session whose latest assistant rows are
-    /// reasoning-only still degrades as `Empty`.
+    /// Reasoning-only assistant turns in the window are dropped from the
+    /// turn list (same as every other parser), but their PRESENCE in
+    /// the window means `parsed.turns` is non-empty — so the digest
+    /// remains `Available` with `last_assistant_message: None` (since
+    /// reasoning isn't dialogue). This is the same outcome as a node
+    /// that has only user turns.
     #[test]
-    fn opencode_digest_reasoning_only_assistant_turns_degrade_to_empty() {
+    fn opencode_digest_reasoning_only_assistant_with_user_turns_returns_available() {
         let messages: Vec<serde_json::Value> = vec![
             serde_json::json!({
                 "info": { "role": "user" },
@@ -3750,10 +3780,37 @@ mod tests {
             }),
         ];
         let tail = read_opencode_digest_from_messages(&messages);
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!(
+                "reasoning-only assistant with user turns must NOT degrade — \
+                 node is actively working; got {tail:?}"
+            );
+        };
+        assert!(turns.is_empty());
+        assert!(
+            last_assistant_message.is_none(),
+            "reasoning content is transport plumbing, not dialogue"
+        );
+    }
+
+    /// The digest legitimately degrades when the window contains NO
+    /// turns at all — an empty window from a brand-new session (before
+    /// the user's first prompt) is `Empty`, and an all-malformed
+    /// window is `ShapeChanged`. These are the two genuine Empty-
+    /// degrade cases.
+    #[test]
+    fn opencode_digest_truly_empty_window_degrades_to_empty() {
+        let messages: Vec<serde_json::Value> = vec![];
+        let tail = read_opencode_digest_from_messages(&messages);
         assert_eq!(
             tail,
             TranscriptTail::unavailable(UnavailableReason::Empty),
-            "reasoning-only assistant rows must not surface as last_assistant_message"
+            "an empty `messages` window represents a brand-new session that \
+             hasn't reached its first user prompt"
         );
     }
 
@@ -4202,3 +4259,5 @@ mod tests {
         );
     }
 }
+
+
