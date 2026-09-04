@@ -138,7 +138,20 @@ pub fn create_with_source_pr_fork(
         None
     };
 
-    let resolved = env::resolve_agent_path(path, worktree_db_name);
+    // Issue #1519: persist the exact resolved `worktree_path` at creation
+    // (Mesh override → app default → `.claude/worktrees`). `None` for Root
+    // Nodes. Existing rows without it retain the legacy fallback via
+    // `env::node_working_path`, so changing a setting affects future nodes
+    // without moving live worktrees.
+    let app_dir = crate::preferences::worktree_directory();
+    let effective_dir = env::effective_worktree_dir_raw(
+        path,
+        mesh.worktree_directory.as_deref(),
+        app_dir.as_deref(),
+    );
+    let worktree_path_owned: Option<String> = worktree_db_name
+        .map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
+    let resolved = env::resolve_agent_path_in_dir(path, &effective_dir, worktree_db_name);
     let env_type = resolved.env_type;
     // Store the harness/profile id verbatim (issue #535) — no premature parse
     // to the legacy `Provider` enum, which would flatten an unknown profile id
@@ -160,6 +173,7 @@ pub fn create_with_source_pr_fork(
         use_worktree,
         head_repo_owner,
         head_repo_clone_url,
+        worktree_path_owned.as_deref(),
     )?;
 
     Ok(node)

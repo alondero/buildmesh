@@ -38,13 +38,31 @@ pub async fn import_discovered_agent_node(
 ) -> Result<AgentNode, String> {
     crate::commands::run_blocking("import_discovered_agent_node", move || {
         let session_name = crate::session_naming::on_spawn();
-        let resolved = env::resolve_agent_path(&mesh_path, None);
+        // Issue #1519: resolve the effective dir so the imported node
+        // persists the same `worktree_path` a fresh spawn would.
+        let mesh_row = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+        let app_dir = crate::preferences::worktree_directory();
+        let effective_dir =
+            env::effective_worktree_dir_raw(&mesh_path, mesh_row.worktree_directory.as_deref(), app_dir.as_deref());
+        let use_worktree = worktree_name.is_some();
+        // Imported nodes keep the discovered `worktree_name` when set;
+        // otherwise they are Root Nodes. Persist the effective path for
+        // worktree imports so later setting changes don't move them.
+        let worktree_path_owned: Option<String> = worktree_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
+        let resolved = env::resolve_agent_path_in_dir(
+            &mesh_path,
+            &effective_dir,
+            worktree_name.as_deref(),
+        );
         let env_type = resolved.env_type;
         // Store the harness/profile id verbatim (issue #535); resolution to a
         // concrete executor happens at the spawn seam. Absent → "anthropic".
         let provider_id = provider.as_deref().unwrap_or("anthropic");
 
-        let use_worktree = worktree_name.is_some();
         let node = db::create_agent_node(
             mesh_id,
             &session_name,
@@ -59,6 +77,7 @@ pub async fn import_discovered_agent_node(
             use_worktree,
             None,
             None,
+            worktree_path_owned.as_deref(),
         )
         .map_err(|e| e.to_string())?;
 

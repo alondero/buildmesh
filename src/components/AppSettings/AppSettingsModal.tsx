@@ -53,7 +53,7 @@ type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
  *  (General), `harness-*` (Harnesses, prefixed where the modal wires
  *  HarnessConfigList), and `account-*` / `add-custom-form` (Providers). */
 function paneForDirtySite(site: string): SettingsTabId {
-  if (site === 'autopilot-pool' || site === 'harness-defaults') return 'general';
+  if (site === 'autopilot-pool' || site === 'harness-defaults' || site === 'worktree-dir') return 'general';
   if (site.startsWith('harness-')) return 'harnesses';
   return 'providers';
 }
@@ -436,6 +436,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // dirty comparison. A ref for the same closure-staleness reason as
   // `selectedRef` (issue #581).
   const poolSavedRef = useRef('');
+  // Issue #1519: Buildmesh-wide default Worktree Node directory. Draft is
+  // the raw textfield value; `''` means "no app override — each Mesh uses
+  // `.claude/worktrees` unless it has its own override". Committed on blur /
+  // Enter like the pool size — a half-typed path must not briefly relocate
+  // the warm pool.
+  const [worktreeDirDraft, setWorktreeDirDraft] = useState('');
+  const [worktreeDirSaving, setWorktreeDirSaving] = useState(false);
+  const worktreeDirSavedRef = useRef('');
   // Issue #734: theme toggle. `themeDraft` mirrors currentTheme() so the
   // radio reflects the active value on modal open; flipping it calls
   // setTheme(), which writes localStorage, updates <html data-theme>,
@@ -563,6 +571,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
         setPoolDraft(storedPool);
         poolSavedRef.current = storedPool;
+        const storedWorktreeDir = prefs.worktree_directory?.trim() ?? '';
+        setWorktreeDirDraft(storedWorktreeDir);
+        worktreeDirSavedRef.current = storedWorktreeDir;
         setHarnessDefaults(prefs.harness_defaults ?? {});
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
@@ -884,6 +895,39 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     } catch (e) {
       setError(formatError(e));
       return false;
+    }
+  };
+
+  // Commit the worktree-directory draft (blur / Enter, issue #1519). `''`
+  // (or whitespace-only) clears the app default so inheriting Meshes fall
+  // back to `.claude/worktrees`; anything else stores the trimmed raw input
+  // verbatim (no shell/`~` expansion — resolution joins it literally).
+  // Optimistic with rollback, mirroring the pool-size write.
+  const commitWorktreeDir = async () => {
+    const trimmed = worktreeDirDraft.trim();
+    const canonical = trimmed;
+    setWorktreeDirDraft(canonical);
+    if (canonical === worktreeDirSavedRef.current) {
+      siteDirtyChange('worktree-dir', false);
+      return;
+    }
+    const previous = worktreeDirSavedRef.current;
+    worktreeDirSavedRef.current = canonical;
+    siteDirtyChange('worktree-dir', false);
+    setWorktreeDirSaving(true);
+    setError(null);
+    try {
+      await api.setAppWorktreeDirectory(canonical === '' ? null : canonical);
+      const prefs = await api.getAppPreferences();
+      const stored = prefs.worktree_directory?.trim() ?? '';
+      setWorktreeDirDraft(stored);
+      worktreeDirSavedRef.current = stored;
+    } catch (e) {
+      worktreeDirSavedRef.current = previous;
+      setWorktreeDirDraft(previous);
+      setError(formatError(e));
+    } finally {
+      setWorktreeDirSaving(false);
     }
   };
 
@@ -1274,6 +1318,44 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               if (e.key === 'Enter') commitPoolSize();
             }}
             className="w-48 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+          />
+        </div>
+
+        <div className="pt-6 border-t border-border-subtle space-y-4">
+          <label
+            htmlFor="worktree-directory"
+            className="block text-lg font-medium text-text-secondary"
+          >
+            Worktree directory
+          </label>
+          <p className="text-base text-text-muted">
+            Default folder for new Worktree Nodes across{' '}
+            <span className="font-medium">all</span> meshes. Relative paths
+            resolve from each mesh root (e.g. <code>worktrees</code>); absolute
+            paths are not allowed here because one default spans both native
+            and WSL meshes — set an absolute path as a per-mesh override in
+            Project Settings instead. Leave empty for{' '}
+            <code>.claude/worktrees</code>. A per-mesh override
+            in Project Settings takes precedence. Changing this affects future
+            nodes and pre-spawn pool entries only — live nodes keep their
+            existing directories.
+          </p>
+          <input
+            id="worktree-directory"
+            type="text"
+            aria-label="Worktree directory"
+            placeholder=".claude/worktrees"
+            value={worktreeDirDraft}
+            disabled={!loaded || worktreeDirSaving}
+            onChange={e => {
+              setWorktreeDirDraft(e.target.value);
+              siteDirtyChange('worktree-dir', e.target.value.trim() !== worktreeDirSavedRef.current);
+            }}
+            onBlur={commitWorktreeDir}
+            onKeyDown={e => {
+              if (e.key === 'Enter') commitWorktreeDir();
+            }}
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           />
         </div>
 

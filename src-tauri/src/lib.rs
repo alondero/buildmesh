@@ -474,6 +474,10 @@ pub fn run() {
             // against the capability descriptor (issue #1148 AC #5).
             commands::preferences::set_harness_default,
             commands::preferences::clear_harness_default,
+            // Configurable Worktree Node directories (issue #1519): app-wide
+            // default + effective-dir read for the Settings surfaces.
+            commands::preferences::set_app_worktree_directory,
+            commands::preferences::get_worktree_directory_config,
             // Coordinator read API (ADR-0008)
             commands::coordinator::get_coordinator_status,
             commands::coordinator::set_coordinator_api_enabled,
@@ -591,6 +595,9 @@ pub fn run() {
             commands::mesh_properties::upsert_mesh_harness_override,
             commands::mesh_properties::remove_mesh_harness_override,
             commands::mesh_properties::clear_mesh_harness_overrides,
+            // Configurable Worktree Node directories (issue #1519): per-Mesh
+            // override with same-environment validation for absolute paths.
+            commands::mesh_properties::update_mesh_worktree_directory,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
             commands::scratchpad::get_mesh_scratchpad,
             commands::scratchpad::set_mesh_scratchpad,

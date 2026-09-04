@@ -11,12 +11,42 @@ vi.mock('../../src/lib/platform', () => ({
   isWindows: true,
 }));
 
-import { getNodeGitPath, pathMatchesGitEvent } from '../../src/lib/paths';
+import { getEffectiveWorktreeDir, getNodeGitPath, pathMatchesGitEvent } from '../../src/lib/paths';
 
 describe('getNodeGitPath', () => {
   it('returns worktree path when worktree_name is set', () => {
     const node = { path: '/Users/adam/myproject', worktree_name: 'gentle-fox' };
     expect(getNodeGitPath(node)).toBe('/Users/adam/myproject/.claude/worktrees/gentle-fox');
+  });
+
+  it('prefers persisted worktree_path for configured directories (issue #1519)', () => {
+    const node = {
+      path: '/repo/mesh',
+      worktree_name: 'my-node',
+      use_worktree: true,
+      worktree_path: '/repo/mesh/custom/my-node',
+    };
+    expect(getNodeGitPath(node)).toBe('/repo/mesh/custom/my-node');
+  });
+
+  it('falls back to legacy layout when worktree_path is blank', () => {
+    const node = {
+      path: '/repo/mesh',
+      worktree_name: 'my-node',
+      use_worktree: true,
+      worktree_path: '   ',
+    };
+    expect(getNodeGitPath(node)).toBe('/repo/mesh/.claude/worktrees/my-node');
+  });
+
+  it('ignores stored worktree_path for Root Nodes', () => {
+    const node = {
+      path: '/repo/mesh',
+      worktree_name: 'my-node',
+      use_worktree: false,
+      worktree_path: '/repo/mesh/custom/my-node',
+    };
+    expect(getNodeGitPath(node)).toBe('/repo/mesh');
   });
 
   it('returns node.path when worktree_name is undefined', () => {
@@ -131,5 +161,43 @@ describe('pathMatchesGitEvent', () => {
       internal_path: '/other/repo/.claude/worktrees/y',
     };
     expect(pathMatchesGitEvent(event, '/home/user/repo')).toBe(false);
+  });
+});
+
+describe('getEffectiveWorktreeDir (issue #1519)', () => {
+  it('defaults to .claude/worktrees when unconfigured', () => {
+    expect(getEffectiveWorktreeDir('/repo/mesh', null, null)).toBe('/repo/mesh/.claude/worktrees');
+    expect(getEffectiveWorktreeDir('/repo/mesh', '  ', '')).toBe('/repo/mesh/.claude/worktrees');
+  });
+
+  it('applies a relative app setting to inheriting meshes', () => {
+    expect(getEffectiveWorktreeDir('/repo/mesh', null, 'custom-wt')).toBe('/repo/mesh/custom-wt');
+  });
+
+  it('prefers the Mesh override and restores inheritance when cleared', () => {
+    expect(getEffectiveWorktreeDir('/repo/mesh', 'mesh-wt', 'app-wt')).toBe('/repo/mesh/mesh-wt');
+    expect(getEffectiveWorktreeDir('/repo/mesh', '  ', 'app-wt')).toBe('/repo/mesh/app-wt');
+  });
+
+  it('uses absolute values verbatim without shell expansion', () => {
+    expect(getEffectiveWorktreeDir('/repo/mesh', '/tmp/wt', null)).toBe('/tmp/wt');
+    expect(getEffectiveWorktreeDir('/repo/mesh', '~/wt', null)).toBe('/repo/mesh/~/wt');
+  });
+});
+
+describe('pathMatchesGitEvent with custom dirs (issue #1519)', () => {
+  it('matches a mesh root when the event is under the effective dir', () => {
+    const event = { path: '/repo/mesh/custom/my-node', internal_path: '/repo/mesh/custom/my-node' };
+    expect(pathMatchesGitEvent(event, '/repo/mesh', ['/repo/mesh/custom'])).toBe(true);
+  });
+
+  it('matches an absolute effective dir outside the mesh root', () => {
+    const event = { path: '/tmp/wt/my-node', internal_path: '/tmp/wt/my-node' };
+    expect(pathMatchesGitEvent(event, '/repo/mesh', ['/tmp/wt'])).toBe(true);
+  });
+
+  it('still rejects unrelated paths even with effective dirs', () => {
+    const event = { path: '/other/wt/my-node' };
+    expect(pathMatchesGitEvent(event, '/repo/mesh', ['/repo/mesh/custom'])).toBe(false);
   });
 });

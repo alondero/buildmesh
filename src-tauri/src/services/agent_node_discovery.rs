@@ -265,10 +265,22 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
     // and pulls the conversation_id off the directory name (matches the
     // `conversation id: <UUID>` banner the agy TUI prints, so the captured
     // id in `agent_nodes.cli_session_id` aligns 1:1 with this dir name).
+    // Issue #1519: resolve the effective worktree container once so the AGY
+    // scan maps custom locations without a per-conversation DB hit.
+    // Best-effort: without a mesh row fall back to legacy-only matching.
+    let agy_effective: Option<String> = db::get_mesh_by_path(mesh_path).ok().map(|m| {
+        let app_dir = crate::preferences::worktree_directory();
+        crate::env::effective_worktree_dir_raw(
+            mesh_path,
+            m.worktree_directory.as_deref(),
+            app_dir.as_deref(),
+        )
+    });
     sessions.extend(discover_agy_sessions_in(
         &env::agy_brain_dir(),
         mesh_path,
         &tracked_ids,
+        agy_effective.as_deref(),
     ));
 
     // Sort by timestamp descending (most recent first)
@@ -489,6 +501,7 @@ fn discover_agy_sessions_in(
     brain_dir: &std::path::Path,
     mesh_path: &str,
     tracked_ids: &std::collections::HashSet<String>,
+    effective_dir_raw: Option<&str>,
 ) -> Vec<ArchivedAgentNode> {
     if !brain_dir.is_dir() {
         return Vec::new();
@@ -540,13 +553,16 @@ fn discover_agy_sessions_in(
         // AGY conversations live outside the mesh's own `.claude/projects/`
         // tree, so the worktree name comes purely from the transcript's
         // workspace metadata. Only attach a worktree name when the path
-        // resolves inside *this* mesh's worktree convention
-        // (`.claude/worktrees/<name>` suffix matching `mesh_path`); anything
+        // resolves inside *this* mesh's worktree convention (effective
+        // `<worktree_dir>/<name>`, issue #1519, falling back to legacy
+        // `.claude/worktrees/<name>` suffix matching `mesh_path`); anything
         // else stays at the mesh root with no worktree_name so the user
         // sees a global session without a misleading association.
         let worktree_name = workspace_path
             .as_deref()
-            .and_then(|p| extract_worktree_name_from_path(p, mesh_path));
+            .and_then(|p| {
+                extract_worktree_name_from_path_with_effective(p, mesh_path, effective_dir_raw)
+            });
 
         sessions.push(ArchivedAgentNode {
             session_id,
@@ -561,13 +577,40 @@ fn discover_agy_sessions_in(
 }
 
 /// Map an AGY step's `workspace_path` onto a Buildmesh worktree name when the
-/// path lives under `<mesh>/.claude/worktrees/<name>`. Mirrors the
+/// path lives under the mesh's effective worktree container
+/// (`<effective_dir>/<name>`, issue #1519) or the legacy
+/// `<mesh>/.claude/worktrees/<name>`. Mirrors the
 /// `extract_worktree_name` / `extract_cursor_worktree_name` rules used by the
-/// other scanners — same separator handling, same `<mesh>/.claude/worktrees/`
-/// convention. Returns `None` for the mesh root (no worktree) and for paths
-/// that don't resolve to a worktree inside the calling mesh (so a foreign
-/// conversation doesn't masquerade as ours).
-fn extract_worktree_name_from_path(workspace_path: &str, mesh_path: &str) -> Option<String> {
+/// other scanners — same separator handling. Returns `None` for the mesh root
+/// (no worktree) and for paths that don't resolve to a worktree inside the
+/// calling mesh (so a foreign conversation doesn't masquerade as ours).
+///
+/// `effective_dir_raw` is the mesh's current effective container dir from
+/// `env::effective_worktree_dir_raw` (Mesh override → app default →
+/// `.claude/worktrees`). `None` means "legacy only" (caller couldn't resolve
+/// settings, e.g. in a unit test without a DB).
+fn extract_worktree_name_from_path(
+    workspace_path: &str,
+    mesh_path: &str,
+) -> Option<String> {
+    extract_worktree_name_from_path_with_effective(workspace_path, mesh_path, None)
+}
+
+fn extract_worktree_name_from_path_with_effective(
+    workspace_path: &str,
+    mesh_path: &str,
+    effective_dir_raw: Option<&str>,
+) -> Option<String> {
+    // Issue #1519: try the effective container first (custom dirs, including
+    // absolute locations outside the mesh root), then the legacy marker.
+    if let Some(effective) = effective_dir_raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(name) = worktree_name_under_dir(workspace_path, effective) {
+            return Some(name);
+        }
+    }
     let mesh = mesh_path.replace('\\', "/");
     let wp = workspace_path.replace('\\', "/");
 
@@ -583,6 +626,43 @@ fn extract_worktree_name_from_path(workspace_path: &str, mesh_path: &str) -> Opt
     }
     let name = &wp[worktree_idx + marker.len()..];
     let name = name.split('/').next().unwrap_or("").trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Extract the first path component under `container_dir` when
+/// `workspace_path` equals `<container>/<name>` or lives inside it.
+/// Separator-normalized (`\` → `/`) and case-aware via `same_path` for the
+/// prefix (so Windows drive case doesn't break matching); the returned name
+/// preserves its original spelling for display.
+fn worktree_name_under_dir(workspace_path: &str, container_dir: &str) -> Option<String> {
+    let wp = workspace_path.replace('\\', "/");
+    let dir = container_dir.replace('\\', "/");
+    let dir_trimmed = dir.trim_end_matches('/');
+    let wp_trimmed = wp.trim_end_matches('/');
+    // Exact container dir itself is not a worktree (no name).
+    if same_path(wp_trimmed, dir_trimmed) {
+        return None;
+    }
+    let prefix = format!("{}/", dir_trimmed.trim_end_matches('/'));
+    // Case-insensitive prefix check on Windows to match `same_path`
+    // semantics; exact on POSIX.
+    let (wp_cmp, prefix_cmp) = if cfg!(target_os = "windows") {
+        (wp.to_ascii_lowercase(), prefix.to_ascii_lowercase())
+    } else {
+        (wp.clone(), prefix.clone())
+    };
+    let rest_start = wp_cmp.find(&prefix_cmp)?;
+    // `find` could match a non-prefix occurrence (e.g. container string
+    // appearing later in the path); require position 0.
+    if rest_start != 0 {
+        return None;
+    }
+    let rest = &wp[prefix.len()..];
+    let name = rest.split('/').next().unwrap_or("").trim();
     if name.is_empty() {
         None
     } else {
@@ -1152,6 +1232,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
 
@@ -1192,6 +1273,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
         assert!(discovered.is_empty());
@@ -1211,6 +1293,7 @@ mod tests {
             &missing,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         assert!(discovered.is_empty());
     }
@@ -1242,6 +1325,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &tracked,
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
 
@@ -1266,6 +1350,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
         assert!(discovered.is_empty());
@@ -1304,6 +1389,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
 
@@ -1352,6 +1438,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
 
@@ -1402,6 +1489,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
 
@@ -1440,6 +1528,7 @@ mod tests {
             &root,
             "C:\\Users\\adam\\src\\buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
 
@@ -1472,6 +1561,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
 
@@ -1507,6 +1597,7 @@ mod tests {
             &root,
             "/Users/adam/src/buildmesh",
             &std::collections::HashSet::new(),
+            None,
         );
         std::fs::remove_dir_all(&root).ok();
 
@@ -1515,5 +1606,66 @@ mod tests {
             discovered[0].timestamp.is_some(),
             "must fall back to file mtime when no step carries a timestamp"
         );
+    }
+
+    #[test]
+    fn agy_discovery_associates_custom_effective_dir_worktrees() {
+        // Issue #1519: a workspace under the mesh's configured container dir
+        // (relative custom dir, and absolute outside the root) must map to
+        // its worktree name when the caller supplies the effective dir.
+        let root = std::env::temp_dir().join(format!(
+            "buildmesh_agy_discovery_custom_{}",
+            std::process::id()
+        ));
+        write_agy_conv(
+            &root,
+            "conv-custom-rel",
+            r#"{"step_type":"USER_INPUT","text":"Custom rel","workspace_path":"/Users/adam/src/buildmesh/custom-wt/olive-fox","created_at":"2026-07-12T11:30:00Z"}
+"#,
+        );
+        write_agy_conv(
+            &root,
+            "conv-custom-abs",
+            r#"{"step_type":"USER_INPUT","text":"Custom abs","workspace_path":"/tmp/wt/copper-bear","created_at":"2026-07-12T11:30:00Z"}
+"#,
+        );
+
+        let discovered = discover_agy_sessions_in(
+            &root,
+            "/Users/adam/src/buildmesh",
+            &std::collections::HashSet::new(),
+            Some("/Users/adam/src/buildmesh/custom-wt"),
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        let rel = discovered
+            .iter()
+            .find(|s| s.session_id == "conv-custom-rel")
+            .expect("custom-rel conversation present");
+        assert_eq!(rel.worktree_name.as_deref(), Some("olive-fox"));
+
+        // Absolute containers outside the root need their own effective dir.
+        let root2 = std::env::temp_dir().join(format!(
+            "buildmesh_agy_discovery_custom2_{}",
+            std::process::id()
+        ));
+        write_agy_conv(
+            &root2,
+            "conv-custom-abs",
+            r#"{"step_type":"USER_INPUT","text":"Custom abs","workspace_path":"/tmp/wt/copper-bear","created_at":"2026-07-12T11:30:00Z"}
+"#,
+        );
+        let discovered2 = discover_agy_sessions_in(
+            &root2,
+            "/Users/adam/src/buildmesh",
+            &std::collections::HashSet::new(),
+            Some("/tmp/wt"),
+        );
+        std::fs::remove_dir_all(&root2).ok();
+        let abs_row = discovered2
+            .iter()
+            .find(|s| s.session_id == "conv-custom-abs")
+            .expect("custom-abs conversation present");
+        assert_eq!(abs_row.worktree_name.as_deref(), Some("copper-bear"));
     }
 }

@@ -629,6 +629,7 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 source_pr_pinned_sha TEXT,
                 status_changed_at TEXT,
                 signal_health TEXT,
+                worktree_path TEXT,
                 pr_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/m');
@@ -801,7 +802,8 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
                 source_pr_pinned_sha TEXT,
-                signal_health TEXT
+                signal_health TEXT,
+                worktree_path TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -862,7 +864,8 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
                 source_pr_pinned_sha TEXT,
-                signal_health TEXT
+                signal_health TEXT,
+                worktree_path TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -973,6 +976,130 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         );
 
         // Idempotent: a second evolve_to call must not error.
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+    }
+
+    /// v37 — configurable Worktree Node directories (issue #1519): a
+    /// pre-v37 DB gains `meshes.worktree_directory` and
+    /// `agent_nodes.worktree_path`; existing rows read back as `None`
+    /// (legacy `<mesh>/.claude/worktrees/<name>` fallback) and the narrow
+    /// writers round-trip.
+    #[test]
+    fn evolve_to_adds_v37_worktree_directory_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE meshes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                layout TEXT NOT NULL DEFAULT 'grid',
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                env TEXT NOT NULL DEFAULT 'windows',
+                provider TEXT NOT NULL DEFAULT 'anthropic',
+                status TEXT NOT NULL DEFAULT 'idle',
+                cli_session_id TEXT,
+                worktree_name TEXT,
+                use_worktree INTEGER NOT NULL DEFAULT 1,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                source_issue INTEGER,
+                source_pr INTEGER,
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT,
+                source_pr_pinned_sha TEXT,
+                signal_health TEXT
+            );
+            INSERT INTO meshes (name, path) VALUES ('m', '/repo/m');
+            INSERT INTO agent_nodes (mesh_id, name, path, worktree_name, created_at)
+                VALUES (1, 'n', '/repo/m', 'n', '2020-01-01T00:00:00Z');
+            ",
+        )
+        .unwrap();
+
+        let has_mesh_before: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'worktree_directory'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_node_before: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'worktree_path'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!has_mesh_before, "PRECONDITION: meshes.worktree_directory must not exist");
+        assert!(!has_node_before, "PRECONDITION: agent_nodes.worktree_path must not exist");
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+        let has_mesh_after: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'worktree_directory'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_node_after: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'worktree_path'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_mesh_after, "meshes.worktree_directory must exist after evolve_to");
+        assert!(has_node_after, "agent_nodes.worktree_path must exist after evolve_to");
+
+        // Pre-v37 rows read back as None (inherit / legacy fallback).
+        let mesh = crate::db::get_mesh_by_id_inner(&conn, 1).unwrap();
+        assert_eq!(mesh.worktree_directory, None);
+        let node = crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap();
+        assert_eq!(node.worktree_path, None);
+
+        // Narrow writers round-trip + blank clears to None.
+        crate::db::set_mesh_worktree_directory_inner(&conn, 1, Some("custom-wt")).unwrap();
+        assert_eq!(
+            crate::db::get_mesh_by_id_inner(&conn, 1)
+                .unwrap()
+                .worktree_directory
+                .as_deref(),
+            Some("custom-wt")
+        );
+        crate::db::set_mesh_worktree_directory_inner(&conn, 1, Some("   ")).unwrap();
+        assert_eq!(
+            crate::db::get_mesh_by_id_inner(&conn, 1).unwrap().worktree_directory,
+            None,
+            "blank clears to inherit"
+        );
+        crate::db::adopt_manual_pool_slug_with_path_inner(
+            &conn,
+            1,
+            "n",
+            Some("/repo/m/custom-wt/n"),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::db::get_agent_node_by_id_inner(&conn, 1)
+                .unwrap()
+                .worktree_path
+                .as_deref(),
+            Some("/repo/m/custom-wt/n")
+        );
+
+        // Idempotent.
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 }

@@ -262,6 +262,36 @@ pub fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
         .map_err(|e| format!("failed to update sandbox: {}", e))
 }
 
+/// Set the per-Mesh Worktree Node directory override (issue #1519).
+/// `None` (or blank, which collapses to `None`) clears the override so the
+/// Mesh inherits the application default (or `.claude/worktrees` when that
+/// too is unset). Relative values resolve from the Mesh root; absolute
+/// values must be in the same host environment (native/Windows versus WSL)
+/// as the Mesh — a mismatch is rejected with an actionable message.
+/// No shell/`~` expansion. Changing it affects future nodes and warm-pool
+/// entries only — live Agent Nodes keep their persisted `worktree_path`
+/// and are never moved. On success, schedules a background pool rebuild
+/// for this Mesh so idle inventory converges on the new location.
+#[tauri::command]
+pub fn update_mesh_worktree_directory(
+    app: AppHandle,
+    mesh_id: i64,
+    directory: Option<String>,
+) -> Result<(), String> {
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let cleaned = crate::env::validate_worktree_directory(&mesh.path, directory.as_deref())?;
+    let rows = db::set_mesh_worktree_directory(mesh_id, cleaned.as_deref())
+        .map_err(|e| format!("failed to update worktree_directory: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    std::thread::spawn(move || {
+        crate::services::warm_pool::rebuild_pools_for_worktree_dir_change(&app, Some(mesh_id));
+    });
+    Ok(())
+}
+
 /// Persist a mesh's Looping Autopilot configuration (wayfinder #990 /
 /// ticket #991). The poller (ticket #992) reads `mode` at startup to
 /// decide which spawn strategy to use; the dedicated typed command

@@ -129,4 +129,15 @@ autopilot_pool_size: number | null,
  * loads as an empty `HashMap` (issue #1148 acceptance criteria 1) via
  * `#[serde(default)]`.
  */
-harness_defaults: { [key in string]: HarnessConfigValue }, };
+harness_defaults: { [key in string]: HarnessConfigValue }, 
+/**
+ * Buildmesh-wide default Worktree Node directory (issue #1519).
+ * Optional raw user input — relative values resolve from the Mesh root,
+ * absolute values must be in the same host environment (native/Windows
+ * versus WSL) as the Mesh. Trimmed; blank collapses to `None`
+ * (inherit/default). Shell variables and `~` are NOT expanded.
+ * `None` means "no app-wide override — use `.claude/worktrees`
+ * under the Mesh root". A per-Mesh `worktree_directory` overrides this.
+ * Additive on disk — older `preferences.json` without it loads as `None`.
+ */
+worktree_directory: string | null, };

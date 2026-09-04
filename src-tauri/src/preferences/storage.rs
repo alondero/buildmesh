@@ -294,6 +294,28 @@ pub fn naming_provider() -> Option<String> {
     }
 }
 
+/// Buildmesh-wide default Worktree Node directory (issue #1519).
+/// Trimmed raw input; blank collapses to `None` (default
+/// `.claude/worktrees` under the Mesh root, overridden per-Mesh).
+/// A load failure logs and falls back to `None` like [`default_provider`].
+pub fn worktree_directory() -> Option<String> {
+    match load() {
+        Ok(prefs) => prefs
+            .worktree_directory
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        Err(e) => {
+            tracing::warn!(
+                "preferences::worktree_directory load failed, falling back: {}",
+                e
+            );
+            None
+        }
+    }
+}
+
 /// The global autopilot pool size — the app-wide cap on concurrently active
 /// autopilot nodes across every mesh (see [`AppPreferences::autopilot_pool_size`]).
 /// `None` means "no global cap" — the per-mesh `autopilot_concurrency_limit`

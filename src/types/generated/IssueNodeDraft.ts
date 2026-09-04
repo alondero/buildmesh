@@ -104,4 +104,16 @@ source_pr_pinned_sha: string | null,
  * distinguish "the harness has not produced an event yet" from "the
  * hook is broken".
  */
-signal_health: SignalHealth | null, position: number, created_at: string, };
+signal_health: SignalHealth | null, position: number, created_at: string, 
+/**
+ * Exact resolved Worktree Node directory for this node (issue #1519).
+ * `Some(raw_path)` for Worktree Nodes created after the configurable
+ * directory landed — the effective `<worktree_dir>/<trimmed_name>`
+ * computed at creation from Mesh override → app default →
+ * `.claude/worktrees`. `None` for Root Nodes and for pre-#1519 rows,
+ * which retain the legacy `<mesh>/.claude/worktrees/<name>` fallback
+ * via `env::node_working_path`. Immutable — changing a directory
+ * setting affects future nodes without moving live worktrees.
+ * Persisted as `agent_nodes.worktree_path TEXT` (schema v37).
+ */
+worktree_path: string | null, };

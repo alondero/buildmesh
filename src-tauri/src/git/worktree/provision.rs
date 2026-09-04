@@ -668,8 +668,9 @@ pub(crate) trait ProvisionSink: Sync {
     fn forget_warm_row(&self, id: i64);
 
     /// Adopt the pool's pre-assigned slug onto a Manual node: persist it as
-    /// the row's identity (`name` AND `worktree_name`, one write — see
-    /// `db::adopt_manual_pool_slug`) AND announce via `node-renamed` so the
+    /// the row's identity (`name` AND `worktree_name` AND `worktree_path`,
+    /// one write — see `db::adopt_manual_pool_slug_with_path`) AND announce
+    /// via `node-renamed` so the
     /// frontend's optimistic stage-1 row re-labels. Three consequences of one
     /// decision — kept as a single trait method because they must be
     /// atomic-ish: a partial application leaves either the on-disk name, the
@@ -679,7 +680,12 @@ pub(crate) trait ProvisionSink: Sync {
     /// Called for every Manual spawn that *claimed* a warm entry, whichever
     /// on-disk outcome it reached; Issue/PR spawns keep their own
     /// `gh{N}-`/`pr{N}-` identity per CONTEXT.md *Spawn Source*.
-    fn adopt_manual_slug(&self, node_id: i64, slug: &str);
+    ///
+    /// Issue #1519: also persists the exact resolved `worktree_path` (raw
+    /// form) so the close path derives its removal directory from the
+    /// configured location, not the stage-1 throwaway. `None` preserves the
+    /// legacy fallback (pre-#1519 rows).
+    fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: Option<&str>);
 
     /// Schedule the single post-spawn pool-maintenance task. Called only
     /// when `ref_advanced_for_pool || pool_was_drained_by_this_spawn`;
@@ -711,20 +717,22 @@ impl ProvisionSink for AppHandleSink {
         crate::services::warm_pool::forget_after_spawn(id);
     }
 
-    fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
+    fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: Option<&str>) {
         // DB write first; emit on success only. A failed DB write leaves
         // the row's identity stale, which the next manual rename (or
         // stage-2 reconcile) can correct — but a stale `node-renamed` emit
         // would also re-label the frontend's optimistic stage-1 row to a
         // value the DB doesn't carry, which is the harder case to undo.
         //
-        // `adopt_manual_pool_slug` writes `name` and `worktree_name`
-        // together. Do NOT narrow this to a name-only update: the close
-        // path derives its removal directory from `worktree_name`, so a
-        // name-only adoption silently leaks the worktree on every close
-        // (#1080).
+        // `adopt_manual_pool_slug_with_path` writes `name`, `worktree_name`
+        // AND `worktree_path` together (issue #1519). Do NOT narrow this to
+        // a name-only update: the close path derives its removal directory
+        // from `worktree_name`/`worktree_path`, so a name-only adoption
+        // silently leaks the worktree on every close (#1080).
         if crate::db::is_initialized() {
-            if let Err(e) = crate::db::adopt_manual_pool_slug(node_id, slug) {
+            if let Err(e) =
+                crate::db::adopt_manual_pool_slug_with_path(node_id, slug, worktree_path)
+            {
                 tracing::warn!(
                     "AppHandleSink::adopt_manual_slug: DB write failed for node {} ({}); \
                      skipping the node-renamed emit so the frontend can't re-label to a value the DB doesn't carry",
@@ -774,7 +782,7 @@ pub(crate) struct NullSink;
 #[cfg(test)]
 impl ProvisionSink for NullSink {
     fn forget_warm_row(&self, _id: i64) {}
-    fn adopt_manual_slug(&self, _node_id: i64, _slug: &str) {}
+    fn adopt_manual_slug(&self, _node_id: i64, _slug: &str, _worktree_path: Option<&str>) {}
     fn on_pool_maintenance_required(&self, _mesh_id: i64, _do_refresh: bool, _do_refill: bool) {}
 }
 
@@ -1088,8 +1096,11 @@ pub fn provision_for_spawn(
     // run in. Issue/PR spawns keep their own `gh{N}-`/`pr{N}-` identity — the
     // pool directory was moved to match them instead — so `manual_pool_slug`
     // is `None` for those and this is a no-op.
+    // Issue #1519: also persist the in-memory `worktree_path` (raw form,
+    // aligned in `prepare_context` to the claimed entry) so the DB row
+    // agrees with the on-disk directory even under a custom container.
     if let Some(slug) = &manual_pool_slug {
-        sink.adopt_manual_slug(ctx.node.id, slug);
+        sink.adopt_manual_slug(ctx.node.id, slug, ctx.node.worktree_path.as_deref());
     }
 
     let do_refresh = hooks.ref_advanced_for_pool;
@@ -1165,6 +1176,7 @@ mod tests {
             signal_health: None,
             position: 0,
             created_at: chrono::Utc::now(),
+            worktree_path: None,
         }
     }
 
@@ -1648,8 +1660,8 @@ mod tests {
     struct RecordingState {
         /// `id` for each `forget_warm_row` call.
         warm_rows_forgotten: Vec<i64>,
-        /// (node_id, slug) for each `adopt_manual_slug` call.
-        adopted_slugs: Vec<(i64, String)>,
+        /// (node_id, slug, worktree_path) for each `adopt_manual_slug` call.
+        adopted_slugs: Vec<(i64, String, Option<String>)>,
         /// (mesh_id, do_refresh, do_refill) for each `on_pool_maintenance_required`
         /// call. Multiple calls would be a regression — exactly one per spawn.
         maintenance_calls: Vec<(i64, bool, bool)>,
@@ -1662,7 +1674,7 @@ mod tests {
         fn warm_rows_forgotten(&self) -> Vec<i64> {
             self.state.lock().unwrap().warm_rows_forgotten.clone()
         }
-        fn adopted_slugs(&self) -> Vec<(i64, String)> {
+        fn adopted_slugs(&self) -> Vec<(i64, String, Option<String>)> {
             self.state.lock().unwrap().adopted_slugs.clone()
         }
         fn maintenance_calls(&self) -> Vec<(i64, bool, bool)> {
@@ -1674,12 +1686,12 @@ mod tests {
         fn forget_warm_row(&self, id: i64) {
             self.state.lock().unwrap().warm_rows_forgotten.push(id);
         }
-        fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
-            self.state
-                .lock()
-                .unwrap()
-                .adopted_slugs
-                .push((node_id, slug.to_string()));
+        fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: Option<&str>) {
+            self.state.lock().unwrap().adopted_slugs.push((
+                node_id,
+                slug.to_string(),
+                worktree_path.map(str::to_string),
+            ));
         }
         fn on_pool_maintenance_required(&self, mesh_id: i64, do_refresh: bool, do_refill: bool) {
             self.state
@@ -1703,8 +1715,8 @@ mod tests {
     struct DbWritingSink;
     impl ProvisionSink for DbWritingSink {
         fn forget_warm_row(&self, _id: i64) {}
-        fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
-            crate::db::adopt_manual_pool_slug(node_id, slug)
+        fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: Option<&str>) {
+            crate::db::adopt_manual_pool_slug_with_path(node_id, slug, worktree_path)
                 .expect("DB write must succeed in this test");
         }
         fn on_pool_maintenance_required(
@@ -1834,7 +1846,7 @@ mod tests {
         assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
         assert_eq!(
             sink.adopted_slugs(),
-            vec![(4242, "bold-amber-fox".to_string())],
+            vec![(4242, "bold-amber-fox".to_string(), None)],
             "Manual warm claim must adopt the pool's slug via the sink",
         );
         // Maintenance NOT scheduled — neither flag set.
@@ -2108,7 +2120,10 @@ mod tests {
         let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink)
             .expect("manual upgrade must succeed");
         assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
-        assert_eq!(sink.adopted_slugs(), vec![(7, "quiet-warm".to_string())]);
+        assert_eq!(
+            sink.adopted_slugs(),
+            vec![(7, "quiet-warm".to_string(), None)]
+        );
         assert!(
             sink.warm_rows_forgotten() == vec![42],
             "manual upgrade must forget the warm row (id from claimed_warm fixture)"

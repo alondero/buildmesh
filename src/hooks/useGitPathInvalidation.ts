@@ -73,6 +73,9 @@ export function useGitPathInvalidation(
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
+  // Issue #1519 extras key — re-subscribe when the effective dir loads after
+  // mount, without tearing down on every parent re-render (fresh arrays).
+  const extraKey = (options?.extraPaths ?? []).join('\0');
   useAsyncEffect((signal) => {
     if (!path) return;
     const unsubscribe = subscribeGitPathInvalidation(
@@ -86,5 +89,5 @@ export function useGitPathInvalidation(
     return () => {
       unsubscribe();
     };
-  }, [path]);
+  }, [path, extraKey]);
 }

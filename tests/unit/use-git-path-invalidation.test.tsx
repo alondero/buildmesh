@@ -164,3 +164,32 @@ describe('useGitPathInvalidation (issue #357)', () => {
     expect(cb1).toHaveBeenCalledTimes(1); // unchanged — re-subscribe did NOT happen
   });
 });
+
+describe('useGitPathInvalidation extraPaths (issue #1519)', () => {
+  it('invokes the callback for events under an extra dir outside the watched root', async () => {
+    const cb = vi.fn();
+    renderHook(() => useGitPathInvalidation('/repo/mesh', cb, { extraPaths: ['/tmp/wt'] }));
+    await act(async () => {
+      await emit(GIT_CHANGED, { path: '/tmp/wt/my-node' });
+    });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('still matches the watched root and legacy worktree prefix with extras set', async () => {
+    const cb = vi.fn();
+    renderHook(() => useGitPathInvalidation('/repo/mesh', cb, { extraPaths: ['/tmp/wt'] }));
+    await act(async () => {
+      await emit(GIT_CHANGED, { path: '/repo/mesh/.claude/worktrees/n' });
+    });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT invoke for unrelated paths even with extras set', async () => {
+    const cb = vi.fn();
+    renderHook(() => useGitPathInvalidation('/repo/mesh', cb, { extraPaths: ['/tmp/wt'] }));
+    await act(async () => {
+      await emit(GIT_CHANGED, { path: '/elsewhere/x' });
+    });
+    expect(cb).not.toHaveBeenCalled();
+  });
+});

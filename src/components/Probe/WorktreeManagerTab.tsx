@@ -43,14 +43,17 @@ import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   deleteBranches,
   deleteWorktrees,
+  getAppPreferences,
   getGitPruneInfo,
   getMeshProperties,
   getWarmPoolCount,
+  getWorktreeDirectoryConfig,
   openInFileManager,
   pruneRemoteTracking,
   updateMeshColumn,
   updateMeshPoolSize,
   updateMeshUseWorktree,
+  updateMeshWorktreeDirectory,
   updateWorktreeBaseRef,
   type BranchInfo,
   type GitRepoPruneInfo,
@@ -58,6 +61,7 @@ import {
   type MeshHealth,
   type WorktreeInfo,
 } from '../../lib/tauri';
+import { getEffectiveWorktreeDir } from '../../lib/paths';
 import { LoadingState, RefreshControl } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
 
@@ -249,6 +253,14 @@ export function WorktreeManagerTab() {
   // claim, draining excess and filling up to this target.
   const [preSpawnPoolSize, setPreSpawnPoolSize] = useState(0);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Issue #1519: per-Mesh worktree directory override draft (`''` = inherit)
+  // plus the inherited effective value for display. Hydrated from
+  // `getMeshProperties` + `getAppPreferences`; the effective display also
+  // refreshes from `getWorktreeDirectoryConfig` so the backend precedence
+  // rule (not a TS re-spelling) is authoritative.
+  const [worktreeDirectory, setWorktreeDirectory] = useState('');
+  const [worktreeDirEffective, setWorktreeDirEffective] = useState('');
+  const [worktreeDirAppDefault, setWorktreeDirAppDefault] = useState<string | null>(null);
 
   // Live pre-spawn pool *ready* count for the active mesh. Source of
   // truth is `db::count_available_warm_for_mesh` on the Rust side; the
@@ -385,13 +397,25 @@ export function WorktreeManagerTab() {
   useAsyncEffect(
     (signal) => {
       if (activeMeshId === null) return;
-      getMeshProperties(activeMeshId)
-        .then((config) => {
+      Promise.all([
+        getMeshProperties(activeMeshId),
+        getAppPreferences().catch(() => null),
+        getWorktreeDirectoryConfig(activeMeshId).catch(() => null),
+      ])
+        .then(([config, prefs, dirConfig]) => {
           if (signal.aborted) return;
           setUseWorktree(config.use_worktree);
           setBaseRef(wireToFormBaseRef(config.base_ref));
           setWorktreeMode(wireToFormMode(config.worktree_mode));
           setPreSpawnPoolSize(config.pre_spawn_pool_size);
+          const meshDir = config.worktree_directory?.trim() ?? '';
+          setWorktreeDirectory(meshDir);
+          const appDir = (prefs?.worktree_directory?.trim() ?? '') || null;
+          setWorktreeDirAppDefault(appDir);
+          const effective =
+            dirConfig?.effective_directory ??
+            getEffectiveWorktreeDir(activeMeshPath ?? '', meshDir, appDir);
+          setWorktreeDirEffective(effective);
         })
         .catch(() => {
           // Swallow — keep the existing form state. Mirrors the legacy
@@ -470,6 +494,43 @@ export function WorktreeManagerTab() {
       }
     },
     [activeMeshId],
+  );
+
+  // Per-Mesh worktree directory save (issue #1519). `''`/blank clears the
+  // override so the Mesh inherits the app default; anything else stores the
+  // trimmed raw input (no shell/`~` expansion). Absolute paths are validated
+  // backend-side for same-environment (native vs WSL) with an actionable
+  // error. Like the other handlers, the form keeps the typed value on
+  // failure. On success, refresh the effective display from the backend so
+  // the inherited value can't drift from the precedence rule.
+  const handleChangeWorktreeDirectory = useCallback(
+    async (next: string) => {
+      if (activeMeshId === null) return;
+      setWorktreeDirectory(next);
+      setSaveError(null);
+      try {
+        const trimmed = next.trim();
+        await updateMeshWorktreeDirectory(activeMeshId, trimmed === '' ? null : trimmed);
+        try {
+          const cfg = await getWorktreeDirectoryConfig(activeMeshId);
+          setWorktreeDirEffective(cfg.effective_directory);
+          setWorktreeDirAppDefault(cfg.app_directory);
+          setWorktreeDirectory(cfg.mesh_directory?.trim() ?? '');
+        } catch {
+          // Keep the optimistic form on config-refresh failure — the save
+          // itself succeeded; the effective display refreshes on next load.
+          const fallback = getEffectiveWorktreeDir(
+            activeMeshPath ?? '',
+            trimmed,
+            worktreeDirAppDefault,
+          );
+          setWorktreeDirEffective(fallback);
+        }
+      } catch (e) {
+        setSaveError(`Failed to update worktree directory: ${formatError(e)}`);
+      }
+    },
+    [activeMeshId, activeMeshPath, worktreeDirAppDefault],
   );
 
   // Recovery actions (restore root to base / free a hostage branch) live
@@ -626,10 +687,13 @@ export function WorktreeManagerTab() {
         worktreeMode={worktreeMode}
         preSpawnPoolSize={preSpawnPoolSize}
         poolCount={poolCount}
+        worktreeDirectory={worktreeDirectory}
+        worktreeDirEffective={worktreeDirEffective}
         onToggleUseWorktree={handleToggleUseWorktree}
         onChangeBaseRef={handleChangeBaseRef}
         onChangeWorktreeMode={handleChangeWorktreeMode}
         onChangePoolSize={handleChangePoolSize}
+        onChangeWorktreeDirectory={handleChangeWorktreeDirectory}
       />
       {saveError && (
         <p className="text-xs text-status-error break-words">{saveError}</p>
@@ -1225,10 +1289,15 @@ interface ConfigurationCardProps {
    * of a misleading "0/N").
    */
   poolCount: number | null;
+  /** Per-Mesh worktree directory override draft (`''` = inherit, issue #1519). */
+  worktreeDirectory: string;
+  /** Inherited effective container dir for display (backend-authoritative). */
+  worktreeDirEffective: string;
   onToggleUseWorktree: (next: boolean) => void;
   onChangeBaseRef: (next: BaseRefForm) => void;
   onChangeWorktreeMode: (next: WorktreeModeForm) => void;
   onChangePoolSize: (next: number) => void;
+  onChangeWorktreeDirectory: (next: string) => void;
 }
 
 /**
@@ -1273,11 +1342,22 @@ function ConfigurationCard({
   worktreeMode,
   preSpawnPoolSize,
   poolCount,
+  worktreeDirectory,
+  worktreeDirEffective,
   onToggleUseWorktree,
   onChangeBaseRef,
   onChangeWorktreeMode,
   onChangePoolSize,
+  onChangeWorktreeDirectory,
 }: ConfigurationCardProps) {
+  // Issue #1519: local draft so typing doesn't fire a backend save +
+  // pool rebuild per keystroke. Committed on blur / Enter; the parent
+  // refreshes `worktreeDirectory` from the backend on success, which
+  // re-syncs this draft via the effect below.
+  const [dirDraft, setDirDraft] = useState(worktreeDirectory);
+  useEffect(() => {
+    setDirDraft(worktreeDirectory);
+  }, [worktreeDirectory]);
   const poolEnabled = preSpawnPoolSize > 0;
   // Display value for the size number input. When the toggle is off,
   // show 1 (the spec's default — the user hasn't picked a size yet, but
@@ -1423,6 +1503,45 @@ function ConfigurationCard({
               </label>
             ))}
           </fieldset>
+
+          {/* Worktree directory override (issue #1519). Empty = inherit the
+              app default (or `.claude/worktrees`); relative resolves from the
+              mesh root, absolute must match the mesh environment. Changing it
+              affects future nodes + pool entries only — live nodes keep their
+              persisted directories. */}
+          <div className="space-y-1">
+            <label className="flex flex-col gap-1 text-xs text-text-primary">
+              <span>Worktree directory</span>
+              <input
+                type="text"
+                aria-label="Worktree directory"
+                placeholder=".claude/worktrees"
+                value={dirDraft}
+                onChange={(e) => setDirDraft(e.target.value)}
+                onBlur={() => {
+                  if (dirDraft !== worktreeDirectory) onChangeWorktreeDirectory(dirDraft);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  if (e.key === 'Escape') setDirDraft(worktreeDirectory);
+                }}
+                className="w-full px-2 py-1 rounded-md border border-border-subtle bg-bg-overlay text-text-primary"
+              />
+            </label>
+            <p className="text-2xs text-text-muted" aria-live="polite">
+              Effective: <code>{worktreeDirEffective || '…'}</code>
+              {worktreeDirectory.trim() === '' ? ' (inherited)' : ''}
+            </p>
+            {worktreeDirectory.trim() !== '' && (
+              <button
+                type="button"
+                onClick={() => onChangeWorktreeDirectory('')}
+                className="text-2xs text-text-muted underline hover:text-text-primary"
+              >
+                Reset to inherited
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

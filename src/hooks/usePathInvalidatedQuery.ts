@@ -78,6 +78,13 @@ export interface UsePathInvalidatedQueryOptions {
    * Defaults to `false`.
    */
   refetchOnFocus?: boolean;
+  /**
+   * Extra dirs that also invalidate this subscription (issue #1519) — a
+   * mesh-root subscriber passes its effective worktree container so edits
+   * under a custom directory (incl. absolute locations outside the root)
+   * refetch. Node-level subscribers (exact worktree path) don't need it.
+   */
+  extraPaths?: Array<string | null | undefined>;
 }
 
 // ------------------------------------------------------------------
@@ -132,7 +139,11 @@ export function usePathInvalidatedQuery(
     ? options
     : (pathOrOptions ?? options ?? {});
 
-  const { enabled = true, refetchOnFocus = false } = opts;
+  const { enabled = true, refetchOnFocus = false, extraPaths } = opts;
+  // Joined key so the subscribe effect re-subscribes when the extras change
+  // (e.g. the effective dir loads after mount) without tearing down on
+  // every parent re-render (fresh arrays are the norm at call sites).
+  const extraKey = (extraPaths ?? []).join('\0');
   const [data, setData] = useState<unknown>(() => {
     // Seed from cache so a remount serves the cached value without a
     // re-fetch. Mirrors the four original hooks' `useState(() => ...)` pattern.
@@ -227,12 +238,12 @@ export function usePathInvalidatedQuery(
       });
     };
     const unsubscribe = isDualKey
-      ? (client as DualKeyClient<unknown, unknown>).subscribeByPath(key, path as string, onInvalidate)
-      : (client as PathKeyedClient<unknown>).subscribe(key as string, onInvalidate);
+      ? (client as DualKeyClient<unknown, unknown>).subscribeByPath(key, path as string, onInvalidate, extraPaths)
+      : (client as PathKeyedClient<unknown>).subscribe(key as string, onInvalidate, extraPaths);
     return () => {
       unsubscribe();
     };
-  }, [key, path, client, isDualKey]);
+  }, [key, path, client, isDualKey, extraKey]);
 
   // Optional: refetch when the window regains focus. Same signal guard as
   // the subscribe effect, so a focus event firing during a key change

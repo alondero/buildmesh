@@ -182,8 +182,11 @@ export interface PathKeyedClient<V> {
   invalidate(key: string): void;
   /** Registers a callback to be invoked when a `GIT_CHANGED` event matches
    * `key` (via `pathMatchesGitEvent` — worktree-subdir + WUNC-aware). The
-   * returned function unsubscribes; call it from the hook's cleanup. */
-  subscribe(key: string, onInvalidate: () => void): () => void;
+   * returned function unsubscribes; call it from the hook's cleanup.
+   * `extraPaths` (issue #1519) additionally matches events under the mesh's
+   * effective worktree container (custom dirs, incl. absolute locations
+   * outside the subscribed root). */
+  subscribe(key: string, onInvalidate: () => void, extraPaths?: Array<string | null | undefined>): () => void;
   /**
    * Programmatically forces every subscriber of `path` to re-fetch,
    * bypassing the `minRefetchIntervalMs` freshness window. Mirrors the
@@ -229,8 +232,9 @@ export interface DualKeyClient<K, V> {
   /** Erases the cached value AND any in-flight fetch for `key`. */
   invalidate(key: K): void;
   /** Registers a callback to be invoked when a `GIT_CHANGED` event matches
-   * `path` (via `pathMatchesGitEvent`). The returned function unsubscribes. */
-  subscribeByPath(key: K, path: string, onInvalidate: () => void): () => void;
+   * `path` (via `pathMatchesGitEvent`). The returned function unsubscribes.
+   * `extraPaths` (issue #1519) — see `PathKeyedClient.subscribe`. */
+  subscribeByPath(key: K, path: string, onInvalidate: () => void, extraPaths?: Array<string | null | undefined>): () => void;
   /**
    * Same as [`PathKeyedClient.notifyByPath`] but for the dual-key shape —
    * drops the cache + freshness stamp for each keyed subscriber whose
@@ -313,6 +317,11 @@ type CallbackBusHandler = (sub: CallbackPathSubscriber) => void;
 // `subscribeGitPathInvalidation` callback-only API.
 // ------------------------------------------------------------------
 const pathSubscribers = new Map<string, Set<PathSubscriber>>();
+// Per-subscriber extra match dirs (issue #1519): a mesh-root subscriber also
+// matches events under the mesh's configured worktree container, which may
+// live outside the root (absolute custom dir). WeakMap so entries die with
+// their subscriber; `addPathSubscriber`'s unsubscribe deletes explicitly.
+const subscriberExtras = new WeakMap<PathSubscriber, string[]>();
 // Per-variant handler maps. Splitting keyed vs callback lets each bus
 // dispatch do a single, well-typed lookup — `busHandlers.get(...)` on a
 // single mixed map would return `KeyedBusHandler<any> | CallbackBusHandler`
@@ -343,11 +352,12 @@ function installListener(): void {
   void listen(GIT_CHANGED, (event) => {
     const payload = event.payload as { path: string; internal_path?: string };
     for (const [path, subs] of pathSubscribers) {
-      if (!pathMatchesGitEvent(payload, path)) continue;
       // Invalidate the owning client's cache for this key, then notify the
       // subscriber. The first notify for a given (client, key) starts a
-      // fetch that subsequent sibling subscribers dedup onto.
+      // fetch that subsequent sibling subscribers dedup onto. Matching is
+      // per-subscriber so each sub's extra dirs apply (issue #1519).
       for (const sub of subs) {
+        if (!pathMatchesGitEvent(payload, path, subscriberExtras.get(sub))) continue;
         if (isCallbackSubscriber(sub)) {
           // Single, monomorphic map lookup — no cast needed (issue #355).
           const handler = callbackBusHandlers.get(sub.clientId);
@@ -423,14 +433,22 @@ function registerCallbackBusHandler(clientId: symbol, handler: CallbackBusHandle
  * `client.subscribe` and `subscribeGitPathInvalidation` — the prune
  * was the most likely drift point.
  */
-function addPathSubscriber(sub: PathSubscriber, path: string): () => void {
+function addPathSubscriber(sub: PathSubscriber, path: string, extraPaths?: Array<string | null | undefined>): () => void {
   let set = pathSubscribers.get(path);
   if (!set) {
     set = new Set();
     pathSubscribers.set(path, set);
   }
   set.add(sub);
+  // Issue #1519: mesh-root subscribers also match the mesh's effective
+  // worktree container (custom dirs, incl. absolute locations outside the
+  // root). Cleaned here so the hot dispatch loop pays no filtering cost.
+  const extras = (extraPaths ?? []).filter(
+    (d): d is string => typeof d === 'string' && d.trim().length > 0,
+  );
+  if (extras.length > 0) subscriberExtras.set(sub, extras);
   return () => {
+    subscriberExtras.delete(sub);
     const live = pathSubscribers.get(path);
     if (!live) return;
     live.delete(sub);
@@ -460,8 +478,9 @@ interface InternalClient<K, V> {
   /** Erases the cached value AND any in-flight fetch for `key`. */
   invalidate(key: K): void;
   /** Wires the bus handler + listener and registers a keyed subscriber
-   * on `path`. Returns the idempotent unsubscribe. */
-  subscribeOn(key: K, path: string, onInvalidate: () => void): () => void;
+   * on `path` (plus `extraPaths`, issue #1519). Returns the idempotent
+   * unsubscribe. */
+  subscribeOn(key: K, path: string, onInvalidate: () => void, extraPaths?: Array<string | null | undefined>): () => void;
   /** See the public-client `notifyByPath` docstring — issue #780. */
   notifyByPath(path: string): void;
 }
@@ -638,14 +657,14 @@ function createInternalClient<K, V>(
       cancelTrailing(key);
     },
 
-    subscribeOn(key, path, onInvalidate) {
+    subscribeOn(key, path, onInvalidate, extraPaths?) {
       // Re-register the handler (idempotent — see `registerKeyedBusHandler`)
       // and install the global listener. Then add the subscriber via the
       // shared helper. Issue #356.
       registerKeyedBusHandler(clientId, handler);
       installListener();
       const sub: KeyedPathSubscriber<K> = { kind: 'keyed', clientId, key, notify: onInvalidate };
-      return addPathSubscriber(sub, path);
+      return addPathSubscriber(sub, path, extraPaths);
     },
 
     notifyByPath(path) {
@@ -718,7 +737,7 @@ export function createPathKeyedCache<V>(
   return {
     ...internal,
     // For the single-key shape, the key IS the path the bus matches.
-    subscribe: (key, onInvalidate) => internal.subscribeOn(key, key, onInvalidate),
+    subscribe: (key, onInvalidate, extraPaths) => internal.subscribeOn(key, key, onInvalidate, extraPaths),
   };
 }
 
@@ -801,6 +820,9 @@ export function createDualKeyCache<K, V>(
 export interface SubscribeGitPathInvalidationOptions {
   /** See [`subscribeGitPathInvalidation`] for the full contract. */
   minRefetchIntervalMs?: number;
+  /** Extra dirs that also match (issue #1519) — the mesh's effective
+   * worktree container for mesh-root subscriptions. */
+  extraPaths?: Array<string | null | undefined>;
 }
 
 export function subscribeGitPathInvalidation(
@@ -832,7 +854,7 @@ export function subscribeGitPathInvalidation(
     trailingTimer: null,
     minRefetchIntervalMs,
   });
-  const unsubscribe = addPathSubscriber(sub, path);
+  const unsubscribe = addPathSubscriber(sub, path, options.extraPaths);
   // Wrap the path unsubscribe so we ALSO cancel any pending trailing
   // timer (#1165). Without this, an unmount mid-burst leaves the
   // timer alive and a stray `cb()` lands after the component is gone.
