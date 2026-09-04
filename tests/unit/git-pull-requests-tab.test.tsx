@@ -566,10 +566,44 @@ describe('GitPullRequestsTab', () => {
     }
   });
 
+  /// A background re-poll tick refetches data only: it must not collapse an
+  /// expanded row or cancel a pending merge confirm. Those clear on scope
+  /// changes and explicit refreshes, never on timer ticks.
+  it('background re-poll preserves expanded rows and pending merge confirms', async () => {
+    vi.useFakeTimers();
+    try {
+      mockBackend(); // PR 204 stays unknown, so a re-poll is scheduled.
+      await act(async () => {
+        render(<GitPullRequestsTab />);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // Expand PR 201's body and open its merge confirm prompt.
+      const row = screen.getByText('Add widget').closest('[data-pr-row]')!;
+      fireEvent.click(row.querySelector('p.line-clamp-2')!);
+      expect(row.querySelector('div.max-h-48, [data-pr-body-expanded]')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Merge pull request #201' }));
+      expect(screen.getByRole('button', { name: /confirm squash merge/i })).toBeTruthy();
+
+      // Fire the background poll: the refetch resolves with identical data.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      const pulls = vi.mocked(invoke).mock.calls.filter(([c]) => c === 'get_repo_pulls');
+      expect(pulls.length).toBe(2);
+
+      // Row state survived the tick.
+      const rowAfter = screen.getByText('Add widget').closest('[data-pr-row]')!;
+      expect(rowAfter.querySelector('div.max-h-48, [data-pr-body-expanded]')).toBeTruthy();
+      expect(screen.getByRole('button', { name: /confirm squash merge/i })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   /// When the component unmounts with a re-poll pending, the load effect's
   /// cleanup must clear the shared timer — no refetch fires after unmount.
-  it('clears the pending re-poll timer when the component unmounts', async () => {
-    vi.useFakeTimers();
+  it('clears the pending re-poll timer when the component unmounts', async () => {    vi.useFakeTimers();
     try {
       let pullsCalls = 0;
       vi.mocked(invoke).mockImplementation((cmd: string) => {

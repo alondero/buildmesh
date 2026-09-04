@@ -512,14 +512,16 @@ pub(crate) fn mergeability_from_summaries(
     // Request order out: every requested number resolves through the map
     // now (summaries hit or detail fallback/sentinel), so a missing key
     // here is unreachable — the debug_assert documents the invariant for
-    // test builds without changing release behaviour.
+    // test builds without changing release behaviour. `.get`, not
+    // `.remove`: a caller passing a duplicate number must resolve it twice,
+    // not trip the assert on the second occurrence.
     Ok(pr_numbers
         .into_iter()
-        .map(|n| match by_number.remove(&n) {
+        .map(|n| match by_number.get(&n) {
             Some((mergeable, mergeable_state)) => PrMergeabilityEntry {
                 number: n,
-                mergeable,
-                mergeable_state,
+                mergeable: *mergeable,
+                mergeable_state: mergeable_state.clone(),
             },
             None => {
                 debug_assert!(false, "mergeability map must cover every requested PR");
@@ -1407,6 +1409,34 @@ mod tests {
         assert_eq!(entries[1].mergeable_state, "clean");
         handle.join().expect("server");
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    /// A caller passing a duplicate number (`[1, 1]`) must resolve it twice
+    /// from the map: entries are read with `.get`, never drained, so the
+    /// second occurrence cannot trip the missing-key sentinel.
+    #[test]
+    fn mergeability_from_summaries_resolves_duplicate_numbers_twice() {
+        use crate::services::github::tests::{fake_node, fake_server, Scripted};
+        use std::sync::atomic::Ordering;
+
+        let open = serde_json::Value::Array(vec![fake_node(1)]);
+        let (base, count, handle) =
+            fake_server(vec![Scripted::Page(open, false, None)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let entries = mergeability_from_summaries(&client, "acme", "demo", vec![1, 1])
+            .expect("batch must not fail on duplicates");
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert_eq!(entry.number, 1);
+            assert_eq!(entry.mergeable, Some(true));
+            assert!(
+                !entry.mergeable_state.starts_with("error: "),
+                "duplicate must not become a sentinel; got: {}",
+                entry.mergeable_state
+            );
+        }
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     /// Build a `TempGitRepo` and an `AgentNode` that uses a branched worktree

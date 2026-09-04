@@ -286,10 +286,18 @@ export function GitPullRequestsTab() {
   // Bounded re-poll budget for `mergeable: null` rows (issue #419, kept
   // through #1529). `pollAttempts` survives reloadKey bumps (the re-poll's
   // own refetches must consume budget, not reset it) and resets only when
-  // the scope changes (mesh/filter effect below) or the list resolves with
-  // no nulls left. `pollExhausted` flips the null rows from "Checking…" to
-  // the "Unknown" retry state the status derives from.
+  // the scope changes (mesh/filter, tracked below) or the list resolves
+  // with no nulls left. `pollExhausted` flips the null rows from
+  // "Checking…" to the "Unknown" retry state the status derives from.
+  // `softReload` marks reloads that must preserve row state (background
+  // timer ticks and row-level Unknown retries) so the load effect can skip
+  // the row-state clears below — those must never collapse an expanded row
+  // or cancel a pending merge confirm under the user's nose.
+  // `softReload` does the same for a row's own Unknown-retry button. Only
+  // a scope change or an explicit toolbar Refresh / merge refetch clears.
   const pollAttempts = useRef(0);
+  const softReload = useRef(false);
+  const prevScope = useRef<{ meshId: number | null; filter: StateFilter } | null>(null);
   const [pollExhausted, setPollExhausted] = useState(false);
   // "View on GitHub" header button — resolves the active mesh's
   // `origin` to a `https://github.com/{owner}/{repo}/pulls` URL.
@@ -299,29 +307,50 @@ export function GitPullRequestsTab() {
   const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
   const pullsListUrl = githubUrl ? `${githubUrl}/pulls` : '';
 
-  // Re-arm the re-poll budget and refetch — the shared handler behind the
-  // toolbar Refresh and every row's "Unknown" retry button.
+  // Re-arm the re-poll budget and refetch. The toolbar Refresh is a hard
+  // reload (row state clears in the effect); a row's own Unknown-retry is
+  // soft (the user may be reading another expanded row).
   const retryListLoad = useCallback(() => {
     pollAttempts.current = 0;
     setPollExhausted(false);
     setReloadKey((k) => k + 1);
   }, []);
-
-  // Fresh scope, fresh budget: declared before the load effect so the reset
-  // runs first on mesh/filter changes (effects fire in declaration order).
-  useAsyncEffect(() => {
+  const retryUnknownRow = useCallback(() => {
     pollAttempts.current = 0;
     setPollExhausted(false);
-  }, [activeMeshId, stateFilter]);
+    softReload.current = true;
+    setReloadKey((k) => k + 1);
+  }, []);
 
+  // Fresh scope, fresh budget: tracked inline in the load effect (no extra
+  // effect lifecycle for two synchronous resets).
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
+    // Scope change (mesh/filter) is a full reset: fresh budget, and the
+    // row state below is cleared (PR numbers don't carry across scopes).
+    // A background poll tick (or explicit refresh/merge refetch) keeps the
+    // running budget and — for poll ticks only — the row state: collapsing
+    // an expanded row or cancelling a pending merge confirm under the
+    // user's nose on a timer tick would be a UX glitch.
+    const scopeChanged =
+      prevScope.current === null ||
+      prevScope.current.meshId !== activeMeshId ||
+      prevScope.current.filter !== stateFilter;
+    prevScope.current = { meshId: activeMeshId, filter: stateFilter };
+    if (scopeChanged) {
+      pollAttempts.current = 0;
+      setPollExhausted(false);
+    }
+    const isSoftReload = softReload.current;
+    softReload.current = false;
     setLoading(true);
     setError(null);
-    setConfirming(null);
-    setMergeError({});
-    // PR numbers don't carry across mesh/filter changes (issue #461).
-    expanded.clear();
+    if (!isSoftReload) {
+      setConfirming(null);
+      setMergeError({});
+      // PR numbers don't carry across mesh/filter changes (issue #461).
+      expanded.clear();
+    }
     // One shared re-poll timer per load (issue #419 via #1529: a single
     // list refetch, not one timer per stuck PR). Owned by this effect run;
     // cleanup clears it so unmount/mesh/filter/reload never leaks a retry.
@@ -351,6 +380,7 @@ export function GitPullRequestsTab() {
           pollTimer = null;
           if (signal.aborted) return;
           pollAttempts.current += 1;
+          softReload.current = true;
           setReloadKey((k) => k + 1);
         }, delay);
       } catch (e) {
@@ -688,7 +718,7 @@ export function GitPullRequestsTab() {
                           ) : status.kind === 'unknown' ? (
                             <button
                               type="button"
-                              onClick={retryListLoad}
+                              onClick={retryUnknownRow}
                               aria-label={`Retry mergeability check for pull request #${pr.number}`}
                               title="GitHub hasn't reported mergeability — click to retry"
                               className="px-2 py-1 text-2xs rounded border border-dashed border-border-subtle text-text-muted hover:text-accent-cyan hover:border-accent-cyan/40 transition-colors"
