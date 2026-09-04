@@ -1156,6 +1156,7 @@ mod tests {
             signal_health: None,
             position: 0,
             created_at: chrono::Utc::now(),
+            worktree_path: None,
         };
         // The worktree path doesn't exist, so the repo open must fail and the
         // pushed=false short-circuit keeps GitHub out of the picture.

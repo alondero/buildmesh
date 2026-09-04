@@ -227,7 +227,8 @@ mod tests {
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
                 source_pr_pinned_sha TEXT,
-                signal_health TEXT
+                signal_health TEXT,
+                worktree_path TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (id, mesh_id, name, path, status)

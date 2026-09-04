@@ -34,7 +34,10 @@ use super::{current_env, Environment};
 // ── Path-conversion primitives ─────────────────────────────────────────────
 
 /// Convert a session path to the correct form for spawning commands
-/// WSL paths are stored as Unix paths internally, Windows paths as Windows paths
+/// WSL paths are stored as Unix paths internally, Windows paths as Windows paths.
+/// Stored paths are always the RAW form (see `resolve_raw_path`), so a host
+/// UNC string must never reach this function — normalize back to POSIX at
+/// the storage boundary instead (issue #1519).
 pub fn to_spawn_path(path: &Path) -> PathBuf {
     match current_env() {
         Environment::Wsl => {
@@ -272,25 +275,14 @@ pub struct ResolvedPath {
     pub env_type: EnvType,
 }
 
-/// Resolve the working directory for an agent node, accounting for worktree
-/// layout and environment differences.
-///
-/// - `base_path`: The agent node's stored `path` field (project root).
-/// - `worktree_name`: If set, the worktree subdirectory name under
-///   `{base_path}/.claude/worktrees/{name}`.
-///
-/// Returns a `ResolvedPath` with host, spawn, and env fields populated.
-pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> ResolvedPath {
-    // Compute the effective path (with worktree if applicable)
-    let raw_path = match worktree_name {
-        Some(wt_name) if !wt_name.is_empty() => {
-            format!("{}/.claude/worktrees/{}", base_path, wt_name)
-        }
-        _ => base_path.to_string(),
-    };
-
+/// Resolve an already-computed raw path into host/spawn/env forms.
+/// Single tail shared by `resolve_agent_path` (legacy layout) and the
+/// configurable-directory path (issue #1519) — the only difference is
+/// how `raw_path` was built; the env detection + host conversion is
+/// identical so every consumer agrees on the same directory.
+pub fn resolve_raw_path(raw_path: &str) -> ResolvedPath {
     // Detect environment from the effective path
-    let path_buf = PathBuf::from(&raw_path);
+    let path_buf = PathBuf::from(raw_path);
     let env_internal = env_for_path(&path_buf);
     let env_type = EnvType::from(env_internal);
 
@@ -299,9 +291,9 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
     // environment (WSL agents need `\\wsl$\...` host paths + `/mnt/...` spawn
     // paths).
     let (host_path, spawn_path) = if !cfg!(target_os = "windows") {
-        (raw_path.clone(), raw_path.clone())
+        (raw_path.to_string(), raw_path.to_string())
     } else {
-        let host = to_host_path(&raw_path);
+        let host = to_host_path(raw_path);
         let spawn = to_spawn_path(&path_buf).to_string_lossy().to_string();
         (host, spawn)
     };
@@ -309,9 +301,261 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
     ResolvedPath {
         host_path,
         spawn_path,
-        raw_path,
+        raw_path: raw_path.to_string(),
         env_type,
     }
+}
+
+/// Resolve the working directory for an agent node, accounting for worktree
+/// layout and environment differences.
+///
+/// - `base_path`: The agent node's stored `path` field (project root).
+/// - `worktree_name`: If set, the worktree subdirectory name under
+///   `{base_path}/.claude/worktrees/{name}`.
+///
+/// Returns a `ResolvedPath` with host, spawn, and env fields populated.
+///
+/// Legacy layout preserved byte-for-byte for the no-config case (issue
+/// #1519): with neither the Mesh override nor the application default
+/// set, this is `{base}/.claude/worktrees/{trimmed}`. Configurable
+/// directories go through `resolve_agent_path_in_dir` instead.
+pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> ResolvedPath {
+    // Compute the effective path (with worktree if applicable)
+    // NOTE: intentionally does NOT trim `worktree_name` here — the
+    // canonical trim lives in `worktree_segment` / `node_working_path`.
+    // Direct callers pass already-trimmed values; keeping the raw
+    // `is_empty` gate preserves the byte-for-byte legacy contract the
+    // `env::mod` regression pins assert.
+    let raw_path = match worktree_name {
+        Some(wt_name) if !wt_name.is_empty() => {
+            format!("{}/.claude/worktrees/{}", base_path, wt_name)
+        }
+        _ => base_path.to_string(),
+    };
+
+    resolve_raw_path(&raw_path)
+}
+
+// ── Configurable Worktree Node directories (issue #1519) ────────────────────
+
+/// Default worktree container dir name under the Mesh root when neither
+/// the Mesh override nor the application default is set.
+pub const DEFAULT_WORKTREE_DIR_NAME: &str = ".claude/worktrees";
+
+/// Trim raw user input for a `worktree_directory` setting and collapse
+/// blank to `None` (inherit/default). No shell-variable or `~` expansion —
+/// values are stored verbatim and joined literally at resolution time.
+pub fn normalize_worktree_directory(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// True for a Windows drive-relative path: a single leading backslash with no
+/// second (`\foo\bar` resolves against the current drive's root — it is
+/// neither a usable absolute nor a mesh-relative path, so validation
+/// rejects it outright instead of joining it onto the Mesh root and
+/// landing on the drive root).
+pub fn is_drive_relative_worktree_path(p: &str) -> bool {
+    let bytes = p.trim().as_bytes();
+    bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] != b'\\'
+}
+
+/// Characters no path segment may contain. The list is the Windows
+/// forbidden set (`/` and `\` are the separators, handled separately);
+/// POSIX forbids only `/`+NUL, so satisfying Windows keeps both hosts
+/// safe. `~` and `$` are deliberately allowed — shell variables and
+/// `~` are stored literally, never expanded.
+const FORBIDDEN_WORKTREE_SEGMENT_CHARS: &[char] = &[':', '*', '?', '"', '<', '>', '|'];
+
+/// Validate + normalize a RELATIVE `worktree_directory` value (shared by the
+/// per-Mesh and application-default write paths). Leading/trailing
+/// separators are stripped; every remaining segment must be non-empty (no
+/// `a//b`) and must not be `.` / `..` (no escaping the Mesh root — rejects
+/// `..`, `../..`, `../../etc`, `.`, and `sub/../..` alike) nor contain
+/// forbidden characters. Returns the canonical stored form.
+pub fn normalize_relative_worktree_dir(value: &str) -> Result<String, String> {
+    let stripped = value.trim().trim_matches(['/', '\\']);
+    if stripped.is_empty() {
+        return Err(format!(
+            "worktree directory '{value}' resolves to nothing — use a relative path like 'worktrees' or clear it to inherit"
+        ));
+    }
+    let mut cleaned: Vec<&str> = Vec::new();
+    for seg in stripped.split(['/', '\\']) {
+        if seg.is_empty() {
+            return Err(format!(
+                "worktree directory '{value}' contains an empty segment (consecutive separators) — use a path like 'worktrees/sub'"
+            ));
+        }
+        if seg == "." || seg == ".." {
+            return Err(format!(
+                "worktree directory '{value}' must stay inside the mesh — '.' and '..' segments are not allowed (got '{seg}')"
+            ));
+        }
+        if let Some(bad) = seg.chars().find(|c| FORBIDDEN_WORKTREE_SEGMENT_CHARS.contains(c)) {
+            return Err(format!(
+                "worktree directory '{value}' contains forbidden character '{bad}' — use letters, numbers, '-', '_', or '.'"
+            ));
+        }
+        cleaned.push(seg);
+    }
+    Ok(cleaned.join("/"))
+}
+
+/// True when `p` is an absolute path in either host environment:
+/// POSIX `/...`, Windows drive `C:\` / `C:/`, or UNC `\\...`.
+/// Relative values (including `~/...` and `$HOME/...`, which are NOT
+/// expanded per the issue) return false and resolve from the Mesh root.
+/// Drive-relative `\foo` (see [`is_drive_relative_worktree_path`]) is NOT
+/// absolute — validation rejects it before it can reach resolution.
+pub fn is_absolute_worktree_path(p: &str) -> bool {
+    let t = p.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with('/') {
+        return true;
+    }
+    if t.starts_with("\\\\") || t.starts_with("//") {
+        return true;
+    }
+    let bytes = t.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+        return true;
+    }
+    // Bare `C:` (no slash) is a drive-relative path on Windows, not an
+    // absolute one — treat as relative so it joins from the Mesh root
+    // rather than silently resolving to the drive's CWD.
+    false
+}
+
+/// Effective worktree container directory (raw form) for a Mesh.
+///
+/// Precedence: Mesh override → application default → `.claude/worktrees`
+/// under the Mesh root. Relative values join from `mesh_path` with `/`
+/// (matching the legacy `format!` spelling); absolute values are used with
+/// trailing separators trimmed so `<dir>/<name>` never doubles up — the
+/// same normalization [`validate_worktree_directory`] stores. Inputs are
+/// trimmed; blank collapses to inherit/default. No shell/`~` expansion.
+pub fn effective_worktree_dir_raw(
+    mesh_path: &str,
+    mesh_setting: Option<&str>,
+    app_setting: Option<&str>,
+) -> String {
+    let chosen = normalize_worktree_directory(mesh_setting)
+        .or_else(|| normalize_worktree_directory(app_setting));
+    // A trailing separator on the stored root (e.g. from a CLI import)
+    // must not produce `root//dir` — strip once here and in the
+    // frontend mirror (`getEffectiveWorktreeDir`) so both spellings agree.
+    let root = mesh_path.trim_end_matches(['/', '\\']);
+    let root = if root.is_empty() { mesh_path } else { root };
+    match chosen {
+        None => format!("{}/{}", root, DEFAULT_WORKTREE_DIR_NAME),
+        Some(dir) => {
+            if is_absolute_worktree_path(&dir) {
+                let trimmed = dir.trim_end_matches(['/', '\\']);
+                if trimmed.is_empty() {
+                    format!("{}/{}", root, DEFAULT_WORKTREE_DIR_NAME)
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                // Values reaching here passed `normalize_relative_worktree_dir`
+                // at the write boundary (no leading/trailing separators, no
+                // `.`/`..`/empty segments); trim defensively so a legacy row
+                // still joins to exactly one separator.
+                let trimmed_dir = dir.trim_matches(['/', '\\']);
+                if trimmed_dir.is_empty() {
+                    format!("{}/{}", root, DEFAULT_WORKTREE_DIR_NAME)
+                } else {
+                    format!("{}/{}", root, trimmed_dir)
+                }
+            }
+        }
+    }
+}
+
+/// Effective raw path for one Worktree Node: `<effective_dir>/<trimmed_name>`.
+/// `effective_dir_raw` comes from `effective_worktree_dir_raw`; `node_name`
+/// is trimmed and must be non-empty (callers gate on `worktree_segment`).
+pub fn resolve_worktree_node_raw(
+    effective_dir_raw: &str,
+    node_name: &str,
+) -> String {
+    let trimmed = node_name.trim();
+    let dir = effective_dir_raw.trim_end_matches(['/', '\\']);
+    format!("{}/{}", dir, trimmed)
+}
+
+/// Resolve with an explicit effective directory (issue #1519).
+/// `effective_dir_raw` is the container dir from
+/// `effective_worktree_dir_raw`; `worktree_name` is the trimmed node slug.
+/// `None`/empty resolves to the Mesh root (Root Node).
+pub fn resolve_agent_path_in_dir(
+    mesh_path: &str,
+    effective_dir_raw: &str,
+    worktree_name: Option<&str>,
+) -> ResolvedPath {
+    let raw_path = match worktree_name.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => resolve_worktree_node_raw(effective_dir_raw, name),
+        None => mesh_path.to_string(),
+    };
+    resolve_raw_path(&raw_path)
+}
+
+/// Validate a raw `worktree_directory` input for a Mesh.
+///
+/// - Trim; blank → `Ok(None)` (inherit/default — clearing restores
+///   inheritance).
+/// - Drive-relative `\foo` → `Err` (ambiguous drive root — neither usable
+///   absolute nor mesh-relative).
+/// - Relative → normalized via [`normalize_relative_worktree_dir`] (no
+///   `.`/`..` escape, no forbidden characters) and resolved from the root.
+/// - Absolute → trailing separators trimmed, filesystem roots rejected,
+///   then must resolve to the same host environment (native/Windows versus
+///   WSL) as `mesh_path`, else `Err` with an actionable message naming
+///   both sides and suggesting a relative path.
+/// - Never expands shell variables or `~` (treated literally).
+pub fn validate_worktree_directory(
+    mesh_path: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(trimmed) = normalize_worktree_directory(value) else {
+        return Ok(None);
+    };
+    if is_drive_relative_worktree_path(&trimmed) {
+        return Err(format!(
+            "worktree directory '{trimmed}' starts with a single backslash (drive-relative) — \
+             use a relative path like 'worktrees' resolved from the mesh root, or a full absolute path"
+        ));
+    }
+    if !is_absolute_worktree_path(&trimmed) {
+        return normalize_relative_worktree_dir(&trimmed).map(Some);
+    }
+    let normalized = trimmed.trim_end_matches(['/', '\\']).to_string();
+    if normalized.is_empty() || normalized.len() == 2 && normalized.as_bytes()[1] == b':' {
+        return Err(format!(
+            "worktree directory '{trimmed}' must not be the filesystem root — \
+             use a relative path like 'worktrees' or a dedicated folder"
+        ));
+    }
+    let mesh_env = env_for_path(&PathBuf::from(mesh_path));
+    let dir_env = env_for_path(&PathBuf::from(&normalized));
+    if mesh_env != dir_env {
+        let (dir_kind, mesh_kind) = match dir_env {
+            super::Environment::Wsl => ("WSL", "Windows (native)"),
+            super::Environment::Windows => ("Windows (native)", "WSL"),
+        };
+        return Err(format!(
+            "worktree directory '{normalized}' is a {} path but mesh '{}' is on {} — \
+             choose a path in the same environment (native/Windows versus WSL) \
+             or use a relative path like 'worktrees' resolved from the mesh root",
+            dir_kind, mesh_path, mesh_kind
+        ));
+    }
+    Ok(Some(normalized))
 }
 
 /// The trimmed, non-empty worktree name iff the node runs in a worktree — the
@@ -348,8 +592,26 @@ pub(crate) fn worktree_segment(node: &AgentNode) -> Option<&str> {
 /// in sync if the worktree layout ever changes (paired cross-language defaults,
 /// not a single source; see [[buildmesh-use-worktree-derivation]] and
 /// [[feedback_cross-language-default-coupling]]).
+///
+/// Issue #1519: Worktree Nodes created after the configurable directory
+/// landed carry the exact resolved dir in `node.worktree_path` (immutable —
+/// changing a setting affects future nodes without moving live worktrees).
+/// When present (trimmed, non-empty) it wins over recomputation; `None`
+/// (Root Nodes + pre-#1519 rows) falls back to the legacy
+/// `<mesh>/.claude/worktrees/<name>` layout byte-for-byte.
 pub fn node_working_path(node: &AgentNode) -> ResolvedPath {
-    resolve_agent_path(&node.path, worktree_segment(node))
+    if worktree_segment(node).is_some() {
+        if let Some(stored) = node
+            .worktree_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return resolve_raw_path(stored);
+        }
+        return resolve_agent_path(&node.path, worktree_segment(node));
+    }
+    resolve_agent_path(&node.path, None)
 }
 
 /// The node's Worktree Node dir — `Some` only for a Worktree Node, `None` for a
@@ -464,5 +726,283 @@ mod tests {
             std::borrow::Cow::Borrowed(_)
         ));
         assert_eq!(normalize_unc_to_wsl(""), "");
+    }
+
+    // ── Configurable Worktree Node directories (issue #1519) ────────────────
+
+    #[test]
+    fn effective_dir_never_doubles_separators_on_trailing_slash_root() {
+        // A stored root with a trailing separator (e.g. from a CLI import)
+        // must join to exactly one separator on both sides of the contract
+        // (see `getEffectiveWorktreeDir`).
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh/", None, None),
+            "/repo/mesh/.claude/worktrees"
+        );
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh/", None, Some("custom-wt")),
+            "/repo/mesh/custom-wt"
+        );
+    }
+
+    #[test]
+    fn effective_dir_defaults_to_claude_worktrees_when_unconfigured() {
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", None, None),
+            "/repo/mesh/.claude/worktrees"
+        );
+        // Blank collapses to inherit/default.
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", Some("   "), Some("")),
+            "/repo/mesh/.claude/worktrees"
+        );
+    }
+
+    #[test]
+    fn effective_dir_relative_app_setting_applies_to_inheriting_meshes() {
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", None, Some("custom-wt")),
+            "/repo/mesh/custom-wt"
+        );
+        // Trimmed; trailing separators collapsed so `<dir>/<name>` never doubles.
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", None, Some("  custom-wt/ ")),
+            "/repo/mesh/custom-wt"
+        );
+    }
+
+    #[test]
+    fn effective_dir_mesh_override_wins_over_app_default() {
+        assert_eq!(
+            effective_worktree_dir_raw(
+                "/repo/mesh",
+                Some("mesh-wt"),
+                Some("app-wt")
+            ),
+            "/repo/mesh/mesh-wt"
+        );
+        // Clearing the override restores inheritance.
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", Some("  "), Some("app-wt")),
+            "/repo/mesh/app-wt"
+        );
+    }
+
+    #[test]
+    fn effective_dir_absolute_used_verbatim() {
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", Some("/tmp/wt"), None),
+            "/tmp/wt"
+        );
+        // No shell/`~` expansion — treated literally (relative → joins).
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", Some("~/wt"), None),
+            "/repo/mesh/~/wt"
+        );
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", Some("$HOME/wt"), None),
+            "/repo/mesh/$HOME/wt"
+        );
+    }
+
+    #[test]
+    fn is_absolute_detects_posix_windows_and_unc() {
+        assert!(is_absolute_worktree_path("/tmp/wt"));
+        assert!(is_absolute_worktree_path("C:\\wt"));
+        assert!(is_absolute_worktree_path("C:/wt"));
+        assert!(is_absolute_worktree_path("\\\\wsl$\\Ubuntu\\home\\u"));
+        assert!(!is_absolute_worktree_path("custom-wt"));
+        assert!(!is_absolute_worktree_path("a/b"));
+        assert!(!is_absolute_worktree_path("~/wt"));
+        assert!(!is_absolute_worktree_path("$HOME/wt"));
+        assert!(!is_absolute_worktree_path(""));
+        assert!(!is_absolute_worktree_path("C:"));
+    }
+
+    #[test]
+    fn resolve_node_raw_joins_effective_dir_and_trimmed_name() {
+        assert_eq!(
+            resolve_worktree_node_raw("/repo/mesh/custom", "  my-node  "),
+            "/repo/mesh/custom/my-node"
+        );
+    }
+
+    #[test]
+    fn resolve_in_dir_matches_legacy_for_default() {
+        let legacy = resolve_agent_path("/repo/mesh", Some("my-node"));
+        let effective = effective_worktree_dir_raw("/repo/mesh", None, None);
+        let via_dir = resolve_agent_path_in_dir("/repo/mesh", &effective, Some("my-node"));
+        assert_eq!(via_dir.raw_path, legacy.raw_path);
+        assert_eq!(via_dir.raw_path, "/repo/mesh/.claude/worktrees/my-node");
+    }
+
+    #[test]
+    fn node_working_path_prefers_persisted_worktree_path() {
+        let mut node = AgentNode {
+            path: "/repo/mesh".to_string(),
+            worktree_name: Some("my-node".to_string()),
+            use_worktree: true,
+            worktree_path: Some("/repo/mesh/custom/my-node".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            node_working_path(&node).raw_path,
+            "/repo/mesh/custom/my-node"
+        );
+        // Blank stored path falls back to legacy (hand-edited blank).
+        node.worktree_path = Some("   ".to_string());
+        assert_eq!(
+            node_working_path(&node).raw_path,
+            "/repo/mesh/.claude/worktrees/my-node"
+        );
+        // Legacy rows without stored path retain the legacy fallback.
+        node.worktree_path = None;
+        assert_eq!(
+            node_working_path(&node).raw_path,
+            "/repo/mesh/.claude/worktrees/my-node"
+        );
+        // Root nodes ignore a stale stored path.
+        node.use_worktree = false;
+        node.worktree_path = Some("/repo/mesh/custom/my-node".to_string());
+        assert_eq!(node_working_path(&node).raw_path, "/repo/mesh");
+    }
+
+    #[test]
+    fn manual_warm_claim_resolves_through_normalized_node_path() {
+        // Issue #1519 review: warm-pool rows store HOST paths (UNC on WSL)
+        // while `worktree_path` stores RAW form. The spawn must resolve the
+        // node's normalized raw path — feeding the host UNC form into
+        // `resolve_raw_path` yields a UNC `spawn_path` that `wsl.exe --cd`
+        // rejects on Windows. This pins the storage contract both halves
+        // rely on (`prepare_context` normalizes at claim time).
+        let raw = normalize_unc_to_wsl("\\\\wsl$\\Ubuntu\\home\\u\\wt\\slug").into_owned();
+        assert_eq!(raw, "/home/u/wt/slug");
+        let node = AgentNode {
+            path: "/home/u/repo".to_string(),
+            worktree_name: Some("slug".to_string()),
+            use_worktree: true,
+            worktree_path: Some(raw.clone()),
+            ..Default::default()
+        };
+        let resolved = node_working_path(&node);
+        assert_eq!(resolved.raw_path, raw);
+        assert!(
+            !resolved.raw_path.starts_with("\\\\"),
+            "raw_path must never be UNC — downstream derivation assumes raw form, got: {}",
+            resolved.raw_path
+        );
+    }
+
+    #[test]
+    fn normalize_worktree_directory_trims_and_collapses_blank() {
+        assert_eq!(normalize_worktree_directory(None), None);
+        assert_eq!(normalize_worktree_directory(Some("   ")), None);
+        assert_eq!(
+            normalize_worktree_directory(Some("  custom  ")),
+            Some("custom".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_relative_and_blank_collapse() {
+        assert_eq!(validate_worktree_directory("/repo/mesh", None).unwrap(), None);
+        assert_eq!(
+            validate_worktree_directory("/repo/mesh", Some("   ")).unwrap(),
+            None
+        );
+        assert_eq!(
+            validate_worktree_directory("/repo/mesh", Some("  custom  ")).unwrap(),
+            Some("custom".to_string())
+        );
+        // Absolute in the same env as the mesh passes (on non-Windows every
+        // path is native so this always passes; on Windows the mesh/path
+        // pair below shares the native env).
+        assert!(validate_worktree_directory("/tmp/mesh", Some("/tmp/wt"))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn validate_rejects_directory_traversal_and_dot_segments() {
+        for bad in [
+            "..",
+            ".",
+            "../..",
+            "../../etc",
+            "sub/../../etc",
+            "wt/../..",
+            "./wt",
+            "wt/.",
+        ] {
+            let err = validate_worktree_directory("/repo/mesh", Some(bad))
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(
+                err.contains("must stay inside the mesh") || err.contains("resolves to nothing"),
+                "traversal input {bad:?} needs an actionable error, got: {err}"
+            );
+        }
+        // Near-misses that are legitimate names stay valid.
+        assert_eq!(
+            validate_worktree_directory("/repo/mesh", Some("..wt")).unwrap(),
+            Some("..wt".to_string())
+        );
+        assert_eq!(
+            validate_worktree_directory("/repo/mesh", Some("my..wt")).unwrap(),
+            Some("my..wt".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_rejects_drive_relative_and_forbidden_characters() {
+        let err = validate_worktree_directory("/repo/mesh", Some("\\foo\\bar"))
+            .expect_err("single-leading-backslash must be rejected");
+        assert!(err.contains("drive-relative"), "got: {err}");
+        for bad in ["a:b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b", "C:foo"] {
+            validate_worktree_directory("/repo/mesh", Some(bad))
+                .expect_err(&format!("{bad:?} must be rejected"));
+        }
+        // Consecutive separators are rejected rather than silently collapsed.
+        validate_worktree_directory("/repo/mesh", Some("a//b"))
+            .expect_err("empty segment must be rejected");
+    }
+
+    #[test]
+    fn validate_normalizes_relative_and_absolute_forms() {
+        // Leading/trailing separators stripped on relative values.
+        assert_eq!(
+            validate_worktree_directory("/repo/mesh", Some("  custom-wt/ ")).unwrap(),
+            Some("custom-wt".to_string())
+        );
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", Some("custom-wt/"), None),
+            "/repo/mesh/custom-wt"
+        );
+        // Trailing separators trimmed on absolute values for consistency.
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh", Some("/tmp/wt/"), None),
+            "/tmp/wt"
+        );
+        // Filesystem roots are rejected, not joined.
+        for root in ["/", "///", "C:", "C:\\", "C:/"] {
+            validate_worktree_directory("C:\\repo\\mesh", Some(root))
+                .expect_err(&format!("{root:?} must be rejected"));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn validate_absolute_mismatch_errors_with_actionable_message() {
+        let err = validate_worktree_directory(r"C:\repo\mesh", Some("/home/user/wt"))
+            .expect_err("WSL absolute for a Windows mesh must be rejected");
+        assert!(
+            err.contains("same environment"),
+            "mismatch error must be actionable, got: {err}"
+        );
+        let err = validate_worktree_directory("/home/user/mesh", Some(r"C:\wt"))
+            .expect_err("Windows absolute for a WSL mesh must be rejected");
+        assert!(
+            err.contains("same environment"),
+            "mismatch error must be actionable, got: {err}"
+        );
     }
 }

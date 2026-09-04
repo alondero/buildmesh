@@ -2264,6 +2264,7 @@ mod tests {
             loop_consecutive_failures: 0,
             harness_overrides: std::collections::HashMap::new(),
             circuit_run_capacity: 2,
+            worktree_directory: None,
         }
     }
 

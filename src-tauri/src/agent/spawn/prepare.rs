@@ -310,7 +310,10 @@ pub(super) async fn prepare_context(
         // on disk this spawn is a resume / handover / re-spawn reusing an
         // existing worktree — never claim a pool entry for it (that would
         // re-point the node at a different directory and abandon its work).
-        let existing = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
+        // Issue #1519: respects the persisted `worktree_path` (immutable) so
+        // legacy rows keep their original legacy location and new rows keep
+        // their creation-time effective dir.
+        let existing = env::node_working_path(&node);
         let existing_present = std::path::Path::new(&existing.host_path).exists();
         if mesh_id > 0 && crate::services::warm_pool::should_claim_for_spawn(existing_present) {
             match crate::services::warm_pool::try_claim(app, mesh_id) {
@@ -395,14 +398,6 @@ pub(super) async fn prepare_context(
         None
     };
 
-    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name.as_deref());
-    tracing::info!(
-        "prepare_context: resolved spawn_path={}, host_path={}, env={:?}",
-        resolved.spawn_path,
-        resolved.host_path,
-        resolved.env_type
-    );
-
     // For a Manual warm claim, the pool's preassigned slug IS the node's
     // `worktree_name` once the spawn completes — the provisioner persists
     // that, but `provision_for_spawn` needs the right branch name in the
@@ -410,10 +405,34 @@ pub(super) async fn prepare_context(
     // <branch>` targets the pool's slug rather than the node's stage-1
     // throwaway. Mutate `node.worktree_name` in place here; the node
     // travels into WorkspaceToProvision.
+    // Issue #1519: align the in-memory row with the claimed pool directory
+    // so the single resolver below lands on it. The pool row holds the
+    // HOST path (UNC on WSL) while `worktree_path` stores the RAW form, so
+    // normalize UNC back to POSIX here — the DB adoption then persists the
+    // same raw value `node_working_path` resolves.
     let mut node = node;
     if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
         node.worktree_name = Some(entry.preassigned_name.clone());
+        node.worktree_path = Some(
+            crate::env::normalize_unc_to_wsl(&entry.path).into_owned(),
+        );
     }
+
+    // Issue #1519: the node row is now authoritative for every spawn kind —
+    // manual claims carry the adopted slug + normalized path above, Issue/PR
+    // claims keep their own `gh{N}-`/`pr{N}-` identity whose stored path is
+    // the move target, and unclaimed spawns resolve from the persisted
+    // `worktree_path` (or the legacy fallback for pre-#1519 rows). One
+    // resolver, no per-source branches: a second path here once fed the raw
+    // host UNC form into `resolve_raw_path` and produced a UNC `spawn_path`
+    // that `wsl.exe --cd` rejects on Windows.
+    let resolved = env::node_working_path(&node);
+    tracing::info!(
+        "prepare_context: resolved spawn_path={}, host_path={}, env={:?}",
+        resolved.spawn_path,
+        resolved.host_path,
+        resolved.env_type
+    );
 
     let harness_id = node.provider.clone();
     let node_mesh_id = node.mesh_id;

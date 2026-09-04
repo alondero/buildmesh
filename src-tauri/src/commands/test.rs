@@ -243,6 +243,7 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
         true,
         None,
         None,
+        None,
     ) {
         Ok(node) => {
             // Emit event so frontend agent-node store can refetch via invoke()

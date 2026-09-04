@@ -426,7 +426,8 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             path TEXT NOT NULL UNIQUE,
             layout TEXT NOT NULL DEFAULT 'grid',
             position INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            worktree_directory TEXT
         );
 
         CREATE TABLE IF NOT EXISTS agent_nodes (
@@ -449,7 +450,8 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             head_repo_owner TEXT,
             head_repo_clone_url TEXT,
             source_pr_pinned_sha TEXT,
-            signal_health TEXT
+            signal_health TEXT,
+            worktree_path TEXT
         );
 
         CREATE TABLE IF NOT EXISTS pending_worktree_removals (
@@ -1797,6 +1799,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         loop_consecutive_failures: row.get::<_, i32>(30)?,
         harness_overrides: parse_harness_overrides(&row.get::<_, String>(31)?),
         circuit_run_capacity: row.get::<_, i32>(32)?,
+        worktree_directory: parse_str(row.get::<_, String>(33)?),
     })
 }
 
@@ -1832,7 +1835,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health, worktree_path";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -1877,6 +1880,16 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         signal_health: row
             .get::<_, Option<String>>(19)?
             .and_then(|s| crate::agent::session_lifecycle::SignalHealth::from_db_str(&s)),
+        // worktree_path is at index 20 (issue #1519). Nullable TEXT — NULL
+        // means legacy `<mesh>/.claude/worktrees/<name>` fallback
+        // (pre-#1519 rows + Root Nodes). Empty string degrades to `None`
+        // so a hand-edited blank doesn't resolve to a bare empty dir.
+        worktree_path: row
+            .get::<_, Option<String>>(20)?
+            .and_then(|s| {
+                let t = s.trim();
+                if t.is_empty() { None } else { Some(t.to_string()) }
+            }),
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -1928,20 +1941,20 @@ pub fn list_coordinator_node_rows_inner(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        // map_agent_node_row reads positional indices 0..19, which match the
+        // map_agent_node_row reads positional indices 0..20, which match the
         // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 20 and 21 (v16 added head_repo_owner +
+        // status_changed_at follow at 21 and 22 (v16 added head_repo_owner +
         // head_repo_clone_url at 16/17, source_pr_pinned_sha at 18, v29
-        // added is_pinned at 13, v35 added signal_health at 19 — see
-        // AGENT_NODE_COLUMNS).
+        // added is_pinned at 13, v35 added signal_health at 19, v37 added
+        // worktree_path at 20 — see AGENT_NODE_COLUMNS).
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(20)?;
+        let mesh_name: String = row.get(21)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(21)?;
+        let status_changed_at: Option<String> = row.get(22)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -2694,6 +2707,35 @@ pub(crate) fn set_mesh_sandbox_inner(
     Ok(())
 }
 
+/// Narrow single-column write for the per-Mesh `worktree_directory`
+/// override (issue #1519). `None` (or blank) clears the override so the
+/// Mesh inherits the application default; `Some(dir)` stores the trimmed
+/// raw input verbatim (no shell/`~` expansion — resolution joins it at
+/// read time via `env::effective_worktree_dir_raw`). Validation
+/// (absolute-path environment match) lives at the IPC boundary
+/// (`commands::mesh_properties::update_mesh_worktree_directory`), not
+/// here — this helper is the typed write pass. Zero-rows-is-an-error
+/// contract matches `set_mesh_sandbox`.
+pub fn set_mesh_worktree_directory(id: i64, directory: Option<&str>) -> SqlResult<usize> {
+    let db = write_conn();
+    set_mesh_worktree_directory_inner(&db, id, directory)
+}
+
+pub(crate) fn set_mesh_worktree_directory_inner(
+    conn: &Connection,
+    id: i64,
+    directory: Option<&str>,
+) -> SqlResult<usize> {
+    let cleaned = directory
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Ok(conn.execute(
+        "UPDATE meshes SET worktree_directory = ?1 WHERE id = ?2",
+        params![cleaned, id],
+    )?)
+}
+
 pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
     if updates.is_empty() { return Ok(()); }
     let db = write_conn();
@@ -2769,6 +2811,7 @@ pub fn create_agent_node(
     use_worktree: bool,
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
+    worktree_path: Option<&str>,
 ) -> SqlResult<AgentNode> {
     let db = write_conn();
     // Append at the end of this mesh's grid order. New nodes land last so an
@@ -2782,9 +2825,15 @@ pub fn create_agent_node(
     // DEFAULT: a DB migrated from pre-v14 added the column nullable with NO
     // default (SQLite can't ALTER-add a non-constant default), so an INSERT that
     // omitted it would store NULL and break the coordinator digest query.
+    // Normalize blank worktree_path to NULL — a hand-edited empty string
+    // must read back as `None` (legacy fallback), not as a bare empty dir
+    // (issue #1519).
+    let worktree_path = worktree_path
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, source_pr_pinned_sha, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, source_pr_pinned_sha, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url, worktree_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             mesh_id,
             name,
@@ -2801,6 +2850,7 @@ pub fn create_agent_node(
             chrono::Utc::now().to_rfc3339(),
             head_repo_owner,
             head_repo_clone_url,
+            worktree_path,
         ],
     )?;
     let id = db.last_insert_rowid();
@@ -2823,9 +2873,10 @@ pub fn update_agent_node_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()
 }
 
 /// Rename IPC only — writes `name` alone and is **not** the spawn-path
-/// slug adoption. The spawn path uses `adopt_manual_pool_slug`, which
-/// writes `name` and `worktree_name` together so the close path's
-/// removal directory cannot drift from the displayed name (#1080).
+/// slug adoption. The spawn path uses `adopt_manual_pool_slug_with_path`,
+/// which writes `name`, `worktree_name`, and `worktree_path` together so
+/// the close path's removal directory cannot drift from the displayed
+/// name (#1080, #1519).
 /// Mixing the two would reintroduce the bug.
 pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
     let db = write_conn();
@@ -2836,20 +2887,48 @@ pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
     Ok(())
 }
 
-/// Adopt the pool's pre-assigned slug onto a Manual node. Writes `name`
-/// AND `worktree_name` in one UPDATE — they are two halves of one
-/// adoption, and #1080 was the two halves drifting apart. Issue/PR
-/// spawns keep their own `gh{N}-`/`pr{N}-` identity; their pool dir is
-/// moved to match instead (see `git::worktree::provision`).
-pub fn adopt_manual_pool_slug(id: i64, slug: &str) -> SqlResult<()> {
-    let db = write_conn();
-    adopt_manual_pool_slug_inner(&db, id, slug)
-}
-
-fn adopt_manual_pool_slug_inner(conn: &Connection, id: i64, slug: &str) -> SqlResult<()> {
+/// Legacy two-half adoption (`name` + `worktree_name`, issue #1080) kept for
+/// the `db::tests` pins. Production spawns use
+/// [`adopt_manual_pool_slug_with_path`], which adds the third half
+/// (`worktree_path`, issue #1519). Test-only, like the pins that call it.
+#[cfg(test)]
+pub(crate) fn adopt_manual_pool_slug_inner(conn: &Connection, id: i64, slug: &str) -> SqlResult<()> {
     conn.execute(
         "UPDATE agent_nodes SET name = ?1, worktree_name = ?1 WHERE id = ?2",
         params![slug, id],
+    )?;
+    Ok(())
+}
+
+/// Adopt the pool's slug AND persist the exact resolved `worktree_path`
+/// (issue #1519). Manual warm claims resolve onto the already-on-disk
+/// pool directory (`entry.path`), which differs from the stage-1
+/// throwaway `worktree_path` the row was created with — without this
+/// third half of the adoption the close path would derive its removal
+/// directory from a stale path and leak the live worktree. Issue/PR
+/// spawns don't call this (their pool dir is moved onto the node's own
+/// `gh{N}-`/`pr{N}-` target, which the row already stores).
+pub fn adopt_manual_pool_slug_with_path(
+    id: i64,
+    slug: &str,
+    worktree_path: Option<&str>,
+) -> SqlResult<()> {
+    let db = write_conn();
+    adopt_manual_pool_slug_with_path_inner(&db, id, slug, worktree_path)
+}
+
+pub(crate) fn adopt_manual_pool_slug_with_path_inner(
+    conn: &Connection,
+    id: i64,
+    slug: &str,
+    worktree_path: Option<&str>,
+) -> SqlResult<()> {
+    let worktree_path = worktree_path
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    conn.execute(
+        "UPDATE agent_nodes SET name = ?1, worktree_name = ?1, worktree_path = ?2 WHERE id = ?3",
+        params![slug, worktree_path, id],
     )?;
     Ok(())
 }
@@ -4009,6 +4088,33 @@ pub(crate) fn list_oldest_warm_entries_for_mesh_inner(
     rows.collect()
 }
 
+/// List every droppable warm entry (all statuses except `claimed`) for a
+/// mesh as `(id, path)` pairs (issue #1519). The directory-change rebuild
+/// drains stale-location inventory regardless of count, so it needs the
+/// full droppable set, not just the oldest-N excess window
+/// `list_oldest_warm_entries_for_mesh` serves.
+pub fn list_all_droppable_warm_entries_for_mesh(
+    mesh_id: i64,
+) -> SqlResult<Vec<(i64, String)>> {
+    let db = read_conn();
+    list_all_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
+}
+
+pub(crate) fn list_all_droppable_warm_entries_for_mesh_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM warm_worktrees \
+         WHERE mesh_id = ?1 AND status != 'claimed' \
+         ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![mesh_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.collect()
+}
+
 /// True iff `path` corresponds to a row in `warm_worktrees`. The prune
 /// pipeline queries this per worktree so the Worktree Manager tab can
 /// badge pool entries and `delete_worktrees` can reject them. Cheap
@@ -4088,14 +4194,21 @@ pub(crate) fn list_worktree_enabled_meshes_for_warm_inner(
     conn: &Connection,
 ) -> SqlResult<Vec<WarmPoolMeshRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, base_ref, pre_spawn_pool_size FROM meshes WHERE use_worktree = 1",
+        "SELECT id, path, base_ref, pre_spawn_pool_size, COALESCE(worktree_directory, '') FROM meshes WHERE use_worktree = 1",
     )?;
     let rows = stmt.query_map([], |row| {
+        let raw_dir: String = row.get(4)?;
+        let worktree_directory = if raw_dir.trim().is_empty() {
+            None
+        } else {
+            Some(raw_dir.trim().to_string())
+        };
         Ok(WarmPoolMeshRow {
             id: row.get(0)?,
             path: row.get(1)?,
             base_ref: row.get(2)?,
             pre_spawn_pool_size: row.get(3)?,
+            worktree_directory,
         })
     })?;
     rows.collect()
@@ -4113,6 +4226,10 @@ pub struct WarmPoolMeshRow {
     pub path: String,
     pub base_ref: String,
     pub pre_spawn_pool_size: i64,
+    /// Per-Mesh `worktree_directory` override (issue #1519). `None` means
+    /// inherit the application default. The pool resolves the effective
+    /// dir per mesh via `env::effective_worktree_dir_raw`.
+    pub worktree_directory: Option<String>,
 }
 
 /// What a claim hands back to the spawn path: the four columns it actually

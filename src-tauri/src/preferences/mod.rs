@@ -45,7 +45,7 @@ pub use model::{
 
 pub use storage::{
     app_data_dir, autopilot_pool_size, default_provider, init, load, naming_provider, save,
-    update,
+    update, worktree_directory,
 };
 #[cfg(test)]
 pub(crate) use storage::{init_for_tests, reset_for_tests};

@@ -143,7 +143,21 @@ pub async fn import_and_resume(
                 Ok(m) => m,
                 Err(_) => return Ok(None),
             };
-            let resolved = crate::env::resolve_agent_path(&mesh.path, None);
+            // Issue #1519: persist the effective `worktree_path` so HTTP
+            // imports agree with spawns on the configured directory.
+            let app_dir = crate::preferences::worktree_directory();
+            let effective_dir = crate::env::effective_worktree_dir_raw(
+                &mesh.path,
+                mesh.worktree_directory.as_deref(),
+                app_dir.as_deref(),
+            );
+            let worktree_path_owned: Option<String> = worktree_owned
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|n| crate::env::resolve_worktree_node_raw(&effective_dir, n));
+            let resolved =
+                crate::env::resolve_agent_path_in_dir(&mesh.path, &effective_dir, worktree_owned.as_deref());
             let use_worktree = worktree_owned.is_some();
             let mut node = match db::create_agent_node(
                 mesh_id,
@@ -159,6 +173,7 @@ pub async fn import_and_resume(
                 use_worktree,
                 None,
                 None,
+                worktree_path_owned.as_deref(),
             ) {
                 Ok(n) => n,
                 Err(e) => return Err(format!("create_agent_node failed: {e}")),

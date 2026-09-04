@@ -2366,6 +2366,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .unwrap_or_else(|_| {
             let conn = crate::db::write_conn();

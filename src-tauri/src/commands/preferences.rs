@@ -53,6 +53,83 @@ pub fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String> {
     preferences::save(prefs)
 }
 
+/// Set the Buildmesh-wide default Worktree Node directory (issue #1519).
+/// `None` (or blank, which collapses to `None`) clears the override and
+/// restores the `.claude/worktrees` default under each Mesh root.
+/// Relative values resolve from each inheriting Mesh's root. Absolute
+/// values are rejected here with an actionable message: one app default
+/// spans meshes in both host environments (native/Windows versus WSL),
+/// so an absolute path can only ever match a subset of meshes — set it
+/// as a per-Mesh override in Project Settings → Worktrees instead, where
+/// the backend validates the environment match. No shell/`~` expansion.
+/// Changing it affects future nodes and warm-pool entries only — live
+/// nodes keep their persisted `worktree_path`. Schedules a background
+/// pool rebuild for inheriting meshes so idle inventory converges on the
+/// new location.
+#[command]
+pub fn set_app_worktree_directory(app: AppHandle, directory: Option<String>) -> Result<(), String> {
+    use crate::env::normalize_worktree_directory;
+    let cleaned = normalize_worktree_directory(directory.as_deref());
+    let cleaned = match cleaned {
+        None => None,
+        Some(dir) => {
+            if crate::env::is_absolute_worktree_path(&dir)
+                || crate::env::is_drive_relative_worktree_path(&dir)
+            {
+                return Err(format!(
+                    "worktree directory '{dir}' is not a plain relative path, but the application default spans meshes in both environments (native/Windows versus WSL) — \
+                     use a relative path like 'worktrees' resolved from each mesh root, or set this path as a per-Mesh override in Project Settings → Worktrees"
+                ));
+            }
+            Some(crate::env::normalize_relative_worktree_dir(&dir)?)
+        }
+    };
+    let mut prefs = preferences::load()?;
+    prefs.worktree_directory = cleaned.clone();
+    preferences::save(prefs)?;
+    // Notify first (`None` = every inheriting mesh may have moved), then
+    // enqueue the rebuild — both read the committed preferences.
+    let _ = app.emit(
+        crate::commands::mesh_properties::WORKTREE_DIR_CHANGED_EVENT,
+        Option::<i64>::None,
+    );
+    // Enqueues a debounced, fill-lock-serialized rebuild for inheriting
+    // meshes and returns immediately (the function owns its background
+    // thread — see `rebuild_pools_for_worktree_dir_change`).
+    crate::services::warm_pool::rebuild_pools_for_worktree_dir_change(&app, None);
+    Ok(())
+}
+
+/// Effective Worktree Node directory config for one Mesh (issue #1519).
+/// Returns the Mesh override, the application default, and the resolved
+/// effective container dir so Settings → General (app default) and
+/// Project Settings → Worktrees (override + inherited effective) can
+/// render without re-spelling the precedence rule.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "WorktreeDirectoryConfig.ts")]
+pub struct WorktreeDirectoryConfig {
+    pub mesh_directory: Option<String>,
+    pub app_directory: Option<String>,
+    pub effective_directory: String,
+}
+
+#[command]
+pub fn get_worktree_directory_config(mesh_id: i64) -> Result<WorktreeDirectoryConfig, String> {
+    let mesh = crate::db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let app_dir = preferences::worktree_directory();
+    let effective = crate::env::effective_worktree_dir_raw(
+        &mesh.path,
+        mesh.worktree_directory.as_deref(),
+        app_dir.as_deref(),
+    );
+    Ok(WorktreeDirectoryConfig {
+        mesh_directory: mesh.worktree_directory.clone(),
+        app_directory: app_dir,
+        effective_directory: effective,
+    })
+}
+
 /// Persist the user's spawn-menu harness order (issue #573). `order` is the list
 /// of harness-row ids in the desired top-to-bottom order; `Terminal` is filtered
 /// out backend-side (it's always forced last). Emits `provider-list-changed` so

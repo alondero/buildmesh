@@ -515,6 +515,18 @@ pub struct Mesh {
     /// the legacy column's wire shape (`number` in TS, not `bigint`).
     #[ts(as = "i32")]
     pub circuit_run_capacity: i32,
+    /// Per-Mesh Worktree Node directory override (issue #1519).
+    /// Optional raw user input with the same semantics as
+    /// [`crate::preferences::AppPreferences::worktree_directory`]:
+    /// relative resolves from the Mesh root, absolute must match the
+    /// Mesh's host environment, blank collapses to `None` (inherit).
+    /// Precedence: Mesh override → application default →
+    /// `.claude/worktrees` under the Mesh root. Changing it affects
+    /// future nodes only — live nodes keep their persisted
+    /// [`AgentNode::worktree_path`]. Persisted as
+    /// `meshes.worktree_directory TEXT` (schema v37); empty/absent
+    /// reads back as `None`.
+    pub worktree_directory: Option<String>,
 }
 
 /// Fallback for [`Mesh::autopilot_trigger_label`] when the user enables
@@ -669,6 +681,16 @@ pub struct AgentNode {
     #[ts(as = "i32")]
     pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,
+    /// Exact resolved Worktree Node directory for this node (issue #1519).
+    /// `Some(raw_path)` for Worktree Nodes created after the configurable
+    /// directory landed — the effective `<worktree_dir>/<trimmed_name>`
+    /// computed at creation from Mesh override → app default →
+    /// `.claude/worktrees`. `None` for Root Nodes and for pre-#1519 rows,
+    /// which retain the legacy `<mesh>/.claude/worktrees/<name>` fallback
+    /// via `env::node_working_path`. Immutable — changing a directory
+    /// setting affects future nodes without moving live worktrees.
+    /// Persisted as `agent_nodes.worktree_path TEXT` (schema v37).
+    pub worktree_path: Option<String>,
 }
 
 /// A worktree whose node is already closed but whose on-disk directory still
@@ -950,6 +972,10 @@ pub struct MeshRow {
     /// atomic write) and the new circuit-run gate appear side-by-side.
     #[ts(as = "i32")]
     pub circuit_run_capacity: i32,
+    /// Per-Mesh Worktree Node directory override (issue #1519) — see
+    /// the matching [`Mesh`] field. Surfaced in Project Settings →
+    /// Worktrees so the Mesh can override the application default.
+    pub worktree_directory: Option<String>,
 }
 
 impl From<&Mesh> for MeshRow {
@@ -981,6 +1007,7 @@ impl From<&Mesh> for MeshRow {
             loop_consecutive_failures: mesh.loop_consecutive_failures,
             harness_overrides: mesh.harness_overrides.clone(),
             circuit_run_capacity: mesh.circuit_run_capacity,
+            worktree_directory: mesh.worktree_directory.clone(),
         }
     }
 }

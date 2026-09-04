@@ -440,4 +440,14 @@ pub struct AppPreferences {
     /// `#[serde(default)]`.
     #[serde(default)]
     pub harness_defaults: HashMap<String, HarnessConfigValue>,
+    /// Buildmesh-wide default Worktree Node directory (issue #1519).
+    /// Optional raw user input — relative values resolve from the Mesh root,
+    /// absolute values must be in the same host environment (native/Windows
+    /// versus WSL) as the Mesh. Trimmed; blank collapses to `None`
+    /// (inherit/default). Shell variables and `~` are NOT expanded.
+    /// `None` means "no app-wide override — use `.claude/worktrees`
+    /// under the Mesh root". A per-Mesh `worktree_directory` overrides this.
+    /// Additive on disk — older `preferences.json` without it loads as `None`.
+    #[serde(default)]
+    pub worktree_directory: Option<String>,
 }

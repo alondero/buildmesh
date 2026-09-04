@@ -357,6 +357,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -397,6 +398,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .unwrap();
         let known = crate::db::list_known_autopilot_issue_numbers(mesh.id).unwrap();
@@ -433,6 +435,7 @@ mod tests {
             None,
             None,
             true,
+            None,
             None,
             None,
         )
@@ -504,6 +507,7 @@ mod tests {
             None,
             None,
             true,
+            None,
             None,
             None,
         )
@@ -584,6 +588,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .unwrap();
         crate::db::create_autopilot_run(node.id, mesh.id, 7).unwrap();
@@ -653,6 +658,7 @@ mod tests {
             None,
             None,
             true,
+            None,
             None,
             None,
         )

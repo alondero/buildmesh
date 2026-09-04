@@ -74,4 +74,10 @@ harness_overrides: { [key in string]: HarnessConfigValue },
  * (kept here for back-compat with the `update_mesh_autopilot`
  * atomic write) and the new circuit-run gate appear side-by-side.
  */
-circuit_run_capacity: number, };
+circuit_run_capacity: number, 
+/**
+ * Per-Mesh Worktree Node directory override (issue #1519) — see
+ * the matching [`Mesh`] field. Surfaced in Project Settings →
+ * Worktrees so the Mesh can override the application default.
+ */
+worktree_directory: string | null, };

@@ -369,6 +369,26 @@ export const getWarmPoolCount = (meshId: number) =>
 export const updateWorktreeBaseRef = (meshId: number, baseRef: string) =>
   _invoke<void>('update_worktree_base_ref', { meshId, baseRef });
 
+/** Set the per-Mesh Worktree Node directory override (issue #1519).
+ *  Pass `null` (or blank, which the backend collapses) to clear and inherit
+ *  the app default. Relative resolves from the Mesh root; absolute must be
+ *  in the same environment (native vs WSL) or the backend rejects with an
+ *  actionable message. Triggers a background warm-pool rebuild; live nodes
+ *  keep their persisted `worktree_path`. */
+export const updateMeshWorktreeDirectory = (meshId: number, directory: string | null) =>
+  _invoke<void>('update_mesh_worktree_directory', { meshId, directory });
+
+export type { WorktreeDirectoryConfig } from '../types/generated/WorktreeDirectoryConfig';
+
+/** Effective worktree directory config for one Mesh (issue #1519) —
+ *  override + app default + resolved effective container for the
+ *  Project Settings → Worktrees inherited-value display. */
+export const getWorktreeDirectoryConfig = (meshId: number) =>
+  _invoke<import('../types/generated/WorktreeDirectoryConfig').WorktreeDirectoryConfig>(
+    'get_worktree_directory_config',
+    { meshId },
+  );
+
 // Scratch Pad (Probe Panel "📝 Scratch Pad" tab).
 //
 // Plain-text free-form notes per mesh. The empty string is a normal
@@ -1003,6 +1023,15 @@ export const setAppNamingProvider = (provider: string | null) =>
  *  Semantics documented on `AppPreferences::autopilot_pool_size`. */
 export const setAppAutopilotPoolSize = (size: number | null) =>
   _invoke('set_app_autopilot_pool_size', { size });
+
+/** Buildmesh-wide default Worktree Node directory (issue #1519).
+ *  Pass `null` (or blank) to clear and restore `.claude/worktrees` under
+ *  each inheriting Mesh root. Relative resolves from each Mesh root;
+ *  absolute stored verbatim (per-Mesh env validation at resolution).
+ *  Triggers a background rebuild of inheriting pools; live nodes keep
+ *  their persisted `worktree_path`. */
+export const setAppWorktreeDirectory = (directory: string | null) =>
+  _invoke('set_app_worktree_directory', { directory });
 
 // ── Application-level Agent Harness defaults (issue #1150 / #1148) ──────────
 //

@@ -19,7 +19,19 @@ use crate::models::{HarnessConfigValue, MeshRow};
 use crate::preferences;
 use crate::services::warm_pool;
 use std::path::PathBuf;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
+
+/// Tauri event emitted after any worktree-directory setting changes
+/// (issue #1519) — both [`update_mesh_worktree_directory`] (payload
+/// `Some(mesh_id)`) and the application-default command in
+/// `commands::preferences` (payload `None`, every inheriting mesh is
+/// affected). Frontend `useWorktreeEffectiveDir` re-resolves on it so
+/// mesh-level `GIT_CHANGED` subscriptions never go stale until restart.
+/// Symmetric constant in `src/lib/events.ts` as
+/// `WORKTREE_DIR_CHANGED_EVENT` — drift is caught by the
+/// `worktree_dir_changed_event_name_matches_frontend_constant` test here
+/// and the literal test in `tests/unit/use-worktree-effective-dir.test.ts`.
+pub const WORKTREE_DIR_CHANGED_EVENT: &str = "worktree-directory-changed";
 
 // ---------------------------------------------------------------------------
 // Settings.json helpers (for base_ref only)
@@ -260,6 +272,54 @@ pub fn get_mesh_pool_count(mesh_id: i64) -> Result<i64, String> {
 pub fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
     db::set_mesh_sandbox(mesh_id, sandbox)
         .map_err(|e| format!("failed to update sandbox: {}", e))
+}
+
+/// Set the per-Mesh Worktree Node directory override (issue #1519).
+/// `None` (or blank, which collapses to `None`) clears the override so the
+/// Mesh inherits the application default (or `.claude/worktrees` when that
+/// too is unset). Relative values resolve from the Mesh root; absolute
+/// values must be in the same host environment (native/Windows versus WSL)
+/// as the Mesh — a mismatch is rejected with an actionable message.
+/// No shell/`~` expansion. Changing it affects future nodes and warm-pool
+/// entries only — live Agent Nodes keep their persisted `worktree_path`
+/// and are never moved. On success, schedules a background pool rebuild
+/// for this Mesh so idle inventory converges on the new location.
+#[tauri::command]
+pub fn update_mesh_worktree_directory(
+    app: AppHandle,
+    mesh_id: i64,
+    directory: Option<String>,
+) -> Result<(), String> {
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let cleaned = crate::env::validate_worktree_directory(&mesh.path, directory.as_deref())?;
+    let rows = db::set_mesh_worktree_directory(mesh_id, cleaned.as_deref())
+        .map_err(|e| format!("failed to update worktree_directory: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    // Notify first so listeners re-resolve against the committed row, then
+    // enqueue the pool rebuild (which reads the same committed row).
+    let _ = app.emit(WORKTREE_DIR_CHANGED_EVENT, Some(mesh_id));
+    // Enqueues a debounced, fill-lock-serialized rebuild and returns
+    // immediately (the function owns its background thread — callers must
+    // NOT wrap it in their own `spawn`, which would defeat the
+    // single-runner collapsing).
+    crate::services::warm_pool::rebuild_pools_for_worktree_dir_change(&app, Some(mesh_id));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WORKTREE_DIR_CHANGED_EVENT;
+
+    #[test]
+    fn worktree_dir_changed_event_name_matches_frontend_constant() {
+        // Symmetric to the `WORKTREE_DIR_CHANGED_EVENT` export in
+        // `src/lib/events.ts` — keeps the two halves of the IPC contract
+        // from drifting (same pattern as warm_pool's pool-count-changed pin).
+        assert_eq!(WORKTREE_DIR_CHANGED_EVENT, "worktree-directory-changed");
+    }
 }
 
 /// Persist a mesh's Looping Autopilot configuration (wayfinder #990 /

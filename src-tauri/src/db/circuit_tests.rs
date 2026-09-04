@@ -312,6 +312,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
         true,
         None,
         None,
+        None,
     )
     .unwrap();
     set_circuit_step_agent_node(run_id, "spawn", agent.id).unwrap();

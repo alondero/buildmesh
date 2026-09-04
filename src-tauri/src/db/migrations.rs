@@ -117,7 +117,15 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// mirroring `autopilot_concurrency_limit`. No backfill — pre-v36 rows
 /// read back as 2 via the `COALESCE(col, 2)` in
 /// `mesh_columns_projection`.
-pub(crate) const SCHEMA_VERSION: u32 = 36;
+///
+/// v37 — Configurable Worktree Node directories (issue #1519): adds
+/// `meshes.worktree_directory TEXT` (per-Mesh override, NULL/empty =
+/// inherit) and `agent_nodes.worktree_path TEXT` (exact resolved dir
+/// persisted at creation, NULL = legacy `<mesh>/.claude/worktrees/<name>`
+/// fallback). No backfill — existing nodes keep resolving to their
+/// original legacy location via the `None` fallback in
+/// `env::node_working_path`, and future nodes store the effective dir.
+pub(crate) const SCHEMA_VERSION: u32 = 37;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -368,6 +376,11 @@ const SPECS: &[ColumnSpec] = &[
     // adds the column safely for upgrade paths; fresh-DB inlines inherit
     // the same DEFAULT through this registry entry.
     ColumnSpec { version: 36, table: "meshes", column: "circuit_run_capacity", type_with_default: "INTEGER NOT NULL DEFAULT 2", read_default: ReadDefault::CoalesceInt(2) },
+    // v37 — Configurable Worktree Node directories (issue #1519).
+    // Nullable TEXT; empty/absent reads back as `None` (inherit for
+    // meshes, legacy fallback for nodes). No COALESCE — NULL is the
+    // meaningful "not configured" shape.
+    ColumnSpec { version: 37, table: "meshes", column: "worktree_directory", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
 
     // ============================================================
     // agent_nodes
@@ -411,6 +424,10 @@ const SPECS: &[ColumnSpec] = &[
     // lifecycle status stays the primary state, this field explains whether
     // the harness's lifecycle signals can be trusted.
     ColumnSpec { version: 35, table: "agent_nodes", column: "signal_health", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    // v37 — Exact resolved Worktree Node dir persisted at creation
+    // (issue #1519). NULL = legacy `<mesh>/.claude/worktrees/<name>`
+    // fallback (pre-#1519 rows + Root Nodes).
+    ColumnSpec { version: 37, table: "agent_nodes", column: "worktree_path", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // autopilot_runs

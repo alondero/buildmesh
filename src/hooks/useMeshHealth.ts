@@ -1,5 +1,6 @@
 import { createDualKeyCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
+import { useWorktreeEffectiveDir } from './useWorktreeEffectiveDir';
 import { getMeshHealth, type MeshHealth } from '../lib/tauri';
 
 // Module-level shared client (keyed by meshId, with a separate git path
@@ -40,8 +41,14 @@ export function useMeshHealth(
 ): { health: MeshHealth | null; refresh: () => void } {
   // `refetchOnFocus` covers the "user ran git checkout in a terminal while
   // away" case; GIT_CHANGED (file-watcher driven) is covered by the primitive.
+  // `extraPaths` (issue #1519) keeps the badge converging when the mesh uses
+  // a custom worktree directory: events under the effective container
+  // (relative-inside-root or absolute-outside) invalidate like legacy
+  // `.claude/worktrees/` events do.
+  const effectiveDir = useWorktreeEffectiveDir(meshId);
   const { data, refresh } = usePathInvalidatedQuery(healthClient, meshId, meshPath, {
     refetchOnFocus: true,
+    extraPaths: effectiveDir ? [effectiveDir] : undefined,
   });
 
   return { health: data, refresh };
