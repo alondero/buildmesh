@@ -554,13 +554,16 @@ mod tests {
             .any(|r| matches!(r, AutopilotCompatibilityReason::PlainTerminal)));
     }
 
-    /// OpenCode now accepts `--prompt` (prefill) but still has no attention
-    /// hook, so Autopilot stays blocked on the remaining gap.
+    /// OpenCode now ships a project-plugin attention hook (issue #1295):
+    /// `session.idle` → InputRequired, `permission.asked` →
+    /// PermissionRequested, both POSTed to `/api/attention/{node_id}`.
+    /// With worktrees on, the Autopilot gate clears — the only remaining
+    /// blocker would be the mesh's `use_worktree` flag.
     #[test]
-    fn evaluate_opencode_emits_attention_reason_only() {
+    fn evaluate_opencode_with_attention_hook_is_allowed() {
         let caps = lookup_capabilities("opencode").expect("opencode known");
         assert!(caps.supports_prefill);
-        assert!(!caps.requires_attention_hook);
+        assert!(caps.requires_attention_hook);
         assert!(!caps.is_plain_terminal);
         let result = evaluate(AutopilotCompatibilityInput {
             resolved_spawn_option: "opencode",
@@ -569,21 +572,84 @@ mod tests {
             mesh_use_worktree: true,
             explicit_autopilot_provider: false,
         });
-        assert!(!result.allowed);
-        let kinds: Vec<&str> = result
-            .reasons
-            .iter()
-            .map(|r| match r {
-                AutopilotCompatibilityReason::MissingAttentionHook { .. } => "attention",
-                _ => "other",
-            })
-            .collect();
         assert!(
-            !kinds.contains(&"prefill"),
-            "OpenCode advertises --prompt; prefill must not block Autopilot. got {:?}",
+            result.allowed,
+            "OpenCode with the plugin attention hook + worktree on must be allowed; got reasons: {:?}",
             result.reasons
         );
-        assert!(kinds.contains(&"attention"), "got reasons: {:?}", result.reasons);
+        assert!(result.reasons.is_empty());
+    }
+
+    /// Issue #1295 negative path: the OpenCode plugin only marks when
+    /// `requires_attention_hook` is true AND `provision_attention_hooks`
+    /// successfully wrote the plugin file. If a future regression flips
+    /// the capability back to false (or the plugin write fails and the
+    /// orchestrator silently skips), the gate must still surface
+    /// `MissingAttentionHook` so the Probe UI can render the actionable
+    /// reason — never a silent green light.
+    #[test]
+    fn evaluate_opencode_without_attention_hook_emits_reason() {
+        let caps = HarnessCapabilities {
+            harness_id: "opencode".into(),
+            supports_extra_args: true,
+            supports_resume: true,
+            auto_resume_on_startup: true,
+            requires_attention_hook: false, // pre-#1295 state
+            attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            supports_passive_turn_watcher: false,
+            produces_readable_transcript: false,
+            supports_model_override: true,
+            supports_effort_override: false,
+            supports_prefill: true,
+            is_plain_terminal: false,
+            effort_control: EffortControlKind::None,
+            available_on: vec!["windows".into()],
+        };
+        let result = evaluate(AutopilotCompatibilityInput {
+            resolved_spawn_option: "opencode",
+            resolved_harness_id: "opencode",
+            capabilities: Some(caps),
+            mesh_use_worktree: true,
+            explicit_autopilot_provider: false,
+        });
+        assert!(!result.allowed);
+        assert!(
+            result.reasons.iter().any(|r| matches!(
+                r,
+                AutopilotCompatibilityReason::MissingAttentionHook { harness_id } if harness_id == "opencode"
+            )),
+            "pre-#1295 capabilities must still surface MissingAttentionHook; got {:?}",
+            result.reasons
+        );
+    }
+
+    /// Issue #1295: OpenCode + worktrees disabled. The harness is now
+    /// compatible (the plugin hook unblocked the gate), so the only
+    /// remaining reason is `WorktreeDisabled`. The pre-#1295 test for
+    /// this same fixture asserted two reasons; this test pins the new
+    /// single-reason shape so a future regression that drops
+    /// `requires_attention_hook` (and silently re-introduces
+    /// `MissingAttentionHook`) trips here, not on a real Autopilot Mesh.
+    #[test]
+    fn evaluate_opencode_with_worktree_disabled_is_only_worktree_reason() {
+        let result = evaluate(AutopilotCompatibilityInput {
+            resolved_spawn_option: "opencode",
+            resolved_harness_id: "opencode",
+            capabilities: lookup_capabilities("opencode"),
+            mesh_use_worktree: false,
+            explicit_autopilot_provider: true,
+        });
+        assert!(!result.allowed);
+        assert_eq!(
+            result.reasons.len(),
+            1,
+            "OpenCode + worktree=false must surface only WorktreeDisabled; got {:?}",
+            result.reasons
+        );
+        assert!(matches!(
+            &result.reasons[0],
+            AutopilotCompatibilityReason::WorktreeDisabled
+        ));
     }
 
     /// Command Code's transcript watcher supplies the same terminal turn
@@ -744,14 +810,34 @@ mod tests {
 
     /// A harness that's missing attention, *and* a mesh with worktrees
     /// disabled, surfaces both reasons. The UI renders them as a
-    /// bulleted list so the user sees every gap. (OpenCode now has
-    /// prefill, so that reason no longer appears.)
+    /// bulleted list so the user sees every gap. We construct a synthetic
+    /// capability descriptor for this case rather than reusing OpenCode —
+    /// issue #1295 gave OpenCode the plugin hook, so today its only
+    /// remaining gap is the mesh's worktree disable. A future harness
+    /// with `requires_attention_hook = false` will exercise the same
+    /// combined-reason path.
     #[test]
     fn evaluate_combines_harness_and_mesh_reasons() {
+        let caps = HarnessCapabilities {
+            harness_id: "futuristic-no-hook".into(),
+            supports_extra_args: true,
+            supports_resume: true,
+            auto_resume_on_startup: true,
+            requires_attention_hook: false,
+            attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            supports_passive_turn_watcher: false,
+            produces_readable_transcript: true,
+            supports_model_override: true,
+            supports_effort_override: false,
+            supports_prefill: true,
+            is_plain_terminal: false,
+            effort_control: EffortControlKind::None,
+            available_on: vec!["windows".into()],
+        };
         let result = evaluate(AutopilotCompatibilityInput {
-            resolved_spawn_option: "opencode",
-            resolved_harness_id: "opencode",
-            capabilities: lookup_capabilities("opencode"),
+            resolved_spawn_option: "futuristic-no-hook",
+            resolved_harness_id: "futuristic-no-hook",
+            capabilities: Some(caps),
             mesh_use_worktree: false,
             explicit_autopilot_provider: true,
         });
