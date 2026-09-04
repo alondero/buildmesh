@@ -75,7 +75,7 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
     enabled: open,
   });
 
-  useViewportClamp(menuRef, [open, confirming, merging]);
+  useViewportClamp(menuRef, [open, confirming, merging, mergeError]);
 
   const menuId = useId();
 
@@ -110,6 +110,19 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
   const handleCancelConfirm = (e: React.MouseEvent) => {
     e.stopPropagation();
     setConfirming(false);
+    // After cancel, itemCount drops from 3 back to 2 (Open + Merge).
+    // The previous activeIndex (2 = Cancel) is now out of bounds, so
+    // both menuitems would render with tabIndex=-1 until an arrow key
+    // moved focus — a focus drop. Pin to the Merge slot (1) and pull
+    // focus onto it after the unmount has settled, mirroring the
+    // closeAndReturnFocus trigger-return pattern used elsewhere in
+    // this component.
+    setActiveIndex(1);
+    requestAnimationFrame(() => {
+      menuRef.current
+        ?.querySelectorAll<HTMLElement>('[role="menuitem"]')[1]
+        ?.focus();
+    });
   };
 
   const handleMerge = async (e: React.MouseEvent) => {

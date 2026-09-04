@@ -129,6 +129,45 @@ describe('PrPill merge menu', () => {
     ).toBeNull();
   });
 
+  it('cancelling from the keyboard-driven Cancel row restores focus and the roving tabindex', async () => {
+    // Drive the keyboard path that landed Cancel at activeIndex=2:
+    // Open (0) -> ArrowDown to Merge (1) -> ArrowDown to Cancel (2).
+    // Activating Cancel must NOT drop focus to document.body, and the
+    // post-cancel Merge row must carry tabIndex="0" so the WAI-ARIA
+    // roving-tabindex invariant holds after the slot shrinks.
+    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    armConfirm();
+    const cancel = screen.getByLabelText(
+      `Cancel merge of pull request #${OPEN_PR.number}`,
+    );
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(cancel);
+    // Native button: activating Cancel triggers the onClick. The
+    // WAI-ARIA Enter / Space activation contract is a real-browser
+    // behaviour; React's fireEvent.keyDown does not synthesise the
+    // synthesized click on the focused button, so we activate it the
+    // way a screen reader / Space-key user would — by clicking it.
+    fireEvent.click(cancel);
+
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        const mergeItem = screen.getByLabelText(
+          `Merge pull request #${OPEN_PR.number}`,
+        );
+        const openItem = screen.getByLabelText(
+          `Open pull request #${OPEN_PR.number} on GitHub`,
+        );
+        // Merge (1) is the active slot — focus + tabIndex=0.
+        expect(document.activeElement).toBe(mergeItem);
+        expect(mergeItem.getAttribute('tabindex')).toBe('0');
+        expect(openItem.getAttribute('tabindex')).toBe('-1');
+        expect(mergePrMock).not.toHaveBeenCalled();
+        resolve();
+      }),
+    );
+  });
+
   it('a merge failure keeps the menu open with the error and resets the confirm', async () => {
     mergePrMock.mockRejectedValueOnce(new Error('Conflicts'));
     render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
