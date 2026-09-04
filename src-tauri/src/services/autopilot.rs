@@ -1027,7 +1027,7 @@ fn spawn_autopilot_node(
     // module derives the watcher's prefill from this same `intent`, so
     // we pass the intent (not a separately-formatted string).
     let intent = crate::agent::spawn::SpawnIntent::Issue(
-        crate::agent::spawn::GitHubWorkContext {
+        crate::agent::spawn::IssueContext {
             owner: owner.to_string(),
             repo: repo.to_string(),
             number: issue.number,

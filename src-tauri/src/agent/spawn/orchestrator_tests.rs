@@ -3,7 +3,7 @@ use super::orchestrator::{
     decide_startup_resume, intent_replaces_conversation, ResumeSkipDecision,
 };
 use super::{
-    ExplicitSpawnOverrides, GitHubWorkContext, ResumeCause, SpawnIntent, SpawnRequest,
+    ExplicitSpawnOverrides, IssueContext, ResumeCause, SpawnIntent, SpawnRequest,
     TerminalSize, WorktreePolicy,
 };
 
@@ -75,7 +75,7 @@ fn every_non_resume_intent_replaces_a_stored_conversation() {
 /// prompt.
 #[test]
 fn issue_intent_builds_its_prefill_at_the_spawn_seam() {
-    let intent = SpawnIntent::Issue(GitHubWorkContext {
+    let intent = SpawnIntent::Issue(IssueContext {
         owner: "alondero".into(),
         repo: "buildmesh".into(),
         number: 247,

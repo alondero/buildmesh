@@ -663,7 +663,11 @@ export const setIssueLabel = (
 // types. Issue #359.
 export type { GitHubPullRequest, PrMergeability, PrMergeabilityEntry, PrFileEntry };
 
-/** List PRs for a mesh's repo, filtered by `state` (`'open'` or `'closed'`). */
+/** List PRs for a mesh's repo, filtered by `state` (`'open'` or `'closed'`).
+ * Issue #1529: cohesive summary query — list fields plus `mergeable` /
+ * `mergeable_state` inline via the GraphQL summaries connection (O(pages)).
+ * The panel consumes this single call and never orchestrates per-row
+ * enrichment. */
 export const getRepoPulls = (meshId: number, state: 'open' | 'closed') =>
   _invoke<GitHubPullRequest[]>('get_repo_pulls', { meshId, state });
 
@@ -676,13 +680,11 @@ export const getRepoPulls = (meshId: number, state: 'open' | 'closed') =>
 export const getPrMergeability = (meshId: number, prNumber: number) =>
   _invoke<PrMergeability>('get_pr_mergeability', { meshId, prNumber });
 
-/// Batched PR mergeability (issue #418). One IPC round-trip resolves the
-/// GitHub token once and loops over the requested PR numbers — replacing
-/// the per-PR fan-out the panel used to fire. Each entry carries the PR
-/// `number` so the frontend can key results back onto the listed PRs.
-/// `mergeable: null` is either "GitHub still computing" or "this PR's
-/// individual probe failed" — both render as "Checking…" in the panel
-/// (see [`get_prs_mergeability`] in `commands/pr.rs` for the rationale).
+/// Batched PR mergeability (issue #418, reimplemented O(pages) for #1529).
+/// **Deprecated on desktop** — the panel now reads `mergeable` inline from
+/// [`getRepoPulls`] and never calls this. Survives for backward compat
+/// (older/mobile callers): one GraphQL summaries fetch serves the whole
+/// batch, missing numbers become the `"error: …"` sentinel.
 export const getPrsMergeability = (meshId: number, prNumbers: number[]) =>
   _invoke<PrMergeabilityEntry[]>('get_prs_mergeability', { meshId, prNumbers });
 

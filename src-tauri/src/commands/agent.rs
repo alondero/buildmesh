@@ -21,7 +21,8 @@
 //! single direct call site; no re-export lives here.
 
 use crate::agent::spawn::{
-    spawn_with_intent, GitHubWorkContext, SpawnIntent, SpawnOutcome, SpawnRequest, TerminalSize,
+    spawn_with_intent, IssueContext, PullRequestContext, SpawnIntent, SpawnOutcome,
+    SpawnRequest, TerminalSize,
 };
 use crate::db;
 use serde::{Deserialize, Serialize};
@@ -252,7 +253,7 @@ pub async fn spawn_issue_agent(
     })
     .await?;
 
-    let intent = SpawnIntent::Issue(GitHubWorkContext {
+    let intent = SpawnIntent::Issue(IssueContext {
         owner,
         repo,
         number: issue_number,
@@ -327,7 +328,7 @@ pub fn create_issue_node(
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
-    let intent = SpawnIntent::Issue(GitHubWorkContext {
+    let intent = SpawnIntent::Issue(IssueContext {
         owner,
         repo,
         number: issue_number,
@@ -603,7 +604,8 @@ pub fn create_pr_node(
 ///
 /// Returns the `(draft, intent)` pair so the wrapper can hand the
 /// **same** `SpawnIntent` to [`spawn_with_intent`] (issue #1180). The
-/// intent is built once from `(owner, repo, pr_number, pr_title)` and
+/// intent is built once from `(owner, repo, pr_number)` (with `pr_title`
+/// used solely for session naming via `pr_node_name`) and
 /// the prefill surfaced on the desktop draft comes from
 /// [`SpawnIntent::initial_prompt`] — the single source of truth shared
 /// with the background launch path and the Autopilot watcher.
@@ -641,11 +643,10 @@ pub(crate) fn create_pr_node_impl(
     // closed the previous `format_pr_prefill` helper duplication — three
     // sites (commands, services/autopilot, autopilot/launch) used to
     // recompute the prompt independently and could silently drift.
-    let intent = SpawnIntent::PullRequest(GitHubWorkContext {
+    let intent = SpawnIntent::PullRequest(PullRequestContext {
         owner,
         repo,
         number: pr_number,
-        title: pr_title.clone(),
     });
     let prefill = intent
         .initial_prompt()

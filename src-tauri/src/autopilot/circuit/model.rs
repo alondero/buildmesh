@@ -734,6 +734,12 @@ impl CircuitGraph {
     /// Exact reviewer instruction used by the issue-driven review blueprint.
     /// Keep this text stable: it is both the user-requested contract and the
     /// prompt that a reviewer sees after its PTY becomes ready.
+    ///
+    /// Shares the grumpy senior engineer review persona with the interactive PR probe
+    /// prefill ([`crate::agent::spawn::intent`]), but intentionally diverges in structure:
+    /// this is a headless circuit template using `{{pr.number}}` that instructs an
+    /// autonomous agent to post comments back to GitHub, whereas the probe prefill formats
+    /// an interactive session for a human developer with the PR URL on a newline.
     pub const PR_REVIEW_PROMPT: &'static str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment";
 
     /// Build the issue-driven Autopilot blueprint with a post-PR review loop.

@@ -1463,7 +1463,8 @@ mod tests {
         assert!(Provider::OpenCode.adapter().supports_model_override());
         assert!(Provider::OpenCode.adapter().supports_prefill());
         assert!(Provider::OpenCode.adapter().auto_resume_on_startup());
-        assert!(!Provider::OpenCode.adapter().requires_attention_hook());
+        // Issue #1295: plugin hook unblocks the Autopilot gate.
+        assert!(Provider::OpenCode.adapter().requires_attention_hook());
         assert!(Provider::Codex.adapter().supports_resume());
         // Kimi Code (wayfinder #918) is a native TUI harness like Codex/Grok
         // — its adapter declares resume + model override, no prefill, no
@@ -1477,8 +1478,15 @@ mod tests {
         // override is no longer advertised.
         assert!(!Provider::Mcode.adapter().supports_model_override());
         assert!(!Provider::Mcode.adapter().requires_attention_hook());
-        assert!(Provider::Dsh.adapter().supports_resume());
-        assert!(Provider::Dsh.adapter().supports_model_override());
+        // Issue #1365: `dsh` is a launcher with no validated profile —
+        // gates resume + model to false so the Spawn Menu hides the
+        // Resume button and the resolver drops `--model`. The
+        // orchestrator routes `SessionIdMode::None` when
+        // `supports_resume = false`, so no `--session-id` flag ever
+        // reaches the recipe.
+        assert!(!Provider::Dsh.adapter().supports_resume());
+        assert!(!Provider::Dsh.adapter().auto_resume_on_startup());
+        assert!(!Provider::Dsh.adapter().supports_model_override());
         assert!(!Provider::Dsh.adapter().requires_attention_hook());
         // Issue #1437: Freebuff is an interactive TUI harness with session resumption
         // via --continue but no model override (the interactive TUI does not accept

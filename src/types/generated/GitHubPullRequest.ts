@@ -4,8 +4,12 @@
  * Wire shape of `get_repo_pulls` (desktop Tauri) — one entry per pull request.
  * Generated to TS via ts-rs (issue #359); `i64` carries `#[ts(as = "i32")]`
  * because serde_json emits it as a JS number, not the `bigint` ts-rs defaults
- * to. Mergeability is intentionally NOT on this struct: the `/pulls` list
- * endpoint omits it, so the panel enriches each PR via `get_pr_mergeability`.
+ * to.
+ *
+ * Issue #1529: mergeability rides inline on this struct via the GraphQL
+ * PR-summaries connection (one request per page, not one per PR). The panel
+ * consumes this single cohesive query and never orchestrates per-row
+ * enrichment calls.
  */
 export type GitHubPullRequest = { number: number, title: string, body: string, 
 /**
@@ -58,4 +62,18 @@ head_repo_clone_url: string,
  * than failing, matching the existing `pr_head_unfetchable` fallback
  * semantics.
  */
-head_sha: string, };
+head_sha: string, 
+/**
+ * Mergeability inline (issue #1529): `Some(true)` mergeable,
+ * `Some(false)` conflicts, `None` while GitHub is still computing
+ * (`UNKNOWN`) — mirrors the old `PrMergeability.mergeable` contract so
+ * the panel's checking/unknown wording is preserved without a second
+ * request. `#[serde(default)]` keeps old cached payloads parsing.
+ */
+mergeable: boolean | null, 
+/**
+ * Lowercase REST vocabulary (`clean`, `dirty`, `blocked`, `behind`,
+ * `unstable`, `unknown`, …) mapped from GraphQL `mergeStateStatus`.
+ * Used for the flag wording. `#[serde(default)]` for old payloads.
+ */
+mergeable_state: string, };
