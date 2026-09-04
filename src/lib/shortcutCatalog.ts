@@ -304,8 +304,8 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
   {
     action: 'term-clear',
     group: 'terminal',
-    description: 'Clear focused terminal',
-    winKey: 'Ctrl+Shift+K',
+    description: 'Clear focused terminal scrollback',
+    winKey: 'Ctrl+Shift+L',
     macKey: '⌘+Shift+K',
   },
 

@@ -8,6 +8,20 @@
 mod tests {
     use rusqlite::{Connection, Result as SqlResult};
 
+    fn canonical_index_names(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND name GLOB 'idx_*' ORDER BY name",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<SqlResult<Vec<String>>>()
+            .unwrap()
+    }
+
     /// Creates a v2 schema (before layout column) for migration testing.
     /// This simulates an existing DB that needs migration to v3/v4+.
     fn create_v2_schema(conn: &Connection) -> SqlResult<()> {
@@ -1154,5 +1168,107 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         );
 
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+    }
+
+    #[test]
+    fn init_schema_upgrades_legacy_circuit_runs_before_creating_the_queue_index() {
+        // This is the production schema sequence without the process-global
+        // database lifecycle, so it is safe to exercise in parallel tests.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO app_settings (key, value) VALUES ('schema_version', '37');
+            CREATE TABLE meshes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL
+            );
+            CREATE TABLE autopilot_circuit_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                circuit_id INTEGER NOT NULL,
+                mesh_id INTEGER NOT NULL,
+                trigger_identity TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending',
+                context_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (circuit_id, trigger_identity)
+            );
+            INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity)
+                VALUES (4, 1, 7, 'legacy-run');
+            ",
+        )
+        .unwrap();
+        super::super::init_schema(&conn).unwrap();
+        let has_queue_column: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('autopilot_circuit_runs') WHERE name = 'queue_position'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_queue_column);
+        assert_eq!(
+            conn.query_row(
+                "SELECT queue_position FROM autopilot_circuit_runs WHERE id = 4",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            4,
+            "legacy runs retain FIFO order when the queue column is added"
+        );
+        let has_queue_index: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = 'idx_circuit_runs_mesh_queue'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_queue_index);
+
+        let fresh = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&fresh).unwrap();
+        assert_eq!(
+            canonical_index_names(&conn),
+            canonical_index_names(&fresh),
+            "legacy and fresh databases must converge on the canonical indexes"
+        );
+    }
+
+    #[test]
+    fn init_schema_creates_canonical_indexes_after_evolution() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        super::super::init_schema(&conn).unwrap();
+
+        for index in [
+            "idx_coordinator_drive_prompts_created_at",
+            "idx_warm_worktrees_mesh",
+            "idx_warm_worktrees_status",
+            "idx_agent_nodes_mesh",
+            "idx_autopilot_runs_mesh",
+            "idx_autopilot_circuits_mesh",
+            "idx_autopilot_circuit_runs_circuit",
+            "idx_autopilot_circuit_runs_state",
+            "idx_circuit_runs_mesh_queue",
+            "idx_circuit_steps_run",
+        ] {
+            let present: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(present, "{index} must exist after schema initialization");
+        }
     }
 }

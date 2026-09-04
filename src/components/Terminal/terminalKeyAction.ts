@@ -25,7 +25,7 @@ export function resolveKeyAction(state: KeyEventState): KeyAction {
     if (k === 'a') return 'selectAll';
     if (k === 'f') return 'find';
     // Issue #1409 — ⌘+K is claimed by the Omnibar (global CommandOrControl+K).
-    // Terminal clear moves to ⌘+Shift+K, mirroring Windows/Linux Ctrl+Shift+K.
+    // Terminal clear moves to ⌘+Shift+K.
     if (shiftKey && k === 'k') return 'clear';
     return 'passthrough';
   }
@@ -38,7 +38,12 @@ export function resolveKeyAction(state: KeyEventState): KeyAction {
     if (k === 'v') return 'paste';
     if (k === 'a') return 'selectAll';
     if (k === 'f') return 'find';
-    if (k === 'k') return 'clear';
+    // Issue #1568 — Ctrl+Shift+K is owned by the Omnibar's Tauri global
+    // shortcut (App.tsx:146). Remap terminal clear off that chord to
+    // Ctrl+Shift+L, following the primer rule "remap the terminal side
+    // or augment the modifier rather than stealing the user's keystroke"
+    // (docs/knowledge-primer.md:133).
+    if (k === 'l') return 'clear';
     return 'passthrough';
   }
 

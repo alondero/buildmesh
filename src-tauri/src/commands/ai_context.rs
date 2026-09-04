@@ -681,6 +681,12 @@ mod tests {
         assert!(gi_str.contains(".agents/hooks.json"));
         assert!(gi_str.contains(".codex/"));
         assert!(gi_str.contains(".cursor/cache/"));
+        // Issue #1368 round-2: Cursor's `.cursor/hooks.json` (provisioned
+        // by `provision_attention_hooks`) is part of the canonical ignore
+        // block — spawning a Cursor node would otherwise dirty the
+        // worktree with an untracked file carrying process-local
+        // localhost URLs.
+        assert!(gi_str.contains(".cursor/hooks.json"));
     }
 
     #[test]
@@ -737,6 +743,7 @@ mod tests {
         // Block content landed.
         assert!(gi_str.contains(ai_context_gitignore::HEADER));
         assert!(gi_str.contains(".agents/hooks.json"));
+        assert!(gi_str.contains(".cursor/hooks.json"));
     }
 
     #[test]
@@ -758,6 +765,7 @@ mod tests {
         let gi_str = std::str::from_utf8(&gi).unwrap();
         assert!(gi_str.contains(ai_context_gitignore::HEADER));
         assert!(gi_str.contains(".agents/hooks.json"));
+        assert!(gi_str.contains(".cursor/hooks.json"));
     }
 
     #[test]

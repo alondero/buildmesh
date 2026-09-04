@@ -75,10 +75,10 @@ describe('shortcutCatalog', () => {
     expect(omnibarCommands?.winKey).not.toBe('Ctrl+P');
   });
 
-  it('pins terminal clear as ⌘+Shift+K on macOS (issue #1409 — ⌘+K freed for the Omnibar)', () => {
+  it('pins terminal clear as Ctrl+Shift+L on Win/Linux (issue #1568 — remapped off the Omnibar chord)', () => {
     const clear = SHORTCUT_CATALOG.find(s => s.action === 'term-clear');
     expect(clear).toBeDefined();
-    expect(clear?.winKey).toBe('Ctrl+Shift+K');
+    expect(clear?.winKey).toBe('Ctrl+Shift+L');
     expect(clear?.macKey).toBe('⌘+Shift+K');
   });
 
