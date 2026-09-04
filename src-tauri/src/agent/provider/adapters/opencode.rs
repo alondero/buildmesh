@@ -39,7 +39,8 @@
 //! restricted-token, mesh-level toggle) is the independent OS-level
 //! containment layer.
 
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::env::ResolvedPath;
 use crate::models::EnvType;
 
 pub struct OpenCodeAdapter;
@@ -84,7 +85,44 @@ impl AgentProvider for OpenCodeAdapter {
     }
 
     fn requires_attention_hook(&self) -> bool {
-        false
+        true
+    }
+
+    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
+        use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+        use crate::agent::session_lifecycle::LifecycleKind;
+        // Issue #1295: OpenCode's project plugin forwards two lifecycle
+        // events back to the attention endpoint:
+        //   - `session.idle` → `InputRequired` (turn ended, user is needed)
+        //   - `permission.asked` → `PermissionRequested` (tool approval)
+        // `PermissionAsk` is the honest launch mode: OpenCode's `--auto`
+        // auto-approves most permissions, but the rare non-auto case still
+        // raises a `permission.asked` signal that the plugin forwards.
+        AttentionCapability::Hook {
+            events: vec![
+                LifecycleKind::InputRequired,
+                LifecycleKind::PermissionRequested,
+            ],
+            launch_mode: AttentionLaunchMode::PermissionAsk,
+            trust: None,
+            min_version: None,
+        }
+    }
+
+    /// Install the OpenCode attention plugin (issue #1295). The plugin is
+    /// loaded from `.opencode/plugins/` and forwards `session.idle` and
+    /// `permission.asked` to the local attention endpoint via env vars set
+    /// per-agent by `spawn_environment` (no node_id baking needed — unlike
+    /// Codex, the OpenCode TUI does NOT env_clear `BUILDMESH_*`).
+    fn provision_attention_hooks(
+        &self,
+        resolved: &ResolvedPath,
+        _runtime: &LaunchRuntime,
+        _node_id: i64,
+    ) -> Result<(), String> {
+        crate::agent::spawn::inject_opencode_attention_plugin(std::path::Path::new(
+            &resolved.host_path,
+        ))
     }
 
     fn supports_model_override(&self) -> bool {
@@ -310,17 +348,18 @@ mod tests {
     }
 
     #[test]
-    fn supports_resume_model_and_prefill_but_no_attention_hook() {
+    fn supports_resume_model_prefill_and_attention_hook() {
         assert!(OPENCODE.supports_resume());
         assert!(OPENCODE.auto_resume_on_startup());
         assert!(OPENCODE.supports_model_override());
         assert!(OPENCODE.supports_prefill());
-        assert!(!OPENCODE.requires_attention_hook());
+        // Issue #1295: plugin hook unblocks the Autopilot gate.
+        assert!(OPENCODE.requires_attention_hook());
         assert!(!OPENCODE.produces_readable_transcript());
     }
 
     #[test]
-    fn capabilities_descriptor_advertises_resume_model_prefill() {
+    fn capabilities_descriptor_advertises_resume_model_prefill_attention_hook() {
         let caps = OPENCODE.capabilities();
         assert_eq!(caps.harness_id, "opencode");
         assert!(caps.supports_resume);
@@ -328,12 +367,135 @@ mod tests {
         assert!(caps.supports_model_override);
         assert!(caps.supports_prefill);
         assert!(!caps.supports_effort_override);
-        assert!(!caps.requires_attention_hook);
+        // Issue #1295: descriptor must mirror the adapter's `requires_attention_hook`.
+        assert!(caps.requires_attention_hook);
         assert!(!caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(
             caps.effort_control,
             crate::agent::capabilities::EffortControlKind::None
+        );
+    }
+
+    // -- Attention plugin (issue #1295) ------------------------------------
+
+    /// The plugin file MUST be a complete ESM module — OpenCode's loader
+    /// fails on syntax errors and surfaces them as a startup fault. Pin
+    /// the export name and the two event handlers we depend on so a
+    /// refactor that renames `BuildmeshAttention` (or drops one of the
+    /// event kinds) trips here, not on a real spawn.
+    #[test]
+    fn plugin_template_exports_idle_and_permission_handlers() {
+        let template = crate::agent::spawn::OPENCODE_ATTENTION_PLUGIN;
+        assert!(
+            template.contains("export const BuildmeshAttention"),
+            "plugin must export BuildmeshAttention (OpenCode plugin contract); got:\n{template}"
+        );
+        assert!(
+            template.contains("event.type === \"session.idle\""),
+            "plugin must handle session.idle (turn-ended → InputRequired)"
+        );
+        assert!(
+            template.contains("event.type === \"permission.asked\""),
+            "plugin must handle permission.asked (tool approval → PermissionRequested)"
+        );
+        // Idempotency pin: the file is rewritten on every spawn; if it
+        // ever accidentally acquires side effects at import time, those
+        // fire on every OpenCode startup.
+        assert!(
+            !template.contains("console.log(") && !template.contains("process.exit("),
+            "plugin must stay side-effect-free at import time; got:\n{template}"
+        );
+    }
+
+    /// `provision_attention_hooks` writes `.opencode/plugins/buildmesh-attention.js`
+    /// into the project directory. Issue #1295 requires idempotency: a
+    /// re-spawn with a byte-identical file MUST NOT rewrite (so mtime is
+    /// preserved and the working tree stays clean), and a re-spawn after
+    /// the template changes MUST overwrite.
+    #[test]
+    fn provision_attention_hooks_writes_plugin_and_is_idempotent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let resolved = ResolvedPath {
+            host_path: temp.path().to_string_lossy().into_owned(),
+            spawn_path: temp.path().to_string_lossy().into_owned(),
+            raw_path: temp.path().to_string_lossy().into_owned(),
+            env_type: EnvType::Windows,
+        };
+
+        // First provision — creates the directory tree and writes the file.
+        OPENCODE
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 42)
+            .expect("first provision");
+
+        let plugin_path = temp
+            .path()
+            .join(".opencode")
+            .join("plugins")
+            .join("buildmesh-attention.js");
+        assert!(
+            plugin_path.exists(),
+            "plugin file not written to {}",
+            plugin_path.display()
+        );
+        let first = std::fs::read(&plugin_path).expect("read plugin");
+        assert_eq!(
+            first.as_slice(),
+            crate::agent::spawn::OPENCODE_ATTENTION_PLUGIN.as_bytes(),
+            "written plugin must be byte-equal to the embedded template"
+        );
+
+        // Idempotency: a second provision with the same template must
+        // NOT touch the file (so the user's working tree stays clean
+        // across repeated spawns).
+        let mtime_before = std::fs::metadata(&plugin_path)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
+        OPENCODE
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 42)
+            .expect("second provision");
+        let mtime_after = std::fs::metadata(&plugin_path)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
+        assert_eq!(
+            mtime_before, mtime_after,
+            "idempotent provision must not rewrite the plugin file (mtime preserved)"
+        );
+
+        std::fs::remove_file(&plugin_path).expect("delete");
+        OPENCODE
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 42)
+            .expect("third provision");
+        assert!(plugin_path.exists(), "plugin file must be re-created after removal");
+    }
+
+    /// Provision must surface a real filesystem error (a leaf file used
+    /// as a project root is unrecoverable). The spawn caller treats this
+    /// as best-effort: a failure is logged, the spawn proceeds, and the
+    /// attention callback is the only casualty.
+    #[test]
+    fn provision_attention_hooks_surfaces_filesystem_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blocker = temp.path().join("blocker");
+        std::fs::write(&blocker, b"not a dir").expect("create blocker");
+        let resolved = ResolvedPath {
+            host_path: blocker.to_string_lossy().into_owned(),
+            spawn_path: blocker.to_string_lossy().into_owned(),
+            raw_path: blocker.to_string_lossy().into_owned(),
+            env_type: EnvType::Windows,
+        };
+        let result =
+            OPENCODE.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0);
+        assert!(
+            result.is_err(),
+            "provision must surface a filesystem error when project path is a leaf file; got Ok"
+        );
+        // The helper must NOT panic or corrupt the blocker.
+        assert!(
+            std::fs::read(&blocker).is_ok(),
+            "provision error path must not mutate the blocker"
         );
     }
 

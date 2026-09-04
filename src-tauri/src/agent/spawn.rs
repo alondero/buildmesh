@@ -30,7 +30,10 @@ pub use command::{build_spawn_command, build_spawn_command_prepared};
 pub(crate) use orchestrator::spawn_with_intent;
 pub(crate) use prepare::resolve_base_ref_for_spawn;
 pub use prepare::DEFAULT_WORKTREE_MODE;
-pub use process::{inject_attention_hook, is_agent_already_running, spawn_child};
+pub use process::{
+    inject_attention_hook, inject_opencode_attention_plugin, is_agent_already_running,
+    spawn_child, OPENCODE_ATTENTION_PLUGIN,
+};
 #[cfg(test)]
 pub(crate) use reader::maybe_buffer_for_naming;
 pub use reader::{open_pty_pair, pump_pty_output, SessionIdMode, EARLY_EXIT_WINDOW};

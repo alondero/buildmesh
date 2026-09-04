@@ -1463,7 +1463,8 @@ mod tests {
         assert!(Provider::OpenCode.adapter().supports_model_override());
         assert!(Provider::OpenCode.adapter().supports_prefill());
         assert!(Provider::OpenCode.adapter().auto_resume_on_startup());
-        assert!(!Provider::OpenCode.adapter().requires_attention_hook());
+        // Issue #1295: plugin hook unblocks the Autopilot gate.
+        assert!(Provider::OpenCode.adapter().requires_attention_hook());
         assert!(Provider::Codex.adapter().supports_resume());
         // Kimi Code (wayfinder #918) is a native TUI harness like Codex/Grok
         // — its adapter declares resume + model override, no prefill, no

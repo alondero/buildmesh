@@ -588,7 +588,8 @@ mod tests {
         assert_eq!(opencode.harness_id, "opencode");
         assert!(opencode.supports_resume);
         assert!(opencode.auto_resume_on_startup);
-        assert!(!opencode.requires_attention_hook);
+        // Issue #1295: plugin hook unblocks the Autopilot gate.
+        assert!(opencode.requires_attention_hook);
         assert!(opencode.supports_model_override);
         assert!(!opencode.supports_effort_override);
         assert!(opencode.supports_extra_args);

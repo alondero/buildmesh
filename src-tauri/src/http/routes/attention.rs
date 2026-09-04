@@ -281,20 +281,28 @@ impl Classified {
 ///    them) with `signal_health = Degraded` — an unknown payload is never
 ///    silently presented as a high-confidence signal.
 /// 2. A permission-prompt Notification (Claude Code), a `PermissionRequest`
-///    event (Codex's dedicated hook for tool approval, issue #884), a
-///    Grok `Notification` with `notificationType == "permission_prompt"`
+///    event (Codex's dedicated hook for tool approval, issue #884), an
+///    OpenCode `permission.asked` plugin event (issue #1295), a Grok
+///    `Notification` with `notificationType == "permission_prompt"`
 ///    (issue #1282), or an AGY `PreToolUse` event (the harness's pre-tool
-///    approval hook, issue #1285) → `MarkInput` always. The agent is blocked
-///    on a tool-approval decision — that needs the user even while
+///    approval hook, issue #1285) → `MarkInput` always. The agent is
+///    blocked on a tool-approval decision — that needs the user even while
 ///    background tasks run.
-/// 3. AGY's `Stop` with `fullyIdle: false` (or explicit `fullyIdle: false`,
+/// 3. An OpenCode `session.idle` plugin event (issue #1295) →
+///    `MarkInput` with `kind = InputRequired`. The agent finished its
+///    turn and is at the input prompt waiting. OpenCode has no
+///    Claude-style transcript file, so this rule must fire BEFORE the
+///    transcript-scan fallback (rule 5) — otherwise the node would land
+///    in `Ready`.
+/// 4. AGY's `Stop` with `fullyIdle: false` (or explicit `fullyIdle: false`,
 ///    issue #1285, #1367) → suppress. The harness signalled the turn ended
 ///    but the agent is still busy on background work. Same false-yield
-///    semantic as Claude Code's transcript-scan path (rule 4), but signalled
-///    directly by the harness because AGY has no background task scan.
-/// 4. Anything else (Stop, idle Notification) with launched-but-unfinished
+///    semantic as Claude Code's transcript-scan path (rule 5), but
+///    signalled directly by the harness because AGY has no background
+///    task scan.
+/// 5. Anything else (Stop, idle Notification) with launched-but-unfinished
 ///    background tasks in the transcript → `SuppressPendingBackground`.
-/// 5. No transcript path, unreadable transcript, or no pending tasks →
+/// 6. No transcript path, unreadable transcript, or no pending tasks →
 ///    `Ready` (issue #1364): a clean turn completion is NOT a user-input
 ///    request. The node lands in `Ready`, never in `AwaitingInput`.
 fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> Classified {
@@ -349,6 +357,14 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
     }
     if matches!(event, Some("permissionrequest") | Some("pretooluse")) {
         return Classified::mark_input(detail);
+    }
+    // OpenCode plugin (issue #1295) — rule 3 above. Mirrors the upstream
+    // plugin event name; case-folded like the other event names so casing
+    // doesn't break the rule.
+    if event == Some("session.idle") {
+        let mut idle = detail;
+        idle.kind = Some(crate::agent::session_lifecycle::LifecycleKind::InputRequired);
+        return Classified::mark_input(idle);
     }
     // Grok posts `hookEventName: "notification"` (lowercase); Claude posts
     // `"Notification"`. Match case-insensitively so the structured
