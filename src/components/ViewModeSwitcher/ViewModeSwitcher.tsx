@@ -154,15 +154,21 @@ export function ViewModeSwitcher() {
             key={mode}
             type="button"
             aria-pressed={active}
+            // aria-label keeps the accessible name when the visible label
+            // hides on narrow windows (see the span below).
+            aria-label={label}
             onClick={() => handleSelect(mode)}
-            className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-sans font-medium transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-sm font-sans font-medium whitespace-nowrap transition-colors ${
               active
                 ? 'bg-bg-card text-accent-cyan'
                 : 'text-text-secondary hover:text-text-primary hover:bg-bg-card'
             }`}
           >
-            <Icon className="w-3.5 h-3.5" />
-            {label}
+            <Icon className="w-4 h-4 shrink-0" />
+            {/* Icon-only below 1150px window width — mirrors the title
+                bar pills' narrow-window degradation so the taller bar
+                never overflows the app's 900px minimum width. */}
+            <span className="max-[1150px]:hidden">{label}</span>
           </button>
         );
       })}
