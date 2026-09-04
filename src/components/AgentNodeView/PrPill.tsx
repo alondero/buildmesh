@@ -1,11 +1,11 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { mergePr } from '../../lib/tauri';
 import { formatError } from '../../lib/errorUtils';
 import { invalidateOpenPrForNode } from '../../hooks/useOpenPr';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
-import { useViewportClamp } from '../../hooks/useViewportClamp';
 import { dropdownId } from '../../lib/dropdownId';
 import type { OpenPr } from '../../types/generated/OpenPr';
 
@@ -66,6 +66,36 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
 
   useClickOutside<string>(open ? dropdownId('pr-pill', nodeId) : null, handleDismiss);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    const menu = menuRef.current;
+    const trigger = triggerRef.current;
+    if (!menu || !trigger) return;
+    const position = () => {
+      const anchor = trigger.getBoundingClientRect();
+      const margin = 4;
+      const left = Math.max(margin, Math.min(anchor.left, window.innerWidth - menu.offsetWidth - margin));
+      const below = anchor.bottom + margin;
+      const top = below + menu.offsetHeight <= window.innerHeight - margin
+        ? below
+        : Math.max(margin, anchor.top - menu.offsetHeight - margin);
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+    };
+    // Position before the menu's auto-focus, which otherwise scrolls its ancestors.
+    position();
+    window.addEventListener('resize', position);
+    window.addEventListener('scroll', position, true);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(position);
+    observer?.observe(menu);
+    observer?.observe(trigger);
+    return () => {
+      window.removeEventListener('resize', position);
+      window.removeEventListener('scroll', position, true);
+      observer?.disconnect();
+    };
+  }, [open, confirming, merging, mergeError]);
+
   useAriaMenu({
     rootRef: menuRef,
     itemCount,
@@ -74,8 +104,6 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
     onClose: closeAndReturnFocus,
     enabled: open,
   });
-
-  useViewportClamp(menuRef, [open, confirming, merging, mergeError]);
 
   const menuId = useId();
 
@@ -181,13 +209,15 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
         PR #{openPr.number}
       </button>
 
-      {open && (
+      {/* Escape the title's clipping and transformed node containing blocks. */}
+      {open && createPortal(
         <div
           ref={menuRef}
           id={menuId}
           role="menu"
           aria-label={`Pull request #${openPr.number} actions`}
-          className="absolute left-0 top-full mt-1 min-w-[240px] bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-50 animate-scale-in origin-top-left"
+          data-dropdown-for={dropdownId('pr-pill', nodeId)}
+          className="fixed w-[240px] max-w-[calc(100vw-8px)] max-h-[calc(100vh-8px)] overflow-y-auto bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-50"
         >
           <button
             role="menuitem"
@@ -265,7 +295,8 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
               {mergeError}
             </p>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

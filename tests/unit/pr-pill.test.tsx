@@ -11,7 +11,7 @@
  *   - Failures keep the menu open with the error, which survives
  *     close/reopen until the next merge attempt.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const { openUrlMock, mergePrMock, invalidateMock } = vi.hoisted(() => ({
@@ -54,10 +54,30 @@ function armConfirm() {
 
 describe('PrPill merge menu', () => {
   beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    });
     openUrlMock.mockClear();
     mergePrMock.mockClear();
     mergePrMock.mockResolvedValue('Merged');
     invalidateMock.mockClear();
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('keeps the menu outside the clipping title and treats portaled clicks as inside', () => {
+    const { container } = render(
+      <div style={{ overflow: 'hidden', height: 24 }}>
+        <PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />
+      </div>,
+    );
+    openPillMenu();
+    const menu = screen.getByRole('menu');
+    expect(container.contains(menu)).toBe(false);
+    expect(menu.parentElement).toBe(document.body);
+    fireEvent.mouseDown(screen.getByRole('menuitem', { name: 'Merge pull request #123', exact: true }));
+    expect(screen.getByRole('menu')).toBe(menu);
   });
 
   it('renders the PR number pill', () => {
