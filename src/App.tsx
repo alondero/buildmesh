@@ -457,8 +457,9 @@ function App() {
           const resumed = await api.autoResumeAgentNodes();
           if (resumed.length > 0) {
             console.log(`[App] Auto-resumed ${resumed.length} sessions`);
-            await fetchAgentNodes();
           }
+          // Recovery can update identity even when the subsequent launch fails.
+          await fetchAgentNodes();
         } catch (e) {
           console.error('[App] Auto-resume failed:', e);
         }

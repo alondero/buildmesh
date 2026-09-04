@@ -136,6 +136,22 @@ pub fn list_recent_root_sessions(
     Ok(out)
 }
 
+/// Historic recovery must constrain time before applying any result limit;
+/// the 50 most recent sessions across all projects can hide the wanted row.
+pub(crate) fn list_root_sessions_in_window(
+    conn: &Connection,
+    not_before: i64,
+    not_after: i64,
+) -> Result<Vec<ListedSession>, String> {
+    let mut stmt = conn.prepare("SELECT id, directory, time_created, time_updated
+        FROM session WHERE parent_id IS NULL AND time_archived IS NULL
+        AND time_created BETWEEN ?1 AND ?2").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([not_before, not_after], |row| Ok(ListedSession {
+        id: row.get(0)?, directory: row.get(1)?, created: row.get(2)?, updated: row.get(3)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
 fn try_capture_from_db_path(
     db_path: &Path,
     spawn_directory: &str,

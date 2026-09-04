@@ -730,20 +730,10 @@ pub async fn spawn_handover_agent(
     Ok(node)
 }
 
-/// Auto-resume all suspended nodes that have a stored CLI session ID.
+/// Recover missing harness identities, then auto-resume suspended nodes.
 /// Called by the frontend on startup after event listeners are ready.
-///
-/// Nodes whose `cli_session_id` is missing OR empty are skipped (marked
-/// `Idle` via the SessionLifecycle sink). The SQL `IS NOT NULL` filter in
-/// `list_suspended_nodes` only catches NULL; the empty-string case still
-/// has to be defended against here because legacy writes could leave an
-/// empty string behind.
 #[command]
 pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String> {
-    if let Err(error) = crate::services::codex_session::backfill_legacy_suspended_nodes_once().await {
-        tracing::warn!("auto_resume_agent_nodes: legacy Codex session migration failed: {error}");
-    }
-
     let nodes = crate::commands::run_blocking("auto_resume_agent_nodes", || {
         db::list_suspended_nodes().map_err(|e| e.to_string())
     })
@@ -758,6 +748,9 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     let mut resumed: Vec<i64> = Vec::new();
 
     for node in &nodes {
+        if let Err(error) = crate::services::session_recovery::recover_suspended_node(node.clone()).await {
+            tracing::warn!("auto_resume_agent_nodes: identity recovery failed for {}: {error}", node.id);
+        }
         match spawn_with_intent(
             &app,
             SpawnRequest::new(

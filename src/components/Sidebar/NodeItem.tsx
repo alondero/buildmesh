@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
-import { canResumeSuspendedNode } from '../../lib/suspended';
+import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
 import { getMeshColor } from '../../lib/meshColors';
 import type { SpawnOption } from '../../lib/groups';
 import { ProviderIcon } from '../Providers/ProviderIcon';
@@ -52,6 +52,8 @@ interface NodeItemProps {
 
 export function NodeItem({ node, meshColor, isActive, providerList, onSelect, onDelete }: NodeItemProps) {
   const config = getStatusConfig(node.status);
+  const isAutopilot = useAgentNodeStore((s) => s.autopilotStates[node.id] != null);
+  const lostConversation = hasLostConversation(node, isAutopilot);
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
   // Issue #1306 — "Start Fresh" escape hatch for error nodes with stale session IDs.
@@ -367,6 +369,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
         onCommit={(next) => renameAgentNode(node.id, next)}
         className="flex-1 truncate text-text-primary font-sans text-left text-sm"
       />
+      {lostConversation && (
+        <span className="text-status-warning text-xs shrink-0"
+          title="No saved session ID. Startup will try to recover it; use Regenerate to start a new conversation in this node.">
+          Lost conversation
+        </span>
+      )}
       {showRestart && (
         <button
           type="button"

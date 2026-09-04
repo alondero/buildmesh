@@ -32,7 +32,7 @@ pub(super) static SPAWNS_IN_FLIGHT: once_cell::sync::Lazy<
 /// RAII claim on a session id in [`SPAWNS_IN_FLIGHT`]. Dropping releases
 /// the claim on every exit path, including a cancelled async task.
 ///
-/// `spawn_agent_inner` acquires this *before* the phase calls and binds
+/// `spawn_with_intent` acquires this before identity mutation and binds
 /// it as a named local (`claim`, never `_claim`) so a future match cannot
 /// drop it at the prepare seam and reopen the #650 race.
 #[must_use = "dropping the claim releases the in-flight spawn slot"]

@@ -36,10 +36,9 @@
 //!   `http/routes/attention.rs`) stays as the secondary capture path for
 //!   those cases.
 //!
-//! There is deliberately no historic backfill: without a tight spawn window
-//! no brain conversation can be proven to belong to a suspended node, and
-//! guessing risks cross-project session corruption. Pre-fix `NULL` rows stay
-//! suspended for the user to re-spawn.
+//! Historic recovery lives in `session_recovery`: it requires a matching
+//! workspace anchor and a bounded launch window. Unknown workspaces that are
+//! eligible for live capture are deliberately ineligible for historic recovery.
 //!
 //! Select/match helpers are pure so the rules are unit-tested without a live
 //! `agy` binary. Filesystem scanning is tested against temp brain roots built
@@ -132,10 +131,14 @@ fn read_conversation_meta(path: &Path) -> Option<(i64, Option<String>)> {
 fn extract_cwd_anchor(val: &serde_json::Value) -> Option<String> {
     let calls = val.get("tool_calls")?.as_array()?;
     for call in calls {
-        let args = call.get("args")?;
+        let Some(args) = call.get("args") else { continue; };
         for key in ["Cwd", "cwd"] {
             if let Some(raw) = args.get(key).and_then(|v| v.as_str()) {
-                let cleaned = raw.trim().trim_matches('"').trim().to_string();
+                // Some transcripts JSON-encode the entire argument, including
+                // Windows backslashes. Stripping only quotes leaves doubled
+                // separators and rejects the correct workspace (#1555).
+                let decoded = serde_json::from_str::<String>(raw).ok();
+                let cleaned = decoded.as_deref().unwrap_or(raw).trim().trim_matches('"').trim().to_string();
                 if !cleaned.is_empty() {
                     return Some(cleaned);
                 }
@@ -248,7 +251,7 @@ pub fn select_id_for_directory<'a>(
     None
 }
 
-fn collect_candidates(brain_dir: &Path, created_not_before_ms: i64) -> Vec<Candidate> {
+pub(crate) fn collect_candidates(brain_dir: &Path, created_not_before_ms: i64) -> Vec<Candidate> {
     let Ok(entries) = fs::read_dir(brain_dir) else {
         return Vec::new();
     };

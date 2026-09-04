@@ -15,10 +15,8 @@ import type { AgentNode } from '../stores/agentNodeStore';
 
 /**
  * True when a Suspended node has a captured `cli_session_id` and is
- * therefore recoverable via the user-driven Resume affordance. Mirrors
- * the same predicate used by the auto-resume sweep's `db::list_suspended_nodes`
- * `cli_session_id IS NOT NULL` filter; the explicit length check
- * defends against legacy writes that left an empty string behind.
+ * therefore recoverable via the user-driven Resume affordance. Startup
+ * discovery also includes nodes without IDs so it can attempt recovery.
  */
 export function canResumeSuspendedNode(node: Pick<AgentNode, 'status' | 'cli_session_id'>): boolean {
   return (
@@ -26,4 +24,10 @@ export function canResumeSuspendedNode(node: Pick<AgentNode, 'status' | 'cli_ses
     typeof node.cli_session_id === 'string' &&
     node.cli_session_id.length > 0
   );
+}
+export function hasLostConversation(
+  node: Pick<AgentNode, 'status' | 'cli_session_id'>,
+  isAutopilot: boolean,
+): boolean {
+  return node.status === 'suspended' && !canResumeSuspendedNode(node) && !isAutopilot;
 }

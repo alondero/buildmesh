@@ -81,6 +81,8 @@ which previously overwrote a partially-unknown prefs file with defaults — a
 silent data-loss path).
 
 ### Terminal Persistence (CRITICAL)
+Startup identity recovery (#1555) lives in `services/session_recovery.rs`. List all Suspended nodes before recovery, including NULL/empty CLI session IDs; never restore the old SQL filter or one-time Codex migration gate. Historic recovery requires an unambiguous workspace/time match and a conditional write against the original fresh-start timestamp. Fresh intent atomically clears identity and records that timestamp; Resume preserves it. Missing-ID Autopilot nodes may be approval-gated and must not be auto-started by transcript matching. See [node-resume-recovery.md](learning/node-resume-recovery.md) for provider evidence, limits, and test coverage.
+
 `TerminalManager` is a **singleton**. xterm.js instances survive React remounts via a hidden container stack. Never call `dispose()` on a terminal unless the agent node is explicitly deleted — see `src/components/Terminal/Terminal.tsx`. Disposing a terminal causes permanent blanking.
 
 ### PTY output streaming (issue #1385 / #1393)
