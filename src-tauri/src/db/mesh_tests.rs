@@ -351,6 +351,7 @@ mod tests {
             crate::models::EnvType::Windows,
             "anthropic",
             None,
+            None,
             Some(42),
             None,
             None,
@@ -391,6 +392,7 @@ mod tests {
             crate::models::EnvType::Windows,
             "anthropic",
             None,
+            None,
             Some(43),
             None,
             None,
@@ -428,6 +430,7 @@ mod tests {
             "origin/main",
             crate::models::EnvType::Windows,
             "anthropic",
+            None,
             None,
             Some(42),
             None,
@@ -499,6 +502,7 @@ mod tests {
             "origin/main",
             crate::models::EnvType::Windows,
             "anthropic",
+            None,
             None,
             Some(99),
             None,
@@ -578,6 +582,7 @@ mod tests {
             crate::models::EnvType::Windows,
             "anthropic",
             None,
+            None,
             Some(7),
             None,
             None,
@@ -652,6 +657,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true,
             None,
             None,
@@ -703,5 +709,39 @@ mod tests {
         }));
 
         std::fs::remove_file(&temp_path).ok();
+    }
+
+    #[test]
+    fn agent_node_worktree_path_round_trips_exactly() {
+        let _serial = serial();
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mesh_path = format!("/tmp/worktree-path-round-trip-{test_id}");
+        let mesh = crate::db::create_mesh("Worktree Path Mesh", &mesh_path).unwrap();
+        let exact_path = format!("/tmp/external-worktrees/node-{test_id}");
+
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "path-snapshot",
+            &mesh.path,
+            "origin/main",
+            crate::models::EnvType::Windows,
+            "anthropic",
+            Some("path-snapshot"),
+            Some(&exact_path),
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(node.worktree_path.as_deref(), Some(exact_path.as_str()));
+        let reread = crate::db::get_agent_node_by_id(node.id).unwrap();
+        assert_eq!(reread.worktree_path.as_deref(), Some(exact_path.as_str()));
     }
 }

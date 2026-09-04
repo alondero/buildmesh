@@ -122,8 +122,8 @@ pub const WARM_FILL_STALE_AFTER_MINUTES: i64 = 5;
 /// stays out of the way.
 ///
 /// `existing_worktree_present` is computed by the caller from
-/// `env::resolve_agent_path(node.path, node.worktree_name)` — the path the
-/// node resolves to WITHOUT a pool claim.
+/// `env::node_working_path(&node)`, which honors a persisted `worktree_path`;
+/// this is the path the node resolves to WITHOUT a pool claim.
 ///
 /// Returns `false` for any spawn the cold path must serve. The caller falls
 /// back to a cold `create_git_worktree` on `false` — exactly what it would
@@ -178,6 +178,41 @@ pub fn try_claim(
         Ok(None) => return Ok(None),
         Err(e) => return Err(format!("warm_pool claim db error: {}", e)),
     };
+
+    // A settings save rebuilds the idle pool asynchronously. A spawn can land
+    // in that window, so validate the claimed row against the *current*
+    // effective directory before handing it to the spawn path. Without this
+    // guard, an old-directory row could be adopted after a per-Mesh/app setting
+    // change and silently violate the persisted Worktree Node path contract.
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("warm_pool mesh lookup failed: {e}"))?;
+    let app_directory = crate::preferences::worktree_directory();
+    let effective_directory = crate::env::effective_worktree_directory(
+        &mesh.path,
+        mesh.worktree_directory.as_deref(),
+        app_directory.as_deref(),
+    )?;
+    let expected_raw = crate::env::resolve_worktree_path(
+        &mesh.path,
+        Some(&effective_directory),
+        &claimed.preassigned_name,
+    )?;
+    let expected_host = crate::env::resolve_path(&expected_raw).host_path;
+    if !crate::env::directories_match(&claimed.path, &expected_host) {
+        tracing::info!(
+            "warm_pool: dropping row {} at {} after worktree directory changed (expected {})",
+            claimed.id,
+            claimed.path,
+            expected_host
+        );
+        // Remove the old git worktree best-effort before dropping its row. The
+        // subsequent cold spawn will create the replacement in the new root.
+        let _ = crate::git::worktree::remove_one_worktree(&claimed.path);
+        let _ = db::delete_warm_worktree(claimed.id);
+        let _ = db::delete_pending_worktree_removal(&claimed.path);
+        emit_pool_changed(app, mesh_id);
+        return Ok(None);
+    }
 
     // Stale-row guard: a previous crash might have left a row marked
     // `available` whose on-disk directory is gone (the worker wrote the row
@@ -346,18 +381,13 @@ pub(crate) fn fresh_slug() -> String {
 /// already-host-converted mesh path so the joined separator matches the host
 /// (a hand-rolled `format!("{}/.claude/worktrees/{}", …)` produces a mixed
 /// separator string on Windows when the mesh path is `C:\…`).
-pub(crate) fn warm_worktree_host_path(mesh_path: &str, slug: &str) -> String {
-    use std::path::Path;
-    let host_mesh = crate::env::to_host_path(mesh_path);
-    // `Path::join` always uses the platform's native separator on the
-    // appended segment, so the result is `C:\repo\m\.claude\worktrees\<slug>`
-    // on Windows and `/repo/m/.claude/worktrees/<slug>` on POSIX.
-    Path::new(&host_mesh)
-        .join(".claude")
-        .join("worktrees")
-        .join(slug)
-        .to_string_lossy()
-        .into_owned()
+pub(crate) fn warm_worktree_host_path(
+    mesh_path: &str,
+    configured_directory: Option<&str>,
+    slug: &str,
+) -> Result<String, String> {
+    let raw = crate::env::resolve_worktree_path(mesh_path, configured_directory, slug)?;
+    Ok(crate::env::resolve_path(&raw).host_path)
 }
 
 /// What one call to [`prewarm_one`] did. Replaces the old `Result<bool, _>`
@@ -450,7 +480,13 @@ pub fn prewarm_one(
     let mut last_err: Option<String> = None;
     for _ in 0..4 {
         let slug = fresh_slug();
-        let host_path = warm_worktree_host_path(&mesh.path, &slug);
+        let app_directory = crate::preferences::worktree_directory();
+        let configured_directory = crate::env::effective_worktree_directory(
+            &mesh.path,
+            mesh.worktree_directory.as_deref(),
+            app_directory.as_deref(),
+        )?;
+        let host_path = warm_worktree_host_path(&mesh.path, Some(&configured_directory), &slug)?;
         if Path::new(&host_path).exists() {
             // Lost the slug lottery on a stale leftover; retry with a new
             // slug so we don't try to `git worktree add` into an existing
@@ -592,6 +628,41 @@ pub fn drain_and_fill_for_mesh(app: &tauri::AppHandle, mesh_id: i64) -> bool {
         return false;
     };
     fill_mesh_to_target(app, &mesh) > 0
+}
+
+/// Rebuild idle warm-pool inventory after the effective Worktree Node
+/// directory changes (issue #1519). Existing live nodes and `claimed` rows
+/// are deliberately untouched; every droppable row is removed using a
+/// temporary zero target, then the current target is refilled in the newly
+/// configured directory.
+pub fn rebuild_after_directory_change(app: tauri::AppHandle, mesh_ids: Vec<i64>) {
+    std::thread::spawn(move || {
+        crate::services::pool_worker::with_fill_lock(|| {
+            let meshes = match db::list_worktree_enabled_meshes_for_warm() {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("warm_pool: directory-change mesh list failed: {}", e);
+                    return;
+                }
+            };
+            for mesh in meshes
+                .into_iter()
+                .filter(|mesh| mesh_ids.contains(&mesh.id))
+            {
+                let mut empty = mesh.clone();
+                empty.pre_spawn_pool_size = 0;
+                if let Err(e) = drain_excess_warm_entries(&app, &empty) {
+                    tracing::warn!(
+                        "warm_pool: directory-change drain failed for mesh {}: {}",
+                        mesh.id,
+                        e
+                    );
+                    continue;
+                }
+                fill_mesh_to_target(&app, &mesh);
+            }
+        });
+    });
 }
 
 /// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
@@ -781,6 +852,17 @@ pub fn reconcile_on_startup(app: tauri::AppHandle) {
         }
     };
     for mesh in meshes {
+        // A settings change can be persisted immediately before shutdown,
+        // before the asynchronous rebuild has drained the old inventory. Do
+        // this path-based reconciliation on startup so an old-root pool is
+        // never considered at target merely because its count is sufficient.
+        if let Err(e) = reconcile_entries_outside_effective_directory(&mesh) {
+            tracing::warn!(
+                "warm_pool: directory-change reconcile failed for mesh {}: {}",
+                mesh.id,
+                e
+            );
+        }
         // Drain-before-fill and fill-to-target (issue #613): if the user
         // shrunk the pool size while the app was off, the downsize is
         // observed first (even if the subsequent fill can't catch up — e.g.
@@ -797,6 +879,61 @@ pub fn reconcile_on_startup(app: tauri::AppHandle) {
         // would violate it).
         emit_pool_changed(&app, mesh.id);
     }
+}
+
+/// Remove every non-claimed warm row whose path is outside a Mesh's current
+/// effective directory. Claimed rows are intentionally left alone because
+/// they may already back a live node. This closes the shutdown window between
+/// saving a directory setting and the asynchronous pool rebuild.
+fn reconcile_entries_outside_effective_directory(
+    mesh: &db::WarmPoolMeshRow,
+) -> Result<usize, String> {
+    let app_directory = crate::preferences::worktree_directory();
+    let effective = crate::env::effective_worktree_directory(
+        &mesh.path,
+        mesh.worktree_directory.as_deref(),
+        app_directory.as_deref(),
+    )?;
+    let expected_root = crate::env::resolve_path(&effective).host_path;
+    let entries = db::list_oldest_warm_entries_for_mesh(mesh.id, i64::MAX)
+        .map_err(|e| format!("list droppable rows failed: {e}"))?;
+    let stale: Vec<db::WarmReconcileEntry> = entries
+        .into_iter()
+        .filter(|(_, path)| !crate::env::path_is_within_directory(&expected_root, path))
+        .filter_map(|(id, path)| match db::reserve_warm_worktree_for_reconcile(id) {
+            Ok(true) => Some(db::WarmReconcileEntry {
+                dir_present: Path::new(&path).exists(),
+                id,
+                path,
+            }),
+            Ok(false) => None,
+            Err(e) => {
+                tracing::warn!(
+                    "warm_pool: failed to reserve stale row {} for mesh {}: {}",
+                    id,
+                    mesh.id,
+                    e
+                );
+                None
+            }
+        })
+        .collect();
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    let count = stale.len();
+    reconcile_warm_entries(
+        stale,
+        crate::git::worktree::remove_one_worktree,
+        db::delete_warm_worktree,
+    );
+    tracing::info!(
+        "warm_pool: removed {} stale old-directory entries for mesh {} (effective root {})",
+        count,
+        mesh.id,
+        expected_root
+    );
+    Ok(count)
 }
 
 /// Tear down each reconcilable pool entry, then drop its bookkeeping row —
@@ -1291,13 +1428,27 @@ mod tests {
     /// exactly so the spawn-time resolution is a no-op on the claimed path.
     #[test]
     fn warm_worktree_host_path_matches_resolve_agent_path_layout() {
-        let path = warm_worktree_host_path("/repo/my-mesh", "bold-amber-fox");
+        let path = warm_worktree_host_path("/repo/my-mesh", None, "bold-amber-fox").unwrap();
         // Either forward-slash (POSIX host) or backslash (Windows host) is
         // acceptable as long as the layout matches `resolve_agent_path`.
         let normalized = path.replace('\\', "/");
         assert_eq!(
             normalized, "/repo/my-mesh/.claude/worktrees/bold-amber-fox",
             "warm pool path must follow the same layout env::resolve_agent_path uses"
+        );
+    }
+
+    #[test]
+    fn warm_worktree_host_path_uses_configured_parent_directory() {
+        let path = warm_worktree_host_path(
+            "/repo/my-mesh",
+            Some("../central-worktrees"),
+            "bold-amber-fox",
+        )
+        .unwrap();
+        assert_eq!(
+            path.replace('\\', "/"),
+            "/repo/my-mesh/../central-worktrees/bold-amber-fox"
         );
     }
 
@@ -1718,6 +1869,7 @@ mod tests {
             path: format!("/tmp/buildmesh_fill_test_{}", id),
             pre_spawn_pool_size: target,
             base_ref: "origin/main".to_string(),
+            worktree_directory: None,
         }
     }
 
@@ -2059,7 +2211,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let slug = format!("wt-{:x}", nanos);
-        let host_path = warm_worktree_host_path(mesh_path, &slug);
+        let host_path = warm_worktree_host_path(mesh_path, None, &slug).unwrap();
 
         let row_id = db::insert_warm_worktree_inner(
             conn,

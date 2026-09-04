@@ -261,6 +261,25 @@ pub fn default_provider() -> Option<String> {
     }
 }
 
+/// The Buildmesh-wide Worktree Node directory default (issue #1519).
+/// Empty values are treated as absent so a hand-edited preferences file has
+/// the same inheritance semantics as the Settings UI.
+pub fn worktree_directory() -> Option<String> {
+    match load() {
+        Ok(prefs) => prefs
+            .worktree_directory
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        Err(e) => {
+            tracing::warn!(
+                "preferences::worktree_directory load failed, using legacy layout: {}",
+                e
+            );
+            None
+        }
+    }
+}
+
 /// The user-configured backend the session-naming helper uses to summarise
 /// PTY output into a slug (issue #824). `None` means "auto-naming is off" —
 /// the session_naming module short-circuits and nodes retain their random

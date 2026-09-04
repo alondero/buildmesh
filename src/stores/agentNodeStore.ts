@@ -86,6 +86,7 @@ const AGENT_NODE_RECONCILE_SCHEMA: Record<ReconciledKey, true> = {
   path: true,
   branch: true,
   worktree_name: true,
+  worktree_path: true,
   env: true,
   provider: true,
   status: true,

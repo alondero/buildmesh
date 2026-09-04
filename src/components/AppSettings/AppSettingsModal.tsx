@@ -53,7 +53,13 @@ type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
  *  (General), `harness-*` (Harnesses, prefixed where the modal wires
  *  HarnessConfigList), and `account-*` / `add-custom-form` (Providers). */
 function paneForDirtySite(site: string): SettingsTabId {
-  if (site === 'autopilot-pool' || site === 'harness-defaults') return 'general';
+  if (
+    site === 'autopilot-pool' ||
+    site === 'harness-defaults' ||
+    site === 'worktree-directory'
+  ) {
+    return 'general';
+  }
   if (site.startsWith('harness-')) return 'harnesses';
   return 'providers';
 }
@@ -436,6 +442,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // dirty comparison. A ref for the same closure-staleness reason as
   // `selectedRef` (issue #581).
   const poolSavedRef = useRef('');
+  const [worktreeDirectoryDraft, setWorktreeDirectoryDraft] = useState('');
+  const [worktreeDirectorySaving, setWorktreeDirectorySaving] = useState(false);
+  const worktreeDirectorySavedRef = useRef('');
   // Issue #734: theme toggle. `themeDraft` mirrors currentTheme() so the
   // radio reflects the active value on modal open; flipping it calls
   // setTheme(), which writes localStorage, updates <html data-theme>,
@@ -563,6 +572,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
         setPoolDraft(storedPool);
         poolSavedRef.current = storedPool;
+        const storedWorktreeDirectory = prefs.worktree_directory?.trim() ?? '';
+        setWorktreeDirectoryDraft(storedWorktreeDirectory);
+        worktreeDirectorySavedRef.current = storedWorktreeDirectory;
         setHarnessDefaults(prefs.harness_defaults ?? {});
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
@@ -926,6 +938,29 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
+  const commitWorktreeDirectory = async () => {
+    const canonical = worktreeDirectoryDraft.trim();
+    setWorktreeDirectoryDraft(canonical);
+    if (canonical === worktreeDirectorySavedRef.current) {
+      siteDirtyChange('worktree-directory', false);
+      return;
+    }
+    const previous = worktreeDirectorySavedRef.current;
+    worktreeDirectorySavedRef.current = canonical;
+    siteDirtyChange('worktree-directory', false);
+    setWorktreeDirectorySaving(true);
+    setError(null);
+    try {
+      await api.setAppWorktreeDirectory(canonical || null);
+    } catch (e) {
+      worktreeDirectorySavedRef.current = previous;
+      setWorktreeDirectoryDraft(previous);
+      setError(formatError(e));
+    } finally {
+      setWorktreeDirectorySaving(false);
+    }
+  };
+
   // Persist an account, then reload the merged list so the card reflects the
   // new enabled/billing state. Rolls the local list back on failure so the
   // toggle never lies about what the backend stored.
@@ -1192,6 +1227,41 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               <option key={p.id} value={p.id}>{p.label}</option>
             ))}
           </select>
+        </div>
+
+        <div className="pt-6 border-t border-border-subtle space-y-4">
+          <label
+            htmlFor="app-worktree-directory"
+            className="block text-lg font-medium text-text-secondary"
+          >
+            Worktree directory
+          </label>
+          <p className="text-base text-text-muted">
+            Default parent directory for new Worktree Nodes. Relative paths are
+            resolved from each project root; absolute paths must be in the same
+            Windows or WSL environment as the project. Leave empty for{' '}
+            <code>.claude/worktrees</code>. Existing nodes are not moved.
+          </p>
+          <input
+            id="app-worktree-directory"
+            type="text"
+            aria-label="Worktree directory"
+            placeholder=".claude/worktrees"
+            value={worktreeDirectoryDraft}
+            disabled={!loaded || worktreeDirectorySaving}
+            onChange={(e) => {
+              setWorktreeDirectoryDraft(e.target.value);
+              siteDirtyChange(
+                'worktree-directory',
+                e.target.value.trim() !== worktreeDirectorySavedRef.current,
+              );
+            }}
+            onBlur={commitWorktreeDirectory}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void commitWorktreeDirectory();
+            }}
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+          />
         </div>
 
         {/* Issue #824: Auto-naming. Distinct from default-provider above.

@@ -154,6 +154,7 @@ function mockBackend(
     health?: unknown;
     prune?: unknown;
     meshRow?: Partial<MeshRow>;
+    appWorktreeDirectory?: string | null;
     poolCount?: number;
     saveUseWorktreeFails?: boolean;
     saveBaseRefFails?: boolean;
@@ -202,6 +203,8 @@ function mockBackend(
         return Promise.resolve([]);
       case 'get_mesh_properties':
         return Promise.resolve(meshRow);
+      case 'get_app_preferences':
+        return Promise.resolve({ worktree_directory: overrides.appWorktreeDirectory ?? null });
       case 'get_mesh_pool_count':
         return Promise.resolve(poolCount);
       case 'detect_mesh_project':
@@ -224,6 +227,8 @@ function mockBackend(
         return overrides.saveBaseRefFails
           ? Promise.reject(new Error('mock: update_worktree_base_ref failed'))
           : Promise.resolve();
+      case 'update_mesh_worktree_directory':
+        return Promise.resolve();
       case 'check_gh_auth':
       case 'get_default_branch':
       case 'get_git_status':
@@ -602,6 +607,46 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // The load IPC was issued with the active mesh id.
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('get_mesh_properties', { meshId: 42 });
+    });
+  });
+
+  it('shows the inherited application directory and saves a Mesh override on blur', async () => {
+    const user = userEvent.setup();
+    mockBackend({ appWorktreeDirectory: '../shared-worktrees' });
+    openProbeDestination('worktrees');
+
+    const input = (await screen.findByLabelText(
+      'Worktree directory override',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(input.placeholder).toBe('/repos/demo/../shared-worktrees'));
+    await user.type(input, '../mesh-worktrees');
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_worktree_directory', {
+        meshId: 42,
+        directory: '../mesh-worktrees',
+      });
+    });
+  });
+
+  it('clearing a Mesh override restores inheritance with null on the wire', async () => {
+    const user = userEvent.setup();
+    mockBackend({ meshRow: { worktree_directory: '../mesh-worktrees' } });
+    openProbeDestination('worktrees');
+
+    const input = (await screen.findByLabelText(
+      'Worktree directory override',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('../mesh-worktrees'));
+    await user.clear(input);
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_worktree_directory', {
+        meshId: 42,
+        directory: null,
+      });
     });
   });
 

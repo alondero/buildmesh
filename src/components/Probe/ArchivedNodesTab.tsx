@@ -208,6 +208,7 @@ export function ArchivedNodesTab() {
         session.session_id,
         session.branch || 'main',
         session.worktree_name,
+        session.cwd,
         providerId,
       );
       await fetchAgentNodes();

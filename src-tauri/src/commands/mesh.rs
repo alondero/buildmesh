@@ -8,6 +8,14 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::agent::spawn::inject_attention_hook;
 
+/// Validate the inherited Buildmesh-wide Worktree Node directory before a
+/// Mesh row is created. This catches an absolute Windows/WSL mismatch at the
+/// point a future Mesh would otherwise inherit an unusable default.
+fn validate_inherited_worktree_directory(mesh_path: &str) -> Result<(), String> {
+    let app_directory = crate::preferences::worktree_directory();
+    crate::env::resolve_worktree_directory(mesh_path, app_directory.as_deref()).map(|_| ())
+}
+
 /// Derive a display name (last path segment) from a picked folder, handling
 /// both the native `Path` case and the URL fallback the dialog can return.
 fn folder_display_name(folder_path: &tauri_plugin_dialog::FilePath, path: &str) -> String {
@@ -68,6 +76,7 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
 
         let path = folder_path.to_string();
         tracing::debug!("selected path: {}", path);
+        validate_inherited_worktree_directory(&path)?;
         let name = folder_display_name(&folder_path, &path);
         tracing::debug!("mesh name: {}", name);
 
@@ -93,6 +102,7 @@ pub async fn create_mesh(
     color: Option<String>,
 ) -> Result<Mesh, String> {
     crate::commands::run_blocking("create_mesh", move || {
+        validate_inherited_worktree_directory(&path)?;
         let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
         if let Some(color) = color.as_deref().filter(|c| !c.is_empty()) {
             db::set_mesh_color(mesh.id, Some(color)).map_err(|e| e.to_string())?;

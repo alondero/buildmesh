@@ -217,6 +217,15 @@ pub fn try_with_fill_lock(f: impl FnOnce()) -> bool {
     }
 }
 
+/// Run a user-requested pool reconfiguration after waiting for any in-flight
+/// fill/claim maintenance to finish. Unlike the idle worker's opportunistic
+/// `try_with_fill_lock`, an explicit settings change must not be dropped just
+/// because a background pass currently owns the lock (issue #1519).
+pub fn with_fill_lock(f: impl FnOnce()) {
+    let _guard = FILL_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    f();
+}
+
 /// Start the background pool-maintenance worker (issue #613 AC1, #634 follow-up).
 ///
 /// Runs on a dedicated OS thread (matching `reconcile_on_startup`'s thread in

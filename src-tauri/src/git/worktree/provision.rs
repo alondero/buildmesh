@@ -679,7 +679,7 @@ pub(crate) trait ProvisionSink: Sync {
     /// Called for every Manual spawn that *claimed* a warm entry, whichever
     /// on-disk outcome it reached; Issue/PR spawns keep their own
     /// `gh{N}-`/`pr{N}-` identity per CONTEXT.md *Spawn Source*.
-    fn adopt_manual_slug(&self, node_id: i64, slug: &str);
+    fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: &str);
 
     /// Schedule the single post-spawn pool-maintenance task. Called only
     /// when `ref_advanced_for_pool || pool_was_drained_by_this_spawn`;
@@ -711,7 +711,7 @@ impl ProvisionSink for AppHandleSink {
         crate::services::warm_pool::forget_after_spawn(id);
     }
 
-    fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
+    fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: &str) {
         // DB write first; emit on success only. A failed DB write leaves
         // the row's identity stale, which the next manual rename (or
         // stage-2 reconcile) can correct — but a stale `node-renamed` emit
@@ -724,7 +724,7 @@ impl ProvisionSink for AppHandleSink {
         // name-only adoption silently leaks the worktree on every close
         // (#1080).
         if crate::db::is_initialized() {
-            if let Err(e) = crate::db::adopt_manual_pool_slug(node_id, slug) {
+            if let Err(e) = crate::db::adopt_manual_pool_slug(node_id, slug, worktree_path) {
                 tracing::warn!(
                     "AppHandleSink::adopt_manual_slug: DB write failed for node {} ({}); \
                      skipping the node-renamed emit so the frontend can't re-label to a value the DB doesn't carry",
@@ -774,7 +774,7 @@ pub(crate) struct NullSink;
 #[cfg(test)]
 impl ProvisionSink for NullSink {
     fn forget_warm_row(&self, _id: i64) {}
-    fn adopt_manual_slug(&self, _node_id: i64, _slug: &str) {}
+    fn adopt_manual_slug(&self, _node_id: i64, _slug: &str, _worktree_path: &str) {}
     fn on_pool_maintenance_required(&self, _mesh_id: i64, _do_refresh: bool, _do_refill: bool) {}
 }
 
@@ -1089,7 +1089,16 @@ pub fn provision_for_spawn(
     // pool directory was moved to match them instead — so `manual_pool_slug`
     // is `None` for those and this is a no-op.
     if let Some(slug) = &manual_pool_slug {
-        sink.adopt_manual_slug(ctx.node.id, slug);
+        // `worktree_path` is the raw/runtime form (e.g. `/home/...` for WSL),
+        // while `host_path` may be a `\\wsl$\\...` UNC used only by git.
+        // Persist the runtime form so the next spawn can reconstruct both
+        // host and spawn paths through `env::node_working_path`.
+        let worktree_path = ctx
+            .node
+            .worktree_path
+            .as_deref()
+            .unwrap_or(&ctx.host_path);
+        sink.adopt_manual_slug(ctx.node.id, slug, worktree_path);
     }
 
     let do_refresh = hooks.ref_advanced_for_pool;
@@ -1151,6 +1160,7 @@ mod tests {
             status: SessionStatus::Idle,
             cli_session_id: None,
             worktree_name: worktree_name.map(|s| s.to_string()),
+            worktree_path: None,
             use_worktree: true,
             // Required by the full-literal `AgentNode { ... }` initializer
             // (wayfinder #982 / ticket #984). `is_pinned` is a UI-toggle
@@ -1674,7 +1684,7 @@ mod tests {
         fn forget_warm_row(&self, id: i64) {
             self.state.lock().unwrap().warm_rows_forgotten.push(id);
         }
-        fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
+        fn adopt_manual_slug(&self, node_id: i64, slug: &str, _worktree_path: &str) {
             self.state
                 .lock()
                 .unwrap()
@@ -1703,8 +1713,8 @@ mod tests {
     struct DbWritingSink;
     impl ProvisionSink for DbWritingSink {
         fn forget_warm_row(&self, _id: i64) {}
-        fn adopt_manual_slug(&self, node_id: i64, slug: &str) {
-            crate::db::adopt_manual_pool_slug(node_id, slug)
+        fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: &str) {
+            crate::db::adopt_manual_pool_slug(node_id, slug, worktree_path)
                 .expect("DB write must succeed in this test");
         }
         fn on_pool_maintenance_required(

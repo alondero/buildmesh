@@ -309,6 +309,112 @@ mod tests {
         }
     }
 
+    #[test]
+    fn worktree_directory_resolves_legacy_relative_and_absolute_paths() {
+        assert_eq!(
+            resolve_worktree_directory("/repo/mesh", None).unwrap(),
+            "/repo/mesh/.claude/worktrees"
+        );
+        assert_eq!(
+            resolve_worktree_directory("/repo/mesh", Some("../worktrees")).unwrap(),
+            "/repo/mesh/../worktrees"
+        );
+        assert_eq!(
+            resolve_worktree_path("/repo/mesh", Some("/fast/worktrees"), "gentle-fox")
+                .unwrap(),
+            "/fast/worktrees/gentle-fox"
+        );
+        assert_eq!(normalize_worktree_directory(Some("  ")), None);
+    }
+
+    #[test]
+    fn imported_worktree_path_accepts_configured_or_legacy_cwd_only() {
+        let configured = effective_worktree_directory("/repo/mesh", None, Some("../shared"))
+            .unwrap();
+        let exact = resolve_imported_worktree_path(
+            "/repo/mesh",
+            &configured,
+            "gentle-fox",
+            Some("/repo/mesh/../shared/gentle-fox"),
+        )
+        .unwrap();
+        assert_eq!(exact, "/repo/mesh/../shared/gentle-fox");
+
+        let legacy = resolve_imported_worktree_path(
+            "/repo/mesh",
+            &configured,
+            "gentle-fox",
+            Some("/repo/mesh/.claude/worktrees/gentle-fox"),
+        )
+        .unwrap();
+        assert_eq!(legacy, "/repo/mesh/.claude/worktrees/gentle-fox");
+
+        let error = resolve_imported_worktree_path(
+            "/repo/mesh",
+            &configured,
+            "gentle-fox",
+            Some("/other/repo/gentle-fox"),
+        )
+        .expect_err("an arbitrary discovered cwd must not be persisted");
+        assert!(error.contains("does not match"));
+    }
+
+    #[test]
+    fn resolve_worktree_path_rejects_directory_traversal_names() {
+        for name in ["", ".", "..", "../outside", "nested\\name"] {
+            assert!(resolve_worktree_path("/repo/mesh", None, name).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn path_is_within_directory_uses_lexical_boundaries() {
+        assert!(path_is_within_directory(
+            "/repo/mesh/.claude/worktrees",
+            "/repo/mesh/.claude/worktrees/gentle-fox"
+        ));
+        assert!(path_is_within_directory(
+            "/repo/mesh/.claude/worktrees",
+            "/repo/mesh/.claude/worktrees/../worktrees/gentle-fox"
+        ));
+        assert!(!path_is_within_directory(
+            "/repo/mesh/.claude/worktrees",
+            "/repo/mesh/.claude/worktrees-foreign/gentle-fox"
+        ));
+    }
+
+    #[test]
+    fn effective_worktree_directory_applies_mesh_then_app_precedence() {
+        assert_eq!(
+            effective_worktree_directory(
+                "/repo/mesh",
+                Some("mesh-worktrees"),
+                Some("../shared-worktrees"),
+            )
+            .unwrap(),
+            "/repo/mesh/mesh-worktrees"
+        );
+        assert_eq!(
+            effective_worktree_directory("/repo/mesh", None, Some("../shared-worktrees"))
+                .unwrap(),
+            "/repo/mesh/../shared-worktrees"
+        );
+    }
+
+    #[test]
+    fn node_working_path_prefers_the_snapshotted_exact_path() {
+        let mut n = node(true, Some("gentle-fox"));
+        n.worktree_path = Some("/fast/worktrees/gentle-fox".to_string());
+        assert_eq!(node_working_path(&n).raw_path, "/fast/worktrees/gentle-fox");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn worktree_directory_rejects_cross_environment_absolute_path() {
+        let error = resolve_worktree_directory("C:\\repo\\mesh", Some("/home/user/worktrees"))
+            .expect_err("native Windows Mesh cannot store worktrees inside WSL");
+        assert!(error.contains("same environment"));
+    }
+
     /// A Worktree Node resolves into its `.claude/worktrees/<name>` dir.
     #[test]
     fn node_working_path_for_worktree_node_resolves_worktree_dir() {

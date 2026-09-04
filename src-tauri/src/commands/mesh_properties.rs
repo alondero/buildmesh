@@ -173,6 +173,41 @@ pub fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), 
     Ok(())
 }
 
+/// Set or clear a Mesh's Worktree Node directory override (issue #1519).
+/// Blank input clears the override. Validation happens against the effective
+/// value (Mesh override, otherwise application default) before the row is
+/// changed, then idle warm-pool inventory is rebuilt asynchronously.
+#[tauri::command]
+pub fn update_mesh_worktree_directory(
+    app: AppHandle,
+    mesh_id: i64,
+    directory: Option<String>,
+) -> Result<(), String> {
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let normalized = crate::env::normalize_worktree_directory(directory.as_deref());
+    let app_directory = preferences::worktree_directory();
+    crate::env::effective_worktree_directory(
+        &mesh.path,
+        normalized.as_deref(),
+        app_directory.as_deref(),
+    )?;
+
+    let rows = {
+        let conn = db::write_conn();
+        conn.execute(
+            "UPDATE meshes SET worktree_directory = ?1 WHERE id = ?2",
+            rusqlite::params![normalized, mesh_id],
+        )
+        .map_err(|e| format!("failed to update worktree_directory: {}", e))?
+    };
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    warm_pool::rebuild_after_directory_change(app, vec![mesh_id]);
+    Ok(())
+}
+
 /// Set the per-mesh target for the pre-spawn Worktree Pool
 /// (`services::warm_pool`, issue #611). `0` disables the pool for the
 /// mesh; `1..=5` is the target the worker fills to on startup + after

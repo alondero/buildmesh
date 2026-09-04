@@ -367,6 +367,11 @@ pub struct Mesh {
     pub effort: Option<String>,
     pub use_worktree: bool, // default true
     pub worktree_mode: Option<String>,
+    /// Optional per-Mesh override for the directory that contains newly
+    /// created Worktree Nodes (issue #1519). Relative values resolve from the
+    /// Mesh root. `None` inherits the application preference, then the legacy
+    /// `.claude/worktrees` default.
+    pub worktree_directory: Option<String>,
     pub default_provider: Option<String>,
     pub base_ref: String, // default "origin/main"
     /// Free-form scratch pad text for the Probe Panel "📝 Scratch Pad"
@@ -613,6 +618,11 @@ pub struct AgentNode {
     pub status: SessionStatus,
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
     pub worktree_name: Option<String>,   // git worktree name (same as name for claude-backed providers)
+    /// Exact resolved directory of this Worktree Node (issue #1519). Captured
+    /// when the node is created so later configuration changes do not strand
+    /// existing worktrees. `None` is the legacy-row fallback derived from
+    /// `path` + `worktree_name`.
+    pub worktree_path: Option<String>,
     pub use_worktree: bool,  // true = commands run in worktree, false = repo root
     /// Whether the user has pinned this node for the Pinned Grid view
     /// (wayfinder #982). Persisted so a pinned node survives app restarts
@@ -902,6 +912,7 @@ pub struct MeshRow {
     pub base_ref: Option<String>,
     pub use_worktree: bool,
     pub worktree_mode: Option<String>,
+    pub worktree_directory: Option<String>,
     pub default_provider: Option<String>,
     /// OS-level sandbox toggle (macOS Seatbelt #497, Windows AppContainer
     /// #498) — see [`Mesh::sandbox`]. The column is one; the OS-specific
@@ -963,6 +974,7 @@ impl From<&Mesh> for MeshRow {
             base_ref: Some(mesh.base_ref.clone()),
             use_worktree: mesh.use_worktree,
             worktree_mode: mesh.worktree_mode.clone(),
+            worktree_directory: mesh.worktree_directory.clone(),
             default_provider: mesh.default_provider.clone(),
             sandbox: mesh.sandbox,
             pre_spawn_pool_size: mesh.pre_spawn_pool_size,
@@ -1153,6 +1165,7 @@ mod tests {
         assert_eq!(cfg.base_ref.as_deref(), Some("origin/main"));
         assert!(!cfg.use_worktree);
         assert_eq!(cfg.worktree_mode.as_deref(), Some("branched"));
+        assert_eq!(cfg.worktree_directory, None);
         assert_eq!(cfg.default_provider, None);
         assert!(cfg.sandbox, "sandbox toggle must map through MeshRow::from");
         // #802 — root_* commands are None on a mesh that never set them, so
@@ -1230,6 +1243,7 @@ mod tests {
         assert_eq!(n.status, SessionStatus::Idle);
         assert_eq!(n.cli_session_id, None);
         assert_eq!(n.worktree_name, None);
+        assert_eq!(n.worktree_path, None);
         assert!(!n.use_worktree);
         assert_eq!(n.source_issue, None);
         assert_eq!(n.source_pr, None);
@@ -1289,6 +1303,7 @@ mod tests {
         assert_eq!(m.effort, None);
         assert!(!m.use_worktree);
         assert_eq!(m.worktree_mode, None);
+        assert_eq!(m.worktree_directory, None);
         assert_eq!(m.default_provider, None);
         assert_eq!(m.base_ref, "");
         assert_eq!(m.scratchpad, "");

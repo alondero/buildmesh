@@ -223,6 +223,56 @@ pub fn directories_match(recorded: &str, spawn: &str) -> bool {
     }
 }
 
+/// Normalize dot components without requiring the path to exist.
+///
+/// Transcript stores record the CLI's normalized working directory, while a
+/// relative Worktree Node preference is intentionally persisted in its raw
+/// form. Discovery uses this helper to consider both spellings when encoding
+/// project directories, including Windows drive and UNC prefixes.
+pub fn normalize_path_lexically(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let (prefix, rest, absolute) = if normalized.starts_with("//") {
+        ("//", &normalized[2..], true)
+    } else if normalized.starts_with('/') {
+        ("/", &normalized[1..], true)
+    } else if normalized.len() >= 3
+        && normalized.as_bytes()[1] == b':'
+        && normalized.as_bytes()[2] == b'/'
+    {
+        (&normalized[..3], &normalized[3..], true)
+    } else if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
+        (&normalized[..2], &normalized[2..], false)
+    } else {
+        ("", normalized.as_str(), false)
+    };
+
+    let mut components = Vec::new();
+    for component in rest.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if components.last().is_some_and(|last| *last != "..") {
+                    components.pop();
+                } else if !absolute {
+                    components.push("..");
+                }
+            }
+            value => components.push(value),
+        }
+    }
+    let joined = components.join("/");
+    match (prefix, joined.as_str()) {
+        ("", value) => value.to_string(),
+        ("/", "") => "/".to_string(),
+        ("//", "") => "//".to_string(),
+        ("/", value) | ("//", value) => format!("{prefix}{value}"),
+        (drive, value) if drive.ends_with(":/") && value.is_empty() => drive.to_string(),
+        (drive, value) if drive.ends_with(":/") => format!("{drive}{value}"),
+        (drive, value) if value.is_empty() => drive.to_string(),
+        (drive, value) => format!("{drive}{value}"),
+    }
+}
+
 fn normalize_directory(path: &str) -> String {
     let mut normalized = path.replace('\\', "/");
     while normalized.len() > 1 && normalized.ends_with('/') {
@@ -257,12 +307,11 @@ pub struct ResolvedPath {
     pub host_path: String,
     /// Path to use as CWD when spawning agent/shell processes.
     pub spawn_path: String,
-    /// The input `base_path`, optionally with a `/`-separated
-    /// `.claude/worktrees/{trimmed_name}` appended for a Worktree Node. The
-    /// "raw" form is input-pass-through — `node.path` is whatever was stored
-    /// in the DB (POSIX `/home/...`, Windows native `C:\...`, or WSL UNC
-    /// `\\wsl$\...`), and the worktree subdir is appended with `/` regardless
-    /// of host. This is the input to `to_host_path` / `to_spawn_path` and
+    /// The exact persisted Worktree Node path, or the legacy `base_path` plus
+    /// `.claude/worktrees/{trimmed_name}` derivation for an upgraded row. The
+    /// "raw" form is input-pass-through: POSIX `/home/...`, Windows native
+    /// `C:\...`, or WSL UNC `\\wsl$\...`. This is the input to
+    /// `to_host_path` / `to_spawn_path` and
     /// the form the frontend's `getNodeGitPath` (in `src/lib/paths.ts`)
     /// mirrors for the GIT_CHANGED subscription. Exposed so callers like
     /// `file_watcher` can stop re-spelling the worktree rule and consume
@@ -270,6 +319,193 @@ pub struct ResolvedPath {
     pub raw_path: String,
     /// The detected environment type for this path.
     pub env_type: EnvType,
+}
+
+/// Resolve one already-composed raw path into its host and spawn forms.
+/// Configured Worktree Node paths use this same conversion seam as the
+/// legacy layout (issue #1519).
+pub fn resolve_path(raw_path: &str) -> ResolvedPath {
+    let path_buf = PathBuf::from(raw_path);
+    let env_internal = env_for_path(&path_buf);
+    let env_type = EnvType::from(env_internal);
+    let (host_path, spawn_path) = if !cfg!(target_os = "windows") {
+        (raw_path.to_string(), raw_path.to_string())
+    } else {
+        (
+            to_host_path(raw_path),
+            to_spawn_path(&path_buf).to_string_lossy().to_string(),
+        )
+    };
+
+    ResolvedPath {
+        host_path,
+        spawn_path,
+        raw_path: raw_path.to_string(),
+        env_type,
+    }
+}
+
+/// Normalize an optional Worktree Node directory setting. Blank input clears
+/// the setting and restores inheritance.
+pub fn normalize_worktree_directory(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn is_absolute_in_any_supported_environment(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    Path::new(path).is_absolute()
+        || path.starts_with('/')
+        || path.starts_with("\\\\")
+        || path.starts_with("//")
+        || (bytes.len() >= 3
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/'))
+}
+
+fn join_raw(base: &str, child: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches(['/', '\\']),
+        child.trim_matches(['/', '\\']).replace('\\', "/")
+    )
+}
+
+/// Resolve the directory that contains a Mesh's Worktree Nodes.
+///
+/// `configured` is already selected by the caller using the precedence
+/// `mesh override -> application default`. Relative values are rooted at the
+/// Mesh; absolute values must stay in the Mesh's native/WSL environment so a
+/// directory preference cannot silently switch which harness runtime starts.
+pub fn resolve_worktree_directory(
+    mesh_path: &str,
+    configured: Option<&str>,
+) -> Result<String, String> {
+    let root = match normalize_worktree_directory(configured) {
+        Some(value) if is_absolute_in_any_supported_environment(&value) => value,
+        Some(value) => join_raw(mesh_path, &value),
+        None => join_raw(mesh_path, ".claude/worktrees"),
+    };
+
+    let mesh_env = EnvType::from(env_for_path(Path::new(mesh_path)));
+    let root_env = EnvType::from(env_for_path(Path::new(&root)));
+    if mesh_env != root_env {
+        return Err(format!(
+            "worktree directory '{}' is in {:?}, but mesh '{}' is in {:?}; choose a path in the same environment",
+            root, root_env, mesh_path, mesh_env
+        ));
+    }
+    Ok(root)
+}
+
+/// Resolve a Mesh's effective Worktree Node directory using the shared
+/// precedence rule: per-Mesh override, then Buildmesh-wide default, then the
+/// legacy `.claude/worktrees` layout. Keeping this selection beside the path
+/// resolver prevents spawn, discovery, and warm-pool callers from drifting.
+pub fn effective_worktree_directory(
+    mesh_path: &str,
+    mesh_override: Option<&str>,
+    app_default: Option<&str>,
+) -> Result<String, String> {
+    let configured = normalize_worktree_directory(mesh_override)
+        .or_else(|| normalize_worktree_directory(app_default));
+    resolve_worktree_directory(mesh_path, configured.as_deref())
+}
+
+/// Resolve the exact raw path for one Worktree Node beneath the effective
+/// directory. The worktree name is a validated slug at this seam.
+pub fn resolve_worktree_path(
+    mesh_path: &str,
+    configured: Option<&str>,
+    worktree_name: &str,
+) -> Result<String, String> {
+    let worktree_name = worktree_name.trim();
+    if worktree_name.is_empty()
+        || worktree_name == "."
+        || worktree_name == ".."
+        || worktree_name.contains('/')
+        || worktree_name.contains('\\')
+    {
+        return Err(format!(
+            "invalid Worktree Node name '{}': expected a single directory name",
+            worktree_name
+        ));
+    }
+    Ok(join_raw(
+        &resolve_worktree_directory(mesh_path, configured)?,
+        worktree_name,
+    ))
+}
+
+/// Resolve a discovered/imported Worktree Node path while preserving an exact
+/// transcript cwd when it is one of the paths Buildmesh permits. A historical
+/// session may still live in the legacy `.claude/worktrees` directory after a
+/// user changes the configured parent, so both the effective and legacy path
+/// for the validated name are accepted. Arbitrary cwd values are rejected.
+pub fn resolve_imported_worktree_path(
+    mesh_path: &str,
+    effective_directory: &str,
+    worktree_name: &str,
+    cwd: Option<&str>,
+) -> Result<String, String> {
+    let configured_raw = resolve_worktree_path(mesh_path, Some(effective_directory), worktree_name)?;
+    let legacy_raw = resolve_worktree_path(mesh_path, None, worktree_name)?;
+    let chosen = cwd
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| configured_raw.clone());
+    if !paths_equivalent(&chosen, &configured_raw) && !paths_equivalent(&chosen, &legacy_raw) {
+        return Err(format!(
+            "discovered Worktree Node cwd '{}' does not match the configured or legacy path for '{}'",
+            chosen, worktree_name
+        ));
+    }
+    Ok(chosen)
+}
+
+fn paths_equivalent(left: &str, right: &str) -> bool {
+    let left_forms = normalized_path_forms(left);
+    let right_forms = normalized_path_forms(right);
+    left_forms.iter().any(|left| {
+        right_forms
+            .iter()
+            .any(|right| directories_match(left, right))
+    })
+}
+
+fn normalized_path_forms(path: &str) -> Vec<String> {
+    let unc = normalize_unc_to_wsl(path);
+    let mut forms = vec![normalize_path_lexically(path)];
+    let unc_form = normalize_path_lexically(&unc);
+    if unc_form != forms[0] {
+        forms.push(unc_form);
+    }
+    forms
+}
+
+/// Return true when `child` is equal to or below `parent` using the same
+/// separator/case rules as [`directories_match`]. Both paths are normalized
+/// lexically so this works for paths that do not exist yet.
+pub fn path_is_within_directory(parent: &str, child: &str) -> bool {
+    let parent = normalize_path_lexically(parent).trim_end_matches('/').to_string();
+    let child = normalize_path_lexically(child).trim_end_matches('/').to_string();
+    if directories_match(&parent, &child) {
+        return true;
+    }
+    let parent_cmp = if case_insensitive_fs(&parent) {
+        parent.to_lowercase()
+    } else {
+        parent.clone()
+    };
+    let child_cmp = if case_insensitive_fs(&child) {
+        child.to_lowercase()
+    } else {
+        child
+    };
+    child_cmp.starts_with(&format!("{parent_cmp}/"))
 }
 
 /// Resolve the working directory for an agent node, accounting for worktree
@@ -289,29 +525,7 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
         _ => base_path.to_string(),
     };
 
-    // Detect environment from the effective path
-    let path_buf = PathBuf::from(&raw_path);
-    let env_internal = env_for_path(&path_buf);
-    let env_type = EnvType::from(env_internal);
-
-    // On macOS and native Linux, paths are always host-native — no WSL
-    // conversion needed. Only a Windows host translates based on the detected
-    // environment (WSL agents need `\\wsl$\...` host paths + `/mnt/...` spawn
-    // paths).
-    let (host_path, spawn_path) = if !cfg!(target_os = "windows") {
-        (raw_path.clone(), raw_path.clone())
-    } else {
-        let host = to_host_path(&raw_path);
-        let spawn = to_spawn_path(&path_buf).to_string_lossy().to_string();
-        (host, spawn)
-    };
-
-    ResolvedPath {
-        host_path,
-        spawn_path,
-        raw_path,
-        env_type,
-    }
+    resolve_path(&raw_path)
 }
 
 /// The trimmed, non-empty worktree name iff the node runs in a worktree — the
@@ -349,7 +563,16 @@ pub(crate) fn worktree_segment(node: &AgentNode) -> Option<&str> {
 /// not a single source; see [[buildmesh-use-worktree-derivation]] and
 /// [[feedback_cross-language-default-coupling]]).
 pub fn node_working_path(node: &AgentNode) -> ResolvedPath {
-    resolve_agent_path(&node.path, worktree_segment(node))
+    match worktree_segment(node) {
+        Some(name) => node
+            .worktree_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(resolve_path)
+            .unwrap_or_else(|| resolve_agent_path(&node.path, Some(name))),
+        None => resolve_agent_path(&node.path, None),
+    }
 }
 
 /// The node's Worktree Node dir — `Some` only for a Worktree Node, `None` for a
@@ -464,5 +687,62 @@ mod tests {
             std::borrow::Cow::Borrowed(_)
         ));
         assert_eq!(normalize_unc_to_wsl(""), "");
+    }
+
+    #[test]
+    fn normalize_path_lexically_collapses_dot_components() {
+        assert_eq!(
+            normalize_path_lexically("/repo/mesh/../shared-worktrees/./node"),
+            "/repo/shared-worktrees/node"
+        );
+        assert_eq!(
+            normalize_path_lexically(r"C:\repo\mesh\..\shared-worktrees\node"),
+            "C:/repo/shared-worktrees/node"
+        );
+    }
+
+    #[test]
+    fn imported_worktree_path_accepts_current_or_legacy_root_only() {
+        let current = resolve_imported_worktree_path(
+            "/repo/mesh",
+            "/repo/mesh/../shared-worktrees",
+            "gentle-fox",
+            Some("/repo/shared-worktrees/gentle-fox"),
+        )
+        .unwrap();
+        assert_eq!(current, "/repo/shared-worktrees/gentle-fox");
+
+        let legacy = resolve_imported_worktree_path(
+            "/repo/mesh",
+            "/repo/shared-worktrees",
+            "gentle-fox",
+            Some("/repo/mesh/.claude/worktrees/gentle-fox"),
+        )
+        .unwrap();
+        assert_eq!(legacy, "/repo/mesh/.claude/worktrees/gentle-fox");
+
+        let error = resolve_imported_worktree_path(
+            "/repo/mesh",
+            "/repo/shared-worktrees",
+            "gentle-fox",
+            Some("/tmp/unrelated/gentle-fox"),
+        )
+        .expect_err("an imported cwd outside both allowed roots must be rejected");
+        assert!(error.contains("does not match"));
+    }
+
+    #[test]
+    fn imported_worktree_path_matches_wsl_unc_spelling() {
+        let path = resolve_imported_worktree_path(
+            "/home/user/repo",
+            "/home/user/shared-worktrees",
+            "gentle-fox",
+            Some(r"\\wsl$\Ubuntu\home\user\shared-worktrees\gentle-fox"),
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            r"\\wsl$\Ubuntu\home\user\shared-worktrees\gentle-fox"
+        );
     }
 }

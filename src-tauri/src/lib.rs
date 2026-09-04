@@ -453,6 +453,7 @@ pub fn run() {
             // App preferences (buildmesh-wide)
             commands::preferences::get_app_preferences,
             commands::preferences::set_app_default_provider,
+            commands::preferences::set_app_worktree_directory,
             commands::preferences::set_app_naming_provider,
             commands::preferences::set_app_autopilot_pool_size,
             commands::preferences::set_harness_order,
@@ -554,6 +555,7 @@ pub fn run() {
             commands::mesh_properties::update_worktree_base_ref,
             commands::mesh_properties::remove_worktree_base_ref,
             commands::mesh_properties::update_mesh_use_worktree,
+            commands::mesh_properties::update_mesh_worktree_directory,
             commands::mesh_properties::update_mesh_sandbox,
             commands::mesh_properties::update_mesh_autopilot,
             // Looping Autopilot config (wayfinder #990 / ticket #991).

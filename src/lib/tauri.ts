@@ -241,6 +241,13 @@ export const updateMeshColumn = (
 export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
   _invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
 
+/** Set a Mesh's Worktree Node directory override. `null` clears it and
+ * restores application/default inheritance (issue #1519). */
+export const updateMeshWorktreeDirectory = (
+  meshId: number,
+  directory: string | null,
+) => _invoke<void>('update_mesh_worktree_directory', { meshId, directory });
+
 /** Toggle whether this mesh's agent nodes run inside an OS process sandbox
  *  (Windows AppContainer #498 / macOS Seatbelt #497). Dedicated command (typed
  *  bool + zero-rows-is-an-error contract), like `updateMeshUseWorktree`. */
@@ -794,11 +801,15 @@ export const importDiscoveredAgentNode = (
   cliSessionId: string,
   branch: string,
   worktreeName: string | null,
+  cwd?: string | null,
   provider?: string,
-) =>
-  _invoke<AgentNode>('import_discovered_agent_node', {
-    meshId, meshPath, cliSessionId, branch, worktreeName, provider
-  });
+) => {
+  const payload: Record<string, unknown> = {
+    meshId, meshPath, cliSessionId, branch, worktreeName, provider,
+  };
+  if (cwd && cwd !== meshPath) payload.cwd = cwd;
+  return _invoke<AgentNode>('import_discovered_agent_node', payload);
+};
 
 // ── App startup ────────────────────────────────────────────────────────────
 //
@@ -986,6 +997,11 @@ export const getAppPreferences = () =>
  *  the override and fall back to the hardcoded `anthropic` default. */
 export const setAppDefaultProvider = (provider: string | null) =>
   _invoke('set_app_default_provider', { provider });
+
+/** Set the Buildmesh-wide Worktree Node directory default. `null` restores
+ * `<mesh>/.claude/worktrees` for Meshes without an override. */
+export const setAppWorktreeDirectory = (directory: string | null) =>
+  _invoke('set_app_worktree_directory', { directory });
 
 /** Issue #824: pick the backend that summarises PTY output into a slug.
  *  Pass `null` (or empty) to **disable** auto-naming — nodes keep their

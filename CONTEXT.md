@@ -83,7 +83,7 @@ _Avoid_: Warm pool, worktree cache.
 An Agent Node operating directly on the parent Mesh's root directory, bypassing worktree isolation. (Used when the Mesh property use_worktree is false, or when overridden via Alt-click).
 
 **Node Working Directory**:
-The directory an Agent Node's work physically lives in: its Worktree Node dir (`.claude/worktrees/<name>`) for a Worktree Node, or the Mesh root for a Root Node. The canonical "where is this node's stuff" rule (resolve `use_worktree` + a trimmed, non-empty `worktree_name`) lives in one place; callers pick the host form (Windows git2) or the spawn form (the path as the agent saw it — Linux for a WSL node, which is the form Claude Code encodes for its on-disk transcript directory).
+The directory an Agent Node's work physically lives in: its exact persisted `worktree_path` for a Worktree Node, or the Mesh root for a Root Node. New worktree paths resolve from the Mesh `worktree_directory` override, then the application preference, then the legacy `.claude/worktrees` default; relative directory settings are rooted at the Mesh. Existing nodes keep their persisted path when configuration changes, while legacy rows without one still derive `.claude/worktrees/<name>`. The canonical "where is this node's stuff" rule lives in `env::node_working_path`; callers pick the host form (Windows git2) or spawn form (the path as the agent saw it — Linux for a WSL node).
 _Avoid_: working path, repo path, node dir
 
 **Node Turn**:

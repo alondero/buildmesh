@@ -1797,6 +1797,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         loop_consecutive_failures: row.get::<_, i32>(30)?,
         harness_overrides: parse_harness_overrides(&row.get::<_, String>(31)?),
         circuit_run_capacity: row.get::<_, i32>(32)?,
+        worktree_directory: parse_str(row.get::<_, String>(33)?),
     })
 }
 
@@ -1832,7 +1833,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health, worktree_path";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -1849,6 +1850,7 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
         cli_session_id: row.get(8)?,
         worktree_name: row.get(9)?,
+        worktree_path: row.get(20)?,
         use_worktree: row.get::<_, i32>(12)? != 0,
         // is_pinned is at index 13 (wayfinder #982 / ticket #984). Same
         // NOT NULL + DEFAULT 0 storage as `use_worktree` — a pre-v29 row
@@ -1928,20 +1930,20 @@ pub fn list_coordinator_node_rows_inner(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        // map_agent_node_row reads positional indices 0..19, which match the
+        // map_agent_node_row reads positional indices 0..20, which match the
         // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 20 and 21 (v16 added head_repo_owner +
+        // status_changed_at follow at 21 and 22 (v16 added head_repo_owner +
         // head_repo_clone_url at 16/17, source_pr_pinned_sha at 18, v29
-        // added is_pinned at 13, v35 added signal_health at 19 — see
-        // AGENT_NODE_COLUMNS).
+        // added is_pinned at 13, v35 added signal_health at 19, and v37
+        // added worktree_path at 20 — see AGENT_NODE_COLUMNS).
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(20)?;
+        let mesh_name: String = row.get(21)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(21)?;
+        let status_changed_at: Option<String> = row.get(22)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -2763,6 +2765,7 @@ pub fn create_agent_node(
     env: EnvType,
     provider: &str,
     worktree_name: Option<&str>,
+    worktree_path: Option<&str>,
     source_issue: Option<i64>,
     source_pr: Option<i64>,
     source_pr_pinned_sha: Option<&str>,
@@ -2783,8 +2786,8 @@ pub fn create_agent_node(
     // default (SQLite can't ALTER-add a non-constant default), so an INSERT that
     // omitted it would store NULL and break the coordinator digest query.
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, source_pr_pinned_sha, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, worktree_path, source_issue, source_pr, source_pr_pinned_sha, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             mesh_id,
             name,
@@ -2793,6 +2796,7 @@ pub fn create_agent_node(
             env.to_string(),
             provider,
             worktree_name,
+            worktree_path,
             source_issue,
             source_pr,
             source_pr_pinned_sha,
@@ -2841,15 +2845,20 @@ pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
 /// adoption, and #1080 was the two halves drifting apart. Issue/PR
 /// spawns keep their own `gh{N}-`/`pr{N}-` identity; their pool dir is
 /// moved to match instead (see `git::worktree::provision`).
-pub fn adopt_manual_pool_slug(id: i64, slug: &str) -> SqlResult<()> {
+pub fn adopt_manual_pool_slug(id: i64, slug: &str, worktree_path: &str) -> SqlResult<()> {
     let db = write_conn();
-    adopt_manual_pool_slug_inner(&db, id, slug)
+    adopt_manual_pool_slug_inner(&db, id, slug, worktree_path)
 }
 
-fn adopt_manual_pool_slug_inner(conn: &Connection, id: i64, slug: &str) -> SqlResult<()> {
+fn adopt_manual_pool_slug_inner(
+    conn: &Connection,
+    id: i64,
+    slug: &str,
+    worktree_path: &str,
+) -> SqlResult<()> {
     conn.execute(
-        "UPDATE agent_nodes SET name = ?1, worktree_name = ?1 WHERE id = ?2",
-        params![slug, id],
+        "UPDATE agent_nodes SET name = ?1, worktree_name = ?1, worktree_path = ?2 WHERE id = ?3",
+        params![slug, worktree_path, id],
     )?;
     Ok(())
 }
@@ -3456,6 +3465,31 @@ pub(crate) fn mark_warm_worktree_refreshing_inner(conn: &Connection, id: i64) ->
         params![WarmWorktreeStatus::Refreshing.as_str(), id],
     )?;
     Ok(())
+}
+
+/// Reserve an available warm row for destructive reconciliation. The
+/// conditional update closes the claim-vs-cleanup race: once this returns
+/// `true`, a concurrent claimer can no longer transition the row to `claimed`
+/// while its directory is being torn down.
+pub fn reserve_warm_worktree_for_reconcile(id: i64) -> SqlResult<bool> {
+    let db = write_conn();
+    reserve_warm_worktree_for_reconcile_inner(&db, id)
+}
+
+pub(crate) fn reserve_warm_worktree_for_reconcile_inner(
+    conn: &Connection,
+    id: i64,
+) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE warm_worktrees SET status = ?1, updated_at = datetime('now') \
+         WHERE id = ?2 AND status = ?3",
+        params![
+            WarmWorktreeStatus::Refreshing.as_str(),
+            id,
+            WarmWorktreeStatus::Available.as_str(),
+        ],
+    )?;
+    Ok(changed == 1)
 }
 
 /// List every `available` warm entry for a mesh — the candidates the
@@ -4088,7 +4122,7 @@ pub(crate) fn list_worktree_enabled_meshes_for_warm_inner(
     conn: &Connection,
 ) -> SqlResult<Vec<WarmPoolMeshRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, base_ref, pre_spawn_pool_size FROM meshes WHERE use_worktree = 1",
+        "SELECT id, path, base_ref, pre_spawn_pool_size, worktree_directory FROM meshes WHERE use_worktree = 1",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(WarmPoolMeshRow {
@@ -4096,6 +4130,7 @@ pub(crate) fn list_worktree_enabled_meshes_for_warm_inner(
             path: row.get(1)?,
             base_ref: row.get(2)?,
             pre_spawn_pool_size: row.get(3)?,
+            worktree_directory: row.get(4)?,
         })
     })?;
     rows.collect()
@@ -4113,6 +4148,7 @@ pub struct WarmPoolMeshRow {
     pub path: String,
     pub base_ref: String,
     pub pre_spawn_pool_size: i64,
+    pub worktree_directory: Option<String>,
 }
 
 /// What a claim hands back to the spawn path: the four columns it actually

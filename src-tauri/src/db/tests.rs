@@ -207,6 +207,7 @@ fn pending_removal_schema() -> rusqlite::Connection {
             status TEXT NOT NULL DEFAULT 'idle',
             cli_session_id TEXT,
             worktree_name TEXT,
+            worktree_path TEXT,
             source_issue INTEGER,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -308,7 +309,7 @@ fn delete_pending_removes_only_named_path() {
 /// One UPDATE rather than two calls is deliberate: these are two halves of a
 /// single adoption, and the bug was exactly the two halves drifting apart.
 #[test]
-fn adopting_manual_pool_slug_sets_both_name_and_worktree_name() {
+fn adopting_manual_pool_slug_sets_name_and_worktree_identity() {
     let conn = pending_removal_schema();
     conn.execute(
         "INSERT INTO agent_nodes (id, mesh_id, name, path, worktree_name) \
@@ -317,13 +318,19 @@ fn adopting_manual_pool_slug_sets_both_name_and_worktree_name() {
     )
     .unwrap();
 
-    crate::db::adopt_manual_pool_slug_inner(&conn, 7, "utopian-repulsive-manatee").unwrap();
+    crate::db::adopt_manual_pool_slug_inner(
+        &conn,
+        7,
+        "utopian-repulsive-manatee",
+        "/repo/.claude/worktrees/utopian-repulsive-manatee",
+    )
+    .unwrap();
 
-    let (name, worktree_name): (String, Option<String>) = conn
+    let (name, worktree_name, worktree_path): (String, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT name, worktree_name FROM agent_nodes WHERE id = 7",
+            "SELECT name, worktree_name, worktree_path FROM agent_nodes WHERE id = 7",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
 
@@ -337,6 +344,10 @@ fn adopting_manual_pool_slug_sets_both_name_and_worktree_name() {
         "worktree_name must adopt the pool slug too — the close path derives the \
          removal directory from this column, so a stale value silently leaks the \
          real worktree (#1080)"
+    );
+    assert_eq!(
+        worktree_path.as_deref(),
+        Some("/repo/.claude/worktrees/utopian-repulsive-manatee")
     );
 }
 
@@ -353,7 +364,13 @@ fn adopting_manual_pool_slug_touches_only_the_named_row() {
     .unwrap();
 
     // Row 42 is seeded by `pending_removal_schema`.
-    crate::db::adopt_manual_pool_slug_inner(&conn, 42, "claimed-slug").unwrap();
+    crate::db::adopt_manual_pool_slug_inner(
+        &conn,
+        42,
+        "claimed-slug",
+        "/repo/.claude/worktrees/claimed-slug",
+    )
+    .unwrap();
 
     let (other_name, other_worktree_name): (String, Option<String>) = conn
         .query_row(

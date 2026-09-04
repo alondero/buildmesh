@@ -11,14 +11,43 @@ import { isWindows } from './platform';
 // divergence (even just whitespace) means the event never matches the
 // subscription and the node's changed-files goes stale. Paired-constant
 // pattern, not a single source of truth (issue #387, ADR-0010).
-export function getNodeGitPath(node: { path: string; worktree_name?: string | null; use_worktree?: boolean }): string {
+export function getNodeGitPath(node: {
+  path: string;
+  worktree_name?: string | null;
+  worktree_path?: string | null;
+  use_worktree?: boolean;
+}): string {
   if (node.use_worktree !== false && node.worktree_name) {
     const trimmed = node.worktree_name.trim();
     if (trimmed) {
+      const stored = node.worktree_path?.trim();
+      if (stored) return stored;
       return `${node.path}/.claude/worktrees/${trimmed}`;
     }
   }
   return node.path;
+}
+
+/**
+ * Resolve the directory containing a Mesh's Worktree Nodes for display and
+ * path matching. The backend applies the same precedence (Mesh override,
+ * app-wide default, legacy fallback); this paired helper keeps the settings
+ * UI from showing a relative preference without its Mesh root context.
+ */
+export function getEffectiveWorktreeDirectory(
+  meshPath: string,
+  meshOverride?: string | null,
+  appDefault?: string | null,
+): string {
+  const configured = meshOverride?.trim() || appDefault?.trim() || '.claude/worktrees';
+  const isAbsolute =
+    configured.startsWith('/') ||
+    configured.startsWith('\\\\') ||
+    configured.startsWith('//') ||
+    /^[A-Za-z]:[\\/]/.test(configured);
+  if (isAbsolute) return configured;
+  const separator = meshPath.includes('\\') ? '\\' : '/';
+  return `${meshPath.replace(/[\\/]+$/, '')}${separator}${configured.replace(/^[\\/]+/, '')}`;
 }
 
 /**
@@ -57,7 +86,7 @@ function normalizePath(p: string): string {
  * Returns `false` for null/undefined/empty `watchedPath`.
  */
 export function pathMatchesGitEvent(
-  event: { path: string; internal_path?: string | undefined },
+  event: { path: string; internal_path?: string | undefined; mesh_path?: string | undefined },
   watchedPath: string | null | undefined,
 ): boolean {
   if (!watchedPath) return false;
@@ -69,7 +98,7 @@ export function pathMatchesGitEvent(
   // starting with `<worktree>/.claude/worktrees/` would only ever match a
   // *nested* worktree, which buildmesh never creates).
   const worktreePrefix = `${watched}/.claude/worktrees/`;
-  const candidates = [event.path, event.internal_path].filter(
+  const candidates = [event.path, event.internal_path, event.mesh_path].filter(
     (c): c is string => typeof c === 'string' && c.length > 0,
   );
 

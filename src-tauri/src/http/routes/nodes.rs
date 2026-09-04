@@ -283,9 +283,16 @@ mod tests {
     /// bytes. `node_id = 0` exercises the 404 path without DB seeding
     /// (the per-test DB has no row 0).
     async fn drive(body: &[u8], node_id: i64) -> Vec<u8> {
+        drive_with_content_length(body, node_id, body.len()).await
+    }
+
+    async fn drive_with_content_length(
+        body: &[u8],
+        node_id: i64,
+        content_length: usize,
+    ) -> Vec<u8> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let content_length = body.len();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut lines = tokio::io::BufStream::new(crate::http::MaybeTls::Plain(stream));
@@ -359,7 +366,10 @@ mod tests {
         // JSON if it slipped through, but the cap rejects first.
         body.extend(std::iter::repeat(b'a').take(2048));
         body.extend_from_slice(br#""}"#);
-        let resp = drive(&body, 0).await;
+        // The handler rejects from Content-Length before reading. Do not send
+        // the oversized payload itself: on Windows, closing a socket with
+        // unread inbound bytes sends a reset that can discard the 413 reply.
+        let resp = drive_with_content_length(&[], 0, body.len()).await;
         let s = status_line(&resp);
         assert!(
             s.starts_with("HTTP/1.1 413"),

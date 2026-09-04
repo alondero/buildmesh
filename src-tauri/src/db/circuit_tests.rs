@@ -306,6 +306,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
         EnvType::Windows,
         "claude",
         None,
+        None,
         Some(42),
         None,
         None,

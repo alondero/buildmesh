@@ -19,7 +19,14 @@ import type { HarnessConfigValue } from "./HarnessConfigValue";
  * Future `Option<T>` columns automatically inherit `None` with no
  * fixture edits.
  */
-export type Mesh = { id: number, name: string, path: string, layout: string, position: number, created_at: string, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, base_ref: string, 
+export type Mesh = { id: number, name: string, path: string, layout: string, position: number, created_at: string, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, use_worktree: boolean, worktree_mode: string | null, 
+/**
+ * Optional per-Mesh override for the directory that contains newly
+ * created Worktree Nodes (issue #1519). Relative values resolve from the
+ * Mesh root. `None` inherits the application preference, then the legacy
+ * `.claude/worktrees` default.
+ */
+worktree_directory: string | null, default_provider: string | null, base_ref: string, 
 /**
  * Free-form scratch pad text for the Probe Panel "📝 Scratch Pad"
  * tab. Owned by Buildmesh only — never written to disk, never visible

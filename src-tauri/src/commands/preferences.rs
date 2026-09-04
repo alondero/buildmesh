@@ -29,6 +29,35 @@ pub fn set_app_default_provider(provider: Option<String>) -> Result<(), String> 
     preferences::save(prefs)
 }
 
+/// Set the Buildmesh-wide default Worktree Node directory (issue #1519).
+/// Relative paths resolve from each inheriting Mesh root. Validate against
+/// every inheriting Mesh before persisting so a Windows/WSL mismatch cannot
+/// leave only some projects able to spawn.
+#[command]
+pub fn set_app_worktree_directory(
+    app: AppHandle,
+    directory: Option<String>,
+) -> Result<(), String> {
+    let normalized = crate::env::normalize_worktree_directory(directory.as_deref());
+    let meshes = crate::db::list_meshes().map_err(|e| e.to_string())?;
+    let inheriting: Vec<_> = meshes
+        .iter()
+        .filter(|mesh| mesh.worktree_directory.is_none())
+        .collect();
+    for mesh in &inheriting {
+        crate::env::resolve_worktree_directory(&mesh.path, normalized.as_deref())?;
+    }
+
+    let mut prefs = preferences::load()?;
+    prefs.worktree_directory = normalized;
+    preferences::save(prefs)?;
+    crate::services::warm_pool::rebuild_after_directory_change(
+        app,
+        inheriting.into_iter().map(|mesh| mesh.id).collect(),
+    );
+    Ok(())
+}
+
 /// Set the backend that summaries node PTY output into a slug (issue #824).
 /// Distinct from [`set_app_default_provider`]: auto-naming runs on every
 /// rename trigger (often), at low content complexity, so it shouldn't

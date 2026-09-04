@@ -152,6 +152,7 @@ describe("mobile api wire shape (issue #1262)", () => {
         cli_session_id: "session-abc",
         branch: "fix/auth",
         worktree_name: "fix-auth-flow",
+        cwd: "/tmp/repo",
         provider: "anthropic",
       });
     });

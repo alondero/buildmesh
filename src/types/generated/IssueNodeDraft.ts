@@ -43,7 +43,14 @@ branch: string, env: EnvType,
  * string is treated as "anthropic" by the resolver, so `Default` is a
  * behaviour-preserving stub.
  */
-provider: string, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, use_worktree: boolean, 
+provider: string, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, 
+/**
+ * Exact resolved directory of this Worktree Node (issue #1519). Captured
+ * when the node is created so later configuration changes do not strand
+ * existing worktrees. `None` is the legacy-row fallback derived from
+ * `path` + `worktree_name`.
+ */
+worktree_path: string | null, use_worktree: boolean, 
 /**
  * Whether the user has pinned this node for the Pinned Grid view
  * (wayfinder #982). Persisted so a pinned node survives app restarts

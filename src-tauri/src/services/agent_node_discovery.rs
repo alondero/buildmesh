@@ -7,6 +7,7 @@
 
 use crate::db;
 use crate::env;
+use crate::git::primitives;
 use crate::models::EnvType;
 use crate::services::commandcode_session;
 use crate::services::transcript_reader::{
@@ -36,10 +37,131 @@ pub struct ArchivedAgentNode {
 
 /// Extract the worktree name from an encoded project directory name.
 /// e.g. "-Users-adam-repo--claude-worktrees-fancy-name" → Some("fancy-name")
+#[cfg(test)]
 fn extract_worktree_name(dir_name: &str, base_prefix: &str) -> Option<String> {
     let suffix = dir_name.strip_prefix(base_prefix)?;
     let wt_marker = "--claude-worktrees-";
     suffix.strip_prefix(wt_marker).map(|s| s.to_string())
+}
+
+/// Return the path spellings a transcript store may use for a workspace.
+/// Windows-hosted WSL meshes can be represented as a UNC path in Buildmesh
+/// while the CLI records the equivalent POSIX path, so matching both forms is
+/// essential for discovery.
+fn path_forms(path: &str) -> Vec<String> {
+    let mut forms = Vec::new();
+    for value in [
+        path.to_string(),
+        env::normalize_unc_to_wsl(path).into_owned(),
+        env::to_spawn_path(Path::new(path)).to_string_lossy().to_string(),
+    ] {
+        if !forms.iter().any(|existing| existing == &value) {
+            forms.push(value.clone());
+        }
+        let lexical = env::normalize_path_lexically(&value);
+        if !forms.iter().any(|existing| existing == &lexical) {
+            forms.push(lexical);
+        }
+    }
+    forms
+}
+
+/// Classify one Claude/Cursor project directory as a mesh root or a configured
+/// Worktree Node directory. `Some(None)` is the mesh root, `Some(Some(name))`
+/// is a worktree, and `None` is an unrelated project.
+#[cfg(test)]
+fn classify_encoded_project_dir(
+    dir_name: &str,
+    mesh_path: &str,
+    worktree_directory: &str,
+    encode: impl Fn(&str) -> String,
+) -> Option<Option<String>> {
+    classify_encoded_project_dir_with_directories(
+        dir_name,
+        mesh_path,
+        &[worktree_directory.to_string()],
+        encode,
+    )
+}
+
+fn classify_encoded_project_dir_with_directories(
+    dir_name: &str,
+    mesh_path: &str,
+    worktree_directories: &[String],
+    encode: impl Fn(&str) -> String,
+) -> Option<Option<String>> {
+    if path_forms(mesh_path)
+        .iter()
+        .map(|path| encode(path))
+        .any(|root| dir_name == root)
+    {
+        return Some(None);
+    }
+    worktree_directories
+        .iter()
+        .find_map(|directory| {
+            extract_configured_worktree_name_with(dir_name, directory, &encode)
+        })
+        .map(Some)
+}
+
+fn extract_configured_worktree_name_with(
+    dir_name: &str,
+    worktree_directory: &str,
+    encode: &impl Fn(&str) -> String,
+) -> Option<String> {
+    for form in path_forms(worktree_directory) {
+        let prefix = encode(&form).trim_end_matches('-').to_string();
+        let marker = format!("{prefix}-");
+        if let Some(name) = dir_name.strip_prefix(&marker).filter(|name| !name.is_empty()) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Keep a classified Worktree Node name only when its transcript workspace is
+/// positively identified as belonging to this Mesh. Unknown/deleted repos are
+/// retained as unassociated archive rows so shared parents do not leak a
+/// foreign session into every Mesh while stale history remains resumable.
+fn associated_worktree_name(
+    mesh_path: &str,
+    worktree_name: Option<String>,
+    workspace_path: Option<&str>,
+) -> Option<String> {
+    let name = worktree_name?;
+    match workspace_path.and_then(|path| {
+        primitives::workspaces_belong_to_same_repository(mesh_path, path)
+    }) {
+        None if workspace_path.is_none() => Some(name),
+        Some(true) => Some(name),
+        Some(false) => None,
+        // A missing legacy worktree can still be safely associated when its
+        // recorded path is rooted below this Mesh. An unavailable path outside
+        // the Mesh is ambiguous under a shared absolute parent, so retain it
+        // as an unassociated archive row.
+        None if workspace_path.is_some_and(|path| workspace_is_within_mesh(mesh_path, path)) => {
+            Some(name)
+        }
+        None => None,
+    }
+}
+
+fn workspace_is_within_mesh(mesh_path: &str, workspace_path: &str) -> bool {
+    path_forms(workspace_path).iter().any(|workspace| {
+        path_forms(mesh_path).iter().any(|mesh| {
+            let mesh = env::normalize_path_lexically(mesh).trim_end_matches('/').to_string();
+            let workspace = env::normalize_path_lexically(workspace)
+                .trim_end_matches('/')
+                .to_string();
+            workspace
+                .get(..mesh.len())
+                .is_some_and(|prefix| env::directories_match(prefix, &mesh))
+                && workspace
+                    .get(mesh.len()..)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+    })
 }
 
 /// True when a Command Code project dir belongs to a mesh: exactly the mesh
@@ -57,6 +179,23 @@ fn is_commandcode_project_dir_for_mesh(dir_name: &str, encoded_prefix: &str) -> 
         return true;
     }
     dir_lower.starts_with(&format!("{encoded_prefix}-claude-worktrees-"))
+}
+
+fn is_commandcode_project_dir_for_mesh_with_worktrees(
+    dir_name: &str,
+    encoded_prefix: &str,
+    worktree_directories: &[String],
+) -> bool {
+    if is_commandcode_project_dir_for_mesh(dir_name, encoded_prefix) {
+        return true;
+    }
+    let dir_lower = dir_name.to_lowercase();
+    worktree_directories.iter().any(|directory| {
+        path_forms(directory).iter().any(|path| {
+            let prefix = commandcode_project_slug(&env::normalize_unc_to_wsl(path));
+            !prefix.is_empty() && dir_lower.starts_with(&format!("{prefix}-"))
+        })
+    })
 }
 
 /// Strip XML/HTML-like tags from a string for clean display.
@@ -135,18 +274,43 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
         .filter_map(|n| n.cli_session_id)
         .collect();
 
+    let mesh_override = db::get_mesh_by_id(mesh_id)
+        .ok()
+        .and_then(|mesh| mesh.worktree_directory);
+    let app_default = crate::preferences::worktree_directory();
+    let worktree_directory = env::effective_worktree_directory(
+        mesh_path,
+        mesh_override.as_deref(),
+        app_default.as_deref(),
+    )
+    .unwrap_or_else(|_| {
+        env::resolve_worktree_directory(mesh_path, None)
+            .expect("legacy worktree directory must resolve")
+    });
+    let legacy_worktree_directory = env::resolve_worktree_directory(mesh_path, None)
+        .expect("legacy worktree directory must resolve");
+    let mut worktree_directories = vec![worktree_directory.clone()];
+    if !worktree_directories
+        .iter()
+        .any(|directory| directory == &legacy_worktree_directory)
+    {
+        worktree_directories.push(legacy_worktree_directory);
+    }
+
     let mut sessions: Vec<ArchivedAgentNode> = Vec::new();
 
     if projects_dir.exists() {
-        let encoded_prefix = encode_path(mesh_path);
         let entries = fs::read_dir(&projects_dir).map_err(|e| e.to_string())?;
         for entry in entries.flatten() {
             let dir_name = entry.file_name().to_string_lossy().to_string();
-            if !dir_name.starts_with(&encoded_prefix) {
+            let Some(classified_worktree_name) = classify_encoded_project_dir_with_directories(
+                &dir_name,
+                mesh_path,
+                &worktree_directories,
+                encode_path,
+            ) else {
                 continue;
-            }
-
-            let worktree_name = extract_worktree_name(&dir_name, &encoded_prefix);
+            };
 
             let dir_path = entry.path();
             if !dir_path.is_dir() {
@@ -180,6 +344,11 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
                     if first_message.is_empty() {
                         continue;
                     }
+                    let worktree_name = associated_worktree_name(
+                        mesh_path,
+                        classified_worktree_name.clone(),
+                        cwd.as_deref(),
+                    );
 
                     // Use file mtime as fallback timestamp
                     let ts = timestamp.or_else(|| {
@@ -208,21 +377,21 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
 
     // Cursor keeps the same user/assistant JSONL shape but nests each session
     // below a workspace slug and an id directory. Its project slug is based on
-    // the actual workspace path, so include the mesh root and Buildmesh's
-    // `.claude/worktrees/<name>` workspaces.
-    sessions.extend(discover_cursor_sessions_in(
+    // the actual workspace path, so include the mesh root and the configured
+    // Worktree Node parent.
+    sessions.extend(discover_cursor_sessions_in_with_worktree(
         &env::cursor_dir().join("projects"),
         mesh_path,
+        &worktree_directories,
         &tracked_ids,
     ));
 
     // Command Code stores sessions per-project under
     // `<home>/.commandcode/projects/<encoded-cwd>/<uuid>.jsonl` (issue #1500).
-    // Walk the mesh root dir plus its `.claude/worktrees/<name>` dirs so
+    // Walk the mesh root dir plus its configured Worktree Node dirs so
     // mesh-root and worktree sessions are both found; the session header cwd
-    // determines the worktree. The match is anchored (exact root or
-    // `{prefix}-claude-worktrees-...`) so sibling repos sharing a slug prefix
-    // (e.g. `api` vs `api-gateway`) are never scanned.
+    // determines the worktree. The match is anchored so sibling repos sharing
+    // a slug prefix are never scanned.
     let env_type = EnvType::from(env::env_for_path(Path::new(mesh_path)));
     // `to_spawn_path` is a no-op for already-spawn-form paths on a Windows
     // host; the UNC mapping handles a host-form WSL mesh path
@@ -240,7 +409,11 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
             if let Ok(entries) = fs::read_dir(&projects_dir) {
                 for entry in entries.flatten() {
                     let dir_name = entry.file_name().to_string_lossy().to_string();
-                    if !is_commandcode_project_dir_for_mesh(&dir_name, &encoded_prefix)
+                    if !is_commandcode_project_dir_for_mesh_with_worktrees(
+                        &dir_name,
+                        &encoded_prefix,
+                        &worktree_directories,
+                    )
                     {
                         continue;
                     }
@@ -248,9 +421,10 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
                     if !dir_path.is_dir() {
                         continue;
                     }
-                    sessions.extend(discover_commandcode_sessions_in(
+                    sessions.extend(discover_commandcode_sessions_in_with_worktree(
                         Some(dir_path.as_path()),
                         mesh_path,
+                        &worktree_directories,
                         &tracked_ids,
                     ));
                 }
@@ -265,9 +439,10 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
     // and pulls the conversation_id off the directory name (matches the
     // `conversation id: <UUID>` banner the agy TUI prints, so the captured
     // id in `agent_nodes.cli_session_id` aligns 1:1 with this dir name).
-    sessions.extend(discover_agy_sessions_in(
+    sessions.extend(discover_agy_sessions_in_with_worktree(
         &env::agy_brain_dir(),
         mesh_path,
+        &worktree_directories,
         &tracked_ids,
     ));
 
@@ -281,28 +456,35 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
     Ok(sessions)
 }
 
-/// Extract the Buildmesh worktree name from a Cursor project slug.
-fn extract_cursor_worktree_name(dir_name: &str, base_slug: &str) -> Option<String> {
-    dir_name
-        .strip_prefix(&format!("{base_slug}--claude-worktrees-"))
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-}
-
 /// Discover Cursor's primary workspace transcripts below an explicit projects
 /// root. Subagent JSONL is intentionally ignored: it cannot be resumed as the
 /// parent Cursor session and lives under the same session directory.
+#[cfg(test)]
 fn discover_cursor_sessions_in(
     projects_dir: &std::path::Path,
     mesh_path: &str,
+    tracked_ids: &std::collections::HashSet<String>,
+) -> Vec<ArchivedAgentNode> {
+    let worktree_directory = env::resolve_worktree_directory(mesh_path, None)
+        .unwrap_or_else(|_| format!("{mesh_path}/.claude/worktrees"));
+    discover_cursor_sessions_in_with_worktree(
+        projects_dir,
+        mesh_path,
+        &[worktree_directory],
+        tracked_ids,
+    )
+}
+
+fn discover_cursor_sessions_in_with_worktree(
+    projects_dir: &std::path::Path,
+    mesh_path: &str,
+    worktree_directories: &[String],
     tracked_ids: &std::collections::HashSet<String>,
 ) -> Vec<ArchivedAgentNode> {
     if !projects_dir.is_dir() {
         return Vec::new();
     }
 
-    let base_slug = cursor_workspace_slug(mesh_path);
-    let worktree_prefix = format!("{base_slug}--claude-worktrees-");
     let mut sessions = Vec::new();
     let Ok(projects) = fs::read_dir(projects_dir) else {
         return sessions;
@@ -314,11 +496,12 @@ fn discover_cursor_sessions_in(
             continue;
         }
         let dir_name = project_entry.file_name().to_string_lossy().to_string();
-        let worktree_name = if dir_name == base_slug {
-            None
-        } else if dir_name.starts_with(&worktree_prefix) {
-            extract_cursor_worktree_name(&dir_name, &base_slug)
-        } else {
+        let Some(classified_worktree_name) = classify_encoded_project_dir_with_directories(
+            &dir_name,
+            mesh_path,
+            worktree_directories,
+            cursor_workspace_slug,
+        ) else {
             continue;
         };
 
@@ -347,6 +530,11 @@ fn discover_cursor_sessions_in(
             if first_message.is_empty() {
                 continue;
             }
+            let worktree_name = associated_worktree_name(
+                mesh_path,
+                classified_worktree_name.clone(),
+                cwd.as_deref(),
+            );
 
             let timestamp = timestamp.or_else(|| {
                 jsonl_path
@@ -376,9 +564,26 @@ fn discover_cursor_sessions_in(
 /// header supplies the working directory and timestamp; the transcript
 /// supplies the first user message for the archive label. Sidecars
 /// (`<id>.checkpoints.jsonl`, …) are skipped via `read_session_file`.
+#[cfg(test)]
 fn discover_commandcode_sessions_in(
     sessions_dir: Option<&Path>,
     mesh_path: &str,
+    tracked_ids: &std::collections::HashSet<String>,
+) -> Vec<ArchivedAgentNode> {
+    let worktree_directory = env::resolve_worktree_directory(mesh_path, None)
+        .unwrap_or_else(|_| format!("{mesh_path}/.claude/worktrees"));
+    discover_commandcode_sessions_in_with_worktree(
+        sessions_dir,
+        mesh_path,
+        &[worktree_directory],
+        tracked_ids,
+    )
+}
+
+fn discover_commandcode_sessions_in_with_worktree(
+    sessions_dir: Option<&Path>,
+    mesh_path: &str,
+    worktree_directories: &[String],
     tracked_ids: &std::collections::HashSet<String>,
 ) -> Vec<ArchivedAgentNode> {
     let Some(sessions_dir) = sessions_dir.filter(|path| path.is_dir()) else {
@@ -407,16 +612,22 @@ fn discover_commandcode_sessions_in(
         let normalized_mesh = env::normalize_unc_to_wsl(mesh_path);
         let is_mesh_root = env::directories_match(&candidate.directory, mesh_path)
             || env::directories_match(&candidate.directory, &normalized_mesh);
-        let worktree_name = if is_mesh_root {
+        let classified_worktree_name = if is_mesh_root {
             None
         } else {
-            extract_worktree_name_from_path(&candidate.directory, mesh_path).or_else(|| {
-                extract_worktree_name_from_path(&candidate.directory, &normalized_mesh)
-            })
+            extract_worktree_name_from_path_with_directories(
+                &candidate.directory,
+                worktree_directories,
+            )
         };
-        if !is_mesh_root && worktree_name.is_none() {
+        if !is_mesh_root && classified_worktree_name.is_none() {
             continue;
         }
+        let worktree_name = associated_worktree_name(
+            mesh_path,
+            classified_worktree_name,
+            Some(&candidate.directory),
+        );
 
         let Some(first_message) = parse_commandcode_first_user_message(&path) else {
             continue;
@@ -485,9 +696,26 @@ fn parse_commandcode_first_user_message(path: &Path) -> Option<String> {
 /// Issue #1284. The `session_id` we return is the directory name, which is
 /// the same UUID the agy TUI prints as `conversation id: <UUID>` and the
 /// `AgentProvider::resume_args` path feeds back to `--conversation` on resume.
+#[cfg(test)]
 fn discover_agy_sessions_in(
     brain_dir: &std::path::Path,
     mesh_path: &str,
+    tracked_ids: &std::collections::HashSet<String>,
+) -> Vec<ArchivedAgentNode> {
+    let worktree_directory = env::resolve_worktree_directory(mesh_path, None)
+        .unwrap_or_else(|_| format!("{mesh_path}/.claude/worktrees"));
+    discover_agy_sessions_in_with_worktree(
+        brain_dir,
+        mesh_path,
+        &[worktree_directory],
+        tracked_ids,
+    )
+}
+
+fn discover_agy_sessions_in_with_worktree(
+    brain_dir: &std::path::Path,
+    mesh_path: &str,
+    worktree_directories: &[String],
     tracked_ids: &std::collections::HashSet<String>,
 ) -> Vec<ArchivedAgentNode> {
     if !brain_dir.is_dir() {
@@ -539,14 +767,17 @@ fn discover_agy_sessions_in(
 
         // AGY conversations live outside the mesh's own `.claude/projects/`
         // tree, so the worktree name comes purely from the transcript's
-        // workspace metadata. Only attach a worktree name when the path
-        // resolves inside *this* mesh's worktree convention
-        // (`.claude/worktrees/<name>` suffix matching `mesh_path`); anything
-        // else stays at the mesh root with no worktree_name so the user
-        // sees a global session without a misleading association.
-        let worktree_name = workspace_path
-            .as_deref()
-            .and_then(|p| extract_worktree_name_from_path(p, mesh_path));
+        // workspace metadata. Only attach a name when the path resolves under
+        // the effective configured Worktree Node parent; unrelated global
+        // conversations remain unassociated.
+        let classified_worktree_name = workspace_path.as_deref().and_then(|p| {
+            extract_worktree_name_from_path_with_directories(p, worktree_directories)
+        });
+        let worktree_name = associated_worktree_name(
+            mesh_path,
+            classified_worktree_name,
+            workspace_path.as_deref(),
+        );
 
         sessions.push(ArchivedAgentNode {
             session_id,
@@ -561,50 +792,54 @@ fn discover_agy_sessions_in(
 }
 
 /// Map an AGY step's `workspace_path` onto a Buildmesh worktree name when the
-/// path lives under `<mesh>/.claude/worktrees/<name>`. Mirrors the
-/// `extract_worktree_name` / `extract_cursor_worktree_name` rules used by the
-/// other scanners — same separator handling, same `<mesh>/.claude/worktrees/`
-/// convention. Returns `None` for the mesh root (no worktree) and for paths
-/// that don't resolve to a worktree inside the calling mesh (so a foreign
-/// conversation doesn't masquerade as ours).
-fn extract_worktree_name_from_path(workspace_path: &str, mesh_path: &str) -> Option<String> {
-    let mesh = mesh_path.replace('\\', "/");
-    let wp = workspace_path.replace('\\', "/");
-
-    let marker = "/.claude/worktrees/";
-    let worktree_idx = wp.find(marker)?;
-    // The parent of the marker is the mesh root (the buildmesh repo or any
-    // equivalent prefix). Match that against the calling mesh *without*
-    // including the marker itself, otherwise we'd compare `<mesh>/.claude/worktrees`
-    // against `<mesh>` and never match.
-    let parent = &wp[..worktree_idx];
-    if !same_path(parent.trim_end_matches('/'), mesh.trim_end_matches('/')) {
-        return None;
-    }
-    let name = &wp[worktree_idx + marker.len()..];
-    let name = name.split('/').next().unwrap_or("").trim();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
-    }
+/// path lives under the effective Worktree Node parent. Returns `None` for
+/// unrelated paths and for the parent itself (which is not a worktree name).
+#[cfg(test)]
+fn extract_worktree_name_from_path_with_directory(
+    workspace_path: &str,
+    worktree_directory: &str,
+) -> Option<String> {
+    extract_worktree_name_from_path_with_directories(
+        workspace_path,
+        &[worktree_directory.to_string()],
+    )
 }
 
-/// Cross-platform path equality for the worktree-association check above.
-/// We can't `Path::canonicalize` here (the AGY session may reference a path
-/// that doesn't exist on *this* machine), so we normalize separators and
-/// case-fold the trailing component — enough to catch the obvious drift
-/// while staying lenient about trailing slashes and Windows drive case.
-fn same_path(a: &str, b: &str) -> bool {
-    let normalize = |s: &str| -> String {
-        let trimmed = s.trim_end_matches('/').trim_end_matches('\\');
-        if cfg!(windows) {
-            trimmed.to_lowercase()
-        } else {
-            trimmed.to_string()
+fn extract_worktree_name_from_path_with_directories(
+    workspace_path: &str,
+    worktree_directories: &[String],
+) -> Option<String> {
+    for workspace_form in path_forms(workspace_path) {
+        let workspace = workspace_form
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
+        for directory in worktree_directories {
+            for directory_form in path_forms(directory) {
+                let directory = directory_form
+                    .replace('\\', "/")
+                    .trim_end_matches('/')
+                    .to_string();
+                let Some(prefix) = workspace.get(..directory.len()) else {
+                    continue;
+                };
+                if !env::directories_match(prefix, &directory) {
+                    continue;
+                }
+                let Some(rest) = workspace
+                    .get(directory.len()..)
+                    .and_then(|rest| rest.strip_prefix('/'))
+                else {
+                    continue;
+                };
+                let name = rest.split('/').next().unwrap_or("").trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
         }
-    };
-    normalize(a) == normalize(b)
+    }
+    None
 }
 
 /// Parse an AGY conversation transcript and return the first real user prompt
@@ -791,6 +1026,62 @@ mod tests {
     }
 
     #[test]
+    fn configured_project_directory_classifies_custom_worktree_parent() {
+        let mesh = "/Users/adam/src/buildmesh";
+        let parent = "/Users/adam/shared-worktrees";
+        let encoded = encode_path(parent);
+        assert_eq!(
+            classify_encoded_project_dir(
+                &format!("{encoded}-fancy-name"),
+                mesh,
+                parent,
+                encode_path,
+            ),
+            Some(Some("fancy-name".to_string()))
+        );
+        assert_eq!(
+            classify_encoded_project_dir(
+                &encode_path(mesh),
+                mesh,
+                parent,
+                encode_path,
+            ),
+            Some(None)
+        );
+        assert_eq!(
+            classify_encoded_project_dir_with_directories(
+                &format!("{}-fancy-name", encode_path("/Users/adam/src/shared-worktrees")),
+                mesh,
+                &["/Users/adam/src/buildmesh/../shared-worktrees".to_string()],
+                encode_path,
+            ),
+            Some(Some("fancy-name".to_string()))
+        );
+    }
+
+    #[test]
+    fn configured_path_extraction_accepts_absolute_shared_parent() {
+        assert_eq!(
+            extract_worktree_name_from_path_with_directory(
+                "/Users/adam/shared-worktrees/fancy-name",
+                "/Users/adam/shared-worktrees",
+            ),
+            Some("fancy-name".to_string())
+        );
+    }
+
+    #[test]
+    fn configured_path_extraction_matches_windows_drive_case() {
+        assert_eq!(
+            extract_worktree_name_from_path_with_directory(
+                "C:\\Shared\\Worktrees\\fancy-name",
+                "c:\\shared\\worktrees",
+            ),
+            Some("fancy-name".to_string())
+        );
+    }
+
+    #[test]
     fn strip_tags_removes_xml() {
         assert_eq!(
             strip_tags("<command-message>grill-me</command-message>"),
@@ -964,6 +1255,38 @@ mod tests {
     }
 
     #[test]
+    fn cursor_discovery_finds_custom_worktree_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "buildmesh_cursor_discovery_custom_{}",
+            std::process::id()
+        ));
+        let parent = "/Users/adam/shared-worktrees";
+        let project = root
+            .join(format!("{}-fancy-name", cursor_workspace_slug(parent)));
+        let session = project.join("agent-transcripts").join("cursor-custom");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("cursor-custom.jsonl"),
+            r#"{"type":"user","message":{"role":"user","content":"Find custom Cursor worktree"},"cwd":"/Users/adam/shared-worktrees/fancy-name"}
+"#,
+        )
+        .unwrap();
+
+        let discovered = discover_cursor_sessions_in_with_worktree(
+            &root,
+            "/Users/adam/src/buildmesh",
+            &[parent.to_string()],
+            &std::collections::HashSet::new(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(discovered.len(), 1);
+        // The fixture uses a synthetic path with no Git repository, so the
+        // session is retained but intentionally left unassociated. A live
+        // repository under a shared parent is positively associated.
+        assert_eq!(discovered[0].worktree_name, None);
+    }
+
+    #[test]
     fn commandcode_discovery_finds_mesh_sessions_and_filters_foreign_or_tracked() {
         let root = std::env::temp_dir().join(format!(
             "buildmesh_commandcode_discovery_{}",
@@ -1109,6 +1432,35 @@ mod tests {
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].session_id, id);
         assert_eq!(discovered[0].first_message, "Inspect the UUID workspace");
+    }
+
+    #[test]
+    fn commandcode_discovery_finds_custom_worktree_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "buildmesh_commandcode_discovery_custom_{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let id = "sess_custom_commandcode";
+        std::fs::write(
+            root.join(format!("{id}.jsonl")),
+            r#"{"type":"session","id":"custom-commandcode","timestamp":"2026-09-02T19:53:20.151Z","cwd":"/Users/adam/shared-worktrees/fancy-name"}
+{"type":"message","message":{"role":"user","content":"Find custom Command Code worktree"}}
+"#,
+        )
+        .unwrap();
+        let discovered = discover_commandcode_sessions_in_with_worktree(
+            Some(root.as_path()),
+            "/Users/adam/src/buildmesh",
+            &["/Users/adam/shared-worktrees".to_string()],
+            &std::collections::HashSet::new(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(discovered.len(), 1);
+        // The synthetic external path cannot be tied to this Mesh without a
+        // readable repository identity; retain it as an unassociated row.
+        assert_eq!(discovered[0].worktree_name, None);
     }
 
     // --- AGY discovery (issue #1284) -----------------------------------

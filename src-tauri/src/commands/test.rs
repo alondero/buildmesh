@@ -239,6 +239,7 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
         Some(name),
         None,
         None,
+        None,
         None, // source_pr_pinned_sha — test fixture; no PR SHA
         true,
         None,

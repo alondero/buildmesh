@@ -114,10 +114,10 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// many agent nodes the blueprint fans out to; default 2 unlocks the
 /// two-overlap PR-review acceptance criterion out of the box. Range
 /// `1..=8` is enforced at the IPC boundary (`update_mesh_circuit_run_capacity`),
-/// mirroring `autopilot_concurrency_limit`. No backfill — pre-v36 rows
-/// read back as 2 via the `COALESCE(col, 2)` in
-/// `mesh_columns_projection`.
-pub(crate) const SCHEMA_VERSION: u32 = 36;
+/// v37 adds configurable Worktree Node directory storage: an optional Mesh
+/// override and an exact nullable path snapshot on Agent Nodes. No backfill:
+/// legacy rows keep the historical `.claude/worktrees/<name>` derivation.
+pub(crate) const SCHEMA_VERSION: u32 = 37;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -368,6 +368,8 @@ const SPECS: &[ColumnSpec] = &[
     // adds the column safely for upgrade paths; fresh-DB inlines inherit
     // the same DEFAULT through this registry entry.
     ColumnSpec { version: 36, table: "meshes", column: "circuit_run_capacity", type_with_default: "INTEGER NOT NULL DEFAULT 2", read_default: ReadDefault::CoalesceInt(2) },
+    // v37 — optional per-Mesh Worktree Node directory override (#1519).
+    ColumnSpec { version: 37, table: "meshes", column: "worktree_directory", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
 
     // ============================================================
     // agent_nodes
@@ -411,6 +413,9 @@ const SPECS: &[ColumnSpec] = &[
     // lifecycle status stays the primary state, this field explains whether
     // the harness's lifecycle signals can be trusted.
     ColumnSpec { version: 35, table: "agent_nodes", column: "signal_health", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    // v37 — immutable resolved path for new Worktree Nodes. NULL retains the
+    // legacy `<mesh>/.claude/worktrees/<name>` derivation for existing rows.
+    ColumnSpec { version: 37, table: "agent_nodes", column: "worktree_path", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // autopilot_runs

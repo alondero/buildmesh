@@ -96,6 +96,7 @@ pub fn watch_agent_node(
     let resolved = env::node_working_path(&node);
     let watch_path = resolved.host_path;
     let internal_path = resolved.raw_path;
+    let mesh_path = node.path;
 
     // Clone before the closures consume app_handle — needed for the immediate emit below.
     let app_handle_outer = app_handle.clone();
@@ -109,6 +110,7 @@ pub fn watch_agent_node(
         let app_handle = app_handle.clone();
         let watch_path = watch_path.clone();
         let internal_path = internal_path.clone();
+        let mesh_path = mesh_path.clone();
         std::thread::Builder::new()
             .name(format!("git-changed-coalescer-{}", node_id))
             .spawn(move || {
@@ -116,7 +118,8 @@ pub fn watch_agent_node(
                     crate::diagnostics::record_git_changed_emit();
                     let _ = app_handle.emit("git-changed", serde_json::json!({
                         "path": &watch_path,
-                        "internal_path": &internal_path
+                        "internal_path": &internal_path,
+                        "mesh_path": &mesh_path
                     }));
                 });
             })
@@ -149,7 +152,8 @@ pub fn watch_agent_node(
         crate::diagnostics::record_git_changed_emit();
         let _ = app_handle_outer.emit("git-changed", serde_json::json!({
             "path": &watch_path,
-            "internal_path": &internal_path
+            "internal_path": &internal_path,
+            "mesh_path": &mesh_path
         }));
     }
 

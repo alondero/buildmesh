@@ -21,6 +21,7 @@ Buildmesh takes ownership of worktree creation:
 2. **PR #126** (`fa73608`, 2026-05-18) replaced the `git worktree add` shell-out with `git2` library calls (`add_worktree_impl`), primarily to eliminate the Windows console-window flash that every CLI shell-out caused.
 3. Buildmesh owns the checkout topology — `branched` (default) vs `detached` worktree modes — and post-creation fix-ups: `.worktreeinclude` copying (file + recursive directory entries as of #248), `.git`-path sanitization for WSL/Windows, and `prune_stale_worktrees` + retry-once self-healing.
 4. Resume is a no-op on the worktree: creation only runs when the worktree directory does not already exist, replacing the brittle `-w`-on-resume handling.
+5. **Issue #1519** made the parent directory configurable. Resolution follows the per-Mesh override, then the application preference, then `.claude/worktrees`; relative values are Mesh-rooted and absolute values must stay in the Mesh's native/WSL environment. Buildmesh snapshots the exact resolved path onto each new `agent_nodes` row. Configuration changes therefore affect future nodes and idle Pre-spawn Pool inventory, never relocate live worktrees; upgraded rows with no snapshot retain the legacy derivation.
 
 ## Considered alternatives
 
@@ -33,6 +34,7 @@ Buildmesh takes ownership of worktree creation:
 - **Buildmesh now owns Git surface area** it previously inherited from the CLI — libgit2 version quirks, lock contention, and repository-corruption handling are now ours.
 - **`base_ref` is fully threaded end-to-end.** `SpawnContext.base_ref` reaches `create_git_worktree(.., base_ref)` → `add_worktree_impl(.., base_ref)` → `git worktree add <path> <base_sha>`. Wired in PR #51's consumer-removal aftermath, audited under #230. Pinned by `branched_worktree_bases_off_base_ref_not_head` + `detached_worktree_bases_off_base_ref_not_head` (`git/worktree/mod.rs:1072+`, primitives) and `provision_for_spawn_cold_created_uses_spawn_context_base_ref_not_local_head` (`git/worktree/provision.rs`, orchestrator→primitive seam, issue #248).
 - **`.worktreeinclude` directory copying is implemented** as of #248 (`git/worktree/mod.rs`, `apply_worktree_include` now does a recursive copy via `copy_dir_all`). The previous "log-and-skip" branch is gone; directory entries copy recursively, missing sources stay silent. Pinned by `apply_worktree_include_copies_directory_recursively` (happy path) and `apply_worktree_include_directory_missing_source_is_noop` (no-op contract).
+- **Node Working Directory is historical state, not a live preference lookup.** New rows persist `worktree_path`; close, resume, watcher, Git, build/run, and UI consumers resolve through that value. This costs one nullable schema column but prevents a later settings edit from redirecting an existing node to a directory it never used.
 
 ## Follow-up (issue #409): `raw_path` collapses the worktree-rule copy in `file_watcher`
 

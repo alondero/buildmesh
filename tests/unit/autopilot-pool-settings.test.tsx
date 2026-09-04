@@ -15,7 +15,10 @@ import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 
-function mockBackend(poolSize: number | null = null) {
+function mockBackend(
+  poolSize: number | null = null,
+  worktreeDirectory: string | null = null,
+) {
   const calls: Record<string, unknown[]> = {};
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     calls[cmd] = [...(calls[cmd] ?? []), args];
@@ -25,6 +28,7 @@ function mockBackend(poolSize: number | null = null) {
           default_provider: null,
           minimax_api_key: null,
           autopilot_pool_size: poolSize,
+          worktree_directory: worktreeDirectory,
         });
       case 'get_coordinator_status':
         return Promise.resolve({ enabled: false, has_token: false });
@@ -46,6 +50,45 @@ function mockBackend(poolSize: number | null = null) {
   });
   return calls;
 }
+
+describe('Settings â€” worktree directory', () => {
+  beforeEach(() => vi.mocked(invoke).mockReset());
+
+  it('hydrates the application default and commits a trimmed value on blur', async () => {
+    const calls = mockBackend(null, '../worktrees');
+    const user = userEvent.setup();
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    const input = (await screen.findByRole('textbox', {
+      name: /worktree directory/i,
+    })) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('../worktrees'));
+    await user.clear(input);
+    await user.type(input, '  D:\\buildmesh-worktrees  ');
+    fireEvent.blur(input);
+
+    await waitFor(() => expect(calls['set_app_worktree_directory']).toBeTruthy());
+    expect(calls['set_app_worktree_directory']![0]).toEqual({
+      directory: 'D:\\buildmesh-worktrees',
+    });
+  });
+
+  it('clearing the application default commits null', async () => {
+    const calls = mockBackend(null, '../worktrees');
+    const user = userEvent.setup();
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    const input = (await screen.findByRole('textbox', {
+      name: /worktree directory/i,
+    })) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('../worktrees'));
+    await user.clear(input);
+    fireEvent.blur(input);
+
+    await waitFor(() => expect(calls['set_app_worktree_directory']).toBeTruthy());
+    expect(calls['set_app_worktree_directory']![0]).toEqual({ directory: null });
+  });
+});
 
 /** The pool-size input lives on the General pane, which is the default
  *  active tab — no navigation needed. Number inputs expose role spinbutton. */

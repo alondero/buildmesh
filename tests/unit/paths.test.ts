@@ -11,7 +11,21 @@ vi.mock('../../src/lib/platform', () => ({
   isWindows: true,
 }));
 
-import { getNodeGitPath, pathMatchesGitEvent } from '../../src/lib/paths';
+import { getEffectiveWorktreeDirectory, getNodeGitPath, pathMatchesGitEvent } from '../../src/lib/paths';
+
+describe('getEffectiveWorktreeDirectory', () => {
+  it('roots relative app defaults at the active mesh', () => {
+    expect(
+      getEffectiveWorktreeDirectory('/repo/mesh', null, '../shared-worktrees'),
+    ).toBe('/repo/mesh/../shared-worktrees');
+  });
+
+  it('prefers the mesh override and preserves absolute paths', () => {
+    expect(
+      getEffectiveWorktreeDirectory('C:\\repo\\mesh', 'C:\\central-worktrees', '../shared'),
+    ).toBe('C:\\central-worktrees');
+  });
+});
 
 describe('getNodeGitPath', () => {
   it('returns worktree path when worktree_name is set', () => {
@@ -46,6 +60,15 @@ describe('getNodeGitPath', () => {
     const node = { path: '/Users/adam/myproject', worktree_name: '  gentle-fox  ' };
     expect(getNodeGitPath(node)).toBe('/Users/adam/myproject/.claude/worktrees/gentle-fox');
   });
+
+  it('uses a persisted custom worktree path before the legacy derivation', () => {
+    const node = {
+      path: '/Users/adam/myproject',
+      worktree_name: 'gentle-fox',
+      worktree_path: '/Volumes/fast-worktrees/gentle-fox',
+    };
+    expect(getNodeGitPath(node)).toBe('/Volumes/fast-worktrees/gentle-fox');
+  });
 });
 
 // Regression coverage for issue #304: every GIT_CHANGED consumer used to do
@@ -77,6 +100,15 @@ describe('pathMatchesGitEvent', () => {
     const event = {
       path: '/home/user/repo/.claude/worktrees/gentle-fox',
       internal_path: '/home/user/repo/.claude/worktrees/gentle-fox',
+    };
+    expect(pathMatchesGitEvent(event, '/home/user/repo')).toBe(true);
+  });
+
+  it('matches the mesh root carried by an external worktree event', () => {
+    const event = {
+      path: '/fast/worktrees/gentle-fox',
+      internal_path: '/fast/worktrees/gentle-fox',
+      mesh_path: '/home/user/repo',
     };
     expect(pathMatchesGitEvent(event, '/home/user/repo')).toBe(true);
   });

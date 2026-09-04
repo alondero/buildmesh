@@ -45,12 +45,13 @@ const meshDefaults = {
   build_command: null, run_command: null, model: null, effort: null,
   use_worktree: true, worktree_mode: 'perNode', default_provider: null,
   base_ref: 'origin/main', scratchpad: '', sandbox: false,
-  pre_spawn_pool_size: 1, color: null,
+  pre_spawn_pool_size: 1, color: null, worktree_directory: null,
 };
 
 const nodeDefaults = {
   env: 'Windows', provider: 'anthropic', cli_session_id: null,
   worktree_name: null, use_worktree: true, source_issue: null,
+  worktree_path: null,
   source_pr: null, head_repo_owner: null, head_repo_clone_url: null,
   source_pr_pinned_sha: null, created_at: '1970-01-01T00:00:00Z',
 };
@@ -115,7 +116,20 @@ export const defaultFixtures = {
   list_agent_nodes: agentNodes,
   get_default_provider: 'anthropic',
   list_providers: [
-    { id: 'anthropic', name: 'Claude', description: 'Anthropic Claude Code', icon: null, available: true, kind: 'cwrap' },
+    {
+      id: 'anthropic', label: 'Claude Code', color: '#d97706', icon: 'claude',
+      resumable: true, harness_id: 'anthropic', provider_id: null,
+      is_proxied: false, group_key: 'anthropic',
+      capabilities: {
+        harness_id: 'anthropic', supports_resume: true, auto_resume_on_startup: true,
+        requires_attention_hook: true, attention_capability: { kind: 'none' },
+        supports_passive_turn_watcher: true, produces_readable_transcript: true,
+        supports_model_override: true, supports_effort_override: true,
+        supports_extra_args: true, supports_prefill: true, is_plain_terminal: false,
+        effort_control: { kind: 'closed', allowed: ['low', 'medium', 'high'] },
+        available_on: ['windows', 'macos', 'linux'],
+      },
+    },
   ],
   list_autopilot_runs: [],
   list_circuit_agent_ownerships: [],
@@ -127,7 +141,10 @@ export const defaultFixtures = {
   get_app_identifier: 'com.alond.buildmesh.dev',
   log_frontend: null,
   subscribe_agent_output: null,
-  get_app_preferences: { default_provider: 'anthropic', minimax_api_key_set: false, google_cloud_project: null },
+  get_app_preferences: {
+    default_provider: 'anthropic', minimax_api_key_set: false,
+    google_cloud_project: null, worktree_directory: null,
+  },
   get_provider_accounts: [],
   get_network_status: { lan_exposure_enabled: false, bound_port: 1992, realized_binds: [] },
   auto_resume_agent_nodes: [],

@@ -138,7 +138,21 @@ pub fn create_with_source_pr_fork(
         None
     };
 
-    let resolved = env::resolve_agent_path(path, worktree_db_name);
+    let app_worktree_directory = crate::preferences::worktree_directory();
+    let configured_directory = env::effective_worktree_directory(
+        path,
+        mesh.worktree_directory.as_deref(),
+        app_worktree_directory.as_deref(),
+    )
+    .map_err(AgentNodeError::Backend)?;
+    let worktree_path = worktree_db_name
+        .map(|name| env::resolve_worktree_path(path, Some(&configured_directory), name))
+        .transpose()
+        .map_err(AgentNodeError::Backend)?;
+    let resolved = worktree_path
+        .as_deref()
+        .map(env::resolve_path)
+        .unwrap_or_else(|| env::resolve_agent_path(path, None));
     let env_type = resolved.env_type;
     // Store the harness/profile id verbatim (issue #535) — no premature parse
     // to the legacy `Provider` enum, which would flatten an unknown profile id
@@ -154,6 +168,7 @@ pub fn create_with_source_pr_fork(
         env_type,
         provider_id,
         worktree_db_name,
+        worktree_path.as_deref(),
         source_issue,
         source_pr,
         source_pr_pinned_sha,

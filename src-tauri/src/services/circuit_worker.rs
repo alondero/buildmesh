@@ -2243,6 +2243,7 @@ mod tests {
             effort: None,
             use_worktree: true,
             worktree_mode: None,
+            worktree_directory: None,
             default_provider: None,
             base_ref: "origin/main".into(),
             scratchpad: String::new(),

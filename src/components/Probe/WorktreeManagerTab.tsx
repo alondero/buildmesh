@@ -33,6 +33,7 @@
  */
 
 import { formatError } from '../../lib/errorUtils';
+import { getEffectiveWorktreeDirectory } from '../../lib/paths';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
@@ -43,6 +44,7 @@ import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   deleteBranches,
   deleteWorktrees,
+  getAppPreferences,
   getGitPruneInfo,
   getMeshProperties,
   getWarmPoolCount,
@@ -51,6 +53,7 @@ import {
   updateMeshColumn,
   updateMeshPoolSize,
   updateMeshUseWorktree,
+  updateMeshWorktreeDirectory,
   updateWorktreeBaseRef,
   type BranchInfo,
   type GitRepoPruneInfo,
@@ -248,6 +251,9 @@ export function WorktreeManagerTab() {
   // (`services::warm_pool`) reads this column on startup + after each
   // claim, draining excess and filling up to this target.
   const [preSpawnPoolSize, setPreSpawnPoolSize] = useState(0);
+  const [worktreeDirectory, setWorktreeDirectory] = useState('');
+  const [appWorktreeDirectory, setAppWorktreeDirectory] = useState('');
+  const worktreeDirectorySavedRef = useRef('');
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Live pre-spawn pool *ready* count for the active mesh. Source of
@@ -385,13 +391,17 @@ export function WorktreeManagerTab() {
   useAsyncEffect(
     (signal) => {
       if (activeMeshId === null) return;
-      getMeshProperties(activeMeshId)
-        .then((config) => {
+      Promise.all([getMeshProperties(activeMeshId), getAppPreferences()])
+        .then(([config, prefs]) => {
           if (signal.aborted) return;
           setUseWorktree(config.use_worktree);
           setBaseRef(wireToFormBaseRef(config.base_ref));
           setWorktreeMode(wireToFormMode(config.worktree_mode));
           setPreSpawnPoolSize(config.pre_spawn_pool_size);
+          const storedDirectory = config.worktree_directory?.trim() ?? '';
+          setWorktreeDirectory(storedDirectory);
+          worktreeDirectorySavedRef.current = storedDirectory;
+          setAppWorktreeDirectory(prefs.worktree_directory?.trim() ?? '');
         })
         .catch(() => {
           // Swallow — keep the existing form state. Mirrors the legacy
@@ -471,6 +481,20 @@ export function WorktreeManagerTab() {
     },
     [activeMeshId],
   );
+
+  const handleCommitWorktreeDirectory = useCallback(async () => {
+    if (activeMeshId === null) return;
+    const canonical = worktreeDirectory.trim();
+    setWorktreeDirectory(canonical);
+    if (canonical === worktreeDirectorySavedRef.current) return;
+    setSaveError(null);
+    try {
+      await updateMeshWorktreeDirectory(activeMeshId, canonical || null);
+      worktreeDirectorySavedRef.current = canonical;
+    } catch (e) {
+      setSaveError(`Failed to update worktree directory: ${formatError(e)}`);
+    }
+  }, [activeMeshId, worktreeDirectory]);
 
   // Recovery actions (restore root to base / free a hostage branch) live
   // in `useMeshRecovery` (issue #283). The hook owns the in-flight flag
@@ -625,11 +649,19 @@ export function WorktreeManagerTab() {
         baseRef={baseRef}
         worktreeMode={worktreeMode}
         preSpawnPoolSize={preSpawnPoolSize}
+        worktreeDirectory={worktreeDirectory}
+        inheritedWorktreeDirectory={getEffectiveWorktreeDirectory(
+          activeMeshPath,
+          null,
+          appWorktreeDirectory,
+        )}
         poolCount={poolCount}
         onToggleUseWorktree={handleToggleUseWorktree}
         onChangeBaseRef={handleChangeBaseRef}
         onChangeWorktreeMode={handleChangeWorktreeMode}
         onChangePoolSize={handleChangePoolSize}
+        onChangeWorktreeDirectory={setWorktreeDirectory}
+        onCommitWorktreeDirectory={handleCommitWorktreeDirectory}
       />
       {saveError && (
         <p className="text-xs text-status-error break-words">{saveError}</p>
@@ -1218,6 +1250,8 @@ interface ConfigurationCardProps {
   /** Per-mesh pre-spawn pool target (`0` = off, `1..=5`). The toggle's
    *  `checked` is derived from `preSpawnPoolSize > 0`. */
   preSpawnPoolSize: number;
+  worktreeDirectory: string;
+  inheritedWorktreeDirectory: string;
   /**
    * Live count of `available` warm pool entries for the mesh. Drives
    * the `<PoolStatus>` row under the "Pre-spawn warm worktrees"
@@ -1229,6 +1263,8 @@ interface ConfigurationCardProps {
   onChangeBaseRef: (next: BaseRefForm) => void;
   onChangeWorktreeMode: (next: WorktreeModeForm) => void;
   onChangePoolSize: (next: number) => void;
+  onChangeWorktreeDirectory: (next: string) => void;
+  onCommitWorktreeDirectory: () => void;
 }
 
 /**
@@ -1272,11 +1308,15 @@ function ConfigurationCard({
   baseRef,
   worktreeMode,
   preSpawnPoolSize,
+  worktreeDirectory,
+  inheritedWorktreeDirectory,
   poolCount,
   onToggleUseWorktree,
   onChangeBaseRef,
   onChangeWorktreeMode,
   onChangePoolSize,
+  onChangeWorktreeDirectory,
+  onCommitWorktreeDirectory,
 }: ConfigurationCardProps) {
   const poolEnabled = preSpawnPoolSize > 0;
   // Display value for the size number input. When the toggle is off,
@@ -1307,6 +1347,29 @@ function ConfigurationCard({
 
       {useWorktree && (
         <div className="pl-4 border-l border-border-subtle space-y-3">
+          <div className="space-y-1">
+            <label htmlFor="mesh-worktree-directory" className="block text-xs text-text-muted">
+              Worktree directory override
+            </label>
+            <input
+              id="mesh-worktree-directory"
+              type="text"
+              value={worktreeDirectory}
+              placeholder={inheritedWorktreeDirectory}
+              onChange={(e) => onChangeWorktreeDirectory(e.target.value)}
+              onBlur={onCommitWorktreeDirectory}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') onCommitWorktreeDirectory();
+              }}
+              className="w-full px-2 py-1 rounded-md border border-border-subtle bg-bg-overlay text-xs text-text-primary focus:outline-none focus:border-accent-cyan"
+            />
+            <p className="text-2xs text-text-muted break-words">
+              {worktreeDirectory
+                ? 'Applies to new nodes; existing worktrees are not moved.'
+                : `Inherited: ${inheritedWorktreeDirectory}`}
+            </p>
+          </div>
+
           {/* Pre-spawn pool (issue #611). The toggle is derived from
               `preSpawnPoolSize > 0`; the size input is disabled when
               the toggle is off. Sits ABOVE Starting point / Worktree

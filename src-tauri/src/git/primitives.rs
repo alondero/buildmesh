@@ -24,6 +24,25 @@ pub fn open_from_host_path(path: &str) -> Result<Repository, git2::Error> {
     Repository::open(to_host_path(path))
 }
 
+/// Whether two session paths resolve to the same Git repository.
+///
+/// Worktree repositories share their main repository's `commondir`, which
+/// makes this suitable for associating transcripts stored below a shared
+/// Worktree Node parent without exposing git2 to service modules. `None`
+/// means one of the paths is missing or unreadable, which lets callers retain
+/// stale transcript history without falsely associating it with a Mesh.
+pub fn workspaces_belong_to_same_repository(first: &str, second: &str) -> Option<bool> {
+    let first_repo = Repository::open(to_host_path(first)).ok();
+    let second_repo = Repository::open(to_host_path(second)).ok();
+    match (first_repo, second_repo) {
+        (Some(first_repo), Some(second_repo)) => Some(crate::env::directories_match(
+            &first_repo.commondir().to_string_lossy(),
+            &second_repo.commondir().to_string_lossy(),
+        )),
+        _ => None,
+    }
+}
+
 /// Whether the working tree has any non-ignored change (modified, staged,
 /// untracked, deleted, renamed). The canonical dirty check.
 ///

@@ -629,6 +629,7 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 source_pr_pinned_sha TEXT,
                 status_changed_at TEXT,
                 signal_health TEXT,
+                worktree_path TEXT,
                 pr_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/m');
@@ -801,7 +802,8 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
                 source_pr_pinned_sha TEXT,
-                signal_health TEXT
+                signal_health TEXT,
+                worktree_path TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -862,7 +864,8 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 head_repo_owner TEXT,
                 head_repo_clone_url TEXT,
                 source_pr_pinned_sha TEXT,
-                signal_health TEXT
+                signal_health TEXT,
+                worktree_path TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');

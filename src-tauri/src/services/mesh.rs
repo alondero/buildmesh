@@ -8,6 +8,7 @@ use crate::models::Mesh;
 pub enum MeshError {
     Db(rusqlite::Error),
     InvalidLayout(String),
+    InvalidWorktreeDirectory(String),
     Io(std::io::Error),
 }
 
@@ -16,6 +17,7 @@ impl std::fmt::Display for MeshError {
         match self {
             MeshError::Db(e) => write!(f, "{}", e),
             MeshError::InvalidLayout(l) => write!(f, "layout must be 'grid' or 'single', got '{}'", l),
+            MeshError::InvalidWorktreeDirectory(e) => write!(f, "{}", e),
             MeshError::Io(e) => write!(f, "{}", e),
         }
     }
@@ -59,6 +61,11 @@ pub fn create_test(name: &str) -> Result<Mesh, MeshError> {
         .unwrap()
         .as_millis();
     let mesh_path = temp_dir.join(format!("buildmesh_test_{}_{}", name.replace(' ', "_"), timestamp));
+    crate::env::resolve_worktree_directory(
+        &mesh_path.to_string_lossy(),
+        crate::preferences::worktree_directory().as_deref(),
+    )
+    .map_err(MeshError::InvalidWorktreeDirectory)?;
     std::fs::create_dir_all(&mesh_path)?;
     let mesh = db::create_mesh(name, &mesh_path.to_string_lossy())?;
     Ok(mesh)

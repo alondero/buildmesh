@@ -18,6 +18,14 @@ export type AppPreferences = {
  */
 default_provider: string | null, 
 /**
+ * Buildmesh-wide default directory for newly-created Worktree Nodes
+ * (issue #1519). Relative values are resolved from each Mesh root;
+ * absolute values are used as written. A per-Mesh `worktree_directory`
+ * overrides this value, and `None` preserves the legacy
+ * `<mesh>/.claude/worktrees` layout.
+ */
+worktree_directory: string | null, 
+/**
  * MiniMax API key for usage fetching. **Deprecated** by `provider_accounts`
  * (#537) — kept so existing preferences.json files still load and the stored
  * key survives via [`super::minimax_api_key_resolved`]'s read-through fallback.

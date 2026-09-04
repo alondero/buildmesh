@@ -63,6 +63,8 @@ struct ImportAndResumeRequest {
     cli_session_id: String,
     branch: String,
     worktree_name: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
     provider: Option<String>,
     #[serde(default = "default_rows")]
     rows: u16,
@@ -123,6 +125,7 @@ pub async fn import_and_resume(
     let provider_id = req.provider.as_deref().unwrap_or("anthropic").to_string();
     let branch_owned = req.branch.clone();
     let worktree_owned = req.worktree_name.clone();
+    let cwd_owned = req.cwd.clone();
     let cli_session_id_for_closure = cli_session_id.clone();
 
     // Issue #1389 / PR #1429 review feedback: bundle the entire pre-spawn
@@ -143,8 +146,28 @@ pub async fn import_and_resume(
                 Ok(m) => m,
                 Err(_) => return Ok(None),
             };
-            let resolved = crate::env::resolve_agent_path(&mesh.path, None);
             let use_worktree = worktree_owned.is_some();
+            let app_directory = crate::preferences::worktree_directory();
+            let configured_directory = crate::env::effective_worktree_directory(
+                &mesh.path,
+                mesh.worktree_directory.as_deref(),
+                app_directory.as_deref(),
+            )?;
+            let worktree_path = worktree_owned
+                .as_deref()
+                .map(|name| {
+                    crate::env::resolve_imported_worktree_path(
+                        &mesh.path,
+                        &configured_directory,
+                        name,
+                        cwd_owned.as_deref(),
+                    )
+                })
+                .transpose()?;
+            let resolved = worktree_path
+                .as_deref()
+                .map(crate::env::resolve_path)
+                .unwrap_or_else(|| crate::env::resolve_agent_path(&mesh.path, None));
             let mut node = match db::create_agent_node(
                 mesh_id,
                 &session_name,
@@ -153,6 +176,7 @@ pub async fn import_and_resume(
                 resolved.env_type,
                 &provider_id,
                 worktree_owned.as_deref(),
+                worktree_path.as_deref(),
                 None,
                 None,
                 None, // source_pr_pinned_sha — HTTP route doesn't accept a pinned SHA

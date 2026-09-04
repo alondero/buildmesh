@@ -1142,6 +1142,7 @@ mod tests {
             status: SessionStatus::Running,
             cli_session_id: None,
             worktree_name: Some("gh1-missing".to_string()),
+            worktree_path: None,
             use_worktree: true,
             // Required by the full-literal `AgentNode { ... }` initializer
             // (wayfinder #982 / ticket #984). `is_pinned` is a UI-toggle

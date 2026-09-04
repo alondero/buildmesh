@@ -310,7 +310,7 @@ pub(super) async fn prepare_context(
         // on disk this spawn is a resume / handover / re-spawn reusing an
         // existing worktree — never claim a pool entry for it (that would
         // re-point the node at a different directory and abandon its work).
-        let existing = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
+        let existing = env::node_working_path(&node);
         let existing_present = std::path::Path::new(&existing.host_path).exists();
         if mesh_id > 0 && crate::services::warm_pool::should_claim_for_spawn(existing_present) {
             match crate::services::warm_pool::try_claim(app, mesh_id) {
@@ -395,14 +395,6 @@ pub(super) async fn prepare_context(
         None
     };
 
-    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name.as_deref());
-    tracing::info!(
-        "prepare_context: resolved spawn_path={}, host_path={}, env={:?}",
-        resolved.spawn_path,
-        resolved.host_path,
-        resolved.env_type
-    );
-
     // For a Manual warm claim, the pool's preassigned slug IS the node's
     // `worktree_name` once the spawn completes — the provisioner persists
     // that, but `provision_for_spawn` needs the right branch name in the
@@ -413,7 +405,24 @@ pub(super) async fn prepare_context(
     let mut node = node;
     if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
         node.worktree_name = Some(entry.preassigned_name.clone());
+        // Warm-pool rows store host paths for git operations. Convert the
+        // claimed path back to the raw/runtime form before persisting it on
+        // the Agent Node; otherwise a WSL UNC path would later be passed to
+        // the WSL process instead of `/home/...`.
+        node.worktree_path = Some(env::normalize_unc_to_wsl(&entry.path).into_owned());
     }
+
+    let resolved = if use_worktree {
+        env::node_working_path(&node)
+    } else {
+        env::resolve_agent_path(&node.path, None)
+    };
+    tracing::info!(
+        "prepare_context: resolved spawn_path={}, host_path={}, env={:?}",
+        resolved.spawn_path,
+        resolved.host_path,
+        resolved.env_type
+    );
 
     let harness_id = node.provider.clone();
     let node_mesh_id = node.mesh_id;

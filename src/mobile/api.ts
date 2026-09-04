@@ -290,6 +290,9 @@ export async function importAndResume(
         cli_session_id: session.session_id,
         branch: session.branch ?? "main",
         worktree_name: session.worktree_name ?? undefined,
+        // Preserve the discovered working directory so resuming a legacy or
+        // custom-parent session does not recreate it under today's setting.
+        cwd: session.worktree_name && session.cwd ? session.cwd : undefined,
         provider,
       }),
     },

@@ -270,6 +270,28 @@ describe('ArchivedNodesTab (#378)', () => {
     });
   });
 
+  it('passes a discovered worktree cwd through import so resume keeps its original path', async () => {
+    mockBackend({
+      sessions: [{
+        session_id: 's-custom',
+        first_message: 'Resume the shared worktree',
+        branch: 'feat/shared',
+        cwd: '/shared/worktrees/s-custom',
+        timestamp: new Date().toISOString(),
+        worktree_name: 's-custom',
+      }],
+    });
+    render(<ArchivedNodesTab />);
+    await userEvent.click(await screen.findByText('Resume'));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
+        worktreeName: 's-custom',
+        cwd: '/shared/worktrees/s-custom',
+      }));
+    });
+  });
+
   it('uses the explicit provider from the `â–¾` picker for the resume', async () => {
     mockBackend();
     render(<ArchivedNodesTab />);
