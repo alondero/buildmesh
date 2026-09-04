@@ -189,9 +189,13 @@ const GROK_CAPS: HarnessCapabilities = {
 };
 
 // Cursor — model yes, effort no, prefill yes (issue #1143). Issue
-// #1368: Cursor now ships an attention hook under `--force`; the
-// descriptor mirrors AGY's skip-permissions shape (Stop-only signal,
-// `min_version` pinned to `CURSOR_MIN_HOOK_VERSION`).
+// #1368 round-2: Cursor now ships an attention hook under `--force`.
+// The descriptor mirrors AGY's skip-permissions shape (stop-only
+// signal, `min_version` pinned to `CURSOR_MIN_HOOK_VERSION`). The
+// `trust` field is `null` rather than `'workspace trust'` because
+// Cursor under `--force` does not require an explicit workspace-trust
+// entry; advertising a non-empty value would promise a step the
+// adapter never takes (round-2 review point 2).
 const CURSOR_CAPS: HarnessCapabilities = {
   harness_id: 'cursor',
   supports_resume: true,
@@ -201,7 +205,7 @@ const CURSOR_CAPS: HarnessCapabilities = {
     kind: 'hook',
     events: ['turn_completed', 'background_running'],
     launch_mode: 'skip_permissions',
-    trust: 'workspace trust',
+    trust: null,
     min_version: '1.0.0',
   },
   supports_passive_turn_watcher: false,

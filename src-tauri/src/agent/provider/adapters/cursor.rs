@@ -14,12 +14,23 @@
 //! explicitly denied by a hook matcher — so the only signal Cursor emits
 //! at a useful cadence is `Stop` (a turn finished, the agent is at its
 //! prompt). Buildmesh provisions `<project>/.cursor/hooks.json` with a
-//! single `Stop` handler that forwards the hook stdin JSON (Cursor's
+//! single `stop` handler that forwards the hook stdin JSON (Cursor's
 //! `conversation_id` + `hook_event_name: "stop"` envelope) to the local
 //! attention endpoint. Cursor documents `conversation_id` (snake_case) as
 //! the canonical session id field, distinct from Claude's `session_id`
 //! and AGY's `conversationId` (camelCase). The route parser accepts all
 //! three casings via stacked `#[serde(alias)]`.
+//!
+//! **Cursor's hooks.json schema** (round-2 review, issue #1368): the
+//! documented shape is
+//! `{ "version": 1, "hooks": { "<event>": [{ "command": "..." }, …] } }`,
+//! not AGY's per-namespace convention. Top-level must be an object, must
+//! carry `"version": 1`, the `hooks` object is keyed by lowercase event
+//! names (`stop`, `notification`, `pretooluse`, …), and each event's
+//! handler array stores entries as `{ "command": "..." }` with no `type`
+//! field. The merge below walks `settings["hooks"]["stop"]` as an array
+//! and detects a stale Buildmesh entry by URL substring so re-provisioning
+//! is idempotent (issue #886).
 
 use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
 use crate::agent::provider::{AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell};
@@ -45,11 +56,6 @@ pub static CURSOR: CursorAdapter = CursorAdapter;
 /// semver through the hook surface.
 pub const CURSOR_MIN_HOOK_VERSION: &str = "1.0.0";
 
-/// File-name-relative-to-`buildmesh-attention`-namespace key we own
-/// under `<project>/.cursor/hooks.json`. Mirrors the AGY
-/// `buildmesh-attention` namespace convention (`agy.rs:166`).
-const HOOK_NAMESPACE: &str = "buildmesh-attention";
-
 /// Counter backing the PID+counter `.tmp` suffix for atomic writes
 /// (`agy.rs:14-39`). Same pattern as AGY: two concurrent writes in the
 /// same process would otherwise collide on a fixed tmp name.
@@ -62,26 +68,40 @@ fn shell_for(platform: Platform) -> WindowsShell {
     }
 }
 
-/// The callback command Cursor's hook runner invokes on `Stop`. The
-/// runner forwards stdin JSON (Cursor's `conversation_id` +
+/// Marker substring written into the Buildmesh-owned `stop` handler.
+/// Used by `ensure_hooks_json` to detect a stale Buildmesh entry on
+/// re-provision (issue #886 idempotency invariant): a re-run that finds
+/// an existing handler with this substring leaves it alone, a re-run
+/// that finds a different Buildmesh entry updates it in place, and a
+/// re-run that finds no Buildmesh entry appends a fresh one.
+const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
+
+/// The callback command Cursor's hook runner invokes on `stop`. The runner
+/// forwards stdin JSON (Cursor's `conversation_id` +
 /// `hook_event_name: "stop"` envelope) and we POST it verbatim to the
 /// attention endpoint via curl. `--data-binary @-` forwards the hook
 /// stdin as the POST body so the attention route's classifier can read
 /// `conversation_id` and `hook_event_name`. Cursor's hook runner
 /// inherits the agent process's environment (no `env_clear` like
 /// Codex's), so `$BUILDMESH_PORT` / `$BUILDMESH_SESSION_ID` set
-/// per-agent by `spawn_environment::wrap` expand at run time — same
-/// shape as AGY's `hook_command` (`agy.rs:50-61`). The command is
-/// bare (no `cmd.exe /c` / `sh -c` wrapper) because Cursor invokes
-/// hook commands through its own shell. Windows uses `%VAR%` syntax
-/// (cmd); Unix uses `$VAR`.
-fn hook_command(platform: Platform) -> String {
-    match platform {
-        Platform::Windows => {
-            "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul".to_string()
+/// per-agent by `spawn_environment::wrap` expand at run time.
+///
+/// The trailing `|| exit 0` (cmd) / `|| true` (POSIX) ensures a curl
+/// failure (Buildmesh restarting, port dropped, EHOSTUNREACH, …) never
+/// surfaces as a non-zero hook exit. Cursor propagates hook exit codes
+/// into its TUI as visible errors, and the attention webhook is
+/// best-effort telemetry — it must never fail-block the agent. Same
+/// shape as `agent::spawn::process::hook_command` (issue #878, line
+/// 101: `... || true`).
+fn hook_command(env_type: EnvType) -> String {
+    match env_type {
+        EnvType::Windows => {
+            "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul || exit 0"
+                .to_string()
         }
-        _ => {
-            "curl -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID >/dev/null 2>/dev/null".to_string()
+        EnvType::Wsl => {
+            "curl -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID >/dev/null 2>/dev/null || true"
+                .to_string()
         }
     }
 }
@@ -123,28 +143,36 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Add or refresh the Buildmesh-owned `Stop` handler under the
-/// `buildmesh-attention` namespace in `<project>/.cursor/hooks.json`.
-/// Preserves user-authored sibling namespaces (other tools, custom
-/// automation) round-trip through a re-injection untouched — same
-/// convention as AGY (`agy.rs:70-94`).
-///
-/// The `Stop` event uses the simple `[{type, command}]` shape — the
-/// whole turn is the event (no tool-name matcher needed) and `Stop` is
-/// the only signal Cursor emits under `--force`. Returns `Ok(())`
-/// when the file already matches the expected shape (no rewrite
-/// fires; the idempotency invariant from issue #886).
+/// True when `handler` looks like the Buildmesh-owned `stop` entry —
+/// the URL contains our `/api/attention/` marker AND the command carries
+/// the per-agent env var names. Used by `ensure_hooks_json` to upsert
+/// the Buildmesh entry into an event's handler array.
+fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
+    handler
+        .get("command")
+        .and_then(|v| v.as_str())
+        .is_some_and(|command| {
+            command.contains(BUILDMESH_HOOK_MARKER)
+                && command.contains("BUILDMESH_PORT")
+                && command.contains("BUILDMESH_SESSION_ID")
+        })
+}
+
+/// Add or refresh the Buildmesh-owned `stop` handler in
+/// `<project>/.cursor/hooks.json`. The merge walks the documented
+/// Cursor shape — `{ "version": 1, "hooks": { "stop": [...] } }` —
+/// and upserts the Buildmesh entry into the `stop` array, preserving
+/// any sibling handlers (other tools, user-authored automation) the
+/// user has registered. Returns `Ok(())` when the file already carries
+/// the expected handler (no rewrite fires; the issue #886 idempotency
+/// invariant).
 ///
 /// A malformed existing file (trailing comma, partial edit, syntax
-/// error) is treated as an explicit `Err` rather than silently
-/// clobbered with `{}` — the Grok precedent (`grok.rs:222-243`)
-/// pins the round-2 review fix: a missing file is `{}`, but a
-/// present-but-unparseable file is the user's data and must surface
-/// to the spawn path as a provision failure so the agent user can
-/// repair it. The AGY pattern (`.ok().and_then(...).ok().unwrap_or`)
-/// would silently overwrite a malformed file, which is exactly the
-/// regression class the test `inject_refuses_to_overwrite_malformed_user_file`
-/// guards against.
+/// error) is treated as an explicit `Err` rather than silently clobbered
+/// with `{}` — the Grok precedent (`grok.rs:222-243`) pins the round-2
+/// review fix: a missing file is `{}`, but a present-but-unparseable
+/// file is the user's data and must surface to the spawn path as a
+/// provision failure so the agent user can repair it.
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content).map_err(|e| {
@@ -166,12 +194,63 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
             settings_kind(&settings)
         ));
     }
-    let stop_handler = serde_json::json!({ "type": "command", "command": command });
-    let expected = serde_json::json!({ "Stop": [stop_handler] });
-    if settings.get(HOOK_NAMESPACE) == Some(&expected) {
+    // Cursor's documented shape requires `"version": 1` at the root.
+    // We don't write anything other than `1` — a user with a future
+    // major-version file would surface that here as an explicit
+    // overwrite rather than silently coercing it.
+    match settings.get("version") {
+        None => {
+            settings["version"] = serde_json::json!(1);
+        }
+        Some(v) if v == &serde_json::json!(1) => {}
+        Some(other) => {
+            return Err(format!(
+                "cursor hooks.json `version` must be 1; got {other}"
+            ));
+        }
+    }
+    if settings.get("hooks").is_none() {
+        settings["hooks"] = serde_json::json!({});
+    }
+    let hooks = settings
+        .get_mut("hooks")
+        .expect("hooks key inserted above");
+    if !hooks.is_object() {
+        return Err(format!(
+            "cursor hooks.json `hooks` must be a JSON object; got {}",
+            settings_kind(hooks)
+        ));
+    }
+    if hooks.get("stop").is_none() {
+        hooks["stop"] = serde_json::json!([]);
+    }
+    let stop = hooks.get_mut("stop").expect("stop key inserted above");
+    if !stop.is_array() {
+        return Err(format!(
+            "cursor hooks.json `hooks.stop` must be an array; got {}",
+            settings_kind(stop)
+        ));
+    }
+    let stop_array = stop
+        .as_array_mut()
+        .expect("verified is_array above");
+    let new_handler = serde_json::json!({ "command": command });
+    let mut changed = false;
+    if let Some(existing) = stop_array
+        .iter_mut()
+        .find(|h| is_buildmesh_handler(h))
+    {
+        if *existing != new_handler {
+            *existing = new_handler;
+            changed = true;
+        }
+    } else {
+        stop_array.push(new_handler);
+        changed = true;
+    }
+    if !changed {
         return Ok(());
     }
-    settings[HOOK_NAMESPACE] = expected;
     let content = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
     atomic_write(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
@@ -231,7 +310,7 @@ impl AgentProvider for CursorAdapter {
 
     fn requires_attention_hook(&self) -> bool {
         // Issue #1368 — Cursor now ships an attention hook via
-        // `<project>/.cursor/hooks.json` (`Stop` event only — under
+        // `<project>/.cursor/hooks.json` (`stop` event only — under
         // `--force` Cursor doesn't raise permission prompts by
         // construction). The descriptor at `attention_capability()`
         // below carries the structured contract.
@@ -242,15 +321,23 @@ impl AgentProvider for CursorAdapter {
         // Issue #1368 + #1364 §3 — Cursor's `--force` flag launches
         // with permission prompts suppressed (every tool call
         // auto-runs unless a hook matcher denies it). The only signal
-        // Cursor emits at a useful cadence is `Stop` (turn finished,
+        // Cursor emits at a useful cadence is `stop` (turn finished,
         // agent at its prompt). Background-running distinguishes a
-        // false-yield Stop from a clean completion the same way AGY's
+        // false-yield stop from a clean completion the same way AGY's
         // `fullyIdle: false` does — Cursor's documented `transcript_path`
         // carries the JSONL the route can scan for pending tasks.
+        //
+        // Round-2 review: `trust` is intentionally `None` here.
+        // Cursor under `--force` does not require an explicit workspace
+        // trust entry; the project's `.cursor/hooks.json` is loaded
+        // unconditionally because `--force` itself is the trust
+        // grant. Advertising `"workspace trust"` would lie about a
+        // step we never take and trip a future caller that assumes
+        // the descriptor's promise (issue #1368 review point 2).
         AttentionCapability::Hook {
             events: vec![LifecycleKind::TurnCompleted, LifecycleKind::BackgroundRunning],
             launch_mode: AttentionLaunchMode::SkipPermissions,
-            trust: Some("workspace trust".into()),
+            trust: None,
             // Issue #1368: pin the validated Cursor release (1.0.0) so
             // a refactor that flips `min_version` to None trips this
             // pin. Mirrors the Grok (`GROK_MIN_HOOK_VERSION`, issue
@@ -261,15 +348,22 @@ impl AgentProvider for CursorAdapter {
 
     /// Provision Cursor's project-local attention hook into
     /// `<project>/.cursor/hooks.json` (issue #1368). The file lives in
-    /// the worktree because Cursor requires workspace trust for any
-    /// `.cursor/hooks.json` it loads — same trust pattern as Codex
-    /// (`codex.rs:1134-1141`). The hook URL template expands
+    /// the worktree because Cursor loads project-local hooks directly
+    /// under `--force`. The hook URL template expands
     /// `$BUILDMESH_PORT` and `$BUILDMESH_SESSION_ID` at runner time
     /// (set per-agent by `spawn_environment::wrap`) and forwards the
     /// hook stdin JSON verbatim to the attention route, which reads
     /// Cursor's documented `conversation_id` + `hook_event_name: "stop"`
     /// envelope. Idempotent and atomic (PID+counter `.tmp` + rename,
     /// AGY precedent `agy.rs:17-40`).
+    ///
+    /// The hook command's shell syntax is derived from
+    /// `resolved.env_type`, not from the host `Platform::current()`:
+    /// a WSL-guest Cursor invocation reads `%VAR%` as literal text and
+    /// `>nul` as a literal redirect target, so a host-side Windows
+    /// host_path with a Linux Cursor under it would write an unrunnable
+    /// command. `%VAR%` for `EnvType::Windows` (cmd.exe), `$VAR` for
+    /// `EnvType::Wsl` (bash).
     fn provision_attention_hooks(
         &self,
         resolved: &ResolvedPath,
@@ -280,7 +374,7 @@ impl AgentProvider for CursorAdapter {
         std::fs::create_dir_all(&cursor_dir)
             .map_err(|e| format!("failed to create .cursor dir: {e}"))?;
         let hooks_path = cursor_dir.join("hooks.json");
-        ensure_hooks_json(&hooks_path, &hook_command(Platform::current()))
+        ensure_hooks_json(&hooks_path, &hook_command(resolved.env_type))
     }
 
     fn produces_readable_transcript(&self) -> bool {
@@ -396,18 +490,25 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Attention hook injection — issue #1368.
+    // Attention hook injection — issue #1368 round-2.
     //
     // Cursor under `--force` behaves like AGY under
     // `--dangerously-skip-permissions`: every tool auto-runs unless a
     // hook matcher denies it, so the only signal Cursor emits at a
-    // useful cadence is `Stop`. Buildmesh provisions
-    // `<project>/.cursor/hooks.json` with a single `Stop` handler that
+    // useful cadence is `stop`. Buildmesh provisions
+    // `<project>/.cursor/hooks.json` with a single `stop` handler that
     // POSTs the hook stdin to the attention endpoint; the route's
     // classifier reads Cursor's documented `conversation_id` (snake_case)
     // + `hook_event_name: "stop"` envelope to land the node in `Ready`
     // (clean turn completion, issue #1364) or `AwaitingInput` (rare,
     // if Cursor adds permission prompts in a future release).
+    //
+    // Round-2 review fix: the schema asserted here is the documented
+    // Cursor shape (`version: 1`, `hooks: { stop: [{command: ...}] }`),
+    // NOT the AGY `buildmesh-attention` namespace. The earlier tests
+    // were tautological (asserted that `ensure_hooks_json` wrote what
+    // `ensure_hooks_json` told it to write); these tests assert against
+    // the public schema Cursor actually loads.
     // -------------------------------------------------------------------
 
     use crate::agent::capabilities::AttentionCapability;
@@ -419,89 +520,99 @@ mod tests {
         serde_json::from_str(&content).expect("hooks.json is not valid JSON")
     }
 
-    fn provision_cursor(project: &Path) {
+    fn provision_cursor(project: &Path, env_type: EnvType) {
         let path = project.to_string_lossy().into_owned();
         let resolved = ResolvedPath {
             host_path: path.clone(),
             spawn_path: path.clone(),
             raw_path: path,
-            env_type: EnvType::Windows,
+            env_type,
         };
         CURSOR
             .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
             .unwrap();
     }
 
-    /// Cursor's Stop hook POSTs the hook stdin (Cursor's documented
-    /// `conversation_id` + `hook_event_name: "stop"` envelope) to the
-    /// attention endpoint via curl. The command is bare (no `cmd.exe /c`
-    /// wrapper) because Cursor invokes hook commands through its own
-    /// shell — same shape as AGY (`agy.rs:50-61`).
+    /// Cursor's documented `.cursor/hooks.json` shape is:
+    ///   { "version": 1, "hooks": { "<event>": [{ "command": "..." }, …] } }
+    /// Asserted against the public schema, not against the implementation's
+    /// own bookkeeping. The `stop` entry stores the bare `{command}` object
+    /// (no `type` field — Cursor's runner doesn't read one).
     #[test]
-    fn inject_writes_stop_webhook() {
+    fn inject_writes_cursor_shaped_hooks_json() {
         let temp = TempDir::new().unwrap();
-        provision_cursor(temp.path());
+        provision_cursor(temp.path(), EnvType::Windows);
 
         let hooks = read_hooks_json(temp.path());
-        let attention = hooks
-            .get(HOOK_NAMESPACE)
-            .expect("hooks.json must own the buildmesh-attention namespace");
 
-        // Stop uses the simple shape — index straight into the first
-        // array element. No matcher, no tool-name filter — the whole
-        // turn is the event.
-        let stop_command = attention["Stop"][0]["command"]
+        // Top-level shape: object, version: 1, hooks: object.
+        assert!(hooks.is_object(), "top-level must be an object: {hooks}");
+        assert_eq!(hooks["version"], serde_json::json!(1));
+        let hooks_obj = hooks.get("hooks").expect("hooks key missing");
+        assert!(hooks_obj.is_object(), "`hooks` must be an object: {hooks_obj}");
+
+        // stop is an array; the Buildmesh handler lives at index 0.
+        let stop_array = hooks_obj["stop"]
+            .as_array()
+            .expect("`hooks.stop` must be an array");
+        assert!(
+            !stop_array.is_empty(),
+            "`hooks.stop` must carry at least one handler: {stop_array:?}"
+        );
+        let handler = &stop_array[0];
+        assert!(handler.is_object(), "handler must be an object: {handler}");
+        // Cursor's runner ignores a `type` field — the documented entry is
+        // bare `{ "command": "..." }`. Asserting the absence locks the wire.
+        assert!(
+            handler.get("type").is_none(),
+            "Cursor handler must NOT carry a `type` field: {handler}"
+        );
+        let cmd = handler["command"]
             .as_str()
-            .expect("Stop command missing");
+            .expect("`command` missing on stop handler");
         assert!(
-            stop_command.contains("/api/attention/"),
-            "Stop must POST to the attention endpoint: {stop_command}"
+            cmd.contains("/api/attention/"),
+            "Stop must POST to the attention endpoint: {cmd}"
         );
         assert!(
-            stop_command.contains("--data-binary @-"),
-            "Stop must forward the hook stdin as the POST body: {stop_command}"
+            cmd.contains("--data-binary @-"),
+            "Stop must forward the hook stdin as the POST body: {cmd}"
         );
         assert!(
-            stop_command.contains("BUILDMESH_PORT") && stop_command.contains("BUILDMESH_SESSION_ID"),
-            "Stop must expand the per-agent env vars at runner time: {stop_command}"
+            cmd.contains("BUILDMESH_PORT") && cmd.contains("BUILDMESH_SESSION_ID"),
+            "Stop must expand the per-agent env vars at runner time: {cmd}"
         );
-
-        // No other event handlers — Cursor under `--force` only emits Stop.
-        assert!(attention.get("PermissionRequest").is_none());
-        assert!(attention.get("PreToolUse").is_none());
     }
 
-    /// Re-running injection over an already-correct project is a no-op.
+    /// Re-running provision over an already-correct project is a no-op.
     /// Re-spawns (resume / handover / re-spawn on a closed node) must
     /// not rewrite the file and risk churn on unrelated siblings the
-    /// user has added. Mirrors AGY's `inject_is_idempotent`
-    /// (`agy.rs:454-467`).
+    /// user has added. Mirrors the AGY `inject_is_idempotent` pattern.
     #[test]
     fn inject_is_idempotent() {
         let temp = TempDir::new().unwrap();
-        provision_cursor(temp.path());
+        provision_cursor(temp.path(), EnvType::Windows);
         let hooks_first = read_hooks_json(temp.path());
 
-        provision_cursor(temp.path());
+        provision_cursor(temp.path(), EnvType::Windows);
         let hooks_second = read_hooks_json(temp.path());
         assert_eq!(hooks_first, hooks_second);
     }
 
-    /// Idempotency at the byte level — when the namespace already
-    /// matches the expected shape, the file is NOT rewritten. Asserted
-    /// by checking mtime is unchanged between two injects that find the
-    /// integration already wired. Same pattern as Grok's
+    /// Idempotency at the byte level — when the Buildmesh handler
+    /// already matches, the file is NOT rewritten. Asserted by mtime.
+    /// Same pattern as Grok's
     /// `idempotent_rerun_does_not_rewrite_when_already_wired`
     /// (`grok.rs:1280-1296`).
     #[test]
     fn idempotent_rerun_does_not_rewrite_when_already_wired() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join(".cursor").join("hooks.json");
-        provision_cursor(temp.path());
+        provision_cursor(temp.path(), EnvType::Windows);
         let first_bytes = std::fs::read(&path).unwrap();
         let first_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        provision_cursor(temp.path());
+        provision_cursor(temp.path(), EnvType::Windows);
         let second_bytes = std::fs::read(&path).unwrap();
         let second_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
 
@@ -512,9 +623,126 @@ mod tests {
         );
     }
 
-    /// Injection only owns the `buildmesh-attention` key — unrelated
-    /// top-level keys the user added (other tools, custom automation)
-    /// round-trip through a re-injection untouched.
+    /// Cursor's documented schema is `hooks[event]: [...]`, NOT the AGY
+    /// `buildmesh-attention` root namespace. Provisioning must NOT
+    /// introduce a `buildmesh-attention` key — that's a leftover from
+    /// the AGY copy that round-2 review caught. The Cursor runner
+    /// ignores any top-level keys other than `version` + `hooks`, so
+    /// the AGY namespace would silently no-op (the hook never fires).
+    #[test]
+    fn inject_does_not_use_agy_buildmesh_attention_namespace() {
+        let temp = TempDir::new().unwrap();
+        provision_cursor(temp.path(), EnvType::Windows);
+
+        let hooks = read_hooks_json(temp.path());
+        assert!(
+            hooks.get("buildmesh-attention").is_none(),
+            "Cursor's documented schema is `hooks[event]`; a top-level \
+             `buildmesh-attention` namespace is the AGY shape and would \
+             be silently ignored: {hooks}"
+        );
+    }
+
+    /// Re-provision must preserve sibling handlers (other tools, user
+    /// automation) the user has registered in `hooks.stop`. We append
+    /// our own handler without touching theirs. Mirrors
+    /// `inject_preserves_sibling_handlers` in `grok.rs`.
+    #[test]
+    fn inject_preserves_sibling_handlers_in_stop_array() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(".cursor");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        // Pre-existing user-authored entry — an audit log shipping
+        // every Cursor stop event to a separate collector. Provisioning
+        // must keep it.
+        let existing = r#"{
+            "version": 1,
+            "hooks": {
+                "stop": [
+                    { "command": "echo user-audit-log >> /tmp/audit.log" }
+                ]
+            }
+        }"#;
+        std::fs::write(cursor_dir.join("hooks.json"), existing).unwrap();
+
+        provision_cursor(temp.path(), EnvType::Windows);
+
+        let hooks = read_hooks_json(temp.path());
+        let stop = hooks["hooks"]["stop"].as_array().expect("stop array");
+        assert_eq!(
+            stop.len(),
+            2,
+            "sibling handler must be preserved alongside Buildmesh: {stop:?}"
+        );
+        assert!(
+            stop.iter()
+                .any(|h| h["command"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("/api/attention/")),
+            "Buildmesh handler must be present: {stop:?}"
+        );
+        assert!(
+            stop.iter()
+                .any(|h| h["command"].as_str() == Some("echo user-audit-log >> /tmp/audit.log")),
+            "user-authored handler must round-trip: {stop:?}"
+        );
+    }
+
+    /// A pre-existing Buildmesh handler (carrying the URL marker but a
+    /// stale command body) must be detected and replaced in place —
+    /// appending would create duplicates. This is the issue #886
+    /// idempotency invariant on the array-of-handlers shape: an
+    /// existing entry with the marker substring is updated rather
+    /// than duplicated.
+    #[test]
+    fn inject_dedupes_existing_buildmesh_stop_entry() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(".cursor");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        // Pre-existing Buildmesh entry (same marker substring so the
+        // upsert path runs, stale body so we can detect the
+        // replace-in-place rather than a duplicate append).
+        let existing = r#"{
+            "version": 1,
+            "hooks": {
+                "stop": [
+                    {
+                        "command": "echo stale-buildmesh-curl http://localhost:1999/api/attention/0 BUILDMESH_PORT=stale BUILDMESH_SESSION_ID=stale"
+                    }
+                ]
+            }
+        }"#;
+        std::fs::write(cursor_dir.join("hooks.json"), existing).unwrap();
+
+        provision_cursor(temp.path(), EnvType::Windows);
+
+        let hooks = read_hooks_json(temp.path());
+        let stop = hooks["hooks"]["stop"].as_array().expect("stop array");
+        assert_eq!(
+            stop.len(),
+            1,
+            "stale Buildmesh entry must be replaced, not appended: {stop:?}"
+        );
+        let cmd = stop[0]["command"].as_str().expect("command");
+        assert!(
+            cmd.contains("/api/attention/"),
+            "replaced entry must carry the Buildmesh URL: {cmd}"
+        );
+        assert!(
+            !cmd.contains("stale-buildmesh-curl"),
+            "stale body must be replaced, not preserved: {cmd}"
+        );
+        assert!(
+            cmd.contains("%BUILDMESH_PORT%"),
+            "replaced body must use the live Windows env-var syntax: {cmd}"
+        );
+    }
+
+    /// Injection must preserve user-authored top-level keys the user
+    /// has added (custom tooling, schema metadata). The Cursor runner
+    /// only reads `version` + `hooks`, but the round-trip is cheap and
+    /// matches the project's "additive merge" invariant.
     #[test]
     fn inject_preserves_unrelated_top_level_keys() {
         let temp = TempDir::new().unwrap();
@@ -522,47 +750,24 @@ mod tests {
         std::fs::create_dir_all(&cursor_dir).unwrap();
         std::fs::write(
             cursor_dir.join("hooks.json"),
-            r#"{"custom_namespace":{"user":"kept"},"sibling":"keep-me"}"#,
+            r#"{"custom_key":"keep-me","version":1,"hooks":{}}"#,
         )
         .unwrap();
 
-        provision_cursor(temp.path());
+        provision_cursor(temp.path(), EnvType::Windows);
 
         let hooks = read_hooks_json(temp.path());
-        assert_eq!(hooks["custom_namespace"]["user"], "kept");
-        assert_eq!(hooks["sibling"], "keep-me");
-        // And the new namespace is in place.
-        assert!(hooks[HOOK_NAMESPACE]["Stop"].is_array());
-    }
-
-    /// A user's existing `hooks.json` that already owns a
-    /// `buildmesh-attention` key survives intact — same namespace, just
-    /// re-asserted with the current command shape (which is byte-for-
-    /// byte identical, so no actual rewrite fires).
-    #[test]
-    fn inject_preserves_sibling_namespaces_alongside_our_namespace() {
-        let temp = TempDir::new().unwrap();
-        let cursor_dir = temp.path().join(".cursor");
-        std::fs::create_dir_all(&cursor_dir).unwrap();
-        std::fs::write(
-            cursor_dir.join("hooks.json"),
-            r#"{"buildmesh-attention":{"stale":"old"},"other":"kept"}"#,
-        )
-        .unwrap();
-
-        provision_cursor(temp.path());
-
-        let hooks = read_hooks_json(temp.path());
-        assert!(hooks[HOOK_NAMESPACE]["Stop"].is_array());
-        assert_eq!(hooks["other"], "kept");
+        assert_eq!(hooks["custom_key"], "keep-me");
+        assert_eq!(hooks["version"], serde_json::json!(1));
+        assert!(hooks["hooks"]["stop"].is_array());
     }
 
     /// Atomic write leaves no `.tmp` residue in the hooks dir. Mirrors
-    /// AGY precedent (`agy.rs:567-582`).
+    /// the AGY precedent (`agy.rs:567-582`).
     #[test]
     fn inject_atomic_write_leaves_no_tmp_residue() {
         let temp = TempDir::new().unwrap();
-        provision_cursor(temp.path());
+        provision_cursor(temp.path(), EnvType::Windows);
 
         let dir = temp.path().join(".cursor");
         let entries = std::fs::read_dir(&dir).unwrap();
@@ -590,7 +795,7 @@ mod tests {
         std::fs::create_dir_all(&cursor_dir).unwrap();
         let path = cursor_dir.join("hooks.json");
         // Deliberately malformed: trailing comma + unmatched brace.
-        let malformed = "{ \"buildmesh-attention\": [],, }";
+        let malformed = "{ \"hooks\": [],, }";
         std::fs::write(&path, malformed).unwrap();
 
         let path_str = project_to_string(temp.path());
@@ -648,6 +853,80 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1, 2, 3]");
     }
 
+    /// The `hooks.stop` value that exists as a non-array (e.g. a
+    /// string) is a misconfiguration — refuse rather than clobbering.
+    /// The AGY round-2 review caught the analogous `trustedWorkspaces`
+    /// case at `workspace_trust.rs:144-156`.
+    #[test]
+    fn inject_refuses_non_array_stop() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(".cursor");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        let path = cursor_dir.join("hooks.json");
+        // `hooks.stop` is a string, not an array — Cursor's runner
+        // would refuse the whole file.
+        std::fs::write(
+            &path,
+            r#"{ "version": 1, "hooks": { "stop": "not-an-array" } }"#,
+        )
+        .unwrap();
+
+        let path_str = project_to_string(temp.path());
+        let resolved = ResolvedPath {
+            host_path: path_str.clone(),
+            spawn_path: path_str.clone(),
+            raw_path: path_str,
+            env_type: EnvType::Windows,
+        };
+        let result = CURSOR.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0);
+        assert!(
+            result.is_err(),
+            "non-array `hooks.stop` must be rejected; got {result:?}"
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("`hooks.stop`"),
+            "error must name the offending field: {error}"
+        );
+    }
+
+    /// A `version` field other than `1` (e.g. a user with a future
+    /// Cursor major-version file) must be refused — silently coercing
+    /// it to `1` would mask a real schema mismatch and the runner
+    /// would silently drop the handler. Pin the gate so a future
+    /// Cursor that documents `version: 2` trips here before silently
+    /// rewriting.
+    #[test]
+    fn inject_refuses_unsupported_version() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(".cursor");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        let path = cursor_dir.join("hooks.json");
+        std::fs::write(
+            &path,
+            r#"{ "version": 2, "hooks": { "stop": [] } }"#,
+        )
+        .unwrap();
+
+        let path_str = project_to_string(temp.path());
+        let resolved = ResolvedPath {
+            host_path: path_str.clone(),
+            spawn_path: path_str.clone(),
+            raw_path: path_str,
+            env_type: EnvType::Windows,
+        };
+        let result = CURSOR.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0);
+        assert!(
+            result.is_err(),
+            "unsupported `version` must be rejected; got {result:?}"
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("`version`"),
+            "error must name the offending field: {error}"
+        );
+    }
+
     /// The matching positive case for the malformed-file pin: a missing
     /// file should be treated as `{}` (fresh install) and written
     /// normally. Lock the happy path so a future refactor that treats
@@ -661,10 +940,12 @@ mod tests {
         // Note: no file at .cursor/hooks.json — fresh install.
         assert!(!cursor_dir.join("hooks.json").exists());
 
-        provision_cursor(temp.path());
+        provision_cursor(temp.path(), EnvType::Windows);
         let written = std::fs::read_to_string(cursor_dir.join("hooks.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&written).unwrap();
-        assert!(value[HOOK_NAMESPACE]["Stop"].is_array());
+        assert_eq!(value["version"], serde_json::json!(1));
+        assert!(value["hooks"]["stop"].is_array());
+        assert!(!value["hooks"]["stop"].as_array().unwrap().is_empty());
     }
 
     /// Helper: convert a project path into a string for `ResolvedPath`
@@ -678,43 +959,79 @@ mod tests {
     /// The Windows hook command uses cmd environment syntax (`%VAR%`)
     /// and is a bare command because Cursor supplies the shell. Unix
     /// uses `$VAR` syntax and likewise does not add a nested shell
-    /// wrapper. Mirrors AGY's `hook_command_uses_platform_env_syntax`
-    /// (`agy.rs:514-532`).
+    /// wrapper. The Windows command must end in `|| exit 0`; the
+    /// Unix command must end in `|| true` (round-2 review, point 5).
     #[test]
-    fn hook_command_uses_platform_env_syntax() {
-        let win = hook_command(Platform::Windows);
+    fn hook_command_uses_env_type_specific_syntax_with_fail_safe() {
+        let win = hook_command(EnvType::Windows);
         assert!(win.starts_with("curl.exe "), "win: {win}");
         assert!(!win.contains("cmd.exe /c"), "win: {win}");
         assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
         assert!(win.contains("%BUILDMESH_SESSION_ID%"), "win: {win}");
+        // Fail-safe: a curl failure (port dropped, Buildmesh restarting)
+        // must not surface as a hook exit error. cmd's `|| exit 0` is
+        // the analogue of POSIX `|| true`.
+        assert!(
+            win.trim_end().ends_with("|| exit 0"),
+            "win command must end with `|| exit 0`: {win}"
+        );
 
-        for platform in [Platform::Macos, Platform::Linux] {
-            let unix = hook_command(platform);
-            assert!(unix.starts_with("curl "), "unix: {unix}");
-            assert!(!unix.contains("sh -c"), "unix: {unix}");
-            assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
-            assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
-        }
+        let unix = hook_command(EnvType::Wsl);
+        assert!(unix.starts_with("curl "), "unix: {unix}");
+        assert!(!unix.contains("sh -c"), "unix: {unix}");
+        assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
+        assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
+        assert!(
+            unix.trim_end().ends_with("|| true"),
+            "unix command must end with `|| true`: {unix}"
+        );
     }
 
-    /// Cursor invokes hook commands through its own Windows shell
-    /// wrapper. The command stored in hooks.json must therefore be a
-    /// bare command rather than a second `cmd.exe /c "..."` wrapper
-    /// (the second `cmd.exe` would env-clear the parent's exports, so
-    /// `$BUILDMESH_PORT` / `$BUILDMESH_SESSION_ID` never expand). Same
-    /// mirror as AGY (`agy.rs:533-554`).
+    /// Round-2 review point 3: a Windows host_path with a WSL Cursor
+    /// underneath must write the bash-flavored command (`$VAR`,
+    /// `>/dev/null`), not the cmd-flavored one. The earlier PR
+    /// hard-coded `Platform::current()` for the shell syntax, which
+    /// would silently write a `%VAR%` command into a Linux WSL
+    /// hooks.json — Linux shells do not expand `%VAR%`, so the curl
+    /// POST never fires. Provision must derive the syntax from
+    /// `resolved.env_type`.
     #[test]
-    fn hook_command_is_bare_no_double_shell_wrap() {
-        let win = hook_command(Platform::Windows);
-        assert!(!win.starts_with("cmd.exe /c"), "win: {win}");
-        assert!(!win.starts_with('"') && !win.ends_with('"'), "win: {win}");
-        assert!(win.contains("curl.exe"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_SESSION_ID%"), "win: {win}");
+    fn provision_uses_resolved_env_type_not_host_platform() {
+        let temp = TempDir::new().unwrap();
+        // host_path is a Windows-style UNC path, but env_type is WSL —
+        // the agent runs inside a Linux distro even though Buildmesh
+        // is on Windows. We must write the bash syntax.
+        let resolved = ResolvedPath {
+            host_path: temp.path().to_string_lossy().into_owned(),
+            spawn_path: temp.path().to_string_lossy().into_owned(),
+            raw_path: temp.path().to_string_lossy().into_owned(),
+            env_type: EnvType::Wsl,
+        };
+        CURSOR
+            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
+            .unwrap();
 
-        let unix = hook_command(Platform::Linux);
-        assert!(!unix.starts_with("sh -c"), "unix: {unix}");
-        assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
+        let hooks = read_hooks_json(temp.path());
+        let cmd = hooks["hooks"]["stop"][0]["command"]
+            .as_str()
+            .expect("command")
+            .to_string();
+        assert!(
+            cmd.contains("$BUILDMESH_PORT"),
+            "WSL target must use POSIX `$VAR` syntax: {cmd}"
+        );
+        assert!(
+            !cmd.contains("%BUILDMESH_PORT%"),
+            "WSL target must NOT write cmd `%VAR%` syntax: {cmd}"
+        );
+        assert!(
+            cmd.contains(">/dev/null 2>/dev/null"),
+            "WSL target must redirect to /dev/null: {cmd}"
+        );
+        assert!(
+            !cmd.contains(">nul"),
+            "WSL target must NOT write cmd `>nul` syntax: {cmd}"
+        );
     }
 
     /// Adapter contract: the harness now requires an attention hook
@@ -727,8 +1044,33 @@ mod tests {
         assert!(CURSOR.produces_readable_transcript());
     }
 
+    /// Issue #1368 round-2: the descriptor advertises `trust = None`,
+    /// not `"workspace trust"`. Cursor under `--force` does not
+    /// require a workspace-trust side-effect; advertising a non-empty
+    /// `trust` would promise a step the codebase never takes
+    /// (Cursor's `ensure_workspace_trusted` falls through to the
+    /// trait no-op default). Pin so a refactor that flips the value
+    /// back to `Some("workspace trust".into())` trips here before
+    /// the wire shape drifts.
+    #[test]
+    fn cursor_attention_capability_advertises_no_trust() {
+        let caps = CURSOR.capabilities();
+        assert!(caps.requires_attention_hook);
+        let cap = caps.attention_capability;
+        match &cap {
+            AttentionCapability::Hook { trust, .. } => {
+                assert!(
+                    trust.is_none(),
+                    "Cursor advertises no workspace-trust side-effect under `--force`; \
+                     a non-None `trust` would promise a step we never take: {trust:?}"
+                );
+            }
+            _ => panic!("expected Hook, got {cap:?}"),
+        }
+    }
+
     /// Issue #1368: pin the attention capability descriptor — the
-    /// `--force` launch mode, the Stop-only events list, and the
+    /// `--force` launch mode, the stop-only events list, and the
     /// `min_version` pin to `CURSOR_MIN_HOOK_VERSION`. Drift in any of
     /// these flips the Inspector's capability table for Cursor and is
     /// the load-bearing contract for the Spawn Menu's hook-aware
