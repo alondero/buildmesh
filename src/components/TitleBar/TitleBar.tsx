@@ -102,11 +102,11 @@ function UsageIcon({ className }: IconProps) {
 
 /** Issue #1375 — the centred command field. The labelled "Search or open…"
     field is the global entry point to the command palette (views, commands,
-    nodes, issues, pull requests). It sits mid-bar between two drag-region
-    spacers (VS Code-style centring) and opens a surface rather than
-    displaying data inline. The kbd hint is read from the shortcut catalog
-    (the knowledge-primer's single source for display labels) so it can
-    never drift from the cheatsheet row. */
+    nodes, issues, pull requests); the header's `1fr auto 1fr` grid centres
+    it on the viewport. It opens a surface rather than displaying data
+    inline. The kbd hint is read from the shortcut catalog (the
+    knowledge-primer's single source for display labels) so it can never
+    drift from the cheatsheet row. */
 function NavigationControls() {
   // The read below drives the field's visible aria state — `aria-expanded`
   // mirrors the omnibar's mounted state so assistive tech reads the same
@@ -114,11 +114,11 @@ function NavigationControls() {
   // directly keeps the subscription cheap so unrelated store ticks
   // (terminal output, agent node updates) don't re-render this header.
   const omnibarOpen = useUIStore((s) => s.omnibarOpen);
-  // `min-w-44` pins this wrapper's flex floor to the field's own
-  // `min-w-40` (130px at the 13px root) + padding — without it the
-  // wrapper's content-based minimum keeps ~100px of dead slack above the
-  // field's real floor, so flex starves the wordmark before the field
-  // yields.
+  // `min-w-44` pins this wrapper's floor to the field's own `min-w-40`
+  // (130px at the 13px root) + padding — without it the wrapper's
+  // content-based minimum keeps ~100px of dead slack above the field's
+  // real floor, so flex/grid pressure starves the wordmark before the
+  // field yields.
   return (
     <div className="flex items-center px-2 min-w-44">
       <button
@@ -140,13 +140,12 @@ function NavigationControls() {
         <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
         {/* `SEARCH_SHORTCUT_LABEL` is resolved once at module scope. The
             conditional still keeps an empty <kbd> chip from appearing if
-            the catalog row were ever renamed. The chip hides below 1350px
-            (a tighter window than the label degradations) — it's the last
-            reclaimable width, and dropping it first keeps the full
-            "Search or open…" placeholder readable at the 1280px default
-            window without touching any visible labels. */}
+            the catalog row were ever renamed. The chip is the LAST thing
+            to come back when widening: with it, the full-label bar needs
+            ~1390px (measured), so it stays hidden below 1400px while the
+            labels return at 1300px (switcher) and 1150px (pills). */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
-          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1349px]:hidden">
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1399px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
           </kbd>
         )}
@@ -176,17 +175,17 @@ function HeaderPillButton({ icon, label, onClick, title, ariaLabel, active = fal
       aria-label={ariaLabel}
       aria-expanded={ariaExpanded}
       title={title}
-      className={`flex h-9 shrink-0 items-center gap-2 rounded-md border px-3 text-xs transition-colors ${
+      className={`flex h-9 shrink-0 items-center gap-2 rounded-md border px-2.5 text-sm transition-colors ${
         active
           ? 'border-accent-cyan/40 bg-accent-cyan/10 text-accent-cyan'
           : 'border-border-default text-text-secondary hover:bg-bg-card hover:text-text-primary'
       }`}
     >
       {icon}
-      {/* Hidden below 1150px container width — the pill degrades to
-          icon-only on narrow windows (the pre-#1375 look) so the bar
-          never overflows its 900px minimum. The aria-label above keeps
-          the accessible name stable either way. */}
+      {/* Icon-only below 1150px window width (a viewport media query, not a
+          container query) — the pills are the first thing the degradation
+          ladder drops, and the first to come back. The aria-label above
+          keeps the accessible name stable either way. */}
       <span className="max-[1150px]:hidden">{label}</span>
     </button>
   );
@@ -382,14 +381,21 @@ export function TitleBar() {
 
   return (
     <>
+      {/* Three-column grid (`1fr auto 1fr`): the palette field's column is
+          `auto` and its siblings get equal `1fr` tracks, so the field is
+          centred on the VIEWPORT — flanking `flex-1` spacers only centre it
+          between unequal side clusters, which is not centring. The side
+          cells are drag regions, so their empty space still grabs the
+          window while buttons inside stay clickable. */}
       <header
         data-tauri-drag-region
-        className="flex items-stretch h-18 shrink-0 bg-bg-surface border-b border-border-subtle select-none"
+        className="grid h-18 shrink-0 grid-cols-[1fr_auto_1fr] items-stretch bg-bg-surface border-b border-border-subtle select-none"
       >
-        {isMac ? (
-          <>
+        {/* Left cell — clusters hug the start edge. */}
+        <div data-tauri-drag-region className="flex items-center pl-3 pr-2">
+          {isMac && (
             <div
-              className="flex items-center gap-2 pl-3 pr-3"
+              className="flex items-center gap-2 pr-3"
               data-testid="macos-traffic-lights"
             >
               <MacosTrafficLight kind="close" onClick={() => appWindow.close()} ariaLabel="Close" />
@@ -400,107 +406,68 @@ export function TitleBar() {
                 ariaLabel={isMaximized ? 'Restore' : 'Maximize'}
               />
             </div>
-            <div data-tauri-drag-region className="flex items-center pr-2 shrink-0">
-              <WordmarkImg />
-            </div>
-          </>
-        ) : (
-          <div data-tauri-drag-region className="flex items-center pl-3 pr-2 shrink-0">
-            <WordmarkImg />
-          </div>
-        )}
-
-        <div className="flex items-center">
+          )}
+          <WordmarkImg />
           <ViewModeSwitcher />
         </div>
 
-        {/* Drag-region spacers — the "empty" parts of the strip the user
-            grabs to move the window; they flank the centred palette field
-            and grow to keep it optically centred. `min-w-8` on EACH side
-            guarantees at least a usable grab zone on narrow windows where
-            the clusters add up past the viewport width (PR #1489 review —
-            at sub-1000px a bare `flex-1` collapses to 0px and users can no
-            longer drag the window). The search field's `min-w-40` and the
-            wrapper floors mirror this: search and the grid input yield
-            space first so the drag regions stay grabbable. */}
-        <div data-tauri-drag-region className="flex-1 min-w-8" />
-
-        {/* Issue #1375 — the centred command field. Non-draggable (the
-            header carries `data-tauri-drag-region`, never this cluster)
-            so clicks don't grab the window. Its wrapper's flex floor is
-            pinned inside `NavigationControls`. */}
+        {/* Centre cell — the #1375 command field. Non-draggable so clicks
+            don't grab the window. */}
         <NavigationControls />
 
-        {/* Drag-region spacer (right of the field) — pairs with the left
-            spacer to keep the field centred as the window resizes. */}
-        <div data-tauri-drag-region className="flex-1 min-w-8" />
+        {/* Right cell — clusters hug the end edge. Non-draggable children
+            (inputs/pills/buttons) keep their clicks; empty space drags. */}
+        <div data-tauri-drag-region className="flex items-center justify-end">
+          <div className="flex items-center pr-1 min-w-[122px]">
+            <GridControls />
+          </div>
 
-        {/* Issue #998 — grid search control. Lives on the right side of the
-            top bar, between the right drag-region spacer and the
-            Usage / Settings / Remote Access pills, per the wayfinder #988
-            spec ("Controls live on the right side of the slim top View Header,
-            introduced in #983"). The component itself is a subset of the
-            full #997 work — just the search input + clear button; the
-            filter popover, sort selector, badges, and reset button called
-            out in #997 land in a follow-up. The component is non-draggable
-            (`[data-tauri-drag-region]` is on the header, not bubbled here)
-            so clicks on the input don't grab the window. `min-w-[122px]`
-            pins the wrapper floor to the input's `min-w-36` + padding so
-            the input yields under flex pressure instead of hoarding its
-            full `w-56`. */}
-        <div className="flex items-center pr-1 min-w-[122px]">
-          <GridControls />
+          <div className="flex items-center gap-2 pr-1">
+            <UsageButton />
+            <HeaderPillButton
+              ariaLabel="Open settings"
+              onClick={() => useUIStore.getState().openAppSettings()}
+              title="Settings"
+              label="Settings"
+              icon={<SettingsIcon className="h-4 w-4 shrink-0" />}
+            />
+            <HeaderPillButton
+              ariaLabel="Open mobile remote access"
+              onClick={() => useUIStore.getState().openRemoteAccess()}
+              title="Remote access"
+              label="Mobile"
+              icon={<MobileIcon className="h-4 w-4 shrink-0" />}
+            />
+          </div>
+
+          {!isMac && (
+            <>
+              <div className="w-px h-6 self-center bg-border-subtle mx-1 shrink-0" />
+
+              {/* `shrink-0` — window buttons are critical chrome: flex
+                  pressure at the 900px minimum width must never squish
+                  them into unreadable slivers. */}
+              <div className="flex items-stretch shrink-0">
+                <WindowControlButton onClick={() => appWindow.minimize()} title="Minimize">
+                  <MinimizeIcon className="w-[18px] h-[18px]" />
+                </WindowControlButton>
+                <WindowControlButton
+                  onClick={handleToggleMaximize}
+                  title={isMaximized ? 'Restore' : 'Maximize'}
+                >
+                  {isMaximized ? (
+                    <RestoreIcon className="w-[18px] h-[18px]" />
+                  ) : (
+                    <MaximizeIcon className="w-[18px] h-[18px]" />
+                  )}
+                </WindowControlButton>
+                <WindowControlButton onClick={() => appWindow.close()} title="Close" danger>
+                  <CloseIcon className="w-[18px] h-[18px]" />
+                </WindowControlButton>
+              </div>
+            </>
+          )}
         </div>
-
-        {/* Right-hand utility cluster — Usage (issue #1375) joins the
-            Settings and Remote Access pills, all sharing the
-            `HeaderPillButton` skeleton. Non-draggable so clicks don't
-            grab the window. */}
-        <div className="flex items-center gap-2 pr-1">
-          <UsageButton />
-          <HeaderPillButton
-            ariaLabel="Open settings"
-            onClick={() => useUIStore.getState().openAppSettings()}
-            title="Settings"
-            label="Settings"
-            icon={<SettingsIcon className="h-4 w-4 shrink-0" />}
-          />
-          <HeaderPillButton
-            ariaLabel="Open remote access"
-            onClick={() => useUIStore.getState().openRemoteAccess()}
-            title="Remote access"
-            label="Mobile"
-            icon={<MobileIcon className="h-4 w-4 shrink-0" />}
-          />
-        </div>
-
-        {!isMac && (
-          <>
-            <div className="w-px h-6 self-center bg-border-subtle mx-1 shrink-0" />
-
-            {/* `shrink-0` — the window buttons are critical chrome: flex
-                pressure at the 900px minimum width must never squish them
-                into unreadable slivers. */}
-            <div className="flex items-stretch shrink-0">
-              <WindowControlButton onClick={() => appWindow.minimize()} title="Minimize">
-                <MinimizeIcon className="w-[18px] h-[18px]" />
-              </WindowControlButton>
-              <WindowControlButton
-                onClick={handleToggleMaximize}
-                title={isMaximized ? 'Restore' : 'Maximize'}
-              >
-                {isMaximized ? (
-                  <RestoreIcon className="w-[18px] h-[18px]" />
-                ) : (
-                  <MaximizeIcon className="w-[18px] h-[18px]" />
-                )}
-              </WindowControlButton>
-              <WindowControlButton onClick={() => appWindow.close()} title="Close" danger>
-                <CloseIcon className="w-[18px] h-[18px]" />
-              </WindowControlButton>
-            </div>
-          </>
-        )}
       </header>
 
       {appSettingsOpen && <AppSettingsModal onClose={() => useUIStore.getState().closeAppSettings()} />}

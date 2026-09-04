@@ -85,22 +85,28 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(screen.getByRole('button', { name: 'Search or open' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Open Usage' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Open settings' })).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Open remote access' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Open mobile remote access' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Minimize window' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Maximize window' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Close window' })).toBeTruthy();
     });
 
-    it('marks the header, wordmark and spacer as drag regions but never the interactive clusters', async () => {
+    it('marks the header, wordmark and side grid cells as drag regions but never the interactive clusters', async () => {
       const { container } = await renderTitleBar();
       const header = container.querySelector('header')!;
       expect(header.hasAttribute('data-tauri-drag-region')).toBe(true);
       expect(screen.getByAltText('Buildmesh').hasAttribute('data-tauri-drag-region')).toBe(true);
-      const spacer = header.querySelector('div.flex-1')!;
-      expect(spacer.hasAttribute('data-tauri-drag-region')).toBe(true);
+      // The header is a 1fr/auto/1fr grid; the two side cells carry the
+      // drag region so their empty space grabs the window (the centre cell
+      // is the palette field and must not).
+      const cells = Array.from(header.children) as HTMLElement[];
+      expect(cells).toHaveLength(3);
+      expect(cells[0].hasAttribute('data-tauri-drag-region')).toBe(true);
+      expect(cells[1].hasAttribute('data-tauri-drag-region')).toBe(false);
+      expect(cells[2].hasAttribute('data-tauri-drag-region')).toBe(true);
       // Buttons (and their glyphs) must stay the mousedown target — if any
       // carried the attribute, Tauri's drag script would eat the click.
-      for (const label of ['Search or open', 'Open Usage', 'Open settings', 'Open remote access', 'Minimize window', 'Maximize window', 'Close window']) {
+      for (const label of ['Search or open', 'Open Usage', 'Open settings', 'Open mobile remote access', 'Minimize window', 'Maximize window', 'Close window']) {
         const button = screen.getByRole('button', { name: label });
         expect(button.hasAttribute('data-tauri-drag-region')).toBe(false);
         expect(button.querySelector('[data-tauri-drag-region]')).toBeNull();
@@ -151,7 +157,7 @@ describe('TitleBar (bespoke window chrome)', () => {
 
     it('opens and closes the Remote Access modal', async () => {
       await renderTitleBar();
-      fireEvent.click(screen.getByRole('button', { name: 'Open remote access' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Open mobile remote access' }));
       expect(screen.getByRole('dialog', { name: 'Remote access' })).toBeTruthy();
       fireEvent.click(screen.getByRole('button', { name: 'stub-close-remote' }));
       expect(screen.queryByRole('dialog')).toBeNull();
@@ -173,6 +179,53 @@ describe('TitleBar (bespoke window chrome)', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Open Usage' }));
       expect(useUIStore.getState().probeOpen).toBe(true);
       expect(useUIStore.getState().probeTab).toBe('usage');
+    });
+
+    it('mirrors the Usage surface state in aria-expanded (closed by default, open when active)', async () => {
+      await renderTitleBar();
+      const usage = screen.getByRole('button', { name: 'Open Usage' });
+      expect(usage.getAttribute('aria-expanded')).toBe('false');
+      act(() => {
+        useUIStore.setState({ probeOpen: true, probeTab: 'usage' });
+      });
+      expect(usage.getAttribute('aria-expanded')).toBe('true');
+    });
+
+    it('keeps visible labels inside accessible names (WCAG 2.5.3) on the utility pills', async () => {
+      await renderTitleBar();
+      // SC 2.5.3 Label in Name: the accessible name must contain the
+      // visible text, or voice dictation ("click Mobile") can't find the
+      // control. Pin it for every pill.
+      for (const [name, visible] of [
+        ['Open Usage', 'Usage'],
+        ['Open settings', 'Settings'],
+        ['Open mobile remote access', 'Mobile'],
+      ] as const) {
+        const button = screen.getByRole('button', { name });
+        const labelSpan = button.querySelector('span');
+        expect(labelSpan?.textContent).toBe(visible);
+        expect(name.toLowerCase()).toContain(visible.toLowerCase());
+      }
+    });
+
+    it('carries the responsive degradation classes (labels, chip, flex floors)', async () => {
+      const { container } = await renderTitleBar();
+      // Pill and switcher labels drop to icon-only below their breakpoints;
+      // the chip is the last affordance back when widening. Class presence
+      // is the contract — the media queries themselves are browser-rendered.
+      const remotePill = screen.getByRole('button', { name: 'Open mobile remote access' });
+      expect(remotePill.querySelector('span')?.className).toContain('max-[1150px]:hidden');
+      const switcherGroup = screen.getByRole('group', { name: /view mode/i });
+      const switcherLabel = switcherGroup.querySelector('span');
+      expect(switcherLabel?.className).toContain('max-[1300px]:hidden');
+      const chip = container.querySelector('kbd');
+      expect(chip?.className).toContain('max-[1399px]:hidden');
+      // Flex floors: the palette field's wrapper and the grid-search
+      // wrapper must never collapse below their yield-first floors.
+      const searchWrapper = screen.getByTestId('titlebar-command-search').parentElement!;
+      expect(searchWrapper.className).toContain('min-w-44');
+      const gridWrapper = screen.getByTestId('grid-controls').parentElement!;
+      expect(gridWrapper.className).toContain('min-w-[122px]');
     });
   });
 });

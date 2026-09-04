@@ -158,17 +158,18 @@ export function ViewModeSwitcher() {
             // hides on narrow windows (see the span below).
             aria-label={label}
             onClick={() => handleSelect(mode)}
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-sm font-sans font-medium whitespace-nowrap transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-2 py-1.5 rounded-md text-sm font-sans font-medium whitespace-nowrap transition-colors ${
               active
                 ? 'bg-bg-card text-accent-cyan'
                 : 'text-text-secondary hover:text-text-primary hover:bg-bg-card'
             }`}
           >
             <Icon className="w-4 h-4 shrink-0" />
-            {/* Icon-only below 1150px window width — mirrors the title
-                bar pills' narrow-window degradation so the taller bar
-                never overflows the app's 900px minimum width. */}
-            <span className="max-[1150px]:hidden">{label}</span>
+            {/* Icon-only below 1300px window width — full segment labels
+                need that much room to coexist with the utility cluster
+                (measured headroom; see the knowledge-primer's Frameless
+                Window section). The aria-label keeps the name stable. */}
+            <span className="max-[1300px]:hidden">{label}</span>
           </button>
         );
       })}
