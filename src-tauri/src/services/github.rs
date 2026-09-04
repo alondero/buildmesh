@@ -657,25 +657,67 @@ fn build_http_client(
         .build()
 }
 
+/// Default GitHub REST/GraphQL API base. Overridable in tests via
+/// `GitHubClient::for_test` (fake-server request-counter tests for issue
+/// #1529) — production always uses this value through `GitHubClient::new()`.
+const DEFAULT_API_BASE: &str = "https://api.github.com";
+
 /// A lightweight GitHub API client.
 pub struct GitHubClient {
     client: Client,
     token: String,
+    /// API base without trailing slash (e.g. `https://api.github.com` in
+    /// prod, `http://127.0.0.1:<port>` in fake-server tests). All REST paths
+    /// are joined onto this; GraphQL appends `/graphql`. Stored (rather
+    /// than read from env per-call) so tests can point one client at a fake
+    /// server without process-global env races.
+    base_url: String,
 }
 
 impl GitHubClient {
     /// Create a new client, resolving the token from environment or gh config.
     pub fn new() -> Result<Self, GitHubError> {
         let token = resolve_token()?;
+        Self::with_token_and_base(token, DEFAULT_API_BASE)
+    }
+
+    /// Build a client from an explicit token + API base. The base is
+    /// normalised (trailing `/` trimmed) so `rest_url("/repos/...")` joins
+    /// correctly whether the caller passes `...com` or `...com/`.
+    pub fn with_token_and_base(token: String, base_url: &str) -> Result<Self, GitHubError> {
         let client = build_http_client(HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT)
             .map_err(GitHubError::Http)?;
-        Ok(Self { client, token })
+        Ok(Self {
+            client,
+            token,
+            base_url: base_url.trim_end_matches('/').to_string(),
+        })
+    }
+
+    /// Test-only constructor: explicit base URL + token, no env/gh-config
+    /// resolution. Used by the issue-#1529 fake-server tests that assert
+    /// O(pages) request counts — each test spins its own loopback server
+    /// and points one client at it.
+    #[cfg(test)]
+    pub fn for_test(base_url: &str, token: &str) -> Result<Self, GitHubError> {
+        Self::with_token_and_base(token.to_string(), base_url)
+    }
+
+    /// Join a REST path (leading `/`) onto the configured base.
+    fn rest_url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    /// GraphQL endpoint for the configured base (`<base>/graphql`).
+    fn graphql_url(&self) -> String {
+        format!("{}/graphql", self.base_url)
     }
 
     /// Verify the token is valid by calling GET /user.
     pub fn check_auth(&self) -> bool {
+        let url = self.rest_url("/user");
         let resp = self.client
-            .get("https://api.github.com/user")
+            .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
@@ -706,9 +748,9 @@ impl GitHubClient {
         repo: &str,
         username: &str,
     ) -> Result<CollaboratorPermission, GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/collaborators/{username}/permission"
-        );
+        let url = self.rest_url(&format!(
+            "/repos/{owner}/{repo}/collaborators/{username}/permission"
+        ));
         let resp = self.client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
@@ -737,10 +779,10 @@ impl GitHubClient {
     /// List open issues (excluding pull requests) for a repository.
     pub fn list_issues_only(&self, owner: &str, repo: &str) -> Result<Vec<Issue>, GitHubError> {
         // Use the search API which lets us filter to only issues (not PRs)
-        let url = format!(
-            "https://api.github.com/search/issues?q=repo:{}/{}+is:issue+state:open&per_page=100",
+        let url = self.rest_url(&format!(
+            "/search/issues?q=repo:{}/{}+is:issue+state:open&per_page=100",
             owner, repo
-        );
+        ));
         let resp = self.client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
@@ -807,10 +849,10 @@ impl GitHubClient {
                 other => other.to_string(),
             })
             .collect();
-        let url = format!(
-            "https://api.github.com/search/issues?q={}&per_page=100",
+        let url = self.rest_url(&format!(
+            "/search/issues?q={}&per_page=100",
             encoded
-        );
+        ));
         let resp = self.client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
@@ -843,7 +885,7 @@ impl GitHubClient {
         head: &str,
         base: &str,
     ) -> Result<String, GitHubError> {
-        let url = format!("https://api.github.com/repos/{}/{}/pulls", owner, repo);
+        let url = self.rest_url(&format!("/repos/{}/{}/pulls", owner, repo));
 
         #[derive(Serialize)]
         struct CreatePr<'a> {
@@ -885,9 +927,9 @@ impl GitHubClient {
         // GitHub's `head=OWNER:BRANCH` filter matches the head ref of a PR.
         // The `state=open` filter is the only thing we care about; `per_page=1`
         // is the invariant: one branch → at most one open PR.
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open&per_page=1"
-        );
+        let url = self.rest_url(&format!(
+            "/repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open&per_page=1"
+        ));
         let resp = self.client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
@@ -909,37 +951,6 @@ impl GitHubClient {
         Ok(prs.into_iter().next())
     }
 
-    /// List pull requests for a repository, filtered by `state`
-    /// (`"open"`, `"closed"`, or `"all"`). Unlike `list_issues_only` (which
-    /// uses the search API and wraps results in `items`), the `/pulls`
-    /// endpoint returns the array directly.
-    pub fn list_pull_requests(
-        &self,
-        owner: &str,
-        repo: &str,
-        state: &str,
-    ) -> Result<Vec<PullRequest>, GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/pulls?state={}&per_page=100",
-            owner, repo, state
-        );
-        let resp = self.client
-            .get(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", self.token))
-            .header(USER_AGENT, "buildmesh")
-            .header(ACCEPT, "application/vnd.github+json")
-            .send()?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().unwrap_or_default();
-            return Err(GitHubError::Api(status.as_u16(), body));
-        }
-
-        let prs: Vec<PullRequest> = resp.json()?;
-        Ok(prs)
-    }
-
     /// Has this pull request been merged? Uses `GET /pulls/{n}/merge`, which
     /// answers with a bare status: `204` = merged, `404` = not merged (or
     /// closed without merging). Cheaper and less ambiguous than fetching the
@@ -950,10 +961,10 @@ impl GitHubClient {
         repo: &str,
         pr_number: i64,
     ) -> Result<bool, GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/pulls/{}/merge",
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/pulls/{}/merge",
             owner, repo, pr_number
-        );
+        ));
         let resp = self.client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
@@ -984,10 +995,10 @@ impl GitHubClient {
         repo: &str,
         pr_number: i64,
     ) -> Result<(Option<bool>, String), GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/pulls/{}",
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/pulls/{}",
             owner, repo, pr_number
-        );
+        ));
         let resp = self.client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
@@ -1024,10 +1035,10 @@ impl GitHubClient {
         repo: &str,
         pr_number: i64,
     ) -> Result<Vec<PrFile>, GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/pulls/{}/files?per_page=100",
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/pulls/{}/files?per_page=100",
             owner, repo, pr_number
-        );
+        ));
         let resp = self.client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
@@ -1053,10 +1064,10 @@ impl GitHubClient {
         repo: &str,
         pr_number: i64,
     ) -> Result<String, GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/pulls/{}/merge",
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/pulls/{}/merge",
             owner, repo, pr_number
-        );
+        ));
 
         #[derive(Serialize)]
         struct MergePr {
@@ -1088,10 +1099,10 @@ impl GitHubClient {
         let result: MergeResult = resp.json()?;
 
         // Now delete the branch. First, get the PR to find the head ref.
-        let pr_url = format!(
-            "https://api.github.com/repos/{}/{}/pulls/{}",
+        let pr_url = self.rest_url(&format!(
+            "/repos/{}/{}/pulls/{}",
             owner, repo, pr_number
-        );
+        ));
         // Post-merge read: the merge already succeeded, so this GET is
         // best-effort. The 30s default would otherwise abort the function
         // with `Err` even though GitHub confirms the merge — use the write
@@ -1116,10 +1127,10 @@ impl GitHubClient {
                 head: PrHead,
             }
             if let Ok(detail) = pr_resp.json::<PrDetail>() {
-                let delete_url = format!(
-                    "https://api.github.com/repos/{}/{}/git/refs/heads/{}",
+                let delete_url = self.rest_url(&format!(
+                    "/repos/{}/{}/git/refs/heads/{}",
                     owner, repo, detail.head.ref_name
-                );
+                ));
                 // Best-effort branch deletion; ignore errors.
                 let _ = self.client
                     .delete(&delete_url)
@@ -1174,10 +1185,10 @@ impl GitHubClient {
         issue_number: i64,
         label: &str,
     ) -> Result<(), GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/issues/{}/labels",
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{}/labels",
             owner, repo, issue_number
-        );
+        ));
 
         #[derive(Serialize)]
         struct AddLabels<'a> {
@@ -1252,10 +1263,10 @@ impl GitHubClient {
         label: &str,
     ) -> Result<(), GitHubError> {
         let encoded = Self::percent_encode_path_component(label);
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/issues/{}/labels/{}",
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{}/labels/{}",
             owner, repo, issue_number, encoded
-        );
+        ));
 
         let resp = self.client
             .delete(&url)
@@ -1296,10 +1307,10 @@ impl GitHubClient {
         issue_number: i64,
         body: &str,
     ) -> Result<(), GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/issues/{}/comments",
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{}/comments",
             owner, repo, issue_number
-        );
+        ));
 
         #[derive(Serialize)]
         struct Comment<'a> {
@@ -1333,10 +1344,10 @@ impl GitHubClient {
         repo: &str,
         issue_number: i64,
     ) -> Result<(), GitHubError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/issues/{}",
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{}",
             owner, repo, issue_number
-        );
+        ));
 
         #[derive(Serialize)]
         struct CloseState {
@@ -1382,6 +1393,415 @@ impl GitHubClient {
         // PullRequest's custom Deserialize already tolerates it (the
         // head object is optional with serde defaults).
         self.search_issues(&query)
+    }
+
+    /// Fetch one page of PR summaries via GitHub's GraphQL connection.
+    ///
+    /// A single page carries up to `first` PRs with their mergeability
+    /// (`mergeable` + `mergeStateStatus`) inline — the REST list endpoint
+    /// omits both, which is what forced the old N+1 detail loop. The
+    /// caller ([`Self::list_pr_summaries`]) pages `after` until
+    /// `hasNextPage` is false or the list cap is reached, so the total
+    /// HTTP cost is O(pages), not O(PRs).
+    fn fetch_pr_summaries_page(
+        &self,
+        owner: &str,
+        repo: &str,
+        states: &[&str],
+        first: i64,
+        after: Option<&str>,
+    ) -> Result<(Vec<PullRequestSummary>, PageInfo), GitHubError> {
+        #[derive(Serialize)]
+        struct Variables<'a> {
+            owner: &'a str,
+            name: &'a str,
+            states: Vec<&'a str>,
+            first: i64,
+            after: Option<&'a str>,
+        }
+        #[derive(Serialize)]
+        struct GraphQLRequest<'a> {
+            query: &'a str,
+            variables: Variables<'a>,
+        }
+        let body = GraphQLRequest {
+            query: PR_SUMMARIES_QUERY,
+            variables: Variables {
+                owner,
+                name: repo,
+                states: states.to_vec(),
+                first,
+                after,
+            },
+        };
+        let url = self.graphql_url();
+        let resp = self
+            .client
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&body)
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), text));
+        }
+
+        let parsed: GraphQLResponse = resp.json().map_err(GitHubError::Http)?;
+        // Join a non-empty `errors` array once — it is the error below
+        // whenever there is no usable repository to read.
+        let joined_errors: Option<String> = parsed.errors.as_ref().and_then(|errors| {
+            if errors.is_empty() {
+                None
+            } else {
+                Some(
+                    errors
+                        .iter()
+                        .map(|e| e.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            }
+        });
+        let data = parsed.data.ok_or_else(|| {
+            GitHubError::Api(
+                status.as_u16(),
+                joined_errors
+                    .clone()
+                    .unwrap_or_else(|| "GitHub GraphQL returned no data".to_string()),
+            )
+        })?;
+        match (data.repository, joined_errors) {
+            (Some(repo_data), errors) => {
+                // Partial data with errors: keep the usable rows and log the
+                // rest. A null node inside `nodes` is skipped per-row below,
+                // so one bad PR never fails its page.
+                if let Some(msg) = errors {
+                    tracing::warn!("GitHub GraphQL partial errors: {}", msg);
+                }
+                let conn = repo_data.pull_requests;
+                let page_info = conn.page_info;
+                let mut out = Vec::with_capacity(conn.nodes.len());
+                for node in conn.nodes.into_iter().flatten() {
+                    out.push(PullRequestSummary::from_graphql_node(node));
+                }
+                Ok((out, page_info))
+            }
+            // `repository: null` WITH errors is the error itself (rate limit,
+            // SAML enforcement, missing permission) — never a 404. Only an
+            // error-free null repository means "no such repo".
+            (None, Some(msg)) => Err(GitHubError::Api(status.as_u16(), msg)),
+            (None, None) => Err(GitHubError::Api(
+                404,
+                format!("repository {}/{} not found", owner, repo),
+            )),
+        }
+    }
+}
+
+/// One page-cursor for the PR-summaries connection.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PageInfo {
+    #[serde(default)]
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(default)]
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+/// Cohesive PR summary: the REST `/pulls` list fields PLUS mergeability.
+///
+/// Returned by [`GitHubClient::list_pr_summaries`] in O(pages) GraphQL
+/// requests. The UI consumes this single shape and never orchestrates
+/// per-row enrichment calls.
+#[derive(Debug, Clone)]
+pub struct PullRequestSummary {
+    pub number: i64,
+    pub title: String,
+    pub body: String,
+    pub html_url: String,
+    /// `"open"` or `"closed"` (GraphQL `MERGED` maps to `"closed"` to match
+    /// the REST list's vocabulary and the frontend's `StateFilter`).
+    pub state: String,
+    pub draft: bool,
+    pub head_ref: String,
+    pub head_repo_owner: String,
+    pub head_repo_clone_url: String,
+    pub head_sha: String,
+    /// `Some(true)` mergeable, `Some(false)` conflicting, `None` while
+    /// GitHub is still computing (`UNKNOWN`) — mirrors the REST detail's
+    /// `mergeable: null` contract so the panel's "checking" state is
+    /// preserved without a second request.
+    pub mergeable: Option<bool>,
+    /// Lowercase REST vocabulary (`clean`, `dirty`, `blocked`, `behind`,
+    /// `unstable`, `unknown`, …) mapped from GraphQL `mergeStateStatus`.
+    pub mergeable_state: String,
+}
+
+/// Cohesive PR-summary query (issue #1529).
+///
+/// Cost is proportional to pages, not PR count: one GraphQL connection
+/// request per page of up to 100 PRs. The UI calls this through
+/// `get_repo_pulls` and never issues per-PR detail requests.
+impl GitHubClient {
+    pub fn list_pr_summaries(
+        &self,
+        owner: &str,
+        repo: &str,
+        state: &str,
+    ) -> Result<Vec<PullRequestSummary>, GitHubError> {
+        let states = graphql_states_for_filter(state);
+        let mut all: Vec<PullRequestSummary> = Vec::new();
+        let mut after: Option<String> = None;
+        // Bound the page walk: a well-behaved server ends it via
+        // `has_next_page == false` (or the cap, first page today), but a
+        // buggy cursor that repeats forever must not park this blocking-pool
+        // thread — same "bound everything" ethos as the HTTP timeouts above.
+        let mut pages_fetched: usize = 0;
+        loop {
+            pages_fetched += 1;
+            if pages_fetched > PR_SUMMARY_MAX_PAGES {
+                tracing::warn!(
+                    "list_pr_summaries: stopped after {} pages for {}/{} — cursor did not terminate",
+                    PR_SUMMARY_MAX_PAGES,
+                    owner,
+                    repo
+                );
+                break;
+            }
+            let (mut page, info) = self.fetch_pr_summaries_page(
+                owner,
+                repo,
+                &states,
+                PR_SUMMARY_PAGE_SIZE,
+                after.as_deref(),
+            )?;
+            all.append(&mut page);
+            // Preserve the REST list's 100-row cap: one page already covers
+            // it, so a second request only fires if the cap is raised later.
+            if all.len() >= PR_SUMMARY_CAP || !info.has_next_page {
+                break;
+            }
+            after = info.end_cursor;
+            if after.is_none() {
+                break;
+            }
+        }
+        all.truncate(PR_SUMMARY_CAP);
+        Ok(all)
+    }
+}
+
+/// Page size for the GraphQL PR-summaries connection. Matches the REST
+/// list's `per_page=100` so the current 100-row behaviour costs exactly
+/// one HTTP request.
+const PR_SUMMARY_PAGE_SIZE: i64 = 100;
+/// List cap preserved from the REST `per_page=100` behaviour.
+const PR_SUMMARY_CAP: usize = 100;
+/// Hard ceiling on pages per `list_pr_summaries` call. With the 100-row cap
+/// the walk ends on page 1 today; the ceiling only binds a misbehaving
+/// cursor (e.g. a repeated `endCursor` with `hasNextPage: true`) so one
+/// refresh can never issue more than this many requests.
+const PR_SUMMARY_MAX_PAGES: usize = 10;
+
+/// Map the panel's `state` filter to GraphQL `PullRequestState` values.
+/// REST `state=closed` includes merged PRs, so the GraphQL side must ask
+/// for both `CLOSED` and `MERGED`; anything that isn't an explicit
+/// `"closed"` falls back to `OPEN` (mirrors `get_repo_pulls_blocking`'s
+/// normalisation so an arbitrary string can't reach the API).
+fn graphql_states_for_filter(state: &str) -> Vec<&'static str> {
+    if state == "closed" {
+        vec!["CLOSED", "MERGED"]
+    } else {
+        vec!["OPEN"]
+    }
+}
+
+/// Map GraphQL `mergeable` (`MERGEABLE` / `CONFLICTING` / `UNKNOWN`) to the
+/// REST detail's `Option<bool>` contract. `UNKNOWN` means GitHub is still
+/// computing — surfaced as `None` so the UI shows its distinct
+/// checking/unknown state rather than falsely claiming conflicts. Any
+/// unrecognised future value is conservative `None` (unknown), never a
+/// false `Some(false)`.
+fn map_graphql_mergeable(s: &str) -> Option<bool> {
+    match s {
+        "MERGEABLE" => Some(true),
+        "CONFLICTING" => Some(false),
+        _ => None,
+    }
+}
+
+/// Map GraphQL `mergeStateStatus` (`CLEAN`, `DIRTY`, `BLOCKED`, `BEHIND`,
+/// `UNSTABLE`, `UNKNOWN`, `DRAFT`, `HAS_HOOKS`) to the lowercase REST
+/// `mergeable_state` vocabulary the panel already renders. Lowercasing is
+/// the whole mapping (`HAS_HOOKS` → `has_hooks`); unknown future values
+/// lowercase through unchanged so they render via the panel's fallback
+/// wording instead of failing the page.
+fn map_graphql_merge_state(s: &str) -> String {
+    s.to_ascii_lowercase()
+}
+
+/// Map GraphQL PR `state` (`OPEN` / `CLOSED` / `MERGED`) to the REST list's
+/// `"open"` / `"closed"` vocabulary. `MERGED` maps to `"closed"` because
+/// the REST list reports merged PRs as closed and the frontend's
+/// `StateFilter` only knows those two values.
+fn map_graphql_state(s: &str) -> String {
+    match s {
+        "OPEN" => "open".to_string(),
+        "CLOSED" => "closed".to_string(),
+        "MERGED" => "closed".to_string(),
+        other => other.to_ascii_lowercase(),
+    }
+}
+
+/// GraphQL connection query for one page of PR summaries. Fetches the list
+/// fields the panel renders plus `mergeable` / `mergeStateStatus` inline —
+/// the two fields that previously required one REST detail request per PR.
+/// `orderBy: CREATED_AT DESC` mirrors the REST list's newest-first order.
+const PR_SUMMARIES_QUERY: &str = r#"
+query PrSummaries($owner: String!, $name: String!, $states: [PullRequestState!], $first: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: $first, after: $after, states: $states, orderBy: {field: CREATED_AT, direction: DESC}) {
+      nodes {
+        number
+        title
+        body
+        url
+        state
+        isDraft
+        headRefName
+        headRefOid
+        headRepository {
+          owner { login }
+          url
+        }
+        mergeable
+        mergeStateStatus
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+struct GraphQLResponse {
+    #[serde(default)]
+    data: Option<GraphQLData>,
+    #[serde(default)]
+    errors: Option<Vec<GraphQLError>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLError {
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLData {
+    #[serde(default)]
+    repository: Option<GraphQLRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLRepository {
+    #[serde(default, rename = "pullRequests")]
+    pull_requests: GraphQLConnection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GraphQLConnection {
+    #[serde(default)]
+    nodes: Vec<Option<GraphQLPrNode>>,
+    #[serde(default, rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+/// One PR node from the summaries connection. Every field GitHub may omit
+/// (deleted fork, missing body, still-computing merge) is `Option` or
+/// `#[serde(default)]` so a partial node degrades to empty/unknown rather
+/// than failing the whole page (issue #1529 partial-data requirement).
+#[derive(Debug, Deserialize)]
+struct GraphQLPrNode {
+    number: i64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default, rename = "isDraft")]
+    is_draft: Option<bool>,
+    #[serde(default, rename = "headRefName")]
+    head_ref_name: Option<String>,
+    #[serde(default, rename = "headRefOid")]
+    head_ref_oid: Option<String>,
+    #[serde(default, rename = "headRepository")]
+    head_repository: Option<GraphQLHeadRepo>,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(default, rename = "mergeStateStatus")]
+    merge_state_status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLHeadRepo {
+    #[serde(default)]
+    owner: Option<GraphQLOwner>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLOwner {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+impl PullRequestSummary {
+    /// Map one GraphQL node onto the cohesive summary. Null/missing fields
+    /// degrade to the same empty/unknown sentinels the REST mapper uses so
+    /// a partial node never fails its page.
+    fn from_graphql_node(node: GraphQLPrNode) -> Self {
+        let (head_owner, head_clone_url) = match node.head_repository {
+            Some(repo) => {
+                let owner = repo
+                    .owner
+                    .and_then(|o| o.login)
+                    .unwrap_or_default();
+                let clone_url = repo.url.map(|u| format!("{}.git", u)).unwrap_or_default();
+                (owner, clone_url)
+            }
+            None => (String::new(), String::new()),
+        };
+        Self {
+            number: node.number,
+            title: node.title.unwrap_or_default(),
+            body: node.body.unwrap_or_default(),
+            html_url: node.url.unwrap_or_default(),
+            state: node.state.map(|s| map_graphql_state(&s)).unwrap_or_else(|| "open".to_string()),
+            draft: node.is_draft.unwrap_or(false),
+            head_ref: node.head_ref_name.unwrap_or_default(),
+            head_repo_owner: head_owner,
+            head_repo_clone_url: head_clone_url,
+            head_sha: node.head_ref_oid.unwrap_or_default(),
+            mergeable: node.mergeable.as_deref().map(map_graphql_mergeable).unwrap_or(None),
+            mergeable_state: node
+                .merge_state_status
+                .as_deref()
+                .map(map_graphql_merge_state)
+                .unwrap_or_else(|| "unknown".to_string()),
+        }
     }
 }
 
@@ -1544,7 +1964,7 @@ pub fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Regression for the overnight-freeze bug: a GitHub probe against a
@@ -2841,5 +3261,515 @@ This issue is related to #481 in a narrative sense.
         client
             .remove_issue_label("alondero", "buildmesh", 1, "definitely-not-on-this-issue-xyz")
             .expect("removing a missing label must collapse to Ok(())");
+    }
+
+    // -----------------------------------------------------------------------
+    // PR summaries GraphQL seam (issue #1529) — mapping + O(pages) cost.
+    //
+    // The old panel cost N+1 HTTP requests per refresh (1 REST list + N REST
+    // details). The cohesive summary query must cost O(pages): 1 GraphQL
+    // request for 1/20/100 PRs (all fit the 100-row first page), 2 for a
+    // two-page connection, regardless of PR count. A fake loopback server
+    // with a request counter pins the cost; pure mapping tests pin the
+    // null/unknown semantics explicitly (UNKNOWN ≠ conflict ≠ transport
+    // failure).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn graphql_states_for_filter_maps_open_and_closed() {
+        assert_eq!(graphql_states_for_filter("open"), vec!["OPEN"]);
+        assert_eq!(
+            graphql_states_for_filter("closed"),
+            vec!["CLOSED", "MERGED"],
+            "REST closed includes merged, so GraphQL must ask for both"
+        );
+        assert_eq!(
+            graphql_states_for_filter("bogus"),
+            vec!["OPEN"],
+            "arbitrary strings fall back to open rather than reaching the API"
+        );
+    }
+
+    #[test]
+    fn map_graphql_mergeable_preserves_null_unknown_semantics() {
+        assert_eq!(map_graphql_mergeable("MERGEABLE"), Some(true));
+        assert_eq!(map_graphql_mergeable("CONFLICTING"), Some(false));
+        assert_eq!(
+            map_graphql_mergeable("UNKNOWN"),
+            None,
+            "UNKNOWN (still computing) must stay None, not coerce to Some(false)"
+        );
+        assert_eq!(
+            map_graphql_mergeable("FUTURE_VALUE"),
+            None,
+            "unrecognised values are conservative unknown, never false conflicts"
+        );
+    }
+
+    #[test]
+    fn map_graphql_merge_state_lowercases_rest_vocabulary() {
+        assert_eq!(map_graphql_merge_state("CLEAN"), "clean");
+        assert_eq!(map_graphql_merge_state("DIRTY"), "dirty");
+        assert_eq!(map_graphql_merge_state("BLOCKED"), "blocked");
+        assert_eq!(map_graphql_merge_state("BEHIND"), "behind");
+        assert_eq!(map_graphql_merge_state("UNSTABLE"), "unstable");
+        assert_eq!(map_graphql_merge_state("UNKNOWN"), "unknown");
+        assert_eq!(map_graphql_merge_state("DRAFT"), "draft");
+        assert_eq!(map_graphql_merge_state("HAS_HOOKS"), "has_hooks");
+    }
+
+    #[test]
+    fn map_graphql_state_merges_merged_into_closed() {
+        assert_eq!(map_graphql_state("OPEN"), "open");
+        assert_eq!(map_graphql_state("CLOSED"), "closed");
+        assert_eq!(
+            map_graphql_state("MERGED"),
+            "closed",
+            "REST reports merged as closed and the frontend filter only knows open/closed"
+        );
+    }
+
+    #[test]
+    fn pr_summary_from_graphql_node_maps_all_fields() {
+        let node: GraphQLPrNode = serde_json::from_value(serde_json::json!({
+            "number": 7,
+            "title": "Add widget",
+            "body": "Adds the widget",
+            "url": "https://github.com/acme/demo/pull/7",
+            "state": "OPEN",
+            "isDraft": false,
+            "headRefName": "feat/7-widget",
+            "headRefOid": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "headRepository": {
+                "owner": {"login": "acme"},
+                "url": "https://github.com/acme/demo"
+            },
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN"
+        }))
+        .expect("node parses");
+        let s = PullRequestSummary::from_graphql_node(node);
+        assert_eq!(s.number, 7);
+        assert_eq!(s.title, "Add widget");
+        assert_eq!(s.html_url, "https://github.com/acme/demo/pull/7");
+        assert_eq!(s.state, "open");
+        assert!(!s.draft);
+        assert_eq!(s.head_ref, "feat/7-widget");
+        assert_eq!(s.head_repo_owner, "acme");
+        assert_eq!(s.head_repo_clone_url, "https://github.com/acme/demo.git");
+        assert_eq!(s.mergeable, Some(true));
+        assert_eq!(s.mergeable_state, "clean");
+    }
+
+    #[test]
+    fn pr_summary_from_graphql_node_unknown_stays_none_not_false() {
+        // GitHub still computing: UNKNOWN/UNKNOWN must surface as
+        // (None, "unknown") — visually distinct from (Some(false), "dirty").
+        let node: GraphQLPrNode = serde_json::from_value(serde_json::json!({
+            "number": 8,
+            "title": "Fresh PR",
+            "state": "OPEN",
+            "isDraft": false,
+            "mergeable": "UNKNOWN",
+            "mergeStateStatus": "UNKNOWN"
+        }))
+        .expect("node parses");
+        let s = PullRequestSummary::from_graphql_node(node);
+        assert_eq!(s.mergeable, None);
+        assert_eq!(s.mergeable_state, "unknown");
+        assert_eq!(s.head_ref, "", "missing head degrades to empty, not failure");
+        assert_eq!(s.head_repo_owner, "");
+    }
+
+    #[test]
+    fn pr_summary_from_graphql_node_tolerates_deleted_fork() {
+        // Deleted fork: headRepository null. The row keeps its list fields
+        // with empty fork metadata (the spawn path treats empty as
+        // same-repo/fail-open) rather than failing the page.
+        let node: GraphQLPrNode = serde_json::from_value(serde_json::json!({
+            "number": 9,
+            "title": "Fork PR",
+            "state": "OPEN",
+            "isDraft": false,
+            "headRefName": "feat/fork",
+            "headRefOid": "bbb",
+            "headRepository": null,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY"
+        }))
+        .expect("node parses");
+        let s = PullRequestSummary::from_graphql_node(node);
+        assert_eq!(s.head_repo_owner, "");
+        assert_eq!(s.head_repo_clone_url, "");
+        assert_eq!(s.mergeable, Some(false));
+        assert_eq!(s.mergeable_state, "dirty");
+    }
+
+    /// One scripted interaction for the fake server, in the exact order the
+    /// client is expected to issue it. `Page` answers `POST /graphql` with
+    /// one connection page; `Detail` answers `GET /repos/.../pulls/{n}`
+    /// with a clean/mergeable detail (the per-PR fallback path).
+    ///
+    /// `pub(crate)` so `commands::pr` tests can script the same fake for
+    /// the summaries-then-detail fallback without a second server.
+    pub(crate) enum Scripted {
+        Page(serde_json::Value, bool, Option<String>),
+        Detail,
+    }
+
+    /// Spin a fake GitHub server that counts requests and serves `script` in
+    /// order. Returns `(base_url, request_count, server_guard)`. Socket
+    /// lifecycle, stated precisely so future editors don't misread it:
+    /// - The guard serves exactly `script.len()` connections, then exits and
+    ///   drops the listener. An over-eager client (N+1 regression) gets
+    ///   connection-refused on the extra request, so its call returns `Err`
+    ///   and the test fails fast — the counter is the assertion, not the
+    ///   join.
+    /// - An under-eager client leaves the guard parked in `accept()`; that
+    ///   is harmless because every test asserts on payload length / counts
+    ///   BEFORE joining, so a short client fails on assertions first and
+    ///   never reaches `join`. The parked thread dies with the test process.
+    /// - A request of an unexpected kind (POST where Detail was scripted or
+    ///   vice versa) panics the guard with the request line, failing loudly.
+    fn fake_graphql_server(
+        pages: Vec<(serde_json::Value, bool, Option<String>)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
+        fake_server(pages.into_iter().map(|(n, h, c)| Scripted::Page(n, h, c)).collect())
+    }
+
+    /// Same fake with an explicit script (pages + REST details in order).
+    pub(crate) fn fake_server(
+        script: Vec<Scripted>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&count);
+        let handle = std::thread::spawn(move || {
+            for step in script {
+                let (mut sock, _) = listener.accept().expect("accept");
+                count_clone.fetch_add(1, Ordering::SeqCst);
+                // Read request line + headers, then body per Content-Length.
+                let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).expect("read request line");
+                let mut content_length: usize = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("read header");
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    if let Some(v) = trimmed.strip_prefix("Content-Length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    } else if let Some(v) = trimmed.strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    reader.read_exact(&mut body).expect("read body");
+                }
+                let resp_body = match step {
+                    Scripted::Page(nodes, has_next, cursor) => {
+                        assert!(
+                            request_line.starts_with("POST "),
+                            "scripted a GraphQL page but client sent: {}",
+                            request_line.trim()
+                        );
+                        serde_json::json!({
+                            "data": {
+                                "repository": {
+                                    "pullRequests": {
+                                        "nodes": nodes,
+                                        "pageInfo": {
+                                            "hasNextPage": has_next,
+                                            "endCursor": cursor,
+                                        }
+                                    }
+                                }
+                            }
+                        })
+                    }
+                    Scripted::Detail => {
+                        assert!(
+                            request_line.starts_with("GET /repos/"),
+                            "scripted a REST detail but client sent: {}",
+                            request_line.trim()
+                        );
+                        serde_json::json!({
+                            "mergeable": true,
+                            "mergeable_state": "clean"
+                        })
+                    }
+                };
+                let resp_str = serde_json::to_string(&resp_body).expect("serialise");
+                let http = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_str.len(),
+                    resp_str
+                );
+                sock.write_all(http.as_bytes()).expect("write");
+            }
+        });
+        (format!("http://{}", addr), count, handle)
+    }
+
+    /// Build one GraphQL node JSON value with a numeric suffix so N PRs are
+    /// distinguishable by number/title.
+    pub(crate) fn fake_node(n: i64) -> serde_json::Value {
+        serde_json::json!({
+            "number": n,
+            "title": format!("PR {}", n),
+            "body": format!("Body {}", n),
+            "url": format!("https://github.com/acme/demo/pull/{}", n),
+            "state": "OPEN",
+            "isDraft": false,
+            "headRefName": format!("feat/{}-x", n),
+            "headRefOid": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "headRepository": {
+                "owner": {"login": "acme"},
+                "url": "https://github.com/acme/demo"
+            },
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN"
+        })
+    }
+
+    #[test]
+    fn list_pr_summaries_costs_one_request_for_one_pr() {
+        use std::sync::atomic::Ordering;
+        let nodes = serde_json::Value::Array(vec![fake_node(1)]);
+        let (base, count, handle) = fake_graphql_server(vec![(nodes, false, None)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let out = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect("summaries");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].number, 1);
+        assert_eq!(out[0].mergeable, Some(true));
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "1 PR must cost 1 request, not N+1"
+        );
+    }
+
+    #[test]
+    fn list_pr_summaries_costs_one_request_for_twenty_prs() {
+        use std::sync::atomic::Ordering;
+        let nodes =
+            serde_json::Value::Array((1..=20).map(fake_node).collect::<Vec<_>>());
+        let (base, count, handle) = fake_graphql_server(vec![(nodes, false, None)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let out = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect("summaries");
+        assert_eq!(out.len(), 20);
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "20 PRs must cost 1 request, not 21"
+        );
+    }
+
+    #[test]
+    fn list_pr_summaries_costs_one_request_for_one_hundred_prs() {
+        use std::sync::atomic::Ordering;
+        let nodes =
+            serde_json::Value::Array((1..=100).map(fake_node).collect::<Vec<_>>());
+        let (base, count, handle) = fake_graphql_server(vec![(nodes, false, None)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let out = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect("summaries");
+        assert_eq!(out.len(), 100);
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "100 PRs must cost 1 request, not 101"
+        );
+    }
+
+    #[test]
+    fn list_pr_summaries_paginates_by_cursor_not_by_pr() {
+        use std::sync::atomic::Ordering;
+        // Two pages: 60 + 40. Cost must be 2 (pages), not 100 (PRs).
+        let p1 = serde_json::Value::Array((1..=60).map(fake_node).collect::<Vec<_>>());
+        let p2 = serde_json::Value::Array((61..=100).map(fake_node).collect::<Vec<_>>());
+        let (base, count, handle) = fake_graphql_server(vec![
+            (p1, true, Some("cursor1".to_string())),
+            (p2, false, None),
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let out = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect("summaries");
+        assert_eq!(out.len(), 100);
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "two pages must cost 2 requests"
+        );
+    }
+
+    #[test]
+    fn list_pr_summaries_skips_null_nodes_partial_data() {
+        use std::sync::atomic::Ordering;
+        // One null node (deleted/partial) + one valid node: the page keeps
+        // the valid row instead of failing.
+        let nodes = serde_json::Value::Array(vec![serde_json::Value::Null, fake_node(2)]);
+        let (base, count, handle) = fake_graphql_server(vec![(nodes, false, None)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let out = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect("summaries");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].number, 2);
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn list_pr_summaries_propagates_http_errors_for_retry() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        // Minimal 403 server (rate limit): the caller must see Err(Api) so
+        // the panel can render a retryable error, not silent unknown rows.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+            let mut content_length: usize = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("header");
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = line.trim().strip_prefix("Content-Length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            if content_length > 0 {
+                let mut buf = vec![0u8; content_length];
+                use std::io::Read;
+                reader.read_exact(&mut buf).expect("body");
+            }
+            let body = r#"{"message":"API rate limit exceeded"}"#;
+            let http = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(http.as_bytes()).expect("write");
+        });
+        let client =
+            GitHubClient::for_test(&format!("http://{}", addr), "fake-token").expect("client");
+        let err = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect_err("rate limit must propagate");
+        match err {
+            GitHubError::Api(403, msg) => assert!(msg.contains("rate limit")),
+            other => panic!("expected Api(403), got {:?}", other),
+        }
+        handle.join().expect("server");
+    }
+
+    /// Serve one connection with a literal HTTP status + JSON body, for
+    /// GraphQL error-envelope shapes the scripted fake cannot express.
+    fn fake_graphql_raw_server(
+        status_line: &str,
+        raw_json: &str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let status_line = status_line.to_string();
+        let raw_json = raw_json.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+            let mut content_length: usize = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("header");
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = line.trim().strip_prefix("Content-Length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            if content_length > 0 {
+                let mut buf = vec![0u8; content_length];
+                reader.read_exact(&mut buf).expect("body");
+            }
+            let http = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status_line,
+                raw_json.len(),
+                raw_json
+            );
+            sock.write_all(http.as_bytes()).expect("write");
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    #[test]
+    fn list_pr_summaries_reports_graphql_field_errors_not_404() {
+        // Regression: GraphQL field errors (rate limit, SAML, permissions)
+        // arrive as HTTP 200 with `{"data": {"repository": null}, "errors":
+        // [...]}`. A null repository WITH errors is the error itself — it
+        // must propagate verbatim, never collapse to a fake 404 "not found".
+        let (base, handle) = fake_graphql_raw_server(
+            "200 OK",
+            r#"{"data": {"repository": null}, "errors": [{"message": "API rate limit exceeded for user ID 123."}]}"#,
+        );
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let err = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect_err("field error must propagate");
+        match err {
+            GitHubError::Api(status, msg) => {
+                assert_ne!(status, 404, "rate-limit error must not become 404");
+                assert!(msg.contains("rate limit"), "got: {}", msg);
+            }
+            other => panic!("expected Api error, got {:?}", other),
+        }
+        handle.join().expect("server");
+    }
+
+    #[test]
+    fn list_pr_summaries_reports_missing_repo_as_404_only_without_errors() {
+        // The 404 is reserved for a genuinely absent repository: null with
+        // an EMPTY errors array. (No errors key at all parses the same way
+        // via #[serde(default)].)
+        let (base, handle) = fake_graphql_raw_server(
+            "200 OK",
+            r#"{"data": {"repository": null}, "errors": []}"#,
+        );
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let err = client
+            .list_pr_summaries("acme", "demo", "open")
+            .expect_err("missing repo must error");
+        match err {
+            GitHubError::Api(404, msg) => assert!(msg.contains("acme/demo"), "got: {}", msg),
+            other => panic!("expected Api(404), got {:?}", other),
+        }
+        handle.join().expect("server");
     }
 }

@@ -56,8 +56,12 @@ pub struct GitHubIssue {
 /// Wire shape of `get_repo_pulls` (desktop Tauri) — one entry per pull request.
 /// Generated to TS via ts-rs (issue #359); `i64` carries `#[ts(as = "i32")]`
 /// because serde_json emits it as a JS number, not the `bigint` ts-rs defaults
-/// to. Mergeability is intentionally NOT on this struct: the `/pulls` list
-/// endpoint omits it, so the panel enriches each PR via `get_pr_mergeability`.
+/// to.
+///
+/// Issue #1529: mergeability rides inline on this struct via the GraphQL
+/// PR-summaries connection (one request per page, not one per PR). The panel
+/// consumes this single cohesive query and never orchestrates per-row
+/// enrichment calls.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "GitHubPullRequest.ts")]
 pub struct GitHubPullRequest {
@@ -106,6 +110,18 @@ pub struct GitHubPullRequest {
     /// semantics.
     #[serde(default)]
     pub head_sha: String,
+    /// Mergeability inline (issue #1529): `Some(true)` mergeable,
+    /// `Some(false)` conflicts, `None` while GitHub is still computing
+    /// (`UNKNOWN`) — mirrors the old `PrMergeability.mergeable` contract so
+    /// the panel's checking/unknown wording is preserved without a second
+    /// request. `#[serde(default)]` keeps old cached payloads parsing.
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+    /// Lowercase REST vocabulary (`clean`, `dirty`, `blocked`, `behind`,
+    /// `unstable`, `unknown`, …) mapped from GraphQL `mergeStateStatus`.
+    /// Used for the flag wording. `#[serde(default)]` for old payloads.
+    #[serde(default)]
+    pub mergeable_state: String,
 }
 
 /// Wire shape of `get_pr_mergeability` — the per-PR enrichment the panel
@@ -299,8 +315,12 @@ pub(crate) fn set_issue_label_blocking(
 /// Get pull requests for a mesh, filtered by `state` (`"open"` or `"closed"`).
 /// Mirrors [`get_repo_issues`]: degrades to an empty list (with a `warn!`) when
 /// the mesh has no GitHub origin, so the panel renders an empty state rather
-/// than an error. Mergeability is fetched separately per PR — see
-/// [`get_pr_mergeability`] — because the list endpoint omits it.
+/// than an error.
+///
+/// Issue #1529: one cohesive summary query — list fields plus mergeability
+/// ride inline via the GraphQL PR-summaries connection (O(pages), not O(PRs)).
+/// The panel consumes this single call and never orchestrates per-row
+/// enrichment.
 #[command]
 pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
     crate::commands::run_blocking("get_repo_pulls", move || get_repo_pulls_blocking(mesh_id, state)).await
@@ -324,7 +344,9 @@ pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let prs = client.list_pull_requests(&owner, &repo, state).map_err(|e| e.to_string())?;
+    let prs = client
+        .list_pr_summaries(&owner, &repo, state)
+        .map_err(|e| e.to_string())?;
 
     Ok(prs.into_iter().map(|pr| GitHubPullRequest {
         number: pr.number,
@@ -337,6 +359,8 @@ pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec
         head_repo_owner: pr.head_repo_owner,
         head_repo_clone_url: pr.head_repo_clone_url,
         head_sha: pr.head_sha,
+        mergeable: pr.mergeable,
+        mergeable_state: pr.mergeable_state,
     }).collect())
 }
 
@@ -364,30 +388,24 @@ pub(crate) fn get_pr_mergeability_blocking(mesh_id: i64, pr_number: i64) -> Resu
     Ok(PrMergeability { mergeable, mergeable_state })
 }
 
-/// Get mergeability for a batch of PRs on a mesh's repo (issue #418).
+/// Get mergeability for a batch of PRs on a mesh's repo (issue #418,
+/// reimplemented O(pages) for issue #1529).
 ///
-/// Replaces the per-PR `get_pr_mergeability` fan-out the panel used to fire
-/// from `GitPullRequestsTab`. Each per-PR call constructed a fresh
-/// `GitHubClient::new()` → `resolve_token()`; when the token resolves only via
-/// the `gh auth token` subprocess fallback (no `GITHUB_TOKEN`/`GH_TOKEN` env var
-/// and no `oauth_token` in `hosts.yml` — the keyring case), every call spawned
-/// `gh` (~200–300ms on Windows). For a repo with N open PRs that was N
-/// subprocess spawns + N token resolutions on each load/toggle.
+/// Historical note: the original implementation resolved the client once and
+/// then looped one REST detail request per PR (N HTTP requests). The desktop
+/// panel no longer calls this endpoint — `get_repo_pulls` now returns
+/// mergeability inline via the GraphQL summaries connection — but the command
+/// survives for backward compat (mobile/older frontends). Its HTTP cost is
+/// now O(pages): one GraphQL connection request per page (currently one for
+/// the 100-row cap), regardless of how many PR numbers were requested.
 ///
-/// This command resolves the client **once** and loops. GitHub still requires
-/// one detail HTTP request per PR (the `/pulls/{n}` endpoint carries
-/// `mergeable`), so the HTTP count is unchanged — but the auth cost drops to
-/// exactly one token resolution per panel render. Empty `pr_numbers` short-
-/// circuits before client construction (no GitHub touch at all).
-///
-/// **Per-PR failure semantics.** A single PR's HTTP error (404, rate limit,
-/// network blip) does NOT fail the whole batch. The failing entry is returned
-/// with `mergeable: None` and `mergeable_state: "error: <reason>"` so the
-/// panel renders "Checking…" for that PR — matches the existing per-PR
-/// failure semantics documented in the frontend (`"a failed mergeability
-/// probe leaves the row in 'Checking…' rather than falsely claiming
-/// conflicts; the next list reload retries"`). The next list reload retries
-/// from scratch, and a successful retry overwrites the error entry.
+/// **Per-PR failure semantics (preserved).** A PR number absent from the
+/// summaries connection (closed/merged while the list was stale, or a partial
+/// page) does NOT fail the whole batch. It returns `mergeable: None` with
+/// `mergeable_state: "error: PR #<n> not in summary results"` so callers keep
+/// the row in their checking/error state rather than falsely claiming
+/// conflicts. A whole-query transport failure (rate limit, network) still
+/// propagates as `Err` so the caller can surface a retryable panel error.
 #[command]
 pub async fn get_prs_mergeability(
     mesh_id: i64,
@@ -429,38 +447,106 @@ pub(crate) fn get_prs_mergeability_blocking(
         }
     };
 
-    // ONE token resolution, ONE HTTP client — this is the whole point of
-    // the batched endpoint. The follow-up loop in `mergeability_entries`
-    // reuses the client for every PR.
+    // ONE token resolution, then cheapest-first lookups: open summaries
+    // (O(pages)), closed summaries for stragglers, then one REST detail
+    // request per STILL-missing PR (e.g. older than the 100-row summary
+    // cap). A missing entry never fails the batch — see
+    // [`mergeability_entries`] for the per-PR sentinel.
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
 
-    Ok(mergeability_entries(pr_numbers, |n| {
-        client.pull_request_mergeability(&owner, &repo, n)
-    }))
+    mergeability_from_summaries(&client, &owner, &repo, pr_numbers).map_err(|e| e.to_string())
+}
+
+/// Resolve a batch of PR numbers to mergeability entries without a DB or
+/// mesh lookup, so the lookup strategy is unit-testable against a fake
+/// server (issue #1529): open summaries first, closed summaries for numbers
+/// still missing, then the single-PR REST detail endpoint per remaining
+/// number (correct past the 100-row summary cap, where a summaries-only
+/// lookup would falsely report "not found"). Whole-query transport failures
+/// propagate as `Err`; per-PR detail failures become the `"error: ..."`
+/// sentinel via [`mergeability_entries`].
+pub(crate) fn mergeability_from_summaries(
+    client: &GitHubClient,
+    owner: &str,
+    repo: &str,
+    pr_numbers: Vec<i64>,
+) -> Result<Vec<PrMergeabilityEntry>, GitHubError> {
+    let mut by_number: std::collections::HashMap<i64, (Option<bool>, String)> =
+        std::collections::HashMap::new();
+    for s in client.list_pr_summaries(owner, repo, "open")? {
+        by_number.insert(s.number, (s.mergeable, s.mergeable_state));
+    }
+    let mut missing: Vec<i64> = pr_numbers
+        .iter()
+        .copied()
+        .filter(|n| !by_number.contains_key(n))
+        .collect();
+    if !missing.is_empty() {
+        match client.list_pr_summaries(owner, repo, "closed") {
+            Ok(closed) => {
+                for s in closed {
+                    by_number.insert(s.number, (s.mergeable, s.mergeable_state));
+                }
+                missing.retain(|n| !by_number.contains_key(n));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "get_prs_mergeability: closed-summaries fetch failed: {} — falling back to per-PR detail",
+                    e
+                );
+            }
+        }
+    }
+
+    // Whatever is still missing (older than the summary cap, or a partial
+    // page) gets one direct detail request each — the pre-#1529 endpoint,
+    // now only a fallback rather than the loop. Failures stay per-PR.
+    if !missing.is_empty() {
+        for entry in mergeability_entries(missing, |n| {
+            client.pull_request_mergeability(owner, repo, n)
+        }) {
+            by_number.insert(entry.number, (entry.mergeable, entry.mergeable_state));
+        }
+    }
+
+    // Request order out: every requested number resolves through the map
+    // now (summaries hit or detail fallback/sentinel), so a missing key
+    // here is unreachable — the debug_assert documents the invariant for
+    // test builds without changing release behaviour. `.get`, not
+    // `.remove`: a caller passing a duplicate number must resolve it twice,
+    // not trip the assert on the second occurrence.
+    Ok(pr_numbers
+        .into_iter()
+        .map(|n| match by_number.get(&n) {
+            Some((mergeable, mergeable_state)) => PrMergeabilityEntry {
+                number: n,
+                mergeable: *mergeable,
+                mergeable_state: mergeable_state.clone(),
+            },
+            None => {
+                debug_assert!(false, "mergeability map must cover every requested PR");
+                PrMergeabilityEntry {
+                    number: n,
+                    mergeable: None,
+                    mergeable_state: format!("error: PR #{} has no mergeability result", n),
+                }
+            }
+        })
+        .collect())
 }
 
 /// Pure per-PR iterator that maps a list of PR numbers onto
 /// `PrMergeabilityEntry` values, threading each through a probe closure.
-/// Lives at module scope (not nested in the command) so the per-PR
-/// success/failure mapping is unit-testable in isolation — the public
-/// command's "single token resolution" guarantee is then enforced by
-/// construction (the command constructs `GitHubClient::new()` exactly
-/// once and threads the client's `pull_request_mergeability` method
-/// through this helper).
 ///
-/// A per-PR probe error becomes an entry with `mergeable: None` and
-/// `mergeable_state: "error: <reason>"` (see `get_prs_mergeability` for
-/// the panel-rendering rationale). The error is also logged at WARN —
-/// without auth + a repo + a PR number, an entry-level error is worth
-/// surfacing once for diagnostics.
-///
+/// Since #1529 this is the per-PR REST-detail fallback inside
+/// [`mergeability_from_summaries`] (numbers older than the summary cap),
+/// not the loop it used to be; its unit tests pin the per-PR
+/// error-sentinel mapping the fallback preserves.
 /// The closure indirection is the test seam: without a trait on
 /// `GitHubClient`, a unit test can't easily stub
 /// `pull_request_mergeability`. The closure accepts the per-PR probe
 /// function as data, so a test passes its own closure and asserts on
-/// the helper's mapping logic in isolation. The same closure shape is
-/// used by the live call path (the public command wraps the client's
-/// method in a closure that captures `&owner` + `&repo`).
+/// the helper's mapping logic in isolation.
 fn mergeability_entries<F>(
     pr_numbers: Vec<i64>,
     probe: F,
@@ -993,6 +1079,49 @@ mod tests {
         let pr: GitHubPullRequest = serde_json::from_str(json).expect("partial wire shape parses");
         assert_eq!(pr.head_ref, "", "missing head_ref defaults to empty");
         assert_eq!(pr.head_sha, "", "missing head_sha defaults to empty");
+        assert_eq!(pr.mergeable, None, "missing mergeable defaults to None (unknown)");
+        assert_eq!(pr.mergeable_state, "", "missing mergeable_state defaults to empty");
+    }
+
+    /// Issue #1529: mergeability rides inline on the list wire shape.
+    /// `mergeable: true/false/null` round-trips with `mergeable_state`, so
+    /// the panel renders mergeable/conflict/checking without a second call.
+    /// `null` (UNKNOWN) must stay `None`, not coerce to `Some(false)`.
+    #[test]
+    fn github_pull_request_wire_shape_with_inline_mergeability() {
+        let json = r#"{
+            "number": 1529,
+            "url": "https://github.com/alondero/buildmesh/pull/1529",
+            "title": "perf summaries",
+            "body": "",
+            "state": "open",
+            "draft": false,
+            "head_ref": "perf/1529-summaries",
+            "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "mergeable": true,
+            "mergeable_state": "clean"
+        }"#;
+        let pr: GitHubPullRequest = serde_json::from_str(json).expect("inline mergeability parses");
+        assert_eq!(pr.mergeable, Some(true));
+        assert_eq!(pr.mergeable_state, "clean");
+
+        let json_null = r#"{
+            "number": 1530,
+            "url": "https://github.com/x/y/pull/1530",
+            "title": "fresh",
+            "body": "",
+            "state": "open",
+            "draft": false,
+            "mergeable": null,
+            "mergeable_state": "unknown"
+        }"#;
+        let pr_null: GitHubPullRequest =
+            serde_json::from_str(json_null).expect("null mergeable parses");
+        assert_eq!(
+            pr_null.mergeable, None,
+            "null must stay None, not coerce to Some(false)"
+        );
+        assert_eq!(pr_null.mergeable_state, "unknown");
     }
 
     /// Issue #443: a fork PR carries `head_repo_owner` (the fork's owner
@@ -1249,6 +1378,65 @@ mod tests {
             entries[0].mergeable_state.starts_with("error: "),
             "NoToken must surface as 'error: ...' so the panel keeps the row in 'Checking…'"
         );
+    }
+
+    /// `mergeability_from_summaries` serves hits from the summary pages and
+    /// falls back to one direct detail request per number the pages miss
+    /// (older than the 100-row cap). Script: open page carries #1 only,
+    /// closed page is empty, then one REST detail answers #2. Cost is 3
+    /// requests for 2 PRs — O(pages) for the hits, one extra each only for
+    /// genuine misses — and request order is preserved.
+    #[test]
+    fn mergeability_from_summaries_falls_back_to_detail_past_the_cap() {
+        use crate::services::github::tests::{fake_node, fake_server, Scripted};
+        use std::sync::atomic::Ordering;
+
+        let open = serde_json::Value::Array(vec![fake_node(1)]);
+        let closed = serde_json::Value::Array(vec![]);
+        let (base, count, handle) = fake_server(vec![
+            Scripted::Page(open, false, None),
+            Scripted::Page(closed, false, None),
+            Scripted::Detail,
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let entries = mergeability_from_summaries(&client, "acme", "demo", vec![1, 2])
+            .expect("batch must not fail on a miss");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].number, 1);
+        assert_eq!(entries[0].mergeable, Some(true), "summary hit");
+        assert_eq!(entries[1].number, 2);
+        assert_eq!(entries[1].mergeable, Some(true), "detail fallback hit");
+        assert_eq!(entries[1].mergeable_state, "clean");
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    /// A caller passing a duplicate number (`[1, 1]`) must resolve it twice
+    /// from the map: entries are read with `.get`, never drained, so the
+    /// second occurrence cannot trip the missing-key sentinel.
+    #[test]
+    fn mergeability_from_summaries_resolves_duplicate_numbers_twice() {
+        use crate::services::github::tests::{fake_node, fake_server, Scripted};
+        use std::sync::atomic::Ordering;
+
+        let open = serde_json::Value::Array(vec![fake_node(1)]);
+        let (base, count, handle) =
+            fake_server(vec![Scripted::Page(open, false, None)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let entries = mergeability_from_summaries(&client, "acme", "demo", vec![1, 1])
+            .expect("batch must not fail on duplicates");
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert_eq!(entry.number, 1);
+            assert_eq!(entry.mergeable, Some(true));
+            assert!(
+                !entry.mergeable_state.starts_with("error: "),
+                "duplicate must not become a sentinel; got: {}",
+                entry.mergeable_state
+            );
+        }
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     /// Build a `TempGitRepo` and an `AgentNode` that uses a branched worktree

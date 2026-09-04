@@ -6,19 +6,26 @@
  * the active mesh's pull requests (open by default, with a toggle to closed)
  * and lets the user squash-merge a mergeable open PR straight from the panel.
  *
- * Mergeability is a two-call problem
- * ----------------------------------
- * GitHub's `/pulls` list endpoint does NOT return `mergeable` — only the
- * single-PR detail endpoint does, and even there it's `null` while GitHub
- * computes the merge asynchronously. So the list loads fast, then every
- * open, non-draft PR is enriched in ONE batched `getPrsMergeability` call
- * (issue #418 — replaced the per-PR fan-out that cost N× token
- * resolutions). Until that resolves each row shows "Checking…"; a draft
- * PR is flagged without any detail call. If GitHub returns `null` (still
- * computing) the enrichment effect schedules a bounded retry so the row
- * doesn't get stuck on "Checking…" forever — see issue #419 and the
- * inline note above the enrichment useEffect. The retry path is itself
- * a single batched call carrying every still-null PR.
+ * Mergeability is a single cohesive query (issue #1529)
+ * -----------------------------------------------------
+ * `getRepoPulls` returns list fields plus `mergeable`/`mergeable_state`
+ * inline via the backend's GraphQL PR-summaries connection — one HTTP
+ * request per page, not one per PR. The panel never orchestrates per-row
+ * enrichment calls. A draft PR is flagged without consulting mergeability.
+ *
+ * Re-poll on `mergeable: null` (issue #419, preserved through #1529)
+ * ------------------------------------------------------------------
+ * GitHub computes mergeability asynchronously, so a fresh/updated PR can
+ * arrive as `mergeable: null` (`UNKNOWN`). The load effect schedules ONE
+ * shared timer that refetches the whole list (still a single IPC /
+ * GraphQL page per attempt — the O(pages) contract holds on the retry
+ * path too): first retry after 1.5s, then 3s, 4.5s, giving up after 3
+ * re-polls (~9s total, mirroring the old per-PR budget). Past that the
+ * row renders "Unknown" with an inline retry instead of sitting on
+ * "Checking…" forever; the retry re-arms the budget and refetches.
+ * Whole-list transport failures (rate limit, network) surface as the
+ * panel-level error with manual retry. Stale list responses are dropped via
+ * the `useAsyncEffect` abort signal when the mesh/filter changes.
  *
  * Merge is squash + delete branch (the existing `merge_pr`), gated behind an
  * inline confirm because it's an irreversible outward action. On success the
@@ -54,15 +61,13 @@
  */
 
 import { formatError } from '../../lib/errorUtils';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   getRepoPulls,
-  getPrsMergeability,
   mergePr,
   createPrNode,
   listProviders,
   type GitHubPullRequest,
-  type PrMergeability,
 } from '../../lib/tauri';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
@@ -91,19 +96,30 @@ import {
 
 type StateFilter = 'open' | 'closed';
 
-/** Derived merge readiness for one open PR. */
+/** Derived merge readiness for one open PR (issue #1529 — inline fields). */
 type MergeStatus =
   | { kind: 'checking' }
   | { kind: 'mergeable' }
-  | { kind: 'blocked'; label: string };
+  | { kind: 'blocked'; label: string }
+  | { kind: 'unknown' };
 
-// Flag wording for a non-mergeable PR, keyed by GitHub's `mergeable_state`.
+// Flag wording for a non-mergeable PR, keyed by GitHub's `mergeable_state`
+// (lowercase REST vocabulary mapped from GraphQL `mergeStateStatus`).
 // Module-level so it isn't rebuilt on every `deriveMergeStatus` call.
 const BLOCKED_WORDING: Record<string, string> = {
   dirty: 'Conflicts',
   blocked: 'Blocked',
   behind: 'Behind',
+  unstable: 'Unstable',
 };
+
+// Re-poll budget for `mergeable: null` rows (issue #419 via #1529): at most
+// this many list refetches after the initial load, spaced BASE_POLL_DELAY_MS
+// * attempt (1.5s, 3s, 4.5s — ~9s total, mirroring the old per-PR budget).
+// Each attempt is one list IPC / GraphQL page, so the retry path stays
+// O(pages). Module-level so the load effect and the tests share them.
+const MAX_POLL_ATTEMPTS = 3;
+const BASE_POLL_DELAY_MS = 1500;
 
 // --- Icon components ------------------------------------------------------
 // Tiny inline SVG icons used by the row's action buttons. The previous
@@ -199,19 +215,34 @@ function XIcon({ className }: { className?: string }) {
 }
 
 /**
- * Turn a PR + its (maybe-missing) mergeability into a display status.
- * `draft` short-circuits to blocked without a detail call. An absent map
- * entry, or a `mergeable: null` (GitHub still computing), is "checking".
+ * Turn a PR with inline mergeability (issue #1529) into a display status.
+ * `draft` short-circuits to blocked. `mergeable: null` (GitHub `UNKNOWN`,
+ * still computing) is "checking" while the bounded re-poll below still has
+ * budget, and "unknown" (with an inline retry) once it is exhausted — both
+ * visually distinct from conflict and from the panel-level transport error.
+ *
+ * `mergeable` answers only "does the tree merge cleanly". When it is true
+ * but `mergeStateStatus` reports a policy gate (`blocked`: required checks
+ * / approvals missing, `behind`: branch out of date, `dirty`: conflicts
+ * reported after all), the merge API would reject the squash — so the row
+ * shows the gate instead of a Merge button that cannot succeed.
  */
-function deriveMergeStatus(
-  pr: GitHubPullRequest,
-  info: PrMergeability | undefined,
-): MergeStatus {
+function deriveMergeStatus(pr: GitHubPullRequest, pollExhausted: boolean): MergeStatus {
   if (pr.draft) return { kind: 'blocked', label: 'Draft' };
-  if (info === undefined || info.mergeable === null) return { kind: 'checking' };
-  if (info.mergeable === true) return { kind: 'mergeable' };
-  // mergeable === false — word the flag from GitHub's mergeable_state.
-  return { kind: 'blocked', label: BLOCKED_WORDING[info.mergeable_state] ?? 'Conflicts' };
+  // `??` covers old cached payloads missing the #1529 fields (the wire
+  // defaults them, but a stale renderer could still see `undefined`).
+  const state = pr.mergeable_state ?? 'unknown';
+  const mergeable = pr.mergeable ?? null;
+  if (mergeable === null) return pollExhausted ? { kind: 'unknown' } : { kind: 'checking' };
+  if (mergeable === false) {
+    // mergeable === false — word the flag from GitHub's mergeable_state.
+    return { kind: 'blocked', label: BLOCKED_WORDING[state] ?? 'Conflicts' };
+  }
+  // mergeable === true with a policy gate still shows the gate.
+  if (state === 'blocked' || state === 'behind' || state === 'dirty') {
+    return { kind: 'blocked', label: BLOCKED_WORDING[state] ?? 'Conflicts' };
+  }
+  return { kind: 'mergeable' };
 }
 
 export function GitPullRequestsTab() {
@@ -224,9 +255,6 @@ export function GitPullRequestsTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stateFilter, setStateFilter] = useState<StateFilter>('open');
-  // Mergeability keyed by PR number. Absence = not fetched yet ("checking");
-  // a fetched value may itself carry `mergeable: null` (still computing).
-  const [mergeability, setMergeability] = useState<Record<number, PrMergeability>>({});
   // Which PR is awaiting an inline merge confirm, and which is mid-merge.
   const [confirming, setConfirming] = useState<number | null>(null);
   const [merging, setMerging] = useState<number | null>(null);
@@ -255,6 +283,22 @@ export function GitPullRequestsTab() {
   // refetch; #813 surfaced Refresh to the user). `useAsyncEffect`
   // aborts the previous effect's signal on dep change.
   const [reloadKey, setReloadKey] = useState(0);
+  // Bounded re-poll budget for `mergeable: null` rows (issue #419, kept
+  // through #1529). `pollAttempts` survives reloadKey bumps (the re-poll's
+  // own refetches must consume budget, not reset it) and resets only when
+  // the scope changes (mesh/filter, tracked below) or the list resolves
+  // with no nulls left. `pollExhausted` flips the null rows from
+  // "Checking…" to the "Unknown" retry state the status derives from.
+  // `softReload` marks reloads that must preserve row state (background
+  // timer ticks and row-level Unknown retries) so the load effect can skip
+  // the row-state clears below — those must never collapse an expanded row
+  // or cancel a pending merge confirm under the user's nose.
+  // `softReload` does the same for a row's own Unknown-retry button. Only
+  // a scope change or an explicit toolbar Refresh / merge refetch clears.
+  const pollAttempts = useRef(0);
+  const softReload = useRef(false);
+  const prevScope = useRef<{ meshId: number | null; filter: StateFilter } | null>(null);
+  const [pollExhausted, setPollExhausted] = useState(false);
   // "View on GitHub" header button — resolves the active mesh's
   // `origin` to a `https://github.com/{owner}/{repo}/pulls` URL.
   // Mirror of GitIssuesTab's hook call; both tabs share the same
@@ -263,21 +307,82 @@ export function GitPullRequestsTab() {
   const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
   const pullsListUrl = githubUrl ? `${githubUrl}/pulls` : '';
 
+  // Re-arm the re-poll budget and refetch. The toolbar Refresh is a hard
+  // reload (row state clears in the effect); a row's own Unknown-retry is
+  // soft (the user may be reading another expanded row).
+  const retryListLoad = useCallback(() => {
+    pollAttempts.current = 0;
+    setPollExhausted(false);
+    setReloadKey((k) => k + 1);
+  }, []);
+  const retryUnknownRow = useCallback(() => {
+    pollAttempts.current = 0;
+    setPollExhausted(false);
+    softReload.current = true;
+    setReloadKey((k) => k + 1);
+  }, []);
+
+  // Fresh scope, fresh budget: tracked inline in the load effect (no extra
+  // effect lifecycle for two synchronous resets).
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
+    // Scope change (mesh/filter) is a full reset: fresh budget, and the
+    // row state below is cleared (PR numbers don't carry across scopes).
+    // A background poll tick (or explicit refresh/merge refetch) keeps the
+    // running budget and — for poll ticks only — the row state: collapsing
+    // an expanded row or cancelling a pending merge confirm under the
+    // user's nose on a timer tick would be a UX glitch.
+    const scopeChanged =
+      prevScope.current === null ||
+      prevScope.current.meshId !== activeMeshId ||
+      prevScope.current.filter !== stateFilter;
+    prevScope.current = { meshId: activeMeshId, filter: stateFilter };
+    if (scopeChanged) {
+      pollAttempts.current = 0;
+      setPollExhausted(false);
+    }
+    const isSoftReload = softReload.current;
+    softReload.current = false;
     setLoading(true);
     setError(null);
-    setMergeability({});
-    setConfirming(null);
-    setMergeError({});
-    // PR numbers don't carry across mesh/filter changes (issue #461).
-    expanded.clear();
+    if (!isSoftReload) {
+      setConfirming(null);
+      setMergeError({});
+      // PR numbers don't carry across mesh/filter changes (issue #461).
+      expanded.clear();
+    }
+    // One shared re-poll timer per load (issue #419 via #1529: a single
+    // list refetch, not one timer per stuck PR). Owned by this effect run;
+    // cleanup clears it so unmount/mesh/filter/reload never leaks a retry.
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
     (async () => {
       try {
         const result = await getRepoPulls(activeMeshId, stateFilter);
         // The mesh / filter could have changed mid-flight — drop a stale result.
         if (signal.aborted) return;
         setPrs(result);
+        // Closed PRs show no merge control, so unknown mergeability there
+        // needs no resolution. Drafts render "Draft" without consulting it.
+        const stillNull =
+          stateFilter === 'open' &&
+          result.some((pr) => !pr.draft && (pr.mergeable ?? null) === null);
+        if (!stillNull) {
+          pollAttempts.current = 0;
+          setPollExhausted(false);
+          return;
+        }
+        if (pollAttempts.current >= MAX_POLL_ATTEMPTS) {
+          setPollExhausted(true);
+          return;
+        }
+        const delay = BASE_POLL_DELAY_MS * (pollAttempts.current + 1);
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          if (signal.aborted) return;
+          pollAttempts.current += 1;
+          softReload.current = true;
+          setReloadKey((k) => k + 1);
+        }, delay);
       } catch (e) {
         if (signal.aborted) return;
         console.error('Failed to load pull requests:', e);
@@ -286,125 +391,11 @@ export function GitPullRequestsTab() {
         if (!signal.aborted) setLoading(false);
       }
     })();
-  }, [activeMeshId, stateFilter, reloadKey]);
-
-  // Enrich each open, non-draft PR with its mergeability via ONE batched
-  // IPC call (issue #418). The previous implementation fired N parallel
-  // `getPrMergeability` calls; each one constructed a fresh `GitHubClient::new()`
-  // → `resolve_token()`, and when the token resolves only via the
-  // `gh auth token` subprocess fallback (no `GITHUB_TOKEN`/`GH_TOKEN` env
-  // var and no `oauth_token` in `hosts.yml` — the keyring case), every
-  // call spawned `gh` (~200–300ms on Windows). Batching N PRs behind one
-  // token resolution cuts auth cost by N× per panel render.
-  //
-  // Closed PRs can't be merged, and drafts are flagged without a call,
-  // so both skip. Keyed on the list (not the `mergeability` map) so it
-  // runs exactly once per load — depending on the map would let the first
-  // batch's setState cancel the siblings' in-flight callbacks and force
-  // needless refetches. `load` already clears the map, so there's nothing
-  // stale to guard against here.
-  //
-  // Re-poll on `mergeable: null` (issue #419)
-  // ----------------------------------------
-  // GitHub computes the merge asynchronously, so the detail endpoint can
-  // return `mergeable: null` for a few seconds. We schedule a bounded retry
-  // — first retry after 1.5s, then 3s, 4.5s — and give up after
-  // `MAX_MERGEABILITY_ATTEMPTS` total (1 initial + 3 retries, ~9s). Past
-  // that, "Checking…" is the best we can do without spamming GitHub; the
-  // next list reload retries from scratch.
-  //
-  // Crucially, the retry path is itself a SINGLE batched call carrying
-  // every still-null PR number from the previous attempt — not one
-  // per-stuck-PR retry timer. The auth cost amortises across the
-  // still-unresolved PRs at every attempt boundary, mirroring the initial
-  // call's contract (issue #418). One `setTimeout` per attempt fires once
-  // after `BASE_RETRY_DELAY_MS * currentAttempt`; if it finds no PRs are
-  // still-null, it doesn't fire a follow-up.
-  useAsyncEffect((signal) => {
-    if (activeMeshId === null || stateFilter !== 'open') return;
-    const MAX_MERGEABILITY_ATTEMPTS = 4;
-    const BASE_RETRY_DELAY_MS = 1500;
-    // Per-PR attempt count + the shared retry timer (one per attempt
-    // boundary). Owned by this effect instance; cleanup clears the timer
-    // and discards the maps.
-    const attempts = new Map<number, number>();
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const probeNumbers = (numbers: number[], attemptBoundary: number) => {
-      getPrsMergeability(activeMeshId, numbers)
-        .then((entries) => {
-          if (signal.aborted) return;
-          // Visible PR numbers as a Set for O(1) stale-entry filtering —
-          // a mid-flight mesh/filter change can deliver entries for PRs
-          // no longer in the rendered list. Entries outside the visible
-          // set are dropped from the state map (their rows aren't
-          // rendered, and storing them risks stale-mergeability reads on
-          // subsequent renders of the same PR number).
-          const visible = new Set(
-            prs.filter((pr) => !pr.draft).map((pr) => pr.number),
-          );
-          setMergeability((prev) => {
-            const next = { ...prev };
-            for (const entry of entries) {
-              if (!visible.has(entry.number)) continue;
-              next[entry.number] = {
-                mergeable: entry.mergeable,
-                mergeable_state: entry.mergeable_state,
-              };
-            }
-            return next;
-          });
-          // Collect every entry that's still-null AND has budget left.
-          // Both "GitHub still computing" and the per-PR error sentinel
-          // (`mergeable: None, mergeable_state: "error: ..."`) leave the
-          // row in "Checking…" and need a follow-up.
-          const stillNull: number[] = [];
-          for (const entry of entries) {
-            if (entry.mergeable !== null) continue;
-            const attempt = (attempts.get(entry.number) ?? 0) + 1;
-            if (attempt < MAX_MERGEABILITY_ATTEMPTS) {
-              attempts.set(entry.number, attempt);
-              stillNull.push(entry.number);
-            }
-            // else: exhausted retries; row stays in "Checking…" until
-            // the next list reload retries from scratch.
-          }
-          if (stillNull.length === 0 || attemptBoundary + 1 >= MAX_MERGEABILITY_ATTEMPTS) return;
-          // ONE timer for the next attempt boundary, regardless of how
-          // many PRs are still stuck. Firing once at t+1.5s/3s/4.5s and
-          // probing the still-null set as one batched call keeps the
-          // auth cost amortised per-attempt, not per-PR.
-          const nextAttempt = attemptBoundary + 1;
-          const delay = BASE_RETRY_DELAY_MS * nextAttempt;
-          retryTimer = setTimeout(() => {
-            retryTimer = null;
-            if (signal.aborted) return;
-            probeNumbers(stillNull, nextAttempt);
-          }, delay);
-        })
-        .catch((e) => {
-          // The whole batch failed (e.g. auth-missing → `GitHubClient::new()`
-          // errored at the command boundary). Per-PR failures inside the
-          // batch surface as `mergeable: null` entries above, not as a
-          // thrown rejection here — so a reject is the rare "couldn't even
-          // start" case. Leave every row in "Checking…" rather than
-          // falsely claiming conflicts; the next list reload retries.
-          console.error('mergeability batch probe failed:', e);
-        });
-    };
-
-    const candidates = prs.filter((pr) => !pr.draft).map((pr) => pr.number);
-    // Empty list short-circuits the IPC; the backend would too, but
-    // skipping the wire call here keeps the `activeMeshId === null` /
-    // no-PR rows path off the IPC seam entirely.
-    if (candidates.length === 0) return;
-    for (const n of candidates) attempts.set(n, 0);
-    probeNumbers(candidates, 0);
 
     return () => {
-      if (retryTimer !== null) clearTimeout(retryTimer);
+      if (pollTimer !== null) clearTimeout(pollTimer);
     };
-  }, [prs, stateFilter, activeMeshId]);
+  }, [activeMeshId, stateFilter, reloadKey]);
 
   // Fetch the provider list once at mount (issue #420, mirrors
   // `GitIssuesTab`). Platform filtering is enforced server-side via
@@ -625,7 +616,7 @@ export function GitPullRequestsTab() {
         }
       >
         <RefreshControl
-          onRefresh={() => setReloadKey((k) => k + 1)}
+          onRefresh={retryListLoad}
           isRefreshing={loading && prs.length > 0}
           ariaLabel="Refresh pull requests"
         />
@@ -642,7 +633,7 @@ export function GitPullRequestsTab() {
         ) : (
           <div className="space-y-1">
             {prs.map((pr) => {
-              const status = deriveMergeStatus(pr, mergeability[pr.number]);
+              const status = deriveMergeStatus(pr, pollExhausted);
               const isMerging = merging === pr.number;
               const isConfirming = confirming === pr.number;
               const rowError = mergeError[pr.number];
@@ -723,7 +714,17 @@ export function GitPullRequestsTab() {
                               <GitMergeIcon className="w-3.5 h-3.5" />
                             </button>
                           ) : status.kind === 'checking' ? (
-                            <span className="px-2 py-1 text-2xs text-text-muted animate-pulse">Checking…</span>
+                            <span className="px-2 py-1 text-2xs text-text-muted animate-pulse" title="GitHub hasn't computed mergeability yet — retrying automatically">Checking…</span>
+                          ) : status.kind === 'unknown' ? (
+                            <button
+                              type="button"
+                              onClick={retryUnknownRow}
+                              aria-label={`Retry mergeability check for pull request #${pr.number}`}
+                              title="GitHub hasn't reported mergeability — click to retry"
+                              className="px-2 py-1 text-2xs rounded border border-dashed border-border-subtle text-text-muted hover:text-accent-cyan hover:border-accent-cyan/40 transition-colors"
+                            >
+                              Unknown
+                            </button>
                           ) : (
                             <span className="px-2 py-1 text-2xs rounded bg-bg-card text-text-muted" title="This pull request can't be merged">{/* allow-bare-rounded */}
                               {status.label}
