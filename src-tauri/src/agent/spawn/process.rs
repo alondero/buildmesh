@@ -138,66 +138,6 @@ pub fn inject_attention_hook(project_path: &std::path::Path) -> Result<(), Strin
     Ok(())
 }
 
-/// OpenCode's attention bridge (issue #1295).
-///
-/// OpenCode has no Claude-style hook file, but it does load **ESM plugin
-/// modules** from `.opencode/plugins/` (https://opencode.ai/docs/plugins).
-/// The plugin runs inside the OpenCode TUI's Node.js process, so it can read
-/// the per-agent `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID` env vars set by
-/// `spawn_environment` (unlike Codex's hook runner, which env_clears them).
-///
-/// We install a single plugin file — `buildmesh-attention.js` — that POSTs
-/// to the local attention endpoint on two events:
-///
-/// - `session.idle` — the agent finished its turn and is at the prompt
-///   waiting for the user (mapped to `hook_event_name: "session.idle"`,
-///   which the classifier maps to `InputRequired`).
-/// - `permission.asked` — the agent is blocked on a tool approval decision
-///   (mapped to `PermissionRequest`, which the classifier always marks).
-///
-/// Both payloads carry the same shape the Claude hook curl POSTs, so the
-/// rule chain in `http::routes::attention::classify` decides the Node Turn
-/// consistently across harnesses.
-///
-/// `BUILDMESH_PLUGIN_LOG` is an optional escape hatch for diagnosing
-/// dropped callbacks on a per-node basis; without it the plugin silently
-/// swallows fetch errors so a network blip never breaks OpenCode.
-pub const OPENCODE_ATTENTION_PLUGIN: &str = include_str!("opencode_attention_plugin.js");
-
-/// Install (or refresh) the OpenCode attention plugin. Idempotent — a
-/// re-run with the same template is a no-op, so the orchestrator's
-/// before-spawn call has zero cost once the file is in place. The plugin
-/// file is fully owned by Buildmesh (the user has no reason to hand-edit
-/// it; the contents are pure template). A re-run with a user-modified
-/// file overwrites back to the template — same shape as
-/// `inject_attention_hook`'s ownership of `.claude/settings.local.json`.
-///
-/// Returns `Ok(())` even when the disk write is a no-op; an `Err` only
-/// surfaces a real filesystem failure (missing directory perms, full
-/// disk, etc.). The spawn caller treats this as best-effort: a failure is
-/// logged, the spawn proceeds, and the attention callback is the only
-/// casualty.
-pub fn inject_opencode_attention_plugin(project_path: &std::path::Path) -> Result<(), String> {
-    let plugins_dir = project_path.join(".opencode").join("plugins");
-    std::fs::create_dir_all(&plugins_dir)
-        .map_err(|e| format!("failed to create .opencode/plugins dir: {e}"))?;
-
-    let plugin_path = plugins_dir.join("buildmesh-attention.js");
-    match std::fs::read(&plugin_path) {
-        Ok(existing) if existing.as_slice() == OPENCODE_ATTENTION_PLUGIN.as_bytes() => {
-            // Already up to date — keep the existing mtime so repeated
-            // spawns don't churn the project working tree.
-            return Ok(());
-        }
-        _ => {}
-    }
-
-    std::fs::write(&plugin_path, OPENCODE_ATTENTION_PLUGIN)
-        .map_err(|e| format!("failed to write OpenCode attention plugin: {e}"))?;
-    tracing::info!("inject_opencode_attention_plugin: wrote plugin at {:?}", plugin_path);
-    Ok(())
-}
-
 /// Check if an agent is already running for this session.
 pub fn is_agent_already_running(session_id: &i64) -> bool {
     if let Some(agent) = PROCESS_REGISTRY.get(session_id) {

@@ -31,8 +31,7 @@ pub(crate) use orchestrator::spawn_with_intent;
 pub(crate) use prepare::resolve_base_ref_for_spawn;
 pub use prepare::DEFAULT_WORKTREE_MODE;
 pub use process::{
-    inject_attention_hook, inject_opencode_attention_plugin, is_agent_already_running,
-    spawn_child, OPENCODE_ATTENTION_PLUGIN,
+    inject_attention_hook, is_agent_already_running, spawn_child,
 };
 #[cfg(test)]
 pub(crate) use reader::maybe_buffer_for_naming;

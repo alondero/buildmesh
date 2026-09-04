@@ -280,14 +280,18 @@ impl Classified {
 ///    configs that post no body keep working until the next spawn migrates
 ///    them) with `signal_health = Degraded` — an unknown payload is never
 ///    silently presented as a high-confidence signal.
-/// 2. A permission-prompt Notification (Claude Code), a `PermissionRequest`
-///    event (Codex's dedicated hook for tool approval, issue #884), an
-///    OpenCode `permission.asked` plugin event (issue #1295), a Grok
-///    `Notification` with `notificationType == "permission_prompt"`
-///    (issue #1282), or an AGY `PreToolUse` event (the harness's pre-tool
-///    approval hook, issue #1285) → `MarkInput` always. The agent is
-///    blocked on a tool-approval decision — that needs the user even while
-///    background tasks run.
+/// 2. Permission-style signals (Claude Code's `Notification` matcher, Codex's
+///    `PermissionRequest` hook, AGY's `PreToolUse` hook, OpenCode's
+///    `permission.asked` plugin event) → `MarkInput` always. Each harness
+///    names the event on its own wire — no borrowed branches. The agent
+///    is blocked on a tool-approval decision; that needs the user even
+///    while background tasks run. OpenCode's event name (issue #1295) is
+///    passed through verbatim; Grok is handled separately under
+///    `notificationType == "permission_prompt"` in rule 2b below.
+/// 2b. Grok `Notification` with `notificationType == "permission_prompt"`
+///    (issue #1282) → `MarkInput`. Grok uses Grok's structured
+///    notification-type vocabulary; the upstream event name is
+///    `notification`, not a dedicated permission event.
 /// 3. An OpenCode `session.idle` plugin event (issue #1295) →
 ///    `MarkInput` with `kind = InputRequired`. The agent finished its
 ///    turn and is at the input prompt waiting. OpenCode has no
@@ -355,7 +359,10 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
             detail,
         };
     }
-    if matches!(event, Some("permissionrequest") | Some("pretooluse")) {
+    if matches!(
+        event,
+        Some("permissionrequest") | Some("pretooluse") | Some("permission.asked")
+    ) {
         return Classified::mark_input(detail);
     }
     // OpenCode plugin (issue #1295) — rule 3 above. Mirrors the upstream
@@ -980,6 +987,131 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(classify_decision(&body, |_| Some(2)), Decision::Ready);
+    }
+
+    // -- OpenCode plugin (issue #1295) ---------------------------------------
+
+    /// OpenCode's `session.idle` plugin event — agent finished its turn
+    /// and is at the prompt. Must land as MarkInput with kind =
+    /// `InputRequired` so the node reaches `awaiting_input`. The rule
+    /// fires before the transcript-scan fallback (OpenCode has no
+    /// transcript), so even a hypothetical "no pending tasks" caller
+    /// does NOT land this on `Ready`.
+    #[test]
+    fn opencode_session_idle_marks_input_as_input_required() {
+        let body = serde_json::json!({
+            "hook_event_name": "session.idle",
+            "message": "OpenCode session idle — agent ready for input",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(0));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.kind,
+            Some(crate::agent::session_lifecycle::LifecycleKind::InputRequired),
+            "session.idle must carry InputRequired, not the bare PermissionRequested kind"
+        );
+        assert_eq!(classified.detail.signal_health, crate::agent::session_lifecycle::SignalHealth::Ok);
+        assert_eq!(classified.detail.provider_event.as_deref(), Some("session.idle"));
+    }
+
+    /// OpenCode's `session.idle` is case-folded the same way as the
+    /// other event names (`SESSION.IDLE` and `session.idle` must hit the
+    /// same rule). Regression: a future refactor that switches to
+    /// `eq_ignore_ascii_case` only on the `permissionrequest` arm would
+    /// silently regress this rule.
+    #[test]
+    fn opencode_session_idle_is_case_insensitive() {
+        for casing in ["session.idle", "SESSION.IDLE", "Session.Idle"] {
+            let body = serde_json::json!({
+                "hook_event_name": casing,
+                "message": "idle",
+            })
+            .to_string()
+            .into_bytes();
+            let classified = classify(&body, |_| Some(0));
+            assert_eq!(
+                classified.decision,
+                Decision::MarkInput,
+                "casing {casing:?} must hit the rule"
+            );
+            assert_eq!(
+                classified.detail.kind,
+                Some(crate::agent::session_lifecycle::LifecycleKind::InputRequired)
+            );
+        }
+    }
+
+    /// OpenCode's `permission.asked` plugin event — agent blocked on a
+    /// tool approval decision. Must always mark input (rule 2-style
+    /// permission handling), regardless of transcript path. The
+    /// classifier does NOT do a transcript scan on permission events —
+    /// the harness signalled "user is needed", full stop.
+    #[test]
+    fn opencode_permission_asked_marks_input_regardless_of_transcript() {
+        let body = serde_json::json!({
+            "hook_event_name": "permission.asked",
+            "notification_type": "permission_prompt",
+            "message": "OpenCode is asking for permission: Bash",
+            "tool_name": "Bash",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(5));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(classified.detail.provider_event.as_deref(), Some("permission.asked"));
+        // Forwarded tool name rides on the structured `tool_name` field;
+        // it does NOT change the lifecycle kind — the harness already
+        // labelled this as a permission event upstream.
+        assert_eq!(classified.detail.kind, None);
+    }
+
+    /// Regression: pre-#1295 the plugin borrowed Codex's
+    /// `hook_event_name: "PermissionRequest"`. A payload with that exact
+    /// shape still classifies correctly (Codex's own rule still handles
+    /// it) — so any historical migration to the honest
+    /// `permission.asked` event name does NOT break in-flight Codex
+    /// callbacks. The two rules are independent.
+    #[test]
+    fn codex_permissionrequest_still_marks_independent_of_opencode_branch() {
+        let body = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "message": "Bash wants to run",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(0));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(classified.detail.provider_event.as_deref(), Some("PermissionRequest"));
+    }
+
+    /// Regression: an OpenCode permission payload that arrives with the
+    /// Grok-style `notification` event name + `notification_type` shape
+    /// must still mark input. This is the cross-harness safety net: if
+    /// a future plugin version forgets to set `hook_event_name` but
+    /// carries the structured `notification_type`, the route still
+    /// recognises it via rule 2b. (Pure "missing event_name" payloads
+    /// without `notification_type` would land on `Ready` — that's the
+    /// documented "no transcript, no signal" semantics.)
+    #[test]
+    fn opencode_permission_payload_with_notification_event_marks_via_notification_type() {
+        let body = serde_json::json!({
+            // Grok-style notification envelope used by an upstream
+            // plugin draft that hadn't migrated to the honest
+            // `permission.asked` event name yet.
+            "hook_event_name": "notification",
+            "notification_type": "permission_prompt",
+            "message": "asking for permission",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, |_| Some(0));
+        assert_eq!(
+            classified.decision,
+            Decision::MarkInput,
+            "notification + notification_type=permission_prompt must still mark via rule 2b"
+        );
     }
 
     /// Codex SessionStart fires as soon as the TUI boots, carrying the
