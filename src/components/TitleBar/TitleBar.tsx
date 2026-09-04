@@ -19,10 +19,12 @@ import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
  *
  * Issue #1375 moved navigation title-bar-first: a labelled "Search or
  * open…" command field opens the Universal Command Omnibar (the palette
- * is the primary way to reach destinations), and Usage — a high-frequency,
- * host-global utility — gets its own labelled action instead of living
- * behind icon-only Probe navigation. Neither shows data in the bar itself;
- * they are entry points, not readouts.
+ * is the primary way to reach destinations), centred in the bar as the
+ * primary affordance. Usage — a high-frequency, host-global utility —
+ * gets its own labelled action instead of living behind icon-only Probe
+ * navigation, and sits in the right-hand utility cluster next to the
+ * Settings and Remote Access pills. None of them show data in the bar
+ * itself; they are entry points, not readouts.
  */
 
 // `SHORTCUT_CATALOG` is a static module constant; resolving the
@@ -98,77 +100,119 @@ function UsageIcon({ className }: IconProps) {
   );
 }
 
-/** Issue #1375 — the title-bar navigation cluster. The labelled "Search or
-    open…" field is the global entry point to the command palette (views,
-    commands, nodes, issues, pull requests), and Usage is a separate labelled
-    action because it is a high-frequency, host-global utility. Both open
-    surfaces rather than displaying data inline: no aggregate Usage number is
-    shown in the bar. The kbd hint is read from the shortcut catalog (the
+/** Issue #1375 — the centred command field. The labelled "Search or open…"
+    field is the global entry point to the command palette (views, commands,
+    nodes, issues, pull requests); the header's `1fr auto 1fr` grid centres
+    it on the viewport. It opens a surface rather than displaying data
+    inline. The kbd hint is read from the shortcut catalog (the
     knowledge-primer's single source for display labels) so it can never
     drift from the cheatsheet row. */
 function NavigationControls() {
-  // Both reads below drive the visible aria state of the navigation
-  // cluster — `Usage` flips between an "open" and "active" treatment,
-  // and the palette field's `aria-expanded` mirrors the omnibar's
-  // mounted state. Selecting the primitive directly keeps the
-  // subscription cheap so unrelated store ticks (terminal output,
-  // agent node updates) don't re-render this header.
-  const probeOpen = useUIStore((s) => s.probeOpen);
-  const probeTab = useUIStore((s) => s.probeTab);
+  // The read below drives the field's visible aria state — `aria-expanded`
+  // mirrors the omnibar's mounted state so assistive tech reads the same
+  // closed→open transition a sighted user gets. Selecting the primitive
+  // directly keeps the subscription cheap so unrelated store ticks
+  // (terminal output, agent node updates) don't re-render this header.
   const omnibarOpen = useUIStore((s) => s.omnibarOpen);
-  const usageActive = probeOpen && probeTab === 'usage';
+  // `min-w-44` pins this wrapper's floor to the field's own `min-w-40`
+  // (130px at the 13px root) + padding — without it the wrapper's
+  // content-based minimum keeps ~100px of dead slack above the field's
+  // real floor, so flex/grid pressure starves the wordmark before the
+  // field yields.
   return (
-    <div className="flex items-center gap-1.5 px-2">
+    <div className="flex items-center px-2 min-w-44">
       <button
         type="button"
         onClick={() => useUIStore.getState().openOmnibar('files')}
         data-testid="titlebar-command-search"
         aria-label="Search or open"
         aria-haspopup="dialog"
-        // `aria-expanded` mirrors the omnibar's open state so assistive
-        // tech reads the same closed→open transition a sighted user gets.
         aria-expanded={omnibarOpen}
         title="Search or open… (command palette)"
-        // `w-64` is the design width; `min-w-40` lets the field shrink to
-        // 160px on half-screen windows (PR #1489 review — drag-region
-        // starvation at sub-1000px). At that minimum the placeholder
-        // still reads "Search or open…" without truncation; on tighter
-        // screens the user types into the palette, not the bar.
-        className="flex h-7 w-64 min-w-40 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-2.5 text-2xs text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
+        // `w-80` is the design width at the taller bar; `min-w-40` lets the
+        // field shrink to 130px on half-screen windows (PR #1489 review —
+        // drag-region starvation at sub-1000px). At that minimum the
+        // placeholder still reads "Search or open…" without truncation; on
+        // tighter screens the user types into the palette, not the bar.
+        className="flex h-10 w-80 min-w-40 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
       >
-        <SearchIcon className="h-3.5 w-3.5 shrink-0" />
+        <SearchIcon className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
         {/* `SEARCH_SHORTCUT_LABEL` is resolved once at module scope. The
             conditional still keeps an empty <kbd> chip from appearing if
-            the catalog row were ever renamed. */}
+            the catalog row were ever renamed. The chip is the LAST thing
+            to come back when widening: with it, the full-label bar needs
+            ~1390px (measured), so it stays hidden below 1400px while the
+            labels return at 1300px (switcher) and 1150px (pills). */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
-          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[9px] text-text-muted">
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1399px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
           </kbd>
         )}
       </button>
-      <button
-        type="button"
-        onClick={() => useUIStore.getState().openProbeTab('usage')}
-        data-testid="titlebar-usage"
-        aria-label="Open Usage"
-        aria-expanded={usageActive}
-        // `title` flips to match the active state — "close" when Usage is
-        // already in the inspector, "open" otherwise. The visible label
-        // stays "Usage" so the surface name doesn't change mid-flight.
-        title={usageActive
-          ? 'Usage surface is open — click the inspector close (X) to dismiss'
-          : 'Open Usage (provider meters and limits)'}
-        className={`flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-2xs transition-colors ${
-          usageActive
-            ? 'border-accent-cyan/40 bg-accent-cyan/10 text-accent-cyan'
-            : 'border-border-default text-text-secondary hover:bg-bg-card hover:text-text-primary'
-        }`}
-      >
-        <UsageIcon className="h-3.5 w-3.5 shrink-0" />
-        <span>Usage</span>
-      </button>
     </div>
+  );
+}
+
+/** Shared icon+text pill for the right-hand utility cluster (Usage,
+    Settings, Remote Access). One skeleton keeps the three visually in
+    step; `active` gives Usage its cyan "surface is open" treatment. */
+function HeaderPillButton({ icon, label, onClick, title, ariaLabel, active = false, testId, ariaExpanded }: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  title: string;
+  ariaLabel: string;
+  active?: boolean;
+  testId?: string;
+  ariaExpanded?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-testid={testId}
+      aria-label={ariaLabel}
+      aria-expanded={ariaExpanded}
+      title={title}
+      className={`flex h-9 shrink-0 items-center gap-2 rounded-md border px-2.5 text-sm transition-colors ${
+        active
+          ? 'border-accent-cyan/40 bg-accent-cyan/10 text-accent-cyan'
+          : 'border-border-default text-text-secondary hover:bg-bg-card hover:text-text-primary'
+      }`}
+    >
+      {icon}
+      {/* Icon-only below 1150px window width (a viewport media query, not a
+          container query) — the pills are the first thing the degradation
+          ladder drops, and the first to come back. The aria-label above
+          keeps the accessible name stable either way. */}
+      <span className="max-[1150px]:hidden">{label}</span>
+    </button>
+  );
+}
+
+/** Usage — a high-frequency, host-global utility, so it keeps its own
+    labelled action rather than living behind icon-only Probe navigation.
+    The `title` flips to match the active state — "close" when Usage is
+    already in the inspector, "open" otherwise. The visible label stays
+    "Usage" so the surface name doesn't change mid-flight. */
+function UsageButton() {
+  const probeOpen = useUIStore((s) => s.probeOpen);
+  const probeTab = useUIStore((s) => s.probeTab);
+  const usageActive = probeOpen && probeTab === 'usage';
+  return (
+    <HeaderPillButton
+      testId="titlebar-usage"
+      ariaLabel="Open Usage"
+      ariaExpanded={usageActive}
+      onClick={() => useUIStore.getState().openProbeTab('usage')}
+      title={usageActive
+        ? 'Usage surface is open — click the inspector close (X) to dismiss'
+        : 'Open Usage (provider meters and limits)'}
+      label="Usage"
+      active={usageActive}
+      icon={<UsageIcon className="h-4 w-4 shrink-0" />}
+    />
   );
 }
 
@@ -294,7 +338,7 @@ function WordmarkImg() {
     <img
       src={Wordmark}
       data-tauri-drag-region
-      className="h-5 w-auto"
+      className="h-10 w-auto"
       alt="Buildmesh"
     />
   );
@@ -337,14 +381,21 @@ export function TitleBar() {
 
   return (
     <>
+      {/* Three-column grid (`1fr auto 1fr`): the palette field's column is
+          `auto` and its siblings get equal `1fr` tracks, so the field is
+          centred on the VIEWPORT — flanking `flex-1` spacers only centre it
+          between unequal side clusters, which is not centring. The side
+          cells are drag regions, so their empty space still grabs the
+          window while buttons inside stay clickable. */}
       <header
         data-tauri-drag-region
-        className="flex items-stretch h-9 shrink-0 bg-bg-surface border-b border-border-subtle select-none"
+        className="grid h-18 shrink-0 grid-cols-[1fr_auto_1fr] items-stretch bg-bg-surface border-b border-border-subtle select-none"
       >
-        {isMac ? (
-          <>
+        {/* Left cell — clusters hug the start edge. */}
+        <div data-tauri-drag-region className="flex items-center pl-3 pr-2">
+          {isMac && (
             <div
-              className="flex items-center gap-2 pl-3 pr-3"
+              className="flex items-center gap-2 pr-3"
               data-testid="macos-traffic-lights"
             >
               <MacosTrafficLight kind="close" onClick={() => appWindow.close()} ariaLabel="Close" />
@@ -355,95 +406,68 @@ export function TitleBar() {
                 ariaLabel={isMaximized ? 'Restore' : 'Maximize'}
               />
             </div>
-            <div data-tauri-drag-region className="flex items-center pr-2">
-              <WordmarkImg />
-            </div>
-          </>
-        ) : (
-          <div data-tauri-drag-region className="flex items-center pl-3 pr-2">
-            <WordmarkImg />
-          </div>
-        )}
-
-        <div className="flex items-center">
+          )}
+          <WordmarkImg />
           <ViewModeSwitcher />
         </div>
 
-        {/* Issue #1375 — title-bar-first navigation: the labelled command
-            field and the Usage action. Non-draggable (the header carries
-            `data-tauri-drag-region`, never this cluster) so clicks don't
-            grab the window. */}
+        {/* Centre cell — the #1375 command field. Non-draggable so clicks
+            don't grab the window. */}
         <NavigationControls />
 
-        {/* Drag-region spacer — the "empty" part of the strip the user grabs
-            to move the window; grows to push the right-side controls over.
-            `min-w-8` (32px) guarantees at least a usable grab zone on
-            half-screen windows where the cluster adds up past the viewport
-            width (PR #1489 review — at sub-1000px the bare `flex-1`
-            collapses to 0px and users can no longer drag the window). The
-            search field's `min-w-40` mirrors this: search yields space first
-            so the drag region stays grabbable. */}
-        <div data-tauri-drag-region className="flex-1 min-w-8" />
+        {/* Right cell — clusters hug the end edge. Non-draggable children
+            (inputs/pills/buttons) keep their clicks; empty space drags. */}
+        <div data-tauri-drag-region className="flex items-center justify-end">
+          <div className="flex items-center pr-1 min-w-[122px]">
+            <GridControls />
+          </div>
 
-        {/* Issue #998 — grid search control. Lives on the right side of the
-            slim top bar, between the drag-region spacer and the
-            Settings / Remote Access buttons, per the wayfinder #988 spec
-            ("Controls live on the right side of the slim top View Header,
-            introduced in #983"). The component itself is a subset of the
-            full #997 work — just the search input + clear button; the
-            filter popover, sort selector, badges, and reset button called
-            out in #997 land in a follow-up. The component is non-draggable
-            (`[data-tauri-drag-region]` is on the header, not bubbled here)
-            so clicks on the input don't grab the window. */}
-        <div className="flex items-center pr-1">
-          <GridControls />
+          <div className="flex items-center gap-2 pr-1">
+            <UsageButton />
+            <HeaderPillButton
+              ariaLabel="Open settings"
+              onClick={() => useUIStore.getState().openAppSettings()}
+              title="Settings"
+              label="Settings"
+              icon={<SettingsIcon className="h-4 w-4 shrink-0" />}
+            />
+            <HeaderPillButton
+              ariaLabel="Open mobile remote access"
+              onClick={() => useUIStore.getState().openRemoteAccess()}
+              title="Remote access"
+              label="Mobile"
+              icon={<MobileIcon className="h-4 w-4 shrink-0" />}
+            />
+          </div>
+
+          {!isMac && (
+            <>
+              <div className="w-px h-6 self-center bg-border-subtle mx-1 shrink-0" />
+
+              {/* `shrink-0` — window buttons are critical chrome: flex
+                  pressure at the 900px minimum width must never squish
+                  them into unreadable slivers. */}
+              <div className="flex items-stretch shrink-0">
+                <WindowControlButton onClick={() => appWindow.minimize()} title="Minimize">
+                  <MinimizeIcon className="w-[18px] h-[18px]" />
+                </WindowControlButton>
+                <WindowControlButton
+                  onClick={handleToggleMaximize}
+                  title={isMaximized ? 'Restore' : 'Maximize'}
+                >
+                  {isMaximized ? (
+                    <RestoreIcon className="w-[18px] h-[18px]" />
+                  ) : (
+                    <MaximizeIcon className="w-[18px] h-[18px]" />
+                  )}
+                </WindowControlButton>
+                <WindowControlButton onClick={() => appWindow.close()} title="Close" danger>
+                  <CloseIcon className="w-[18px] h-[18px]" />
+                </WindowControlButton>
+              </div>
+            </>
+          )}
         </div>
-
-        <div className="flex items-center gap-1 pr-1">
-          <button
-            type="button"
-            onClick={() => useUIStore.getState().openAppSettings()}
-            className="p-1 rounded-md text-text-muted hover:text-text-primary hover:bg-bg-card transition-colors"
-            title="Settings"
-            aria-label="Open settings"
-          >
-            <SettingsIcon className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => useUIStore.getState().openRemoteAccess()}
-            className="p-1 rounded-md text-text-muted hover:text-text-primary hover:bg-bg-card transition-colors"
-            title="Remote access"
-            aria-label="Open remote access"
-          >
-            <MobileIcon className="w-4 h-4" />
-          </button>
-        </div>
-
-        {!isMac && (
-          <>
-            <div className="w-px h-4 self-center bg-border-subtle mx-1" />
-
-            <div className="flex items-stretch">
-              <WindowControlButton onClick={() => appWindow.minimize()} title="Minimize">
-                <MinimizeIcon className="w-4 h-4" />
-              </WindowControlButton>
-              <WindowControlButton
-                onClick={handleToggleMaximize}
-                title={isMaximized ? 'Restore' : 'Maximize'}
-              >
-                {isMaximized ? (
-                  <RestoreIcon className="w-4 h-4" />
-                ) : (
-                  <MaximizeIcon className="w-4 h-4" />
-                )}
-              </WindowControlButton>
-              <WindowControlButton onClick={() => appWindow.close()} title="Close" danger>
-                <CloseIcon className="w-4 h-4" />
-              </WindowControlButton>
-            </div>
-          </>
-        )}
       </header>
 
       {appSettingsOpen && <AppSettingsModal onClose={() => useUIStore.getState().closeAppSettings()} />}

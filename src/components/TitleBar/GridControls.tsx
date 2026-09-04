@@ -148,7 +148,7 @@ export function GridControls() {
         // announce the field as a search input. The custom button
         // (rendered conditionally below) is the only visible clear
         // affordance.
-        className="bg-bg-card border border-border-default rounded-md px-2 py-1 text-xs text-text-primary placeholder:text-text-muted w-44 outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30 transition-colors [&::-webkit-search-cancel-button]:appearance-none"
+        className="bg-bg-card border border-border-default rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-muted w-56 min-w-36 outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30 transition-colors [&::-webkit-search-cancel-button]:appearance-none"
       />
       {query !== '' && (
         <button
@@ -157,7 +157,7 @@ export function GridControls() {
           data-testid="grid-search-clear"
           aria-label="Clear search"
           title="Clear search (Esc)"
-          className="text-text-muted hover:text-status-error text-xs px-1 transition-colors"
+          className="text-text-muted hover:text-status-error text-sm px-1 transition-colors"
         >
           ✕
         </button>

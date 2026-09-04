@@ -109,7 +109,7 @@ describe('TitleBar on macOS', () => {
       expect(search.textContent).toContain('⌘+K');
       expect(screen.getByRole('button', { name: 'Open Usage' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Open settings' })).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Open remote access' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Open mobile remote access' })).toBeTruthy();
     });
 
     it('wordmark still carries data-tauri-drag-region; the traffic lights themselves do NOT', async () => {
