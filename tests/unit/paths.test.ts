@@ -183,6 +183,11 @@ describe('getEffectiveWorktreeDir (issue #1519)', () => {
     expect(getEffectiveWorktreeDir('/repo/mesh', '/tmp/wt', null)).toBe('/tmp/wt');
     expect(getEffectiveWorktreeDir('/repo/mesh', '~/wt', null)).toBe('/repo/mesh/~/wt');
   });
+
+  it('never doubles separators when the mesh root has a trailing slash', () => {
+    expect(getEffectiveWorktreeDir('/repo/mesh/', null, null)).toBe('/repo/mesh/.claude/worktrees');
+    expect(getEffectiveWorktreeDir('/repo/mesh/', null, 'custom-wt')).toBe('/repo/mesh/custom-wt');
+  });
 });
 
 describe('pathMatchesGitEvent with custom dirs (issue #1519)', () => {

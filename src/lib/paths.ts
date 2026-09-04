@@ -52,19 +52,20 @@ export function getEffectiveWorktreeDir(
     return t ? t : null;
   };
   const chosen = clean(meshDirectory) ?? clean(appDirectory);
-  if (!chosen) return `${meshPath}/.claude/worktrees`;
+  const root = meshPath.replace(/[/\\]+$/, '');
+  if (!chosen) return `${root}/.claude/worktrees`;
   // Mirrors the backend normalization (issue #1519): trailing separators
   // trimmed on absolute values; leading/trailing stripped on relative ones
   // (the backend additionally rejects `.`/`..`/forbidden segments at the
   // write boundary — this helper is display-only).
   if (isAbsoluteWorktreePath(chosen)) {
     const dir = chosen.replace(/[/\\]+$/, '');
-    if (!dir) return `${meshPath}/.claude/worktrees`;
+    if (!dir) return `${root}/.claude/worktrees`;
     return dir;
   }
   const dir = chosen.replace(/^[/\\]+/, '').replace(/[/\\]+$/, '');
-  if (!dir) return `${meshPath}/.claude/worktrees`;
-  return `${meshPath}/${dir}`;
+  if (!dir) return `${root}/.claude/worktrees`;
+  return `${root}/${dir}`;
 }
 
 function isAbsoluteWorktreePath(p: string): boolean {

@@ -446,28 +446,31 @@ pub fn effective_worktree_dir_raw(
 ) -> String {
     let chosen = normalize_worktree_directory(mesh_setting)
         .or_else(|| normalize_worktree_directory(app_setting));
+    // A trailing separator on the stored root (e.g. from a CLI import)
+    // must not produce `root//dir` — strip once here and in the
+    // frontend mirror (`getEffectiveWorktreeDir`) so both spellings agree.
+    let root = mesh_path.trim_end_matches(['/', '\\']);
+    let root = if root.is_empty() { mesh_path } else { root };
     match chosen {
-        None => format!("{}/{}", mesh_path, DEFAULT_WORKTREE_DIR_NAME),
+        None => format!("{}/{}", root, DEFAULT_WORKTREE_DIR_NAME),
         Some(dir) => {
             if is_absolute_worktree_path(&dir) {
                 let trimmed = dir.trim_end_matches(['/', '\\']);
                 if trimmed.is_empty() {
-                    format!("{}/{}", mesh_path, DEFAULT_WORKTREE_DIR_NAME)
+                    format!("{}/{}", root, DEFAULT_WORKTREE_DIR_NAME)
                 } else {
                     trimmed.to_string()
                 }
             } else {
-                // Strip leading `./` segments literally? No — store verbatim
-                // and join literally so the on-disk layout matches exactly
-                // what the user typed (minus surrounding whitespace).
-                // Trailing separators are trimmed so `<dir>/<name>` never
-                // doubles up; the mesh_path itself is left untouched to
-                // preserve its stored spelling.
-                let trimmed_dir = dir.trim_end_matches(['/', '\\']);
+                // Values reaching here passed `normalize_relative_worktree_dir`
+                // at the write boundary (no leading/trailing separators, no
+                // `.`/`..`/empty segments); trim defensively so a legacy row
+                // still joins to exactly one separator.
+                let trimmed_dir = dir.trim_matches(['/', '\\']);
                 if trimmed_dir.is_empty() {
-                    format!("{}/{}", mesh_path, DEFAULT_WORKTREE_DIR_NAME)
+                    format!("{}/{}", root, DEFAULT_WORKTREE_DIR_NAME)
                 } else {
-                    format!("{}/{}", mesh_path, trimmed_dir)
+                    format!("{}/{}", root, trimmed_dir)
                 }
             }
         }
@@ -726,6 +729,21 @@ mod tests {
     }
 
     // ── Configurable Worktree Node directories (issue #1519) ────────────────
+
+    #[test]
+    fn effective_dir_never_doubles_separators_on_trailing_slash_root() {
+        // A stored root with a trailing separator (e.g. from a CLI import)
+        // must join to exactly one separator on both sides of the contract
+        // (see `getEffectiveWorktreeDir`).
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh/", None, None),
+            "/repo/mesh/.claude/worktrees"
+        );
+        assert_eq!(
+            effective_worktree_dir_raw("/repo/mesh/", None, Some("custom-wt")),
+            "/repo/mesh/custom-wt"
+        );
+    }
 
     #[test]
     fn effective_dir_defaults_to_claude_worktrees_when_unconfigured() {

@@ -34,6 +34,8 @@
 
 import { formatError } from '../../lib/errorUtils';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { WORKTREE_DIR_CHANGED_EVENT } from '../../lib/events';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshRecovery } from '../../hooks/useMeshRecovery';
@@ -55,10 +57,13 @@ import {
   updateMeshUseWorktree,
   updateMeshWorktreeDirectory,
   updateWorktreeBaseRef,
+  type AppPreferences,
   type BranchInfo,
   type GitRepoPruneInfo,
   type HoldingWorktree,
   type MeshHealth,
+  type MeshRow,
+  type WorktreeDirectoryConfig,
   type WorktreeInfo,
 } from '../../lib/tauri';
 import { getEffectiveWorktreeDir } from '../../lib/paths';
@@ -394,9 +399,43 @@ export function WorktreeManagerTab() {
   // than showing an error — the user can still toggle the controls,
   // and a subsequent save will retry the load path on the next
   // mesh switch.
+  // Applies a loaded directory config to the form state. Shared by the
+  // mount effect (guarded by its AbortSignal) and the
+  // `worktree-directory-changed` listener below (guarded by its own
+  // `cancelled` flag) so a Settings change elsewhere refreshes this tab
+  // instead of leaving a stale inherited value until remount (issue #1519).
+  const applyWorktreeDirConfig = useCallback(
+    (
+      config: MeshRow,
+      prefs: AppPreferences | null,
+      dirConfig: WorktreeDirectoryConfig | null,
+    ) => {
+      const meshDir = config.worktree_directory?.trim() ?? '';
+      setWorktreeDirectory(meshDir);
+      const appDir = (prefs?.worktree_directory?.trim() ?? '') || null;
+      setWorktreeDirAppDefault(appDir);
+      setWorktreeDirEffective(
+        dirConfig?.effective_directory ??
+          getEffectiveWorktreeDir(activeMeshPath ?? '', meshDir, appDir),
+      );
+    },
+    [activeMeshPath],
+  );
+
   useAsyncEffect(
     (signal) => {
       if (activeMeshId === null) return;
+      getMeshProperties(activeMeshId)
+        .then((config) => {
+          if (signal.aborted) return;
+          setUseWorktree(config.use_worktree);
+          setBaseRef(wireToFormBaseRef(config.base_ref));
+          setWorktreeMode(wireToFormMode(config.worktree_mode));
+          setPreSpawnPoolSize(config.pre_spawn_pool_size);
+        })
+        .catch(() => {
+          // Swallow — keep the existing form state (see below).
+        });
       Promise.all([
         getMeshProperties(activeMeshId),
         getAppPreferences().catch(() => null),
@@ -404,18 +443,7 @@ export function WorktreeManagerTab() {
       ])
         .then(([config, prefs, dirConfig]) => {
           if (signal.aborted) return;
-          setUseWorktree(config.use_worktree);
-          setBaseRef(wireToFormBaseRef(config.base_ref));
-          setWorktreeMode(wireToFormMode(config.worktree_mode));
-          setPreSpawnPoolSize(config.pre_spawn_pool_size);
-          const meshDir = config.worktree_directory?.trim() ?? '';
-          setWorktreeDirectory(meshDir);
-          const appDir = (prefs?.worktree_directory?.trim() ?? '') || null;
-          setWorktreeDirAppDefault(appDir);
-          const effective =
-            dirConfig?.effective_directory ??
-            getEffectiveWorktreeDir(activeMeshPath ?? '', meshDir, appDir);
-          setWorktreeDirEffective(effective);
+          applyWorktreeDirConfig(config, prefs, dirConfig);
         })
         .catch(() => {
           // Swallow — keep the existing form state. Mirrors the legacy
@@ -423,8 +451,42 @@ export function WorktreeManagerTab() {
           // MeshPropertiesTab's load-failure behaviour.
         });
     },
-    [activeMeshId, activeMeshPath],
+    [activeMeshId, activeMeshPath, applyWorktreeDirConfig],
   );
+
+  // Re-resolve when the directory config changes outside this tab (e.g. the
+  // app-wide default edited in Settings while the probe is open). Skips
+  // events for other meshes; `null` (app default moved) refreshes any mesh.
+  // Guarded by its own `cancelled` flag (the mount effect above has the
+  // AbortSignal for the same race).
+  useEffect(() => {
+    if (activeMeshId === null) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    listen<number | null>(WORKTREE_DIR_CHANGED_EVENT, (event) => {
+      const affected = event.payload;
+      if (affected !== null && affected !== undefined && affected !== activeMeshId) return;
+      if (cancelled) return;
+      Promise.all([
+        getMeshProperties(activeMeshId),
+        getAppPreferences().catch(() => null),
+        getWorktreeDirectoryConfig(activeMeshId).catch(() => null),
+      ])
+        .then(([config, prefs, dirConfig]) => {
+          if (!cancelled) applyWorktreeDirConfig(config, prefs, dirConfig);
+        })
+        .catch(() => {
+          // Swallow — keep the existing form state (see above).
+        });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [activeMeshId, applyWorktreeDirConfig]);
 
   // Configuration card save handlers. Each: (1) update form state
   // optimistically, (2) clear any prior save error, (3) call the

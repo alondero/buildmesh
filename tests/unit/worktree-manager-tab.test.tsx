@@ -25,6 +25,7 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
 import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
+import { WORKTREE_DIR_CHANGED_EVENT } from '../../src/lib/events';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { openProbeDestination } from './helpers/openProbeDestination';
 
@@ -1315,5 +1316,88 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
     });
     expect(selectRecommended.textContent).toMatch(/\(1\)/);
     expect(selectRecommended.textContent).not.toMatch(/\(2\)/);
+  });
+});
+
+describe('WorktreeManagerTab worktree directory reactivity (issue #1519)', () => {
+  // Capture the worktree-directory-changed handler the tab attaches so tests
+  // can fire it with mesh-scoped / app-wide payloads.
+  let dirEventHandler: ((e: { payload: unknown }) => void) | null = null;
+
+  beforeEach(() => {
+    dirEventHandler = null;
+    vi.mocked(listen).mockImplementation((event: string, handler: (e: unknown) => void) => {
+      if (event === WORKTREE_DIR_CHANGED_EVENT) {
+        dirEventHandler = handler as (e: { payload: unknown }) => void;
+      }
+      return Promise.resolve(() => {});
+    });
+  });
+
+  it('refreshes the inherited effective value when the app default changes elsewhere', async () => {
+    mockBackend();
+    // The backend's effective dir moves after mount (simulating a Settings
+    // change to the app-wide default while the probe is open).
+    let effective = '/repos/demo/.claude/worktrees';
+    const prevImpl = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'get_worktree_directory_config') {
+        return Promise.resolve({
+          mesh_directory: '',
+          app_directory: null,
+          effective_directory: effective,
+        });
+      }
+      return prevImpl?.(cmd, args) ?? Promise.resolve({});
+    });
+    openProbeDestination('worktrees');
+
+    // Initial load shows the inherited legacy default.
+    const input = (await screen.findByLabelText('Worktree directory')) as HTMLInputElement;
+    expect(input.value).toBe('');
+    await waitFor(() => {
+      expect(screen.getByText('/repos/demo/.claude/worktrees')).toBeTruthy();
+    });
+
+    // App default moves (null payload = every inheriting mesh may have moved).
+    effective = '/repos/demo/custom-wt';
+    dirEventHandler?.({ payload: null });
+
+    await waitFor(() => {
+      expect(screen.getByText('/repos/demo/custom-wt')).toBeTruthy();
+    });
+    // And the event name is the shared constant (drift guard).
+    const { WORKTREE_DIR_CHANGED_EVENT: evt } = await import(
+      '../../src/lib/events'
+    );
+    expect(evt).toBe('worktree-directory-changed');
+  });
+
+  it('ignores worktree-directory-changed for other meshes', async () => {
+    mockBackend();
+    const prevImpl = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'get_worktree_directory_config') {
+        return Promise.resolve({
+          mesh_directory: '',
+          app_directory: null,
+          effective_directory: '/repos/demo/.claude/worktrees',
+        });
+      }
+      return prevImpl?.(cmd, args) ?? Promise.resolve({});
+    });
+    openProbeDestination('worktrees');
+    await screen.findByLabelText('Worktree directory');
+
+    const callsBefore = vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === 'get_worktree_directory_config').length;
+    // A change scoped to mesh 999 must not refetch mesh 42's config.
+    dirEventHandler?.({ payload: 999 });
+    await new Promise((r) => setTimeout(r, 50));
+    const callsAfter = vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === 'get_worktree_directory_config').length;
+    expect(callsAfter).toBe(callsBefore);
   });
 });
