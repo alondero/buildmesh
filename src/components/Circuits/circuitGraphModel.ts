@@ -46,6 +46,8 @@ export const NODE_SPECS: readonly NodeKindSpec[] = [
   { discriminator: 'close_agent_node', label: 'Close Agent Node', category: 'action' },
   { discriminator: 'notify', label: 'Notify', category: 'action' },
   { discriminator: 'llm_turn_classifier', label: 'LLM Turn Classifier', category: 'gate' },
+  { discriminator: 'await_agent_turn', label: 'Wait for Task Completion', category: 'gate' },
+  { discriminator: 'review_verdict', label: 'Review Verdict', category: 'gate' },
   {
     discriminator: 'deterministic_verification',
     label: 'Deterministic Verification',
@@ -120,6 +122,10 @@ export function defaultKind(discriminator: string): CircuitNodeKind {
       return { type: 'notify', message: '' };
     case 'llm_turn_classifier':
       return { type: 'llm_turn_classifier', target_node_id: null };
+    case 'await_agent_turn':
+      return { type: 'await_agent_turn', target_node_id: '$source' };
+    case 'review_verdict':
+      return { type: 'review_verdict', target_node_id: null };
     case 'deterministic_verification':
       return { type: 'deterministic_verification', command: '' };
     case 'collaborator_check':
@@ -175,6 +181,10 @@ export function configSummary(kind: CircuitNodeKind): string {
       return truncate(kind.message, 48) || '(no message)';
     case 'llm_turn_classifier':
       return 'classify each turn';
+    case 'await_agent_turn':
+      return 'classify completion, including an earlier turn';
+    case 'review_verdict':
+      return 'approval, changes requested, or needs attention';
     case 'close_agent_node':
       return kind.target_node_id ? `close ${kind.target_node_id}` : 'close nearest agent';
     case 'deterministic_verification':
@@ -367,6 +377,11 @@ export const MUSTACHE_PATHS: readonly string[] = [
   'verification.command',
   'retry.attempt',
   'retry.max_retries',
+  'source.agent_id',
+  'source.name',
+  'source.path',
+  'source.base_ref',
+  'source.output',
 ];
 
 /** Display labels + order for the namespace chips that group the
@@ -384,6 +399,7 @@ export interface MustacheGroupSpec {
 
 export const MUSTACHE_GROUPS: readonly MustacheGroupSpec[] = [
   { namespace: 'circuit', label: 'Circuit Metadata', description: 'Identity of this circuit and the current run.' },
+  { namespace: 'source', label: 'Triggering Agent', description: 'Available when launched from an Agent Node; empty on ordinary Trigger Now runs.' },
   { namespace: 'node', label: 'Current Node', description: 'Identifier of the node whose template is being resolved.' },
   { namespace: 'issue', label: 'Issue Context', description: 'GitHub issue that fired the trigger (issue-label runs).' },
   { namespace: 'pr', label: 'Pull Request', description: 'PR payload — populated when a github_action opens or a PR-label trigger fires.' },
@@ -663,6 +679,8 @@ export function isReachablePath(
   switch (ns) {
     case 'circuit':
       return true;
+    case 'source':
+      return reachable.triggers.manual;
     case 'node':
       // `node.id` is always live (with_node is called per step).
       // Spawn-output chips (`node.<id>.output`) are routed to the
@@ -701,6 +719,11 @@ export function isReachablePath(
  *  purely an authoring hint. */
 export function sampleValueForPath(path: string): string {
   switch (path) {
+    case 'source.agent_id': return '42';
+    case 'source.name': return 'Fix parser';
+    case 'source.path': return '/repo/.claude/worktrees/fix-parser';
+    case 'source.base_ref': return 'origin/main';
+    case 'source.output': return 'Implementation complete; relevant checks passed.';
     case 'circuit.id':
       return '7';
     case 'circuit.name':
@@ -775,7 +798,10 @@ export function sampleValueForPath(path: string): string {
 export function sourceOutcomes(kind: CircuitNodeKind): StepOutcome[] | null {
   switch (kind.type) {
     case 'llm_turn_classifier':
+    case 'review_verdict':
       return ['completed', 'blocked', 'working'];
+    case 'await_agent_turn':
+      return ['completed'];
     case 'deterministic_verification':
       return ['green', 'red'];
     default:

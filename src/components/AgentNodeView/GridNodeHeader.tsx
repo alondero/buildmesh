@@ -27,6 +27,7 @@ import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 import { CircuitsIcon } from '../Probe/probeIcons';
+import { AgentReviewButton } from './AgentReviewButton';
 
 interface GridNodeHeaderProps {
   /// Issue #1384 — pass the id only; the header subscribes to
@@ -444,6 +445,7 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
       </div>
       <div className="flex items-center gap-1.5 flex-shrink-0" onPointerDown={(e) => e.stopPropagation()}>
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
+        <AgentReviewButton node={node} />
         {showInlineActions ? (
           <>
             {/* Issue #1502 — Regenerate toolbar affordance (in-place

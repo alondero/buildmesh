@@ -50,6 +50,8 @@ const ALL_DISCRIMINATORS = [
   'close_agent_node',
   'notify',
   'llm_turn_classifier',
+  'await_agent_turn',
+  'review_verdict',
   'deterministic_verification',
   'collaborator_check',
   'retry_limit',

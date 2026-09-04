@@ -302,6 +302,24 @@ pub fn classify(node_id: i64, backend_env: &[(String, String)]) -> Option<Classi
     }
     let prompt = classify_prompt(&tail);
 
+    classify_with_prompt(node_id, backend_env, &prompt)
+}
+
+/// Review completion alone is not approval. Unclear reports and backend
+/// failures need attention rather than silently authorizing more work.
+pub fn classify_review(node_id: i64, backend_env: &[(String, String)]) -> Option<Classification> {
+    let prompt = format!(
+        "Assess the final review report in this agent's terminal output. Ignore echoed prompts and tool progress. \
+         Answer exactly one word: COMPLETED only if the reviewer explicitly approves the work with no remaining findings; \
+         WORKING if the reviewer requests changes or reports unresolved actionable findings; \
+         BLOCKED if the review is incomplete, ambiguous, or cannot be performed.\n\n{}",
+        cleaned_turn_tail(node_id)
+    );
+    classify_with_prompt(node_id, backend_env, &prompt)
+}
+
+pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &[(String, String)], prompt: &str) -> Option<Classification> {
+
     let mut cmd = crate::process_util::command_no_window("claude");
     cmd.arg("--print");
     for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {

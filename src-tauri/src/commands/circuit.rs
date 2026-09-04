@@ -337,8 +337,17 @@ fn retire_cancelled_agents(agent_ids: Vec<i64>) -> Result<(), String> {
     })
 }
 
+fn release_circuit_source(run_id: i64) {
+    if let Some(source) = crate::db::get_circuit_run(run_id).ok().flatten()
+        .and_then(|r| crate::autopilot::circuit::context::CircuitContext::from_json(&r.context_json).ok())
+        .and_then(|ctx| ctx.source_agent_id()) {
+        crate::autopilot::evaluator::unregister(source);
+    }
+}
+
 fn cancel_run_and_cleanup_inner(app: &AppHandle, run_id: i64) -> Result<(), String> {
     let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(|error| error.to_string())?;
+    release_circuit_source(run_id);
     crate::services::circuit_worker::wake_circuit_worker();
     let cleanup = retire_cancelled_agents(agent_ids);
     let state = crate::db::get_circuit_run(run_id)
@@ -363,6 +372,7 @@ fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
             // retire itself; retaining the terminal ledger makes a retry
             // possible if that OS cleanup is transiently locked.
             let _ = crate::db::cancel_circuit_run(run_id);
+            release_circuit_source(run_id);
             crate::services::circuit_worker::wake_circuit_worker();
             Err(wait_error)
         }
@@ -431,6 +441,7 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
             if let Ok(run_ids) = crate::db::list_circuit_run_ids_for_cleanup(circuit_id) {
                 for run_id in run_ids {
                     let _ = crate::db::cancel_circuit_run(run_id);
+                    release_circuit_source(run_id);
                 }
             }
             crate::services::circuit_worker::wake_circuit_worker();
@@ -458,6 +469,9 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
     let graph = CircuitGraph::from_json(&circuit.graph_json)?;
+    if graph.requires_source_agent() {
+        return Err("Start this Circuit from the source agent's title bar.".into());
+    }
     if graph.is_issue_driven_autopilot_review() {
         return Err(
             "issue-driven Autopilot review circuits are triggered by labelled GitHub issues; Trigger Now requires issue context"
@@ -487,6 +501,27 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     .map_err(|e| e.to_string())?;
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: manual trigger for circuit {} → run {}", circuit_id, run_id);
+    Ok(run_id)
+}
+
+#[command]
+pub fn trigger_circuit_from_node(app: AppHandle, node_id: i64, circuit_id: Option<i64>, max_rounds: i32) -> Result<i64, String> {
+    if !(1..=10).contains(&max_rounds) {
+        return Err("Review rounds must be between 1 and 10.".into());
+    }
+    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
+        return Err("Resume the agent before starting a review.".into());
+    }
+    let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if node.provider == "terminal" {
+        return Err("Review loops require an AI agent.".into());
+    }
+    let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds)?;
+    crate::autopilot::evaluator::register_circuit(node_id);
+    let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload {
+        run_id, state: "pending".into(),
+    });
+    crate::services::circuit_worker::wake_circuit_worker();
     Ok(run_id)
 }
 

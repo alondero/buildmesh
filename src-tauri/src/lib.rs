@@ -541,6 +541,7 @@ pub fn run() {
             commands::circuit::cancel_circuit_run,
             commands::circuit::move_circuit_run,
             commands::circuit::trigger_circuit_now,
+            commands::circuit::trigger_circuit_from_node,
             commands::circuit::list_circuit_runs,
             commands::circuit::pause_circuit_run,
             commands::circuit::resume_circuit_run,

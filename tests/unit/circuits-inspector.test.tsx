@@ -73,6 +73,27 @@ function renderNode(node: CircuitNode, onChange = vi.fn()) {
   return render(<InspectorPanel node={node} onChange={onChange} />);
 }
 
+describe('InspectorPanel — borrowed source targets', () => {
+  it.each(['llm_turn_classifier', 'await_agent_turn', 'review_verdict'] as const)(
+    'offers the triggering agent for %s', type => {
+      renderNode({ id: 'gate', type: { type, target_node_id: null } });
+      expect((screen.getByRole('option', { name: 'Triggering agent (node-started runs)' }) as HTMLOptionElement).value).toBe('$source');
+    },
+  );
+
+  it('offers the source for injection but never for destructive actions', () => {
+    const { rerender } = renderNode({ id: 'action', type: { type: 'inject_pty', target_node_id: null, prompt: 'Review this' } });
+    expect(screen.getByRole('option', { name: 'Triggering agent (node-started runs)' })).not.toBeNull();
+    for (const type of [
+      { type: 'close_agent_node' as const, target_node_id: null },
+      { type: 'set_node_status' as const, target_node_id: null, status: 'completed' },
+    ]) {
+      rerender(<InspectorPanel node={{ id: 'action', type }} onChange={vi.fn()} />);
+      expect(screen.queryByRole('option', { name: 'Triggering agent (node-started runs)' })).toBeNull();
+    }
+  });
+});
+
 describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', () => {
   beforeEach(() => {
     vi.clearAllMocks();

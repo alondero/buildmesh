@@ -36,6 +36,7 @@ import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
 import * as api from './lib/tauri';
 import { addToast, dismissToast, useToastStore } from './stores/toastStore';
+import type { CircuitNotificationPayload } from './types/generated/CircuitEvents';
 import './App.css';
 
 const createNodeGuard = createShortcutGuard(300);
@@ -517,6 +518,13 @@ function App() {
       addToast('Sync', event.payload.message, 'warning');
     });
     return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<CircuitNotificationPayload>('circuit-notification', ({ payload }) => {
+      addToast(`Circuit #${payload.run_id}`, payload.message, 'warning');
+    });
+    return () => { void unlisten.then(fn => fn()); };
   }, []);
 
   // Autopilot lifecycle notifications (PRD #480 story 14). Same toast stack

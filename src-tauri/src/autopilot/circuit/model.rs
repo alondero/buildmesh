@@ -210,6 +210,11 @@ pub enum CircuitNodeKind {
         #[serde(default)]
         target_node_id: Option<String>,
     },
+    /// Classify task completion, including a transcript turn already finished
+    /// before this run was attached. `$source` binds to the triggering agent.
+    AwaitAgentTurn { target_node_id: Option<String> },
+    /// Distinguish reviewer approval from a completed review with findings.
+    ReviewVerdict { target_node_id: Option<String> },
     /// Deterministic verification command (Green | Red). Not yet executed.
     DeterministicVerification { command: String },
     /// Collaborator approval gate. Not yet executed.
@@ -369,6 +374,8 @@ pub fn is_executable(kind: &CircuitNodeKind) -> bool {
             | CircuitNodeKind::CloseAgentNode { .. }
             | CircuitNodeKind::Notify { .. }
             | CircuitNodeKind::LlmTurnClassifier { .. }
+            | CircuitNodeKind::AwaitAgentTurn { .. }
+            | CircuitNodeKind::ReviewVerdict { .. }
             | CircuitNodeKind::DeterministicVerification { .. }
             | CircuitNodeKind::CollaboratorCheck { .. }
             | CircuitNodeKind::RetryLimit { .. }
@@ -378,6 +385,16 @@ pub fn is_executable(kind: &CircuitNodeKind) -> bool {
 }
 
 impl CircuitGraph {
+    pub fn requires_source_agent(&self) -> bool {
+        self.nodes.iter().any(|node| match &node.kind {
+            CircuitNodeKind::InjectPty { target_node_id, .. }
+            | CircuitNodeKind::AwaitAgentTurn { target_node_id }
+            | CircuitNodeKind::LlmTurnClassifier { target_node_id }
+            | CircuitNodeKind::ReviewVerdict { target_node_id } => target_node_id.as_deref() == Some("$source"),
+            _ => false,
+        })
+    }
+
     /// Parse a blueprint from its stored `graph_json`. Unknown node kinds
     /// are a hard error at the read boundary (the writer always writes
     /// what this build understands) rather than a silent skip.

@@ -218,10 +218,12 @@ function TargetNodeSelect({
   value,
   upstreamSpawns,
   onChange,
+  allowSource = false,
 }: {
   value: string | null;
   upstreamSpawns: string[];
   onChange: (targetNodeId: string | null) => void;
+  allowSource?: boolean;
 }) {
   return (
     <select
@@ -236,6 +238,7 @@ function TargetNodeSelect({
           ? '(no upstream spawn — will resolve at runtime)'
           : '(nearest upstream spawn at runtime)'}
       </option>
+      {allowSource && <option value="$source">Triggering agent (node-started runs)</option>}
       {upstreamSpawns.map((id) => (
         <option key={id} value={id}>
           {id}
@@ -249,14 +252,16 @@ function TargetAgentField({
   value,
   upstreamSpawns,
   onChange,
+  allowSource = false,
 }: {
   value: string | null;
   upstreamSpawns: string[];
   onChange: (targetNodeId: string | null) => void;
+  allowSource?: boolean;
 }) {
   return (
     <Field label="Target agent">
-      <TargetNodeSelect value={value} upstreamSpawns={upstreamSpawns} onChange={onChange} />
+      <TargetNodeSelect value={value} upstreamSpawns={upstreamSpawns} onChange={onChange} allowSource={allowSource} />
     </Field>
   );
 }
@@ -443,6 +448,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         <>
           <Field label="Target agent">
             <TargetNodeSelect
+              allowSource
               value={kind.target_node_id}
               upstreamSpawns={upstreamSpawns}
               onChange={(target_node_id) => onChange({ ...kind, target_node_id })}
@@ -550,8 +556,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
         />
       )}
 
-      {kind.type === 'llm_turn_classifier' && (
+      {(kind.type === 'llm_turn_classifier' || kind.type === 'await_agent_turn' || kind.type === 'review_verdict') && (
         <TargetAgentField
+          allowSource
           value={kind.target_node_id}
           upstreamSpawns={upstreamSpawns}
           onChange={(target_node_id) => onChange({ ...kind, target_node_id })}

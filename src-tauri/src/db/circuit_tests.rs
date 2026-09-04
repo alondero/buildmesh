@@ -31,6 +31,50 @@ fn sample_graph_json() -> String {
         .unwrap()
 }
 
+#[test]
+fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
+    init_temp_db("node-review");
+    let mesh = create_mesh("node-review-mesh", "/tmp/node-review").unwrap();
+    let source = create_agent_node(mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
+    let run_id = create_node_circuit_run(source.id, None, 3).unwrap();
+    assert_eq!(create_node_circuit_run(source.id, None, 3).unwrap(), run_id);
+    assert_eq!(list_autopilot_circuits(mesh.id).unwrap().len(), 1);
+    let run = get_circuit_run(run_id).unwrap().unwrap();
+    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
+    assert_eq!(ctx.source_agent_id(), Some(source.id));
+    assert_eq!(ctx.get("source.base_ref"), Some(mesh.base_ref.as_str()));
+    assert!(list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id && row.1 == run_id));
+    commit_circuit_advance(run_id, Some("running"), None, &[CircuitStepOp {
+        node_id: "reviewer".into(), status: "running".into(), outcome: None, error: None,
+        agent_node_id: Some(123456), attempt: 1, fresh_attempt: false,
+    }]).unwrap();
+    assert_eq!(cancel_circuit_run(run_id).unwrap(), vec![123456]);
+    assert!(get_agent_node_by_id(source.id).is_ok());
+    assert!(!list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id));
+}
+
+#[test]
+fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
+    init_temp_db("node-circuit-validation");
+    let mesh = create_mesh("node-workflow-mesh", "/tmp/node-workflow").unwrap();
+    let other = create_mesh("node-other-mesh", "/tmp/node-other").unwrap();
+    let source = create_agent_node(mesh.id, "Source", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, false, None, None, None).unwrap();
+    update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
+    let foreign = create_autopilot_circuit(other.id, "foreign", "", 1, &sample_graph_json()).unwrap();
+    assert!(create_node_circuit_run(source.id, Some(foreign.id), 3).unwrap_err().contains("manual Circuit"));
+    let interval = CircuitGraph::triggered_skeleton("task", crate::autopilot::circuit::model::CircuitNodeKind::Interval { interval_seconds: 60 });
+    let timed = create_autopilot_circuit(mesh.id, "timed", "", 1, &interval.to_json().unwrap()).unwrap();
+    assert!(create_node_circuit_run(source.id, Some(timed.id), 3).is_err());
+    let manual = create_autopilot_circuit(mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
+    let run = create_node_circuit_run(source.id, Some(manual.id), 3).unwrap();
+    assert_eq!(get_circuit_run(run).unwrap().unwrap().circuit_id, manual.id);
+    cancel_circuit_run(run).unwrap();
+    assert_ne!(create_node_circuit_run(source.id, Some(manual.id), 3).unwrap(), run);
+}
+
 // ---------------------------------------------------------------------------
 // Circuit CRUD + persistence across "restarts" (re-open reads).
 // ---------------------------------------------------------------------------

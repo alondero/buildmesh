@@ -94,12 +94,13 @@ describe('attachAgentNodeListeners', () => {
       'autopilot-pr-created',
       'autopilot-finish-failed',
       'autopilot-node-closed',
+      'circuit-run-updated',
     ]));
     // No `attention-needed` store listener: the backend emits
     // `agent-lifecycle` on every mark transition (issue #1364), so a
     // second listener would duplicate the state mutations.
     expect(eventNames).not.toContain('attention-needed');
-    expect(eventNames).toHaveLength(11);
+    expect(eventNames).toHaveLength(12);
   });
 
   it('returns a single unlisten handle that detaches every registered handler', async () => {
@@ -117,12 +118,12 @@ describe('attachAgentNodeListeners', () => {
     const unlisten = await attachAgentNodeListeners(surface);
 
     expect(typeof unlisten).toBe('function');
-    // 11 events → 11 unlisten registrations.
-    expect(mockListen).toHaveBeenCalledTimes(11);
+    // One unlisten per registered event, including Circuit ownership changes.
+    expect(mockListen).toHaveBeenCalledTimes(12);
     expect(unlistenFns).toHaveLength(0);
 
     unlisten();
-    expect(unlistenFns).toHaveLength(11);
+    expect(unlistenFns).toHaveLength(12);
   });
 
   // The narrow surface contract: every handler must dispatch to the

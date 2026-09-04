@@ -262,6 +262,18 @@ impl RunView {
     /// match on `CircuitNodeKind` to extract a target the resolver has
     /// direct access to.
     pub fn resolve_target_agent(&self, node_id: &str) -> Option<i64> {
+        // A source binding is borrowed: never put it on a spawn step, whose
+        // agent association grants cancellation permission to delete it.
+        let target = match self.graph.node(node_id).map(|n| &n.kind) {
+            Some(CircuitNodeKind::InjectPty { target_node_id, .. })
+            | Some(CircuitNodeKind::LlmTurnClassifier { target_node_id })
+            | Some(CircuitNodeKind::AwaitAgentTurn { target_node_id })
+            | Some(CircuitNodeKind::ReviewVerdict { target_node_id }) => target_node_id.as_deref(),
+            _ => None,
+        };
+        if target == Some("$source") {
+            return self.context.source_agent_id();
+        }
         resolve_target_agent(&self.graph, &self.steps, node_id)
     }
 
@@ -291,6 +303,8 @@ pub fn resolve_target_agent(
     let explicit = match graph.node(node_id).map(|n| &n.kind) {
         Some(CircuitNodeKind::InjectPty { target_node_id, .. }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::LlmTurnClassifier { target_node_id }) => target_node_id.as_deref(),
+        Some(CircuitNodeKind::AwaitAgentTurn { target_node_id })
+        | Some(CircuitNodeKind::ReviewVerdict { target_node_id }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::SetNodeStatus { target_node_id, .. }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::CloseAgentNode { target_node_id, .. }) => target_node_id.as_deref(),
         // GithubAction / Notify / Join / RetryLimit / AnyCompleted /
@@ -701,10 +715,17 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 Some(s) if s.status == StepStatus::Running
             ) && matches!(
                 run.graph.node(node_id).map(|n| &n.kind),
-                Some(CircuitNodeKind::LlmTurnClassifier { .. })
+                Some(CircuitNodeKind::LlmTurnClassifier { .. }
+                    | CircuitNodeKind::AwaitAgentTurn { .. }
+                    | CircuitNodeKind::ReviewVerdict { .. })
             );
             if is_waiting_classifier && run.state == RunState::Running {
                 if let Some(out) = output {
+                    run.context.set(&format!("node.{}.evaluated_output", node_id), out.clone());
+                    t.context_changed = true;
+                    if run.context.source_agent_id() == run.resolve_target_agent(node_id) {
+                        run.context.set("source.output", out.clone());
+                    }
                     if let Some(spawn_node_id) = spawn_node_for_agent(run, node_id) {
                         run.context.set(&format!("node.{}.output", spawn_node_id), out.clone());
                         t.context_changed = true;
@@ -1388,6 +1409,8 @@ fn start_effects_and_completion(
         }
         // -- Gates (#1207) -------------------------------------------------
         CircuitNodeKind::LlmTurnClassifier { target_node_id }
+        | CircuitNodeKind::AwaitAgentTurn { target_node_id }
+        | CircuitNodeKind::ReviewVerdict { target_node_id }
             // Parks Running until the seam classifies the piloted
             // agent's next turn yield and feeds TurnClassified back.
             // Without any spawned agent there is nothing to classify —
@@ -1401,7 +1424,9 @@ fn start_effects_and_completion(
                 "no agent node was spawned earlier in this run to classify".to_string(),
             );
         }
-        CircuitNodeKind::LlmTurnClassifier { .. } => {
+        CircuitNodeKind::LlmTurnClassifier { .. }
+        | CircuitNodeKind::AwaitAgentTurn { .. }
+        | CircuitNodeKind::ReviewVerdict { .. } => {
             // Stays Running until TurnClassified.
         }
         CircuitNodeKind::DeterministicVerification { .. } => {
