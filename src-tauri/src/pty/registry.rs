@@ -28,10 +28,11 @@ impl<K: std::hash::Hash + Clone + Eq, V> PtyRegistry<K, V> {
         map.get(key).cloned()
     }
 
-    /// Insert a new entry. Replaces any existing entry for the same key.
-    pub fn insert(&self, key: K, value: Arc<V>) {
+    /// Insert a new entry. Replaces any existing entry for the same key
+    /// and returns the previous value, if any.
+    pub fn insert(&self, key: K, value: Arc<V>) -> Option<Arc<V>> {
         let mut map = self.processes.lock().unwrap();
-        map.insert(key, value);
+        map.insert(key, value)
     }
 
     /// Remove and return the entry for the given key.
@@ -49,15 +50,12 @@ impl<K: std::hash::Hash + Clone + Eq, V> PtyRegistry<K, V> {
         F: FnOnce(&V) -> bool,
     {
         let mut map = self.processes.lock().unwrap();
-        let matches = map
-            .get(key)
-            .map(|value| pred(value.as_ref()))
-            .unwrap_or(false);
-        if matches {
-            map.remove(key)
-        } else {
-            None
+        if let std::collections::hash_map::Entry::Occupied(entry) = map.entry(key.clone()) {
+            if pred(entry.get().as_ref()) {
+                return Some(entry.remove());
+            }
         }
+        None
     }
 
     /// Returns true if the registry contains the given key.

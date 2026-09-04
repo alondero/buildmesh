@@ -36,8 +36,9 @@ pub struct AgentProcess {
     /// Wrapped in `Option` so teardown can `take()` it — dropping the
     /// last sender unblocks the writer thread's `recv()` (issue #1531).
     /// Holding a live sender while joining the writer pays the two-second
-    /// fallback every time.
-    pub writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
+    /// fallback every time. Private: callers enqueue through
+    /// [`AgentProcessRegistry::write_bytes`].
+    writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
     /// Handle to the dedicated writer thread. `kill_session` joins it
     /// with a bounded timeout so the close path can never hang the UI
     /// on a wedged writer (mirror of the `reader_handle` contract).
@@ -113,6 +114,46 @@ pub struct AgentProcess {
 }
 
 impl AgentProcess {
+    /// Build a registry entry. `generation` is assigned by
+    /// [`AgentProcessRegistry::insert`]; pass `0` from callers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        child: Box<dyn Child + Send + Sync>,
+        writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+        writer_handle: Option<JoinHandle<()>>,
+        master: Box<dyn MasterPty + Send>,
+        reader_alive: Arc<AtomicBool>,
+        deliberate_kill: Arc<AtomicBool>,
+        job: Option<crate::process_util::JobHandle>,
+        reader_handle: Option<JoinHandle<()>>,
+        spawn_start: std::time::Instant,
+        mesh_id: i64,
+    ) -> Self {
+        Self {
+            child: Arc::new(Mutex::new(child)),
+            writer_tx: Mutex::new(Some(writer_tx)),
+            writer_handle: Mutex::new(writer_handle),
+            master: Arc::new(Mutex::new(Some(master))),
+            reader_alive,
+            deliberate_kill,
+            mesh_id,
+            job,
+            reader_handle: Mutex::new(reader_handle),
+            spawn_start,
+            first_user_input_logged: AtomicBool::new(false),
+            generation: 0,
+        }
+    }
+
+    /// Non-blocking enqueue onto the dedicated writer thread.
+    fn enqueue_input(&self, data: Vec<u8>) -> Result<(), std::sync::mpsc::TrySendError<Vec<u8>>> {
+        let guard = self.writer_tx.lock().unwrap();
+        match guard.as_ref() {
+            Some(tx) => tx.try_send(data),
+            None => Err(std::sync::mpsc::TrySendError::Disconnected(data)),
+        }
+    }
+
     /// Stash the reader thread's `JoinHandle` on the registry entry.
     ///
     /// Split out from `register_agent` so the spawn flow can keep the
@@ -200,15 +241,7 @@ impl AgentProcessRegistry {
         // still draining a slow PTY; we drop the new bytes with a warn
         // (the user can re-type). Bound is 64 entries × ~tens of bytes
         // — a few KB of in-flight data, well within the PTY pipe buffer.
-        let send_result = {
-            let guard = agent.writer_tx.lock().unwrap();
-            match guard.as_ref() {
-                Some(tx) => tx.try_send(data.to_vec()),
-                None => {
-                    return Err("Agent not running".to_string());
-                }
-            }
-        };
+        let send_result = agent.enqueue_input(data.to_vec());
         match send_result {
             Ok(()) => {}
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -267,39 +300,37 @@ impl AgentProcessRegistry {
         .map_err(|e| e.to_string())
     }
 
-    pub fn insert(&self, session_id: i64, mut agent: AgentProcess) {
-        agent.generation = NEXT_PROCESS_GENERATION.fetch_add(1, Ordering::Relaxed);
-        self.inner.insert(session_id, Arc::new(agent));
-    }
-
-    pub fn remove(&self, session_id: &i64) -> Option<Arc<AgentProcess>> {
-        self.inner.remove(session_id)
+    /// Insert `agent` and return the generation token assigned to this
+    /// incarnation. A previous entry under the same session id is torn
+    /// down so insert cannot leak a child/PTY/writer.
+    pub fn insert(&self, session_id: i64, mut agent: AgentProcess) -> u64 {
+        let generation = NEXT_PROCESS_GENERATION.fetch_add(1, Ordering::Relaxed);
+        agent.generation = generation;
+        let previous = self.inner.insert(session_id, Arc::new(agent));
+        if let Some(prev) = previous {
+            prev.deliberate_kill.store(true, Ordering::SeqCst);
+            teardown_incarnation(session_id, &prev, JoinPolicy::Both);
+        }
+        generation
     }
 
     /// Drop the registry entry only if it is still this incarnation.
     /// A replacement spawn under the same session id keeps its entry
     /// (issue #1531).
-    pub fn remove_if_current(&self, session_id: i64, generation: u64) -> Option<Arc<AgentProcess>> {
+    fn remove_if_current(&self, session_id: i64, generation: u64) -> Option<Arc<AgentProcess>> {
         self.inner
             .remove_if(&session_id, |agent| agent.generation == generation)
     }
 
-    /// Reap a naturally-exited process incarnation. No-ops when a
-    /// replacement has already been inserted, or when `kill_session`
-    /// owns teardown (`deliberate_kill`). Must not unregister the
-    /// node-scoped output Channel.
+    /// Reap a naturally-exited process incarnation. Compare-and-remove
+    /// first so only one teardown owns the Arc: a replacement spawn or a
+    /// concurrent `kill_session` wins the other path. Must not unregister
+    /// the node-scoped output Channel.
     pub fn reap_incarnation(&self, session_id: i64, generation: u64) {
-        let Some(agent) = self.get(&session_id) else {
+        let Some(agent) = self.remove_if_current(session_id, generation) else {
             return;
         };
-        if agent.generation != generation {
-            return;
-        }
-        if agent.deliberate_kill.load(Ordering::SeqCst) {
-            return;
-        }
-        teardown_incarnation(&agent, JoinPolicy::WriterOnly);
-        self.remove_if_current(session_id, generation);
+        teardown_incarnation(session_id, &agent, JoinPolicy::WriterOnly);
     }
 
     pub fn contains(&self, session_id: &i64) -> bool {
@@ -349,37 +380,49 @@ impl AgentProcessRegistry {
     ///    join protects the close path from any future regression that
     ///    re-wedges a worker — we never want `kill_session` to hang the
     ///    UI thread.
-    /// 5. **Remove-if-current** so a replacement spawn that landed under
-    ///    the same session id is not deleted by this incarnation's kill.
+    ///
+    /// The registry entry is removed *before* the joins so `is_alive`
+    /// cannot report a corpse, and so a racing `reap_incarnation` cannot
+    /// teardown the same Arc. Natural-exit reaping uses compare-and-remove
+    /// against the generation token so it cannot delete a replacement.
     ///
     /// Must not touch the node-scoped PTY output Channel. Fresh spawn
     /// calls this before the child exists (step 2 of `spawn_agent_inner`);
     /// unregistering here drops the terminal's subscription and the new
     /// reader buffers bytes the viewport never sees.
     pub fn kill_session(&self, session_id: i64) {
-        if let Some(agent) = self.inner.get(&session_id) {
+        if let Some(agent) = self.inner.remove(&session_id) {
             // Flag the teardown as deliberate BEFORE closing anything,
             // so the reader thread — EOFed by the master drop below —
             // is guaranteed to observe the flag when its epilogue runs.
             // See the `deliberate_kill` field doc for why the reader
             // must not apply the early-exit Error heuristic here.
             agent.deliberate_kill.store(true, Ordering::SeqCst);
-            teardown_incarnation(&agent, JoinPolicy::Both);
-            self.remove_if_current(session_id, agent.generation);
+            teardown_incarnation(session_id, &agent, JoinPolicy::Both);
+            return;
         }
 
-        // Sandbox cleanup (issue #498/#528): revoke the node's restricted-token
-        // worktree ACE grant. No-op for unsandboxed sessions. Runs after the
-        // process tree is dead so nothing is still using the granted directory.
-        #[cfg(target_os = "windows")]
-        crate::sandbox::spawn::cleanup_restricted(session_id);
+        // No live process (fresh-spawn step 2, already reaped). Still
+        // revoke sandbox grants so a failed spawn cannot leak ACEs.
+        sandbox_cleanup(session_id);
     }
+}
+
+fn sandbox_cleanup(session_id: i64) {
+    // Sandbox cleanup (issue #498/#528): revoke the node's restricted-token
+    // worktree ACE grant. No-op for unsandboxed sessions. Runs after the
+    // process tree is dead so nothing is still using the granted directory.
+    #[cfg(target_os = "windows")]
+    crate::sandbox::spawn::cleanup_restricted(session_id);
+    #[cfg(not(target_os = "windows"))]
+    let _ = session_id;
 }
 
 /// Shared teardown for a process incarnation (issue #1531). `kill_session`
 /// joins both worker threads; natural-exit reaping runs on the reader and
-/// therefore only joins the writer.
-fn teardown_incarnation(agent: &AgentProcess, join: JoinPolicy) {
+/// therefore only joins the writer. The caller must already have removed
+/// `agent` from the registry so only one path owns this Arc.
+fn teardown_incarnation(session_id: i64, agent: &AgentProcess, join: JoinPolicy) {
     // 1. Cancel input. Dropping the sender unblocks `recv()` so the
     //    writer join does not pay the two-second fallback.
     agent.close_input();
@@ -430,6 +473,8 @@ fn teardown_incarnation(agent: &AgentProcess, join: JoinPolicy) {
     if let Some(handle) = agent.writer_handle.lock().unwrap().take() {
         join_with_timeout(handle, std::time::Duration::from_secs(2));
     }
+
+    sandbox_cleanup(session_id);
 }
 
 /// Join a thread, detaching it (via the watchdog) if it hasn't returned in
@@ -443,14 +488,25 @@ fn teardown_incarnation(agent: &AgentProcess, join: JoinPolicy) {
 /// reader does. The inner `JoinHandle` is dropped at the end of the
 /// watchdog's closure, which detaches the reader per `JoinHandle::drop` docs.
 fn join_with_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) {
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let _watchdog = std::thread::spawn(move || {
+    if handle.is_finished() {
         let _ = handle.join();
-        // If the receiver is gone (we timed out), the send errors silently;
-        // the `JoinHandle` is still dropped on closure exit, detaching the
-        // reader thread.
-        let _ = tx.send(());
-    });
+        return;
+    }
+    let watch_name = match handle.thread().name() {
+        Some(name) => format!("join-watch-{name}"),
+        None => "join-watch-pty-worker".to_string(),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let _watchdog = std::thread::Builder::new()
+        .name(watch_name)
+        .spawn(move || {
+            let _ = handle.join();
+            // If the receiver is gone (we timed out), the send errors silently;
+            // the `JoinHandle` is still dropped on closure exit, detaching the
+            // reader thread.
+            let _ = tx.send(());
+        })
+        .expect("failed to spawn join watchdog");
     let _ = rx.recv_timeout(timeout);
 }
 
@@ -622,7 +678,10 @@ mod tests {
     use crate::models::EnvType;
     use std::io::Write;
 
-    fn insert_trivial_agent(registry: &AgentProcessRegistry, session_id: i64) -> Arc<AtomicBool> {
+    fn insert_trivial_agent(
+        registry: &AgentProcessRegistry,
+        session_id: i64,
+    ) -> (u64, Arc<AtomicBool>) {
         let recipe = SpawnRecipe {
             binary: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" },
             base_args: if cfg!(windows) {
@@ -657,24 +716,22 @@ mod tests {
             }
             writer_exited_thread.store(true, Ordering::SeqCst);
         });
-        registry.insert(
+        let generation = registry.insert(
             session_id,
-            AgentProcess {
-                child: Arc::new(Mutex::new(child)),
-                writer_tx: Mutex::new(Some(writer_tx)),
-                writer_handle: Mutex::new(Some(writer_thread)),
-                master: Arc::new(Mutex::new(Some(pair.master))),
-                reader_alive: Arc::new(AtomicBool::new(true)),
-                deliberate_kill: Arc::new(AtomicBool::new(false)),
-                job: None,
-                reader_handle: Mutex::new(None),
-                spawn_start: std::time::Instant::now(),
-                first_user_input_logged: AtomicBool::new(false),
-                mesh_id: 0,
-                generation: 0,
-            },
+            AgentProcess::new(
+                child,
+                writer_tx,
+                Some(writer_thread),
+                pair.master,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+                std::time::Instant::now(),
+                0,
+            ),
         );
-        writer_exited
+        (generation, writer_exited)
     }
 
     #[test]
@@ -845,20 +902,18 @@ mod tests {
         });
         registry.insert(
             -915_4002,
-            AgentProcess {
-                child: Arc::new(Mutex::new(child)),
-                writer_tx: Mutex::new(Some(writer_tx)),
-                writer_handle: Mutex::new(Some(writer_thread)),
-                master: Arc::new(Mutex::new(Some(pair.master))),
-                reader_alive: Arc::new(AtomicBool::new(true)),
-                deliberate_kill: deliberate_kill.clone(),
-                job: None,
-                reader_handle: Mutex::new(None),
-                spawn_start: std::time::Instant::now(),
-                first_user_input_logged: AtomicBool::new(false),
-                mesh_id: 0,
-                generation: 0,
-            },
+            AgentProcess::new(
+                child,
+                writer_tx,
+                Some(writer_thread),
+                pair.master,
+                Arc::new(AtomicBool::new(true)),
+                deliberate_kill.clone(),
+                None,
+                None,
+                std::time::Instant::now(),
+                0,
+            ),
         );
 
         registry.kill_session(-915_4002);
@@ -918,20 +973,18 @@ mod tests {
         let registry = AgentProcessRegistry::new();
         registry.insert(
             session_id,
-            AgentProcess {
-                child: Arc::new(Mutex::new(child)),
-                writer_tx: Mutex::new(Some(writer_tx)),
-                writer_handle: Mutex::new(Some(writer_thread)),
-                master: Arc::new(Mutex::new(Some(pair.master))),
-                reader_alive: Arc::new(AtomicBool::new(true)),
-                deliberate_kill: Arc::new(AtomicBool::new(false)),
-                job: None,
-                reader_handle: Mutex::new(None),
-                spawn_start: std::time::Instant::now(),
-                first_user_input_logged: AtomicBool::new(false),
-                mesh_id: 0,
-                generation: 0,
-            },
+            AgentProcess::new(
+                child,
+                writer_tx,
+                Some(writer_thread),
+                pair.master,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+                std::time::Instant::now(),
+                0,
+            ),
         );
 
         let started = std::time::Instant::now();
@@ -956,10 +1009,8 @@ mod tests {
     #[test]
     fn insert_assigns_distinct_generation_tokens() {
         let registry = AgentProcessRegistry::new();
-        insert_trivial_agent(&registry, -915_1532);
-        insert_trivial_agent(&registry, -915_1533);
-        let g1 = registry.get(&-915_1532).unwrap().generation;
-        let g2 = registry.get(&-915_1533).unwrap().generation;
+        let (g1, _) = insert_trivial_agent(&registry, -915_1532);
+        let (g2, _) = insert_trivial_agent(&registry, -915_1533);
         assert_ne!(g1, 0, "insert must overwrite the unassigned 0 token");
         assert_ne!(g2, 0);
         assert_ne!(g1, g2);
@@ -971,20 +1022,19 @@ mod tests {
     fn stale_generation_cannot_remove_replacement() {
         let registry = AgentProcessRegistry::new();
         let session_id = -915_1534;
-        insert_trivial_agent(&registry, session_id);
-        let gen1 = registry.get(&session_id).unwrap().generation;
-        insert_trivial_agent(&registry, session_id);
-        let gen2 = registry.get(&session_id).unwrap().generation;
+        let (gen1, _) = insert_trivial_agent(&registry, session_id);
+        registry.kill_session(session_id);
+        let (gen2, _) = insert_trivial_agent(&registry, session_id);
         assert_ne!(gen1, gen2);
 
+        registry.reap_incarnation(session_id, gen1);
         assert!(
-            registry.remove_if_current(session_id, gen1).is_none(),
+            registry.contains(&session_id),
             "an old incarnation must not reap the replacement"
         );
-        assert!(registry.contains(&session_id));
         assert_eq!(registry.get(&session_id).unwrap().generation, gen2);
 
-        assert!(registry.remove_if_current(session_id, gen2).is_some());
+        registry.kill_session(session_id);
         assert!(!registry.contains(&session_id));
     }
 
@@ -992,8 +1042,7 @@ mod tests {
     fn reap_incarnation_cleans_up_natural_exit() {
         let registry = AgentProcessRegistry::new();
         let session_id = -915_1535;
-        let writer_exited = insert_trivial_agent(&registry, session_id);
-        let generation = registry.get(&session_id).unwrap().generation;
+        let (generation, writer_exited) = insert_trivial_agent(&registry, session_id);
 
         registry.reap_incarnation(session_id, generation);
 
@@ -1011,10 +1060,9 @@ mod tests {
     fn reap_incarnation_does_not_reap_a_replacement() {
         let registry = AgentProcessRegistry::new();
         let session_id = -915_1536;
-        insert_trivial_agent(&registry, session_id);
-        let gen1 = registry.get(&session_id).unwrap().generation;
-        let replacement_writer_exited = insert_trivial_agent(&registry, session_id);
-        let gen2 = registry.get(&session_id).unwrap().generation;
+        let (gen1, _) = insert_trivial_agent(&registry, session_id);
+        registry.kill_session(session_id);
+        let (gen2, replacement_writer_exited) = insert_trivial_agent(&registry, session_id);
 
         registry.reap_incarnation(session_id, gen1);
 
@@ -1032,22 +1080,18 @@ mod tests {
     }
 
     #[test]
-    fn reap_incarnation_yields_to_deliberate_kill() {
+    fn reap_incarnation_is_a_noop_after_kill_session() {
         let registry = AgentProcessRegistry::new();
         let session_id = -915_1537;
-        insert_trivial_agent(&registry, session_id);
-        let agent = registry.get(&session_id).unwrap();
-        let generation = agent.generation;
-        agent.deliberate_kill.store(true, Ordering::SeqCst);
-
-        registry.reap_incarnation(session_id, generation);
-
-        assert!(
-            registry.contains(&session_id),
-            "kill_session owns teardown when deliberate_kill is set"
-        );
+        let (generation, _) = insert_trivial_agent(&registry, session_id);
         registry.kill_session(session_id);
         assert!(!registry.contains(&session_id));
+
+        registry.reap_incarnation(session_id, generation);
+        assert!(
+            !registry.contains(&session_id),
+            "kill_session already claimed exclusive teardown"
+        );
     }
 
     /// Regression guard for issue #287: when the agent CLI exits

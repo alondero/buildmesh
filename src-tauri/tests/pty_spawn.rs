@@ -35,7 +35,7 @@ use buildmesh_lib::models::EnvType;
 /// tests would fail to compile because `AgentProcess` no longer has
 /// a `writer: Arc<Mutex<Box<dyn Write>>>` field. The thread drains
 /// the channel and writes bytes to the underlying PTY writer until
-/// the sender is dropped (test exit or `PROCESS_REGISTRY.remove`).
+/// the sender is dropped (test exit or `kill_session`).
 fn make_test_writer_thread(
     writer: Box<dyn Write + Send>,
 ) -> (
@@ -121,30 +121,18 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
     let (writer_tx, writer_handle) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess {
-            child: Arc::new(Mutex::new(child)),
-            writer_tx: Mutex::new(Some(writer_tx)),
-            writer_handle: Mutex::new(Some(writer_handle)),
-            master: Arc::new(Mutex::new(Some(master))),
-            reader_alive: reader_alive.clone(),
-            deliberate_kill: Arc::new(AtomicBool::new(false)),
-            job: None,
-            // The natural-exit helper drains via the master drop in
-            // `PROCESS_REGISTRY.remove` and joins the local `reader_handle`
-            // below; we never give the registry the real handle.
-            reader_handle: Mutex::new(None),
-            // Spawn-timing instrumentation (#spawn-latency investigation):
-            // production code populates these from `SpawnTimer.start` /
-            // a fresh `AtomicBool`. Tests don't exercise the timing path,
-            // so any Instant + any fresh AtomicBool is correct here.
-            spawn_start: std::time::Instant::now(),
-            first_user_input_logged: AtomicBool::new(false),
-            // Issue #634: tests don't exercise the activity-recording
-            // hot path, so `0` is the sentinel — production code passes
-            // the real `db::get_mesh_by_path(&node.path).id` here.
-            mesh_id: 0,
-            generation: 0,
-        },
+        AgentProcess::new(
+            child,
+            writer_tx,
+            Some(writer_handle),
+            master,
+            reader_alive.clone(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None,
+            std::time::Instant::now(),
+            0,
+        ),
     );
 
     // Drain output on a background thread using the production read loop.
@@ -182,11 +170,11 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // Close the PTY the same way `kill_agent` does — dropping the registry
-    // entry drops the master, which closes the pseudoconsole and EOFs the
+    // Close the PTY the same way `kill_agent` does — `kill_session`
+    // drops the master, which closes the pseudoconsole and EOFs the
     // reader. (Pre-2026-06 Windows builds EOF'd on child exit by themselves;
     // current conhost only releases the pipe when the pseudoconsole closes.)
-    PROCESS_REGISTRY.remove(&session_id);
+    PROCESS_REGISTRY.kill_session(session_id);
     assert!(
         !PROCESS_REGISTRY.contains(&session_id),
         "PROCESS_REGISTRY entry for session {session_id} should be cleaned up"
@@ -361,36 +349,21 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
         reader_alive_t.store(false, Ordering::SeqCst);
     });
 
+    let (writer_tx, _writer_thread) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess {
-            child: Arc::new(Mutex::new(child)),
-            // Issue #1122: writer is consumed by `make_test_writer_thread`
-            // to set up the dedicated writer thread + channel. The
-            // returned `(writer_tx, writer_handle)` is destructured
-            // into the AgentProcess fields below.
-            writer_tx: {
-                let (tx, _h) = make_test_writer_thread(writer);
-                Mutex::new(Some(tx))
-            },
-            writer_handle: Mutex::new(None),
-            master: Arc::new(Mutex::new(Some(master))),
-            reader_alive: reader_alive.clone(),
-            deliberate_kill: Arc::new(AtomicBool::new(false)),
-            job: None,
-            reader_handle: Mutex::new(Some(reader_handle)),
-            // Spawn-timing instrumentation (#spawn-latency investigation):
-            // production code populates these from `SpawnTimer.start` /
-            // a fresh `AtomicBool`. Tests don't exercise the timing path,
-            // so any Instant + any fresh AtomicBool is correct here.
-            spawn_start: std::time::Instant::now(),
-            first_user_input_logged: AtomicBool::new(false),
-            // Issue #634: tests don't exercise the activity-recording
-            // hot path, so `0` is the sentinel — production code passes
-            // the real `db::get_mesh_by_path(&node.path).id` here.
-            mesh_id: 0,
-            generation: 0,
-        },
+        AgentProcess::new(
+            child,
+            writer_tx,
+            Some(_writer_thread),
+            master,
+            reader_alive.clone(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Some(reader_handle),
+            std::time::Instant::now(),
+            0,
+        ),
     );
 
     // Give the reader a moment to be actively blocked on `read()`
@@ -401,12 +374,7 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
         "reader should be alive before kill_session (it is, after all, blocked on read)"
     );
 
-    // Production path: kill_session now reaps the current incarnation
-    // (issue #1531). The extra remove is a no-op when the generation
-    // still matches, and is kept so a missing reap would still fail
-    // the contains assertion below.
     PROCESS_REGISTRY.kill_session(session_id);
-    PROCESS_REGISTRY.remove(&session_id);
 
     // The reader is wedged in `read()` without the master close.
     // The production kill_session takes the master, EOFs the reader,
@@ -468,36 +436,21 @@ fn windows_kill_session_closes_master() {
         reader_alive_t.store(false, Ordering::SeqCst);
     });
 
+    let (writer_tx, _writer_thread) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess {
-            child: Arc::new(Mutex::new(child)),
-            // Issue #1122: writer is consumed by `make_test_writer_thread`
-            // to set up the dedicated writer thread + channel. The
-            // returned `(writer_tx, writer_handle)` is destructured
-            // into the AgentProcess fields below.
-            writer_tx: {
-                let (tx, _h) = make_test_writer_thread(writer);
-                Mutex::new(Some(tx))
-            },
-            writer_handle: Mutex::new(None),
-            master: Arc::new(Mutex::new(Some(master))),
-            reader_alive: reader_alive.clone(),
-            deliberate_kill: Arc::new(AtomicBool::new(false)),
-            job: None,
-            reader_handle: Mutex::new(Some(reader_handle)),
-            // Spawn-timing instrumentation (#spawn-latency investigation):
-            // production code populates these from `SpawnTimer.start` /
-            // a fresh `AtomicBool`. Tests don't exercise the timing path,
-            // so any Instant + any fresh AtomicBool is correct here.
-            spawn_start: std::time::Instant::now(),
-            first_user_input_logged: AtomicBool::new(false),
-            // Issue #634: tests don't exercise the activity-recording
-            // hot path, so `0` is the sentinel — production code passes
-            // the real `db::get_mesh_by_path(&node.path).id` here.
-            mesh_id: 0,
-            generation: 0,
-        },
+        AgentProcess::new(
+            child,
+            writer_tx,
+            Some(_writer_thread),
+            master,
+            reader_alive.clone(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Some(reader_handle),
+            std::time::Instant::now(),
+            0,
+        ),
     );
 
     // Hold our own Arc clone of the master so we can probe its
@@ -529,11 +482,10 @@ fn windows_kill_session_closes_master() {
         );
     }
 
-    PROCESS_REGISTRY.remove(&session_id);
     let count_after = Arc::strong_count(&master_arc);
     assert_eq!(
         count_after, 1,
-        "only our local clone should hold the master Arc after remove; \
+        "only our local clone should hold the master Arc after kill_session; \
          a higher count means the registry still has a reference (leak)"
     );
 
@@ -677,29 +629,21 @@ fn windows_pi_interactive_tui() {
     drop(pair.slave);
 
     let reader_alive = Arc::new(AtomicBool::new(true));
+    let (writer_tx, writer_handle) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess {
-            child: Arc::new(Mutex::new(child)),
-            // Issue #1122: writer is consumed by `make_test_writer_thread`
-            // to set up the dedicated writer thread + channel. The
-            // returned `(writer_tx, writer_handle)` is destructured
-            // into the AgentProcess fields below.
-            writer_tx: {
-                let (tx, _h) = make_test_writer_thread(writer);
-                Mutex::new(Some(tx))
-            },
-            writer_handle: Mutex::new(None),
-            master: Arc::new(Mutex::new(Some(master))),
-            reader_alive: reader_alive.clone(),
-            deliberate_kill: Arc::new(AtomicBool::new(false)),
-            job: None,
-            reader_handle: Mutex::new(None),
-            spawn_start: std::time::Instant::now(),
-            first_user_input_logged: AtomicBool::new(false),
-            mesh_id: 0,
-            generation: 0,
-        },
+        AgentProcess::new(
+            child,
+            writer_tx,
+            Some(writer_handle),
+            master,
+            reader_alive.clone(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None,
+            std::time::Instant::now(),
+            0,
+        ),
     );
 
     // Drain output on a background thread
@@ -735,21 +679,9 @@ fn windows_pi_interactive_tui() {
 
     // Write a key to the PTY stdin (like 'a')
     eprintln!("[pty-test {session_id}] writing input");
-    {
-        let entry = PROCESS_REGISTRY.get(&session_id).expect("entry registered");
-        // Issue #1122: write goes through the dedicated writer thread's
-        // channel rather than a Mutex<Box<dyn Write>>. The test only
-        // cares that the bytes reach the PTY — the channel write is
-        // non-blocking and the writer thread drains immediately.
-        entry
-            .writer_tx
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("writer channel open")
-            .send(b"a".to_vec())
-            .expect("send to writer");
-    }
+    PROCESS_REGISTRY
+        .write_bytes(session_id, b"a")
+        .expect("send to writer");
 
     // Wait for the input to be echoed or processed
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -761,7 +693,6 @@ fn windows_pi_interactive_tui() {
 
     // Kill the session cleanly
     PROCESS_REGISTRY.kill_session(session_id);
-    PROCESS_REGISTRY.remove(&session_id);
     reader_handle.join().expect("reader thread joins");
 }
 
@@ -799,29 +730,21 @@ fn wsl_pi_interactive_tui() {
     drop(pair.slave);
 
     let reader_alive = Arc::new(AtomicBool::new(true));
+    let (writer_tx, writer_handle) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess {
-            child: Arc::new(Mutex::new(child)),
-            // Issue #1122: writer is consumed by `make_test_writer_thread`
-            // to set up the dedicated writer thread + channel. The
-            // returned `(writer_tx, writer_handle)` is destructured
-            // into the AgentProcess fields below.
-            writer_tx: {
-                let (tx, _h) = make_test_writer_thread(writer);
-                Mutex::new(Some(tx))
-            },
-            writer_handle: Mutex::new(None),
-            master: Arc::new(Mutex::new(Some(master))),
-            reader_alive: reader_alive.clone(),
-            deliberate_kill: Arc::new(AtomicBool::new(false)),
-            job: None,
-            reader_handle: Mutex::new(None),
-            spawn_start: std::time::Instant::now(),
-            first_user_input_logged: AtomicBool::new(false),
-            mesh_id: 0,
-            generation: 0,
-        },
+        AgentProcess::new(
+            child,
+            writer_tx,
+            Some(writer_handle),
+            master,
+            reader_alive.clone(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None,
+            std::time::Instant::now(),
+            0,
+        ),
     );
 
     // Drain output on a background thread
@@ -860,21 +783,9 @@ fn wsl_pi_interactive_tui() {
 
     // Write a key to the PTY stdin (like 'a')
     eprintln!("[pty-test {session_id}] writing input to WSL");
-    {
-        let entry = PROCESS_REGISTRY.get(&session_id).expect("entry registered");
-        // Issue #1122: write goes through the dedicated writer thread's
-        // channel rather than a Mutex<Box<dyn Write>>. The test only
-        // cares that the bytes reach the PTY — the channel write is
-        // non-blocking and the writer thread drains immediately.
-        entry
-            .writer_tx
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("writer channel open")
-            .send(b"a".to_vec())
-            .expect("send to writer");
-    }
+    PROCESS_REGISTRY
+        .write_bytes(session_id, b"a")
+        .expect("send to writer");
 
     // Wait for the input to be echoed or processed
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -886,6 +797,5 @@ fn wsl_pi_interactive_tui() {
 
     // Kill the session cleanly
     PROCESS_REGISTRY.kill_session(session_id);
-    PROCESS_REGISTRY.remove(&session_id);
     reader_handle.join().expect("reader thread joins");
 }

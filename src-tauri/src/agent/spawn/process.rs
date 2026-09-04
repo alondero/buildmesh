@@ -1,7 +1,7 @@
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
 use portable_pty::{CommandBuilder, PtyPair};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Spawn the child process.
 pub fn spawn_child(
@@ -211,7 +211,7 @@ pub(super) fn register_agent(
     spawn_start: std::time::Instant,
     mesh_id: i64,
     deliberate_kill: Arc<AtomicBool>,
-) {
+) -> u64 {
     // Issue #1122: spawn the dedicated PTY writer thread and stand up
     // the bounded channel *before* the registry `insert` so a concurrent
     // `write_bytes` call (visible the moment the entry exists) can never
@@ -227,39 +227,17 @@ pub(super) fn register_agent(
 
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess {
-            child: Arc::new(Mutex::new(child)),
-            writer_tx: Mutex::new(Some(writer_tx)),
-            writer_handle: Mutex::new(Some(writer_handle)),
-            // Wrap the master in `Some` so `kill_session` can `take()` it
-            // out to drop the pseudoconsole (issue #300).
-            master: Arc::new(Mutex::new(Some(master))),
+        AgentProcess::new(
+            child,
+            writer_tx,
+            Some(writer_handle),
+            master,
             reader_alive,
-            // Shared with the reader thread (started right after this
-            // insert) so a `kill_session` teardown is distinguishable
-            // from the child dying on its own — see the field docs.
             deliberate_kill,
             job,
-            // The handle is set after the reader thread is spawned, via
-            // `AgentProcess::set_reader_handle`. We insert first so a
-            // concurrent `is_agent_already_running` sees the entry; the
-            // window between insert and setter is benign (see process.rs).
-            reader_handle: Mutex::new(None),
+            None,
             spawn_start,
-            // First-write gate: starts false, flipped true exactly once
-            // by `record_first_input_if_first` on the first successful
-            // `write_bytes` call for this session. Plain `AtomicBool` —
-            // the field lives inside `Arc<AgentProcess>` already, so no
-            // inner Arc is needed (the reader thread doesn't share this
-            // flag).
-            first_user_input_logged: AtomicBool::new(false),
-            // Issue #634: stored at registration so `write_bytes` and the
-            // PTY read loop can record per-mesh activity without a DB
-            // lookup on every chunk. `mesh_id` was already resolved at
-            // `prepare_context` via `db::get_mesh_by_path(&node.path)`
-            // — the value is in scope here.
             mesh_id,
-            generation: 0,
-        },
-    );
+        ),
+    )
 }
