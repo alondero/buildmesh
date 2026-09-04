@@ -78,6 +78,10 @@ pub(super) async fn start_streams(
         mesh_id,
         deliberate_kill.clone(),
     );
+    let generation = PROCESS_REGISTRY
+        .get(&session_id)
+        .map(|entry| entry.generation)
+        .expect("register_agent just inserted this session");
     tracing::info!("start_streams: stored agent process");
 
     // Start the reader thread after register so `is_agent_already_running`
@@ -114,6 +118,7 @@ pub(super) async fn start_streams(
         spawn_start,
         mesh_id,
         deliberate_kill,
+        generation,
     );
 
     // Natural-exit watcher (issue #287). On Windows ConPTY

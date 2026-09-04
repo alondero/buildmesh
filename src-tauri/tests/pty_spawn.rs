@@ -38,7 +38,10 @@ use buildmesh_lib::models::EnvType;
 /// the sender is dropped (test exit or `PROCESS_REGISTRY.remove`).
 fn make_test_writer_thread(
     writer: Box<dyn Write + Send>,
-) -> (std::sync::mpsc::SyncSender<Vec<u8>>, std::thread::JoinHandle<()>) {
+) -> (
+    std::sync::mpsc::SyncSender<Vec<u8>>,
+    std::thread::JoinHandle<()>,
+) {
     let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
     let handle = std::thread::spawn(move || {
         let mut writer = writer;
@@ -56,7 +59,9 @@ struct ChunkedReader {
 
 impl ChunkedReader {
     fn new(chunks: Vec<Vec<u8>>) -> Self {
-        Self { chunks: chunks.into() }
+        Self {
+            chunks: chunks.into(),
+        }
     }
 }
 
@@ -88,7 +93,15 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
     // the `windows_shell` branch on Windows; on Unix that branch falls through
     // to a direct spawn of the binary, which is what we want for `/bin/sh`.
     let cwd = std::env::current_dir().unwrap();
-    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, None, None, &cwd.to_string_lossy(), session_id, false);
+    let cmd = spawn_environment::wrap(
+        recipe,
+        EnvType::Windows,
+        None,
+        None,
+        &cwd.to_string_lossy(),
+        session_id,
+        false,
+    );
 
     // Stage markers (visible with --nocapture) so a hang in the ConPTY stack
     // points at the exact call rather than reading as a silent stall.
@@ -110,7 +123,7 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
         session_id,
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
-            writer_tx,
+            writer_tx: Mutex::new(Some(writer_tx)),
             writer_handle: Mutex::new(Some(writer_handle)),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
@@ -130,6 +143,7 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
             // hot path, so `0` is the sentinel — production code passes
             // the real `db::get_mesh_by_path(&node.path).id` here.
             mesh_id: 0,
+            generation: 0,
         },
     );
 
@@ -211,7 +225,10 @@ fn unix_sh_echo_through_real_pty() {
         windows_shell: WindowsShell::Direct,
     };
     let (out, exit_ok) = run_recipe_through_pty(-915_4001, recipe, "hello");
-    assert!(out.contains("hello"), "expected 'hello' in PTY output, got: {out:?}");
+    assert!(
+        out.contains("hello"),
+        "expected 'hello' in PTY output, got: {out:?}"
+    );
     assert!(exit_ok, "child should exit cleanly");
 }
 
@@ -226,7 +243,10 @@ fn windows_direct_echo_through_real_pty() {
         windows_shell: WindowsShell::Direct,
     };
     let (out, exit_ok) = run_recipe_through_pty(-915_4002, recipe, "hello");
-    assert!(out.contains("hello"), "expected 'hello' in PTY output, got: {out:?}");
+    assert!(
+        out.contains("hello"),
+        "expected 'hello' in PTY output, got: {out:?}"
+    );
     assert!(exit_ok, "child should exit cleanly");
 }
 
@@ -305,11 +325,7 @@ fn windows_kill_mid_session_unblocks_reader() {
     // a natural-exit coincidence.
     let recipe = SpawnRecipe {
         binary: "ping",
-        base_args: vec![
-            "127.0.0.1".into(),
-            "-n".into(),
-            "60".into(),
-        ],
+        base_args: vec!["127.0.0.1".into(), "-n".into(), "60".into()],
         trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
@@ -355,7 +371,7 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
             // into the AgentProcess fields below.
             writer_tx: {
                 let (tx, _h) = make_test_writer_thread(writer);
-                tx
+                Mutex::new(Some(tx))
             },
             writer_handle: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(master))),
@@ -373,6 +389,7 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
             // hot path, so `0` is the sentinel — production code passes
             // the real `db::get_mesh_by_path(&node.path).id` here.
             mesh_id: 0,
+            generation: 0,
         },
     );
 
@@ -384,9 +401,10 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
         "reader should be alive before kill_session (it is, after all, blocked on read)"
     );
 
-    // Production order: kill_session, then remove. Together they are
-    // the user-click-X path. (kill_agent / kill_all_agents / the
-    // service-layer delete all use this exact order.)
+    // Production path: kill_session now reaps the current incarnation
+    // (issue #1531). The extra remove is a no-op when the generation
+    // still matches, and is kept so a missing reap would still fail
+    // the contains assertion below.
     PROCESS_REGISTRY.kill_session(session_id);
     PROCESS_REGISTRY.remove(&session_id);
 
@@ -460,7 +478,7 @@ fn windows_kill_session_closes_master() {
             // into the AgentProcess fields below.
             writer_tx: {
                 let (tx, _h) = make_test_writer_thread(writer);
-                tx
+                Mutex::new(Some(tx))
             },
             writer_handle: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(master))),
@@ -478,6 +496,7 @@ fn windows_kill_session_closes_master() {
             // hot path, so `0` is the sentinel — production code passes
             // the real `db::get_mesh_by_path(&node.path).id` here.
             mesh_id: 0,
+            generation: 0,
         },
     );
 
@@ -633,10 +652,18 @@ fn windows_pi_interactive_tui() {
         trailing_args: Vec::new(),
         windows_shell: WindowsShell::Cmd,
     };
-    
+
     let session_id = -915_4201;
     let cwd = std::env::current_dir().unwrap();
-    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, None, None, &cwd.to_string_lossy(), session_id, false);
+    let cmd = spawn_environment::wrap(
+        recipe,
+        EnvType::Windows,
+        None,
+        None,
+        &cwd.to_string_lossy(),
+        session_id,
+        false,
+    );
 
     eprintln!("[pty-test {session_id}] opening pty pair");
     let pair = open_pty_pair(24, 80).expect("open pty pair");
@@ -660,7 +687,7 @@ fn windows_pi_interactive_tui() {
             // into the AgentProcess fields below.
             writer_tx: {
                 let (tx, _h) = make_test_writer_thread(writer);
-                tx
+                Mutex::new(Some(tx))
             },
             writer_handle: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(master))),
@@ -671,6 +698,7 @@ fn windows_pi_interactive_tui() {
             spawn_start: std::time::Instant::now(),
             first_user_input_logged: AtomicBool::new(false),
             mesh_id: 0,
+            generation: 0,
         },
     );
 
@@ -697,9 +725,12 @@ fn windows_pi_interactive_tui() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    
+
     let initial_output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
-    eprintln!("[pty-test {session_id}] initial output: {:?}", initial_output);
+    eprintln!(
+        "[pty-test {session_id}] initial output: {:?}",
+        initial_output
+    );
     assert!(initialized, "pi TUI should produce output within 4 seconds");
 
     // Write a key to the PTY stdin (like 'a')
@@ -710,13 +741,23 @@ fn windows_pi_interactive_tui() {
         // channel rather than a Mutex<Box<dyn Write>>. The test only
         // cares that the bytes reach the PTY — the channel write is
         // non-blocking and the writer thread drains immediately.
-        entry.writer_tx.send(b"a".to_vec()).expect("send to writer");
+        entry
+            .writer_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("writer channel open")
+            .send(b"a".to_vec())
+            .expect("send to writer");
     }
 
     // Wait for the input to be echoed or processed
     std::thread::sleep(std::time::Duration::from_millis(500));
     let after_input_output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
-    eprintln!("[pty-test {session_id}] output after writing 'a': {:?}", after_input_output);
+    eprintln!(
+        "[pty-test {session_id}] output after writing 'a': {:?}",
+        after_input_output
+    );
 
     // Kill the session cleanly
     PROCESS_REGISTRY.kill_session(session_id);
@@ -741,7 +782,7 @@ fn wsl_pi_interactive_tui() {
         trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     };
-    
+
     let session_id = -915_4202;
     let cwd = "/home";
     let cmd = spawn_environment::wrap(recipe, EnvType::Wsl, None, None, cwd, session_id, false);
@@ -768,7 +809,7 @@ fn wsl_pi_interactive_tui() {
             // into the AgentProcess fields below.
             writer_tx: {
                 let (tx, _h) = make_test_writer_thread(writer);
-                tx
+                Mutex::new(Some(tx))
             },
             writer_handle: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(master))),
@@ -779,6 +820,7 @@ fn wsl_pi_interactive_tui() {
             spawn_start: std::time::Instant::now(),
             first_user_input_logged: AtomicBool::new(false),
             mesh_id: 0,
+            generation: 0,
         },
     );
 
@@ -805,10 +847,16 @@ fn wsl_pi_interactive_tui() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    
+
     let initial_output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
-    eprintln!("[pty-test {session_id}] WSL initial output: {:?}", initial_output);
-    assert!(initialized, "WSL pi TUI should produce output within 4 seconds");
+    eprintln!(
+        "[pty-test {session_id}] WSL initial output: {:?}",
+        initial_output
+    );
+    assert!(
+        initialized,
+        "WSL pi TUI should produce output within 4 seconds"
+    );
 
     // Write a key to the PTY stdin (like 'a')
     eprintln!("[pty-test {session_id}] writing input to WSL");
@@ -818,13 +866,23 @@ fn wsl_pi_interactive_tui() {
         // channel rather than a Mutex<Box<dyn Write>>. The test only
         // cares that the bytes reach the PTY — the channel write is
         // non-blocking and the writer thread drains immediately.
-        entry.writer_tx.send(b"a".to_vec()).expect("send to writer");
+        entry
+            .writer_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("writer channel open")
+            .send(b"a".to_vec())
+            .expect("send to writer");
     }
 
     // Wait for the input to be echoed or processed
     std::thread::sleep(std::time::Duration::from_millis(500));
     let after_input_output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
-    eprintln!("[pty-test {session_id}] WSL output after writing 'a': {:?}", after_input_output);
+    eprintln!(
+        "[pty-test {session_id}] WSL output after writing 'a': {:?}",
+        after_input_output
+    );
 
     // Kill the session cleanly
     PROCESS_REGISTRY.kill_session(session_id);

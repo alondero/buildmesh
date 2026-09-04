@@ -163,7 +163,8 @@ pub fn is_agent_already_running(session_id: &i64) -> bool {
 /// hot path) and drains a `std::sync::mpsc::SyncSender` channel that
 /// `AgentProcessRegistry::write_bytes` enqueues bytes into from the
 /// async runtime. The thread exits when the channel closes (sender
-/// dropped) or when the underlying write returns an error (broken
+/// `take()`n by `AgentProcess::close_input` / kill_session, issue
+/// #1531) or when the underlying write returns an error (broken
 /// pipe — the channel is then disconnected, subsequent `try_send`s
 /// return `Disconnected`, and `write_bytes` surfaces "Agent not
 /// running" to the caller).
@@ -182,7 +183,7 @@ pub(super) fn pty_writer_thread(
             return;
         }
     }
-    // Channel closed cleanly (kill_session dropped the sender). The
+    // Channel closed cleanly (`close_input` dropped the sender). The
     // writer's `Drop` closes the underlying PTY pipe, so the agent's
     // stdin EOFs and the agent CLI exits cleanly.
     tracing::debug!(session_id, "PTY writer thread exiting (channel closed)");
@@ -228,7 +229,7 @@ pub(super) fn register_agent(
         session_id,
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
-            writer_tx,
+            writer_tx: Mutex::new(Some(writer_tx)),
             writer_handle: Mutex::new(Some(writer_handle)),
             // Wrap the master in `Some` so `kill_session` can `take()` it
             // out to drop the pseudoconsole (issue #300).
@@ -258,6 +259,7 @@ pub(super) fn register_agent(
             // `prepare_context` via `db::get_mesh_by_path(&node.path)`
             // — the value is in scope here.
             mesh_id,
+            generation: 0,
         },
     );
 }

@@ -468,6 +468,10 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
     // adds it when the table exists — closes the loop with the
     // shared `ensure_column` "added on present table" property the
     // pre-#249 helper covered.
+    // `evolve_to` now materialises baseline tables first, so the
+    // earlier call already created a full `meshes`. Drop it and
+    // recreate the skinny shape the walk is supposed to thicken.
+    conn.execute("DROP TABLE IF EXISTS meshes", []).unwrap();
     conn.execute(
         "CREATE TABLE meshes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

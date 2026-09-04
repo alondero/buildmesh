@@ -40,6 +40,26 @@ impl<K: std::hash::Hash + Clone + Eq, V> PtyRegistry<K, V> {
         map.remove(key)
     }
 
+    /// Remove the entry only when `pred` is true for the value currently
+    /// stored at `key`. Used to reap a process incarnation without
+    /// deleting a replacement that landed under the same key
+    /// (issue #1531).
+    pub fn remove_if<F>(&self, key: &K, pred: F) -> Option<Arc<V>>
+    where
+        F: FnOnce(&V) -> bool,
+    {
+        let mut map = self.processes.lock().unwrap();
+        let matches = map
+            .get(key)
+            .map(|value| pred(value.as_ref()))
+            .unwrap_or(false);
+        if matches {
+            map.remove(key)
+        } else {
+            None
+        }
+    }
+
     /// Returns true if the registry contains the given key.
     pub fn contains(&self, key: &K) -> bool {
         let map = self.processes.lock().unwrap();
@@ -61,7 +81,10 @@ impl<K: std::hash::Hash + Clone + Eq, V> PtyRegistry<K, V> {
     /// Iterate over all key-value pairs currently in the registry.
     pub fn iter(&self) -> impl Iterator<Item = (K, Arc<V>)> {
         let map = self.processes.lock().unwrap();
-        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>().into_iter()
+        map.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
@@ -91,6 +114,28 @@ mod tests {
         registry.insert(1, Arc::new("test".to_string()));
         let removed = registry.remove(&1);
         assert!(removed.is_some());
+        assert!(registry.get(&1).is_none());
+    }
+
+    #[test]
+    fn remove_if_keeps_entry_when_predicate_fails() {
+        let registry = PtyRegistry::<i64, String>::new();
+        registry.insert(1, Arc::new("current".to_string()));
+        assert!(registry.remove_if(&1, |v| v == "stale").is_none());
+        assert_eq!(registry.get(&1).unwrap().as_str(), "current");
+    }
+
+    #[test]
+    fn remove_if_drops_entry_when_predicate_matches() {
+        let registry = PtyRegistry::<i64, String>::new();
+        registry.insert(1, Arc::new("current".to_string()));
+        assert_eq!(
+            registry
+                .remove_if(&1, |v| v == "current")
+                .as_deref()
+                .map(String::as_str),
+            Some("current")
+        );
         assert!(registry.get(&1).is_none());
     }
 
