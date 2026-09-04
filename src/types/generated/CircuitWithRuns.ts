@@ -3,6 +3,6 @@ import type { AutopilotCircuit } from "./AutopilotCircuit";
 import type { CircuitRunDetail } from "./CircuitRunDetail";
 
 /**
- * One circuit plus its recent run ledger — the Probe tab's load unit.
+ * One circuit plus its visible run ledger — the Probe tab's load unit.
  */
 export type CircuitWithRuns = { circuit: AutopilotCircuit, runs: Array<CircuitRunDetail>, };

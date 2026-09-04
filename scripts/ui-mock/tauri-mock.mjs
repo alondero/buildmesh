@@ -110,6 +110,37 @@ const circuitsWithRuns = [
   },
 ];
 
+const circuitQueue = [
+  {
+    run: {
+      id: 1002,
+      circuit_id: 101,
+      mesh_id: 1,
+      trigger_identity: 'issue:1501:buildmesh:run',
+      state: 'pending',
+      context_json: '{}',
+      created_at: '2026-01-01T00:03:00Z',
+      updated_at: '2026-01-01T00:03:00Z',
+    },
+    circuit_name: 'Issue review loop',
+    queue_rank: 1,
+  },
+  {
+    run: {
+      id: 1003,
+      circuit_id: 101,
+      mesh_id: 1,
+      trigger_identity: 'issue:1502:buildmesh:run',
+      state: 'pending',
+      context_json: '{}',
+      created_at: '2026-01-01T00:04:00Z',
+      updated_at: '2026-01-01T00:04:00Z',
+    },
+    circuit_name: 'Issue review loop',
+    queue_rank: 2,
+  },
+];
+
 export const defaultFixtures = {
   list_meshes: meshes,
   list_agent_nodes: agentNodes,
@@ -121,6 +152,8 @@ export const defaultFixtures = {
   list_circuit_agent_ownerships: [],
   list_semantic_turns: [],
   list_circuits_with_runs: circuitsWithRuns,
+  list_circuit_queue: circuitQueue,
+  list_circuit_probe: { circuits: circuitsWithRuns, queue: circuitQueue },
   get_github_url_for_mesh: null,
   get_git_branch_status: null,
   get_git_summary: null,
@@ -160,6 +193,15 @@ const defaultHandlers = {
     const meshId = args?.meshId;
     if (!Array.isArray(rows) || meshId === undefined || meshId === null) return rows;
     return rows.filter((row) => row?.circuit?.mesh_id === Number(meshId));
+  },
+  list_circuit_probe: (args, responses) => {
+    const snapshot = responses.list_circuit_probe;
+    const meshId = args?.meshId;
+    if (!snapshot || meshId === undefined || meshId === null) return snapshot;
+    return {
+      circuits: (snapshot.circuits ?? []).filter((row) => row?.circuit?.mesh_id === Number(meshId)),
+      queue: (snapshot.queue ?? []).filter((entry) => entry?.run?.mesh_id === Number(meshId)),
+    };
   },
 };
 

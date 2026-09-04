@@ -19,11 +19,14 @@
 //!   whose fan-in rule is satisfied by ANY completed parent. Trigger
 //!   roots have no incoming edges.
 //! - Triggers auto-complete at run start — they fired to create the run.
-//! - `SpawnAgentNode` needs BOTH a free per-circuit step slot and a free
-//!   mesh agent slot; otherwise the step parks in `Queued`
-//!   (`pending_slot` in the ledger) and promotes FIFO by insertion order
-//!   on a later `Tick`. Non-agent steps never wait on agent slots (they
-//!   still respect the per-circuit limit). Known milestone-1 scope note:
+//! - Every `SpawnAgentNode` needs BOTH a free per-circuit step slot and a
+//!   free slot in its run's durable agent lease; otherwise the step parks in
+//!   `Queued` (`pending_slot` in the ledger) and promotes FIFO on a later
+//!   `Tick`. The worker reserves the blueprint's declared spawn slots before
+//!   admitting a run, so retained agents never bypass the host safety cap and
+//!   peer runs cannot steal capacity needed by a downstream reviewer. Non-
+//!   agent steps never wait on agent slots (they still respect the per-
+//!   circuit limit). Known milestone-1 scope note:
 //!   FIFO ordering is per-run — cross-run ordering on one circuit is
 //!   tick order until the multi-run scheduler milestone.
 //! - `InjectPty` waits for `AgentReady` (the spawned agent's process is
@@ -361,8 +364,8 @@ fn spawn_node_for_agent(run: &RunView, classifier_node_id: &str) -> Option<Strin
 pub struct Capacity {
     /// Free per-circuit step slots (`concurrency_limit - running steps`).
     pub circuit_free_slots: i64,
-    /// Free mesh-wide auto-spawned-agent slots
-    /// (`meshes.autopilot_concurrency_limit - active circuit agents`).
+    /// Free slots in this run's durable agent lease, additionally bounded by
+    /// the mesh/global process safety counters.
     pub mesh_agent_free_slots: i64,
 }
 
@@ -1174,8 +1177,7 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
             if run.state != RunState::Running {
                 break;
             }
-            let already_has_agent = run.step(&node_id).and_then(|s| s.agent_node_id).is_some();
-            let needs_agent_slot = consumes_agent_slot(&kind) && !already_has_agent;
+            let needs_agent_slot = consumes_agent_slot(&kind);
             let agent_fits = !needs_agent_slot || mesh_agent_free > 0;
             if circuit_free <= 0 || !agent_fits {
                 set_step(run, t, &node_id, StepStatus::Queued);
@@ -1244,8 +1246,7 @@ fn try_start(
     circuit_free: &mut i64,
     mesh_agent_free: &mut i64,
 ) -> bool {
-    let already_has_agent = run.step(node_id).and_then(|s| s.agent_node_id).is_some();
-    let needs_agent_slot = consumes_agent_slot(kind) && !already_has_agent;
+    let needs_agent_slot = consumes_agent_slot(kind);
     let agent_fits = !needs_agent_slot || *mesh_agent_free > 0;
     if *circuit_free <= 0 || !agent_fits {
         return false;
@@ -3662,6 +3663,41 @@ mod tests {
             "PR success must NOT fan out a Notify (complete is gated on retry exhaustion)"
         );
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+    }
+
+    #[test]
+    fn two_issue_review_runs_spawn_reviewers_while_retaining_implementers() {
+        let mut runs = [issue_review_run(), issue_review_run()];
+        for run in &mut runs {
+            issue_review_to_open_pr(run);
+            assert_eq!(run.step("implementer").and_then(|step| step.agent_node_id), Some(700));
+            advance(
+                run,
+                &CircuitEvent::GithubActionResult {
+                    node_id: "open_pr".into(),
+                    success: true,
+                    pr_number: Some(314),
+                    pr_url: Some("https://github.com/example/repo/pull/314".into()),
+                    pr_head_ref: Some("gh42".into()),
+                    pr_title: Some("Improve the widget".into()),
+                    error: None,
+                },
+            );
+        }
+
+        // Each run receives the remaining slot from its durable lease. The
+        // worker reserves the complete blueprint before admission, so peer
+        // runs cannot consume capacity needed by this reviewer.
+        for run in &mut runs {
+            let transition = advance(run, &tick(8, 1));
+            assert_eq!(status_of(run, "reviewer"), StepStatus::Running);
+            assert_eq!(
+                transition.effects,
+                vec![Effect::SpawnAgentNode {
+                    node_id: "reviewer".into(),
+                }]
+            );
+        }
     }
 
     /// The reviewer's classifier output lands in `node.<id>.output` for

@@ -111,6 +111,7 @@ describe('tauri-mock harness', () => {
   it('ships a circuit ledger fixture for Probe screenshots', () => {
     expect(defaultFixtures.list_circuits_with_runs).toHaveLength(1);
     expect(defaultFixtures.list_circuits_with_runs[0].runs[0].run.state).toBe('failed');
+    expect(defaultFixtures.list_circuit_queue.map((entry) => entry.queue_rank)).toEqual([1, 2]);
   });
 
   it('keeps circuit fixtures scoped to the requested mesh', async () => {

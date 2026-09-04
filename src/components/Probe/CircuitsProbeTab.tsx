@@ -36,14 +36,17 @@ import { listen } from '@tauri-apps/api/event';
 import { formatError } from '../../lib/errorUtils';
 import {
   approveCircuitStep,
+  cancelCircuitRun,
   createCircuit,
   deleteCircuit,
-  listCircuitsWithRuns,
+  listCircuitProbe,
+  moveCircuitRun,
   pauseCircuitRun,
   resumeCircuitRun,
   setCircuitEnabled,
   triggerCircuitNow,
   type CircuitBlueprintKind,
+  type CircuitQueueEntry,
   type CircuitTriggerKind,
   type CircuitWithRuns,
 } from '../../lib/tauri';
@@ -58,9 +61,11 @@ export function CircuitsProbeTab() {
   const { activeMeshId } = useProbeContext();
   const openCircuitEditor = useUIStore((s) => s.openCircuitEditor);
   const [rows, setRows] = useState<CircuitWithRuns[]>([]);
+  const [queue, setQueue] = useState<CircuitQueueEntry[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
   /**
    * Explicit run-card disclosure overrides, keyed by run id. Absent means
    * "use the default" (live runs open, terminal runs closed) — storing
@@ -95,12 +100,14 @@ export function CircuitsProbeTab() {
   const load = useCallback(async () => {
     if (activeMeshId === null) {
       setRows([]);
+      setQueue([]);
       return;
     }
     try {
-      // One batched IPC: circuits with their recent run ledgers.
-      const rows = await listCircuitsWithRuns(activeMeshId, 10);
-      setRows(rows);
+      // Ledger cards and the complete queue hydrate through one IPC payload.
+      const snapshot = await listCircuitProbe(activeMeshId, 10);
+      setRows(snapshot.circuits);
+      setQueue(snapshot.queue);
       setLoadError(null);
     } catch (err) {
       console.error('Failed to load circuits:', err);
@@ -299,6 +306,65 @@ export function CircuitsProbeTab() {
         className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
         data-testid="circuits-probe-body"
       >
+        {queue.length > 0 && (
+          <section className="border-b border-border-subtle p-2" data-testid="circuit-queue">
+            <div className="flex items-baseline justify-between gap-2 mb-1.5">
+              <h3 className="text-xs font-semibold text-text-primary">Queue</h3>
+              <span className="text-2xs text-text-muted">Next to start first</span>
+            </div>
+            <ol className="flex flex-col gap-1">
+              {queue.map((entry, index) => (
+                <li
+                  key={entry.run.id}
+                  className="rounded-md border border-border-subtle bg-bg-card/40 p-1.5"
+                  data-testid={`queue-run-${entry.run.id}`}
+                >
+                  <div className="flex items-start gap-1.5 min-w-0">
+                    <span className="text-2xs font-mono text-accent-cyan shrink-0">
+                      {entry.queue_rank}
+                    </span>
+                    <span className="text-xs text-text-primary break-words min-w-0 flex-1">
+                      {entry.circuit_name}{' '}
+                      <span className="font-mono text-text-muted">#{entry.run.id}</span>
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1 pl-4">
+                    <button
+                      type="button"
+                      onClick={() => runAction(() => moveCircuitRun(entry.run.id, 'up'))}
+                      disabled={busy || index === 0}
+                      aria-label={`Move run ${entry.run.id} up`}
+                      className="px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runAction(() => moveCircuitRun(entry.run.id, 'down'))}
+                      disabled={busy || index === queue.length - 1}
+                      aria-label={`Move run ${entry.run.id} down`}
+                      className="px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runAction(() => cancelCircuitRun(entry.run.id))}
+                      disabled={busy}
+                      aria-label={`Cancel run ${entry.run.id}`}
+                      className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <p className="mt-1 text-2xs font-mono text-text-muted break-all pl-4">
+                    {entry.run.trigger_identity}
+                  </p>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
         {rows.length === 0 ? (
           <div className="p-4">
             <EmptyState
@@ -318,7 +384,7 @@ export function CircuitsProbeTab() {
               };
               return (
               <li key={circuit.id} className="rounded-md border border-border-subtle p-2" data-testid="circuit-row">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-col items-stretch gap-1">
                   <label className="flex items-center gap-1.5 min-w-0">
                     <input
                       type="checkbox"
@@ -333,7 +399,7 @@ export function CircuitsProbeTab() {
                       {circuit.name}
                     </span>
                   </label>
-                  <span className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-1 flex-wrap">
                     <button
                       type="button"
                       onClick={() => openCircuitEditor(circuit.id)}
@@ -351,17 +417,44 @@ export function CircuitsProbeTab() {
                     >
                       Trigger Now
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => runAction(() => deleteCircuit(circuit.id))}
-                      disabled={busy}
-                      aria-label={`Delete ${circuit.name}`}
-                      data-testid={`circuit-delete-${circuit.id}`}
-                      className="px-1.5 py-0.5 rounded-md text-text-muted hover:text-status-error"
-                    >
-                      ✕
-                    </button>
-                  </span>
+                    {confirmDeleteCircuitId === circuit.id ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmDeleteCircuitId(null);
+                            void runAction(() => deleteCircuit(circuit.id));
+                          }}
+                          disabled={busy}
+                          aria-label={`Confirm delete ${circuit.name}`}
+                          data-testid={`circuit-confirm-delete-${circuit.id}`}
+                          className="px-1.5 py-0.5 rounded-md bg-status-error/15 text-status-error disabled:opacity-40"
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteCircuitId(null)}
+                          disabled={busy}
+                          aria-label={`Keep ${circuit.name}`}
+                          className="px-1.5 py-0.5 rounded-md text-text-muted disabled:opacity-40"
+                        >
+                          Keep
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteCircuitId(circuit.id)}
+                        disabled={busy}
+                        aria-label={`Delete ${circuit.name}`}
+                        data-testid={`circuit-delete-${circuit.id}`}
+                        className="px-1.5 py-0.5 rounded-md text-text-muted hover:text-status-error disabled:opacity-40"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Run ledger — one expandable diagnostic card per run
@@ -382,6 +475,7 @@ export function CircuitsProbeTab() {
                         busy={busy}
                         onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
                         onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}
+                        onCancel={() => runAction(() => cancelCircuitRun(detail.run.id))}
                         onApprove={(nodeId) =>
                           runAction(() => approveCircuitStep(detail.run.id, nodeId))
                         }

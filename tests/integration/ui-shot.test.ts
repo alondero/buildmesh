@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const uiShot = resolve(repoRoot, 'scripts', 'ui-shot.mjs');
 const circuitSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-circuit.steps.mjs');
+const circuitFixtures = resolve(repoRoot, 'tests', 'integration', 'ui-shot-circuit.fixtures.mjs');
 
 async function freePort() {
   const server = createTcpServer();
@@ -73,6 +74,7 @@ describe('ui-shot mock mode', () => {
         '--mock',
         '--serve',
         '--mock-url', `http://127.0.0.1:${port}`,
+        '--fixtures', circuitFixtures,
         '--steps', circuitSteps,
       ]);
 
