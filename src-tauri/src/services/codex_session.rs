@@ -436,7 +436,6 @@ mod tests {
                 "root.jsonl",
                 serde_json::json!({
                     "id": ID,
-                    "session_id": ID,
                     "cwd": "F:\\repo",
                     "timestamp": TIMESTAMP,
                     "thread_source": "user"
