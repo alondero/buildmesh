@@ -120,6 +120,20 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let sessions_dir = crate::env::codex_sessions_dir(env_type, spawn_directory)?;
+    find_historic_id_for_directory_in(
+        &sessions_dir,
+        spawn_directory,
+        anchor_ms,
+        recorded_start,
+    )
+}
+
+pub(crate) fn find_historic_id_for_directory_in(
+    sessions_dir: &Path,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
     let candidates = find_candidates(&sessions_dir, spawn_directory, cutoff, None);
     crate::services::session_recovery::select_recovery_identity(
@@ -406,6 +420,56 @@ mod tests {
         assert_eq!(
             find_fresh_id_for_directory_in(temp.path(), directory, 1_787_830_399_000),
             Some(parent.to_string())
+        );
+    }
+
+    #[test]
+    fn historic_recovery_reads_metadata_without_banner_and_excludes_child_threads() {
+        const ID: &str = "01a067ef-81ab-7141-a6b4-208e32df59bf";
+        const CREATED: i64 = 1_787_830_399_000;
+        const TIMESTAMP: &str = "2026-08-27T11:33:19.986Z";
+        let temp = tempfile::TempDir::new().unwrap();
+        let day = temp.path().join("2026/08/27");
+        fs::create_dir_all(&day).unwrap();
+        for (file, payload) in [
+            (
+                "root.jsonl",
+                serde_json::json!({
+                    "id": ID,
+                    "session_id": ID,
+                    "cwd": "F:\\repo",
+                    "timestamp": TIMESTAMP,
+                    "thread_source": "user"
+                }),
+            ),
+            (
+                "child.jsonl",
+                serde_json::json!({
+                    "id": "01a067ec-e952-7830-b3a6-bc16bc79f327",
+                    "cwd": "F:\\repo",
+                    "timestamp": TIMESTAMP,
+                    "source": {"subagent": {}}
+                }),
+            ),
+        ] {
+            fs::write(
+                day.join(file),
+                serde_json::json!({"type": "session_meta", "payload": payload}).to_string(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "f:/repo", CREATED, true),
+            Some(ID.to_string())
+        );
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "f:/other", CREATED, true),
+            None
+        );
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "f:/repo", CREATED + 10_000, true),
+            None
         );
     }
 }

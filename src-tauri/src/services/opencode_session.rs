@@ -162,6 +162,20 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let db_path = opencode_db_path(env_type)?;
+    find_historic_id_for_db_path(
+        &db_path,
+        spawn_directory,
+        anchor_ms,
+        recorded_start,
+    )
+}
+
+pub(crate) fn find_historic_id_for_db_path(
+    db_path: &Path,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
     let not_after = if recorded_start {
@@ -432,5 +446,42 @@ mod tests {
         .unwrap();
         let listed = list_recent_root_sessions(&conn, 100).unwrap();
         assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn historic_recovery_finds_a_delayed_session_before_other_projects_fill_the_window() {
+        const CREATED: i64 = 1_787_830_399_000;
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("opencode.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT,
+                directory TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                parent_id TEXT,
+                time_archived INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session VALUES ('ses_wanted', 'F:/repo', ?1, ?1, NULL, NULL)",
+            [CREATED + 133_000],
+        )
+        .unwrap();
+        for i in 0..55 {
+            conn.execute(
+                "INSERT INTO session VALUES (?1, 'F:/other', ?2, ?2, NULL, NULL)",
+                params![format!("ses_other{i}"), CREATED + 600_000 + i],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        assert_eq!(
+            find_historic_id_for_db_path(&path, "F:/repo", CREATED, true),
+            Some("ses_wanted".to_string())
+        );
     }
 }

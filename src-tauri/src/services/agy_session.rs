@@ -284,6 +284,20 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let brain_dir = crate::env::agy_brain_dir_for_env(env_type, spawn_directory)?;
+    find_historic_id_for_directory_in(
+        &brain_dir,
+        spawn_directory,
+        anchor_ms,
+        recorded_start,
+    )
+}
+
+pub(crate) fn find_historic_id_for_directory_in(
+    brain_dir: &Path,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
     let candidates = collect_candidates(&brain_dir, cutoff)
         .into_iter()
@@ -548,6 +562,41 @@ mod tests {
         assert_eq!(
             find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
             Some(UUID_A.to_string())
+        );
+    }
+
+    #[test]
+    fn historic_recovery_uses_json_encoded_windows_workspace_anchor() {
+        const CREATED: i64 = 1_787_830_399_000;
+        const TIMESTAMP: &str = "2026-08-27T11:33:19.986Z";
+        let temp = tempfile::TempDir::new().unwrap();
+        let transcript = write_conv(
+            temp.path(),
+            UUID_A,
+            &serde_json::json!({
+                "created_at": TIMESTAMP,
+                "tool_calls": [{
+                    "args": {"Cwd": serde_json::to_string(r"F:\repo").unwrap()}
+                }]
+            })
+            .to_string(),
+        )
+        .join(".system_generated/logs/transcript.jsonl");
+
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED, true),
+            Some(UUID_A.to_string())
+        );
+
+        fs::write(
+            transcript,
+            serde_json::json!({"created_at": TIMESTAMP}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED, true),
+            None,
+            "an AGY transcript without a workspace anchor must not be bound during historic recovery",
         );
     }
 
