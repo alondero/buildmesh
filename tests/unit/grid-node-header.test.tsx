@@ -847,7 +847,7 @@ describe('GridNodeHeader resume affordance', () => {
     seedAgentNodes([node], node.id);
     useAgentNodeStore.setState({ autopilotStates: {} });
     const { getByText, queryByTestId } = render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />);
-    expect(getByText('Lost conversation')).toBeTruthy();
+    expect(getByText('Missing session ID')).toBeTruthy();
     expect(queryByTestId('grid-resume-button')).toBeNull();
   });
 

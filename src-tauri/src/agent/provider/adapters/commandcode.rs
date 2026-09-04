@@ -161,6 +161,18 @@ impl AgentProvider for CommandCodeAdapter {
         );
     }
 
+    fn recover_suspended_session_id(
+        &self,
+        spawn_path: &str,
+        env_type: EnvType,
+        anchor_ms: i64,
+        recorded_start: bool,
+    ) -> Option<String> {
+        crate::services::commandcode_session::find_historic_id_for_directory(
+            env_type, spawn_path, anchor_ms, recorded_start,
+        )
+    }
+
     fn before_resume_spawn<'a>(
         &'a self,
         node_id: i64,

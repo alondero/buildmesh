@@ -440,6 +440,7 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
             provider TEXT NOT NULL DEFAULT 'anthropic',
             status TEXT NOT NULL DEFAULT 'idle',
             cli_session_id TEXT,
+            session_started_at INTEGER,
             worktree_name TEXT,
             use_worktree INTEGER NOT NULL DEFAULT 1,
             is_pinned INTEGER NOT NULL DEFAULT 0,
@@ -3218,22 +3219,19 @@ pub fn clear_cli_session_id(id: i64) -> SqlResult<()> {
 }
 
 pub(crate) fn clear_cli_session_id_inner(conn: &Connection, id: i64) -> SqlResult<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "UPDATE agent_nodes SET cli_session_id = NULL WHERE id = ?1",
-        params![id],
+    conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = NULL, session_started_at = ?1 WHERE id = ?2",
+        params![chrono::Utc::now().timestamp_millis(), id],
     )?;
-    tx.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
-        params![format!("session_started_at:{id}"), chrono::Utc::now().timestamp_millis().to_string()])?;
-    tx.commit()
+    Ok(())
 }
 
 pub fn session_started_at_ms(id: i64) -> SqlResult<Option<i64>> {
     use rusqlite::OptionalExtension;
     let conn = read_conn();
-    conn.query_row("SELECT value FROM app_settings WHERE key = ?1",
-        params![format!("session_started_at:{id}")], |row| row.get::<_, String>(0))
-        .optional().map(|value| value.and_then(|value| value.parse().ok()))
+    conn.query_row("SELECT session_started_at FROM agent_nodes WHERE id = ?1",
+        params![id], |row| row.get(0))
+        .optional()
 }
 
 /// Persist a provider-assigned session id without overwriting an id captured
@@ -3308,11 +3306,11 @@ pub(crate) fn recover_suspended_cli_session_id_inner(
     let changed = conn.execute("UPDATE agent_nodes SET cli_session_id = ?1
         WHERE id = ?2 AND status = 'suspended' AND provider = ?3 AND path = ?4
         AND worktree_name IS ?5 AND worktree_path IS ?6
-        AND (SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = ?7) IS ?8
+        AND session_started_at IS ?7
         AND (cli_session_id IS NULL OR cli_session_id = '')
         AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
         params![cli_id, node.id, node.provider, node.path, node.worktree_name, node.worktree_path,
-            format!("session_started_at:{}", node.id), generation])?;
+            generation])?;
     Ok(changed > 0)
 }
 
@@ -3380,7 +3378,6 @@ fn delete_agent_node_enqueueing_removal_inner(
 ) -> SqlResult<()> {
     conn.execute("DELETE FROM agent_nodes WHERE id = ?1", params![id])?;
     conn.execute("DELETE FROM app_settings WHERE key = ?1", params![format!("{SEMANTIC_TURN_KEY_PREFIX}{id}")])?;
-    conn.execute("DELETE FROM app_settings WHERE key = ?1", params![format!("session_started_at:{id}")])?;
     if let Some((path, node_name)) = removal {
         enqueue_worktree_removal_inner(conn, path, node_name)?;
     }

@@ -23,6 +23,7 @@ fn suspended_recovery_schema() -> rusqlite::Connection {
         ALTER TABLE agent_nodes ADD COLUMN source_pr_pinned_sha TEXT;
         ALTER TABLE agent_nodes ADD COLUMN signal_health TEXT DEFAULT 'healthy';
         ALTER TABLE agent_nodes ADD COLUMN worktree_path TEXT;
+        ALTER TABLE agent_nodes ADD COLUMN session_started_at INTEGER;
         UPDATE agent_nodes SET status = 'suspended';
         INSERT INTO agent_nodes (id, mesh_id, name, path, status, cli_session_id)
         VALUES (43, 1, 'empty', '/repo', 'suspended', ''),
@@ -55,9 +56,37 @@ fn recovery_does_not_overwrite_or_share_an_identity_or_revive_a_changed_node() {
     assert!(super::recover_suspended_cli_session_id_inner(&conn, sibling, "recovered", None).unwrap());
     assert!(!super::recover_suspended_cli_session_id_inner(&conn, sibling, "replacement", None).unwrap());
     conn.execute("UPDATE agent_nodes SET cli_session_id = NULL WHERE id = 43", []).unwrap();
-    conn.execute("INSERT INTO app_settings VALUES ('session_started_at:43', '1234')", []).unwrap();
+    conn.execute("UPDATE agent_nodes SET session_started_at = 1234 WHERE id = 43", []).unwrap();
     assert!(!super::recover_suspended_cli_session_id_inner(&conn, sibling, "old-generation", None).unwrap());
     assert!(super::recover_suspended_cli_session_id_inner(&conn, sibling, "new-generation", Some(1234)).unwrap());
+}
+
+#[test]
+fn v39_migrates_legacy_session_generation_keys_into_agent_nodes() {
+    let conn = suspended_recovery_schema();
+    conn.execute(
+        "INSERT INTO app_settings VALUES ('session_started_at:43', '1234')",
+        [],
+    )
+    .unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+    let started: Option<i64> = conn
+        .query_row(
+            "SELECT session_started_at FROM agent_nodes WHERE id = 43",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(started, Some(1234));
+    let old_key_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_settings WHERE key = 'session_started_at:43'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_key_count, 0);
 }
 
 #[test]

@@ -152,6 +152,37 @@ pub(crate) fn list_root_sessions_in_window(
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
+/// Historic startup recovery entry point used by the OpenCode adapter. The
+/// bounded SQL window is applied before any result selection, so old sessions
+/// in other projects cannot hide a matching row behind a global LIMIT.
+pub(crate) fn find_historic_id_for_directory(
+    env_type: EnvType,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let db_path = opencode_db_path(env_type)?;
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
+    let not_after = if recorded_start {
+        anchor_ms.saturating_add(crate::services::session_recovery::INITIAL_SPAWN_WINDOW_MS)
+    } else {
+        i64::MAX
+    };
+    let candidates = list_root_sessions_in_window(&conn, cutoff, not_after)
+        .ok()?
+        .into_iter()
+        .filter(|candidate| {
+            is_opencode_session_id(&candidate.id)
+                && crate::env::directories_match(&candidate.directory, spawn_directory)
+        });
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.map(|candidate| (candidate.id, candidate.created)),
+        anchor_ms,
+        recorded_start,
+    )
+}
+
 fn try_capture_from_db_path(
     db_path: &Path,
     spawn_directory: &str,

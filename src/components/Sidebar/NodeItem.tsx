@@ -4,6 +4,7 @@ import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
 import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
+import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import { getMeshColor } from '../../lib/meshColors';
 import type { SpawnOption } from '../../lib/groups';
 import { ProviderIcon } from '../Providers/ProviderIcon';
@@ -369,12 +370,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
         onCommit={(next) => renameAgentNode(node.id, next)}
         className="flex-1 truncate text-text-primary font-sans text-left text-sm"
       />
-      {lostConversation && (
-        <span className="text-status-warning text-xs shrink-0"
-          title="No saved session ID. Startup will try to recover it; use Regenerate to start a new conversation in this node.">
-          Lost conversation
-        </span>
-      )}
+      {lostConversation && <MissingSessionIdBadge />}
       {showRestart && (
         <button
           type="button"

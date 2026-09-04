@@ -25,6 +25,7 @@ mod tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 status TEXT NOT NULL DEFAULT 'idle',
                 cli_session_id TEXT,
+                session_started_at INTEGER,
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE TABLE app_settings (
@@ -83,24 +84,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session_id, None);
-        let started: String = conn.query_row(
-            "SELECT value FROM app_settings WHERE key = ?1",
-            params![format!("session_started_at:{id}")], |row| row.get(0),
+        let started: i64 = conn.query_row(
+            "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
+            params![id], |row| row.get(0),
         ).unwrap();
-        assert!(started.parse::<i64>().unwrap() > 0);
+        assert!(started > 0);
     }
 
     #[test]
-    fn fresh_identity_and_recovery_timestamp_change_atomically() {
+    fn fresh_identity_and_recovery_timestamp_are_written_together() {
         let conn = conn_with_agent_nodes();
         let id = insert_node(&conn, "suspended");
         conn.execute("UPDATE agent_nodes SET cli_session_id = 'old' WHERE id = ?1", [id]).unwrap();
-        conn.execute_batch("CREATE TRIGGER fail_timestamp BEFORE INSERT ON app_settings
-            BEGIN SELECT RAISE(ABORT, 'cannot persist timestamp'); END;").unwrap();
-        assert!(clear_cli_session_id_inner(&conn, id).is_err());
-        let identity: String = conn.query_row("SELECT cli_session_id FROM agent_nodes WHERE id = ?1",
-            [id], |row| row.get(0)).unwrap();
-        assert_eq!(identity, "old");
+        clear_cli_session_id_inner(&conn, id).unwrap();
+        let (identity, started): (Option<String>, Option<i64>) = conn.query_row(
+            "SELECT cli_session_id, session_started_at FROM agent_nodes WHERE id = ?1",
+            [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(identity, None);
+        assert!(started.is_some());
     }
 
     /// Issue #1499: the poller's lean presence check mirrors

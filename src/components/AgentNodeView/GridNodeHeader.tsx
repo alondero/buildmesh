@@ -14,6 +14,7 @@ import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
+import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
@@ -332,12 +333,7 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
           </span>
         )}
         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${getStatusConfig(node.status).bgColor}`} />
-        {hasLostConversation(node, isAutopilotNode) && (
-          <span className="text-status-warning text-xs shrink-0"
-            title="No saved session ID. Startup will try to recover it; use Regenerate to start a new conversation in this node.">
-            Lost conversation
-          </span>
-        )}
+        {hasLostConversation(node, isAutopilotNode) && <MissingSessionIdBadge />}
         {/* Issue #1364 §3 — node-level hook-health warning. Layered on top
             of the status, never a status: the node may be running fine while
             its attention hook is broken, and the user must be able to tell

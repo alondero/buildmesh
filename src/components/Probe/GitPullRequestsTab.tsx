@@ -721,7 +721,7 @@ export function GitPullRequestsTab() {
                               onClick={retryUnknownRow}
                               aria-label={`Retry mergeability check for pull request #${pr.number}`}
                               title="GitHub hasn't reported mergeability — click to retry"
-                              className="px-2 py-1 text-2xs rounded-sm border border-dashed border-border-subtle text-text-muted hover:text-accent-cyan hover:border-accent-cyan/40 transition-colors"
+                              className="px-2 py-1 text-2xs rounded border border-dashed border-border-subtle text-text-muted hover:text-accent-cyan hover:border-accent-cyan/40 transition-colors" /* allow-bare-rounded */
                             >
                               Unknown
                             </button>

@@ -747,10 +747,26 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     tracing::info!("auto_resume_agent_nodes: resuming {} nodes", nodes.len());
     let mut resumed: Vec<i64> = Vec::new();
 
-    for node in &nodes {
-        if let Err(error) = crate::services::session_recovery::recover_suspended_node(node.clone()).await {
-            tracing::warn!("auto_resume_agent_nodes: identity recovery failed for {}: {error}", node.id);
+    // Recovery is filesystem/SQLite work and each provider scans a different
+    // store. Run those independent scans together so one slow Codex rollout
+    // directory cannot hold every other node on the startup critical path.
+    let recovery_tasks = nodes.iter().cloned().map(|node| {
+        tauri::async_runtime::spawn(async move {
+            let node_id = node.id;
+            (node_id, crate::services::session_recovery::recover_suspended_node(node).await)
+        })
+    }).collect::<Vec<_>>();
+    for task in recovery_tasks {
+        match task.await {
+            Ok((node_id, Err(error))) => {
+                tracing::warn!("auto_resume_agent_nodes: identity recovery failed for {node_id}: {error}");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!("auto_resume_agent_nodes: identity recovery task failed: {error}"),
         }
+    }
+
+    for node in &nodes {
         match spawn_with_intent(
             &app,
             SpawnRequest::new(

@@ -173,7 +173,8 @@ pub(crate) fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Optio
 }
 
 /// Load the node, resolve worktree policy and paths. The orchestrator
-/// must already hold [`SpawnInFlightClaim`] for `opts.session_id`.
+/// The caller (`spawn_with_intent`) must already hold [`SpawnInFlightClaim`]
+/// for `opts.session_id`.
 pub(super) async fn prepare_context(
     app: &tauri::AppHandle,
     opts: SpawnOptions,
@@ -181,7 +182,7 @@ pub(super) async fn prepare_context(
 ) -> Result<PrepareOutcome, String> {
     debug_assert!(
         SPAWNS_IN_FLIGHT.lock().contains(&opts.session_id),
-        "prepare_context requires spawn_agent_inner to hold SpawnInFlightClaim"
+        "prepare_context requires spawn_with_intent to hold SpawnInFlightClaim"
     );
 
     let SpawnOptions {

@@ -110,6 +110,25 @@ pub(crate) fn find_candidates(
     candidates
 }
 
+/// Historic startup recovery entry point used by the Codex adapter. The
+/// adapter owns the Codex rollout layout; the shared recovery service owns
+/// only the time-window and ambiguity policy.
+pub(crate) fn find_historic_id_for_directory(
+    env_type: EnvType,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let sessions_dir = crate::env::codex_sessions_dir(env_type, spawn_directory)?;
+    let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
+    let candidates = find_candidates(&sessions_dir, spawn_directory, cutoff, None);
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.into_iter().map(|candidate| (candidate.id, candidate.timestamp_ms)),
+        anchor_ms,
+        recorded_start,
+    )
+}
+
 fn was_written_since(path: &Path, not_before_ms: i64) -> bool {
     path.metadata()
         .ok()

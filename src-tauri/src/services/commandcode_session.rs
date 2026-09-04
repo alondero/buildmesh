@@ -201,6 +201,29 @@ pub fn find_fresh_id_for_directory_in(
     select_id_for_directory(&candidates, spawn_directory, created_not_before_ms).map(str::to_string)
 }
 
+/// Historic startup recovery entry point used by the Command Code adapter.
+/// Transcript validation and directory matching stay in this provider module;
+/// the shared service applies the common time and ambiguity rules.
+pub(crate) fn find_historic_id_for_directory(
+    env_type: EnvType,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let sessions_dir =
+        crate::services::transcript_reader::commandcode_sessions_dir(env_type, spawn_directory)?;
+    let entries = fs::read_dir(sessions_dir).ok()?;
+    let candidates = entries
+        .flatten()
+        .filter_map(|entry| read_session_file(&entry.path()))
+        .filter(|candidate| crate::env::directories_match(&candidate.directory, spawn_directory));
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.map(|candidate| (candidate.id, candidate.timestamp_ms)),
+        anchor_ms,
+        recorded_start,
+    )
+}
+
 /// Background poller: read Command Code's session directory until a fresh session
 /// created in this node's spawn window appears, then save `cli_session_id`.
 pub fn start_capture_poller(

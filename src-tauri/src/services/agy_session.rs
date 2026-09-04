@@ -135,10 +135,13 @@ fn extract_cwd_anchor(val: &serde_json::Value) -> Option<String> {
         for key in ["Cwd", "cwd"] {
             if let Some(raw) = args.get(key).and_then(|v| v.as_str()) {
                 // Some transcripts JSON-encode the entire argument, including
-                // Windows backslashes. Stripping only quotes leaves doubled
-                // separators and rejects the correct workspace (#1555).
-                let decoded = serde_json::from_str::<String>(raw).ok();
-                let cleaned = decoded.as_deref().unwrap_or(raw).trim().trim_matches('"').trim().to_string();
+                // Windows backslashes. JSON decoding already removes the
+                // enclosing quotes and escape sequences; plain text is kept as
+                // written when decoding is not applicable.
+                let cleaned = serde_json::from_str::<String>(raw)
+                    .unwrap_or_else(|_| raw.to_owned())
+                    .trim()
+                    .to_owned();
                 if !cleaned.is_empty() {
                     return Some(cleaned);
                 }
@@ -269,6 +272,32 @@ pub(crate) fn collect_candidates(brain_dir: &Path, created_not_before_ms: i64) -
         }
     }
     out
+}
+
+/// Historic startup recovery entry point used by the AGY adapter. Workspace
+/// matching remains provider-owned because AGY records it inside tool-call
+/// metadata rather than in the conversation directory name.
+pub(crate) fn find_historic_id_for_directory(
+    env_type: EnvType,
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
+    let brain_dir = crate::env::agy_brain_dir_for_env(env_type, spawn_directory)?;
+    let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
+    let candidates = collect_candidates(&brain_dir, cutoff)
+        .into_iter()
+        .filter(|candidate| {
+            candidate
+                .workspace
+                .as_deref()
+                .is_some_and(|cwd| crate::env::directories_match(cwd, spawn_directory))
+        });
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.map(|candidate| (candidate.id, candidate.created_ms)),
+        anchor_ms,
+        recorded_start,
+    )
 }
 
 /// Scan `brain_dir` for the conversation this spawn minted: proven fresh by

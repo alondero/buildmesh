@@ -61,11 +61,11 @@ describe('NodeItem restart button', () => {
   it('distinguishes a missing conversation from a resumable or approval-gated node', () => {
     const node = makeNode({ status: 'suspended', cli_session_id: null });
     const { rerender } = renderNode(node);
-    expect(screen.getByText('Lost conversation')).toBeTruthy();
+    expect(screen.getByText('Missing session ID')).toBeTruthy();
     useAgentNodeStore.setState({ autopilotStates: { [node.id]: 'implementing' } });
     rerender(<NodeItem node={node} meshColor={{ name: 'default', hex: '#000', textOnDark: '#fff' }}
       isActive={false} onSelect={vi.fn()} onDelete={vi.fn()} />);
-    expect(screen.queryByText('Lost conversation')).toBeNull();
+    expect(screen.queryByText('Missing session ID')).toBeNull();
   });
 
   it('renders a Retry resume button when the node is in error state with a cli_session_id', () => {
