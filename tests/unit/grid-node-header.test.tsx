@@ -27,10 +27,10 @@ vi.mock('../../src/hooks/useGitSummary', () => ({
 // Each test sets what the PR chip will see by calling prMock.mockReturnValue(...)
 // (or .mockReturnValue(null) to hide the chip). Mirrors the summaryMock pattern.
 const prMock = vi.fn();
-const refreshOpenPrByPathMock = vi.fn();
+const invalidateOpenPrForNodeMock = vi.fn();
 vi.mock('../../src/hooks/useOpenPr', () => ({
   useOpenPr: () => ({ pr: prMock(), loading: false, refresh: vi.fn() }),
-  refreshOpenPrByPath: (...args: unknown[]) => refreshOpenPrByPathMock(...args),
+  invalidateOpenPrForNode: (...args: unknown[]) => invalidateOpenPrForNodeMock(...args),
 }));
 
 // Stub the opener plugin so the chip's onClick doesn't try to launch a real browser.

@@ -1,8 +1,8 @@
-import { useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { mergePr } from '../../lib/tauri';
 import { formatError } from '../../lib/errorUtils';
-import { refreshOpenPrByPath } from '../../hooks/useOpenPr';
+import { invalidateOpenPrForNode } from '../../hooks/useOpenPr';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useViewportClamp } from '../../hooks/useViewportClamp';
@@ -16,25 +16,13 @@ interface PrPillProps {
 }
 
 /**
- * PR pill with merge menu — the agent-node title's `PR #N` chip.
+ * PR pill merge menu — the agent-node title's `PR #N` chip.
  *
- * Clicking the pill opens a menu (not the browser directly) with:
- *   - "Open on GitHub" (the old direct-click behaviour, now one level in)
- *   - "Merge (squash & delete branch)" gated behind an inline confirm,
- *     mirroring the Probe Panel's Pull Requests tab contract
- *     (`GitPullRequestsTab`: squash + delete branch via `merge_pr`,
- *     irreversible outward action so confirm is required).
- *
- * Draft PRs disable merge (GitHub would reject the squash) with a tooltip.
- * On success the Open-PR cache is refreshed by path so the chip flips to
- * "no open PR" immediately instead of lagging behind the 60s freshness
- * window (same `refreshOpenPrByPath` the Probe merge flow uses).
- *
- * Dropdown plumbing mirrors `BuildRunDropdown`: `relative` wrapper with
- * `data-dropdown-for` scoping, `useClickOutside` + `useAriaMenu` +
- * `useViewportClamp`, `absolute left-0 top-full` menu (left-aligned —
- * the pill lives on the title's left side, unlike the right-side Build
- * trigger which uses `right-0`).
+ * Click opens a menu with Open on GitHub plus Merge (squash and
+ * delete branch) behind an inline confirm, matching the Probe Pull
+ * Requests tab contract. Drafts expose merge as aria-disabled.
+ * A merge failure keeps the menu open with the error; the error
+ * persists across close/reopen until the next merge attempt.
  */
 export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
   const [open, setOpen] = useState(false);
@@ -44,10 +32,25 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  // Guards the post-await setStates: the menu may close (outside
+  // click / Escape / Open click) or the whole pill may unmount
+  // (cache invalidation flips openPr to null) while merge is in
+  // flight. Without this the resolution would set state on an
+  // unmounted component and a late failure would be invisible.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
-  // Normal: Open + Merge (2). Confirming: Open + Confirm + Cancel (3).
-  // Merging reuses the 2-slot (Open + disabled "Merging…" row).
-  const itemCount = confirming ? 3 : 2;
+  // State-machine invariant: confirming and merging are never true
+  // together — handleMerge resets confirming the moment merge
+  // starts — so the count always matches the rendered rows:
+  // merging renders Open + Merging (2), confirming renders
+  // Open + Confirm + Cancel (3), otherwise Open + Merge (2).
+  const itemCount = merging ? 2 : confirming ? 3 : 2;
 
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
@@ -56,10 +59,12 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
     requestAnimationFrame(() => trigger?.focus());
   };
 
-  useClickOutside<string>(open ? dropdownId('pr-pill', nodeId) : null, () => {
+  const handleDismiss = () => {
     setOpen(false);
     setConfirming(false);
-  });
+  };
+
+  useClickOutside<string>(open ? dropdownId('pr-pill', nodeId) : null, handleDismiss);
 
   useAriaMenu({
     rootRef: menuRef,
@@ -72,39 +77,75 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
 
   useViewportClamp(menuRef, [open, confirming, merging]);
 
+  const menuId = useId();
+
   const handleToggle = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (open) {
-      setOpen(false);
-      setConfirming(false);
+      handleDismiss();
     } else {
-      setMergeError(null);
+      // Deliberately preserves mergeError: a failure that landed
+      // while the menu was closed (dismissed mid-merge) must still
+      // be readable on reopen instead of wiped before first paint.
       setOpen(true);
     }
   };
 
   const handleOpen = (e: React.MouseEvent) => {
     e.stopPropagation();
-    setOpen(false);
-    setConfirming(false);
+    // Disabled while merging so the click cannot unmount the menu
+    // out from under the in-flight merge IPC.
+    if (merging) return;
+    handleDismiss();
     openUrl(openPr.url).catch(console.error);
+  };
+
+  const handleArmConfirm = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (merging) return;
+    setMergeError(null);
+    setConfirming(true);
+  };
+
+  const handleCancelConfirm = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setConfirming(false);
   };
 
   const handleMerge = async (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (merging) return;
+    // Reset confirming synchronously with arming merging: from this
+    // render on the menu shows Open + Merging (2 rows) and itemCount
+    // is 2, so arrow navigation can never address a stale index 2.
+    // activeIndex returns to 0 for the same reason (Cancel sat at 2).
     setMerging(true);
+    setConfirming(false);
+    setActiveIndex(0);
     setMergeError(null);
     try {
       await mergePr(openPr.url);
-      if (gitPath) refreshOpenPrByPath(gitPath);
+      if (!mountedRef.current) return;
+      // Drops this node's cache entry even when no hook instance is
+      // mounted, then notifies path subscribers — the chip flips to
+      // "no open PR" instead of lagging behind the freshness window.
+      // gitPath is non-null whenever the pill renders (the header
+      // returns null when the node is not loaded), so the guard is
+      // dead-code defensive, never a silent skip in practice.
+      if (gitPath) invalidateOpenPrForNode(nodeId, gitPath);
       setOpen(false);
-      setConfirming(false);
     } catch (err) {
+      if (!mountedRef.current) return;
+      // confirming is already false: the error presents alongside
+      // the plain Merge row, menu stays open for a retry.
       setMergeError(formatError(err));
     } finally {
-      setMerging(false);
+      if (mountedRef.current) setMerging(false);
     }
   };
+
+  const openDisabled = merging;
+  const mergeDisabled = merging;
 
   return (
     <div
@@ -118,6 +159,7 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
         onClick={handleToggle}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
         aria-label={`Open pull request #${openPr.number} options`}
         title={openPr.draft ? `Draft · ${openPr.title}` : openPr.title}
         data-testid="pr-pill-trigger"
@@ -129,6 +171,7 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
       {open && (
         <div
           ref={menuRef}
+          id={menuId}
           role="menu"
           aria-label={`Pull request #${openPr.number} actions`}
           className="absolute left-0 top-full mt-1 min-w-[240px] bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-50 animate-scale-in origin-top-left"
@@ -136,22 +179,26 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
           <button
             role="menuitem"
             tabIndex={activeIndex === 0 ? 0 : -1}
+            aria-disabled={openDisabled}
             onClick={handleOpen}
             aria-label={`Open pull request #${openPr.number} on GitHub`}
-            title={openPr.url}
-            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+            title={merging ? 'Merge in progress' : openPr.url}
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent aria-disabled:hover:text-text-primary"
           >
             Open on GitHub ↗
           </button>
           {merging ? (
-            <div
+            <button
               role="menuitem"
+              tabIndex={activeIndex === 1 ? 0 : -1}
               aria-disabled="true"
+              onClick={(e) => e.stopPropagation()}
               aria-label={`Merging pull request #${openPr.number}`}
-              className="w-full px-3 py-1.5 text-left text-xs text-text-muted animate-pulse"
+              title="Merge in progress"
+              className="w-full px-3 py-1.5 text-left text-xs text-text-muted animate-pulse cursor-wait"
             >
               Merging…
-            </div>
+            </button>
           ) : confirming ? (
             <>
               <button
@@ -167,10 +214,7 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
               <button
                 role="menuitem"
                 tabIndex={activeIndex === 2 ? 0 : -1}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setConfirming(false);
-                }}
+                onClick={handleCancelConfirm}
                 aria-label={`Cancel merge of pull request #${openPr.number}`}
                 title="Cancel"
                 className="w-full px-3 py-1.5 text-left text-xs text-text-muted hover:bg-bg-base hover:text-text-secondary transition-colors"
@@ -181,7 +225,9 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
           ) : openPr.draft ? (
             <button
               role="menuitem"
-              disabled
+              tabIndex={activeIndex === 1 ? 0 : -1}
+              aria-disabled="true"
+              onClick={(e) => e.stopPropagation()}
               aria-label={`Merge pull request #${openPr.number} (unavailable for drafts)`}
               title="Draft PR can't be merged yet"
               className="w-full px-3 py-1.5 text-left text-xs text-text-muted opacity-50 cursor-not-allowed"
@@ -192,11 +238,8 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
             <button
               role="menuitem"
               tabIndex={activeIndex === 1 ? 0 : -1}
-              onClick={(e) => {
-                e.stopPropagation();
-                setMergeError(null);
-                setConfirming(true);
-              }}
+              aria-disabled={mergeDisabled}
+              onClick={handleArmConfirm}
               aria-label={`Merge pull request #${openPr.number}`}
               title="Merge pull request (squash & delete branch)"
               className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"

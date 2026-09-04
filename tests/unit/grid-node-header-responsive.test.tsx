@@ -105,7 +105,7 @@ vi.mock('../../src/hooks/useGitSummary', () => ({
 const prMock = vi.fn();
 vi.mock('../../src/hooks/useOpenPr', () => ({
   useOpenPr: () => ({ pr: prMock(), loading: false, refresh: vi.fn() }),
-  refreshOpenPrByPath: vi.fn(),
+  invalidateOpenPrForNode: vi.fn(),
 }));
 
 const { openUrlMock } = vi.hoisted(() => ({
