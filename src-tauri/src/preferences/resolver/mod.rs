@@ -47,9 +47,8 @@ pub(crate) use catalog::{
 
 #[allow(unused_imports)]
 pub use accounts::{
-    deepseek_api_key_resolved, kimi_api_key_resolved, minimax_api_key_resolved,
-    openai_api_key_resolved, openrouter_api_key_resolved, provider_accounts, remove_provider_account,
-    set_account_key_if_absent, upsert_provider_account,
+    minimax_api_key_resolved, provider_accounts, remove_provider_account, set_account_key_if_absent,
+    upsert_provider_account,
 };
 
 // ----- Re-exports: pairings ----------------------------------------------
