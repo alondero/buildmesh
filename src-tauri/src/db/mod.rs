@@ -609,7 +609,12 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
-        CREATE INDEX IF NOT EXISTS idx_circuit_runs_mesh_queue ON autopilot_circuit_runs(mesh_id, state, queue_position);
+        -- `idx_circuit_runs_mesh_queue` is deliberately NOT here: this
+        -- ensure-net runs BEFORE `evolve_to`, so on a DB created between
+        -- v34 (circuit-runs table) and v38 (`queue_position` column) the
+        -- index would trip `no such column` and panic startup before the
+        -- v38 column-add could run. `AlwaysStep::EnsureAutopilotCircuitsTables`
+        -- creates it after the column walk guarantees the column exists.
 
         CREATE TABLE IF NOT EXISTS autopilot_circuit_run_agent_leases (
             run_id INTEGER PRIMARY KEY REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
