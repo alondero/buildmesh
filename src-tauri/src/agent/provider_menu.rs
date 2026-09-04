@@ -1157,11 +1157,11 @@ mod tests {
 
     /// Negative companion to the previous test: the `harness` field must
     /// actually drive the executor resolution. If a profile pins
-    /// `harness: "opencode"`, `resumable` must be `false` even though the
-    /// id is user-chosen and the test env has no stored profiles. This
-    /// pins that `provider_info_for` consults `profile.harness` directly
-    /// (via `Provider::from_db_str`) rather than silently falling through
-    /// to Anthropic on the id.
+    /// `harness: "opencode"`, `resumable` must reflect OpenCode's actual
+    /// capability (true as of #1296: `supports_resume && produces_readable_transcript`)
+    /// rather than silently collapsing to Anthropic on the id. The test
+    /// pins the harness-driven lookup — the resumable value is asserted
+    /// elsewhere (`models::tests::only_transcript_writing_providers_produce_a_readable_transcript`).
     #[test]
     fn provider_info_consults_harness_field_not_id_fallback() {
         use crate::preferences::HarnessProfile;
@@ -1178,8 +1178,14 @@ mod tests {
         let info = provider_info_for(&custom_opencode, Platform::Windows)
             .expect("OpenCode-backed profile is available on Windows");
         assert!(
-            !info.resumable,
-            "OpenCode-backed profile must be resumable=false; the harness field drives resolution"
+            info.capabilities.produces_readable_transcript,
+            "OpenCode-backed profile must advertise produces_readable_transcript=true \
+             (#1296); the harness field drives resolution, not the user-chosen id"
+        );
+        assert!(
+            info.resumable,
+            "OpenCode-backed profile is resumable=true since #1296: \
+             supports_resume && produces_readable_transcript"
         );
     }
 

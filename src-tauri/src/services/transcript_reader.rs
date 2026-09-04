@@ -5,16 +5,17 @@
 //! [`Unavailable`] reason when the provider has no readable transcript or the
 //! file fails to parse.
 //!
-//! Six harness formats are supported, selected by [`TranscriptFormat`]:
+//! Seven harness formats are supported, selected by [`TranscriptFormat`]:
 //! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, Cursor's
 //! `~/.cursor/projects/<workspace>/agent-transcripts/<session>/<session>.jsonl`,
 //! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
 //! #885), Antigravity's per-conversation JSONL, Grok Code's
 //! `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl, updates.jsonl}`
-//! (issue #1281), and Command Code's
+//! (issue #1281), Command Code's
 //! `~/.commandcode/projects/<encoded-cwd>/<session>.jsonl` (issues #1407,
-//! #1500). All map onto the same [`Turn`]/[`ToolCall`] wire shape, so
-//! the Coordinator never learns which harness wrote the file.
+//! #1500), and OpenCode's local `opencode.db` SQLite store (issue #1296).
+//! All map onto the same [`Turn`]/[`ToolCall`] wire shape, so the Coordinator
+//! never learns which harness wrote the file.
 //!
 //! **All transcript-format brittleness is quarantined here.** Both this reader
 //! and `services::session_discovery` share the Claude-Code JSONL primitives
@@ -77,6 +78,15 @@ pub enum TranscriptFormat {
     /// `chat_history.jsonl` (the per-message conversation log) and
     /// `updates.jsonl` (event-level telemetry). Issue #1281.
     Grok,
+    /// OpenCode (issue #1296) stores all session messages in a single local
+    /// SQLite database (`~/.local/share/opencode/opencode.db`), not in
+    /// per-session JSONL files. The reader pulls messages by `session_id`
+    /// and normalises each row to the public `opencode export <id>` JSON
+    /// shape (`{info, parts, …}` per message) before parsing. Dispatch is
+    /// short-circuited in [`read_tail`] / [`read_last_assistant_message`] —
+    /// this variant does not flow through the file-based `locate_transcript`
+    /// chain because OpenCode has no per-session transcript file.
+    OpenCode,
 }
 
 impl TranscriptFormat {
@@ -90,7 +100,10 @@ impl TranscriptFormat {
     /// Command Code writes structured message events (issue #1407).
     /// Kimi Code (wayfinder #918) writes standard JSONL
     /// (`~/.kimi/sessions/wire.jsonl`) but the path resolver isn't wired yet
-    /// — tracked as a follow-up.
+    /// — tracked as a follow-up. OpenCode (#1296) stores messages in SQLite
+    /// and routes through its own read entry point; the variant is included
+    /// here so `for_harness` agrees with the dispatch table in
+    /// [`read_tail`] / [`read_last_assistant_message`].
     pub fn for_harness(harness_id: &str) -> Self {
         match harness_id {
             "codex" => TranscriptFormat::Codex,
@@ -98,6 +111,7 @@ impl TranscriptFormat {
             "cursor" => TranscriptFormat::Cursor,
             "agy" => TranscriptFormat::Agy,
             "grok" => TranscriptFormat::Grok,
+            "opencode" => TranscriptFormat::OpenCode,
             _ => TranscriptFormat::ClaudeCode,
         }
     }
@@ -314,6 +328,12 @@ pub fn read_tail(
     node_path: &str,
     tail: usize,
 ) -> TranscriptTail {
+    // OpenCode stores all sessions in a single SQLite DB — there is no
+    // per-session transcript file. Short-circuit before the file-based chain
+    // (issue #1296).
+    if format == TranscriptFormat::OpenCode {
+        return read_opencode_tail(session_id, node_path, tail);
+    }
     let Some(session_id) = session_id.filter(|s| !s.is_empty()) else {
         return TranscriptTail::unavailable(UnavailableReason::NoSession);
     };
@@ -333,6 +353,11 @@ fn locate_transcript(
     session_id: &str,
     node_path: &str,
 ) -> Option<PathBuf> {
+    // File-based formats only. OpenCode's per-session data lives in a
+    // shared SQLite DB rather than a transcript file (issue #1296), so
+    // `read_tail` / `read_last_assistant_message` short-circuit before
+    // this dispatch runs. The wildcard keeps the match exhaustive when
+    // new file-based formats are added later.
     match format {
         TranscriptFormat::ClaudeCode => Some(transcript_path(session_id, node_path)),
         TranscriptFormat::Cursor => Some(cursor_transcript_path(session_id, node_path)),
@@ -340,6 +365,7 @@ fn locate_transcript(
         TranscriptFormat::Agy => find_agy_transcript(session_id),
         TranscriptFormat::Grok => find_grok_transcript(session_id, node_path),
         TranscriptFormat::CommandCode => find_commandcode_transcript(session_id, node_path),
+        _ => None,
     }
 }
 
@@ -474,6 +500,415 @@ pub(crate) fn cursor_workspace_slug(path: &str) -> String {
         .collect::<Vec<_>>()
         .join("-")
 }
+
+// --- OpenCode transcript reader (issue #1296) ---
+//
+// OpenCode stores every session's messages in a single local SQLite database
+// (`~/.local/share/opencode/opencode.db`), not in per-session JSONL files
+// (issue #1296). The reader bypasses the file-based `locate_transcript`
+// chain in [`read_tail`] / [`read_last_assistant_message`] and queries the DB
+// directly through `read_opencode_messages`. The parser takes a slice of
+// `serde_json::Value` (no synthetic envelope roundtrip — issue #1296 review
+// surfaced the cost of wrapping rows in `{info, messages}` just to unwrap
+// `messages` on the next stack frame).
+//
+// **Two read paths, two row budgets.**
+// - `read_opencode_tail` (full /log endpoint): budget = `tail * factor` rows
+//   because OpenCode rows are *message events*, not turns — an assistant
+//   turn can span multiple rows (`msg-004` + `msg-005` in our fixture) and
+//   reasoning-only / tool-only messages drop, so bounding by `tail` rows
+//   guarantees the caller gets fewer than `tail` turns.
+// - `read_opencode_digest` (`GET /nodes` digest): budget = `DIGEST_WINDOW`
+//   so a single user reply at the latest message does not wipe the
+//   blocking question — the parser must see the assistant turn before
+//   it. `DIGEST_WINDOW` is large enough to span a typical user->
+//   assistant exchange but bounded so a multi-thousand-row session
+//   doesn't full-scan on every Coordinator poll (default 50).
+//
+// **`SQLITE_OPEN_READ_ONLY` + `busy_timeout`.** OpenCode writes to
+// `opencode.db` while the agent is alive, and a long-running query from
+// the Coordinator's Tokio worker (issue #1380) is the silent-degrade risk
+// if we trip SQLITE_BUSY. A 500 ms busy timeout lets SQLite wait out
+// brief concurrent writes instead of returning `None` → `Unreadable`.
+//
+// **Defensive parsing.** The parser accepts the documented part types
+// (`text`, `reasoning`, `tool`, `step-start`, `step-finish`, …) and silently
+// drops unknown ones — same "graceful failure on unknown event types" rule
+// Grok (#1281) follows. A renamed `info.role` or `parts` is a structural
+// break and degrades loudly as `ShapeChanged`, not the quieter `Empty`.
+//
+// **Schema assumption (verify against the live CLI):** `message(id PK,
+// session_id, time_created, data TEXT)`. The `data` blob is the full
+// MessageV2 record (`role`, `time`, `parts`, ...). If OpenCode ever splits
+// `parts` into a separate `part` table, `read_opencode_messages` gains a
+// second query and the contract test
+// (`opencode_locator_reads_messages_from_file_backed_db`) is the pin.
+
+/// Fixed-row window for the Coordinator digest path. Chosen to be wide
+/// enough to span a typical user → assistant exchange (a few turns each
+/// with reasoning + tool + text parts) but bounded so a 10k-row session
+/// doesn't full-scan on every poll. Tuned so the digest finds the blocking
+/// question even when the latest row is a user reply.
+const OPENCODE_DIGEST_WINDOW: usize = 50;
+
+/// Row-to-turn factor for the full /log read path. OpenCode rows are
+/// message events, not turns — assistant turn coalescing, reasoning-only
+/// drop, and tool-only drop mean `factor` rows typically produce 1 turn.
+/// Factor > 1 ensures the caller can always extract `tail` turns once the
+/// parser has coalesced/dropped, even on dense conversations.
+const OPENCODE_TURN_TO_MESSAGE_FACTOR: usize = 3;
+
+/// SQLite busy_timeout the OpenCode reader applies on every open: lets a
+/// concurrent writer (the live OpenCode CLI) hold the lock briefly instead
+/// of returning `SQLITE_BUSY` to a Coordinator poll. 500 ms is generous
+/// enough for a single write transaction and short enough that a stuck
+/// writer doesn't stall the digest path.
+const OPENCODE_READER_BUSY_TIMEOUT_MS: u64 = 500;
+
+/// Read the row tail of an OpenCode session's `message` table. Returns the
+/// up-to-`row_budget` newest rows in chronological order (oldest → newest),
+/// matching how `opencode export <id>` orders them. Returns `None` on any
+/// I/O or query failure so callers can degrade to `Unreadable`.
+///
+/// `Limit` is bound as a real SQL parameter (`?2`) — no `format!` SQL,
+/// even though `limit` is server-controlled. The shape matches the rest
+/// of the reader's prepared statements and stays parameter-bound for the
+/// case where the upstream schema adds a filter column we don't control
+/// yet.
+fn read_opencode_messages(
+    db_path: &Path,
+    session_id: &str,
+    row_budget: usize,
+) -> Option<Vec<serde_json::Value>> {
+    use rusqlite::{Connection, OpenFlags};
+    use std::time::Duration;
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    if let Err(error) = conn.busy_timeout(Duration::from_millis(OPENCODE_READER_BUSY_TIMEOUT_MS)) {
+        // Busytimeout is best-effort — log but don't fail the read;
+        // a non-zero busy_timeout simply means concurrent writers will
+        // surface as SQLITE_BUSY (the previous behaviour).
+        tracing::debug!(
+            "opencode transcript reader: busy_timeout set failed ({error}); \
+             concurrent writes may degrade to Unreadable"
+        );
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT data FROM message \
+             WHERE session_id = ?1 \
+             ORDER BY time_created DESC \
+             LIMIT ?2",
+        )
+        .ok()?;
+    let mut latest: Vec<serde_json::Value> = Vec::new();
+    let mut rows = stmt
+        .query(rusqlite::params![session_id, row_budget as i64])
+        .ok()?;
+    while let Some(row) = rows.next().ok()? {
+        let data: String = row.get(0).ok()?;
+        // Each row's `data` is one message record. We accept any JSON shape
+        // here — structural validation lives in the parser so an unknown
+        // shape degrades as `ShapeChanged`, not a panic. Rows that aren't
+        // valid JSON are silently dropped (graceful failure on bad rows).
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+            latest.push(value);
+        }
+    }
+    // The query returned DESC; the parser consumes ASC (matches the
+    // natural timeline that `opencode export` orders by). Reverse once
+    // here so the parser never has to know about the bound direction.
+    latest.reverse();
+    Some(latest)
+}
+
+/// Pure tail reader over a Vec of OpenCode message values. Splits
+/// parse + result shaping so tests can drive the dispatch (env path
+/// resolution) and the parsing semantics independently — same split the
+/// `agy_locator_in` / `agy_locator` pair uses for the AGY adapter. The
+/// `tail` argument flows through `effective_tail` to the parser's
+/// rolling-buffer keep.
+pub(crate) fn read_opencode_tail_from_messages(
+    messages: &[serde_json::Value],
+    tail: usize,
+) -> TranscriptTail {
+    build_tail(parse_opencode_messages(messages, effective_tail(tail)))
+}
+
+/// Pure digest reader. Always returns `turns: Vec::new()` so the
+/// digest consumer's bounded-memory optimisation holds for OpenCode
+/// (issue #1296 review finding A — a pre-review implementation
+/// returned `Vec<Turn>` from this path and broke the digest contract).
+/// `last_assistant_message` comes from the parser's whole-stream
+/// tracker; a session with no surviving turns degrades as `Empty` /
+/// `ShapeChanged`.
+pub(crate) fn read_opencode_digest_from_messages(
+    messages: &[serde_json::Value],
+) -> TranscriptTail {
+    let parsed = parse_opencode_messages(messages, 1);
+    // The digest's contract: only return `Available` when the window
+    // contained at least one assistant message — the Coordinator polls
+    // many nodes and `last_assistant_message: None` is indistinguishable
+    // from "node hasn't spoken yet". A session of only user prompts
+    // degrades as `Empty`; an all-malformed window degrades as
+    // `ShapeChanged`.
+    let Some(last) = parsed.last_assistant_message else {
+        return TranscriptTail::unavailable(empty_or_shape_changed(parsed.saw_malformed));
+    };
+    TranscriptTail::Available {
+        turns: Vec::new(),
+        last_assistant_message: Some(last),
+    }
+}
+
+/// Open the OpenCode SQLite DB and read the latest `tail` turns (with a
+/// `factor` row budget to span assistant coalescing) for a session_id.
+/// Wraps [`read_opencode_tail_from_messages`] over the rows the locator
+/// returns, and degrades through the same [`UnavailableReason`] ladder
+/// as every other harness so the Coordinator's `/nodes/{id}/log`
+/// endpoint sees a uniform error surface.
+pub(crate) fn read_opencode_tail(
+    session_id: Option<&str>,
+    node_path: &str,
+    tail: usize,
+) -> TranscriptTail {
+    let _session_id = session_id;
+    let Some((db_path, session_id)) = opencode_resolve(session_id, node_path) else {
+        return TranscriptTail::unavailable(opencode_unavailable_reason(
+            _session_id.filter(|s| !s.is_empty()).map(str::to_string),
+        ));
+    };
+    let row_budget = effective_tail(tail).saturating_mul(OPENCODE_TURN_TO_MESSAGE_FACTOR);
+    let Some(messages) = read_opencode_messages(&db_path, &session_id, row_budget) else {
+        return TranscriptTail::unavailable(UnavailableReason::Unreadable);
+    };
+    read_opencode_tail_from_messages(&messages, tail)
+}
+
+/// Coordinator digest read path (`GET /nodes`). Resolves the env-aware
+/// DB path, fetches a fixed-size window (independent of the caller-
+/// supplied `tail`, which is ignored on every digest path), and shapes
+/// the result through [`read_opencode_digest_from_messages`]. Mirrors
+/// the AGY split: test the semantics with explicit messages, drive the
+/// dispatch through this.
+pub(crate) fn read_opencode_digest(
+    session_id: Option<&str>,
+    node_path: &str,
+) -> TranscriptTail {
+    let _session_id = session_id;
+    let Some((db_path, session_id)) = opencode_resolve(session_id, node_path) else {
+        return TranscriptTail::unavailable(opencode_unavailable_reason(
+            _session_id.filter(|s| !s.is_empty()).map(str::to_string),
+        ));
+    };
+    let Some(messages) =
+        read_opencode_messages(&db_path, &session_id, OPENCODE_DIGEST_WINDOW)
+    else {
+        return TranscriptTail::unavailable(UnavailableReason::Unreadable);
+    };
+    read_opencode_digest_from_messages(&messages)
+}
+
+/// Shared session-id + DB-path resolver for both OpenCode read paths.
+/// Returns `Some((PathBuf, String))` on success; `None` on NoSession /
+/// NoTranscript, with `session_id: None` on the error path so the caller
+/// can map back to the right [`UnavailableReason`] via
+/// [`opencode_unavailable_reason`].
+fn opencode_resolve(
+    session_id: Option<&str>,
+    node_path: &str,
+) -> Option<(PathBuf, String)> {
+    let session_id = session_id.filter(|s| !s.is_empty())?.to_string();
+    if !crate::services::opencode_session::is_opencode_session_id(&session_id) {
+        // A non-`ses_` id cannot match any OpenCode row. Degrade quietly
+        // rather than opening the DB to find nothing. The gate is shared
+        // with `services::opencode_session::is_opencode_session_id` so
+        // the two readers (transcript + capture poller) cannot drift on
+        // what an OpenCode session id looks like.
+        return None;
+    }
+    let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
+    let db_path = crate::services::opencode_session::opencode_db_path(env_type)?;
+    if !db_path.exists() {
+        return None;
+    }
+    Some((db_path, session_id))
+}
+
+/// Map a missing-input outcome from [`opencode_resolve`] back to the
+/// right [`UnavailableReason`]. `Some(id)` means the session id was
+/// present (and `OpenCode`-shaped) but the DB path was missing →
+/// `NoTranscript`. `None` means the session id was absent →
+/// `NoSession`.
+fn opencode_unavailable_reason(session_id: Option<String>) -> UnavailableReason {
+    match session_id {
+        Some(_) => UnavailableReason::NoTranscript,
+        None => UnavailableReason::NoSession,
+    }
+}
+
+/// Parse a slice of OpenCode message envelopes into the shared [`Parsed`]
+/// contract: rolling `keep`-bounded turn window, whole-stream
+/// last-assistant-message tracking, malformed-flag so a renamed-field
+/// message degrades as `ShapeChanged`. Maps each message's `parts` array
+/// onto text + tool calls:
+///
+/// - `text` parts → concatenated into `Turn.text`
+/// - `reasoning` parts → silently dropped (chain-of-thought, not dialogue)
+/// - `tool` parts → converted to [`ToolCall`]s using `state.input` and
+///   `state.title` as the tool name (falling back to the part's `name`)
+/// - `step-start` / `step-finish` / unknown parts → silently skipped, never
+///   flagged (the "graceful failure on unknown event types" rule)
+///
+/// A user turn with no `text` parts, or an assistant turn with neither
+/// text nor tool calls, is dropped — same as Claude's thinking-only line.
+pub(crate) fn parse_opencode_messages(
+    messages: &[serde_json::Value],
+    keep: usize,
+) -> Parsed {
+    let keep = keep.max(1);
+    let mut turns: VecDeque<Turn> = VecDeque::new();
+    let mut last_assistant_message: Option<String> = None;
+    let mut saw_malformed = false;
+
+    for message in messages {
+        // Each message envelope is `{"info": {role, ...}, "parts": [...]}`. A
+        // missing `info.role` is a structural break on a recognized message
+        // shape — flag malformed. A missing `parts` is empty (no text, no
+        // tool calls); the message is then dropped as a no-op.
+        let Some(info) = message.get("info") else {
+            saw_malformed = true;
+            continue;
+        };
+        let Some(role) = info.get("role").and_then(|r| r.as_str()) else {
+            saw_malformed = true;
+            continue;
+        };
+        if role != "user" && role != "assistant" {
+            // Unknown role on a recognized envelope — flag as malformed so a
+            // future "system" or "tool" role doesn't silently degrade.
+            saw_malformed = true;
+            continue;
+        }
+        let parts = message
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+
+        let text = concat_opencode_text_parts(parts);
+        let mut tool_calls = extract_opencode_tool_calls(parts);
+
+        if role == "user" {
+            // Empty user prompts (e.g. a file-only attachment with no text)
+            // are dropped — mirrors Claude's empty `user` line rule.
+            if text.trim().is_empty() {
+                continue;
+            }
+            push_bounded(
+                &mut turns,
+                Turn {
+                    role: "user".to_string(),
+                    text: truncate(&text, MAX_TURN_TEXT),
+                    tool_calls: Vec::new(),
+                },
+                keep,
+            );
+            continue;
+        }
+
+        // Assistant turn: drop thinking-only (text empty AND no tool calls).
+        if text.trim().is_empty() && tool_calls.is_empty() {
+            continue;
+        }
+        cap_tool_calls(&mut tool_calls);
+        let turn = Turn {
+            role: "assistant".to_string(),
+            text: truncate(&text, MAX_TURN_TEXT),
+            tool_calls,
+        };
+        if !turn.text.is_empty() {
+            last_assistant_message = Some(turn.text.clone());
+        }
+        push_bounded(&mut turns, turn, keep);
+    }
+
+    Parsed {
+        turns: turns.into(),
+        last_assistant_message,
+        saw_malformed,
+    }
+}
+
+/// Parse the on-disk export JSON shape (`{info, messages}`) used by the
+/// fixture + the `opencode export <id>` CLI. Pure: passes the `messages`
+/// slice straight to [`parse_opencode_messages`]. A missing `messages`
+/// array is a structural break — `ShapeChanged`, not `Empty`. An empty
+/// `messages` array is a brand-new session — `Empty`.
+///
+/// **Test-only helper** — the production runtime path uses
+/// [`read_opencode_messages`] (which returns `Vec<serde_json::Value>`
+/// directly, with no envelope) and feeds that to
+/// [`parse_opencode_messages`] without going through this wrapper. The
+/// fixture + parser contract tests are the only callers; cargo's
+/// `dead_code` analysis doesn't see `#[cfg(test)]` use-sites in some
+/// versions, hence the `#[allow(dead_code)]`.
+#[allow(dead_code)]
+pub(crate) fn parse_opencode_export(
+    export: &serde_json::Value,
+    keep: usize,
+) -> Parsed {
+    match export.get("messages").and_then(|m| m.as_array()) {
+        Some(messages) => parse_opencode_messages(messages, keep),
+        None => Parsed {
+            turns: Vec::new(),
+            last_assistant_message: None,
+            saw_malformed: true,
+        },
+    }
+}
+
+/// Concatenate the `text` parts of an OpenCode message, separated by
+/// newlines. Reasoning parts are deliberately excluded — chain-of-thought is
+/// transport plumbing, not Coordinator dialogue (matches Claude's
+/// `thinking`-block skip). Returns the empty string when no `text` parts
+/// exist (an assistant turn then degrades to "tool calls only").
+fn concat_opencode_text_parts(parts: &[serde_json::Value]) -> String {
+    parts
+        .iter()
+        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Pull `tool` parts out of an OpenCode message into the shared
+/// [`ToolCall`] wire shape (`{name, input}`). The OpenCode export places the
+/// tool name on `state.title` (e.g. `"read_file"`, `"search_replace"`) and
+/// the raw input on `state.input`; output lives on `state.output` but the
+/// Coordinator only consumes `input` — output re-emission is a future
+/// harness-shape addition. Unknown part types (`file`, `patch`, `agent`, …)
+/// are silently dropped, mirroring Grok's "graceful failure on unknown event
+/// types" rule (#1281).
+fn extract_opencode_tool_calls(parts: &[serde_json::Value]) -> Vec<ToolCall> {
+    parts
+        .iter()
+        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("tool"))
+        .filter_map(|p| {
+            let state = p.get("state")?;
+            let name = state
+                .get("title")
+                .and_then(|n| n.as_str())
+                .or_else(|| p.get("name").and_then(|n| n.as_str()))
+                .unwrap_or("")
+                .to_string();
+            let input = state.get("input").cloned().unwrap_or(serde_json::Value::Null);
+            Some(ToolCall {
+                name,
+                input: truncate_json_strings(input, MAX_TOOL_STRING),
+            })
+        })
+        .collect()
+}
 /// Locate a Codex rollout file `rollout-<timestamp>-<session_id>.jsonl` under
 /// `<codex home>/sessions/YYYY/MM/DD/`. Codex cannot relocate its sessions dir
 /// per-project (issue #885), so the global one is walked — fixed depth 3,
@@ -546,12 +981,22 @@ fn parse_transcript(
     lines: impl Iterator<Item = String>,
     keep: usize,
 ) -> Parsed {
+    // JSONL pipeline only. OpenCode never reaches this dispatch — see
+    // the comment on `locate_transcript`. The wildcard arm returns an
+    // empty `Parsed` (no turns, no digest message) so a future file-based
+    // harness that ends up routed here in error degrades as `Empty`,
+    // not a panic.
     match format {
         TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => parse_turns(lines, keep),
         TranscriptFormat::Codex => parse_codex_turns(lines, keep),
         TranscriptFormat::Agy => parse_agy_turns(lines, keep),
         TranscriptFormat::Grok => parse_grok_turns(lines, keep),
         TranscriptFormat::CommandCode => parse_commandcode_turns(lines, keep),
+        _ => Parsed {
+            turns: Vec::new(),
+            last_assistant_message: None,
+            saw_malformed: false,
+        },
     }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
@@ -568,6 +1013,15 @@ pub fn read_last_assistant_message(
     session_id: Option<&str>,
     node_path: &str,
 ) -> TranscriptTail {
+    // OpenCode short-circuit (issue #1296) — `read_last_assistant_message`
+    // for OpenCode uses a fixed window (`OPENCODE_DIGEST_WINDOW`), NOT the
+    // caller-supplied `tail` (which is ignored on the digest path for
+    // every other adapter). A user reply at the latest row would otherwise
+    // wipe the blocking question — the digest must always have enough
+    // context to surface the most recent assistant message.
+    if format == TranscriptFormat::OpenCode {
+        return read_opencode_digest(session_id, node_path);
+    }
     let Some(session_id) = session_id.filter(|s| !s.is_empty()) else {
         return TranscriptTail::unavailable(UnavailableReason::NoSession);
     };
@@ -662,7 +1116,8 @@ fn effective_tail(tail: usize) -> usize {
 /// question), and whether any structurally-malformed `user`/`assistant` line was
 /// seen (issue #335: lets [`empty_or_shape_changed`] tell a broken Claude Code
 /// shape from a genuinely-quiet session that simply has no turns yet).
-struct Parsed {
+#[derive(Debug, PartialEq)]
+pub(crate) struct Parsed {
     turns: Vec<Turn>,
     last_assistant_message: Option<String>,
     saw_malformed: bool,
@@ -2275,10 +2730,11 @@ mod tests {
     }
 
     /// `for_harness` routes each harness to its native format — codex to
-    /// Codex, cursor to Cursor, agy to a dedicated AGY shape (#1283), and
-    /// grok to its own Grok shape (#1281). Every Claude-backed executor id
-    /// stays on Claude Code. The Claude-routed list deliberately excludes
-    /// "agy" and "grok" so the catch-all ClaudeCode assertion can't mask a
+    /// Codex, cursor to Cursor, agy to a dedicated AGY shape (#1283),
+    /// grok to its own Grok shape (#1281), opencode to OpenCode (#1296).
+    /// Every Claude-backed executor id stays on Claude Code. The
+    /// Claude-routed list deliberately excludes "agy", "grok", and
+    /// "opencode" so the catch-all ClaudeCode assertion can't mask a
     /// future routing regression.
     #[test]
     fn transcript_format_for_harness_routes_each_format() {
@@ -2290,7 +2746,8 @@ mod tests {
         assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
         assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
         assert_eq!(TranscriptFormat::for_harness("grok"), TranscriptFormat::Grok);
-        for id in ["anthropic", "claude", "opencode", "terminal", ""] {
+        assert_eq!(TranscriptFormat::for_harness("opencode"), TranscriptFormat::OpenCode);
+        for id in ["anthropic", "claude", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
         }
     }
@@ -3115,6 +3572,633 @@ mod tests {
             grok_urlencode_cwd("with space"),
             "with%20space",
             "space encodes to %20, not '+' (RFC 3986, not form-style)"
+        );
+    }
+
+    // --- OpenCode transcript format (issue #1296) ---
+    //
+    // The parser is tested directly over the public `opencode export <id>`
+    // JSON shape (the checked-in fixture). The locator is tested separately
+    // over a file-backed SQLite database whose schema matches the assumed
+    // `message(id, session_id, time_created, data)` layout. Each test
+    // uses a `tempfile::NamedTempFile` for RAII cleanup so a panic mid-test
+    // leaves nothing behind in the OS temp dir. If OpenCode ever splits
+    // parts into a separate table, the locator tests fail first.
+
+    /// Parse the checked-in `opencode_export.json` fixture: every message's
+    /// `text` parts surface on the matching turn, `tool` parts map to the
+    /// shared `ToolCall` wire shape, `reasoning` parts are excluded from
+    /// `Turn.text`, and unknown event types (`step-finish`) are silently
+    /// dropped. The blocking question is the most recent assistant text —
+    /// exactly the contract the Coordinator digest relies on.
+    #[test]
+    fn opencode_contract_parses_export_fixture() {
+        let raw = std::fs::read_to_string(fixture("opencode_export.json"))
+            .expect("opencode fixture should be readable");
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("opencode fixture should be valid JSON");
+        let parsed = parse_opencode_export(&value, 20);
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = build_tail(parsed)
+        else {
+            panic!("expected available, got ShapeChanged or Empty");
+        };
+
+        // The fixture spans user → assistant tool → user → assistant
+        // (text + reasoning + tool) → assistant (text + step-finish).
+        // reasoning and step-finish must not surface as turns, so the
+        // surviving sequence is [user, assistant, user, assistant, assistant].
+        let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "assistant", "assistant"],
+            "turns: {turns:#?}"
+        );
+        assert_eq!(turns[0].text, "Inspect src/login.ts for the redirect bug.");
+        // First assistant turn: text + tool call (no reasoning, no
+        // step-finish).
+        assert_eq!(turns[1].text, "I'll inspect the file first.");
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "read_file");
+        assert_eq!(
+            turns[1].tool_calls[0].input["file_path"],
+            "src/login.ts",
+            "OpenCode `state.input` is mapped onto the shared `input` wire shape"
+        );
+        // Second assistant turn: reasoning (skipped), text, tool call — the
+        // reasoning block must NOT pollute Turn.text.
+        assert_eq!(
+            turns[3].text,
+            "Found it — the redirect drops the query string. Shall I apply the fix?"
+        );
+        assert!(
+            !turns[3].text.contains("URL"),
+            "reasoning content must not leak into Turn.text, got: {}",
+            turns[3].text
+        );
+        assert_eq!(turns[3].tool_calls[0].name, "search_replace");
+        assert_eq!(
+            turns[3].tool_calls[0].input["file_path"],
+            "src/login.ts"
+        );
+        // Final assistant turn: text only, with a trailing step-finish part
+        // that must be silently dropped.
+        assert_eq!(
+            turns[4].text,
+            "The redirect now preserves the query string."
+        );
+        assert_eq!(turns[4].tool_calls.len(), 0);
+        // The last assistant message is the whole-stream recovery — same
+        // contract as every other parser.
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("The redirect now preserves the query string."),
+        );
+    }
+
+    /// **The digest-bug pin (issue #1296 review finding A).** When the latest
+    /// SQLite row is a user reply, the digest must still surface the
+    /// preceding assistant message as `last_assistant_message`. A
+    /// pre-review implementation fetched exactly one row, so the user
+    /// reply wiped the blocking question. The digest now reads the
+    /// [DIGEST_WINDOW] rows (default 50) so the parser sees the assistant
+    /// turn that preceded the user reply. We drive the pure
+    /// `read_opencode_digest_from_messages` here; the env-coupled
+    /// `read_opencode_digest` is exercised by the short-circuit test.
+    #[test]
+    fn opencode_digest_user_reply_at_latest_does_not_wipe_blocking_question() {
+        let messages: Vec<serde_json::Value> = vec![
+            serde_json::json!({
+                "info": { "role": "assistant" },
+                "parts": [{ "type": "text", "text": "Did the fix work?" }]
+            }),
+            // User reply at the latest row.
+            serde_json::json!({
+                "info": { "role": "user" },
+                "parts": [{ "type": "text", "text": "Yes, ship it." }]
+            }),
+        ];
+        let tail = read_opencode_digest_from_messages(&messages);
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!(
+                "digest must remain available when the latest row is a user reply; \
+                 got {tail:?}"
+            );
+        };
+        // Contract: digest returns Vec::new() — materialising the turn list
+        // would defeat the bounded-memory optimisation.
+        assert!(
+            turns.is_empty(),
+            "digest path must return turns: Vec::new(); got {turns:?}"
+        );
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Did the fix work?"),
+            "the digest must surface the assistant message BEFORE the user \
+             reply — fetching only the latest row wipes the blocking question"
+        );
+    }
+
+    /// The digest also handles the "no assistant message in the window" case
+    /// — degrades as `Empty`, not `ShapeChanged` or `Unreadable`. A busy
+    /// node that has only seen user prompts must not flip to a structural
+    /// break degrade.
+    #[test]
+    fn opencode_digest_no_assistant_message_degrades_to_empty() {
+        let messages: Vec<serde_json::Value> = vec![
+            serde_json::json!({
+                "info": { "role": "user" },
+                "parts": [{ "type": "text", "text": "hi" }]
+            }),
+            serde_json::json!({
+                "info": { "role": "user" },
+                "parts": [{ "type": "text", "text": "are you there?" }]
+            }),
+        ];
+        let tail = read_opencode_digest_from_messages(&messages);
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::Empty),
+            "a session with no assistant turns is a quiet session, not a structural break"
+        );
+    }
+
+    /// The digest path excludes reasoning-only assistant turns from
+    /// `last_assistant_message` — reasoning is transport plumbing, not
+    /// Coordinator dialogue. A session whose latest assistant rows are
+    /// reasoning-only still degrades as `Empty`.
+    #[test]
+    fn opencode_digest_reasoning_only_assistant_turns_degrade_to_empty() {
+        let messages: Vec<serde_json::Value> = vec![
+            serde_json::json!({
+                "info": { "role": "user" },
+                "parts": [{ "type": "text", "text": "think about it" }]
+            }),
+            serde_json::json!({
+                "info": { "role": "assistant" },
+                "parts": [{ "type": "reasoning", "text": "pondering..." }]
+            }),
+            serde_json::json!({
+                "info": { "role": "user" },
+                "parts": [{ "type": "text", "text": "any answer?" }]
+            }),
+        ];
+        let tail = read_opencode_digest_from_messages(&messages);
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::Empty),
+            "reasoning-only assistant rows must not surface as last_assistant_message"
+        );
+    }
+
+    /// The full /log path also uses `read_opencode_tail_from_messages`
+    /// once the DB read is done. Drive the pure function with a
+    /// multi-message shape to confirm the rolling buffer keeps the
+    /// tail turns in timeline order (matches `parse_opencode_messages`
+    /// 's contract).
+    #[test]
+    fn opencode_tail_from_messages_keeps_rolling_tail_in_timeline_order() {
+        let messages: Vec<serde_json::Value> = (0..50)
+            .map(|i| {
+                serde_json::json!({
+                    "info": { "role": if i % 2 == 0 { "user" } else { "assistant" } },
+                    "parts": [{ "type": "text", "text": format!("msg #{i}") }]
+                })
+            })
+            .collect();
+        let tail = read_opencode_tail_from_messages(&messages, 2);
+        let TranscriptTail::Available { turns, .. } = tail else {
+            panic!("expected available, got {tail:?}");
+        };
+        assert_eq!(turns.len(), 2);
+        // Last two turns are user(48) and assistant(49).
+        assert_eq!(turns[0].text, "msg #48");
+        assert_eq!(turns[1].text, "msg #49");
+    }
+
+    /// A renamed `info.role` value is a structural break in the OpenCode
+    /// message envelope — degrade loudly as `ShapeChanged`, not the quieter
+    /// `Empty`. Issue #1296 acceptance: a busy node must never look quiet.
+    #[test]
+    fn opencode_renamed_role_field_degrades_to_shape_changed() {
+        let value = serde_json::json!({
+            "info": { "id": "ses_abc" },
+            "messages": [
+                { "info": { "role": "human" }, "parts": [] },
+                { "info": { "role": "user", "content": "ok" }, "parts": [{"type": "text", "text": "hi"}] },
+            ]
+        });
+        let parsed = parse_opencode_export(&value, 10);
+        // The malformed message is flagged; the well-formed one still
+        // surfaces. The malformed flag trips `build_tail`'s
+        // `empty_or_shape_changed` only when no turns survive — with a
+        // surviving turn, the result is `Available` carrying the recovered
+        // turn + the `saw_malformed` flag is preserved for callers that
+        // want to surface it. The contract test pins the surviving path;
+        // the "all broken" path is pinned separately below.
+        assert!(parsed.saw_malformed, "renamed role is malformed");
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].text, "hi");
+    }
+
+    /// When *every* message has a broken `info.role`, the parsed turn list
+    /// is empty and `saw_malformed` is true — `build_tail` must degrade
+    /// loudly, not as the quiet `Empty`.
+    #[test]
+    fn opencode_all_broken_messages_degrade_to_shape_changed() {
+        let value = serde_json::json!({
+            "info": { "id": "ses_abc" },
+            "messages": [
+                { "info": { "type": "user" }, "parts": [] }, // role missing
+                { "info": { "role": "system" }, "parts": [] }, // role unknown
+            ]
+        });
+        let tail = build_tail(parse_opencode_export(&value, 10));
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::ShapeChanged),
+            "all-broken messages must degrade as ShapeChanged"
+        );
+    }
+
+    /// A top-level export whose `messages` field is missing entirely is a
+    /// structural break, not a quiet empty session — same degrade rule as
+    /// the per-message rename case.
+    #[test]
+    fn opencode_missing_messages_field_degrades_to_shape_changed() {
+        let value = serde_json::json!({ "info": { "id": "ses_abc" } });
+        let tail = build_tail(parse_opencode_export(&value, 10));
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::ShapeChanged),
+            "missing top-level `messages` is a structural break"
+        );
+    }
+
+    /// An export whose `messages` array is empty is a genuinely-quiet
+    /// session — `Empty`, not `ShapeChanged`. A brand-new OpenCode session
+    /// legitimately has zero messages before the user types a prompt.
+    #[test]
+    fn opencode_empty_messages_array_degrades_to_empty() {
+        let value = serde_json::json!({
+            "info": { "id": "ses_abc" },
+            "messages": []
+        });
+        let tail = build_tail(parse_opencode_export(&value, 10));
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::Empty),
+            "zero messages is a quiet session, not a shape break"
+        );
+    }
+
+    /// Unknown part types (`file`, `patch`, `agent`, `subtask`, …) must be
+    /// silently dropped — same "graceful failure on unknown event types"
+    /// rule Grok (#1281) follows. Never flagged as malformed.
+    #[test]
+    fn opencode_unknown_part_types_are_silently_skipped() {
+        let value = serde_json::json!({
+            "info": { "id": "ses_abc" },
+            "messages": [
+                {
+                    "info": { "role": "assistant" },
+                    "parts": [
+                        { "type": "file", "url": "https://example.com/spec.md" },
+                        { "type": "patch", "hash": "abc123" },
+                        { "type": "agent", "source": { "value": "plan" } },
+                        { "type": "step-start", "snapshot": "snap-1" },
+                        { "type": "text", "text": "Real reply." },
+                    ]
+                }
+            ]
+        });
+        let parsed = parse_opencode_export(&value, 10);
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].text, "Real reply.");
+        assert!(
+            !parsed.saw_malformed,
+            "unknown part types must not flag malformed, got: {parsed:?}"
+        );
+    }
+
+    /// An assistant message whose only parts are reasoning (chain-of-thought)
+    /// and tool calls with empty inputs is a no-op turn — drop it instead of
+    /// surfacing an empty `assistant` turn. Mirrors Claude's thinking-only
+    /// skip.
+    #[test]
+    fn opencode_reasoning_only_assistant_turn_is_dropped() {
+        let value = serde_json::json!({
+            "info": { "id": "ses_abc" },
+            "messages": [
+                {
+                    "info": { "role": "assistant" },
+                    "parts": [
+                        { "type": "reasoning", "text": "I should think about this carefully." },
+                    ]
+                }
+            ]
+        });
+        let tail = build_tail(parse_opencode_export(&value, 10));
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::Empty),
+            "reasoning-only turn produces no dialogue, so the file is empty"
+        );
+    }
+
+    /// `parse_opencode_messages` honours the rolling-buffer contract: a
+    /// `keep=2` request retains only the last two turns but the
+    /// `last_assistant_message` survives the eviction (issue #335 invariant
+    /// — same as every other parser).
+    #[test]
+    fn opencode_rolling_buffer_retains_only_last_keep() {
+        let mut messages = Vec::new();
+        for i in 0..50 {
+            messages.push(serde_json::json!({
+                "info": { "role": "user" },
+                "parts": [{"type": "text", "text": format!("prompt {i}")}]
+            }));
+            messages.push(serde_json::json!({
+                "info": { "role": "assistant" },
+                "parts": [{"type": "text", "text": format!("reply {i}")}]
+            }));
+        }
+        let value = serde_json::json!({ "info": { "id": "ses_abc" }, "messages": messages });
+        let parsed = parse_opencode_export(&value, 2);
+        assert_eq!(parsed.turns.len(), 2);
+        assert_eq!(parsed.turns[0].text, "prompt 49");
+        assert_eq!(parsed.turns[1].text, "reply 49");
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("reply 49"),
+            "last assistant message survives eviction of older turns"
+        );
+    }
+
+    /// A tool call whose `state.input` carries a multi-MB string is bounded
+    /// through the shared `truncate_json_strings` helper — same defensive
+    /// rule as Claude / Codex / Command Code so a `write_file` body doesn't
+    /// blow up the Coordinator payload.
+    #[test]
+    fn opencode_tool_input_truncates_large_string_leaves() {
+        let big = "x".repeat(MAX_TOOL_STRING + 50);
+        let value = serde_json::json!({
+            "info": { "id": "ses_abc" },
+            "messages": [{
+                "info": { "role": "assistant" },
+                "parts": [{
+                    "type": "tool",
+                    "state": {
+                        "status": "completed",
+                        "input": { "path": "src/main.rs", "content": big },
+                        "output": "ok",
+                        "title": "write_file"
+                    }
+                }]
+            }]
+        });
+        let parsed = parse_opencode_export(&value, 10);
+        let call = &parsed.turns[0].tool_calls[0];
+        assert_eq!(call.name, "write_file");
+        let content = call.input["content"].as_str().unwrap();
+        assert!(content.ends_with('…'), "large args body must be truncated");
+        assert!(content.chars().count() <= MAX_TOOL_STRING + 1);
+    }
+
+    /// A tool part whose `state.title` is missing falls back to a top-level
+    /// `name` field — defensive breadth for an OpenCode version that hasn't
+    /// yet populated `state.title`.
+    #[test]
+    fn opencode_tool_name_falls_back_to_part_name_when_state_title_missing() {
+        let value = serde_json::json!({
+            "info": { "id": "ses_abc" },
+            "messages": [{
+                "info": { "role": "assistant" },
+                "parts": [{
+                    "type": "tool",
+                    "name": "bash",
+                    "state": {
+                        "status": "completed",
+                        "input": { "command": "ls" },
+                        "output": ""
+                    }
+                }]
+            }]
+        });
+        let parsed = parse_opencode_export(&value, 10);
+        assert_eq!(parsed.turns[0].tool_calls[0].name, "bash");
+    }
+
+    /// `for_harness` routes `"opencode"` to the OpenCode variant so the
+    /// dispatch table in `read_tail` / `read_last_assistant_message` agrees
+    /// with the harness id (issue #1296).
+    #[test]
+    fn opencode_transcript_format_for_harness_routes_opencode() {
+        assert_eq!(
+            TranscriptFormat::for_harness("opencode"),
+            TranscriptFormat::OpenCode,
+            "the dispatch table must include the OpenCode variant"
+        );
+    }
+
+    // --- Locator (SQLite read) tests ---
+    //
+    // Each locator test opens a `tempfile::NamedTempFile` and inserts rows
+    // via the production schema. RAII cleanup means a panic mid-test still
+    // removes the file from the OS temp dir (no leaked files when CI runs
+    // 50 tests in parallel and one panics).
+
+    /// Build a file-backed SQLite matching the assumed `message` schema
+    /// and insert the given `(time_created, role, raw_data_json)` rows
+    /// (one `(1, "user", "...")` triplet per row). The function returns
+    /// the temp file path; the test calls `read_opencode_messages(db_path,
+    /// session_id, row_budget)` directly and pins the parsed shape.
+    fn tempfile_opencode_db(rows: &[(i64, &str, &str)]) -> tempfile::NamedTempFile {
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let conn = rusqlite::Connection::open(tmp.path()).expect("open temp db");
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .expect("create message table");
+        for (idx, (time, _role, data)) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) \
+                 VALUES (?1, 'ses_fixedsid000000000000000000001', ?2, ?3)",
+                rusqlite::params![format!("row-{idx}"), time, data],
+            )
+            .expect("insert row");
+        }
+        // RAII: the connection drops when this function returns.
+        drop(conn);
+        tmp
+    }
+
+    /// Build the canonical `(role, text)` message JSON for a row payload.
+    fn opencode_text_message(role: &str, text: &str) -> String {
+        serde_json::json!({
+            "info": { "role": role, "time": { "created": 1 } },
+            "parts": [{ "type": "text", "text": text }]
+        })
+        .to_string()
+    }
+
+    /// The locator must pull rows for the requested session id and only
+    /// that session — multi-session isolation. Drives the production
+    /// path (`read_opencode_messages` → `parse_opencode_messages`) so a
+    /// any regression in either layer surfaces here, not just in the
+    /// parser in isolation.
+    #[test]
+    fn opencode_locator_reads_messages_from_file_backed_db() {
+        let tmp = tempfile_opencode_db(&[
+            (100, "user", &opencode_text_message("user", "Inspect src/login.ts.")),
+            (200, "assistant", &opencode_text_message("assistant", "Looking now.")),
+            // Row for a *different* session id — must not leak in. We
+            // re-open and write to that session id below.
+        ]);
+        let conn = rusqlite::Connection::open(tmp.path()).expect("reopen for foreign row");
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) \
+             VALUES ('foreign', 'ses_othersessionid0000000000001', 150, ?1)",
+            rusqlite::params![opencode_text_message("user", "this should not surface")],
+        )
+        .expect("insert foreign row");
+        drop(conn);
+
+        let messages =
+            read_opencode_messages(tmp.path(), "ses_fixedsid000000000000000000001", 10)
+                .expect("locator should return a value");
+        let parsed = parse_opencode_messages(&messages, 10);
+        assert_eq!(parsed.turns.len(), 2);
+        assert_eq!(parsed.turns[0].role, "user");
+        assert_eq!(parsed.turns[0].text, "Inspect src/login.ts.");
+        assert_eq!(parsed.turns[1].role, "assistant");
+        assert_eq!(parsed.turns[1].text, "Looking now.");
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("Looking now.")
+        );
+        for turn in &parsed.turns {
+            assert!(
+                !turn.text.contains("this should not surface"),
+                "session-id filter leaked a row from the other session id"
+            );
+        }
+    }
+
+    /// A session id that doesn't match any row is not an error — the
+    /// locator returns an empty `messages` Vec and the parser degrades as
+    /// `Empty`, never as `ShapeChanged`. The RAII handle cleans up the
+    /// file on drop.
+    #[test]
+    fn opencode_locator_returns_empty_for_unknown_session() {
+        let tmp = tempfile_opencode_db(&[(
+            100,
+            "user",
+            &opencode_text_message("user", "hi"),
+        )]);
+        let messages = read_opencode_messages(tmp.path(), "ses_unknown0000000000000000000000001", 10)
+            .expect("locator must not error when the session has no rows");
+        let parsed = parse_opencode_messages(&messages, 10);
+        assert_eq!(
+            parsed,
+            Parsed {
+                turns: Vec::new(),
+                last_assistant_message: None,
+                saw_malformed: false,
+            },
+            "an unknown session id is a quiet session, not a shape break"
+        );
+    }
+
+    /// A row whose `data` blob is not valid JSON is silently dropped —
+    /// a single bad row doesn't break the whole session (graceful
+    /// failure on bad rows, same defensive rule as
+    /// `services::opencode_session`).
+    #[test]
+    fn opencode_locator_drops_malformed_rows() {
+        let tmp = tempfile_opencode_db(&[
+            (100, "user", "not valid json"),
+            (200, "user", &opencode_text_message("user", "good")),
+        ]);
+        let messages = read_opencode_messages(tmp.path(), "ses_fixedsid000000000000000000001", 10)
+            .expect("locator must not error on a bad row");
+        let parsed = parse_opencode_messages(&messages, 10);
+        assert_eq!(parsed.turns.len(), 1, "the malformed row must be skipped");
+        assert_eq!(parsed.turns[0].text, "good");
+    }
+
+    /// The locator must return rows in chronological order (oldest →
+    /// newest), reversing the DESC query the underlying SQL emits. The
+    /// parser consumes ASC and tracks `last_assistant_message` across
+    /// the *whole* fetched window, not just the bounded tail.
+    #[test]
+    fn opencode_locator_returns_rows_in_ascending_order() {
+        let tmp = tempfile_opencode_db(&[
+            (0, "user", &opencode_text_message("user", "first ever row")),
+            (50_000, "assistant", &opencode_text_message("assistant", "early assistant")),
+            (100_000, "user", &opencode_text_message("user", "near latest 2")),
+            (150_000, "assistant", &opencode_text_message("assistant", "latest 1")),
+            (200_000, "user", &opencode_text_message("user", "latest 2")),
+        ]);
+        let messages =
+            read_opencode_messages(tmp.path(), "ses_fixedsid000000000000000000001", 3)
+                .expect("locator must accept the bounded row_budget");
+        assert_eq!(
+            messages.len(),
+            3,
+            "locator must cap the row fetch at the parser's row_budget"
+        );
+        // SQL emits DESC LIMIT 3 → [latest 2 (200_000), latest 1 (150_000),
+        // near latest 2 (100_000)]. After the Rust-side reverse the
+        // natural timeline is restored: ascending time order.
+        assert!(messages[0].to_string().contains("near latest 2"));
+        assert!(messages[1].to_string().contains("latest 1"));
+        assert!(messages[2].to_string().contains("latest 2"));
+    }
+
+    /// A `session_id` that isn't a `ses_…` id short-circuits before
+    /// opening the DB — keeps a non-OpenCode session-id shape from
+    /// triggering an avoidable I/O round trip. Distinct from
+    /// `NoSession` (missing session_id), which corresponds to a
+    /// supported-but-not-yet-captured node.
+    #[test]
+    fn opencode_locator_short_circuits_non_ses_ids() {
+        let tail = read_opencode_tail(Some("not-an-opencode-id"), "/home/adam/src/proj", 10);
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::NoTranscript),
+            "non-`ses_` ids must short-circuit before any disk read"
+        );
+        let tail = read_opencode_digest(Some("not-an-opencode-id"), "/home/adam/src/proj");
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::NoTranscript),
+            "non-`ses_` ids must short-circuit on the digest path too"
+        );
+        // A missing session_id is the supported-provider-but-no-session
+        // state, distinct from `NoTranscript`.
+        let tail = read_opencode_tail(None, "/home/adam/src/proj", 10);
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::NoSession),
+            "missing session id is NoSession, not NoTranscript"
+        );
+        let tail = read_opencode_digest(None, "/home/adam/src/proj");
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::NoSession),
+            "missing session id is NoSession on the digest path too"
         );
     }
 }

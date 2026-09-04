@@ -54,7 +54,12 @@ pub fn select_id_for_directory<'a>(
 }
 
 /// OpenCode session IDs start with `ses_` (schema `SessionID`).
-pub fn is_opencode_session_id(id: &str) -> bool {
+/// `pub(crate)` so the transcript reader (`services::transcript_reader`) can
+/// share the same gate without duplicating the prefix check — both modules
+/// live inside the private `services` tree, so crate-private visibility is
+/// the right seam for a sibling call (mirrors the `opencode_db_path`
+/// narrowing, issue #1296).
+pub(crate) fn is_opencode_session_id(id: &str) -> bool {
     id.starts_with("ses_") && id.len() > 4
 }
 
@@ -67,7 +72,13 @@ pub const CAPTURE_SKEW_MS: i64 = 2_000;
 
 const RETRY_DELAYS_MS: &[u64] = &[400, 800, 1_600, 2_500, 4_000];
 
-fn opencode_db_path(env_type: EnvType) -> Option<PathBuf> {
+/// Resolve the on-disk SQLite path OpenCode uses for its session + message
+/// store. Mirrors the env handling in `services::usage` (which opens the same
+/// DB for the billing rollup); on WSL the Linux-side path is converted to the
+/// Windows-side UNC form so a Rust reader can `Connection::open` it directly.
+/// `pub(crate)` so the transcript reader (`services::transcript_reader`) can
+/// resolve the same DB without duplicating the env↔host mapping.
+pub(crate) fn opencode_db_path(env_type: EnvType) -> Option<PathBuf> {
     match env_type {
         EnvType::Wsl => {
             let user = std::env::var("USERNAME")
