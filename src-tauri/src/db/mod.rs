@@ -609,7 +609,10 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_circuit ON autopilot_circuit_runs(circuit_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuit_runs_state ON autopilot_circuit_runs(state);
-        CREATE INDEX IF NOT EXISTS idx_circuit_runs_mesh_queue ON autopilot_circuit_runs(mesh_id, state, queue_position);
+        -- The queue index is installed by the post-migration
+        -- EnsureAutopilotCircuitsTables safety net. An existing pre-v38
+        -- table is not changed by CREATE TABLE IF NOT EXISTS, so creating
+        -- this index here would reference its not-yet-migrated column.
 
         CREATE TABLE IF NOT EXISTS autopilot_circuit_run_agent_leases (
             run_id INTEGER PRIMARY KEY REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,

@@ -1155,4 +1155,95 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
 
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
+
+    #[test]
+    fn init_upgrades_legacy_circuit_runs_before_creating_the_queue_index() {
+        // `init` owns the ordering that failed in the shipped macOS build.
+        // Run the actual check in a child test process so this test cannot be
+        // bypassed when another parallel test has initialized the global DB.
+        const CHILD_ENV: &str = "BUILDMESH_INIT_QUEUE_MIGRATION_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .env(CHILD_ENV, "1")
+                .args([
+                    "--exact",
+                    "db::migration_tests::tests::init_upgrades_legacy_circuit_runs_before_creating_the_queue_index",
+                    "--test-threads=1",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated startup migration test failed:\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("legacy-v37.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO app_settings (key, value) VALUES ('schema_version', '37');
+            CREATE TABLE meshes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL
+            );
+            CREATE TABLE autopilot_circuit_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                circuit_id INTEGER NOT NULL,
+                mesh_id INTEGER NOT NULL,
+                trigger_identity TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending',
+                context_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (circuit_id, trigger_identity)
+            );
+            INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity)
+                VALUES (4, 1, 7, 'legacy-run');
+            ",
+        )
+        .unwrap();
+        drop(conn);
+
+        super::super::init(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let has_queue_column: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('autopilot_circuit_runs') WHERE name = 'queue_position'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_queue_column);
+        assert_eq!(
+            conn.query_row(
+                "SELECT queue_position FROM autopilot_circuit_runs WHERE id = 4",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            4,
+            "legacy runs retain FIFO order when the queue column is added"
+        );
+        let has_queue_index: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = 'idx_circuit_runs_mesh_queue'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_queue_index);
+    }
 }

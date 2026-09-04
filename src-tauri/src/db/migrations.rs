@@ -897,10 +897,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
         AlwaysStep::EnsureAutopilotCircuitsTables => {
             // v34/v38 — Autopilot Circuits ledger (spec #1205) plus the
             // queue index and durable agent-lease table. Mirrors the inline
-            // CREATE in `db::init` verbatim; see that comment for the column
-            // semantics. Keeping these idempotent safety nets here upgrades
-            // databases whose version flag already passed the original
-            // circuit migration.
+            // table DDL in `db::init`; the queue index intentionally lives
+            // here so it is created only after the v38 column walk. Keeping
+            // these idempotent safety nets here upgrades databases whose
+            // version flag already passed the original circuit migration.
             conn.execute_batch(
                 "
                 CREATE TABLE IF NOT EXISTS autopilot_circuits (
