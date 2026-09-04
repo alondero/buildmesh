@@ -15,8 +15,8 @@ mod command;
 mod intent;
 mod process;
 pub(crate) use intent::{
-    format_issue_prefill_with_url, ExplicitSpawnOverrides, GitHubWorkContext, ResumeCause,
-    SpawnIntent, SpawnOutcome, SpawnRequest, TerminalSize, WorktreePolicy,
+    format_issue_prefill_with_url, ExplicitSpawnOverrides, IssueContext, PullRequestContext,
+    ResumeCause, SpawnIntent, SpawnOutcome, SpawnRequest, TerminalSize, WorktreePolicy,
 };
 mod launch;
 mod orchestrator;

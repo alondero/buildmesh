@@ -309,7 +309,7 @@ mod tests {
             provider: "claude".into(),
             branch: "main".into(),
             initial_name: "x".into(),
-            intent: SpawnIntent::Issue(crate::agent::spawn::GitHubWorkContext {
+            intent: SpawnIntent::Issue(crate::agent::spawn::IssueContext {
                 owner: "o".into(),
                 repo: "r".into(),
                 number: 1,
@@ -353,7 +353,7 @@ mod tests {
             provider: "claude".into(),
             branch: "main".into(),
             initial_name: "x".into(),
-            intent: SpawnIntent::Issue(crate::agent::spawn::GitHubWorkContext {
+            intent: SpawnIntent::Issue(crate::agent::spawn::IssueContext {
                 owner: "o".into(),
                 repo: "r".into(),
                 number: 42,
@@ -466,7 +466,7 @@ mod tests {
             provider: "claude".into(),
             branch: "main".into(),
             initial_name: "fix-auth".into(),
-            intent: SpawnIntent::Issue(crate::agent::spawn::GitHubWorkContext {
+            intent: SpawnIntent::Issue(crate::agent::spawn::IssueContext {
                 owner: "alondero".into(),
                 repo: "buildmesh".into(),
                 number: 1178,

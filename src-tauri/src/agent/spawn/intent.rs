@@ -24,11 +24,23 @@ impl Default for TerminalSize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GitHubWorkContext {
+pub(crate) struct IssueContext {
     pub(crate) owner: String,
     pub(crate) repo: String,
     pub(crate) number: i64,
     pub(crate) title: String,
+}
+
+
+/// Context required to spawn an agent on a GitHub pull request.
+/// Does not carry `title` because the PR prefill is persona-driven and
+/// intentionally independent of the PR title. The PR title is used
+/// separately for node naming (`session_naming::pr_node_name`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullRequestContext {
+    pub(crate) owner: String,
+    pub(crate) repo: String,
+    pub(crate) number: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,8 +109,8 @@ impl std::fmt::Display for InitialPrompt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SpawnIntent {
     Fresh,
-    Issue(GitHubWorkContext),
-    PullRequest(GitHubWorkContext),
+    Issue(IssueContext),
+    PullRequest(PullRequestContext),
     Handover { selected_text: String },
     Loop { initial_prompt: String },
     Resume { cause: ResumeCause },
@@ -106,20 +118,19 @@ pub(crate) enum SpawnIntent {
 
 impl SpawnIntent {
     /// Build the authoritative initial prompt once, at the spawn seam
-    /// (issue #1180). Every consumer — desktop draft, background launch,
+    /// (issue #1180, #1561). Every consumer — desktop draft, background launch,
     /// Autopilot watcher — routes through this method instead of
     /// recomputing from a free function. The truth table:
     ///
-    /// | Variant                            | Result                              |
-    /// |------------------------------------|-------------------------------------|
-    /// | `Fresh`                            | `None`                              |
-    /// | `Resume { .. }`                    | `None`                              |
-    /// | `Issue(context)` w/ title          | `Some("... #N — title\n<url>")`     |
-    /// | `Issue(context)` blank title       | `Some("... #N\n<url>")`             |
-    /// | `PullRequest(context)` w/ title    | `Some("... PR #N — title\n<url>")`  |
-    /// | `PullRequest(context)` blank title | `Some("... PR #N\n<url>")`          |
-    /// | `Handover { selected_text }`       | `Some(selected_text)` verbatim      |
-    /// | `Loop { initial_prompt }`          | `Some(initial_prompt)` verbatim     |
+    /// | Variant                            | Result                                          |
+    /// |------------------------------------|-------------------------------------------------|
+    /// | `Fresh`                            | `None`                                          |
+    /// | `Resume { .. }`                    | `None`                                          |
+    /// | `Issue(context)` w/ title          | `Some("Please work on ... #N — title\n<url>")`  |
+    /// | `Issue(context)` blank title       | `Some("Please work on ... #N\n<url>")`          |
+    /// | `PullRequest(context)`             | `Some("Review PR #N as a grumpy...\n<url>")`    |
+    /// | `Handover { selected_text }`       | `Some(selected_text)` verbatim                  |
+    /// | `Loop { initial_prompt }`          | `Some(initial_prompt)` verbatim                 |
     pub(crate) fn initial_prompt(&self) -> Option<InitialPrompt> {
         match self {
             Self::Fresh | Self::Resume { .. } => None,
@@ -133,7 +144,6 @@ impl SpawnIntent {
                 &context.owner,
                 &context.repo,
                 context.number,
-                &context.title,
             ))),
             Self::Handover { selected_text } => Some(InitialPrompt(selected_text.clone())),
             Self::Loop { initial_prompt } => Some(InitialPrompt(initial_prompt.clone())),
@@ -264,21 +274,28 @@ pub(crate) fn format_issue_prefill_with_url(number: i64, title: &str, url: &str)
     }
 }
 
-/// Format the GitHub-PR prefill. Single source of truth (issue #1180);
+/// Canonical persona instruction for PR reviews spawned from the PR probe.
+///
+/// NOTE on divergence from [`crate::autopilot::circuit::model::CircuitGraph::PR_REVIEW_PROMPT`]:
+/// The probe prefill is for an interactive desktop session spawned by a human user:
+/// it is capitalized ("Review PR #..."), appends the canonical PR URL for context,
+/// and omits the automated headless directive ("Add the review comments to the PR as a comment")
+/// because the human user guides the interactive session.
+/// `CircuitGraph::PR_REVIEW_PROMPT` is a headless background circuit template with
+/// `{{pr.number}}` that instructs an autonomous reviewer bot to post findings directly
+/// to GitHub without human supervision.
+const PR_REVIEW_PERSONA: &str =
+    "as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture";
+
+/// Format the GitHub-PR prefill. Single source of truth (issue #1180, #1561);
 /// see [`format_issue_prefill`] for the parallel doc.
 pub(crate) fn format_pull_request_prefill(
     owner: &str,
     repo: &str,
     number: i64,
-    title: &str,
 ) -> String {
     let url = format!("https://github.com/{owner}/{repo}/pull/{number}");
-    let title = title.trim();
-    if title.is_empty() {
-        format!("Please review pull request #{number}\n{url}")
-    } else {
-        format!("Please review pull request #{number} — {title}\n{url}")
-    }
+    format!("Review PR #{number} {PR_REVIEW_PERSONA}\n{url}")
 }
 
 #[cfg(test)]
@@ -292,7 +309,7 @@ mod tests {
     /// Autopilot watcher — so the wording is locked to this exact shape.
     #[test]
     fn issue_prefill_uses_canonical_github_url_and_trimmed_title() {
-        let intent = SpawnIntent::Issue(GitHubWorkContext {
+        let intent = SpawnIntent::Issue(IssueContext {
             owner: "alondero".into(),
             repo: "buildmesh".into(),
             number: 247,
@@ -308,21 +325,20 @@ https://github.com/alondero/buildmesh/issues/247"
         );
     }
 
-    /// Pin the PR prefill contract (issue #1180 AC #3) parallel to the
-    /// issue flow above — `Please review pull request #N — Title\n<url>`.
+    /// Pin the PR prefill contract (issue #1180 AC #3, #1561):
+    /// `Review PR #N as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture\n<url>`.
     #[test]
-    fn pull_request_prefill_uses_canonical_pull_url_and_trimmed_title() {
-        let intent = SpawnIntent::PullRequest(GitHubWorkContext {
+    fn pull_request_prefill_uses_canonical_pull_url_and_grumpy_engineer_prompt() {
+        let intent = SpawnIntent::PullRequest(PullRequestContext {
             owner: "alondero".into(),
             repo: "buildmesh".into(),
             number: 420,
-            title: "  spawn on PR  ".into(),
         });
 
         assert_eq!(
             intent.initial_prompt().as_ref().map(InitialPrompt::as_str),
             Some(
-                "Please review pull request #420 — spawn on PR\n\
+                "Review PR #420 as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture\n\
 https://github.com/alondero/buildmesh/pull/420"
             )
         );
@@ -393,7 +409,7 @@ https://github.com/alondero/buildmesh/pull/420"
     /// the title segment.
     #[test]
     fn issue_prefill_with_empty_title_falls_back_to_number_only() {
-        let intent = SpawnIntent::Issue(GitHubWorkContext {
+        let intent = SpawnIntent::Issue(IssueContext {
             owner: "alondero".into(),
             repo: "buildmesh".into(),
             number: 7,
@@ -408,52 +424,19 @@ https://github.com/alondero/buildmesh/issues/7"
         );
     }
 
-    /// Pin the AC #4 truth-table entry: a PR with a blank title degrades
-    /// to `Please review pull request #N\n<url>`.
-    #[test]
-    fn pull_request_prefill_with_empty_title_falls_back_to_number_only() {
-        let intent = SpawnIntent::PullRequest(GitHubWorkContext {
-            owner: "alondero".into(),
-            repo: "buildmesh".into(),
-            number: 420,
-            title: String::new(),
-        });
-        assert_eq!(
-            intent.initial_prompt().as_ref().map(InitialPrompt::as_str),
-            Some(
-                "Please review pull request #420\n\
-https://github.com/alondero/buildmesh/pull/420"
-            )
-        );
-    }
-
     /// Whitespace-only title is normalised to empty for the purposes of
     /// the title-trim branch — the prompt reads like the empty-title
-    /// case so no dangling em-dash reaches the harness. Both issue and
-    /// PR paths must honour the same whitespace-collapse rule.
+    /// case so no dangling em-dash reaches the harness.
     #[test]
-    fn issue_and_pr_prefill_treat_whitespace_title_as_empty() {
-        let issue = SpawnIntent::Issue(GitHubWorkContext {
+    fn issue_prefill_treats_whitespace_title_as_empty() {
+        let issue = SpawnIntent::Issue(IssueContext {
             owner: "alondero".into(),
             repo: "buildmesh".into(),
             number: 1,
             title: "   \t  ".into(),
         });
-        let pr = SpawnIntent::PullRequest(GitHubWorkContext {
-            owner: "alondero".into(),
-            repo: "buildmesh".into(),
-            number: 1,
-            title: "   \t  ".into(),
-        });
-        // Same shape as the empty-title cases.
-        let expected_issue = SpawnIntent::Issue(GitHubWorkContext {
-            owner: "alondero".into(),
-            repo: "buildmesh".into(),
-            number: 1,
-            title: String::new(),
-        })
-        .initial_prompt();
-        let expected_pr = SpawnIntent::PullRequest(GitHubWorkContext {
+        // Same shape as the empty-title case.
+        let expected_issue = SpawnIntent::Issue(IssueContext {
             owner: "alondero".into(),
             repo: "buildmesh".into(),
             number: 1,
@@ -461,7 +444,6 @@ https://github.com/alondero/buildmesh/pull/420"
         })
         .initial_prompt();
         assert_eq!(issue.initial_prompt(), expected_issue);
-        assert_eq!(pr.initial_prompt(), expected_pr);
     }
 
     /// Titles with double quotes pass through verbatim — the prefill
@@ -471,7 +453,7 @@ https://github.com/alondero/buildmesh/pull/420"
     /// the contract moved here.
     #[test]
     fn issue_prefill_preserves_quotes_in_title_verbatim() {
-        let intent = SpawnIntent::Issue(GitHubWorkContext {
+        let intent = SpawnIntent::Issue(IssueContext {
             owner: "alondero".into(),
             repo: "buildmesh".into(),
             number: 42,
