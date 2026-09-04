@@ -105,6 +105,7 @@ vi.mock('../../src/hooks/useGitSummary', () => ({
 const prMock = vi.fn();
 vi.mock('../../src/hooks/useOpenPr', () => ({
   useOpenPr: () => ({ pr: prMock(), loading: false, refresh: vi.fn() }),
+  refreshOpenPrByPath: vi.fn(),
 }));
 
 const { openUrlMock } = vi.hoisted(() => ({
@@ -121,7 +122,12 @@ const { openInFileManagerMock, toggleNodePinnedMock } = vi.hoisted(() => ({
 }));
 vi.mock('../../src/lib/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/lib/tauri')>();
-  return { ...actual, openInFileManager: openInFileManagerMock, toggleNodePinned: toggleNodePinnedMock };
+  return {
+    ...actual,
+    openInFileManager: openInFileManagerMock,
+    toggleNodePinned: toggleNodePinnedMock,
+    mergePr: vi.fn().mockResolvedValue('Merged'),
+  };
 });
 
 // Imported AFTER mocks so it sees the stubbed BuildRunDropdown etc.

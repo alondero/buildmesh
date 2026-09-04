@@ -27,8 +27,10 @@ vi.mock('../../src/hooks/useGitSummary', () => ({
 // Each test sets what the PR chip will see by calling prMock.mockReturnValue(...)
 // (or .mockReturnValue(null) to hide the chip). Mirrors the summaryMock pattern.
 const prMock = vi.fn();
+const refreshOpenPrByPathMock = vi.fn();
 vi.mock('../../src/hooks/useOpenPr', () => ({
   useOpenPr: () => ({ pr: prMock(), loading: false, refresh: vi.fn() }),
+  refreshOpenPrByPath: (...args: unknown[]) => refreshOpenPrByPathMock(...args),
 }));
 
 // Stub the opener plugin so the chip's onClick doesn't try to launch a real browser.
@@ -48,9 +50,10 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 // missing / not a directory) are exercised in src-tauri's own tests;
 // here we just assert wiring: the click resolves the path through
 // `getNodeGitPath` and hands it to the IPC layer.
-const { openInFileManagerMock, toggleNodePinnedMock } = vi.hoisted(() => ({
+const { openInFileManagerMock, toggleNodePinnedMock, mergePrMock } = vi.hoisted(() => ({
   openInFileManagerMock: vi.fn().mockResolvedValue(undefined),
   toggleNodePinnedMock: vi.fn(),
+  mergePrMock: vi.fn().mockResolvedValue('Merged'),
 }));
 vi.mock('../../src/lib/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/lib/tauri')>();
@@ -58,6 +61,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
     ...actual,
     openInFileManager: openInFileManagerMock,
     toggleNodePinned: toggleNodePinnedMock,
+    mergePr: mergePrMock,
   };
 });
 
@@ -460,14 +464,53 @@ describe('GridNodeHeader PR chip', () => {
     expect(queryByText(/^PR #/)).toBeNull();
   });
 
-  it('opens the PR in the default browser when clicked', () => {
+  it('clicking the pill opens a menu instead of the browser directly', () => {
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue({
+      number: 123,
+      url: 'https://github.com/alondero/buildmesh/pull/123',
+      title: 'Add PR chip',
+      draft: false,
+    });
+    const { getByText, getByRole } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+
+    fireEvent.click(getByText('PR #123'));
+    // Menu replaces the direct open — browser stays shut until the user
+    // picks "Open on GitHub" inside the menu.
+    expect(openUrlMock).not.toHaveBeenCalled();
+    expect(getByRole('menu')).toBeTruthy();
+    expect(getByText(/Open on GitHub/)).toBeTruthy();
+    expect(getByText(/Merge \(squash/)).toBeTruthy();
+  });
+
+  it('menu "Open on GitHub" opens the PR in the default browser', () => {
     summaryMock.mockReturnValue(null);
     const url = 'https://github.com/alondero/buildmesh/pull/123';
     prMock.mockReturnValue({ number: 123, url, title: 'Add PR chip', draft: false });
     const { getByText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
 
     fireEvent.click(getByText('PR #123'));
+    fireEvent.click(getByText(/Open on GitHub/));
     expect(openUrlMock).toHaveBeenCalledWith(url);
+  });
+
+  it('menu Merge requires confirm then calls mergePr', async () => {
+    summaryMock.mockReturnValue(null);
+    const url = 'https://github.com/alondero/buildmesh/pull/123';
+    prMock.mockReturnValue({ number: 123, url, title: 'Add PR chip', draft: false });
+    mergePrMock.mockClear();
+    const { getByText, getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+
+    fireEvent.click(getByText('PR #123'));
+    fireEvent.click(getByText(/Merge \(squash/));
+    // First click arms confirm — must NOT merge yet.
+    expect(mergePrMock).not.toHaveBeenCalled();
+
+    fireEvent.click(getByLabelText('Confirm squash merge of pull request #123'));
+    const { waitFor } = await import('@testing-library/react');
+    await waitFor(() => {
+      expect(mergePrMock).toHaveBeenCalledWith(url);
+    });
   });
 
   it('opens the probe panel on the review tab when the git-summary chip is clicked (#376)', () => {
