@@ -1008,8 +1008,8 @@ fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
 }
 
 // ---------------------------------------------------------------------------
-// Migration pin: v33 → v34 materialises the three circuit tables via the
-// new AlwaysStep safety net (the warm_worktrees precedent).
+// Migration pin: a v33 database receives the circuit tables during the
+// migration runner's baseline-table phase.
 // ---------------------------------------------------------------------------
 
 #[test]

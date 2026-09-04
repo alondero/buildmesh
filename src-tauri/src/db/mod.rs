@@ -9,7 +9,8 @@
 //! - the read-side `COALESCE` defaults for the `meshes` projection
 //!   (via [`migrations::mesh_columns_projection`]),
 //! - the `schema_version` probe and the post-migration bump,
-//! - the post-migration verification (always-run idempotent safety nets).
+//! - baseline table creation before columns evolve, and
+//! - canonical index creation after every migrated column exists.
 //!
 //! A new column becomes "add a [`migrations::ColumnSpec`] entry to
 //! `migrations::SPECS` and you're done" — one place, not three. See
@@ -424,10 +425,17 @@ pub fn init(db_path: &Path) -> SqlResult<()> {
 
 /// Bring one SQLite connection to the current Buildmesh schema.
 ///
-/// This is the schema module's test seam: it owns baseline table creation,
-/// evolution, and canonical index creation, but not connection lifecycle or
-/// installation of the process-global database singleton.
+/// This is the schema module's test seam: it invokes the complete migration
+/// pipeline without connection lifecycle or installation of the process-global
+/// database singleton.
 pub(crate) fn init_schema(conn: &Connection) -> SqlResult<()> {
+    migrations::evolve_to(migrations::SCHEMA_VERSION, conn)
+}
+
+/// Create the baseline tables before the migration runner evolves their
+/// columns. The runner calls this itself, so direct `evolve_to` callers and
+/// application startup share this single DDL source.
+pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
     // Ensure app_settings exists first (needed by evolve_to to probe
     // schema_version).
     conn.execute_batch(
@@ -441,7 +449,7 @@ pub(crate) fn init_schema(conn: &Connection) -> SqlResult<()> {
 
     // Create the baseline tables (IF NOT EXISTS so they're idempotent). For
     // fresh DBs this creates the tables; for existing DBs it's a no-op. MUST
-    // run before `evolve_to` so the runner's
+    // run before the migration runner's
     // always-run column walk can find the tables and add missing
     // columns (e.g. `use_worktree`, `pre_spawn_pool_size`, etc., that
     // the v6-shape inline CREATE doesn't include).
@@ -654,15 +662,13 @@ pub(crate) fn init_schema(conn: &Connection) -> SqlResult<()> {
     // any missing columns (e.g. `use_worktree`, `pre_spawn_pool_size`
     // — the inline CREATE above is a v6-shape snapshot and the v8+
     // columns live in the registry's `all_column_specs`).
-    migrations::evolve_to(migrations::SCHEMA_VERSION, conn)?;
-    ensure_schema_indexes(conn)?;
     Ok(())
 }
 
-/// Create every canonical index only after [`init_schema`] has evolved table
-/// columns. This keeps index ordering independent of when a column entered
-/// the schema history.
-fn ensure_schema_indexes(conn: &Connection) -> SqlResult<()> {
+/// Create every canonical index only after the migration runner has evolved
+/// table columns. This keeps index ordering independent of when a column
+/// entered the schema history.
+pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(
         "
         CREATE INDEX IF NOT EXISTS idx_coordinator_drive_prompts_created_at
@@ -722,7 +728,7 @@ fn ensure_schema_indexes(conn: &Connection) -> SqlResult<()> {
 // `ensure_coordinator_drive_prompt_claim_columns` (v32, issue #750) moved to `db::migrations`.
 
 // `ensure_coordinator_drive_prompt_created_at_index` (v32, issue #750
-// item 3) moved into `init_schema`'s post-evolution canonical index pass.
+// item 3) moved into `evolve_to`'s post-evolution canonical index pass.
 
 // `ensure_mesh_columns` (v8 user-tunable columns) moved to `db::migrations`.
 
@@ -3482,11 +3488,8 @@ impl WarmWorktreeStatus {
     }
 }
 
-// `ensure_warm_worktables_table` (v21) moved to
-// `db::migrations::AlwaysStep::EnsureWarmWorktreesTable`. Fresh DBs
-// still create the table via the inline CREATE in `init()`; the
-// always-run pass is the v6+ safety net for DBs whose
-// `schema_version` was bumped past 21 without the inline CREATE.
+// `ensure_warm_worktables_table` (v21) is subsumed by the baseline-table
+// phase that every `db::migrations::evolve_to` call runs before columns.
 
 /// Insert a new warm_worktrees row. The pool worker calls this AFTER cutting
 /// the on-disk worktree so a `status = 'available'` row always points at a

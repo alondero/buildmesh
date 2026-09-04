@@ -8,6 +8,20 @@
 mod tests {
     use rusqlite::{Connection, Result as SqlResult};
 
+    fn canonical_index_names(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND name GLOB 'idx_*' ORDER BY name",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<SqlResult<Vec<String>>>()
+            .unwrap()
+    }
+
     /// Creates a v2 schema (before layout column) for migration testing.
     /// This simulates an existing DB that needs migration to v3/v4+.
     fn create_v2_schema(conn: &Connection) -> SqlResult<()> {
@@ -1219,6 +1233,14 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             )
             .unwrap();
         assert!(has_queue_index);
+
+        let fresh = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&fresh).unwrap();
+        assert_eq!(
+            canonical_index_names(&conn),
+            canonical_index_names(&fresh),
+            "legacy and fresh databases must converge on the canonical indexes"
+        );
     }
 
     #[test]
