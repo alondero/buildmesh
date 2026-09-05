@@ -215,10 +215,11 @@ pub(crate) fn normalize_unc_to_wsl(path: &str) -> std::borrow::Cow<'_, str> {
     //   `\\wsl.localhost\<distro>\...`  — 16-byte prefix (`\\wsl.localhost\`)
     // Both tokens are case-insensitive (Windows UNC roots are). The literal
     // `.` inside `wsl.localhost` distinguishes it from any sibling
-    // `\\wsl-runner\...` UNC root. The `2..15` window on the `.localhost`
-    // arm spans bytes 2..14 inclusive (13 bytes) — `wsl.localhost` is 13
-    // chars at indices 0..12 in its own frame, plus the leading `\\` it
-    // lands at byte 2; the trailing separator is byte 15, so prefix_len = 16.
+    // `\\wsl-runner\...` UNC root. Byte layout for the `.localhost` arm:
+    //   path byte 0-1: `\\`
+    //   path byte 2-14: `wsl.localhost` (13 bytes — matched by `bytes.get(2..15)`)
+    //   path byte 15: separator (`\` or `/`, matched by `bytes.get(15)`)
+    //   `prefix_len = 16` because it includes bytes 0..15 (the trailing `\\`).
     let prefix_len: usize = if bytes
         .get(2..6)
         .is_some_and(|s| s.eq_ignore_ascii_case(b"wsl$"))
@@ -899,6 +900,31 @@ mod tests {
     fn is_absolute_worktree_path_accepts_wsl_localhost_form() {
         assert!(is_absolute_worktree_path(r"\\wsl.localhost\Debian\home\u\wt"));
         assert!(is_absolute_worktree_path("//wsl.localhost/Debian/home/u/wt"));
+    }
+
+    /// Issue #1227 (round-trip, host side): `to_host_path` must pass a
+    /// Windows host UNC through unchanged. Both `\\wsl$\<distro>\...` and
+    /// `\\wsl.localhost\<distro>\...` are already host paths and the distro
+    /// is embedded — rewriting to `\\wsl$\\<default_distro>\...` (the
+    /// `/home/...` arm's behaviour) would silently misroute a non-default
+    /// distro. The doc-comment claim "the `\\`-prefixed input is returned
+    /// unchanged" is load-bearing; pin it. Gated to Windows because on
+    /// macOS / Linux `to_host_path` is a hard identity return (the function
+    /// short-circuits before the UNC `else` branch).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn to_host_path_passes_wsl_localhost_unc_through_unchanged() {
+        let raw = r"\\wsl.localhost\Debian\home\u\repo";
+        assert_eq!(to_host_path(raw), raw);
+        // Empty-tail case (root only, no trailing path) — same branch, just
+        // past the start of the distro name.
+        assert_eq!(to_host_path(r"\\wsl.localhost\Debian"), r"\\wsl.localhost\Debian");
+        // Legacy form must keep passing through too — no regression on the
+        // path every existing fixture uses.
+        assert_eq!(
+            to_host_path(r"\\wsl$\Ubuntu\home\u\repo"),
+            r"\\wsl$\Ubuntu\home\u\repo"
+        );
     }
 
     // ── Configurable Worktree Node directories (issue #1519) ────────────────
