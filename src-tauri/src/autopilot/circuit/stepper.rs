@@ -307,7 +307,11 @@ pub fn resolve_target_agent(
         | Some(CircuitNodeKind::ReviewVerdict { target_node_id }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::SetNodeStatus { target_node_id, .. }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::CloseAgentNode { target_node_id, .. }) => target_node_id.as_deref(),
-        // GithubAction / Notify / Join / RetryLimit / AnyCompleted /
+        // OpenPr verifies the implementation agent's branch even when the
+        // agent has already created the PR. Other GitHub actions only need
+        // issue/PR context and must not acquire agent lifecycle ownership.
+        Some(CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, .. }) => None,
+        // Notify / Join / RetryLimit / AnyCompleted /
         // Manual / Interval / SpawnAgentNode have no target lineage —
         // nothing to resolve. `SpawnAgentNode` owns its agent directly
         // via `step.agent_node_id`, not via this resolver.
@@ -3537,6 +3541,62 @@ mod tests {
         advance(run, &CircuitEvent::AgentReady { node_id: "finish".into() });
         advance(run, &tick(8, 8));
         advance(run, &classified("finish_classifier", Some(Classification::Completed)))
+    }
+
+    #[test]
+    fn issue_review_open_pr_resolves_implementer_before_and_after_retry() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        assert_eq!(run.resolve_target_agent("open_pr"), Some(700));
+
+        // Replay uses persisted step associations, including a reviewer
+        // from an earlier round. PR ownership must remain the implementer.
+        let mut replay = RunView {
+            graph: CircuitGraph::from_json(&run.graph.to_json().unwrap()).unwrap(),
+            context: CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap(),
+            ..run.clone()
+        };
+        advance(&mut replay, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(314),
+            pr_url: Some("https://github.com/example/repo/pull/314".into()),
+            pr_head_ref: Some("gh42".into()),
+            pr_title: None,
+            error: None,
+        });
+        advance(&mut replay, &tick(8, 8));
+        replay.attach_agent_node("reviewer", 701);
+        assert_eq!(replay.resolve_target_agent("open_pr"), Some(700));
+
+        advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: false,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: Some("temporary lookup failure".into()),
+        });
+        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &CircuitEvent::AgentReady { node_id: "wrapup_correction".into() });
+        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &classified("finish_classifier", Some(Classification::Completed)));
+        assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+        assert_eq!(run.step("open_pr").unwrap().attempt, 2);
+        assert_eq!(run.resolve_target_agent("open_pr"), Some(700));
+    }
+
+    #[test]
+    fn issue_review_open_pr_waits_for_github_and_cancels_when_implementer_is_lost() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(&mut run, &agent_finished(700, true));
+        assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+        assert!(run.step("reviewer").is_none());
+        advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 700 });
+        assert_eq!(status_of(&run, "open_pr"), StepStatus::Cancelled);
+        assert_eq!(run.state, RunState::Failed);
     }
 
     #[test]

@@ -479,6 +479,37 @@ pub(crate) fn observe_wrapup_state(
     node: &crate::models::AgentNode,
     pr_required: bool,
 ) -> WrapupState {
+    let (mut state, branch) = observe_wrapup_git_state(node);
+    state.pr_required = pr_required;
+    // Legacy Autopilot owns its PR observation here. Circuits perform their
+    // own fallible lookup so an API error cannot masquerade as a missing PR.
+    if state.pushed {
+        let pr = branch.as_deref().and_then(|b| {
+            let mesh = db::get_mesh_by_id(node.mesh_id).ok()?;
+            let (owner, repo_name) =
+                crate::commands::pr::resolve_github_owner_repo(&mesh).ok()?;
+            let client = crate::services::github::GitHubClient::new().ok()?;
+            match client.find_open_pr_for_branch(&owner, &repo_name, b) {
+                Ok(pr) => pr,
+                Err(e) => {
+                    tracing::warn!("autopilot pipeline({}): PR lookup for {} failed: {}", node.id, b, e);
+                    None
+                }
+            }
+        });
+        if let Some(pr) = pr {
+            state.pr_number = Some(pr.number);
+            state.pr_url = Some(pr.html_url);
+        }
+    }
+    state
+}
+
+/// Observe local wrap-up prerequisites and the actual checked-out branch.
+/// Worktree directory names may outlive a branch rename by the agent.
+pub(crate) fn observe_wrapup_git_state(
+    node: &crate::models::AgentNode,
+) -> (WrapupState, Option<String>) {
     // `node_working_path` resolves Worktree and Root Nodes alike (host path +
     // env), so the self-heal below covers both; on a Root Node the sanitize
     // is a no-op (`.git` is a directory, not a gitlink).
@@ -541,35 +572,9 @@ pub(crate) fn observe_wrapup_state(
         }
     };
 
-    // PR lookup only makes sense once the branch exists remotely.
-    let pr = if pushed {
-        branch.as_deref().and_then(|b| {
-            let mesh = db::get_mesh_by_id(node.mesh_id).ok()?;
-            let (owner, repo_name) =
-                crate::commands::pr::resolve_github_owner_repo(&mesh).ok()?;
-            let client = crate::services::github::GitHubClient::new().ok()?;
-            match client.find_open_pr_for_branch(&owner, &repo_name, b) {
-                Ok(pr) => pr.map(|p| (p.number, p.html_url)),
-                Err(e) => {
-                    tracing::warn!(
-                        "autopilot pipeline({}): PR lookup for {} failed: {}",
-                        node.id,
-                        b,
-                        e
-                    );
-                    None
-                }
-            }
-        })
-    } else {
-        None
-    };
-    let (pr_number, pr_url) = match pr {
-        Some((n, url)) => (Some(n), Some(url)),
-        None => (None, None),
-    };
-
-    WrapupState { dirty, pushed, pr_url, pr_number, pr_required, repo_error }
+    (WrapupState {
+        dirty, pushed, pr_url: None, pr_number: None, pr_required: false, repo_error,
+    }, branch)
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,13 +1127,8 @@ mod tests {
         }
     }
 
-    /// The impure half of the repo-error contract: an unopenable worktree
-    /// must actually populate `repo_error` (and name the inspected path) —
-    /// without this, a regression in `observe_wrapup_state`'s Err arm would
-    /// pass every pure `decide_finishing` test above.
-    #[test]
-    fn observe_wrapup_state_populates_repo_error_for_an_unopenable_worktree() {
-        let node = crate::models::AgentNode {
+    fn wrapup_test_node() -> crate::models::AgentNode {
+        crate::models::AgentNode {
             id: 1,
             mesh_id: 1,
             name: "gh1-missing".to_string(),
@@ -1157,7 +1157,45 @@ mod tests {
             position: 0,
             created_at: chrono::Utc::now(),
             worktree_path: None,
-        };
+        }
+    }
+
+    #[test]
+    fn observe_wrapup_git_state_uses_actual_branch_without_github_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("test", "test@example.com").unwrap();
+        let commit = repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[]).unwrap();
+        repo.branch("renamed-implementation", &repo.find_commit(commit).unwrap(), false).unwrap();
+        repo.set_head("refs/heads/renamed-implementation").unwrap();
+        repo.remote("origin", "https://github.com/example/repo.git").unwrap();
+        repo.reference("refs/remotes/origin/renamed-implementation", commit, true, "test").unwrap();
+        repo.find_branch("renamed-implementation", git2::BranchType::Local).unwrap()
+            .set_upstream(Some("origin/renamed-implementation")).unwrap();
+        let worktree_path = dir.path().join("original-worktree-name");
+        let branch_ref = repo.find_reference("refs/heads/renamed-implementation").unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(&branch_ref));
+        // Release the branch from the main checkout before attaching it.
+        repo.set_head_detached(commit).unwrap();
+        repo.worktree("original-worktree-name", &worktree_path, Some(&options)).unwrap();
+        let mut node = wrapup_test_node();
+        node.path = dir.path().to_string_lossy().into_owned();
+        node.worktree_name = Some("original-worktree-name".into());
+        node.worktree_path = Some(worktree_path.to_string_lossy().into_owned());
+        let (state, branch) = observe_wrapup_git_state(&node);
+        assert_eq!(branch.as_deref(), Some("renamed-implementation"));
+        assert_ne!(branch, node.worktree_name);
+        assert!(state.pushed);
+        assert!(wrapup_reasons(&state).is_empty());
+        assert!(state.pr_url.is_none());
+    }
+
+    #[test]
+    fn observe_wrapup_state_populates_repo_error_for_an_unopenable_worktree() {
+        let node = wrapup_test_node();
         // The worktree path doesn't exist, so the repo open must fail and the
         // pushed=false short-circuit keeps GitHub out of the picture.
         let state = observe_wrapup_state(&node, true);

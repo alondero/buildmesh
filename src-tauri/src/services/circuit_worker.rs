@@ -1327,6 +1327,47 @@ fn determine_github_target(
     }
 }
 
+/// Reconcile the implementation branch with GitHub before emitting the durable
+/// result. Inject the external observations so replay and lookup failures can
+/// be exercised without a process-wide database or GitHub writes.
+fn ensure_open_pr(
+    view: &RunView,
+    node_id: &str,
+    observe: impl FnOnce(i64) -> Result<(crate::autopilot::pipeline::WrapupState, Option<String>), String>,
+    find: impl FnOnce(&str) -> Result<Option<crate::services::github::PullRequest>, String>,
+    create: impl FnOnce(&str, &str) -> Result<String, String>,
+) -> Result<CircuitEvent, String> {
+    let agent_node_id = view.resolve_target_agent(node_id)
+        .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
+    let (wrapup, head) = observe(agent_node_id)?;
+    let reasons = crate::autopilot::pipeline::wrapup_reasons(&wrapup);
+    if !reasons.is_empty() {
+        return Err(format!("autopilot wrap-up verification failed: {}", reasons.join("; ")));
+    }
+    let head = head.ok_or_else(|| "the implementation worktree has no checked-out branch".to_string())?;
+    let title = view.context.get("issue.title")
+        .or_else(|| view.context.get("pr.title"))
+        .unwrap_or("Circuit run").to_string();
+    // A replay after GitHub accepted creation but before the ledger commit
+    // must discover that PR, never create a second one.
+    let (number, url, head_ref, title) = if let Some(pr) = find(&head)? {
+        (Some(pr.number), pr.html_url,
+         if pr.head_ref.trim().is_empty() { head } else { pr.head_ref },
+         if pr.title.trim().is_empty() { title } else { pr.title })
+    } else if view.graph.is_issue_driven_autopilot_review() {
+        return Err("the implementation agent did not raise an open pull request for its branch".to_string());
+    } else {
+        let url = create(&head, &title)?;
+        let number = url.trim_end_matches('/').rsplit('/').next().and_then(|s| s.parse::<i64>().ok());
+        (number, url, head, title)
+    };
+    Ok(CircuitEvent::GithubActionResult {
+        node_id: node_id.to_string(), success: true, pr_number: number,
+        pr_url: Some(url), pr_head_ref: Some(head_ref),
+        pr_title: if title.is_empty() { None } else { Some(title) }, error: None,
+    })
+}
+
 /// Perform one `CallGithub` effect (milestone 3, issue #1208): resolve
 /// the target repo from the mesh's `origin`, execute the mutation through
 /// the shared [`crate::services::github::GitHubClient`] seam, and advance
@@ -1430,70 +1471,23 @@ fn call_github_effect(
                             .to_string(),
                     );
                 }
-                let agent_node_id = view
-                    .resolve_target_agent(node_id)
-                    .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
-                let agent_node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
-                let wrapup =
-                    crate::autopilot::pipeline::observe_wrapup_state(&agent_node, review_blueprint);
-                let wrapup_reasons = crate::autopilot::pipeline::wrapup_reasons(&wrapup);
-                if !wrapup_reasons.is_empty() {
-                    return Err(format!(
-                        "autopilot wrap-up verification failed: {}",
-                        wrapup_reasons.join("; ")
-                    ));
-                }
-                let head = open_pr_head_branch(view, node_id)?;
-                let title = view
-                    .context
-                    .get("issue.title")
-                    .or_else(|| view.context.get("pr.title"))
-                    .unwrap_or("Circuit run")
-                    .to_string();
                 let body = resolved_comment.unwrap_or_default();
-                // The issue-driven finish prompt asks the agent to run
-                // `gh pr create` itself.  Treat this action as an
-                // idempotent ensure: discover that PR first, and only fall
-                // back to the API create when the agent did not create one.
-                // This also makes a crash/retry between the GitHub mutation
-                // and its ledger commit safe.
-                let existing = client
-                    .find_open_pr_for_branch(&owner, &repo, &head)
-                    .map_err(|e| e.to_string())?;
-                let (pr_num, pr_url, pr_head_ref, pr_title) = if let Some(pr) = existing {
-                    (
-                        Some(pr.number),
-                        pr.html_url,
-                        if pr.head_ref.trim().is_empty() { head.clone() } else { pr.head_ref },
-                        if pr.title.trim().is_empty() { title.clone() } else { pr.title },
-                    )
-                } else if review_blueprint {
-                    return Err(
-                        "the implementation agent did not raise an open pull request for its branch"
-                            .to_string(),
-                    );
-                } else {
-                    let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
-                    let pr_url = client
-                        .create_pull_request(&owner, &repo, &title, &body, &head, &base)
-                        .map_err(|e| e.to_string())?;
-                    let pr_num = pr_url
-                        .trim_end_matches('/')
-                        .rsplit('/')
-                        .next()
-                        .and_then(|s| s.parse::<i64>().ok());
-                    (pr_num, pr_url, head.clone(), title.clone())
-                };
-
-                Ok(CircuitEvent::GithubActionResult {
-                    node_id: node_id.to_string(),
-                    success: true,
-                    pr_number: pr_num,
-                    pr_url: Some(pr_url),
-                    pr_head_ref: Some(pr_head_ref),
-                    pr_title: if !pr_title.is_empty() { Some(pr_title) } else { None },
-                    error: None,
-                })
+                ensure_open_pr(view, node_id,
+                    |agent_node_id| {
+                        let agent_node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
+                        if !agent_node.use_worktree {
+                            return Err("OpenPr requires a worktree-backed agent (its commits have no branch)".to_string());
+                        }
+                        Ok(crate::autopilot::pipeline::observe_wrapup_git_state(&agent_node))
+                    },
+                    |head| client.find_open_pr_for_branch(&owner, &repo, head)
+                        .map_err(|e| format!("could not verify the pull request for {owner}/{repo} branch {head}: {e}")),
+                    |head, title| {
+                        let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
+                        client.create_pull_request(&owner, &repo, title, &body, head, &base)
+                            .map_err(|e| e.to_string())
+                    },
+                )
             }
         }
     })();
@@ -1552,27 +1546,6 @@ fn call_github_effect(
         repo
     );
     Ok(())
-}
-
-/// The head branch for a GithubAction OpenPr effect: the piloted agent's
-/// worktree branch. Circuit spawn steps cut branched worktrees, so the
-/// worktree name IS the branch; the *agent* is responsible for having
-/// committed and pushed it (the legacy wrap-up contract) — Buildmesh
-/// opens the PR, it does not push on the agent's behalf. A root-repo
-/// spawn (no worktree) cannot open a PR and fails loudly instead.
-fn open_pr_head_branch(view: &RunView, node_id: &str) -> Result<String, String> {
-    let agent_node_id = view
-        .resolve_target_agent(node_id)
-        .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
-    let node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
-    if !node.use_worktree {
-        return Err(
-            "OpenPr requires a worktree-backed agent (its commits have no branch)".to_string(),
-        );
-    }
-    node.worktree_name
-        .filter(|w| !w.trim().is_empty())
-        .ok_or_else(|| "the piloted agent has no worktree branch name".to_string())
 }
 
 /// Find the SpawnAgentNode row whose association owns a CloseAgentNode
@@ -3647,6 +3620,100 @@ mod tests {
             2,
             "ticks 1 + 2 must succeed after tick 0 panicked"
         );
+    }
+
+    fn open_pr_run() -> RunView {
+        let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let steps = graph.nodes.iter().map(|node| StepView {
+            node_id: node.id.clone(),
+            status: if node.id == "open_pr" { StepStatus::Running } else { StepStatus::Completed },
+            outcome: None, error: None,
+            agent_node_id: if node.id == "implementer" { Some(700) } else { None },
+            attempt: 1,
+        }).collect();
+        RunView { run_id: 42, graph, state: RunState::Running,
+            context: CircuitContext::new(), steps }
+    }
+
+    fn pushed_implementation(agent: i64) -> Result<(crate::autopilot::pipeline::WrapupState, Option<String>), String> {
+        assert_eq!(agent, 700);
+        Ok((crate::autopilot::pipeline::WrapupState {
+            dirty: false, pushed: true, pr_url: None, pr_number: None,
+            pr_required: false, repo_error: None,
+        }, Some("renamed-implementation".into())))
+    }
+
+    fn implementation_pr() -> crate::services::github::PullRequest {
+        serde_json::from_value(serde_json::json!({
+            "number": 314, "html_url": "https://github.com/example/repo/pull/314",
+            "title": "Implementation", "head": { "ref": "renamed-implementation" }
+        })).unwrap()
+    }
+
+    #[test]
+    fn open_pr_acknowledges_existing_pr_and_publishes_review_context() {
+        let mut run = open_pr_run();
+        let event = ensure_open_pr(&run, "open_pr", pushed_implementation,
+            |head| { assert_eq!(head, "renamed-implementation"); Ok(Some(implementation_pr())) },
+            |_, _| panic!("existing PR must not be created again"),
+        ).unwrap();
+        let transition = advance(&mut run, &event);
+        assert!(transition.step_writes.iter().any(|write| write.node_id == "open_pr" && write.status == StepStatus::Completed));
+        assert_eq!(run.context.get("pr.number"), Some("314"));
+        assert_eq!(run.context.get("pr.url"), Some("https://github.com/example/repo/pull/314"));
+        assert_eq!(run.context.get("pr.head_ref"), Some("renamed-implementation"));
+    }
+
+    #[test]
+    fn open_pr_review_requires_agent_pr_without_creating_one() {
+        let error = ensure_open_pr(&open_pr_run(), "open_pr", pushed_implementation,
+            |_| Ok(None), |_, _| panic!("review blueprint delegates creation to its agent"),
+        ).unwrap_err();
+        assert!(error.contains("did not raise an open pull request"));
+    }
+
+    #[test]
+    fn open_pr_lookup_error_does_not_create_or_report_missing_pr() {
+        let mut run = open_pr_run();
+        run.graph.blueprint = None;
+        let error = ensure_open_pr(&run, "open_pr", pushed_implementation,
+            |_| Err("GitHub unavailable".into()), |_, _| panic!("unknown is not absent"),
+        ).unwrap_err();
+        assert_eq!(error, "GitHub unavailable");
+    }
+
+    #[test]
+    fn open_pr_replay_after_creation_discovers_pr_without_duplicate() {
+        let mut run = open_pr_run();
+        run.graph.blueprint = None;
+        let created = std::cell::RefCell::new(None);
+        let creates = std::cell::Cell::new(0);
+        // Simulate losing the first result before its ledger commit: replay
+        // the same Running snapshot against the now-existing remote PR.
+        for _ in 0..2 {
+            let event = ensure_open_pr(&run, "open_pr", pushed_implementation,
+                |_| Ok(created.borrow().clone()),
+                |head, _| {
+                    assert_eq!(head, "renamed-implementation");
+                    creates.set(creates.get() + 1);
+                    let pr = implementation_pr();
+                    let url = pr.html_url.clone();
+                    *created.borrow_mut() = Some(pr);
+                    Ok(url)
+                },
+            ).unwrap();
+            assert!(matches!(event, CircuitEvent::GithubActionResult { success: true, pr_number: Some(314), .. }));
+        }
+        assert_eq!(creates.get(), 1);
+    }
+
+    #[test]
+    fn open_pr_failed_git_observation_does_not_query_github() {
+        let error = ensure_open_pr(&open_pr_run(), "open_pr",
+            |_| Err("worktree unavailable".into()),
+            |_| panic!("branch identity is unknown"), |_, _| panic!("branch identity is unknown"),
+        ).unwrap_err();
+        assert_eq!(error, "worktree unavailable");
     }
 
     #[test]
