@@ -36,9 +36,19 @@ use super::{current_env, Environment};
 /// Convert a session path to the correct form for spawning commands
 /// WSL paths are stored as Unix paths internally, Windows paths as Windows paths.
 /// Stored paths are always the RAW form (see `resolve_raw_path`), so a host
-/// UNC string must never reach this function — normalize back to POSIX at
-/// the storage boundary instead (issue #1519).
+/// UNC string should not reach this function — normalize back to POSIX at
+/// the storage boundary instead (issue #1519). When one does (issue #1227:
+/// a mesh row stores `\\wsl.localhost\Debian\...` from Windows 11 discovery,
+/// or the legacy `\\wsl$\...`), normalise to the in-WSL POSIX form here so
+/// the WSL agent gets a path it can `cd` into instead of a meaningless UNC.
 pub fn to_spawn_path(path: &Path) -> PathBuf {
+    // UNC → POSIX rewrite runs on every call but is zero-alloc on the
+    // non-UNC hot path (`normalize_unc_to_wsl` returns `Cow::Borrowed`).
+    if let std::borrow::Cow::Owned(normalized) =
+        normalize_unc_to_wsl(&path.to_string_lossy())
+    {
+        return PathBuf::from(normalized);
+    }
     match current_env() {
         Environment::Wsl => {
             if path.to_string_lossy().starts_with("/mnt/") {
@@ -71,10 +81,21 @@ pub fn env_for_path(path: &Path) -> Environment {
 
     let path_str = path.to_string_lossy().to_lowercase();
 
-    // WSL detection: paths starting with /mnt/, /home/, or \\wsl$
+    // WSL detection: paths starting with /mnt/, /home/, the legacy `\\wsl$\`
+    // UNC, or Windows 11+'s canonical `\\wsl.localhost\` UNC. The `.localhost`
+    // form is the RFC 1738 hostname for the per-distro root and is what
+    // Windows 11's own UNC provider emits; omitting it silently misroutes a
+    // WSL mesh to the Windows code path (issue #1227).
+    //
+    // The forward-slash `//wsl.localhost/` variant is checked alongside the
+    // backslash form because external tools (POSIX path emitters, some
+    // discovery inputs) normalise separators before handing the string to
+    // us — the `normalize_unc_to_wsl` rewrite accepts either.
     if path_str.starts_with("/mnt/")
         || path_str.starts_with("/home/")
         || path_str.starts_with("\\\\wsl$")
+        || path_str.starts_with("\\\\wsl.localhost")
+        || path_str.starts_with("//wsl.localhost")
     {
         Environment::Wsl
     } else {
@@ -83,7 +104,11 @@ pub fn env_for_path(path: &Path) -> Environment {
 }
 
 /// Convert a path from session internal form to host-readable form
-/// (e.g., /home/user -> \\wsl$\Ubuntu\home\user, /mnt/c/Users -> C:\Users, /c/Users -> C:\Users)
+/// (e.g., /home/user -> \\wsl$\Ubuntu\home\user, /mnt/c/Users -> C:\Users, /c/Users -> C:\Users).
+/// A Windows host UNC (`\\wsl$\<distro>\...` or the Windows 11+ canonical
+/// `\\wsl.localhost\<distro>\...`, issue #1227) is already a host path, so
+/// the `\\`-prefixed input is returned unchanged — both forms keep their
+/// distro embedded rather than being rewritten to the default distro.
 pub fn to_host_path(path: &str) -> String {
     // Only a Windows host has a WSL filesystem to translate into (`\\wsl$\...`
     // UNC paths, drive letters). On macOS and native Linux the path is already
@@ -162,13 +187,18 @@ pub(crate) fn agy_brain_dir_for_env(env_type: EnvType, spawn_path: &str) -> Opti
 }
 
 /// Normalize a raw path that may be a WSL UNC path (`\\wsl$\<distro>\...` or
-/// `//wsl$/<distro>/...`) into WSL spawn form (`/...`). Non-UNC paths are
+/// the Windows 11+ canonical `\\wsl.localhost\<distro>\...`, and their
+/// forward-slash variants) into WSL spawn form (`/...`). Non-UNC paths are
 /// returned unchanged (borrowed — no allocation on the hot path).
 ///
 /// Command Code runs inside WSL with cwd `/home/user/repo` and slugs that
 /// form, but Buildmesh may hold the same mesh as a Windows host UNC path.
 /// Slugging the UNC form would yield `wsl-ubuntu-home-user-repo` and silently
 /// match nothing; normalize before slugging (issue #1500).
+///
+/// Both UNC tokens are recognised because Windows 11 emits `\\wsl.localhost\`
+/// (RFC 1738 hostname `wsl.localhost`) as the canonical per-distro form, and
+/// mesh rows / discovery outputs may carry either — issue #1227.
 pub(crate) fn normalize_unc_to_wsl(path: &str) -> std::borrow::Cow<'_, str> {
     let bytes = path.as_bytes();
     if bytes.len() < 8 {
@@ -178,14 +208,37 @@ pub(crate) fn normalize_unc_to_wsl(path: &str) -> std::borrow::Cow<'_, str> {
     if !sep(bytes[0]) || !sep(bytes[1]) {
         return std::borrow::Cow::Borrowed(path);
     }
-    if !path.get(2..6).is_some_and(|s| s.eq_ignore_ascii_case("wsl$")) {
+    // Match the WSL UNC token + the trailing separator before the distro:
+    //   `\\wsl$\<distro>\...`           — 7-byte prefix (`\\wsl$\`, includes
+    //                                     trailing separator so `rest` starts
+    //                                     on the distro name itself)
+    //   `\\wsl.localhost\<distro>\...`  — 16-byte prefix (`\\wsl.localhost\`)
+    // Both tokens are case-insensitive (Windows UNC roots are). The literal
+    // `.` inside `wsl.localhost` distinguishes it from any sibling
+    // `\\wsl-runner\...` UNC root. The `2..15` window on the `.localhost`
+    // arm spans bytes 2..14 inclusive (13 bytes) — `wsl.localhost` is 13
+    // chars at indices 0..12 in its own frame, plus the leading `\\` it
+    // lands at byte 2; the trailing separator is byte 15, so prefix_len = 16.
+    let prefix_len: usize = if bytes
+        .get(2..6)
+        .is_some_and(|s| s.eq_ignore_ascii_case(b"wsl$"))
+        && bytes.get(6).is_some_and(|&b| sep(b))
+    {
+        7
+    } else if bytes
+        .get(2..15)
+        .is_some_and(|s| s.eq_ignore_ascii_case(b"wsl.localhost"))
+        && bytes.get(15).is_some_and(|&b| sep(b))
+    {
+        16
+    } else {
         return std::borrow::Cow::Borrowed(path);
-    }
-    if !sep(bytes[6]) {
-        return std::borrow::Cow::Borrowed(path);
-    }
-    let rest = &path[7..];
-    let distro_end = rest.find(['\\', '/']).map(|i| i + 7).unwrap_or(path.len());
+    };
+    let rest = &path[prefix_len..];
+    let distro_end = rest
+        .find(['\\', '/'])
+        .map(|i| i + prefix_len)
+        .unwrap_or(path.len());
     let after = if distro_end < path.len() {
         &path[distro_end..]
     } else {
@@ -726,6 +779,126 @@ mod tests {
             std::borrow::Cow::Borrowed(_)
         ));
         assert_eq!(normalize_unc_to_wsl(""), "");
+    }
+
+    /// Issue #1227: Windows 11's canonical per-distro UNC is
+    /// `\\wsl.localhost\<Distro>\...`, distinct from the legacy `\\wsl$\...`
+    /// form. Discovery / manual mesh paths can arrive in either shape and the
+    /// spawn form (what the WSL agent sees as its CWD) must not embed the
+    /// `\\wsl.localhost\` prefix — the in-WSL shell can't read it. Normalize
+    /// both forms to POSIX `/...` so the slug / lookup / spawn layers see a
+    /// single canonical input. Case-insensitive on the `wsl.localhost` token
+    /// matches the existing `wsl$` handling.
+    #[test]
+    fn normalize_unc_to_wsl_recognises_wsl_localhost_form() {
+        assert_eq!(
+            normalize_unc_to_wsl(r"\\wsl.localhost\Debian\home\user\repo"),
+            "/home/user/repo"
+        );
+        assert_eq!(
+            normalize_unc_to_wsl("//wsl.localhost/Debian/home/user/repo"),
+            "/home/user/repo"
+        );
+        assert_eq!(
+            normalize_unc_to_wsl(r"\\WSL.LOCALHOST\debian\HOME\user\repo\"),
+            "/HOME/user/repo"
+        );
+        assert_eq!(normalize_unc_to_wsl(r"\\wsl.localhost\Debian"), "/");
+        // Bare `\\wsl.localhost` (no distro separator) is malformed and must
+        // pass through borrowed, not panic on `find(['\\', '/'])`.
+        assert!(matches!(
+            normalize_unc_to_wsl(r"\\wsl.localhost"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // Sibling UNC roots (`\\wsl-runner\...`, `\\localhost\...`) must NOT
+        // match — they share the leading `\\wsl` prefix but are not WSL
+        // distro paths. Pin the boundary so a future relaxation doesn't
+        // accidentally hoist them into the spawn-form rewrite.
+        assert!(matches!(
+            normalize_unc_to_wsl(r"\\wsl-runner\distro\home\user\repo"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    // ── wsl.localhost UNC detection (issue #1227) ─────────────────────────
+    //
+    // Windows 11's canonical per-distro UNC is `\\wsl.localhost\<Distro>\...`
+    // (RFC 1738 hostname `wsl.localhost`); the legacy `\\wsl$\...` form is the
+    // older server-name fallback. Both are valid WSL host paths, and a mesh
+    // can arrive in either shape depending on how it was captured. These
+    // tests pin the WSL classification for both forms on a Windows host —
+    // on macOS / native Linux `env_for_path` is a hard `Environment::Windows`
+    // return (see the early-return in the function body), so the assertions
+    // are gated to `target_os = "windows"`.
+
+    /// Issue #1227 (part 1): `\\wsl.localhost\Debian\...` must classify as
+    /// WSL — without this, `EnvType::from(env_for_path(...))` collapses to
+    /// Windows and downstream consumers (transcript reader, agent node
+    /// discovery, validate_worktree_directory) silently misroute a non-default
+    /// distro to the Windows code path.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn env_for_path_classifies_wsl_localhost_as_wsl() {
+        assert_eq!(
+            env_for_path(Path::new(r"\\wsl.localhost\Debian\home\u\repo")),
+            super::Environment::Wsl
+        );
+        // Forward-slash variant must match too — Windows path APIs and POSIX
+        // tool outputs disagree on the separator.
+        assert_eq!(
+            env_for_path(Path::new("//wsl.localhost/Debian/home/u/repo")),
+            super::Environment::Wsl
+        );
+        // Case-insensitive on the `wsl.localhost` token (parity with the
+        // existing `wsl$` rule, which is also lowercased before compare).
+        assert_eq!(
+            env_for_path(Path::new(r"\\WSL.LOCALHOST\debian\home\u\repo")),
+            super::Environment::Wsl
+        );
+    }
+
+    /// Pin the boundary so `\\wsl-runner\...` (a UNC root that happens to
+    /// share the `\\wsl` prefix) is NOT classified as WSL — only the exact
+    /// `\\wsl$\` and `\\wsl.localhost\` tokens qualify.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn env_for_path_does_not_misclassify_wsl_prefix_only_un_roots() {
+        assert_eq!(
+            env_for_path(Path::new(r"\\wsl-runner\distro\home\u\repo")),
+            super::Environment::Windows
+        );
+        assert_eq!(
+            env_for_path(Path::new(r"\\wslsomethingelse\distro\home\u")),
+            super::Environment::Windows
+        );
+    }
+
+    /// Issue #1227 (round-trip): when `raw_path` is already a Windows host
+    /// UNC in the `.localhost` form, `to_spawn_path` must hand the WSL agent
+    /// a POSIX path it can `cd` into — `\\wsl.localhost\Debian\home\u\repo`
+    /// is a valid Windows UNC but is meaningless inside the WSL shell.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn to_spawn_path_normalises_wsl_localhost_unc_for_spawned_process() {
+        let spawn = to_spawn_path(Path::new(r"\\wsl.localhost\Debian\home\u\repo"));
+        assert_eq!(spawn, PathBuf::from("/home/u/repo"));
+        // Legacy `wsl$` form must keep working (no regression on the path
+        // every existing fixture uses).
+        assert_eq!(
+            to_spawn_path(Path::new(r"\\wsl$\Ubuntu\home\u\repo")),
+            PathBuf::from("/home/u/repo")
+        );
+    }
+
+    /// `is_absolute_worktree_path` already accepts any UNC (`\\` prefix). Pin
+    /// that `\\wsl.localhost\...` is treated as absolute so a user entering
+    /// the canonical Windows 11 form as a Mesh `worktree_directory` doesn't
+    /// fall through to the relative-join path and produce
+    /// `<mesh>/\\wsl.localhost\...`.
+    #[test]
+    fn is_absolute_worktree_path_accepts_wsl_localhost_form() {
+        assert!(is_absolute_worktree_path(r"\\wsl.localhost\Debian\home\u\wt"));
+        assert!(is_absolute_worktree_path("//wsl.localhost/Debian/home/u/wt"));
     }
 
     // ── Configurable Worktree Node directories (issue #1519) ────────────────
