@@ -277,6 +277,22 @@ impl RunView {
         resolve_target_agent(&self.graph, &self.steps, node_id)
     }
 
+    /// Resolve the implementation agent whose worktree an OpenPr action
+    /// inspects. This is deliberately separate from target-agent resolution:
+    /// an OpenPr step observes a repository, it does not pilot a process.
+    pub fn resolve_open_pr_agent(&self, node_id: &str) -> Option<i64> {
+        if !matches!(
+            self.graph.node(node_id).map(|node| &node.kind),
+            Some(CircuitNodeKind::GithubAction {
+                action: GithubActionKind::OpenPr,
+                ..
+            })
+        ) {
+            return None;
+        }
+        resolve_upstream_spawn_agent(&self.graph, &self.steps, node_id)
+    }
+
     /// Attach the spawned mesh agent node to its step. Called by the seam
     /// right after the synchronous stage-1 row creation succeeds.
     pub fn attach_agent_node(&mut self, node_id: &str, agent_node_id: i64) {
@@ -307,7 +323,7 @@ pub fn resolve_target_agent(
         | Some(CircuitNodeKind::ReviewVerdict { target_node_id }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::SetNodeStatus { target_node_id, .. }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::CloseAgentNode { target_node_id, .. }) => target_node_id.as_deref(),
-        // GithubAction / Notify / Join / RetryLimit / AnyCompleted /
+        // Notify / Join / RetryLimit / AnyCompleted /
         // Manual / Interval / SpawnAgentNode have no target lineage —
         // nothing to resolve. `SpawnAgentNode` owns its agent directly
         // via `step.agent_node_id`, not via this resolver.
@@ -329,8 +345,18 @@ pub fn resolve_target_agent(
             .find(|s| s.node_id == target)
             .and_then(|s| s.agent_node_id);
     }
-    // `target_node_id` is `None` — walk backward through incoming edges
-    // and return the nearest upstream `SpawnAgentNode`'s agent id.
+    resolve_upstream_spawn_agent(graph, steps, node_id)
+}
+
+/// Walk backward through incoming edges and return the nearest upstream
+/// SpawnAgentNode's attached agent. This is shared by explicit lifecycle
+/// targets and the repository-observation OpenPr seam, but only callers that
+/// model a process target may use it for lifecycle events.
+pub fn resolve_upstream_spawn_agent(
+    graph: &CircuitGraph,
+    steps: &[StepView],
+    node_id: &str,
+) -> Option<i64> {
     let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
     queue.push_back(node_id);
@@ -807,15 +833,27 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     let failure = error
                         .clone()
                         .unwrap_or_else(|| "GitHub action failed".to_string());
-                    // The issue-driven blueprint routes an OpenPr failure
-                    // through its bounded retry loop. Preserve the concrete
-                    // verification/API reason in the run context so the
-                    // correction injection can tell the original agent what
-                    // to repair instead of sending a generic retry request.
-                    run.context.set(
-                        "autopilot.wrapup_correction",
-                        crate::autopilot::pipeline::correction_prompt(&[failure.clone()], ""),
+                    // An OpenPr action with an explicit existing-PR policy
+                    // may feed a correction node. Other GitHub actions have
+                    // no agent correction contract, so do not leak a stale
+                    // wrap-up prompt into their run context.
+                    let needs_agent_correction = matches!(
+                        run.graph.node(node_id).map(|node| &node.kind),
+                        Some(CircuitNodeKind::GithubAction {
+                            action: GithubActionKind::OpenPr,
+                            open_pr_policy: Some(policy),
+                            ..
+                        }) if policy.requires_existing()
                     );
+                    if needs_agent_correction {
+                        run.context.set(
+                            "autopilot.wrapup_correction",
+                            crate::autopilot::pipeline::correction_prompt(
+                                std::slice::from_ref(&failure),
+                                "",
+                            ),
+                        );
+                    }
                     fail_step(
                         run,
                         &mut t,
@@ -835,7 +873,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 run.step(node_id),
                 Some(s) if s.status == StepStatus::Running
             ) {
-                if let Some(CircuitNodeKind::GithubAction { action, label, comment }) =
+                if let Some(CircuitNodeKind::GithubAction { action, label, comment, .. }) =
                     run.graph.node(node_id).map(|node| &node.kind)
                 {
                     t.effects.push(Effect::CallGithub {
@@ -1387,7 +1425,7 @@ fn start_effects_and_completion(
         CircuitNodeKind::InjectPty { .. } => {
             // Stays Running until AgentReady.
         }
-        CircuitNodeKind::GithubAction { action, label, comment } => {
+        CircuitNodeKind::GithubAction { action, label, comment, .. } => {
             t.effects.push(Effect::CallGithub {
                 node_id: node_id.to_string(),
                 action: *action,
@@ -1680,6 +1718,7 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autopilot::circuit::model::OpenPrPolicy;
     use crate::autopilot::circuit::model::{
         CircuitEdge, CircuitNode, GithubActionKind,
     };
@@ -2390,6 +2429,7 @@ mod tests {
             id: "label".into(),
             kind: CircuitNodeKind::GithubAction {
                 action: GithubActionKind::AddLabel,
+                open_pr_policy: None,
                 label: Some("in-progress".into()),
                 comment: None,
             },
@@ -2448,6 +2488,7 @@ mod tests {
                         id: "comment".into(),
                         kind: CircuitNodeKind::GithubAction {
                             action: GithubActionKind::PostComment,
+                            open_pr_policy: None,
                             label: None,
                             comment: Some("started {{issue.number}}".into()),
                         },
@@ -2499,6 +2540,7 @@ mod tests {
             id: "label".into(),
             kind: CircuitNodeKind::GithubAction {
                 action: GithubActionKind::AddLabel,
+                open_pr_policy: None,
                 label: Some("reviewing".into()),
                 comment: None,
             },
@@ -3540,6 +3582,64 @@ mod tests {
     }
 
     #[test]
+    fn issue_review_open_pr_resolves_implementer_before_and_after_retry() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        assert_eq!(run.resolve_target_agent("open_pr"), None);
+        assert_eq!(run.resolve_open_pr_agent("open_pr"), Some(700));
+
+        // Replay uses persisted step associations, including a reviewer
+        // from an earlier round. PR ownership must remain the implementer.
+        let mut replay = RunView {
+            graph: CircuitGraph::from_json(&run.graph.to_json().unwrap()).unwrap(),
+            context: CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap(),
+            ..run.clone()
+        };
+        advance(&mut replay, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(314),
+            pr_url: Some("https://github.com/example/repo/pull/314".into()),
+            pr_head_ref: Some("gh42".into()),
+            pr_title: None,
+            error: None,
+        });
+        advance(&mut replay, &tick(8, 8));
+        replay.attach_agent_node("reviewer", 701);
+        assert_eq!(replay.resolve_target_agent("open_pr"), None);
+        assert_eq!(replay.resolve_open_pr_agent("open_pr"), Some(700));
+
+        advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: false,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: Some("temporary lookup failure".into()),
+        });
+        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &CircuitEvent::AgentReady { node_id: "wrapup_correction".into() });
+        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &classified("finish_classifier", Some(Classification::Completed)));
+        assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+        assert_eq!(run.step("open_pr").unwrap().attempt, 2);
+        assert_eq!(run.resolve_open_pr_agent("open_pr"), Some(700));
+    }
+
+    #[test]
+    fn issue_review_open_pr_waits_for_github_without_agent_lifecycle_events() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(&mut run, &agent_finished(700, true));
+        assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+        assert!(run.step("reviewer").is_none());
+        advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 700 });
+        assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+        assert_eq!(run.state, RunState::Running);
+    }
+
+    #[test]
     fn issue_review_blueprint_runs_reviewer_feedback_and_closes_reviewer_node() {
         let mut run = issue_review_run();
         let open = issue_review_to_open_pr(&mut run);
@@ -4158,6 +4258,7 @@ mod tests {
                         id: "open_pr".into(),
                         kind: CircuitNodeKind::GithubAction {
                             action: GithubActionKind::OpenPr,
+                            open_pr_policy: Some(OpenPrPolicy::RequireExisting),
                             label: None,
                             comment: Some("ready for review".into()),
                         },

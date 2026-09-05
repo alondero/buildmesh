@@ -8,6 +8,108 @@
 mod tests {
     use rusqlite::{Connection, Result as SqlResult};
 
+    #[test]
+    fn review_open_pr_policy_migration_is_persistent_and_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::ensure_baseline_tables(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'migration-test', 'C:/migration-test')",
+            [],
+        )
+        .unwrap();
+
+        let stale = crate::autopilot::circuit::model::CircuitGraph::issue_driven_autopilot_review(
+            "buildmesh:run",
+        );
+        let mut raw: serde_json::Value = serde_json::from_str(&stale.to_json().unwrap()).unwrap();
+        raw["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["id"] == "open_pr")
+            .unwrap()["type"]
+            .as_object_mut()
+            .unwrap()
+            .remove("open_pr_policy");
+        let stale_json = serde_json::to_string(&raw).unwrap();
+
+        // An explicitly authored policy must survive the migration unchanged.
+        let mut explicit_graph = crate::autopilot::circuit::model::CircuitGraph::issue_driven_autopilot_review(
+            "buildmesh:other",
+        );
+        if let Some(node) = explicit_graph.nodes.iter_mut().find(|node| node.id == "open_pr") {
+            if let crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
+                open_pr_policy,
+                ..
+            } = &mut node.kind
+            {
+                *open_pr_policy = Some(crate::autopilot::circuit::model::OpenPrPolicy::CreateIfMissing);
+            }
+        }
+        let explicit = explicit_graph.to_json().unwrap();
+        conn.execute(
+            "INSERT INTO autopilot_circuits
+             (id, mesh_id, name, graph_json, is_preset)
+             VALUES (?1, 1, ?2, ?3, 0)",
+            rusqlite::params![1, "stale", stale_json],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO autopilot_circuits
+             (id, mesh_id, name, graph_json, is_preset)
+             VALUES (?1, 1, ?2, ?3, 0)",
+            rusqlite::params![2, "explicit", explicit],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES
+             ('schema_version', ?1),
+             ('issue_review_first_turn_upgrade_v1', '1')",
+            rusqlite::params![crate::db::migrations::SCHEMA_VERSION.to_string()],
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+        let graph_json = |id: i64| {
+            conn.query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let migrated = crate::autopilot::circuit::model::CircuitGraph::from_json(&graph_json(1)).unwrap();
+        assert!(matches!(
+            migrated.node("open_pr").map(|node| &node.kind),
+            Some(crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
+                open_pr_policy: Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting),
+                ..
+            })
+        ));
+        let explicit_graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&graph_json(2)).unwrap();
+        assert!(matches!(
+            explicit_graph.node("open_pr").map(|node| &node.kind),
+            Some(crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
+                open_pr_policy: Some(crate::autopilot::circuit::model::OpenPrPolicy::CreateIfMissing),
+                ..
+            })
+        ));
+
+        let first_json = graph_json(1);
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'issue_review_first_turn_upgrade_v2'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "1"
+        );
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(graph_json(1), first_json, "second initializer pass is idempotent");
+    }
+
     fn canonical_index_names(conn: &Connection) -> Vec<String> {
         let mut statement = conn
             .prepare(

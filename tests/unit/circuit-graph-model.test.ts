@@ -447,7 +447,7 @@ describe('upstream reachability (issue #1359)', () => {
       version: CIRCUIT_GRAPH_VERSION,
       nodes: [
         { id: 't', type: { type: 'github_issue_label' as const, label: 'buildmesh:run' } },
-        { id: 'a', type: { type: 'github_action' as const, action: 'post_comment' as const, label: null, comment: null } },
+        { id: 'a', type: { type: 'github_action' as const, action: 'post_comment' as const, open_pr_policy: null, label: null, comment: null } },
       ],
       edges: [{ from: 't', to: 'a', condition: 'always' as const }],
     };
@@ -462,7 +462,7 @@ describe('upstream reachability (issue #1359)', () => {
       version: CIRCUIT_GRAPH_VERSION,
       nodes: [
         { id: 't', type: { type: 'manual' as const } },
-        { id: 'a', type: { type: 'github_action' as const, action: 'open_pr' as const, label: null, comment: null } },
+        { id: 'a', type: { type: 'github_action' as const, action: 'open_pr' as const, open_pr_policy: null, label: null, comment: null } },
         { id: 's', type: { type: 'spawn_agent_node' as const, prompt: 'go', name: null, provider: null, model: null, effort: null, extra_args: null } },
         { id: 'n', type: { type: 'notify' as const, message: '' } },
       ],
@@ -605,7 +605,7 @@ describe('upstream reachability (issue #1359)', () => {
       version: CIRCUIT_GRAPH_VERSION,
       nodes: [
         { id: 't', type: { type: 'github_pull_request_label' as const, label: 'l' } },
-        { id: 'a', type: { type: 'github_action' as const, action: 'post_comment' as const, label: null, comment: null } },
+        { id: 'a', type: { type: 'github_action' as const, action: 'post_comment' as const, open_pr_policy: null, label: null, comment: null } },
       ],
       edges: [{ from: 't', to: 'a', condition: 'always' as const }],
     };
