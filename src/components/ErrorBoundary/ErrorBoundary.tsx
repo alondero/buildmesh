@@ -43,7 +43,7 @@ export class ErrorBoundary extends Component<Props, State> {
               <h1 className="text-xl font-semibold">Buildmesh hit a render error</h1>
             </div>
             <div className="text-sm text-text-secondary">
-              The UI crashed. Details have been written to <code className="text-accent-cyan">buildmesh.log</code>.
+              The UI crashed. Details have been written to <code className="text-text-primary font-medium">buildmesh.log</code>.
             </div>
             <pre className="text-xs text-text-primary bg-bg-base border border-border-subtle rounded-md p-3 overflow-auto max-h-64">
               {this.state.error.name}: {this.state.error.message}

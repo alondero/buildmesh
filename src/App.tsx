@@ -700,13 +700,13 @@ function App() {
               key={toast.id}
               role="status"
               className={`animate-slide-in-right bg-bg-surface border px-4 py-3 rounded-md flex items-start gap-2 min-w-[280px] max-w-[420px] shadow-md ${
-                isWarning ? 'border-status-warning/50' : isSuccess ? 'border-status-success/50' : isInfo ? 'border-accent-cyan/50' : 'border-status-error/50'
+                isWarning ? 'border-status-warning/50' : isSuccess ? 'border-status-success/50' : isInfo ? 'border-border-strong' : 'border-status-error/50'
               }`}
             >
               <div className="flex-1 min-w-0">
                 <div
                   className={`text-2xs font-bold uppercase ${
-                    isWarning ? 'text-status-warning' : isSuccess ? 'text-status-success' : isInfo ? 'text-accent-cyan' : 'text-status-error'
+                    isWarning ? 'text-status-warning' : isSuccess ? 'text-status-success' : isInfo ? 'text-text-secondary' : 'text-status-error'
                   }`}
                 >
                   {toast.provider}

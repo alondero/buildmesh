@@ -375,7 +375,7 @@ function AwaitingActivationView({
           target="_blank"
           rel="noopener noreferrer"
           data-testid="opencode-verification-link"
-          className="text-base text-accent-cyan hover:text-accent-cyan/80"
+          className="text-base text-text-secondary hover:text-text-primary"
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();

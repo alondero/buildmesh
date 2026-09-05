@@ -57,7 +57,7 @@ export function BootErrorPanel({ error, onRetry, busy = false }: Props) {
         <div className="text-sm text-text-secondary">
           Buildmesh failed to load its initial state. The raw error is
           below — you can copy it for a bug report. Details have also been
-          written to <code className="text-accent-cyan">buildmesh.log</code>.
+          written to <code className="text-text-primary font-medium">buildmesh.log</code>.
         </div>
         {/* Raw error in a copyable <pre> block, same pattern as
             ErrorBoundary: a fixed-height scrollable surface so a long

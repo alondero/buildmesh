@@ -470,7 +470,7 @@ function HarnessCard({
       ) : (
         <button
           onClick={() => setAdding(true)}
-          className="mt-3 text-base text-accent-cyan hover:text-accent-cyan/80"
+          className="mt-3 text-base text-text-secondary hover:text-text-primary"
         >
           + Add proxied provider
         </button>
@@ -597,7 +597,7 @@ function ProxiedChildRow({
         <div className="min-w-0 flex-1">
           <div className="text-base text-text-primary truncate">
             {accountName(pairing.provider_id)}
-            <span className="ml-2 text-sm text-accent-cyan">{SURFACE_LABEL[pairing.surface]}</span>
+            <span className="ml-2 text-sm text-text-secondary">{SURFACE_LABEL[pairing.surface]}</span>
           </div>
           {!editing && pairing.base_url && (
             <div className="text-sm text-text-secondary truncate font-mono">{pairing.base_url}</div>
@@ -633,7 +633,7 @@ function ProxiedChildRow({
                     key={envType}
                     onClick={() => verify(envType)}
                     disabled={busy || verifying !== null}
-                    className="px-2 py-1 text-sm text-accent-cyan hover:text-accent-cyan/80 disabled:opacity-50"
+                    className="px-2 py-1 text-sm text-text-secondary hover:text-text-primary disabled:opacity-50"
                     aria-label={`Verify ${envType === 'wsl' ? 'WSL' : 'native'} ${accountName(pairing.provider_id)} under ${harnessLabel}`}
                   >
                     {verifying === envType
@@ -647,7 +647,7 @@ function ProxiedChildRow({
               <button
                 onClick={onStartEdit}
                 disabled={busy}
-                className="px-3 py-1 text-sm text-accent-cyan hover:text-accent-cyan/80 disabled:opacity-50"
+                className="px-3 py-1 text-sm text-text-secondary hover:text-text-primary disabled:opacity-50"
                 aria-label={`Edit ${accountName(pairing.provider_id)} under ${harnessLabel}`}
               >
                 Edit

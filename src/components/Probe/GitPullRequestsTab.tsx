@@ -590,7 +590,7 @@ export function GitPullRequestsTab() {
               url={pullsListUrl}
               ariaLabel="Open this repo's pull requests list on GitHub"
               title="Open this repo's pull requests list on GitHub"
-              className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+              className="text-2xs font-medium text-text-secondary hover:text-text-primary transition-colors"
             >
               View on GitHub ↗
             </SafeLink>
