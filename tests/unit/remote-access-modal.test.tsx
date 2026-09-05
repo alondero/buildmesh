@@ -358,10 +358,14 @@ describe('RemoteAccessModal', () => {
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
     );
-    const { container } = render(<RemoteAccessModal onClose={() => {}} />);
+    render(<RemoteAccessModal onClose={() => {}} />);
 
     await screen.findByTestId('remote-access-connect-qr');
-    const img = container.querySelector(
+    // Issue #1292: the modal is portaled to document.body now, so the
+    // <img> lives in document.body, not in the render container. Query
+    // the document directly so the assertion still targets the same
+    // element after the portal move.
+    const img = document.body.querySelector(
       '[data-testid="remote-access-connect-qr"] img',
     ) as HTMLImageElement | null;
     expect(img).toBeTruthy();

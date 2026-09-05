@@ -28,15 +28,18 @@ describe('ShortcutCheatsheet', () => {
   });
 
   it('lists every entry from the catalog (drift guard — adding a shortcut must show up here)', () => {
-    const { container } = render(
+    render(
       <ShortcutCheatsheet open onClose={() => {}} />,
     );
     // We don't pin exact text (the catalog grows), but every group heading
     // must be present so the user sees a complete list, not a partial one.
-    expect(container.textContent).toMatch(/App|Window|Global/);
-    expect(container.textContent).toMatch(/Grid/);
-    expect(container.textContent).toMatch(/Terminal/);
-    expect(container.textContent).toMatch(/Modal|Dialog/);
+    // Issue #1292: the modal is portaled to document.body now, so we
+    // query the catalog headings from there instead of the render
+    // container (which is empty after the portal).
+    expect(document.body.textContent).toMatch(/App|Window|Global/);
+    expect(document.body.textContent).toMatch(/Grid/);
+    expect(document.body.textContent).toMatch(/Terminal/);
+    expect(document.body.textContent).toMatch(/Modal|Dialog/);
   });
 
   it('focuses the close button on open (acceptance criterion: "focus the close button by default")', () => {

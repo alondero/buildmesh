@@ -60,9 +60,13 @@ function mockBackend(opts: { accounts?: ReturnType<typeof anthropicAccount>[] } 
 }
 
 /** The visible dimmer div is the wrapper's first child. Click it instead
- *  of the wrapper to exercise the real-DOM backdrop path. */
-function getBackdrop(container: HTMLElement) {
-  return (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+ *  of the wrapper to exercise the real-DOM backdrop path. Issue #1292:
+ *  the modal is now portaled to `document.body`, so we walk from the
+ *  dialog role upward instead of from the render container — same
+ *  structure (wrapper > dimmer + panel), same click target. */
+function getBackdrop(): HTMLElement {
+  const wrapper = screen.getByRole('dialog').parentElement as HTMLElement;
+  return wrapper.firstElementChild as HTMLElement;
 }
 
 /** Open Add provider → Other / custom so the name+key form is dirty-trackable. */
@@ -78,14 +82,14 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     mockBackend();
     const onClose = vi.fn();
     const user = userEvent.setup();
-    const { container } = render(<AppSettingsModal onClose={onClose} />);
+    render(<AppSettingsModal onClose={onClose} />);
 
     await screen.findByText('Anthropic / Claude');
     await openSettingsPane('Providers');
     await openGenericAddForm(user);
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
-    fireEvent.click(getBackdrop(container));
+    fireEvent.click(getBackdrop());
     expect(onClose).not.toHaveBeenCalled();
     screen.getByTestId('modal-discard-banner');
   });
@@ -113,7 +117,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     mockBackend();
     const onClose = vi.fn();
     const user = userEvent.setup();
-    const { container } = render(<AppSettingsModal onClose={onClose} />);
+    render(<AppSettingsModal onClose={onClose} />);
 
     await screen.findByText('Anthropic / Claude');
     await openSettingsPane('Providers');
@@ -121,7 +125,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
     // Verify dirty before cancel.
-    fireEvent.click(getBackdrop(container));
+    fireEvent.click(getBackdrop());
     expect(onClose).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('modal-discard-cancel'));
 
@@ -130,7 +134,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
 
     // After cancel, backdrop should close the modal cleanly (not show the banner).
     onClose.mockClear();
-    fireEvent.click(getBackdrop(container));
+    fireEvent.click(getBackdrop());
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

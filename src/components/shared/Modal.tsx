@@ -10,6 +10,7 @@ import {
   type Ref,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 // Lets `<ModalCloseButton>` (rendered inside the consumer's children) route
 // its click through the Modal's dirty-aware close instead of closing
@@ -263,7 +264,20 @@ export function Modal({
     onClose();
   };
 
-  return (
+  // Issue #1292 — portal the modal to `document.body` so the fixed-
+  // positioned wrapper resolves against the viewport, not against an
+  // ancestor that creates a containing block (`filter`, `transform`,
+  // `opacity`, `backdrop-filter`, `will-change`). The NodeItem row
+  // applies `hover:brightness-125` (`filter`); the MeshItem parent
+  // applies dnd-kit's `transform`. With the wrapper nested under either
+  // of those, `fixed inset-0` shrinks to the ancestor's box and the
+  // dialog stops covering the window. Doing this once at the Modal
+  // boundary covers every consumer (ConfirmDialog, AppSettingsModal,
+  // and the per-tab dialogs in Probe) without patching call sites.
+  // Focus trap, defaultFocusRef, Escape/backdrop close, and the dirty
+  // discard banner all keep working unchanged — the React tree is
+  // identical, only the DOM parent moves.
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
       onMouseDown={captureFocusBeforeBackdrop}
@@ -320,7 +334,8 @@ export function Modal({
           {children}
         </ModalCloseContext.Provider>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
