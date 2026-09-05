@@ -104,10 +104,7 @@ pub async fn read_body_or_send_error(
 ///
 /// The fix is systemic: one helper, one invariant ("flush after every
 /// write"), every route passes through it.
-pub async fn write_full(
-    lines: &mut BufStream<MaybeTls>,
-    bytes: &[u8],
-) -> std::io::Result<()> {
+pub async fn write_full(lines: &mut BufStream<MaybeTls>, bytes: &[u8]) -> std::io::Result<()> {
     let writer = lines.get_mut();
     writer.write_all(bytes).await?;
     writer.flush().await
@@ -280,11 +277,7 @@ pub async fn write_json_with_retry_after(
     write_full(lines, response.as_bytes()).await
 }
 
-pub async fn send_json_error(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    status: &str,
-    msg: &str,
-) {
+pub async fn send_json_error(lines: &mut tokio::io::BufStream<MaybeTls>, status: &str, msg: &str) {
     let body = format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\""));
     let _ = write_json(lines, status, &body).await;
 }
@@ -311,6 +304,89 @@ pub async fn send_json_error(
 /// case-fold step.
 pub fn parse_cli_session_id(s: &str) -> Option<String> {
     uuid::Uuid::parse_str(s).ok().map(|u| u.to_string())
+}
+
+/// Parse an OpenCode session id as posted by the project plugin's
+/// `session.created` event (issue #1294).
+///
+/// OpenCode's `SessionID` schema is `ses_<hex+base62>` (12 hex timestamp
+/// chars + 14 base62 chars), e.g. `ses_fc52ccfb9ffek1jl23ZwpRuSP7`
+/// (`docs/learning/opencode-harness-capabilities.md`). The hex segment is
+/// lowercase, but the base62 tail is **case-sensitive** — OpenCode looks
+/// up ids case-sensitively (`opencode export ses_…Zwp…` succeeds,
+/// `ses_…zwp…` returns `Session not found`), so a "helpful" lower-case
+/// fold here destroys the id and breaks `AgentProvider::resume_args`.
+/// The hook payload cannot use [`parse_cli_session_id`] because OpenCode
+/// ids are NOT UUIDs — they would fail `Uuid::parse_str` and be silently
+/// dropped, leaving `agent_nodes.cli_session_id` NULL forever.
+///
+/// Like the UUID validator, this gate closes the argv flag-position
+/// injection vector for the `--session <id>` resume path
+/// (`AgentProvider::resume_args`). An id like `-dangerously-skip-permissions`
+/// would land in flag position; an id like `ses_$(whoami)` would let
+/// shell metacharacters through. Bounds:
+///   * Must start with the `ses_` prefix (case-insensitive — live 1.18.3
+///     rejects unknown `ses_…` ids rather than creating them, so any
+///     upstream plugin revision that ships a different casing is still
+///     legitimate input; see `opencode-harness-capabilities.md` for the
+///     three settled failure cases). The prefix is normalised to
+///     lowercase on output.
+///   * Total length is bounded to `[5, 129]` — `ses_` alone (4 chars)
+///     is rejected as too short, a 1-char remainder (5 total) is the
+///     shortest well-formed id. The upper bound leaves headroom for
+///     any future OpenCode schema bump without admitting flag-shaped
+///     strings (live ids are 30 chars; 124 chars of remainder is still
+///     well-formed).
+///   * The remainder after `ses_` must be `[0-9a-zA-Z_]` — base62
+///     (case-sensitive) plus the underscore separator. Hyphens, dots,
+///     spaces, and non-ASCII letters are rejected. The remainder's
+///     original casing is preserved on output.
+///
+/// Returns `Some(canonical_form)` where the prefix is `ses_` and the
+/// remainder keeps its original casing, or `None` if the input doesn't
+/// match the gate.
+pub fn parse_opencode_session_id(s: &str) -> Option<String> {
+    let s = s.trim();
+    // Case-insensitive prefix check on the original (un-lowered) input
+    // so we can preserve the remainder's casing. `eq_ignore_ascii_case`
+    // is allocation-free; the prefix itself is only four bytes.
+    if s.len() < 4 || !s.as_bytes()[..4].eq_ignore_ascii_case(b"ses_") {
+        return None;
+    }
+    let rest = &s[4..];
+    if rest.is_empty() || rest.len() > 124 {
+        return None;
+    }
+    // Base62 + underscore. `is_ascii_alphanumeric` covers 0-9, A-Z, a-z;
+    // we add the underscore explicitly. Anything outside ASCII (e.g.
+    // Unicode look-alikes) is rejected by `is_ascii_*`.
+    if !rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return None;
+    }
+    // Canonical form: lowercase prefix + original-cased remainder.
+    Some(format!("ses_{rest}"))
+}
+
+/// Pick the right per-provider validator for a hook payload's session id
+/// (issue #1294).
+///
+/// Returns `None` for unknown providers so the route defaults to its
+/// pre-#1294 behaviour (UUID validator) — a future harness that ships a
+/// non-UUID id shape must update both this dispatcher and its adapter's
+/// `claude_session_id`-style column before the value reaches
+/// `agent_nodes.cli_session_id`. The provider string is the value stored
+/// in `agent_nodes.provider`; OpenCode's id gate lives here, not in
+/// `agent::opencode`, so the attention route has one extraction point.
+pub fn parse_session_id_for_provider(provider: &str, raw: &str) -> Option<String> {
+    match provider {
+        "opencode" => parse_opencode_session_id(raw),
+        // Codex/Claude/AGY/Grok/Cursor all use UUIDs (the alias stack on
+        // `HookPayload::session_id` accepts every casing each harness
+        // ships; canonicalisation to lowercase happens in
+        // `parse_cli_session_id`). Defaulting here means a future
+        // harness adopting UUIDs without code changes "just works".
+        _ => parse_cli_session_id(raw),
+    }
 }
 
 #[cfg(test)]
@@ -374,10 +450,7 @@ mod tests {
         assert_eq!(parse_cli_session_id("1234"), None);
         // Truncated UUID (missing the final segment) — `Uuid::parse_str` is
         // strict about the hyphenated 8-4-4-4-12 shape.
-        assert_eq!(
-            parse_cli_session_id("550e8400-e29b-41d4-a716"),
-            None
-        );
+        assert_eq!(parse_cli_session_id("550e8400-e29b-41d4-a716"), None);
     }
 
     #[test]
@@ -392,6 +465,202 @@ mod tests {
         assert_eq!(parse_cli_session_id("`id`"), None);
     }
 
+    // ---- parse_opencode_session_id (issue #1294) ------------------------
+    //
+    // OpenCode mints `ses_<hex+base62>` ids. Live 1.18.3 rejects unknown
+    // shapes rather than creating them; the validator mirrors that
+    // contract so an unknown id never reaches `--session` argv.
+
+    #[test]
+    fn parse_opencode_session_id_accepts_live_format() {
+        // Canonical example from
+        // `docs/learning/opencode-harness-capabilities.md`. The Base62
+        // tail (`ZwpRuSP7`) is case-sensitive — OpenCode's CLI rejects
+        // unknown ids and looks them up case-sensitively, so the
+        // remainder MUST round-trip in its original casing.
+        assert_eq!(
+            parse_opencode_session_id("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7".to_string()),
+            "the live id round-trips with Base62 casing preserved"
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_id_preserves_mixed_case_remainder() {
+        // The base62 tail is case-sensitive: lowercasing it on output
+        // breaks `opencode --session <id>` resume. Only the `ses_`
+        // prefix is normalised to lowercase; the remainder keeps its
+        // original casing (lower, upper, or mixed).
+        assert_eq!(
+            parse_opencode_session_id("ses_Fc52ccFb9ffEk1jL23zWprUsP7"),
+            Some("ses_Fc52ccFb9ffEk1jL23zWprUsP7".to_string()),
+            "all-upper / all-lower / mixed remainders round-trip as-is"
+        );
+        // Uppercase-only remainder (legal Base62) round-trips unchanged.
+        assert_eq!(
+            parse_opencode_session_id("ses_FC52CCFB9FFEK1JL23ZWPRUSP7"),
+            Some("ses_FC52CCFB9FFEK1JL23ZWPRUSP7".to_string()),
+        );
+        // Lowercase-only remainder round-trips unchanged (no folding).
+        assert_eq!(
+            parse_opencode_session_id("ses_fc52ccfb9ffek1jl23zwprusp7"),
+            Some("ses_fc52ccfb9ffek1jl23zwprusp7".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_id_normalises_prefix_case() {
+        // The `ses_` prefix check is case-insensitive — an upstream
+        // plugin revision could ship `SES_`/`Ses_`/etc. — but the
+        // canonical form stored in `agent_nodes.cli_session_id` always
+        // uses lowercase `ses_` so downstream comparison is uniform.
+        // The remainder keeps its original casing.
+        assert_eq!(
+            parse_opencode_session_id("SES_FC52CCFB9FFE"),
+            Some("ses_FC52CCFB9FFE".to_string()),
+            "uppercase prefix is normalised, remainder casing preserved"
+        );
+        assert_eq!(
+            parse_opencode_session_id("Ses_Fc52CcFb9"),
+            Some("ses_Fc52CcFb9".to_string()),
+        );
+        // Leading whitespace (plugin payload could carry it) is trimmed.
+        assert_eq!(
+            parse_opencode_session_id("  ses_abc123  "),
+            Some("ses_abc123".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_id_accepts_well_formed_unknown_id() {
+        // The validator only gates SHAPE — whether an id actually
+        // resolves in OpenCode is the harness's concern (`opencode
+        // --session ses_000…` returns `Session not found`, so the plugin
+        // never POSTs a phantom id from inside a real OpenCode process).
+        // A well-formed but unknown id round-trips through the gate;
+        // the "don't write unknown ids" AC is enforced by the plugin
+        // running inside OpenCode, not by this Rust validator.
+        assert_eq!(
+            parse_opencode_session_id("ses_0000000000000000000"),
+            Some("ses_0000000000000000000".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_id_rejects_uuid_shaped_input() {
+        // The UUID validator (`parse_cli_session_id`) accepts UUIDs; the
+        // OpenCode validator must NOT — they're disjoint shapes and a
+        // regression that lets a UUID through here would corrupt
+        // `cli_session_id` for an OpenCode resume (`opencode --session <uuid>`
+        // is `Invalid session ID`).
+        assert_eq!(
+            parse_opencode_session_id("550e8400-e29b-41d4-a716-446655440000"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_id_rejects_short_or_oversize_input() {
+        // `ses_` alone (zero remainder) is rejected — too short to be a
+        // real id. The upper bound (124 chars of remainder) bounds
+        // hostile inputs while leaving room for any future OpenCode
+        // schema bump (live ids are 26 chars; a hypothetical 124-char
+        // id is still well-formed).
+        assert_eq!(parse_opencode_session_id("ses_"), None);
+        // A 1-char remainder is well-formed; OpenCode's documented
+        // generator produces 26-char remainders today, but the
+        // validator stays format-only so a future schema bump doesn't
+        // silently reject valid ids.
+        assert_eq!(
+            parse_opencode_session_id("ses_a"),
+            Some("ses_a".to_string())
+        );
+        // Length cap: 132 chars total (5 prefix + 127 remainder > 124 max).
+        let oversize = format!("ses_{}", "a".repeat(127));
+        assert_eq!(parse_opencode_session_id(&oversize), None);
+    }
+
+    #[test]
+    fn parse_opencode_session_id_rejects_flag_like_and_shell_metachars() {
+        // Same argv-injection guard as the UUID validator (issue #1237):
+        // a value beginning with `-` lands in flag position once spliced
+        // into `--session <id>`; a value with shell metacharacters opens
+        // a much wider injection vector.
+        assert_eq!(
+            parse_opencode_session_id("--dangerously-skip-permissions"),
+            None
+        );
+        assert_eq!(parse_opencode_session_id("ses_$(whoami)"), None);
+        assert_eq!(parse_opencode_session_id("ses_a; rm -rf /"), None);
+        assert_eq!(parse_opencode_session_id("ses_a`id`"), None);
+    }
+
+    #[test]
+    fn parse_opencode_session_id_rejects_punctuation_and_non_ascii() {
+        // The character class for the remainder is `[0-9a-zA-Z_]`
+        // (Base62 + underscore, case-preserving). Hyphens, dots,
+        // spaces, and non-ASCII letters are all foreign. Uppercase in
+        // the input is fine — `parse_opencode_session_id_preserves_mixed_case_remainder`
+        // pins that — so we don't re-test it here.
+        assert_eq!(parse_opencode_session_id("ses_abc-123"), None);
+        assert_eq!(parse_opencode_session_id("ses_abc.123"), None);
+        assert_eq!(parse_opencode_session_id("ses_abc 123"), None);
+        assert_eq!(parse_opencode_session_id("ses_café"), None);
+        // Unicode look-alike for `_` (U+1806, MONGOLIAN FOUR DOT
+        // PUNCTUATION sometimes used as a visual underscore) must be
+        // rejected — only ASCII underscore is legal.
+        assert_eq!(parse_opencode_session_id("ses_a\u{1806}b"), None);
+    }
+
+    #[test]
+    fn parse_session_id_for_provider_dispatches_opencode_to_ses_validator() {
+        // The dispatcher used by `attention::hook_session_id` routes
+        // OpenCode through the new gate and every other provider
+        // through the legacy UUID gate. A regression that hard-codes the
+        // UUID validator for all providers would silently drop every
+        // OpenCode plugin POST (the exact symptom from issue #1294).
+        //
+        // Base62 casing is preserved: OpenCode's CLI looks ids up
+        // case-sensitively, so a "helpful" lower-case fold on the way
+        // through the dispatcher would break `AgentProvider::resume_args`.
+        let opencode_id = "ses_fc52ccfb9ffek1jl23ZwpRuSP7";
+        assert_eq!(
+            parse_session_id_for_provider("opencode", opencode_id).as_deref(),
+            Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+        );
+        // Uppercase-prefixed input still routes through OpenCode's
+        // gate and the prefix is normalised to lowercase on output.
+        assert_eq!(
+            parse_session_id_for_provider("opencode", "SES_abcDEF").as_deref(),
+            Some("ses_abcDEF"),
+        );
+        // UUID-shaped input to an OpenCode node — must be rejected, NOT
+        // silently accepted (would corrupt `--session` argv on resume).
+        assert_eq!(
+            parse_session_id_for_provider("opencode", "550e8400-e29b-41d4-a716-446655440000"),
+            None,
+        );
+        // Other providers fall through to the UUID validator (their
+        // contract; a regression that routed them through the OpenCode
+        // gate would break Claude/Codex/AGY/Grok/Cursor captures).
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(
+            parse_session_id_for_provider("claude", uuid).as_deref(),
+            Some(uuid)
+        );
+        assert_eq!(
+            parse_session_id_for_provider("codex", uuid).as_deref(),
+            Some(uuid)
+        );
+        // An unknown provider defaults to the UUID validator — same as
+        // pre-#1294 behaviour, so a future harness adopting UUIDs works
+        // without changes here.
+        assert_eq!(
+            parse_session_id_for_provider("", uuid).as_deref(),
+            Some(uuid)
+        );
+    }
+
     #[test]
     fn extract_token_from_single_cookie() {
         let headers = "Host: localhost\r\nCookie: bm_session=abc123\r\n";
@@ -400,8 +669,7 @@ mod tests {
 
     #[test]
     fn extract_token_from_cookie_with_others() {
-        let headers =
-            "Host: localhost\r\nCookie: foo=bar; bm_session=secret; baz=qux\r\n";
+        let headers = "Host: localhost\r\nCookie: foo=bar; bm_session=secret; baz=qux\r\n";
         assert_eq!(extract_token_from_cookies(headers), Some("secret".into()));
     }
 
@@ -489,8 +757,14 @@ mod tests {
     #[test]
     fn extract_header_value_case_insensitive() {
         let headers = "Host: localhost\r\nSec-WebSocket-Key: abc123\r\nConnection: Upgrade\r\n";
-        assert_eq!(extract_header_value(headers, "Sec-WebSocket-Key"), Some("abc123"));
-        assert_eq!(extract_header_value(headers, "sec-websocket-key"), Some("abc123"));
+        assert_eq!(
+            extract_header_value(headers, "Sec-WebSocket-Key"),
+            Some("abc123")
+        );
+        assert_eq!(
+            extract_header_value(headers, "sec-websocket-key"),
+            Some("abc123")
+        );
         assert_eq!(extract_header_value(headers, "Host"), Some("localhost"));
         assert_eq!(extract_header_value(headers, "Missing"), None);
     }

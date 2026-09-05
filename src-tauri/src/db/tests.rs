@@ -129,6 +129,23 @@ fn hook_session_capture_only_fills_a_missing_cli_session_id() {
     );
 }
 
+/// Issue #1294 — two Root Nodes in the same mesh root share an OpenCode
+/// `directory`; the SQLite poller would conflate them (it matches on
+/// `directory` + `time_created`), but the OpenCode plugin POSTs each
+/// TUI's `session.created` event to a per-node URL
+/// (`/api/attention/<node_id>`, where `node_id` comes from
+/// `BUILDMESH_SESSION_ID` set per-agent by `spawn_environment`). The DB
+/// write is therefore per-row, not per-directory — the fill-only
+/// `UPDATE … WHERE id = ?2` clause in `set_cli_session_id_if_missing_inner`
+/// pins the right row from the URL path component. A regression that
+/// swapped `id` for a directory-derived id would re-introduce the
+/// two-Root-Node collision; the existing
+/// `set_cli_session_id_if_missing_basic_semantics` test pins the row
+/// semantics, and the route's `path_without_query.strip_prefix(
+/// "/api/attention/")` parse is the only place that derives `node_id`
+/// from the wire. Testing the route end-to-end requires the live HTTP
+/// harness (out of scope for an inner-helper unit test).
+
 // File-level `#[cfg(test)]` is applied by the parent module's
 // `#[cfg(test)] mod tests;` declaration — no inner `mod tests {}` wrapper
 // needed (clippy::module_inception otherwise fires because the file is

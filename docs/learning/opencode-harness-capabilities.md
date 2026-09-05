@@ -88,7 +88,7 @@ Not present on TUI: `--session-id`, `--resume`, `--effort`, `--variant`, `--pref
 
 ### Session ID format
 
-Schema: must start with `ses`. Generator: `"ses_" + descending()` → 12 hex timestamp chars + 14 base62 chars.
+Schema: must start with `ses`. Generator: `"ses_" + descending()` → 12 hex timestamp chars + 14 base62 chars. **The base62 tail is case-sensitive** (`0-9a-zA-Z`) — OpenCode's CLI looks ids up case-sensitively (`opencode --session ses_…Zwp…` resolves, `ses_…zwp…` returns `Session not found`). Any "helpful" lower-case fold on the wire destroys the id and breaks `AgentProvider::resume_args`. Live example from a working install: `ses_fdccb6795ffeg1FnX4aC8egj2M` — note the mixed-case `F`, `C`, and `M` in the base62 tail.
 
 Live `opencode session list --format json` includes `id`, `title`, `updated`, `created`, `projectId`, `directory`. SQLite: `opencode db path` → `%USERPROFILE%\.local\share\opencode\opencode.db`.
 
@@ -115,7 +115,7 @@ TUI `validateSession` decodes the ID then `session.get({ throwOnError: true })` 
 | **Model override** | Yes — `--model provider/model` | **Yes** | Format is `provider/model`. |
 | **Effort / variant** | `run --variant`; TUI `ctrl+t` | **No** | Honest for TUI spawn. |
 | **Prefill** | Yes — TUI `--prompt` | **Yes** | Autopilot still blocked on attention. |
-| **Attention / Node Turn** | Plugin `session.idle` / `permission.asked`; SSE `/event` | **No** | Follow-up: inject a plugin. |
+| **Attention / Node Turn** | Plugin `session.idle` / `permission.asked`; SSE `/event` | **Yes** (`session.idle`, `permission.asked`) | Plugin installed via `OpenCode::provision_attention_hooks` (issue #1295). |
 | **Readable transcript** | Export JSON, HTTP messages, SQLite | **No** | Follow-up: `TranscriptFormat::OpenCode`. |
 | **Auto-approve** | `--auto` | **Yes** | Baked into `spawn_recipe()` `base_args`. |
 | **Agent selection** | `--agent` | Unmodeled | No trait flag today. |
@@ -127,7 +127,55 @@ TUI `validateSession` decodes the ID then `session.get({ throwOnError: true })` 
 
 Because OpenCode mints the ID, Buildmesh learns it after spawn and stores `agent_nodes.cli_session_id`.
 
-Shipped: `services::opencode_session` reads the local `opencode.db` (same file as the usage meter), matches `directory` to `resolved.spawn_path`, and requires `time_created` in the spawn window (2s skew). **No historical fallback** — empty window means retry, then give up. IDs must start with `ses_`. Child/archived rows are ignored. PTY capture is off. The poller is a Tokio task that stops if the node leaves the process registry.
+**Two-layered capture (issue #1294, current):**
+
+1. **Primary — plugin `session.created`.** The project plugin installed by
+   `OpenCode::provision_attention_hooks` (issue #1295) forwards the
+   `session.created` event back to `/api/attention/<node_id>`. The
+   attention route classifies it as `Ignore` (lifecycle-neutral) and
+   persists the freshly minted `ses_<…>` id via
+   `set_cli_session_id_if_missing`. This path is unambiguous for two
+   Root Nodes in one mesh root — the plugin runs in-process with the
+   TUI that just started, so it knows which node it belongs to via
+   the per-agent `BUILDMESH_SESSION_ID` env var (`spawn_environment`).
+2. **Fallback — SQLite poller.** `services::opencode_session` reads
+   the local `opencode.db` (same file as the usage meter), matches
+   `directory` to `resolved.spawn_path`, and requires `time_created`
+   in the spawn window (2s skew). **No historical fallback** — empty
+   window means retry, then give up. IDs must start with `ses_`.
+   Child/archived rows are ignored. PTY capture is off. The poller
+   is a Tokio task that stops if the node leaves the process
+   registry. Cannot distinguish two Root Nodes in one directory
+   (matches only on `directory`, which is shared), but the plugin has
+   already disambiguated by then.
+
+   **Important — interactive-only limitation.** OpenCode mints the
+   `ses_<…>` row on the first interactive prompt, NOT at TUI boot. The
+   poller runs its five fixed delays (400ms, 800ms, 1600ms, 2500ms,
+   4000ms ≈ 9.3s total) and stops. **The fallback is therefore reliable
+   only for prefill/automated spawns (`--prompt "..."` flows) where the
+   first prompt fires inside the 9.3s window.** For an interactive
+   spawn where the user takes longer than ~9s to type their first
+   prompt, the poller will time out and `cli_session_id` will stay
+   NULL — the plugin path is the ONLY reliable capture for
+   interactive sessions. If the plugin is missing or blocked (e.g.
+   the `.opencode/plugins/` write was denied, the user runs OpenCode
+   from a read-only install), `auto_resume_agent_nodes` cannot recover
+   the node on restart. Document this in any deployment where the
+   plugin is optional.
+
+### Why the SQLite poller isn't enough alone
+
+Production repro from issue #1294's investigation comment: node
+`3417` was spawned at `20:10:04 UTC`. The poller's 9.3s retry window
+gave up at `20:10:13 UTC`. OpenCode actually created the session row
+at `21:06:29 UTC` (an hour later) — the TUI mints the row on first
+interactive prompt, not at boot. Once the poller times out, it never
+retries, and `agent_nodes.cli_session_id` stays NULL. On restart,
+`auto_resume_agent_nodes` queries `cli_session_id IS NOT NULL` and
+the node is never returned for auto-resume. The plugin's
+`session.created` event closes that gap by firing at TUI boot, not
+at first prompt.
 
 ### What will not work
 
@@ -152,7 +200,7 @@ supports_resume: true
 auto_resume_on_startup: true
 self_assigns_session_id: true
 captures_session_id_from_pty: false
-after_fresh_spawn: OpenCode SQLite poller
+after_fresh_spawn: OpenCode SQLite poller (fallback only — primary capture is the plugin's `session.created`)
 session_assign_args: []
 resume_args(id): ["--session", id]
 supports_model_override: true
@@ -160,10 +208,20 @@ model_args: ["--model", model]          // provider/model
 supports_prefill: true
 prefill_args: ["--prompt", text]
 effort_control: None
-requires_attention_hook: false
-produces_readable_transcript: false
+requires_attention_hook: true           // issue #1295 — plugin forwards session.idle + permission.asked
+attention_capability: Hook { events: [InputRequired, PermissionRequested], launch_mode: PermissionAsk }
+produces_readable_transcript: true      // issue #1296 — transcript reader over opencode.db
 spawn_recipe base_args: ["--auto"]      // issue #1297 — auto-approve non-denied perms
 ```
+
+The attention route (issue #1294) is provider-aware:
+`hook_session_id(body, provider)` routes an OpenCode `ses_<…>` id
+through `parse_opencode_session_id` (ses_ prefix + length + char
+class) and every other provider through the legacy UUID validator
+`parse_cli_session_id`. The classifier recognizes
+`hook_event_name: "session.created"` and returns `Decision::Ignore`,
+so the capture-only event never trips the "needs attention"
+pipeline.
 
 Closest siblings: **Kimi** (`-S` / `--session`, self-assign, model yes) plus **mcode** prefill. OpenCode is Kimi + `--prompt` + `--auto`.
 
@@ -171,9 +229,9 @@ Closest siblings: **Kimi** (`-S` / `--session`, self-assign, model yes) plus **m
 
 ## Remaining follow-ups
 
-- Harden capture further: plugin `session.created` or `--port` + HTTP. SQLite polling still cannot distinguish two Root Nodes in the same directory.
-- Attention plugin (`session.idle` / `permission.asked`) so Autopilot can run.
-- Transcript reader (`opencode export` JSON) so the archive picker and coordinator rich layer work.
+- Attention plugin (`session.idle` / `permission.asked`) so Autopilot can run. — **DONE issue #1295 (PR #1559).**
+- Transcript reader (`opencode export` JSON) so the archive picker and coordinator rich layer work. — **DONE issue #1296.**
+- Harden capture further: plugin `session.created` or `--port` + HTTP. SQLite polling still cannot distinguish two Root Nodes in the same directory. — **DONE issue #1294. Plugin path is primary, SQLite poller is fallback.**
 - `--fork` regenerate-same-harness wire-up: add a `ResumeCause::Regenerate` variant and route `default_prepare` to append `--fork` after `--session <id>` when that cause is set. The CLI shape is settled; the call site is the next slice.
 - `--agent <name>` Mesh / app-default slot: add `agent` to `HarnessConfigValue` + `ResolvedAgentConfig`, plus a capability gate. The CLI shape is settled; the slot is the next slice.
 - `run --variant` does not exist on the TUI recipe; the TUI is `EffortControlKind::None` and the capability-coherence test (`agent::spawn::command_tests::capability_recipe_coherence`) confirms Buildmesh never forwards a synthetic `--effort` to OpenCode.

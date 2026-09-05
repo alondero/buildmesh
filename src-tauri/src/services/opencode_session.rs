@@ -210,10 +210,27 @@ fn try_capture_from_db_path(
     select_id_for_directory(&sessions, spawn_directory, created_not_before_ms).map(str::to_string)
 }
 
-/// Background poller: read OpenCode's local SQLite until a session created
-/// in this spawn's time window appears, then write `cli_session_id`.
-/// Cancels if the node is no longer in the process registry (killed /
-/// crashed before the TUI flushed).
+/// Background poller (fallback path, issue #1294): read OpenCode's local
+/// SQLite until a session created in this spawn's time window appears,
+/// then write `cli_session_id`. Cancels if the node is no longer in the
+/// process registry (killed / crashed before the TUI flushed).
+///
+/// **The primary capture path is the project's plugin** (see
+/// `provider::opencode` and `opencode_attention_plugin.js`): the
+/// plugin's `session.created` event reaches the attention route's
+/// `Decision::Ignore` arm and persists the `ses_<…>` id via
+/// `set_cli_session_id_if_missing`. This poller is the fallback when
+/// the plugin is missing or blocked — it matches the spawn
+/// `directory` against the opencode.db session table (no node_id
+/// binding, so two Root Nodes in one mesh root are
+/// indistinguishable — but the plugin has already disambiguated by then).
+///
+/// Production reproduction from issue #1294's investigation comment:
+/// the SQLite row landed an hour after spawn (the TUI minted the id
+/// on first interactive prompt, not at boot), so a 9.3s retry window
+/// gives up too early for the typical cold-spawn case. The plugin
+/// closes that gap; this poller remains as a safety net for hosts where
+/// the plugin is absent.
 pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: EnvType) {
     let spawn_epoch_ms = chrono::Utc::now().timestamp_millis();
     tauri::async_runtime::spawn(async move {

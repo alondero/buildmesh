@@ -16,8 +16,8 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
-use crate::http::MaybeTls;
 use crate::agent::session_lifecycle::{SemanticTurnKind, SemanticTurnPayload};
+use crate::http::MaybeTls;
 
 use crate::http::request;
 
@@ -53,12 +53,22 @@ const MAX_HOOK_BODY: usize = 64 * 1024;
 /// Cursor hook payload with `{"conversation_id": "...", "hook_event_name":
 /// "stop"}` flows through the same parser as Claude/AGY/Grok callbacks.
 ///
+/// OpenCode (issue #1294) ships `sessionID` (all-caps for "ID", per
+/// the upstream plugin event convention). The alias stack accepts
+/// that shape alongside the Claude/AGY/Grok/Cursor ones so a single
+/// parser handles every harness's payload.
+///
 /// Note: fields like `execution_num`, `workspace_paths`, `artifact_directory_path`,
 /// `model_name`, and `error` are parsed for telemetry, diagnostics, and forward
 /// compatibility with future AGY revisions, but are not decision inputs in `decide()`.
 #[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 struct HookPayload {
-    #[serde(alias = "sessionId", alias = "conversationId", alias = "conversation_id")]
+    #[serde(
+        alias = "sessionId",
+        alias = "sessionID",
+        alias = "conversationId",
+        alias = "conversation_id"
+    )]
     session_id: Option<String>,
     #[serde(alias = "hookEventName", alias = "hook_event_name")]
     hook_event_name: Option<String>,
@@ -111,7 +121,11 @@ struct HookPayload {
     #[serde(alias = "workspacePaths", alias = "workspace_paths", default)]
     workspace_paths: Option<Vec<String>>,
     /// AGY artifact directory path.
-    #[serde(alias = "artifactDirectoryPath", alias = "artifact_directory_path", default)]
+    #[serde(
+        alias = "artifactDirectoryPath",
+        alias = "artifact_directory_path",
+        default
+    )]
     artifact_directory_path: Option<String>,
     /// AGY model name.
     #[serde(alias = "modelName", alias = "model_name", default)]
@@ -132,10 +146,16 @@ const MAX_SEMANTIC_DESCRIPTION: usize = 240;
 
 fn clean_description(value: &str) -> Option<String> {
     let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() { return None; }
+    if normalized.is_empty() {
+        return None;
+    }
     let mut chars = normalized.chars();
     let clipped: String = chars.by_ref().take(MAX_SEMANTIC_DESCRIPTION).collect();
-    Some(if chars.next().is_some() { format!("{clipped}…") } else { clipped })
+    Some(if chars.next().is_some() {
+        format!("{clipped}…")
+    } else {
+        clipped
+    })
 }
 
 fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
@@ -154,7 +174,11 @@ fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
 fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|part| {
         let (k, v) = part.split_once('=')?;
-        if k == key { Some(v) } else { None }
+        if k == key {
+            Some(v)
+        } else {
+            None
+        }
     })
 }
 
@@ -181,8 +205,7 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
     let permission_event = matches!(
         payload.hook_event_name.as_deref(),
         Some("PermissionRequest") | Some("PreToolUse") | Some("permission.asked")
-    ) || payload.notification_type.as_deref() == Some("permission_prompt")
-    ;
+    ) || payload.notification_type.as_deref() == Some("permission_prompt");
 
     if permission_event {
         if let Some(command) = command {
@@ -197,12 +220,21 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
         });
         let description = match (tool_name, path) {
             (Some(name), Some(path)) => {
-                let label = if name.eq_ignore_ascii_case("edit") { "edit" } else { name.trim() };
+                let label = if name.eq_ignore_ascii_case("edit") {
+                    "edit"
+                } else {
+                    name.trim()
+                };
                 format!("Allow {}: {}", label, path.trim())
             }
             (Some(name), None) => format!("Allow: {}", name.trim()),
             (None, Some(path)) => format!("Allow: {}", path.trim()),
-            _ => payload.message.as_deref().map(str::trim).unwrap_or("Allow tool" ).to_owned(),
+            _ => payload
+                .message
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("Allow tool")
+                .to_owned(),
         };
         return Some(SemanticTurn {
             kind: SemanticTurnKind::PermissionRequest,
@@ -228,16 +260,22 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
     })
 }
 
-/// Extract the provider-owned UUID from a structured hook callback. An
-/// arbitrary string must never enter `cli_session_id`: resume treats that
-/// column as an executable CLI argument. Codex, Claude, and AGY all use
-/// UUIDs; the alias on `HookPayload::session_id` makes
-/// `conversationId` (AGY) parse through the same code path. Validation
-/// is delegated to [`request::parse_cli_session_id`] so this route and
-/// `import_and_resume` share one boundary check (issue #1237).
-fn hook_session_id(body: &[u8]) -> Option<String> {
-    let id = serde_json::from_slice::<HookPayload>(body).ok()?.session_id?;
-    request::parse_cli_session_id(&id)
+/// Extract the provider-owned session id from a structured hook callback.
+/// An arbitrary string must never enter `cli_session_id`: resume treats
+/// that column as an executable CLI argument. Codex, Claude, AGY, Grok,
+/// and Cursor all use UUIDs; the alias on `HookPayload::session_id`
+/// makes `conversationId` (AGY) and `conversation_id` (Cursor) parse
+/// through the same code path. OpenCode mints `ses_<hex+base62>` ids
+/// instead (issue #1294), so this helper is **provider-aware** and
+/// dispatches to `request::parse_opencode_session_id` for OpenCode
+/// (`--session <uuid>` is `Invalid session ID` on the live CLI) or to
+/// `request::parse_cli_session_id` for every other provider (the
+/// issue #1237 UUID validator shared with `import_and_resume`).
+fn hook_session_id(body: &[u8], provider: &str) -> Option<String> {
+    let id = serde_json::from_slice::<HookPayload>(body)
+        .ok()?
+        .session_id?;
+    request::parse_session_id_for_provider(provider, &id)
 }
 
 /// What to do with an incoming attention webhook (issue #1364).
@@ -268,13 +306,22 @@ struct Classified {
 
 impl Classified {
     fn mark_input(detail: crate::agent::session_lifecycle::HookSignalDetail) -> Self {
-        Self { decision: Decision::MarkInput, detail }
+        Self {
+            decision: Decision::MarkInput,
+            detail,
+        }
     }
     fn ready(detail: crate::agent::session_lifecycle::HookSignalDetail) -> Self {
-        Self { decision: Decision::Ready, detail }
+        Self {
+            decision: Decision::Ready,
+            detail,
+        }
     }
     fn suppress(detail: crate::agent::session_lifecycle::HookSignalDetail) -> Self {
-        Self { decision: Decision::SuppressPendingBackground, detail }
+        Self {
+            decision: Decision::SuppressPendingBackground,
+            detail,
+        }
     }
 }
 
@@ -305,6 +352,14 @@ impl Classified {
 ///    Claude-style transcript file, so this rule must fire BEFORE the
 ///    transcript-scan fallback (rule 5) — otherwise the node would land
 ///    in `Ready`.
+/// 3b. An OpenCode `session.created` plugin event (issue #1294) →
+///    `Ignore`. Fires once at TUI boot carrying the freshly minted
+///    `ses_<…>` id; persisting that id is the primary capture path for
+///    `agent_nodes.cli_session_id` (the SQLite poller remains the fallback
+///    when the plugin is missing or blocked). This rule runs BEFORE the
+///    transcript-scan fallback for the same reason as `session.idle`: an
+///    OpenCode node never has a Claude-style transcript path, so rule 5
+///    would otherwise land a boot event on `Ready`.
 /// 4. AGY's `Stop` with `fullyIdle: false` (or explicit `fullyIdle: false`,
 ///    issue #1285, #1367) → suppress. The harness signalled the turn ended
 ///    but the agent is still busy on background work. Same false-yield
@@ -316,7 +371,11 @@ impl Classified {
 /// 6. No transcript path, unreadable transcript, or no pending tasks →
 ///    `Ready` (issue #1364): a clean turn completion is NOT a user-input
 ///    request. The node lands in `Ready`, never in `AwaitingInput`.
-fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> Classified {
+fn classify(
+    body: &[u8],
+    provider: &str,
+    count_pending: impl FnOnce(&Path) -> Option<usize>,
+) -> Classified {
     let Ok(payload) = serde_json::from_slice::<HookPayload>(body) else {
         return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
             signal_health: crate::agent::session_lifecycle::SignalHealth::Degraded,
@@ -336,10 +395,19 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
     }
     let detail = crate::agent::session_lifecycle::HookSignalDetail {
         provider_event: payload.hook_event_name.clone(),
+        // Provider-aware extractor: OpenCode ships `ses_<…>` ids, every
+        // other harness ships UUIDs. Defaulting to UUID parsing for
+        // unknown providers matches the pre-#1294 behaviour so a future
+        // UUID harness "just works". Issue #1294 round-2 review
+        // (the original implementation hard-coded `parse_cli_session_id`
+        // here, which silently dropped every OpenCode `session.idle` /
+        // `permission.asked` callback — the frontend telemetry and the
+        // `agent-lifecycle` event both received a blank
+        // `provider_session_id`).
         provider_session_id: payload
             .session_id
             .as_deref()
-            .and_then(request::parse_cli_session_id),
+            .and_then(|raw| request::parse_session_id_for_provider(provider, raw)),
         completion_reason: payload
             .termination_reason
             .clone()
@@ -380,11 +448,22 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
         idle.kind = Some(crate::agent::session_lifecycle::LifecycleKind::InputRequired);
         return Classified::mark_input(idle);
     }
+    // OpenCode plugin (issue #1294) — rule 3b above. Fires once at TUI
+    // boot carrying the freshly minted `ses_…` id; `set_cli_session_id_if_missing`
+    // (called outside this function) persists it as the primary
+    // capture path. The classifier still treats the event as lifecycle-neutral
+    // so a fresh spawn doesn't immediately trip the "needs attention"
+    // pipeline on what is, structurally, just an id handshake.
+    if event == Some("session.created") {
+        return Classified {
+            decision: Decision::Ignore,
+            detail,
+        };
+    }
     // Grok posts `hookEventName: "notification"` (lowercase); Claude posts
     // `"Notification"`. Match case-insensitively so the structured
     // `notificationType` handling below applies to both.
     if event == Some("notification") {
-
         // Claude Code's documented Notification envelope is "… needs your
         // permission to use X" — anchored to the verb phrase, not a bare
         // "permission" substring, so prose like "Permission was already
@@ -522,16 +601,16 @@ pub async fn handle_post(
     // below — see the N1 review point about hitting SQLite twice
     // for the same row.
     let node: Option<crate::models::AgentNode> =
-    tokio::task::spawn_blocking(move || crate::db::get_agent_node_by_id(session_id))
-        .await
-        .ok()
-        .and_then(|r| r.ok());
-let stored_cli_session_id: String = node
-    .as_ref()
-    .and_then(|n| n.cli_session_id.clone())
-    .unwrap_or_default();
-let node_provider: Option<String> = node.as_ref().map(|n| n.provider.clone());
-let provider: &str = node_provider.as_deref().unwrap_or("");
+        tokio::task::spawn_blocking(move || crate::db::get_agent_node_by_id(session_id))
+            .await
+            .ok()
+            .and_then(|r| r.ok());
+    let stored_cli_session_id: String = node
+        .as_ref()
+        .and_then(|n| n.cli_session_id.clone())
+        .unwrap_or_default();
+    let node_provider: Option<String> = node.as_ref().map(|n| n.provider.clone());
+    let provider: &str = node_provider.as_deref().unwrap_or("");
     if !verify_attention_token(
         provider,
         query_string,
@@ -541,8 +620,7 @@ let provider: &str = node_provider.as_deref().unwrap_or("");
         return;
     }
 
-    let Some(body) =
-        request::read_body_or_send_error(lines, content_length, MAX_HOOK_BODY).await
+    let Some(body) = request::read_body_or_send_error(lines, content_length, MAX_HOOK_BODY).await
     else {
         return;
     };
@@ -560,7 +638,13 @@ let provider: &str = node_provider.as_deref().unwrap_or("");
     // — then runs in ONE `run_blocking` dispatch below, so a single webhook
     // POST costs one blocking hop and one DB lock acquisition instead of a
     // Tokio↔SQLite ping-pong (issue #1364 review).
-    let hook_uuid = hook_session_id(&body);
+    //
+    // Issue #1294: the session-id extractor is provider-aware so an
+    // OpenCode `ses_…` id parses through `parse_opencode_session_id`
+    // (the existing UUID validator would silently drop it). Provider
+    // is read from the row already fetched for the token gate above —
+    // no extra DB hop.
+    let hook_uuid = hook_session_id(&body, provider);
 
     // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
     // `"tool_execution_limit_reached"`) so a future debugging session can
@@ -570,7 +654,11 @@ let provider: &str = node_provider.as_deref().unwrap_or("");
     let payload_parsed = serde_json::from_slice::<HookPayload>(&body);
     match payload_parsed {
         Ok(ref payload) => {
-            if let Some(ref reason) = payload.termination_reason.as_deref().filter(|r| !r.is_empty()) {
+            if let Some(ref reason) = payload
+                .termination_reason
+                .as_deref()
+                .filter(|r| !r.is_empty())
+            {
                 tracing::debug!(
                     "attention webhook for node {} reported terminationReason={}",
                     session_id,
@@ -595,7 +683,11 @@ let provider: &str = node_provider.as_deref().unwrap_or("");
 
     let semantic = payload_parsed.as_ref().ok().and_then(semantic_turn);
 
-    let classified = classify(&body, crate::services::transcript_reader::count_pending_background_tasks);
+    let classified = classify(
+        &body,
+        provider,
+        crate::services::transcript_reader::count_pending_background_tasks,
+    );
     let mut detail = classified.detail;
     // The semantic turn always wins over the raw message for the
     // human-facing description; keep the health the classifier set.
@@ -825,9 +917,10 @@ mod tests {
     /// Test shim: classify and return just the [`Decision`].
     fn classify_decision(
         body: &[u8],
+        provider: &str,
         count_pending: impl FnOnce(&Path) -> Option<usize>,
     ) -> Decision {
-        classify(body, count_pending).decision
+        classify(body, provider, count_pending).decision
     }
 
     #[test]
@@ -836,7 +929,7 @@ mod tests {
         // the old always-mark behaviour, never to silence — but the signal is
         // unknown, so the health is Degraded, never a high-confidence mark.
         for body in [&b""[..], b"not json".as_slice()] {
-            let classified = classify(body, |_| Some(5));
+            let classified = classify(body, "", |_| Some(5));
             assert_eq!(classified.decision, Decision::MarkInput);
             assert_eq!(
                 classified.detail.signal_health,
@@ -850,7 +943,7 @@ mod tests {
     fn fieldless_json_body_marks_input_with_degraded_health() {
         // A parseable `{}` with no recognized fields is an unknown signal —
         // not "turn completed". Mark with degraded health (issue #1364).
-        let classified = classify(b"{}", |_| Some(0));
+        let classified = classify(b"{}", "", |_| Some(0));
         assert_eq!(classified.decision, Decision::MarkInput);
         assert_eq!(
             classified.detail.signal_health,
@@ -866,23 +959,26 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "claude").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
     }
 
     #[test]
     fn missing_malformed_or_non_uuid_session_id_is_ignored() {
-        assert_eq!(hook_session_id(b"{}"), None);
-        assert_eq!(hook_session_id(b"not json"), None);
-        assert_eq!(hook_session_id(br#"{"session_id":"most-recent"}"#), None);
+        assert_eq!(hook_session_id(b"{}", "claude"), None);
+        assert_eq!(hook_session_id(b"not json", "claude"), None);
+        assert_eq!(
+            hook_session_id(br#"{"session_id":"most-recent"}"#, "claude"),
+            None
+        );
     }
 
     #[test]
     fn stop_with_pending_background_tasks_suppresses() {
         let body = stop_body("/tmp/session.jsonl");
         assert_eq!(
-            classify_decision(&body, |_| Some(2)),
+            classify_decision(&body, "", |_| Some(2)),
             Decision::SuppressPendingBackground
         );
     }
@@ -892,7 +988,7 @@ mod tests {
         // Issue #1364 — a clean turn completion is NOT a user-input request;
         // the node lands in Ready, never AwaitingInput.
         let body = stop_body("/tmp/session.jsonl");
-        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
+        assert_eq!(classify_decision(&body, "", |_| Some(0)), Decision::Ready);
     }
 
     #[test]
@@ -901,13 +997,15 @@ mod tests {
         // prove pending work — the turn is treated as completed (Ready),
         // which still never blocks a later permission callback.
         let body = stop_body("/tmp/session.jsonl");
-        assert_eq!(classify_decision(&body, |_| None), Decision::Ready);
+        assert_eq!(classify_decision(&body, "", |_| None), Decision::Ready);
     }
 
     #[test]
     fn missing_transcript_path_is_ready() {
-        let body = serde_json::json!({"hook_event_name": "Stop"}).to_string().into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(3)), Decision::Ready);
+        let body = serde_json::json!({"hook_event_name": "Stop"})
+            .to_string()
+            .into_bytes();
+        assert_eq!(classify_decision(&body, "", |_| Some(3)), Decision::Ready);
     }
 
     #[test]
@@ -921,7 +1019,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(2));
+        let classified = classify(&body, "", |_| Some(2));
         assert_eq!(classified.decision, Decision::MarkInput);
         assert_eq!(
             classified.detail.signal_health,
@@ -943,7 +1041,10 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::MarkInput);
+        assert_eq!(
+            classify_decision(&body, "", |_| Some(2)),
+            Decision::MarkInput
+        );
     }
 
     #[test]
@@ -958,7 +1059,7 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(
-            classify_decision(&body, |_| Some(1)),
+            classify_decision(&body, "", |_| Some(1)),
             Decision::SuppressPendingBackground
         );
     }
@@ -986,7 +1087,10 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::MarkInput);
+        assert_eq!(
+            classify_decision(&body, "", |_| Some(2)),
+            Decision::MarkInput
+        );
     }
 
     /// Grok's idle prompt (`notificationType = "idle_prompt"`) carries
@@ -1002,7 +1106,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::Ready);
+        assert_eq!(classify_decision(&body, "", |_| Some(2)), Decision::Ready);
     }
 
     /// Grok's `task_complete` notification is an explicit completion signal
@@ -1017,7 +1121,127 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::Ready);
+        assert_eq!(classify_decision(&body, "", |_| Some(2)), Decision::Ready);
+    }
+
+    // -- OpenCode plugin (issue #1294) ---------------------------------------
+
+    /// OpenCode's `session.created` plugin event fires once at TUI boot
+    /// carrying the freshly minted `ses_<…>` id. The classifier treats
+    /// it as lifecycle-neutral (`Ignore`); the session id itself is
+    /// captured by `set_cli_session_id_if_missing` above the
+    /// classifier's apply pass — the very property that makes this the
+    /// primary capture path for `agent_nodes.cli_session_id`. A regression
+    /// that lands this event on `Ready` or `MarkInput` would either fire
+    /// naming/autopilot on an empty session (Ready) or pop an
+    /// "awaiting_input" badge on a node that just booted (MarkInput).
+    #[test]
+    fn opencode_session_created_is_lifecycle_neutral() {
+        let body = serde_json::json!({
+            "hook_event_name": "session.created",
+            "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(classify_decision(&body, "", |_| Some(5)), Decision::Ignore);
+        // The classifier uses `provider_event` for downstream telemetry;
+        // `Ignore` callers still record the upstream name verbatim so
+        // future diagnostics can correlate.
+        let classified = classify(&body, "", |_| Some(5));
+        assert_eq!(
+            classified.detail.provider_event.as_deref(),
+            Some("session.created")
+        );
+        // The id must round-trip through the provider-aware extractor so
+        // `set_cli_session_id_if_missing` (called outside the classifier)
+        // has a valid `ses_…` string to write. Without the OpenCode
+        // gate the UUID parser would silently drop it — the exact symptom
+        // this issue set out to fix. Base62 casing is preserved (issue
+        // #1294 round-2 review): the live `ses_…ZwpRuSP7` round-trips
+        // case-sensitively because OpenCode's CLI looks ids up that way.
+        assert_eq!(
+            hook_session_id(&body, "opencode").as_deref(),
+            Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+        );
+        // Same body, non-OpenCode provider — the legacy UUID gate
+        // rejects the `ses_…` shape (a UUID-shaped field is what Claude/
+        // Codex/AGY/Grok/Cursor carry). Pins the per-provider
+        // dispatcher.
+        assert_eq!(hook_session_id(&body, "claude"), None);
+    }
+
+    /// Issue #1294 — `session.created` is case-folded the same way as
+    /// `session.idle` so an upstream plugin version that emits
+    /// `SESSION.CREATED` still hits the rule. Regression pin matching
+    /// `opencode_session_idle_is_case_insensitive` above.
+    #[test]
+    fn opencode_session_created_is_case_insensitive() {
+        for casing in ["session.created", "SESSION.CREATED", "Session.Created"] {
+            let body = serde_json::json!({
+                "hook_event_name": casing,
+                "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+            })
+            .to_string()
+            .into_bytes();
+            assert_eq!(
+                classify_decision(&body, "", |_| Some(5)),
+                Decision::Ignore,
+                "casing {casing:?} must hit the session.created rule"
+            );
+        }
+    }
+
+    /// Issue #1294 negative AC: a plugin payload that claims to be a
+    /// `session.created` event but carries a UUID-shaped id (instead of
+    /// the documented `ses_…` shape) must NOT be captured. The provider-
+    /// aware extractor drops it on the OpenCode gate, so the underlying
+    /// `set_cli_session_id_if_missing` call sees `None` and writes
+    /// nothing. The classifier still returns `Ignore` so a malformed
+    /// payload can't fake a "needs attention" land via a side channel.
+    #[test]
+    fn opencode_session_created_with_uuid_is_not_captured() {
+        let body = serde_json::json!({
+            "hook_event_name": "session.created",
+            "sessionID": "550e8400-e29b-41d4-a716-446655440000",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(classify_decision(&body, "", |_| Some(5)), Decision::Ignore);
+        assert_eq!(hook_session_id(&body, "opencode"), None);
+    }
+
+    /// Issue #1294 round-2 review: `classify()` must use the
+    /// provider-aware extractor (not the legacy UUID-only gate) so the
+    /// `detail.provider_session_id` survives into the `agent-lifecycle`
+    /// event for OpenCode. The original implementation hard-coded
+    /// `parse_cli_session_id` here, which silently dropped every
+    /// OpenCode callback's id and left the frontend telemetry with a
+    /// blank `provider_session_id` field. Pin that the provider reaches
+    /// the extractor by checking the field on the classified detail.
+    #[test]
+    fn classify_populates_provider_session_id_for_opencode() {
+        let body = serde_json::json!({
+            "hook_event_name": "session.created",
+            "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+        })
+        .to_string()
+        .into_bytes();
+        // Provider is "opencode" — the Base62 tail must round-trip
+        // with original casing preserved (issue #1294 round-2 review).
+        let classified = classify(&body, "opencode", |_| Some(5));
+        assert_eq!(
+            classified.detail.provider_session_id.as_deref(),
+            Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            "opencode provider must route through parse_opencode_session_id, not the UUID gate",
+        );
+        // Same body, provider = "" — the legacy UUID gate rejects the
+        // `ses_…` shape, so `provider_session_id` is None. Pins that
+        // the dispatcher truly switches on provider.
+        let classified_unknown = classify(&body, "", |_| Some(5));
+        assert_eq!(
+            classified_unknown.detail.provider_session_id, None,
+            "default UUID gate must not accept the OpenCode id shape",
+        );
     }
 
     // -- OpenCode plugin (issue #1295) ---------------------------------------
@@ -1036,15 +1260,72 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(0));
+        let classified = classify(&body, "", |_| Some(0));
         assert_eq!(classified.decision, Decision::MarkInput);
         assert_eq!(
             classified.detail.kind,
             Some(crate::agent::session_lifecycle::LifecycleKind::InputRequired),
             "session.idle must carry InputRequired, not the bare PermissionRequested kind"
         );
-        assert_eq!(classified.detail.signal_health, crate::agent::session_lifecycle::SignalHealth::Ok);
-        assert_eq!(classified.detail.provider_event.as_deref(), Some("session.idle"));
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Ok
+        );
+        assert_eq!(
+            classified.detail.provider_event.as_deref(),
+            Some("session.idle")
+        );
+    }
+
+    /// Issue #1294 round-2 review: the OpenCode plugin now attaches
+    /// `sessionID` to EVERY lifecycle event (session.created /
+    /// session.idle / permission.asked) so the route's ordering-token
+    /// fence (`attention.rs:690-702`) can drop stale callbacks from a
+    /// previous OpenCode incarnation. Pin that `session.idle`'s id flows
+    /// through the provider-aware extractor and lands on
+    /// `detail.provider_session_id` — without this, the fence's
+    /// `if let Some(hook) = hook_uuid.as_deref()` short-circuits and a
+    /// second OpenCode process can poison the first's UI state.
+    #[test]
+    fn opencode_session_idle_carries_session_id_for_fencing() {
+        let body = serde_json::json!({
+            "hook_event_name": "session.idle",
+            "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+            "message": "idle",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, "opencode", |_| Some(0));
+        assert_eq!(
+            classified.detail.provider_session_id.as_deref(),
+            Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            "session.idle must propagate sessionID with Base62 casing preserved \
+             (issue #1294 round-2 — fence must fire on idle callbacks too)",
+        );
+        assert_eq!(classified.decision, Decision::MarkInput);
+    }
+
+    /// Same regression pin for `permission.asked`. Without sessionID on
+    /// the permission callback, an old OpenCode process can re-issue a
+    /// stale permission request and the route has no way to distinguish
+    /// it from the live process's callback.
+    #[test]
+    fn opencode_permission_asked_carries_session_id_for_fencing() {
+        let body = serde_json::json!({
+            "hook_event_name": "permission.asked",
+            "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+            "notification_type": "permission_prompt",
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, "opencode", |_| Some(0));
+        assert_eq!(
+            classified.detail.provider_session_id.as_deref(),
+            Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            "permission.asked must propagate sessionID with Base62 casing preserved \
+             (issue #1294 round-2 — fence must fire on permission callbacks too)",
+        );
+        assert_eq!(classified.decision, Decision::MarkInput);
     }
 
     /// OpenCode's `session.idle` is case-folded the same way as the
@@ -1061,7 +1342,7 @@ mod tests {
             })
             .to_string()
             .into_bytes();
-            let classified = classify(&body, |_| Some(0));
+            let classified = classify(&body, "", |_| Some(0));
             assert_eq!(
                 classified.decision,
                 Decision::MarkInput,
@@ -1089,9 +1370,12 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(5));
+        let classified = classify(&body, "", |_| Some(5));
         assert_eq!(classified.decision, Decision::MarkInput);
-        assert_eq!(classified.detail.provider_event.as_deref(), Some("permission.asked"));
+        assert_eq!(
+            classified.detail.provider_event.as_deref(),
+            Some("permission.asked")
+        );
         // Forwarded tool name rides on the structured `tool_name` field;
         // it does NOT change the lifecycle kind — the harness already
         // labelled this as a permission event upstream.
@@ -1112,9 +1396,12 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(0));
+        let classified = classify(&body, "", |_| Some(0));
         assert_eq!(classified.decision, Decision::MarkInput);
-        assert_eq!(classified.detail.provider_event.as_deref(), Some("PermissionRequest"));
+        assert_eq!(
+            classified.detail.provider_event.as_deref(),
+            Some("PermissionRequest")
+        );
     }
 
     /// Regression: an OpenCode permission payload that arrives with the
@@ -1137,7 +1424,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(0));
+        let classified = classify(&body, "", |_| Some(0));
         assert_eq!(
             classified.decision,
             Decision::MarkInput,
@@ -1159,9 +1446,9 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ignore);
+        assert_eq!(classify_decision(&body, "", |_| Some(0)), Decision::Ignore);
         assert_eq!(
-            hook_session_id(&body).as_deref(),
+            hook_session_id(&body, "codex").as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
     }
@@ -1180,7 +1467,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
+        assert_eq!(classify_decision(&body, "", |_| Some(0)), Decision::Ready);
     }
 
     /// Grok's Stop carries `reason` and `stopHookActive` — parse them into
@@ -1197,9 +1484,12 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(0));
+        let classified = classify(&body, "", |_| Some(0));
         assert_eq!(classified.decision, Decision::Ready);
-        assert_eq!(classified.detail.completion_reason.as_deref(), Some("end_turn"));
+        assert_eq!(
+            classified.detail.completion_reason.as_deref(),
+            Some("end_turn")
+        );
         assert_eq!(
             classified.detail.provider_session_id.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
@@ -1231,7 +1521,7 @@ mod tests {
             })
             .to_string()
             .into_bytes();
-            let classified = classify(&body, |_| Some(0));
+            let classified = classify(&body, "", |_| Some(0));
             assert_eq!(
                 classified.detail.notification_type.as_deref(),
                 Some(notification_type),
@@ -1257,7 +1547,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(2));
+        let classified = classify(&body, "", |_| Some(2));
         assert_eq!(classified.detail.notification_type, None);
         // 2 pending tasks → suppress (the prose-only fallback is
         // strict on "needs your permission"; untyped notifications
@@ -1278,7 +1568,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "grok").as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
     }
@@ -1299,7 +1589,10 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(2)), Decision::MarkInput);
+        assert_eq!(
+            classify_decision(&body, "", |_| Some(2)),
+            Decision::MarkInput
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1330,7 +1623,7 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(
-            classify_decision(&body, |_| Some(0)),
+            classify_decision(&body, "", |_| Some(0)),
             Decision::SuppressPendingBackground
         );
     }
@@ -1348,7 +1641,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
+        assert_eq!(classify_decision(&body, "", |_| Some(0)), Decision::Ready);
     }
 
     /// `fullyIdle: true` with pending tasks still suppresses — the
@@ -1365,7 +1658,7 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(
-            classify_decision(&body, |_| Some(2)),
+            classify_decision(&body, "", |_| Some(2)),
             Decision::SuppressPendingBackground
         );
     }
@@ -1384,7 +1677,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
+        assert_eq!(classify_decision(&body, "", |_| Some(0)), Decision::Ready);
 
         let missing_transcript = serde_json::json!({
             "conversationId": "abc-123",
@@ -1393,7 +1686,7 @@ mod tests {
         .to_string()
         .into_bytes();
         assert_eq!(
-            classify_decision(&missing_transcript, |_| Some(3)),
+            classify_decision(&missing_transcript, "", |_| Some(3)),
             Decision::Ready
         );
     }
@@ -1412,7 +1705,10 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(5)), Decision::MarkInput);
+        assert_eq!(
+            classify_decision(&body, "", |_| Some(5)),
+            Decision::MarkInput
+        );
     }
 
     /// `hook_session_id` extracts the AGY UUID from `conversationId` via
@@ -1429,7 +1725,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "agy").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
     }
@@ -1449,7 +1745,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "agy").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
     }
@@ -1471,17 +1767,27 @@ mod tests {
         });
         let body = json_body.to_string().into_bytes();
 
-        let parsed = serde_json::from_slice::<HookPayload>(&body).expect("must parse full AGY fixture");
-        assert_eq!(parsed.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        let parsed =
+            serde_json::from_slice::<HookPayload>(&body).expect("must parse full AGY fixture");
+        assert_eq!(
+            parsed.session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
         assert_eq!(parsed.execution_num, Some(4));
         assert_eq!(parsed.termination_reason.as_deref(), Some("model_stop"));
         assert!(parsed.error.as_deref().is_some_and(|e| e.is_empty()) || parsed.error.is_none());
         assert_eq!(parsed.fully_idle, Some(true));
-        assert_eq!(parsed.workspace_paths.as_deref(), Some(&["/Users/dev/project".to_string()][..]));
+        assert_eq!(
+            parsed.workspace_paths.as_deref(),
+            Some(&["/Users/dev/project".to_string()][..])
+        );
         assert_eq!(parsed.model_name.as_deref(), Some("gemini-3.7-flash"));
 
-        assert_eq!(hook_session_id(&body).as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
-        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
+        assert_eq!(
+            hook_session_id(&body, "agy").as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(classify_decision(&body, "", |_| Some(0)), Decision::Ready);
     }
 
     /// Issue #1367: Background yield fixture (`fullyIdle: false`) with no hook_event_name
@@ -1497,7 +1803,10 @@ mod tests {
             "transcriptPath": "/work/proj/transcript.jsonl"
         });
         let body = json_body.to_string().into_bytes();
-        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::SuppressPendingBackground);
+        assert_eq!(
+            classify_decision(&body, "", |_| Some(0)),
+            Decision::SuppressPendingBackground
+        );
     }
 
     /// Issue #1367: Various termination reasons emitted by AGY releases.
@@ -1518,7 +1827,7 @@ mod tests {
             .to_string()
             .into_bytes();
             assert_eq!(
-                classify_decision(&body_idle, |_| Some(0)),
+                classify_decision(&body_idle, "", |_| Some(0)),
                 Decision::Ready,
                 "reason={reason} with fullyIdle=true must be Ready"
             );
@@ -1531,7 +1840,7 @@ mod tests {
             .to_string()
             .into_bytes();
             assert_eq!(
-                classify_decision(&body_busy, |_| Some(0)),
+                classify_decision(&body_busy, "", |_| Some(0)),
                 Decision::SuppressPendingBackground,
                 "reason={reason} with fullyIdle=false must Suppress"
             );
@@ -1544,7 +1853,7 @@ mod tests {
     #[test]
     fn agy_malformed_payload_degrades_to_mark_input() {
         let malformed = b"{not: valid, json";
-        let classified = classify(malformed, |_| Some(0));
+        let classified = classify(malformed, "", |_| Some(0));
         assert_eq!(classified.decision, Decision::MarkInput);
         assert_eq!(
             classified.detail.signal_health,
@@ -1552,7 +1861,7 @@ mod tests {
         );
 
         let empty_obj = b"{}";
-        let classified = classify(empty_obj, |_| Some(0));
+        let classified = classify(empty_obj, "", |_| Some(0));
         assert_eq!(classified.decision, Decision::MarkInput);
         assert_eq!(
             classified.detail.signal_health,
@@ -1573,7 +1882,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(2));
+        let classified = classify(&body, "", |_| Some(2));
         assert_eq!(classified.decision, Decision::MarkInput);
         assert_eq!(
             classified.detail.kind,
@@ -1594,7 +1903,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(0));
+        let classified = classify(&body, "", |_| Some(0));
         assert_ne!(
             classified.detail.kind,
             Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
@@ -1613,7 +1922,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(0));
+        let classified = classify(&body, "", |_| Some(0));
         assert_eq!(classified.decision, Decision::Ready);
         assert_ne!(
             classified.detail.kind,
@@ -1634,9 +1943,12 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let classified = classify(&body, |_| Some(2));
+        let classified = classify(&body, "", |_| Some(2));
         assert_eq!(classified.decision, Decision::MarkInput);
-        assert_eq!(classified.detail.provider_event.as_deref(), Some("PermissionRequest"));
+        assert_eq!(
+            classified.detail.provider_event.as_deref(),
+            Some("PermissionRequest")
+        );
         assert_eq!(
             classified.detail.signal_health,
             crate::agent::session_lifecycle::SignalHealth::Ok
@@ -1660,10 +1972,7 @@ mod tests {
 
     #[test]
     fn extract_query_value_returns_value_when_key_matches() {
-        assert_eq!(
-            extract_query_value("token=abc123", "token"),
-            Some("abc123")
-        );
+        assert_eq!(extract_query_value("token=abc123", "token"), Some("abc123"));
         assert_eq!(
             extract_query_value("foo=bar&token=abc123", "token"),
             Some("abc123")
@@ -1683,121 +1992,128 @@ mod tests {
     }
 
     /// Pin the module-scope OnceLock storage (issue #1366 review, point
-/// 1.1). A previous revision kept `static TOKEN` inside two functions
-/// — two separate allocations, one store and one read never agreed,
-/// so `runtime_hook_token()` always returned `None`. The fix is
-/// module-level storage; this test exercises the actual accessor
-/// against `mint_runtime_hook_token()` round-trip.
-#[test]
-fn runtime_hook_token_round_trips_through_module_level_once_lock() {
-    // Test setup: the runtime token is minted lazily by the Grok
-    // adapter's `provision_attention_hooks` (production path),
-    // not at every spawn. In a test process no Grok agent ever
-    // spawns, so the OnceLock stays None until we mint here.
-    // `mint_runtime_hook_token` is idempotent: it pins the same
-    // value across all subsequent calls in this process, so calling
-    // it from multiple tests is safe — every test that needs the
-    // token will read the same value.
-    let minted = crate::agent::mint_runtime_hook_token();
-    let read_back = crate::agent::runtime_hook_token();
-    assert_eq!(
-        read_back.as_deref(),
-        Some(minted.as_str()),
-        "runtime_hook_token must read from the same OnceLock that \
+    /// 1.1). A previous revision kept `static TOKEN` inside two functions
+    /// — two separate allocations, one store and one read never agreed,
+    /// so `runtime_hook_token()` always returned `None`. The fix is
+    /// module-level storage; this test exercises the actual accessor
+    /// against `mint_runtime_hook_token()` round-trip.
+    #[test]
+    fn runtime_hook_token_round_trips_through_module_level_once_lock() {
+        // Test setup: the runtime token is minted lazily by the Grok
+        // adapter's `provision_attention_hooks` (production path),
+        // not at every spawn. In a test process no Grok agent ever
+        // spawns, so the OnceLock stays None until we mint here.
+        // `mint_runtime_hook_token` is idempotent: it pins the same
+        // value across all subsequent calls in this process, so calling
+        // it from multiple tests is safe — every test that needs the
+        // token will read the same value.
+        let minted = crate::agent::mint_runtime_hook_token();
+        let read_back = crate::agent::runtime_hook_token();
+        assert_eq!(
+            read_back.as_deref(),
+            Some(minted.as_str()),
+            "runtime_hook_token must read from the same OnceLock that \
          mint_runtime_hook_token writes to"
-    );
-    // Format sanity: 32 lowercase hex chars (16 random bytes).
-    assert_eq!(minted.len(), 32);
-    assert!(minted.chars().all(|c| c.is_ascii_hexdigit()));
-}
+        );
+        // Format sanity: 32 lowercase hex chars (16 random bytes).
+        assert_eq!(minted.len(), 32);
+        assert!(minted.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 
-/// The route gate at `handle_post:438-455` collapses to:
-///   * no token minted  → permissive
-///   * query token == minted → proceed
-///   * anything else (no token, wrong token, empty token) → reject
-/// This pins the comparator logic the route uses so a future refactor
-/// can't silently let an unrelated harness through. The end-to-end
-/// POST loopback round-trip is exercised by
-/// `http::tests::attention_webhook_*` for the loopback peer path.
-#[test]
-fn runtime_token_validator_three_cases() {
-    // `mint_runtime_hook_token` is idempotent across the process.
-    // Explicitly mint here so this test passes both in isolation
-    // (e.g. when selected by name) and under the default cargo-test
-    // schedule. The round-trip test in this module reads the same
-    // pinned value back to assert structural integrity; production
-    // code only ever mints once per Buildmesh runtime lifetime.
-    let minted = crate::agent::mint_runtime_hook_token();
+    /// The route gate at `handle_post:438-455` collapses to:
+    ///   * no token minted  → permissive
+    ///   * query token == minted → proceed
+    ///   * anything else (no token, wrong token, empty token) → reject
+    /// This pins the comparator logic the route uses so a future refactor
+    /// can't silently let an unrelated harness through. The end-to-end
+    /// POST loopback round-trip is exercised by
+    /// `http::tests::attention_webhook_*` for the loopback peer path.
+    #[test]
+    fn runtime_token_validator_three_cases() {
+        // `mint_runtime_hook_token` is idempotent across the process.
+        // Explicitly mint here so this test passes both in isolation
+        // (e.g. when selected by name) and under the default cargo-test
+        // schedule. The round-trip test in this module reads the same
+        // pinned value back to assert structural integrity; production
+        // code only ever mints once per Buildmesh runtime lifetime.
+        let minted = crate::agent::mint_runtime_hook_token();
 
-    // Case A: matching token → accept.
-    let query_with_match = format!("token={minted}");
-    assert_eq!(
-        extract_query_value(&query_with_match, "token").as_deref(),
-        Some(minted.as_str()),
-        "matching token must round-trip via extract_query_value"
-    );
+        // Case A: matching token → accept.
+        let query_with_match = format!("token={minted}");
+        assert_eq!(
+            extract_query_value(&query_with_match, "token").as_deref(),
+            Some(minted.as_str()),
+            "matching token must round-trip via extract_query_value"
+        );
 
-    // Case B: wrong token → reject.
-    let wrong_token = "z".repeat(32);
-    let query_wrong = format!("token={wrong_token}");
-    let presented = extract_query_value(&query_wrong, "token")
-        .expect("wrong-token query is non-empty");
-    assert_ne!(
-        presented, minted,
-        "wrong token must not match the minted one"
-    );
+        // Case B: wrong token → reject.
+        let wrong_token = "z".repeat(32);
+        let query_wrong = format!("token={wrong_token}");
+        let presented =
+            extract_query_value(&query_wrong, "token").expect("wrong-token query is non-empty");
+        assert_ne!(
+            presented, minted,
+            "wrong token must not match the minted one"
+        );
 
-    // Case C: empty token (`$VAR` expansion on an unset env produces an
-    // empty value, the typical non-Buildmesh-shell case) → reject.
-    let query_empty = "token=";
-    let presented_empty = extract_query_value(query_empty, "token")
-        .expect("trailing '=' still parses as a key=value pair");
-    assert_eq!(presented_empty, "");
-    assert_ne!(presented_empty, minted);
-}
+        // Case C: empty token (`$VAR` expansion on an unset env produces an
+        // empty value, the typical non-Buildmesh-shell case) → reject.
+        let query_empty = "token=";
+        let presented_empty = extract_query_value(query_empty, "token")
+            .expect("trailing '=' still parses as a key=value pair");
+        assert_eq!(presented_empty, "");
+        assert_ne!(presented_empty, minted);
+    }
 
+    /// Round-2 review fix 4 — the per-provider token gate.
+    ///
+    /// Calls the production `verify_attention_token` helper directly
+    /// so a refactor that flips the comparator semantics or that
+    /// drops the per-provider discrimination fails here. The truth
+    /// table (minted `Some("grok_token")`, query varies):
+    ///
+    ///   provider="claude", no query  → accept (sibling bypass)
+    ///   provider="claude", any token → accept (sibling bypass)
+    ///   provider="grok",   no query  → reject (no token)
+    ///   provider="grok",   wrong     → reject
+    ///   provider="grok",   match     → accept
+    ///   provider="grok",   minted=None, any → reject (defence in depth)
+    #[test]
+    fn verify_attention_token_truth_table() {
+        let minted = Some("grok_token");
 
-/// Round-2 review fix 4 — the per-provider token gate.
-///
-/// Calls the production `verify_attention_token` helper directly
-/// so a refactor that flips the comparator semantics or that
-/// drops the per-provider discrimination fails here. The truth
-/// table (minted `Some("grok_token")`, query varies):
-///
-///   provider="claude", no query  → accept (sibling bypass)
-///   provider="claude", any token → accept (sibling bypass)
-///   provider="grok",   no query  → reject (no token)
-///   provider="grok",   wrong     → reject
-///   provider="grok",   match     → accept
-///   provider="grok",   minted=None, any → reject (defence in depth)
-#[test]
-fn verify_attention_token_truth_table() {
-    let minted = Some("grok_token");
+        // Sibling harnesses — bypass entirely even when a token is
+        // minted. Their hook URLs never carry `?token=`, but more
+        // importantly the per-provider lookup classifies them as
+        // non-Grok so the comparator never runs.
+        assert!(verify_attention_token("claude", None, minted));
+        assert!(verify_attention_token("claude", Some("anything"), minted));
+        assert!(verify_attention_token("codex", None, minted));
+        assert!(verify_attention_token("agy", Some("token=z"), minted));
+        // Empty provider string ("default anthropic" sentinel) is
+        // also non-Grok — still bypass.
+        assert!(verify_attention_token("", None, minted));
 
-    // Sibling harnesses — bypass entirely even when a token is
-    // minted. Their hook URLs never carry `?token=`, but more
-    // importantly the per-provider lookup classifies them as
-    // non-Grok so the comparator never runs.
-    assert!(verify_attention_token("claude", None, minted));
-    assert!(verify_attention_token("claude", Some("anything"), minted));
-    assert!(verify_attention_token("codex", None, minted));
-    assert!(verify_attention_token("agy", Some("token=z"), minted));
-    // Empty provider string ("default anthropic" sentinel) is
-    // also non-Grok — still bypass.
-    assert!(verify_attention_token("", None, minted));
-
-    // Grok callbacks — token required.
-    assert!(!verify_attention_token("grok", None, minted));
-    assert!(!verify_attention_token("grok", Some("token="), minted));
-    assert!(!verify_attention_token("grok", Some("token=wrong"), minted));
-    assert!(verify_attention_token("grok", Some("token=grok_token"), minted));
-    // No minted token yet (no Grok spawn in this runtime) AND a
-    // Grok callback arrives — refuse. This is the defensive 403
-    // that catches a Buildmesh instance whose own Grok spawn
-    // never ran but the file system somehow has a hook caller.
-    assert!(!verify_attention_token("grok", Some("token=grok_token"), None));
-    assert!(!verify_attention_token("grok", None, None));
-}
+        // Grok callbacks — token required.
+        assert!(!verify_attention_token("grok", None, minted));
+        assert!(!verify_attention_token("grok", Some("token="), minted));
+        assert!(!verify_attention_token("grok", Some("token=wrong"), minted));
+        assert!(verify_attention_token(
+            "grok",
+            Some("token=grok_token"),
+            minted
+        ));
+        // No minted token yet (no Grok spawn in this runtime) AND a
+        // Grok callback arrives — refuse. This is the defensive 403
+        // that catches a Buildmesh instance whose own Grok spawn
+        // never ran but the file system somehow has a hook caller.
+        assert!(!verify_attention_token(
+            "grok",
+            Some("token=grok_token"),
+            None
+        ));
+        assert!(!verify_attention_token("grok", None, None));
+    }
 
     // -------------------------------------------------------------------
     // Cursor Agent (issue #1368) — snake_case `conversation_id` +
@@ -1821,7 +2137,7 @@ fn verify_attention_token_truth_table() {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "cursor").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
     }
@@ -1839,7 +2155,10 @@ fn verify_attention_token_truth_table() {
             "transcript_path": "/tmp/session.jsonl",
         })
         .to_string();
-        assert_eq!(classify_decision(body.as_bytes(), |_| Some(0)), Decision::Ready);
+        assert_eq!(
+            classify_decision(body.as_bytes(), "", |_| Some(0)),
+            Decision::Ready
+        );
     }
 
     /// Cursor's `Stop` with launched-but-unfinished background tasks
@@ -1854,7 +2173,7 @@ fn verify_attention_token_truth_table() {
         })
         .to_string();
         assert_eq!(
-            classify_decision(body.as_bytes(), |_| Some(2)),
+            classify_decision(body.as_bytes(), "", |_| Some(2)),
             Decision::SuppressPendingBackground
         );
     }
@@ -1872,7 +2191,7 @@ fn verify_attention_token_truth_table() {
         })
         .to_string();
         assert_eq!(
-            classify_decision(body.as_bytes(), |_| Some(3)),
+            classify_decision(body.as_bytes(), "", |_| Some(3)),
             Decision::Ready
         );
     }
@@ -1889,7 +2208,7 @@ fn verify_attention_token_truth_table() {
             "transcript_path": "/tmp/session.jsonl",
         })
         .to_string();
-        let classified = classify(body.as_bytes(), |_| Some(0));
+        let classified = classify(body.as_bytes(), "", |_| Some(0));
         assert_eq!(classified.decision, Decision::Ready);
         assert_eq!(classified.detail.provider_event.as_deref(), Some("stop"));
         assert_eq!(
@@ -1912,9 +2231,12 @@ fn verify_attention_token_truth_table() {
         });
         let body = json_body.to_string().into_bytes();
 
-        let parsed = serde_json::from_slice::<HookPayload>(&body)
-            .expect("must parse full Cursor fixture");
-        assert_eq!(parsed.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        let parsed =
+            serde_json::from_slice::<HookPayload>(&body).expect("must parse full Cursor fixture");
+        assert_eq!(
+            parsed.session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
         assert_eq!(parsed.hook_event_name.as_deref(), Some("stop"));
         assert_eq!(
             parsed.transcript_path.as_deref(),
@@ -1922,10 +2244,9 @@ fn verify_attention_token_truth_table() {
         );
 
         assert_eq!(
-            hook_session_id(&body).as_deref(),
+            hook_session_id(&body, "cursor").as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
-        assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
+        assert_eq!(classify_decision(&body, "", |_| Some(0)), Decision::Ready);
     }
-
 }
