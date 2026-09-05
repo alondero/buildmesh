@@ -215,6 +215,16 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    /// Serialises every test in this module. Windows Credential Manager's
+    /// `CredWriteW` → `CredReadW` has a visibility race under parallel calls
+    /// inside one process — a fresh write can briefly report success while
+    /// a subsequent read sees `NoCredential` (issue #1278). UUID-suffixed
+    /// targets rule out name collisions; the race is the vault's internal
+    /// propagation lag. Pattern matches `PROFILE_WRITE_LOCK` / `PR_TEST_LOCK`
+    /// / `DRAIN_LOCK`; `into_inner` recovers from a panicked-test poison so
+    /// peers aren't permanently locked out.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Collision-resistant test target: every test run gets a fresh random
     /// suffix so a half-cleaned credential from a previous failure cannot
     /// shadow the result. `buildmesh-test-` prefix is registered in
@@ -254,6 +264,7 @@ mod tests {
         if !require_cred_mgr() {
             return;
         }
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let target = unique_target("write-read");
         let _cleanup = CleanupTarget(target.clone());
         let blob = b"hello credential bytes \x00\x01\x02\xff";
@@ -272,6 +283,7 @@ mod tests {
         if !require_cred_mgr() {
             return;
         }
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // `CredWriteW` is documented as upsert; pin that behavior so a future
         // caller depending on "replace" semantics doesn't get surprised.
         let target = unique_target("overwrite");
@@ -286,6 +298,7 @@ mod tests {
 
     #[test]
     fn read_missing_target_returns_no_credential() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let target = unique_target("absent");
         let result = read(&target);
         assert!(
@@ -299,6 +312,7 @@ mod tests {
         if !require_cred_mgr() {
             return;
         }
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let target = unique_target("delete-read");
         let _cleanup = CleanupTarget(target.clone());
 
@@ -315,6 +329,7 @@ mod tests {
 
     #[test]
     fn delete_idempotent_when_missing() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The Settings "Sign out" affordance must not error when the user
         // was already signed out — pin the idempotency contract so a future
         // tightening of `delete` to surface missing-credential as an error
@@ -334,6 +349,7 @@ mod tests {
         if !require_cred_mgr() {
             return;
         }
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Mirrors the agy / opencode read paths, where an existing credential
         // with a null/empty blob body parses to `Ok(Vec::new())` so the
         // higher-level parser can decide what "empty" means.
@@ -354,6 +370,7 @@ mod tests {
         if !require_cred_mgr() {
             return;
         }
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Pin the JSON-blob shape that the OAuth refresher + reader will
         // hand around. Without this, a future migration to UTF-16 blob
         // encoding would silently break the parser.
