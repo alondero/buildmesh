@@ -384,78 +384,85 @@ export function CircuitsProbeTab() {
               };
               return (
               <li key={circuit.id} className="rounded-md border border-border-subtle p-2" data-testid="circuit-row">
-                <div className="flex flex-col items-stretch gap-1">
-                  <label className="flex items-center gap-1.5 min-w-0">
-                    <input
-                      type="checkbox"
-                      checked={circuit.enabled}
-                      onChange={() =>
-                        runAction(() => setCircuitEnabled(circuit.id, !circuit.enabled))
-                      }
-                      aria-label={`Enable ${circuit.name}`}
-                      data-testid={`circuit-enabled-${circuit.id}`}
-                    />
-                    <span className="truncate text-text-primary" title={circuit.name}>
-                      {circuit.name}
-                    </span>
-                  </label>
-                  <div className="flex items-center gap-1 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => openCircuitEditor(circuit.id)}
-                      data-testid={`circuit-edit-flow-${circuit.id}`}
-                      className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet hover:bg-accent-violet/25"
-                    >
-                      Edit Flow
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => runAction(() => triggerCircuitNow(circuit.id))}
-                      disabled={busy}
-                      data-testid={`circuit-trigger-${circuit.id}`}
-                      className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
-                    >
-                      Trigger Now
-                    </button>
-                    {confirmDeleteCircuitId === circuit.id ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setConfirmDeleteCircuitId(null);
-                            void runAction(() => deleteCircuit(circuit.id));
-                          }}
-                          disabled={busy}
-                          aria-label={`Confirm delete ${circuit.name}`}
-                          data-testid={`circuit-confirm-delete-${circuit.id}`}
-                          className="px-1.5 py-0.5 rounded-md bg-status-error/15 text-status-error disabled:opacity-40"
-                        >
-                          Confirm
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeleteCircuitId(null)}
-                          disabled={busy}
-                          aria-label={`Keep ${circuit.name}`}
-                          className="px-1.5 py-0.5 rounded-md text-text-muted disabled:opacity-40"
-                        >
-                          Keep
-                        </button>
-                      </>
-                    ) : (
+                {circuit.is_preset ? (
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="text-xs font-semibold text-text-primary">Agent review history</span>
+                    <span className="text-2xs text-text-muted truncate" title={circuit.name}>{circuit.name}</span>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-stretch gap-1">
+                    <label className="flex items-center gap-1.5 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={circuit.enabled}
+                        onChange={() =>
+                          runAction(() => setCircuitEnabled(circuit.id, !circuit.enabled))
+                        }
+                        aria-label={`Enable ${circuit.name}`}
+                        data-testid={`circuit-enabled-${circuit.id}`}
+                      />
+                      <span className="truncate text-text-primary" title={circuit.name}>
+                        {circuit.name}
+                      </span>
+                    </label>
+                    <div className="flex items-center gap-1 flex-wrap">
                       <button
                         type="button"
-                        onClick={() => setConfirmDeleteCircuitId(circuit.id)}
-                        disabled={busy}
-                        aria-label={`Delete ${circuit.name}`}
-                        data-testid={`circuit-delete-${circuit.id}`}
-                        className="px-1.5 py-0.5 rounded-md text-text-muted hover:text-status-error disabled:opacity-40"
+                        onClick={() => openCircuitEditor(circuit.id)}
+                        data-testid={`circuit-edit-flow-${circuit.id}`}
+                        className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet hover:bg-accent-violet/25"
                       >
-                        Delete
+                        Edit Flow
                       </button>
-                    )}
+                      <button
+                        type="button"
+                        onClick={() => runAction(() => triggerCircuitNow(circuit.id))}
+                        disabled={busy}
+                        data-testid={`circuit-trigger-${circuit.id}`}
+                        className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
+                      >
+                        Trigger Now
+                      </button>
+                      {confirmDeleteCircuitId === circuit.id ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmDeleteCircuitId(null);
+                              void runAction(() => deleteCircuit(circuit.id));
+                            }}
+                            disabled={busy}
+                            aria-label={`Confirm delete ${circuit.name}`}
+                            data-testid={`circuit-confirm-delete-${circuit.id}`}
+                            className="px-1.5 py-0.5 rounded-md bg-status-error/15 text-status-error disabled:opacity-40"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteCircuitId(null)}
+                            disabled={busy}
+                            aria-label={`Keep ${circuit.name}`}
+                            className="px-1.5 py-0.5 rounded-md text-text-muted disabled:opacity-40"
+                          >
+                            Keep
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteCircuitId(circuit.id)}
+                          disabled={busy}
+                          aria-label={`Delete ${circuit.name}`}
+                          data-testid={`circuit-delete-${circuit.id}`}
+                          className="px-1.5 py-0.5 rounded-md text-text-muted hover:text-status-error disabled:opacity-40"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Run ledger — one expandable diagnostic card per run
                     (#1468), replacing the old truncated one-line chain. */}

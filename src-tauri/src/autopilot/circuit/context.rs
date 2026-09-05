@@ -40,6 +40,11 @@ impl CircuitContext {
         self.vars.get(path).map(|s| s.as_str())
     }
 
+    /// Borrowed triggering agent, deliberately separate from owned spawns.
+    pub fn source_agent_id(&self) -> Option<i64> {
+        self.get("source.agent_id")?.parse().ok()
+    }
+
     /// Populate the `circuit.*` namespace for a run.
     pub fn with_circuit(&mut self, circuit_id: i64, name: &str, mesh_id: i64) -> &mut Self {
         self.set("circuit.id", circuit_id.to_string());

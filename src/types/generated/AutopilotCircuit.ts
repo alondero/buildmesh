@@ -11,4 +11,8 @@ enabled: boolean, concurrency_limit: number,
 /**
  * The `CircuitGraph` blueprint, JSON-encoded (see module note above).
  */
-graph_json: string, created_at: string, updated_at: string, };
+graph_json: string, created_at: string, updated_at: string, 
+/**
+ * Built-in execution preset, hidden from user-authored Circuit lists.
+ */
+is_preset: boolean, };

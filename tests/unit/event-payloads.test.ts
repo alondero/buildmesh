@@ -136,7 +136,10 @@ function fileHasGeneratedImport(filePath: string, payloadType: string): boolean 
     const importRe = new RegExp(
       String.raw`from\s+['"][^'"]*types/generated/${name}['"]`,
     );
-    return importRe.test(source);
+    const namedImportRe = new RegExp(
+      String.raw`import\s+type\s*\{[^}]*\b${name}\b[^}]*\}\s+from\s+['"][^'"]*types/generated/[^'"]+['"]`,
+    );
+    return importRe.test(source) || namedImportRe.test(source);
   });
 }
 

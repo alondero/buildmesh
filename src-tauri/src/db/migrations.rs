@@ -144,7 +144,7 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// (issue #1555): adds nullable `agent_nodes.session_started_at`. This keeps
 /// per-node lifecycle state with the node and lets recovery use one conditional
 /// UPDATE without an app-settings EAV key or a correlated subquery.
-pub(crate) const SCHEMA_VERSION: u32 = 39;
+pub(crate) const SCHEMA_VERSION: u32 = 41;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -275,6 +275,9 @@ pub(crate) enum AlwaysStep {
     /// pre-v39 recovery implementation after their values have been copied to
     /// `agent_nodes.session_started_at`.
     DropLegacySessionRecoveryKeys,
+    /// Collapse duplicate built-in review preset rows left by pre-v40 builds,
+    /// preserving their run history on the oldest row for each mesh.
+    DeduplicateReviewPresets,
 }
 
 // ---------------------------------------------------------------------------
@@ -461,11 +464,19 @@ const SPECS: &[ColumnSpec] = &[
     ColumnSpec { version: 31, table: "autopilot_runs", column: "loop_iteration", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
 
     // ============================================================
+    // autopilot_circuits
+    // ============================================================
+    // v40 - built-in review preset rows are durable execution templates,
+    // but are not user-authored blueprints and stay hidden from the editor.
+    ColumnSpec { version: 40, table: "autopilot_circuits", column: "is_preset", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
+
     // autopilot_circuit_runs
     // ============================================================
     // v38: global per-mesh Circuit Run queue order. Kept off the run wire
     // model: the queue DTO exposes a 1-based rank instead of this storage key.
     ColumnSpec { version: 38, table: "autopilot_circuit_runs", column: "queue_position", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
+    // v41 - relational source binding for title-bar-launched runs.
+    ColumnSpec { version: 41, table: "autopilot_circuit_runs", column: "source_agent_node_id", type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // coordinator_drive_prompts
@@ -591,6 +602,21 @@ const ONE_SHOT_BACKFILLS: &[OneShotBackfill] = &[
         params: &[],
         sql: "UPDATE agent_nodes SET session_started_at = (SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = 'session_started_at:' || agent_nodes.id) WHERE session_started_at IS NULL AND EXISTS (SELECT 1 FROM app_settings WHERE key = 'session_started_at:' || agent_nodes.id)",
     },
+    OneShotBackfill {
+        version: 40,
+        flag: "circuit_review_presets_v40",
+        params: &[],
+        sql: "UPDATE autopilot_circuits SET is_preset = 1 WHERE description = 'Review an existing agent and return findings until approved' AND name LIKE 'Review agent %'",
+    },
+    // v41 - hydrate the relational source binding for runs created by the
+    // pre-v41 implementation. JSON remains the migration-only compatibility
+    // source; ownership queries and cancellation use the indexed column.
+    OneShotBackfill {
+        version: 41,
+        flag: "circuit_run_source_agent_v41",
+        params: &[],
+        sql: "UPDATE autopilot_circuit_runs SET source_agent_node_id = CAST(json_extract(context_json, '$.\"source.agent_id\"') AS INTEGER) WHERE source_agent_node_id IS NULL AND json_valid(context_json) AND json_extract(context_json, '$.\"source.agent_id\"') IS NOT NULL AND EXISTS (SELECT 1 FROM agent_nodes WHERE agent_nodes.id = CAST(json_extract(autopilot_circuit_runs.context_json, '$.\"source.agent_id\"') AS INTEGER))",
+    },
 ];
 
 /// The v33 one-shot backfill SQL. Mirrored as the `OneShotBackfill`
@@ -620,6 +646,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::HashCoordinatorTokens,
     AlwaysStep::EnforceCircuitRunCapacityRange,
     AlwaysStep::DropLegacySessionRecoveryKeys,
+    AlwaysStep::DeduplicateReviewPresets,
 ];
 
 // ---------------------------------------------------------------------------
@@ -949,6 +976,57 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 "DELETE FROM app_settings WHERE key LIKE 'session_started_at:%'",
                 [],
             )?;
+        }
+        AlwaysStep::DeduplicateReviewPresets => {
+            // Pre-v40 builds inserted one review blueprint per click. Keep
+            // the oldest row per mesh as the canonical execution template,
+            // move any existing run history to it, then remove the duplicate
+            // rows. This is deliberately an always-run step: it is harmless
+            // after the first cleanup and also repairs a partially completed
+            // upgrade without another schema bump.
+            if !table_present(conn, "autopilot_circuits")?
+                || !table_present(conn, "autopilot_circuit_runs")?
+            {
+                return Ok(());
+            }
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE autopilot_circuit_runs
+                 SET circuit_id = (
+                     SELECT MIN(canonical.id)
+                     FROM autopilot_circuits canonical
+                     WHERE canonical.mesh_id = (
+                         SELECT duplicate.mesh_id
+                         FROM autopilot_circuits duplicate
+                         WHERE duplicate.id = autopilot_circuit_runs.circuit_id
+                     )
+                       AND canonical.is_preset = 1
+                 )
+                 WHERE circuit_id IN (
+                     SELECT duplicate.id
+                     FROM autopilot_circuits duplicate
+                     WHERE duplicate.is_preset = 1
+                       AND duplicate.id <> (
+                           SELECT MIN(canonical.id)
+                           FROM autopilot_circuits canonical
+                           WHERE canonical.mesh_id = duplicate.mesh_id
+                             AND canonical.is_preset = 1
+                       )
+                 )",
+                [],
+            )?;
+            tx.execute(
+                "DELETE FROM autopilot_circuits
+                 WHERE is_preset = 1
+                   AND id NOT IN (
+                       SELECT MIN(id)
+                       FROM autopilot_circuits
+                       WHERE is_preset = 1
+                       GROUP BY mesh_id
+                   )",
+                [],
+            )?;
+            tx.commit()?;
         }
         AlwaysStep::UpgradeIssueReviewFirstTurns => {
             const FLAG: &str = "issue_review_first_turn_upgrade_v1";

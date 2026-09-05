@@ -52,6 +52,7 @@ import type { AutopilotFinishFailedPayload } from '../types/generated/AutopilotF
 import type { AutopilotNodeClosedPayload } from '../types/generated/AutopilotNodeClosedPayload';
 import type { AgentNode } from '../types/generated/AgentNode';
 import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
+import type { CircuitRunUpdatedPayload } from '../types/generated/CircuitEvents';
 import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
 import { getNodeGitPath } from '../lib/paths';
 
@@ -108,6 +109,14 @@ export async function attachAgentNodeListeners(
   surface: AgentNodeActionSurface,
 ): Promise<() => void> {
   const unlistens: Array<() => void> = [];
+
+  unlistens.push(
+    await listen<CircuitRunUpdatedPayload>('circuit-run-updated', ({ payload }) => {
+      if (['pending', 'completed', 'failed', 'cancelled'].includes(payload.state)) {
+        void surface.fetchAgentNodes();
+      }
+    }),
+  );
 
   unlistens.push(
     await listen<AttentionClearedPayload>('attention-cleared', (event) => {

@@ -40,7 +40,8 @@
 //! multi-hour runs self-heal.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -80,6 +81,98 @@ static WAKE: Lazy<(Mutex<()>, Condvar)> = Lazy::new(|| (Mutex::new(()), Condvar:
 static CIRCUIT_SPAWNS: Lazy<(Mutex<HashMap<i64, usize>>, Condvar)> =
     Lazy::new(|| (Mutex::new(HashMap::new()), Condvar::new()));
 const CIRCUIT_SPAWN_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cancellation invalidation for an in-flight effect batch. The worker takes
+/// one durable run-state snapshot per transition (avoiding an N+1 query),
+/// while command-side cancellation flips this token before waiting for any
+/// spawn teardown. Every effect checks the token immediately before it runs,
+/// so a cancellation that arrives between two slow external effects still
+/// stops the remainder of the batch.
+struct CircuitEffectCancellation {
+    cancelled: Arc<AtomicBool>,
+    finished: bool,
+    in_flight: usize,
+}
+
+static CIRCUIT_EFFECT_CANCELLATIONS: Lazy<Mutex<HashMap<i64, CircuitEffectCancellation>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+pub struct CircuitEffectBatchPermit {
+    run_id: i64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CircuitEffectBatchPermit {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for CircuitEffectBatchPermit {
+    fn drop(&mut self) {
+        let mut active = CIRCUIT_EFFECT_CANCELLATIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = active.get_mut(&self.run_id) else {
+            return;
+        };
+        entry.in_flight = entry.in_flight.saturating_sub(1);
+        if entry.in_flight == 0
+            && (!entry.cancelled.load(Ordering::Acquire) || entry.finished)
+        {
+            // A cancellation command that has already acknowledged the
+            // durable terminal state can leave the marker behind only until
+            // the final in-flight batch drops.
+            active.remove(&self.run_id);
+        }
+    }
+}
+
+pub fn begin_circuit_effect_batch(run_id: i64) -> CircuitEffectBatchPermit {
+    let mut active = CIRCUIT_EFFECT_CANCELLATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = active.entry(run_id).or_insert_with(|| CircuitEffectCancellation {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        finished: false,
+        in_flight: 0,
+    });
+    entry.in_flight += 1;
+    CircuitEffectBatchPermit {
+        run_id,
+        cancelled: Arc::clone(&entry.cancelled),
+    }
+}
+
+/// Invalidate effects before a cancellation command waits on external
+/// cleanup. The marker remains until the command acknowledges the durable
+/// terminal state, closing the race where a new batch starts during that wait.
+pub fn mark_circuit_run_cancelled(run_id: i64) {
+    let mut active = CIRCUIT_EFFECT_CANCELLATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = active.entry(run_id).or_insert_with(|| CircuitEffectCancellation {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        finished: false,
+        in_flight: 0,
+    });
+    entry.cancelled.store(true, Ordering::Release);
+    entry.finished = false;
+}
+
+/// Release a cancellation marker once the run's durable state is terminal.
+/// An in-flight batch removes itself when it observes the marker and drops.
+pub fn finish_circuit_run_cancellation(run_id: i64) {
+    let mut active = CIRCUIT_EFFECT_CANCELLATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = active.get_mut(&run_id) {
+        entry.finished = true;
+        if entry.in_flight == 0 {
+            active.remove(&run_id);
+        }
+    }
+}
 
 struct CircuitSpawnPermit {
     run_id: i64,
@@ -545,6 +638,21 @@ fn drive_run(
         steps: load_steps(active.run.id)?,
     };
 
+    if let Some(source) = active.run.source_agent_node_id {
+        let lost = db::get_agent_node_by_id(source).map(|n|
+            matches!(n.status, SessionStatus::Archived | SessionStatus::Error)
+        ).unwrap_or(true);
+        if lost {
+            db::commit_circuit_advance(active.run.id, Some("failed"), None, &[])
+                .map_err(|e| e.to_string())?;
+            close_run_agents(&view);
+            crate::autopilot::evaluator::unregister(source);
+            let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
+            return Ok(());
+        }
+        crate::autopilot::evaluator::register_circuit(source);
+    }
+
     for event in observe(app, active, &view) {
         let transition = advance(&mut view, &event);
 
@@ -659,6 +767,11 @@ let ops = failed
             break;
         }
     }
+    if matches!(view.state, RunState::Completed | RunState::Failed) {
+        if let Some(source) = active.run.source_agent_node_id {
+            crate::autopilot::evaluator::unregister(source);
+        }
+    }
     Ok(())
 }
 
@@ -763,7 +876,8 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
         if step.status != StepStatus::Running {
             continue;
         }
-        let Some(agent_node_id) = observed_agent_for_step(step, &view.graph, &view.steps) else {
+        let Some(agent_node_id) = observed_agent_for_step(step, &view.graph, &view.steps)
+            .or_else(|| view.resolve_target_agent(&step.node_id)) else {
             continue;
         };
         let node = db::get_agent_node_by_id(agent_node_id).ok();
@@ -972,6 +1086,13 @@ fn observe_close_agent_retries(view: &RunView, events: &mut Vec<CircuitEvent>) {
             if let Some(CircuitNodeKind::CloseAgentNode { .. }) =
                 view.graph.node(&step.node_id).map(|node| &node.kind)
             {
+                // A completed close belongs to its review round, not a
+                // later reviewer attached to the same spawn step.
+                if view.resolve_target_agent(&step.node_id).is_some_and(|id|
+                    view.steps.iter().any(|target| target.agent_node_id == Some(id)
+                        && target.attempt > step.attempt)) {
+                    continue;
+                }
                 if view
                     .resolve_target_agent(&step.node_id)
                     .is_some()
@@ -1000,7 +1121,7 @@ fn observe_gates(
             continue;
         }
         match view.graph.node(&step.node_id).map(|n| &n.kind) {
-            Some(CircuitNodeKind::LlmTurnClassifier { .. }) => {
+            Some(CircuitNodeKind::AwaitAgentTurn { .. } | CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::ReviewVerdict { .. }) => {
                 if let Some((agent_node_id, classification, output)) =
                     classify_step_turn(active, view, &step.node_id)
                 {
@@ -1071,6 +1192,16 @@ fn classify_step_turn(
     if !yielded {
         return None;
     }
+    let initial_source = matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::AwaitAgentTurn { .. }));
+    let initial_output = if initial_source {
+        db::get_agent_node_by_id(agent_node_id).ok()
+            .and_then(|node| crate::coordinator::enrichment::digest_enrichment(&node))
+            .and_then(|tail| match tail {
+                crate::services::transcript_reader::TranscriptTail::Available { last_assistant_message, .. } => last_assistant_message,
+                _ => None,
+            })
+    } else { None };
+    let mut output = initial_output.unwrap_or_else(|| evaluator::cleaned_turn_tail(agent_node_id));
     let fresh_output = match (
         evaluator::millis_since_last_output(agent_node_id),
         evaluator::millis_since_last_evaluation(agent_node_id),
@@ -1079,7 +1210,11 @@ fn classify_step_turn(
         (Some(_), None) => true,
         _ => false,
     };
-    if !fresh_output {
+    if initial_source {
+        if view.context.get(&format!("node.{}.evaluated_output", node_id)) == Some(output.as_str()) {
+            return None;
+        }
+    } else if !fresh_output {
         return None;
     }
     // Evaluator backend env: the mesh's Autopilot provider side-channel
@@ -1090,8 +1225,20 @@ fn classify_step_turn(
         .unwrap_or_else(|| "claude".to_string());
     let backend_env = crate::session_naming::naming_backend_env(&backend_provider);
     evaluator::note_evaluation(agent_node_id);
-    let output = evaluator::cleaned_turn_tail(agent_node_id);
-    let classification = evaluator::classify(agent_node_id, &backend_env);
+    let classification = if initial_source {
+        let verdict = if output.trim().is_empty() { None } else {
+            evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::classify_prompt(&output))
+        };
+        if verdict.is_none() {
+            output = "Task completion could not be verified. Confirm the source task is finished using the approval step in this Circuit, or cancel and continue the agent.".into();
+        }
+        Some(verdict.unwrap_or(evaluator::Classification::Blocked))
+    } else if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
+        Some(evaluator::classify_review(agent_node_id, &backend_env)
+            .unwrap_or(evaluator::Classification::Blocked))
+    } else {
+        evaluator::classify(agent_node_id, &backend_env)
+    };
     tracing::info!(
         "circuits: turn classifier for run {} step {} agent {} → {:?}",
         active.run.id,
@@ -1467,8 +1614,22 @@ fn execute_effects(
     effects: &[crate::autopilot::circuit::stepper::Effect],
 ) -> Result<(), String> {
     use crate::autopilot::circuit::stepper::Effect;
+    let effect_batch = begin_circuit_effect_batch(active.run.id);
+    let run_state = db::get_circuit_run(active.run.id)
+        .map_err(|e| e.to_string())?
+        .map(|run| run.state);
     for effect in effects {
-        if !run_accepts_effects(active.run.id)? {
+        if effect_batch.is_cancelled() {
+            tracing::info!(
+                "circuits: cancellation invalidated remaining effects for run {}",
+                active.run.id
+            );
+            return Ok(());
+        }
+        let accepts_effect = run_state.as_deref().is_some_and(|state| {
+            effect_allowed_in_state(state, view.state == RunState::Completed, effect)
+        });
+        if !accepts_effect {
             tracing::info!(
                 "circuits: stopped effects for terminal/deleted run {}",
                 active.run.id
@@ -1589,6 +1750,7 @@ fn execute_effects(
                     CircuitNotificationPayload {
                         run_id: active.run.id,
                         message: message.clone(),
+                        severity: notification_severity(message),
                     },
                 );
             }
@@ -1601,9 +1763,21 @@ fn execute_effects(
 }
 
 /// Cancellation commits the terminal run state before retiring external
-/// resources. Every effect rechecks that durable state so a worker pass that
-/// observed the run just before cancellation cannot continue spawning,
-/// injecting, notifying, or mutating GitHub afterward.
+/// resources. The transition's effects take one durable-state snapshot before
+/// execution and check an in-memory cancellation token before each effect;
+/// terminal transitions retain only their synchronous cleanup and notification
+/// effects, while InjectPty is never allowed after completion.
+fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &crate::autopilot::circuit::stepper::Effect) -> bool {
+    use crate::autopilot::circuit::stepper::Effect;
+    matches!(state, "pending" | "running" | "paused")
+        // Synchronous terminal actions are emitted by the same transition
+        // that completes the run, and must survive its commit-before-effects.
+        // InjectPty is intentionally absent: it starts new work after the
+        // run has durably finished and would leave an untracked command.
+        || (state == "completed" && completing_transition && matches!(effect,
+            Effect::Notify { .. } | Effect::SetNodeStatus { .. } | Effect::CloseAgentNode { .. }))
+}
+
 fn run_accepts_effects(run_id: i64) -> Result<bool, String> {
     Ok(matches!(
         db::get_circuit_run(run_id).map_err(|error| error.to_string())?,
@@ -1877,9 +2051,33 @@ fn spawn_step_agent(
     let ResolvedCircuitSpawn {
         prompt,
         name,
-        provider_str,
-        explicit,
+        mut provider_str,
+        mut explicit,
     } = resolve_circuit_spawn_inputs(&kind)?;
+
+    // The built-in review graph is shared by all node-started runs in a mesh.
+    // Resolve the source's provider/model/effort from this run's context so a
+    // later invocation cannot inherit configuration from the run that first
+    // created the canonical preset row.
+    if view.context.get("source.review_preset") == Some("1") {
+        if let Some(provider) = view
+            .context
+            .get("source.provider")
+            .and_then(non_empty_trim)
+        {
+            provider_str = Some(provider.to_string());
+        }
+        explicit.model = view
+            .context
+            .get("source.model")
+            .and_then(non_empty_trim)
+            .map(str::to_string);
+        explicit.effort = view
+            .context
+            .get("source.effort")
+            .and_then(non_empty_trim)
+            .map(str::to_string);
+    }
 
     let resolved_prompt = view.context.resolve(&prompt);
     let source_issue = view
@@ -1892,7 +2090,9 @@ fn spawn_step_agent(
         .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
     let prompt_delivery =
         crate::autopilot::launch::initial_prompt_delivery(&provider, &resolved_prompt);
-    let worktree_policy = if source_issue.is_some() {
+    let worktree_policy = if source_issue.is_some()
+        || view.context.get("source.review_preset") == Some("1")
+    {
         WorktreePolicy::ForceBranched
     } else {
         WorktreePolicy::RespectMesh
@@ -2171,8 +2371,13 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                 continue;
             }
         };
-        for step in steps.iter().filter(|s| s.status == StepStatus::Running) {
-            let Some(node) = graph.node(&step.node_id) else {
+        let context = match CircuitContext::from_json(&active.run.context_json) {
+            Ok(context) => context,
+            Err(_) => continue,
+        };
+        let view = RunView { run_id: active.run.id, graph, context, steps, state: RunState::from_db_str(&active.run.state) };
+        for step in view.steps.iter().filter(|s| s.status == StepStatus::Running) {
+            let Some(node) = view.graph.node(&step.node_id) else {
                 continue;
             };
             match &node.kind {
@@ -2233,10 +2438,13 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                 // step alone.
                 CircuitNodeKind::InjectPty { .. }
                 | CircuitNodeKind::LlmTurnClassifier { .. }
+                | CircuitNodeKind::AwaitAgentTurn { .. }
+                | CircuitNodeKind::ReviewVerdict { .. }
                 | CircuitNodeKind::SetNodeStatus { .. }
                 | CircuitNodeKind::CloseAgentNode { .. } => {
                     let observed =
-                        observed_agent_for_step(step, &graph, &steps).and_then(|id| {
+                        observed_agent_for_step(step, &view.graph, &view.steps)
+                            .or_else(|| view.resolve_target_agent(&step.node_id)).and_then(|id| {
                             // A present-but-archived lineage target is
                             // also lost from the run's perspective.
                             db::get_agent_node_by_id(id)
@@ -2348,10 +2556,14 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
             Ok(s) => s,
             Err(_) => continue,
         };
-        for step in steps.iter().filter(|s| s.status == StepStatus::Running) {
-            let Some(agent_node_id) = step.agent_node_id else {
+        let (Ok(graph), Ok(context)) = (CircuitGraph::from_json(&active.circuit_graph_json), CircuitContext::from_json(&active.run.context_json)) else { continue; };
+        let view = RunView { run_id: active.run.id, graph, context, steps, state: RunState::Running };
+        let mut observed = HashSet::new();
+        for step in view.steps.iter().filter(|s| s.status == StepStatus::Running) {
+            let Some(agent_node_id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) else {
                 continue;
             };
+            if !observed.insert(agent_node_id) { continue; }
             let Ok(node) = db::get_agent_node_by_id(agent_node_id) else {
                 continue;
             };
@@ -2391,11 +2603,110 @@ pub struct CircuitNotificationPayload {
     #[ts(as = "i32")]
     pub run_id: i64,
     pub message: String,
+    /// `success` for approval, `warning` for blocked/limit notices, and
+    /// `info` for ordinary workflow updates.
+    pub severity: String,
+}
+
+fn notification_severity(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("not approved")
+        || lower.contains("not been approved")
+        || lower.contains("rejected")
+    {
+        "warning".into()
+    } else if lower.contains("approved for") {
+        "success".into()
+    } else if lower.contains("attention")
+        || lower.contains("limit")
+        || lower.contains("failed")
+    {
+        "warning".into()
+    } else {
+        "info".into()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autopilot::circuit::model::StepOutcome;
+
+    #[test]
+    fn circuit_completion_allows_its_terminal_actions_but_not_stale_effects_or_spawns() {
+        use crate::autopilot::circuit::stepper::Effect;
+        let notify = Effect::Notify { message: "approved".into() };
+        let set_status = Effect::SetNodeStatus {
+            node_id: "source-status".into(),
+            status: "completed".into(),
+            target_node_id: Some("$source".into()),
+        };
+        let close = Effect::CloseAgentNode { node_id: "close".into(), target_node_id: Some("reviewer".into()) };
+        let spawn = Effect::SpawnAgentNode { node_id: "reviewer".into() };
+        let inject = Effect::InjectPty { node_id: "feedback".into(), target_node_id: Some("$source".into()), prompt: "fix".into() };
+        assert!(effect_allowed_in_state("completed", true, &notify));
+        assert!(effect_allowed_in_state("completed", true, &set_status));
+        assert!(effect_allowed_in_state("completed", true, &close));
+        assert!(!effect_allowed_in_state("completed", true, &spawn));
+        assert!(!effect_allowed_in_state("completed", true, &inject));
+        for effect in [notify, set_status, close, spawn, inject] {
+            assert!(!effect_allowed_in_state("completed", false, &effect));
+            assert!(!effect_allowed_in_state("cancelled", true, &effect));
+            assert!(!effect_allowed_in_state("failed", true, &effect));
+        }
+    }
+
+    #[test]
+    fn notification_severity_does_not_call_unapproved_findings_success() {
+        assert_eq!(notification_severity("Review approved for Fix parser"), "success");
+        assert_eq!(
+            notification_severity("Latest fixes have not been approved; inspect the report"),
+            "warning"
+        );
+        assert_eq!(notification_severity("Review not approved for Fix parser"), "warning");
+        assert_eq!(notification_severity("Review needs attention"), "warning");
+    }
+
+    #[test]
+    fn cancellation_marker_invalidates_batches_until_durable_ack() {
+        let run_id = 9_876_543_210_i64;
+        let permit = begin_circuit_effect_batch(run_id);
+        assert!(!permit.is_cancelled());
+
+        mark_circuit_run_cancelled(run_id);
+        assert!(permit.is_cancelled());
+
+        // A batch admitted while the command is waiting must inherit the
+        // already-cancelled token rather than starting fresh work.
+        let blocked = begin_circuit_effect_batch(run_id);
+        assert!(blocked.is_cancelled());
+        drop(blocked);
+
+        // The marker is retained while the original batch is in flight and
+        // only becomes removable after the durable cancellation is acknowledged.
+        finish_circuit_run_cancellation(run_id);
+        drop(permit);
+
+        let fresh = begin_circuit_effect_batch(run_id);
+        assert!(!fresh.is_cancelled());
+        drop(fresh);
+    }
+
+    #[test]
+    fn circuit_old_close_cannot_retire_next_review_round() {
+        let view = RunView {
+            run_id: 1, graph: CircuitGraph::agent_review("claude", None, None, 3), state: RunState::Running,
+            context: CircuitContext::new(), steps: vec![
+                StepView { node_id: "reviewer".into(), agent_node_id: Some(101), attempt: 2,
+                    status: StepStatus::Running, outcome: None, error: None },
+                StepView { node_id: "close_reviewer".into(), agent_node_id: None, attempt: 1,
+                    status: StepStatus::Completed, outcome: Some(StepOutcome::Completed), error: None },
+            ],
+        };
+        let mut events = vec![];
+        observe_close_agent_retries(&view, &mut events);
+        assert!(events.is_empty());
+    }
 
     // -- draft-first drive gate (issue #1356) ----------------------------------
 
@@ -2575,6 +2886,7 @@ mod tests {
                 id: run_id,
                 circuit_id: 1,
                 mesh_id,
+                source_agent_node_id: None,
                 trigger_identity: String::new(),
                 state: state.to_string(),
                 context_json: "{}".to_string(),
@@ -3017,6 +3329,7 @@ mod tests {
                 id,
                 circuit_id: 0,
                 mesh_id: 0,
+                source_agent_node_id: None,
                 trigger_identity: String::new(),
                 state: String::new(),
                 context_json: String::new(),

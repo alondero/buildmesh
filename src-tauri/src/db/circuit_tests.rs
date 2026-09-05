@@ -31,6 +31,60 @@ fn sample_graph_json() -> String {
         .unwrap()
 }
 
+#[test]
+fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
+    init_temp_db("node-review");
+    let mesh = create_mesh("node-review-mesh", "/tmp/node-review").unwrap();
+    let source = create_agent_node(mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
+    let run_id = create_node_circuit_run(source.id, None, 3).unwrap();
+    assert_eq!(create_node_circuit_run(source.id, None, 3).unwrap(), run_id);
+    assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty(), "preset is hidden from user blueprints");
+    let preset_count: i64 = write_conn().query_row(
+        "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 1",
+        rusqlite::params![mesh.id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(preset_count, 1);
+    let run = get_circuit_run(run_id).unwrap().unwrap();
+    assert_eq!(run.source_agent_node_id, Some(source.id));
+    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
+    assert_eq!(ctx.source_agent_id(), Some(source.id));
+    assert_eq!(ctx.get("source.base_ref"), Some(mesh.base_ref.as_str()));
+    assert!(list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id && row.1 == run_id));
+    commit_circuit_advance(run_id, Some("running"), None, &[CircuitStepOp {
+        node_id: "reviewer".into(), status: "running".into(), outcome: None, error: None,
+        agent_node_id: Some(123456), attempt: 1, fresh_attempt: false,
+    }]).unwrap();
+    assert_eq!(cancel_circuit_run(run_id).unwrap(), vec![123456]);
+    assert!(get_agent_node_by_id(source.id).is_ok());
+    assert!(!list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id));
+    let history = list_circuits_with_recent_runs(mesh.id, 10).unwrap();
+    assert_eq!(history.len(), 1, "the preset is history-visible after completion");
+    assert!(history[0].0.is_preset);
+    assert_eq!(history[0].1[0].run.state, "cancelled");
+}
+
+#[test]
+fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
+    init_temp_db("node-circuit-validation");
+    let mesh = create_mesh("node-workflow-mesh", "/tmp/node-workflow").unwrap();
+    let other = create_mesh("node-other-mesh", "/tmp/node-other").unwrap();
+    let source = create_agent_node(mesh.id, "Source", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, false, None, None, None).unwrap();
+    update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
+    let foreign = create_autopilot_circuit(other.id, "foreign", "", 1, &sample_graph_json()).unwrap();
+    assert!(create_node_circuit_run(source.id, Some(foreign.id), 3).unwrap_err().contains("manual Circuit"));
+    let interval = CircuitGraph::triggered_skeleton("task", crate::autopilot::circuit::model::CircuitNodeKind::Interval { interval_seconds: 60 });
+    let timed = create_autopilot_circuit(mesh.id, "timed", "", 1, &interval.to_json().unwrap()).unwrap();
+    assert!(create_node_circuit_run(source.id, Some(timed.id), 3).is_err());
+    let manual = create_autopilot_circuit(mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
+    let run = create_node_circuit_run(source.id, Some(manual.id), 3).unwrap();
+    assert_eq!(get_circuit_run(run).unwrap().unwrap().circuit_id, manual.id);
+    cancel_circuit_run(run).unwrap();
+    assert_ne!(create_node_circuit_run(source.id, Some(manual.id), 3).unwrap(), run);
+}
+
 // ---------------------------------------------------------------------------
 // Circuit CRUD + persistence across "restarts" (re-open reads).
 // ---------------------------------------------------------------------------
@@ -492,7 +546,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
 
     assert_eq!(
         list_circuit_agent_ownerships().unwrap(),
-        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string())]
+        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string(), "completed".to_string())]
     );
 
     clear_circuit_step_agent_node(run_id, "spawn").unwrap();
@@ -1087,6 +1141,109 @@ fn evolve_to_v34_creates_circuit_tables_and_queue_index_from_a_v33_db() {
 
     // Idempotent: re-running the migration must not error or duplicate.
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+}
+
+#[test]
+fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO app_settings (key, value) VALUES ('schema_version', '39');
+        CREATE TABLE meshes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            layout TEXT NOT NULL DEFAULT 'grid',
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO meshes (name, path) VALUES ('mesh', '/tmp/review-migration');
+        CREATE TABLE agent_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            env TEXT NOT NULL DEFAULT 'windows',
+            provider TEXT NOT NULL DEFAULT 'anthropic',
+            status TEXT NOT NULL DEFAULT 'idle',
+            cli_session_id TEXT,
+            worktree_name TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (7, 1, 'source', '/tmp/source');
+        CREATE TABLE autopilot_circuits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            concurrency_limit INTEGER NOT NULL DEFAULT 1,
+            graph_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE autopilot_circuit_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            circuit_id INTEGER NOT NULL,
+            mesh_id INTEGER NOT NULL,
+            trigger_identity TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'pending',
+            context_json TEXT NOT NULL DEFAULT '{}',
+            queue_position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (circuit_id, trigger_identity)
+        );
+        INSERT INTO autopilot_circuits (mesh_id, name, description, graph_json)
+            VALUES (1, 'Review agent 7', 'Review an existing agent and return findings until approved', '{}');
+        INSERT INTO autopilot_circuits (mesh_id, name, description, graph_json)
+            VALUES (1, 'Review agent 7', 'Review an existing agent and return findings until approved', '{}');
+        INSERT INTO autopilot_circuit_runs (circuit_id, mesh_id, trigger_identity, context_json)
+            VALUES (2, 1, 'manual:agent:7:old', '{\"source.agent_id\":\"7\"}');
+        INSERT INTO autopilot_circuit_runs (circuit_id, mesh_id, trigger_identity, context_json)
+            VALUES (1, 1, 'manual:agent:999:old', '{\"source.agent_id\":\"999\"}');
+        ",
+    )
+    .unwrap();
+
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+    let preset_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = 1 AND is_preset = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preset_count, 1);
+    let (circuit_id, source_id): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT circuit_id, source_agent_node_id FROM autopilot_circuit_runs WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(circuit_id, 1, "run history moves to the canonical preset row");
+    assert_eq!(source_id, Some(7));
+    let missing_source: Option<i64> = conn
+        .query_row(
+            "SELECT source_agent_node_id FROM autopilot_circuit_runs WHERE id = 2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(missing_source, None, "deleted historical sources remain nullable during migration");
+    let unique_preset_index: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'uq_autopilot_circuits_preset_mesh'",
+            [],
+            |row| row.get::<_, i64>(0).map(|count| count > 0),
+        )
+        .unwrap();
+    assert!(unique_preset_index, "each mesh can have only one review preset row");
 }
 
 // ---------------------------------------------------------------------------

@@ -74,6 +74,7 @@ pub struct CircuitAgentOwnership {
     #[ts(as = "i32")]
     pub circuit_id: i64,
     pub circuit_name: String,
+    pub state: String,
 }
 
 #[command]
@@ -81,11 +82,12 @@ pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, Str
     crate::db::list_circuit_agent_ownerships()
         .map(|rows| {
             rows.into_iter()
-                .map(|(node_id, run_id, circuit_id, circuit_name)| CircuitAgentOwnership {
+                .map(|(node_id, run_id, circuit_id, circuit_name, state)| CircuitAgentOwnership {
                     node_id,
                     run_id,
                     circuit_id,
                     circuit_name,
+                    state,
                 })
                 .collect()
         })
@@ -150,10 +152,11 @@ fn map_queue_rows(
         .collect()
 }
 
-/// Batched single-IPC load for the Circuits Probe tab: every circuit on the
-/// mesh with every running/paused run and up to `limit` newest terminal runs
-/// (steps included), one command instead of N+1 round-trips. Pending runs are
-/// returned by `list_circuit_queue` so none are hidden behind this limit.
+/// Batched single-IPC load for the Circuits Probe tab: every user-authored
+/// circuit (and any active built-in preset) on the mesh with every
+/// running/paused run and up to `limit` newest terminal runs (steps included),
+/// one command instead of N+1 round-trips. Pending runs are returned by
+/// `list_circuit_queue` so none are hidden behind this limit.
 #[command]
 pub fn list_circuits_with_runs(
     mesh_id: i64,
@@ -337,8 +340,18 @@ fn retire_cancelled_agents(agent_ids: Vec<i64>) -> Result<(), String> {
     })
 }
 
+fn release_circuit_source(run_id: i64) {
+    if let Some(source) = crate::db::get_circuit_run(run_id).ok().flatten()
+        .and_then(|run| run.source_agent_node_id) {
+        crate::autopilot::evaluator::unregister(source);
+    }
+}
+
 fn cancel_run_and_cleanup_inner(app: &AppHandle, run_id: i64) -> Result<(), String> {
+    crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
     let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(|error| error.to_string())?;
+    crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
+    release_circuit_source(run_id);
     crate::services::circuit_worker::wake_circuit_worker();
     let cleanup = retire_cancelled_agents(agent_ids);
     let state = crate::db::get_circuit_run(run_id)
@@ -353,6 +366,10 @@ fn cancel_run_and_cleanup_inner(app: &AppHandle, run_id: i64) -> Result<(), Stri
 }
 
 fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
+    // Invalidate the worker's current effect batch before waiting for spawn
+    // teardown. This closes the race where a slow external effect would
+    // otherwise continue after the user pressed Cancel.
+    crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
     match crate::services::circuit_worker::with_circuit_run_spawns_quiesced(run_id, || {
         cancel_run_and_cleanup_inner(app, run_id)
     }) {
@@ -362,7 +379,10 @@ fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
             // quiescence window. The spawn's post-launch compensation will
             // retire itself; retaining the terminal ledger makes a retry
             // possible if that OS cleanup is transiently locked.
-            let _ = crate::db::cancel_circuit_run(run_id);
+            if crate::db::cancel_circuit_run(run_id).is_ok() {
+                crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
+            }
+            release_circuit_source(run_id);
             crate::services::circuit_worker::wake_circuit_worker();
             Err(wait_error)
         }
@@ -397,6 +417,14 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
     // pass that already loaded this circuit.
     crate::db::set_autopilot_circuit_enabled(circuit_id, false)
         .map_err(|error| error.to_string())?;
+    // Invalidate effect batches before waiting for spawn quiescence. Fresh
+    // triggers are disabled above, so this snapshot covers every run that
+    // the deletion barrier will subsequently clean up.
+    if let Ok(run_ids) = crate::db::list_circuit_run_ids_for_cleanup(circuit_id) {
+        for run_id in run_ids {
+            crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
+        }
+    }
     let result = crate::services::circuit_worker::with_circuit_spawns_quiesced(circuit_id, || {
         let run_ids = crate::db::list_circuit_run_ids_for_cleanup(circuit_id)
             .map_err(|error| error.to_string())?;
@@ -430,7 +458,11 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
             // retry, which will re-snapshot all attached agents.
             if let Ok(run_ids) = crate::db::list_circuit_run_ids_for_cleanup(circuit_id) {
                 for run_id in run_ids {
-                    let _ = crate::db::cancel_circuit_run(run_id);
+                    crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
+                    if crate::db::cancel_circuit_run(run_id).is_ok() {
+                        crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
+                    }
+                    release_circuit_source(run_id);
                 }
             }
             crate::services::circuit_worker::wake_circuit_worker();
@@ -458,6 +490,9 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
     let graph = CircuitGraph::from_json(&circuit.graph_json)?;
+    if graph.requires_source_agent() {
+        return Err("Start this Circuit from the source agent's title bar.".into());
+    }
     if graph.is_issue_driven_autopilot_review() {
         return Err(
             "issue-driven Autopilot review circuits are triggered by labelled GitHub issues; Trigger Now requires issue context"
@@ -487,6 +522,31 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     .map_err(|e| e.to_string())?;
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: manual trigger for circuit {} → run {}", circuit_id, run_id);
+    Ok(run_id)
+}
+
+#[command]
+pub fn trigger_circuit_from_node(app: AppHandle, node_id: i64, circuit_id: Option<i64>, max_rounds: i32) -> Result<i64, String> {
+    if !(1..=10).contains(&max_rounds) {
+        return Err("Review rounds must be between 1 and 10.".into());
+    }
+    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
+        return Err("Resume the agent before starting a review.".into());
+    }
+    let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if node.provider == "terminal" {
+        return Err("Review loops require an AI agent.".into());
+    }
+    let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds)?;
+    crate::autopilot::evaluator::register_circuit(node_id);
+    let state = crate::db::get_circuit_run(run_id)
+        .map_err(|e| e.to_string())?
+        .map(|run| run.state)
+        .unwrap_or_else(|| "pending".into());
+    let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload {
+        run_id, state,
+    });
+    crate::services::circuit_worker::wake_circuit_worker();
     Ok(run_id)
 }
 

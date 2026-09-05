@@ -1535,6 +1535,9 @@ export const moveCircuitRun = (runId: number, direction: CircuitQueueDirection) 
 export const triggerCircuitNow = (circuitId: number) =>
   _invoke<number>('trigger_circuit_now', { circuitId });
 
+export const triggerCircuitFromNode = (nodeId: number, circuitId: number | null, maxRounds: number) =>
+  _invoke<number>('trigger_circuit_from_node', { nodeId, circuitId, maxRounds });
+
 /** Graceful pause: the graph stops advancing; current steps finish (#1207). */
 export const pauseCircuitRun = (runId: number) =>
   _invoke<void>('pause_circuit_run', { runId });

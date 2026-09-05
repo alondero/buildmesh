@@ -262,6 +262,18 @@ impl RunView {
     /// match on `CircuitNodeKind` to extract a target the resolver has
     /// direct access to.
     pub fn resolve_target_agent(&self, node_id: &str) -> Option<i64> {
+        // A source binding is borrowed: never put it on a spawn step, whose
+        // agent association grants cancellation permission to delete it.
+        let target = match self.graph.node(node_id).map(|n| &n.kind) {
+            Some(CircuitNodeKind::InjectPty { target_node_id, .. })
+            | Some(CircuitNodeKind::LlmTurnClassifier { target_node_id })
+            | Some(CircuitNodeKind::AwaitAgentTurn { target_node_id })
+            | Some(CircuitNodeKind::ReviewVerdict { target_node_id }) => target_node_id.as_deref(),
+            _ => None,
+        };
+        if target == Some("$source") {
+            return self.context.source_agent_id();
+        }
         resolve_target_agent(&self.graph, &self.steps, node_id)
     }
 
@@ -291,6 +303,8 @@ pub fn resolve_target_agent(
     let explicit = match graph.node(node_id).map(|n| &n.kind) {
         Some(CircuitNodeKind::InjectPty { target_node_id, .. }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::LlmTurnClassifier { target_node_id }) => target_node_id.as_deref(),
+        Some(CircuitNodeKind::AwaitAgentTurn { target_node_id })
+        | Some(CircuitNodeKind::ReviewVerdict { target_node_id }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::SetNodeStatus { target_node_id, .. }) => target_node_id.as_deref(),
         Some(CircuitNodeKind::CloseAgentNode { target_node_id, .. }) => target_node_id.as_deref(),
         // GithubAction / Notify / Join / RetryLimit / AnyCompleted /
@@ -701,10 +715,17 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 Some(s) if s.status == StepStatus::Running
             ) && matches!(
                 run.graph.node(node_id).map(|n| &n.kind),
-                Some(CircuitNodeKind::LlmTurnClassifier { .. })
+                Some(CircuitNodeKind::LlmTurnClassifier { .. }
+                    | CircuitNodeKind::AwaitAgentTurn { .. }
+                    | CircuitNodeKind::ReviewVerdict { .. })
             );
             if is_waiting_classifier && run.state == RunState::Running {
                 if let Some(out) = output {
+                    run.context.set(&format!("node.{}.evaluated_output", node_id), out.clone());
+                    t.context_changed = true;
+                    if run.context.source_agent_id() == run.resolve_target_agent(node_id) {
+                        run.context.set("source.output", out.clone());
+                    }
                     if let Some(spawn_node_id) = spawn_node_for_agent(run, node_id) {
                         run.context.set(&format!("node.{}.output", spawn_node_id), out.clone());
                         t.context_changed = true;
@@ -1388,6 +1409,8 @@ fn start_effects_and_completion(
         }
         // -- Gates (#1207) -------------------------------------------------
         CircuitNodeKind::LlmTurnClassifier { target_node_id }
+        | CircuitNodeKind::AwaitAgentTurn { target_node_id }
+        | CircuitNodeKind::ReviewVerdict { target_node_id }
             // Parks Running until the seam classifies the piloted
             // agent's next turn yield and feeds TurnClassified back.
             // Without any spawned agent there is nothing to classify —
@@ -1401,7 +1424,9 @@ fn start_effects_and_completion(
                 "no agent node was spawned earlier in this run to classify".to_string(),
             );
         }
-        CircuitNodeKind::LlmTurnClassifier { .. } => {
+        CircuitNodeKind::LlmTurnClassifier { .. }
+        | CircuitNodeKind::AwaitAgentTurn { .. }
+        | CircuitNodeKind::ReviewVerdict { .. } => {
             // Stays Running until TurnClassified.
         }
         CircuitNodeKind::DeterministicVerification { .. } => {
@@ -1419,7 +1444,21 @@ fn start_effects_and_completion(
             }
         }
         CircuitNodeKind::RetryLimit { max_retries } => {
-            execute_retry_limit(run, t, node_id, *max_retries);
+            // Node-started review runs carry their per-run round limit in
+            // context so the shared preset can be reused safely by multiple
+            // runs with different limits. Ordinary authored circuits must
+            // always use each gate's graph value; otherwise one gate's
+            // context write would silently override another gate.
+            let max_retries = if run.context.get("source.review_preset") == Some("1") {
+                run.context
+                    .get("retry.max_retries")
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(*max_retries)
+            } else {
+                *max_retries
+            };
+            execute_retry_limit(run, t, node_id, max_retries);
         }
         // Triggers never normally reach here (auto-completed at trigger
         // time), but a re-tick racing the trigger write must not wedge.
@@ -1623,7 +1662,16 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
     }
     let any_completed = run.steps.iter().any(|s| s.status == StepStatus::Completed);
     let has_eligible = !collect_eligible(run).is_empty();
-    if any_completed && !has_eligible {
+    // AgentReady transitions complete an InjectPty step and may cascade
+    // instant successors, but their PTY write still has to execute while
+    // the durable run is active. Defer the final run-state write until the
+    // next tick so execute_effects cannot mistake the injection for a stale
+    // post-completion command. Other terminal effects remain safe to run on
+    // the same completing transition.
+    let has_pending_injection = t.effects.iter().any(|effect| {
+        matches!(effect, Effect::InjectPty { .. })
+    });
+    if any_completed && !has_eligible && !has_pending_injection {
         run.state = RunState::Completed;
         t.run_state_changed = true;
     }
@@ -1893,6 +1941,13 @@ mod tests {
         );
         assert_eq!(status_of(&run, "inject"), StepStatus::Completed);
         assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Running, "PTY injection must execute before terminalising the run");
+
+        // The next worker tick observes that the injection transition has
+        // no remaining work and records the terminal run state. No PTY
+        // effect is emitted from this completion-only transition.
+        let completion = advance(&mut run, &tick(1, 1));
+        assert!(completion.effects.is_empty());
         assert_eq!(run.state, RunState::Completed);
     }
 
@@ -2959,6 +3014,20 @@ mod tests {
         // Next tick re-executes the retried step.
         advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "work"), StepStatus::Running);
+    }
+
+    #[test]
+    fn authored_retry_limit_ignores_review_round_context_override() {
+        let mut run = retry_run(2);
+        run.context.set("retry.max_retries", "1");
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("work", 11);
+
+        advance(&mut run, &agent_finished(11, false));
+        assert_eq!(run.state, RunState::Running);
+        assert_eq!(status_of(&run, "work"), StepStatus::Queued);
+        assert_eq!(run.step("work").unwrap().attempt, 2);
     }
 
     #[test]
