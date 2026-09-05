@@ -113,7 +113,7 @@ export function defaultKind(discriminator: string): CircuitNodeKind {
     case 'inject_pty':
       return { type: 'inject_pty', prompt: '', target_node_id: null };
     case 'github_action':
-      return { type: 'github_action', action: 'add_label', label: null, comment: null };
+      return { type: 'github_action', action: 'add_label', open_pr_policy: null, label: null, comment: null };
     case 'set_node_status':
       return { type: 'set_node_status', status: 'completed', target_node_id: null };
     case 'close_agent_node':
@@ -282,6 +282,14 @@ function normalizeKind(kind: CircuitNodeKind): CircuitNodeKind {
       return {
         type: 'close_agent_node',
         target_node_id: kind.target_node_id ?? null,
+      };
+    case 'github_action':
+      return {
+        type: 'github_action',
+        action: kind.action,
+        open_pr_policy: kind.open_pr_policy ?? null,
+        label: kind.label ?? null,
+        comment: kind.comment ?? null,
       };
     case 'llm_turn_classifier':
       return {

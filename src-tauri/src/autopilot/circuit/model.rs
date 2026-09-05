@@ -180,6 +180,10 @@ pub enum CircuitNodeKind {
     /// Parsed but not yet executed.
     GithubAction {
         action: GithubActionKind,
+        // OpenPr's reconciliation policy. `None` preserves v1 graphs and
+        // means create the PR when no existing PR is found.
+        #[serde(default)]
+        open_pr_policy: Option<OpenPrPolicy>,
         label: Option<String>,
         comment: Option<String>,
     },
@@ -239,6 +243,25 @@ pub enum GithubActionKind {
     PostComment,
     OpenPr,
     CloseIssue,
+}
+
+/// How an OpenPr action reconciles the remote pull request.
+///
+/// This belongs to the graph node rather than the worker or a blueprint
+/// marker: a custom graph can explicitly require its agent to create the PR,
+/// while the walking skeleton can retain the create-if-missing behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "OpenPrPolicy.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum OpenPrPolicy {
+    CreateIfMissing,
+    RequireExisting,
+}
+
+impl OpenPrPolicy {
+    pub fn requires_existing(self) -> bool {
+        matches!(self, Self::RequireExisting)
+    }
 }
 
 /// The agent-node status a [`CircuitNodeKind::SetNodeStatus`] step writes.
@@ -607,6 +630,24 @@ impl CircuitGraph {
             return false;
         }
 
+        // The original review blueprint predates the explicit OpenPr policy.
+        // Preserve its require-existing contract when loading a persisted
+        // graph that omitted the new optional field.
+        let mut policy_changed = false;
+        for node in &mut self.nodes {
+            if let CircuitNodeKind::GithubAction {
+                action: GithubActionKind::OpenPr,
+                open_pr_policy,
+                ..
+            } = &mut node.kind
+            {
+                if open_pr_policy.is_none() {
+                    *open_pr_policy = Some(OpenPrPolicy::RequireExisting);
+                    policy_changed = true;
+                }
+            }
+        }
+
         let implementer_changed = self.replace_legacy_injected_first_turn(
             "implementer",
             "implementation_prompt",
@@ -626,7 +667,7 @@ impl CircuitGraph {
                 Self::PR_REVIEW_PROMPT
             ),
         );
-        marker_changed || implementer_changed || reviewer_changed
+        marker_changed || policy_changed || implementer_changed || reviewer_changed
     }
 
     fn replace_legacy_injected_first_turn(
@@ -839,6 +880,7 @@ impl CircuitGraph {
                     "open_pr",
                     CircuitNodeKind::GithubAction {
                         action: GithubActionKind::OpenPr,
+                        open_pr_policy: Some(OpenPrPolicy::RequireExisting),
                         label: None,
                         comment: Some("Closes #{{issue.number}}".to_string()),
                     },
@@ -1084,7 +1126,7 @@ mod tests {
             CircuitNodeKind::GithubPullRequestLabel { label: "review-me".into() },
             spawn_kind("p", Some("fix-it")),
             inject_kind("wrap up"),
-            CircuitNodeKind::GithubAction { action: GithubActionKind::AddLabel, label: Some("done".into()), comment: None },
+            CircuitNodeKind::GithubAction { action: GithubActionKind::AddLabel, open_pr_policy: None, label: Some("done".into()), comment: None },
             set_status_kind(SessionStatusKind::Completed),
             CircuitNodeKind::Notify { message: "hi".into() },
             CircuitNodeKind::LlmTurnClassifier { target_node_id: None },
@@ -1215,7 +1257,7 @@ mod tests {
             GithubActionKind::CloseIssue,
         ] {
             assert!(
-                is_executable(&CircuitNodeKind::GithubAction { action, label: None, comment: None }),
+                is_executable(&CircuitNodeKind::GithubAction { action, open_pr_policy: None, label: None, comment: None }),
                 "{action:?} must be executable"
             );
         }
@@ -1627,6 +1669,14 @@ mod tests {
             Some(CircuitNodeKind::GithubIssueLabel { label }) if label == "buildmesh:run"
         ));
         assert!(matches!(
+            g.node("open_pr").map(|n| &n.kind),
+            Some(CircuitNodeKind::GithubAction {
+                action: GithubActionKind::OpenPr,
+                open_pr_policy: Some(OpenPrPolicy::RequireExisting),
+                ..
+            })
+        ));
+        assert!(matches!(
             g.node("implementer").map(|n| &n.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
                 if prompt == "{{issue.prefill}}"
@@ -1785,6 +1835,15 @@ mod tests {
         });
         let mut raw: serde_json::Value = serde_json::from_str(&graph.to_json().unwrap()).unwrap();
         raw.as_object_mut().unwrap().remove("blueprint");
+        raw["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["id"] == "open_pr")
+            .unwrap()["type"]
+            .as_object_mut()
+            .unwrap()
+            .remove("open_pr_policy");
 
         let mut parsed = CircuitGraph::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
         assert!(parsed.upgrade_legacy_issue_review_first_turns());
@@ -1793,5 +1852,13 @@ mod tests {
             Some(CircuitBlueprintKind::IssueDrivenAutopilotReview)
         );
         assert!(parsed.is_issue_driven_autopilot_review());
+        assert!(matches!(
+            parsed.node("open_pr").map(|node| &node.kind),
+            Some(CircuitNodeKind::GithubAction {
+                action: GithubActionKind::OpenPr,
+                open_pr_policy: Some(OpenPrPolicy::RequireExisting),
+                ..
+            })
+        ));
     }
 }

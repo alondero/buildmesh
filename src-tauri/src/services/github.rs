@@ -875,8 +875,8 @@ impl GitHubClient {
         Ok(result.items)
     }
 
-    /// Create a pull request. Returns the PR URL.
-    pub fn create_pull_request(
+    /// Create a pull request and return GitHub's typed response.
+    pub fn create_pull_request_details(
         &self,
         owner: &str,
         repo: &str,
@@ -884,7 +884,7 @@ impl GitHubClient {
         body: &str,
         head: &str,
         base: &str,
-    ) -> Result<String, GitHubError> {
+    ) -> Result<PullRequest, GitHubError> {
         let url = self.rest_url(&format!("/repos/{}/{}/pulls", owner, repo));
 
         #[derive(Serialize)]
@@ -910,7 +910,20 @@ impl GitHubClient {
             return Err(GitHubError::Api(status.as_u16(), body));
         }
 
-        let pr: PullRequest = resp.json()?;
+        resp.json().map_err(GitHubError::from)
+    }
+
+    /// Create a pull request. Returns the PR URL for existing callers.
+    pub fn create_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        head: &str,
+        base: &str,
+    ) -> Result<String, GitHubError> {
+        let pr = self.create_pull_request_details(owner, repo, title, body, head, base)?;
         Ok(pr.html_url)
     }
 

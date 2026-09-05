@@ -36,6 +36,7 @@ import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
 import type { GithubActionKind } from '../../types/generated/GithubActionKind';
+import type { OpenPrPolicy } from '../../types/generated/OpenPrPolicy';
 import type { SessionStatusKind } from '../../types/generated/SessionStatusKind';
 import { MustacheTextarea } from './MustacheTextarea';
 import {
@@ -497,6 +498,20 @@ export function InspectorPanel(props: InspectorPanelProps) {
               <option value="close_issue">Close issue</option>
             </select>
           </Field>
+          {kind.action === 'open_pr' && (
+            <Field label="PR policy">
+              <select
+                value={kind.open_pr_policy ?? 'create_if_missing'}
+                aria-label="Open PR policy"
+                data-testid="inspector-open-pr-policy"
+                onChange={(e) => onChange({ ...kind, open_pr_policy: e.target.value as OpenPrPolicy })}
+                className={inputClass}
+              >
+                <option value="create_if_missing">Create if missing</option>
+                <option value="require_existing">Require existing PR</option>
+              </select>
+            </Field>
+          )}
           {(kind.action === 'add_label' || kind.action === 'remove_label') && (
             <Field label="Label">
               <input

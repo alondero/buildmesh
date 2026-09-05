@@ -193,6 +193,8 @@ pub(crate) struct WrapupState {
     pub dirty: bool,
     /// Branch pushed with an up-to-date upstream (upstream exists, 0 ahead).
     pub pushed: bool,
+    /// The branch currently checked out in the inspected worktree.
+    pub branch: Option<String>,
     /// Open PR URL for the branch, if any.
     pub pr_url: Option<String>,
     /// The same PR's number — persisted to the ledger on completion so the
@@ -478,38 +480,60 @@ fn clear_attention_after_injection(node_id: i64, app: &AppHandle) {
 pub(crate) fn observe_wrapup_state(
     node: &crate::models::AgentNode,
     pr_required: bool,
-) -> WrapupState {
-    let (mut state, branch) = observe_wrapup_git_state(node);
+) -> Result<WrapupState, String> {
+    let mesh_id = node.mesh_id;
+    observe_wrapup_state_with(
+        node,
+        pr_required,
+        observe_wrapup_git_state,
+        move |branch| {
+            let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+            let (owner, repo_name) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
+            let client = crate::services::github::GitHubClient::new().map_err(|e| e.to_string())?;
+            client
+                .find_open_pr_for_branch(&owner, &repo_name, branch)
+                .map_err(|e| {
+                    format!(
+                        "could not verify the pull request for {owner}/{repo_name} branch {branch}: {e}"
+                    )
+                })
+        },
+    )
+}
+
+/// Combine local wrap-up observation with an optional, fallible PR lookup.
+/// Keeping the external lookup behind this seam lets callers defer
+/// infrastructure errors without changing the agent's correction budget.
+fn observe_wrapup_state_with(
+    node: &crate::models::AgentNode,
+    pr_required: bool,
+    observe_git: impl FnOnce(&crate::models::AgentNode) -> WrapupState,
+    find: impl FnOnce(&str) -> Result<Option<crate::services::github::PullRequest>, String>,
+) -> Result<WrapupState, String> {
+    let mut state = observe_git(node);
     state.pr_required = pr_required;
-    // Legacy Autopilot owns its PR observation here. Circuits perform their
-    // own fallible lookup so an API error cannot masquerade as a missing PR.
-    if state.pushed {
-        let pr = branch.as_deref().and_then(|b| {
-            let mesh = db::get_mesh_by_id(node.mesh_id).ok()?;
-            let (owner, repo_name) =
-                crate::commands::pr::resolve_github_owner_repo(&mesh).ok()?;
-            let client = crate::services::github::GitHubClient::new().ok()?;
-            match client.find_open_pr_for_branch(&owner, &repo_name, b) {
-                Ok(pr) => pr,
-                Err(e) => {
-                    tracing::warn!("autopilot pipeline({}): PR lookup for {} failed: {}", node.id, b, e);
-                    None
-                }
-            }
-        });
+    // A PR is a prerequisite only when the mesh policy requires one. The
+    // optional path must not turn an unavailable GitHub service into a
+    // finishing blocker merely because a PR lookup would be nice to have.
+    if state.pushed && pr_required {
+        let pr = if let Some(branch) = state.branch.as_deref() {
+            find(branch)?
+        } else {
+            None
+        };
         if let Some(pr) = pr {
             state.pr_number = Some(pr.number);
             state.pr_url = Some(pr.html_url);
         }
     }
-    state
+    Ok(state)
 }
 
 /// Observe local wrap-up prerequisites and the actual checked-out branch.
 /// Worktree directory names may outlive a branch rename by the agent.
 pub(crate) fn observe_wrapup_git_state(
     node: &crate::models::AgentNode,
-) -> (WrapupState, Option<String>) {
+) -> WrapupState {
     // `node_working_path` resolves Worktree and Root Nodes alike (host path +
     // env), so the self-heal below covers both; on a Root Node the sanitize
     // is a no-op (`.git` is a directory, not a gitlink).
@@ -572,9 +596,9 @@ pub(crate) fn observe_wrapup_git_state(
         }
     };
 
-    (WrapupState {
-        dirty, pushed, pr_url: None, pr_number: None, pr_required: false, repo_error,
-    }, branch)
+    WrapupState {
+        dirty, pushed, branch, pr_url: None, pr_number: None, pr_required: false, repo_error,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -699,7 +723,16 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
             }
         }
         S::Finishing => {
-            let observed = observe_wrapup_state(&node, action_on_success != "none");
+            let observed = match observe_wrapup_state(&node, action_on_success != "none") {
+                Ok(state) => state,
+                Err(error) => {
+                    // A GitHub outage is infrastructure state, not a fact
+                    // the coding agent can repair. Leave the finishing
+                    // attempt untouched and let a later redrive retry it.
+                    tracing::warn!("autopilot pipeline({}): wrap-up observation deferred: {}", node_id, error);
+                    return;
+                }
+            };
             match decide_finishing(&observed, attempts) {
                 FinishOutcome::Complete => handle_verified_wrapup(
                     node_id,
@@ -995,7 +1028,13 @@ fn redrive_one(node_id: i64, app: &AppHandle) {
     let mesh = db::get_mesh_by_id(node.mesh_id).ok();
     let action_on_success = crate::services::autopilot::configured_action_on_success(node.mesh_id);
 
-    let observed = observe_wrapup_state(&node, action_on_success != "none");
+    let observed = match observe_wrapup_state(&node, action_on_success != "none") {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!("autopilot redrive({}): wrap-up observation deferred: {}", node_id, error);
+            return;
+        }
+    };
     match decide_finishing(&observed, attempts) {
         FinishOutcome::Complete => {
             tracing::info!(
@@ -1035,6 +1074,7 @@ mod tests {
         WrapupState {
             dirty,
             pushed,
+            branch: None,
             pr_url: pr.map(str::to_string),
             pr_number: pr.map(|_| 1),
             pr_required,
@@ -1185,9 +1225,9 @@ mod tests {
         node.path = dir.path().to_string_lossy().into_owned();
         node.worktree_name = Some("original-worktree-name".into());
         node.worktree_path = Some(worktree_path.to_string_lossy().into_owned());
-        let (state, branch) = observe_wrapup_git_state(&node);
-        assert_eq!(branch.as_deref(), Some("renamed-implementation"));
-        assert_ne!(branch, node.worktree_name);
+        let state = observe_wrapup_git_state(&node);
+        assert_eq!(state.branch.as_deref(), Some("renamed-implementation"));
+        assert_ne!(state.branch, node.worktree_name);
         assert!(state.pushed);
         assert!(wrapup_reasons(&state).is_empty());
         assert!(state.pr_url.is_none());
@@ -1198,7 +1238,7 @@ mod tests {
         let node = wrapup_test_node();
         // The worktree path doesn't exist, so the repo open must fail and the
         // pushed=false short-circuit keeps GitHub out of the picture.
-        let state = observe_wrapup_state(&node, true);
+        let state = observe_wrapup_state(&node, true).unwrap();
         let err = state.repo_error.expect("unopenable worktree must set repo_error");
         assert!(
             err.contains("gh1-missing"),
@@ -1206,6 +1246,68 @@ mod tests {
             err
         );
         assert!(err.contains("could not open"));
+    }
+
+    fn synthetic_pushed_wrapup() -> WrapupState {
+        WrapupState {
+            dirty: false,
+            pushed: true,
+            branch: Some("feature/implementation".into()),
+            pr_url: None,
+            pr_number: None,
+            pr_required: false,
+            repo_error: None,
+        }
+    }
+
+    #[test]
+    fn optional_wrapup_does_not_block_on_github_lookup_errors() {
+        let node = wrapup_test_node();
+        let state = observe_wrapup_state_with(
+            &node,
+            false,
+            |_| synthetic_pushed_wrapup(),
+            |_| panic!("optional PR discovery must not be required"),
+        )
+        .unwrap();
+        assert!(!state.pr_required);
+        assert!(state.pr_number.is_none());
+        assert!(state.pr_url.is_none());
+    }
+
+    #[test]
+    fn required_wrapup_propagates_lookup_error_then_accepts_recovery() {
+        let node = wrapup_test_node();
+        let error = observe_wrapup_state_with(
+            &node,
+            true,
+            |_| synthetic_pushed_wrapup(),
+            |_| Err("GitHub unavailable".into()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "GitHub unavailable");
+
+        let recovered = observe_wrapup_state_with(
+            &node,
+            true,
+            |_| synthetic_pushed_wrapup(),
+            |_| {
+                Ok(Some(
+                    serde_json::from_value(serde_json::json!({
+                        "number": 42,
+                        "html_url": "https://github.com/example/repo/pull/42"
+                    }))
+                    .unwrap(),
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(recovered.pr_number, Some(42));
+        assert_eq!(
+            recovered.pr_url.as_deref(),
+            Some("https://github.com/example/repo/pull/42")
+        );
+        assert!(recovered.pr_required);
     }
 
     /// The honest repo-error reason still respects the attempts cap.

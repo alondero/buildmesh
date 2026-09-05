@@ -826,7 +826,8 @@ fn load_steps(run_id: i64) -> Result<Vec<StepView>, String> {
 /// `SpawnAgentNode` case — spawn owns the agent it created), or — for
 /// steps that act on an upstream spawned agent (`InjectPty`,
 /// `LlmTurnClassifier`, `SetNodeStatus`, `CloseAgentNode`) — the resolved
-/// lineage agent via [`resolve_target_agent`]. Returns `None` when
+/// lineage agent via [`resolve_target_agent`] (or the borrowed `$source`
+/// context binding). Returns `None` when
 /// neither applies (not a piloted step, or no spawn in lineage).
 ///
 /// Used by [`observe`] and the matching startup-recovery pass to detect
@@ -838,11 +839,38 @@ fn observed_agent_for_step(
     step: &StepView,
     graph: &CircuitGraph,
     steps: &[StepView],
+    source_agent_id: Option<i64>,
 ) -> Option<i64> {
-    if let Some(id) = step.agent_node_id {
-        return Some(id);
+    let piloted = matches!(
+        graph.node(&step.node_id).map(|node| &node.kind),
+        Some(
+            CircuitNodeKind::SpawnAgentNode { .. }
+                | CircuitNodeKind::InjectPty { .. }
+                | CircuitNodeKind::LlmTurnClassifier { .. }
+                | CircuitNodeKind::AwaitAgentTurn { .. }
+                | CircuitNodeKind::ReviewVerdict { .. }
+                | CircuitNodeKind::SetNodeStatus { .. }
+                | CircuitNodeKind::CloseAgentNode { .. }
+        )
+    );
+    if !piloted {
+        return None;
     }
-    crate::autopilot::circuit::stepper::resolve_target_agent(graph, steps, &step.node_id)
+    let source_bound = match graph.node(&step.node_id).map(|node| &node.kind) {
+        Some(CircuitNodeKind::InjectPty { target_node_id, .. })
+        | Some(CircuitNodeKind::LlmTurnClassifier { target_node_id })
+        | Some(CircuitNodeKind::AwaitAgentTurn { target_node_id })
+        | Some(CircuitNodeKind::ReviewVerdict { target_node_id }) => {
+            target_node_id.as_deref() == Some("$source")
+        }
+        _ => false,
+    };
+    if source_bound {
+        return source_agent_id;
+    }
+    step.agent_node_id.or_else(|| {
+        crate::autopilot::circuit::stepper::resolve_target_agent(graph, steps, &step.node_id)
+    })
 }
 
 /// Observe the world and turn it into pure events for this run.
@@ -876,8 +904,12 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
         if step.status != StepStatus::Running {
             continue;
         }
-        let Some(agent_node_id) = observed_agent_for_step(step, &view.graph, &view.steps)
-            .or_else(|| view.resolve_target_agent(&step.node_id)) else {
+        let Some(agent_node_id) = observed_agent_for_step(
+            step,
+            &view.graph,
+            &view.steps,
+            view.context.source_agent_id(),
+        ) else {
             continue;
         };
         let node = db::get_agent_node_by_id(agent_node_id).ok();
@@ -1333,37 +1365,39 @@ fn determine_github_target(
 fn ensure_open_pr(
     view: &RunView,
     node_id: &str,
-    observe: impl FnOnce(i64) -> Result<(crate::autopilot::pipeline::WrapupState, Option<String>), String>,
+    policy: Option<crate::autopilot::circuit::model::OpenPrPolicy>,
+    observe: impl FnOnce(i64) -> Result<crate::autopilot::pipeline::WrapupState, String>,
     find: impl FnOnce(&str) -> Result<Option<crate::services::github::PullRequest>, String>,
-    create: impl FnOnce(&str, &str) -> Result<String, String>,
+    create: impl FnOnce(&str, &str) -> Result<crate::services::github::PullRequest, String>,
 ) -> Result<CircuitEvent, String> {
-    let agent_node_id = view.resolve_target_agent(node_id)
+    let agent_node_id = view.resolve_open_pr_agent(node_id)
         .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
-    let (wrapup, head) = observe(agent_node_id)?;
+    let wrapup = observe(agent_node_id)?;
     let reasons = crate::autopilot::pipeline::wrapup_reasons(&wrapup);
     if !reasons.is_empty() {
         return Err(format!("autopilot wrap-up verification failed: {}", reasons.join("; ")));
     }
-    let head = head.ok_or_else(|| "the implementation worktree has no checked-out branch".to_string())?;
+    let head = wrapup
+        .branch
+        .clone()
+        .ok_or_else(|| "the implementation worktree has no checked-out branch".to_string())?;
     let title = view.context.get("issue.title")
         .or_else(|| view.context.get("pr.title"))
         .unwrap_or("Circuit run").to_string();
     // A replay after GitHub accepted creation but before the ledger commit
     // must discover that PR, never create a second one.
-    let (number, url, head_ref, title) = if let Some(pr) = find(&head)? {
-        (Some(pr.number), pr.html_url,
-         if pr.head_ref.trim().is_empty() { head } else { pr.head_ref },
-         if pr.title.trim().is_empty() { title } else { pr.title })
-    } else if view.graph.is_issue_driven_autopilot_review() {
-        return Err("the implementation agent did not raise an open pull request for its branch".to_string());
-    } else {
-        let url = create(&head, &title)?;
-        let number = url.trim_end_matches('/').rsplit('/').next().and_then(|s| s.parse::<i64>().ok());
-        (number, url, head, title)
+    let pr = match find(&head)? {
+        Some(pr) => pr,
+        None if policy.is_some_and(|policy| policy.requires_existing()) => {
+            return Err("the implementation agent did not raise an open pull request for its branch".to_string());
+        }
+        None => create(&head, &title)?,
     };
+    let head_ref = if pr.head_ref.trim().is_empty() { head } else { pr.head_ref };
+    let title = if pr.title.trim().is_empty() { title } else { pr.title };
     Ok(CircuitEvent::GithubActionResult {
-        node_id: node_id.to_string(), success: true, pr_number: number,
-        pr_url: Some(url), pr_head_ref: Some(head_ref),
+        node_id: node_id.to_string(), success: true, pr_number: Some(pr.number),
+        pr_url: Some(pr.html_url), pr_head_ref: Some(head_ref),
         pr_title: if title.is_empty() { None } else { Some(title) }, error: None,
     })
 }
@@ -1389,6 +1423,10 @@ fn call_github_effect(
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
     let resolved_comment = comment.map(|c| view.context.resolve(c));
+    let open_pr_policy = match view.graph.node(node_id).map(|node| &node.kind) {
+        Some(CircuitNodeKind::GithubAction { open_pr_policy, .. }) => *open_pr_policy,
+        _ => None,
+    };
 
     let action_res: Result<CircuitEvent, String> = (|| {
         match action {
@@ -1461,18 +1499,17 @@ fn call_github_effect(
                 })
             }
             GithubActionKind::OpenPr => {
-                let review_blueprint = view.graph.is_issue_driven_autopilot_review();
-                if review_blueprint
+                if open_pr_policy.is_some_and(|policy| policy.requires_existing())
                     && crate::services::autopilot::configured_action_on_success(active.run.mesh_id)
                         == "none"
                 {
                     return Err(
-                        "the issue-driven Autopilot review blueprint cannot open a PR while the mesh policy is none"
+                        "this OpenPr action requires a pull-request wrap-up policy"
                             .to_string(),
                     );
                 }
                 let body = resolved_comment.unwrap_or_default();
-                ensure_open_pr(view, node_id,
+                ensure_open_pr(view, node_id, open_pr_policy,
                     |agent_node_id| {
                         let agent_node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
                         if !agent_node.use_worktree {
@@ -1484,7 +1521,7 @@ fn call_github_effect(
                         .map_err(|e| format!("could not verify the pull request for {owner}/{repo} branch {head}: {e}")),
                     |head, title| {
                         let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
-                        client.create_pull_request(&owner, &repo, title, &body, head, &base)
+                        client.create_pull_request_details(&owner, &repo, title, &body, head, &base)
                             .map_err(|e| e.to_string())
                     },
                 )
@@ -2415,8 +2452,13 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                 | CircuitNodeKind::SetNodeStatus { .. }
                 | CircuitNodeKind::CloseAgentNode { .. } => {
                     let observed =
-                        observed_agent_for_step(step, &view.graph, &view.steps)
-                            .or_else(|| view.resolve_target_agent(&step.node_id)).and_then(|id| {
+                        observed_agent_for_step(
+                            step,
+                            &view.graph,
+                            &view.steps,
+                            view.context.source_agent_id(),
+                        )
+                        .and_then(|id| {
                             // A present-but-archived lineage target is
                             // also lost from the run's perspective.
                             db::get_agent_node_by_id(id)
@@ -2532,7 +2574,12 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
         let view = RunView { run_id: active.run.id, graph, context, steps, state: RunState::Running };
         let mut observed = HashSet::new();
         for step in view.steps.iter().filter(|s| s.status == StepStatus::Running) {
-            let Some(agent_node_id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) else {
+            let Some(agent_node_id) = observed_agent_for_step(
+                step,
+                &view.graph,
+                &view.steps,
+                view.context.source_agent_id(),
+            ) else {
                 continue;
             };
             if !observed.insert(agent_node_id) { continue; }
@@ -2602,7 +2649,7 @@ fn notification_severity(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autopilot::circuit::model::StepOutcome;
+    use crate::autopilot::circuit::model::{CircuitNode, StepOutcome};
 
     #[test]
     fn circuit_completion_allows_its_terminal_actions_but_not_stale_effects_or_spawns() {
@@ -3091,7 +3138,7 @@ mod tests {
             .step("follow_feedback")
             .expect("fixture includes follow_feedback");
         assert_eq!(
-            observed_agent_for_step(follow, &view.graph, &view.steps),
+            observed_agent_for_step(follow, &view.graph, &view.steps, view.context.source_agent_id()),
             Some(42),
             "InjectPty lineage walks back to implementer's agent_node_id"
         );
@@ -3102,9 +3149,40 @@ mod tests {
         let view = review_blueprint_view_with_orphan_inject(None);
         let follow = view.step("follow_feedback").unwrap();
         assert_eq!(
-            observed_agent_for_step(follow, &view.graph, &view.steps),
+            observed_agent_for_step(follow, &view.graph, &view.steps, view.context.source_agent_id()),
             None,
             "no spawn attachment → no observed agent"
+        );
+    }
+
+    #[test]
+    fn observed_agent_for_step_resolves_source_binding_from_run_context() {
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![CircuitNode {
+                id: "inject".into(),
+                kind: CircuitNodeKind::InjectPty {
+                    prompt: "follow-up".into(),
+                    target_node_id: Some("$source".into()),
+                },
+            }],
+            edges: vec![],
+        };
+        let step = StepView {
+            node_id: "inject".into(),
+            status: StepStatus::Running,
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+        };
+        let mut context = CircuitContext::new();
+        context.set("source.agent_id", "77");
+        assert_eq!(
+            observed_agent_for_step(&step, &graph, &[step.clone()], context.source_agent_id()),
+            Some(77),
+            "borrowed source bindings must remain visible to lifecycle observation"
         );
     }
 
@@ -3121,7 +3199,7 @@ mod tests {
         };
         // Empty steps slice is fine here — the early-return on direct id
         // short-circuits before any lineage walk.
-        assert_eq!(observed_agent_for_step(&step, &graph, &[]), Some(99));
+        assert_eq!(observed_agent_for_step(&step, &graph, &[], None), Some(99));
     }
 
     #[test]
@@ -3136,7 +3214,18 @@ mod tests {
             agent_node_id: None,
             attempt: 1,
         };
-        assert_eq!(observed_agent_for_step(&step, &graph, &[]), None);
+        assert_eq!(observed_agent_for_step(&step, &graph, &[], None), None);
+    }
+
+    #[test]
+    fn observed_agent_for_step_ignores_open_pr_worktree_observation() {
+        let view = open_pr_run();
+        let open_pr = view.step("open_pr").unwrap();
+        assert_eq!(
+            observed_agent_for_step(open_pr, &view.graph, &view.steps, view.context.source_agent_id()),
+            None,
+            "OpenPr inspects a worktree but never observes or pilots the agent process"
+        );
     }
 
     #[test]
@@ -3216,7 +3305,7 @@ mod tests {
         ];
         let inject = steps.iter().find(|s| s.node_id == "inject").unwrap();
         assert_eq!(
-            observed_agent_for_step(inject, &graph, &steps),
+            observed_agent_for_step(inject, &graph, &steps, None),
             Some(42),
             "InjectPty with target_node_id=None must walk upstream BFS, not short-circuit"
         );
@@ -3257,7 +3346,7 @@ mod tests {
         }];
         let notify = steps.first().unwrap();
         assert_eq!(
-            observed_agent_for_step(notify, &graph, &steps),
+            observed_agent_for_step(notify, &graph, &steps, None),
             None,
             "Notify has no lineage arm → no agent to check → helper returns None"
         );
@@ -3635,12 +3724,12 @@ mod tests {
             context: CircuitContext::new(), steps }
     }
 
-    fn pushed_implementation(agent: i64) -> Result<(crate::autopilot::pipeline::WrapupState, Option<String>), String> {
+    fn pushed_implementation(agent: i64) -> Result<crate::autopilot::pipeline::WrapupState, String> {
         assert_eq!(agent, 700);
-        Ok((crate::autopilot::pipeline::WrapupState {
-            dirty: false, pushed: true, pr_url: None, pr_number: None,
+        Ok(crate::autopilot::pipeline::WrapupState {
+            dirty: false, pushed: true, branch: Some("renamed-implementation".into()), pr_url: None, pr_number: None,
             pr_required: false, repo_error: None,
-        }, Some("renamed-implementation".into())))
+        })
     }
 
     fn implementation_pr() -> crate::services::github::PullRequest {
@@ -3650,10 +3739,21 @@ mod tests {
         })).unwrap()
     }
 
+    fn set_open_pr_policy(
+        run: &mut RunView,
+        policy: Option<crate::autopilot::circuit::model::OpenPrPolicy>,
+    ) {
+        if let Some(node) = run.graph.nodes.iter_mut().find(|node| node.id == "open_pr") {
+            if let CircuitNodeKind::GithubAction { open_pr_policy, .. } = &mut node.kind {
+                *open_pr_policy = policy;
+            }
+        }
+    }
+
     #[test]
     fn open_pr_acknowledges_existing_pr_and_publishes_review_context() {
         let mut run = open_pr_run();
-        let event = ensure_open_pr(&run, "open_pr", pushed_implementation,
+        let event = ensure_open_pr(&run, "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
             |head| { assert_eq!(head, "renamed-implementation"); Ok(Some(implementation_pr())) },
             |_, _| panic!("existing PR must not be created again"),
         ).unwrap();
@@ -3666,7 +3766,7 @@ mod tests {
 
     #[test]
     fn open_pr_review_requires_agent_pr_without_creating_one() {
-        let error = ensure_open_pr(&open_pr_run(), "open_pr", pushed_implementation,
+        let error = ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
             |_| Ok(None), |_, _| panic!("review blueprint delegates creation to its agent"),
         ).unwrap_err();
         assert!(error.contains("did not raise an open pull request"));
@@ -3675,8 +3775,8 @@ mod tests {
     #[test]
     fn open_pr_lookup_error_does_not_create_or_report_missing_pr() {
         let mut run = open_pr_run();
-        run.graph.blueprint = None;
-        let error = ensure_open_pr(&run, "open_pr", pushed_implementation,
+        set_open_pr_policy(&mut run, None);
+        let error = ensure_open_pr(&run, "open_pr", None, pushed_implementation,
             |_| Err("GitHub unavailable".into()), |_, _| panic!("unknown is not absent"),
         ).unwrap_err();
         assert_eq!(error, "GitHub unavailable");
@@ -3685,19 +3785,19 @@ mod tests {
     #[test]
     fn open_pr_replay_after_creation_discovers_pr_without_duplicate() {
         let mut run = open_pr_run();
-        run.graph.blueprint = None;
+        set_open_pr_policy(&mut run, None);
         let created = std::cell::RefCell::new(None);
         let creates = std::cell::Cell::new(0);
         // Simulate losing the first result before its ledger commit: replay
         // the same Running snapshot against the now-existing remote PR.
         for _ in 0..2 {
-            let event = ensure_open_pr(&run, "open_pr", pushed_implementation,
+            let event = ensure_open_pr(&run, "open_pr", None, pushed_implementation,
                 |_| Ok(created.borrow().clone()),
                 |head, _| {
                     assert_eq!(head, "renamed-implementation");
                     creates.set(creates.get() + 1);
                     let pr = implementation_pr();
-                    let url = pr.html_url.clone();
+                    let url = pr.clone();
                     *created.borrow_mut() = Some(pr);
                     Ok(url)
                 },
@@ -3709,7 +3809,7 @@ mod tests {
 
     #[test]
     fn open_pr_failed_git_observation_does_not_query_github() {
-        let error = ensure_open_pr(&open_pr_run(), "open_pr",
+        let error = ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting),
             |_| Err("worktree unavailable".into()),
             |_| panic!("branch identity is unknown"), |_, _| panic!("branch identity is unknown"),
         ).unwrap_err();
@@ -3730,6 +3830,7 @@ mod tests {
                     id: "pre_label".into(),
                     kind: CircuitNodeKind::GithubAction {
                         action: GithubActionKind::AddLabel,
+                        open_pr_policy: None,
                         label: Some("in-progress".into()),
                         comment: None,
                     },
@@ -3738,6 +3839,7 @@ mod tests {
                     id: "open_pr".into(),
                     kind: CircuitNodeKind::GithubAction {
                         action: GithubActionKind::OpenPr,
+                        open_pr_policy: Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting),
                         label: None,
                         comment: None,
                     },
@@ -3746,6 +3848,7 @@ mod tests {
                     id: "post_label".into(),
                     kind: CircuitNodeKind::GithubAction {
                         action: GithubActionKind::AddLabel,
+                        open_pr_policy: None,
                         label: Some("approved".into()),
                         comment: None,
                     },

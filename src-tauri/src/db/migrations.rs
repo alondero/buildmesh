@@ -269,7 +269,8 @@ pub(crate) enum AlwaysStep {
     /// the length distinguishes the two.
     HashCoordinatorTokens,
     /// Upgrade the original Issue Driven Autopilot graph shape once its
-    /// persisted first-turn injections are no longer needed.
+    /// persisted first-turn injections are no longer needed, and backfill
+    /// the explicit OpenPr policy on stored review graphs.
     UpgradeIssueReviewFirstTurns,
     /// Remove the temporary per-node session-generation keys written by the
     /// pre-v39 recovery implementation after their values have been copied to
@@ -1029,7 +1030,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             tx.commit()?;
         }
         AlwaysStep::UpgradeIssueReviewFirstTurns => {
-            const FLAG: &str = "issue_review_first_turn_upgrade_v1";
+            // v2 also backfills the explicit OpenPr policy on persisted
+            // review graphs, so the migration must run once after v1 has
+            // already been recorded.
+            const FLAG: &str = "issue_review_first_turn_upgrade_v2";
             let already_done: bool = conn
                 .query_row(
                     "SELECT COUNT(*) FROM app_settings WHERE key = ?1",

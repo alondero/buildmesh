@@ -94,6 +94,58 @@ describe('InspectorPanel — borrowed source targets', () => {
   });
 });
 
+describe('InspectorPanel — OpenPr policy', () => {
+  const openPrNode = (open_pr_policy: 'create_if_missing' | 'require_existing' | null = null): CircuitNode => ({
+    id: 'open-pr',
+    type: {
+      type: 'github_action',
+      action: 'open_pr',
+      open_pr_policy,
+      label: null,
+      comment: null,
+    },
+  });
+
+  it('shows a create-if-missing default only for OpenPr and emits policy changes', () => {
+    const onChange = vi.fn();
+    const { rerender } = renderNode(openPrNode(), onChange);
+    const policy = screen.getByTestId('inspector-open-pr-policy') as HTMLSelectElement;
+    expect(policy.value).toBe('create_if_missing');
+    fireEvent.change(policy, { target: { value: 'require_existing' } });
+    expect(onChange).toHaveBeenCalledWith({
+      type: 'github_action',
+      action: 'open_pr',
+      open_pr_policy: 'require_existing',
+      label: null,
+      comment: null,
+    });
+
+    rerender(
+      <InspectorPanel
+        node={{
+          id: 'label',
+          type: {
+            type: 'github_action',
+            action: 'add_label',
+            open_pr_policy: null,
+            label: 'ready',
+            comment: null,
+          },
+        }}
+        onChange={onChange}
+      />,
+    );
+    expect(screen.queryByTestId('inspector-open-pr-policy')).toBeNull();
+  });
+
+  it('preserves an explicit require-existing policy when the node is rendered', () => {
+    renderNode(openPrNode('require_existing'));
+    expect((screen.getByTestId('inspector-open-pr-policy') as HTMLSelectElement).value).toBe(
+      'require_existing',
+    );
+  });
+});
+
 describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', () => {
   beforeEach(() => {
     vi.clearAllMocks();

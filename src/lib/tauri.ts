@@ -1460,6 +1460,7 @@ export type { CircuitEdge } from '../types/generated/CircuitEdge';
 export type { EdgeCondition } from '../types/generated/EdgeCondition';
 export type { StepOutcome } from '../types/generated/StepOutcome';
 export type { GithubActionKind } from '../types/generated/GithubActionKind';
+export type { OpenPrPolicy } from '../types/generated/OpenPrPolicy';
 export type { SessionStatusKind } from '../types/generated/SessionStatusKind';
 
 export const listCircuits = (meshId: number) =>

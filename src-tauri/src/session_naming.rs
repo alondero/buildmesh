@@ -39,17 +39,11 @@ mod engine;
 mod repository;
 mod slug;
 mod words;
-#[cfg(test)]
-pub(crate) use words::{ADJECTIVES, NOUNS};
 mod wire;
 
 pub use engine::{buffers_size_bytes, cleanup, on_output, on_turn, reset_buffers};
-pub(crate) use engine::{
-    naming_backend_env, ANSI_ESCAPE,
-};
-#[cfg(test)]
-pub(crate) use engine::{naming_backend_env_with, resolve_claude_binary, user_renamed_mid_flight};
-pub use slug::{is_default_name, issue_node_name, on_spawn, pr_node_name, slugify_issue_title};
+pub(crate) use engine::{naming_backend_env, ANSI_ESCAPE};
+pub use slug::{is_default_name, issue_node_name, on_spawn, pr_node_name};
 pub use wire::{NamingBackendFailedPayload, NodeRenamedPayload};
 
 #[cfg(test)]
