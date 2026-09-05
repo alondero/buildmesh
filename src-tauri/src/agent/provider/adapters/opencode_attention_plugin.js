@@ -106,12 +106,21 @@ function isValidSessionId(id) {
   return true;
 }
 
-// Pull the session id off an OpenCode `session.created` event.
+// Pull the session id off an OpenCode lifecycle event
+// (`session.created`, `session.idle`, `permission.asked`).
 // Upstream has shipped the field under a few different shapes across
 // plugin-event revisions; we check every documented location so a
-// nested payload shape doesn't silently yield `undefined` and drop the
-// capture. Order matches the most-likely-to-be-populated field first
-// (top-level `sessionID`, the documented upstream field).
+// nested payload shape doesn't silently yield `undefined` and drop
+// the capture. Order matches the most-likely-to-be-populated field
+// first (top-level `sessionID`, the documented upstream field).
+//
+// `event.data?.sessionID` / `event.data?.id` are checked too —
+// OpenCode's internal event bus often wraps the payload under `.data`
+// when dispatching through its typed-event layer, and a hook that
+// misses the inner wrapper yields `undefined` and silently bypasses
+// fencing. The check is in addition to the top-level and `properties/`
+// variants, not a replacement; order matters only for tie-breaking when
+// multiple candidates are non-empty.
 function pickSessionId(event) {
   if (!event || typeof event !== "object") return undefined;
   if (typeof event.sessionID === "string" && event.sessionID.length > 0) {
@@ -120,6 +129,9 @@ function pickSessionId(event) {
   if (typeof event.session_id === "string" && event.session_id.length > 0) {
     return event.session_id;
   }
+  if (typeof event.id === "string" && event.id.length > 0) {
+    return event.id;
+  }
   const props = event.properties;
   if (props && typeof props === "object") {
     if (typeof props.sessionID === "string" && props.sessionID.length > 0) {
@@ -127,6 +139,9 @@ function pickSessionId(event) {
     }
     if (typeof props.session_id === "string" && props.session_id.length > 0) {
       return props.session_id;
+    }
+    if (typeof props.id === "string" && props.id.length > 0) {
+      return props.id;
     }
     const info = props.info;
     if (info && typeof info === "object") {
@@ -139,6 +154,21 @@ function pickSessionId(event) {
   const info = event.info;
   if (info && typeof info === "object" && typeof info.id === "string") {
     return info.id;
+  }
+  // OpenCode's typed-event layer wraps the payload under `.data` on some
+  // revisions; treat it the same as a top-level candidate so a hook
+  // wired through that bus doesn't lose fencing on resumed sessions.
+  const data = event.data;
+  if (data && typeof data === "object") {
+    if (typeof data.sessionID === "string" && data.sessionID.length > 0) {
+      return data.sessionID;
+    }
+    if (typeof data.session_id === "string" && data.session_id.length > 0) {
+      return data.session_id;
+    }
+    if (typeof data.id === "string" && data.id.length > 0) {
+      return data.id;
+    }
   }
   return undefined;
 }
@@ -262,22 +292,29 @@ export const BuildmeshAttention = async () => {
       // would otherwise classify this as `Ready` (turn done, no pending
       // tasks).
       //
-      // Generation fencing (issue #1294 round-2 review): `sessionID`
-      // is attached so the route's `hook_uuid != stored_cli_session_id`
-      // check can drop callbacks from a previous OpenCode incarnation.
-      // Prefer the event-supplied id; fall back to the cached value
-      // captured at `session.created` for revisions that drop the field.
+      // Best-effort fencing (issue #1294 round-3 review): `sessionID`
+      // is attached when we can resolve one (event-supplied or cached
+      // from `session.created`), but we ALWAYS post the event — a
+      // missing id is a defensive risk the route already handles
+      // gracefully (`if let Some(hook) = …` short-circuits the fence
+      // to a no-op), while a hard drop here would 100% hang the UI on
+      // resumed sessions where OpenCode never re-fires `session.created`
+      // and `cachedSessionId` is null. Fencing is best-effort; the
+      // primary contract is delivering the turn completion.
       if (event.type === "session.idle") {
         const id = pickSessionId(event) ?? cachedSessionId;
-        if (!isValidSessionId(id)) {
-          await appendLog("session.idle missing or malformed id\n");
-          return;
-        }
-        await postAttention({
+        const body = {
           hook_event_name: "session.idle",
-          sessionID: id,
           message: "OpenCode session idle — agent ready for input",
-        });
+        };
+        if (isValidSessionId(id)) {
+          body.sessionID = id;
+        } else {
+          await appendLog(
+            "session.idle missing or malformed id; posting without fencing token\n",
+          );
+        }
+        await postAttention(body);
         return;
       }
 
@@ -291,26 +328,29 @@ export const BuildmeshAttention = async () => {
       // any tool info OpenCode exposes so the route's semantic turn
       // extractor can render a meaningful description.
       //
-      // Generation fencing (issue #1294 round-2 review): `sessionID`
-      // is attached so the route's ordering-token fence can drop
-      // permission callbacks from a previous OpenCode incarnation that
-      // share a `cli_session_id` with the running process.
+      // Best-effort fencing: same rationale as `session.idle` above —
+      // a missing `sessionID` is logged but never blocks the post. The
+      // route's fence only fires on a token mismatch, not on absence,
+      // and dropping a permission prompt here means the user never
+      // sees the approval dialog and the agent hangs indefinitely.
       if (event.type === "permission.asked") {
         const toolName = pickToolInfo(event);
         const id = pickSessionId(event) ?? cachedSessionId;
-        if (!isValidSessionId(id)) {
-          await appendLog("permission.asked missing or malformed id\n");
-          return;
-        }
         const body = {
           hook_event_name: "permission.asked",
-          sessionID: id,
           notification_type: "permission_prompt",
           message: toolName
             ? `OpenCode is asking for permission: ${toolName}`
             : "OpenCode is asking for permission",
         };
         if (toolName) body.tool_name = toolName;
+        if (isValidSessionId(id)) {
+          body.sessionID = id;
+        } else {
+          await appendLog(
+            "permission.asked missing or malformed id; posting without fencing token\n",
+          );
+        }
         await postAttention(body);
         return;
       }

@@ -354,12 +354,12 @@ impl Classified {
 ///    in `Ready`.
 /// 3b. An OpenCode `session.created` plugin event (issue #1294) →
 ///    `Ignore`. Fires once at TUI boot carrying the freshly minted
-/// `ses_<…>` id; persisting that id is the primary capture path for
-/// `agent_nodes.cli_session_id` (the SQLite poller remains the fallback
-/// when the plugin is missing or blocked). This rule runs BEFORE the
-/// transcript-scan fallback for the same reason as `session.idle`: an
-/// OpenCode node never has a Claude-style transcript path, so rule 5
-/// would otherwise land a boot event on `Ready`.
+///    `ses_<…>` id; persisting that id is the primary capture path for
+///    `agent_nodes.cli_session_id` (the SQLite poller remains the fallback
+///    when the plugin is missing or blocked). This rule runs BEFORE the
+///    transcript-scan fallback for the same reason as `session.idle`: an
+///    OpenCode node never has a Claude-style transcript path, so rule 5
+///    would otherwise land a boot event on `Ready`.
 /// 4. AGY's `Stop` with `fullyIdle: false` (or explicit `fullyIdle: false`,
 ///    issue #1285, #1367) → suppress. The harness signalled the turn ended
 ///    but the agent is still busy on background work. Same false-yield
