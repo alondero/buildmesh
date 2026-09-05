@@ -2011,7 +2011,6 @@ fn spawn_circuit_agent_in_background(
 /// reload the row.
 fn abort_circuit_spawn(run_id: i64, node_id: i64) {
     crate::agent::process::PROCESS_REGISTRY.kill_session(node_id);
-    crate::agent::process::PROCESS_REGISTRY.remove(&node_id);
     let retired = match db::get_agent_node_by_id(node_id) {
         Ok(_) => crate::services::agent_node::delete(node_id, true)
             .map_err(|error| error.to_string()),

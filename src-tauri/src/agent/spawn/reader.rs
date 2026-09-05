@@ -230,6 +230,7 @@ pub(super) fn start_reader(
     spawn_start: std::time::Instant,
     mesh_id: i64,
     deliberate_kill: Arc<AtomicBool>,
+    generation: u64,
 ) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
@@ -380,6 +381,11 @@ pub(super) fn start_reader(
         }
 
         tracing::debug!("PTY reader thread exited for session {}", session_id);
+        // Natural exit must reap this incarnation (writer channel, child
+        // handle, registry slot). Compare-and-remove so a replacement
+        // spawn is not deleted by this EOF (issue #1531). Deliberate
+        // kills skip reaping here — `kill_session` owns that teardown.
+        crate::agent::process::PROCESS_REGISTRY.reap_incarnation(session_id, generation);
     })
 }
 

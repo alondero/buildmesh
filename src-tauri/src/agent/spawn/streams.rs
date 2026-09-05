@@ -67,7 +67,7 @@ pub(super) async fn start_streams(
     // One flag instance shared three ways: the registry entry (kill_session
     // sets it), the reader thread (its epilogue reads it), and nothing else.
     let deliberate_kill = Arc::new(AtomicBool::new(false));
-    register_agent(
+    let generation = register_agent(
         session_id,
         child,
         writer,
@@ -114,6 +114,7 @@ pub(super) async fn start_streams(
         spawn_start,
         mesh_id,
         deliberate_kill,
+        generation,
     );
 
     // Natural-exit watcher (issue #287). On Windows ConPTY

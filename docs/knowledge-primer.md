@@ -314,15 +314,18 @@ Agent state lives in a **static** `ProcessRegistry`: `HashMap<i64, Arc<AgentProc
 ### AgentProcess Fields
 Each entry holds:
 - `child` — `Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>`
-- `writer` — `Arc<Mutex<Box<dyn std::io::Write + Send>>`
-- `master` — `Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>`
+- Writer channel — takeable internally so teardown can close it before joining the writer thread (issue #1531). Callers enqueue through `write_bytes`; a live sender plus a `recv()`-blocked writer pays the two-second join fallback.
+- `master` — `Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>` — `take()` on kill/EOF closes the ConPTY (issue #300)
 - `reader_alive` — `Arc<AtomicBool>` — set to `false` on PTY EOF; used to detect if an agent is still alive
+- `generation` — per-incarnation token assigned at `insert`. `kill_session` and the reader-EOF `reap_incarnation` compare-and-remove against it so an old EOF cannot delete a replacement process (issue #1531)
 - `job` — `Option<process_util::JobHandle>` — a Windows Job Object containing the agent's whole process tree (see *Killing the process tree* below); `None` on non-Windows or if assignment failed
 
 The PTY handles are behind `Arc<Mutex<...>>` so the PTY reader thread and Tauri command handlers can both access them safely.
 
 ### Killing the process tree (Windows)
 `kill_session` must kill **everything** the agent spawned, or a survivor pins the worktree's directory (as its CWD or via an open handle) and blocks removal on close. `taskkill /T` alone is insufficient: it walks *live* parent→child links, so it misses any descendant whose parent already exited — e.g. a dev server the agent backgrounded then orphaned. The fix is a **Job Object** (`process_util::JobHandle`): at spawn we assign the PTY shell to a kill-on-close job, so every process it later spawns is *contained* however it detaches. `kill_session` calls `TerminateJobObject` first (reaches detached/orphaned descendants), then keeps `taskkill /T` + `child.kill()` as fallbacks for the rare case job assignment failed. Assign happens immediately after spawn, before the shell launches the agent CLI, so the whole tree is covered. FFI to `kernel32` is declared inline via `extern "system"` (same no-new-deps pattern as `services::usage.rs`).
+
+Teardown is centralized (issue #1531): compare-and-remove (or `kill_session`'s take of the current entry) claims exclusive ownership of the `Arc`, then cancel input (`close_input`), close the master, terminate/reap the process tree, join worker threads, and revoke Windows restricted-token grants. Natural PTY EOF goes through `reap_incarnation` with the same compare-and-remove so an idle node does not keep a registry slot, writer thread, child handle, or sandbox ACE. When `insert` overwrites a previous incarnation, it runs the same handle/thread teardown but **skips** sandbox revocation — grants are keyed by `session_id`, and the replacement spawn already registered them before `insert`. `kill_session` is the only public way to drop a live entry; an unconditional `remove` would delete a replacement spawn. Node-scoped output Channels stay registered across process incarnations.
 
 ### Worktree Support (git2-based)
 Buildmesh creates a dedicated worktree per agent node **itself**, via `git2` in `git/worktree/mod.rs` (`create_git_worktree` → `add_worktree_impl`) — for **all** providers, not just cwrap. This prevents concurrent agent node conflicts when multiple agent nodes target the same git repository. Two modes: `branched` (default, a real branch per worktree) and `detached` (a throwaway detached HEAD); both are cut from the configured Base Ref (default `origin/main`), resolved via `resolve_base_commit` with a fall-back to local `HEAD` when the ref is unresolvable (#230). See `docs/adr/0003-buildmesh-owns-worktree-creation.md` for why this moved off the agent CLI's old `-w` flag, and `docs/adr/0007-extract-git-module.md` for why the worktree lifecycle now lives in the `git` module.

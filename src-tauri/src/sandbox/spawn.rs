@@ -240,6 +240,25 @@ pub fn cleanup_restricted(session_id: i64) {
     }
 }
 
+/// Test seam: register a cleanup entry without spawning. Used to assert
+/// that overwriting an `AgentProcess` registry slot does not revoke the
+/// replacement spawn's grants (RESTRICTED_CLEANUP is keyed by session id).
+#[cfg(test)]
+pub(crate) fn insert_restricted_cleanup_for_test(session_id: i64) {
+    RESTRICTED_CLEANUP.lock().unwrap().insert(
+        session_id,
+        RestrictedCleanup {
+            sid: "S-1-5-21-TEST".into(),
+            granted: Vec::new(),
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn has_restricted_cleanup(session_id: i64) -> bool {
+    RESTRICTED_CLEANUP.lock().unwrap().contains_key(&session_id)
+}
+
 /// User-profile dirs to grant so the default agent chain can run. `.local\bin`
 /// holds `cwrap`/`claude.exe` (run = RX); `.claude` holds config + session
 /// state the agent reads and writes (Full).

@@ -363,7 +363,6 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
 
     let removal_path = if remove_worktree {
         crate::agent::process::PROCESS_REGISTRY.kill_session(session_id);
-        crate::agent::process::PROCESS_REGISTRY.remove(&session_id);
         env::node_worktree_path(&node).map(|r| r.host_path)
     } else {
         None

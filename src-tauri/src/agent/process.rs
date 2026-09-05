@@ -33,7 +33,12 @@ pub struct AgentProcess {
     /// duration, reintroducing the latency this PR is meant to fix.
     /// `SyncSender` is bounded so a stuck agent doesn't grow memory
     /// without limit; full sends are dropped with a warn-level log.
-    pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    /// Wrapped in `Option` so teardown can `take()` it — dropping the
+    /// last sender unblocks the writer thread's `recv()` (issue #1531).
+    /// Holding a live sender while joining the writer pays the two-second
+    /// fallback every time. Private: callers enqueue through
+    /// [`AgentProcessRegistry::write_bytes`].
+    writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
     /// Handle to the dedicated writer thread. `kill_session` joins it
     /// with a bounded timeout so the close path can never hang the UI
     /// on a wedged writer (mirror of the `reader_handle` contract).
@@ -101,9 +106,54 @@ pub struct AgentProcess {
     /// consumer, so the inner Arc would be one needless heap alloc per
     /// session.
     pub first_user_input_logged: AtomicBool,
+    /// Per-incarnation token assigned at `insert`. Natural-exit reaping
+    /// and `kill_session` compare-and-remove against this so an old
+    /// reader's EOF cannot delete a replacement process (issue #1531).
+    /// `0` in a struct literal is unassigned; `insert` overwrites it.
+    pub generation: u64,
 }
 
 impl AgentProcess {
+    /// Build a registry entry. `generation` is assigned by
+    /// [`AgentProcessRegistry::insert`]; pass `0` from callers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        child: Box<dyn Child + Send + Sync>,
+        writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+        writer_handle: Option<JoinHandle<()>>,
+        master: Box<dyn MasterPty + Send>,
+        reader_alive: Arc<AtomicBool>,
+        deliberate_kill: Arc<AtomicBool>,
+        job: Option<crate::process_util::JobHandle>,
+        reader_handle: Option<JoinHandle<()>>,
+        spawn_start: std::time::Instant,
+        mesh_id: i64,
+    ) -> Self {
+        Self {
+            child: Arc::new(Mutex::new(child)),
+            writer_tx: Mutex::new(Some(writer_tx)),
+            writer_handle: Mutex::new(writer_handle),
+            master: Arc::new(Mutex::new(Some(master))),
+            reader_alive,
+            deliberate_kill,
+            mesh_id,
+            job,
+            reader_handle: Mutex::new(reader_handle),
+            spawn_start,
+            first_user_input_logged: AtomicBool::new(false),
+            generation: 0,
+        }
+    }
+
+    /// Non-blocking enqueue onto the dedicated writer thread.
+    fn enqueue_input(&self, data: Vec<u8>) -> Result<(), std::sync::mpsc::TrySendError<Vec<u8>>> {
+        let guard = self.writer_tx.lock().unwrap();
+        match guard.as_ref() {
+            Some(tx) => tx.try_send(data),
+            None => Err(std::sync::mpsc::TrySendError::Disconnected(data)),
+        }
+    }
+
     /// Stash the reader thread's `JoinHandle` on the registry entry.
     ///
     /// Split out from `register_agent` so the spawn flow can keep the
@@ -128,6 +178,14 @@ impl AgentProcess {
     pub fn set_writer_handle(&self, handle: std::thread::JoinHandle<()>) {
         *self.writer_handle.lock().unwrap() = Some(handle);
     }
+
+    /// Drop the PTY input sender so the writer thread's `recv()` returns.
+    /// Idempotent: a second call is a no-op. Must run before joining the
+    /// writer, otherwise the join waits for the two-second fallback
+    /// (issue #1531).
+    pub fn close_input(&self) {
+        drop(self.writer_tx.lock().unwrap().take());
+    }
 }
 
 /// Trait abstracting the process registry methods needed by http_server.
@@ -143,6 +201,17 @@ pub struct AgentProcessRegistry {
     inner: PtyRegistry<i64, AgentProcess>,
 }
 
+/// Monotonic token source for [`AgentProcess::generation`]. Starts at 1 so a
+/// literal `generation: 0` is visibly "not yet inserted".
+static NEXT_PROCESS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Whether teardown should join the PTY reader thread. Natural-exit reaping
+/// runs *on* the reader, so it must not join itself.
+enum JoinPolicy {
+    Both,
+    WriterOnly,
+}
+
 impl AgentProcessRegistry {
     pub fn new() -> Self {
         Self {
@@ -155,7 +224,9 @@ impl AgentProcessRegistry {
     }
 
     pub fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
-        let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
+        let agent = self
+            .get(&session_id)
+            .ok_or_else(|| "Agent not running".to_string())?;
         // Issue #1122: non-blocking enqueue. The actual `write_all`+`flush`
         // happens on a dedicated OS thread (one per agent) that owns the
         // underlying `Box<dyn Write + Send>`. The previous design held
@@ -170,7 +241,8 @@ impl AgentProcessRegistry {
         // still draining a slow PTY; we drop the new bytes with a warn
         // (the user can re-type). Bound is 64 entries × ~tens of bytes
         // — a few KB of in-flight data, well within the PTY pipe buffer.
-        match agent.writer_tx.try_send(data.to_vec()) {
+        let send_result = agent.enqueue_input(data.to_vec());
+        match send_result {
             Ok(()) => {}
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(
@@ -202,13 +274,19 @@ impl AgentProcessRegistry {
         // helper is the only place the flag flips and the log line fires —
         // see its doc comment for the atomic contract and the
         // coordinator-drive caveat.
-        record_first_input_if_first(&agent.first_user_input_logged, agent.spawn_start, session_id);
+        record_first_input_if_first(
+            &agent.first_user_input_logged,
+            agent.spawn_start,
+            session_id,
+        );
         Ok(())
     }
 
     pub fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
         use portable_pty::PtySize;
-        let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
+        let agent = self
+            .get(&session_id)
+            .ok_or_else(|| "Agent not running".to_string())?;
         let master = agent.master.lock().unwrap();
         let Some(m) = master.as_ref() else {
             return Err("PTY master already closed".to_string());
@@ -222,12 +300,42 @@ impl AgentProcessRegistry {
         .map_err(|e| e.to_string())
     }
 
-    pub fn insert(&self, session_id: i64, agent: AgentProcess) {
-        self.inner.insert(session_id, Arc::new(agent));
+    /// Insert `agent` and return the generation token assigned to this
+    /// incarnation. A previous entry under the same session id is torn
+    /// down so insert cannot leak a child/PTY/writer.
+    ///
+    /// Sandbox ACE grants are keyed by `session_id` (not generation). The
+    /// replacement spawn registers those grants *before* `insert`, so
+    /// overwriting `prev` must tear down handles/threads without calling
+    /// `sandbox_cleanup` — otherwise the new child's grants are revoked.
+    pub fn insert(&self, session_id: i64, mut agent: AgentProcess) -> u64 {
+        let generation = NEXT_PROCESS_GENERATION.fetch_add(1, Ordering::Relaxed);
+        agent.generation = generation;
+        let previous = self.inner.insert(session_id, Arc::new(agent));
+        if let Some(prev) = previous {
+            prev.deliberate_kill.store(true, Ordering::SeqCst);
+            teardown_incarnation(session_id, &prev, JoinPolicy::Both, false);
+        }
+        generation
     }
 
-    pub fn remove(&self, session_id: &i64) -> Option<Arc<AgentProcess>> {
-        self.inner.remove(session_id)
+    /// Drop the registry entry only if it is still this incarnation.
+    /// A replacement spawn under the same session id keeps its entry
+    /// (issue #1531).
+    fn remove_if_current(&self, session_id: i64, generation: u64) -> Option<Arc<AgentProcess>> {
+        self.inner
+            .remove_if(&session_id, |agent| agent.generation == generation)
+    }
+
+    /// Reap a naturally-exited process incarnation. Compare-and-remove
+    /// first so only one teardown owns the Arc: a replacement spawn or a
+    /// concurrent `kill_session` wins the other path. Must not unregister
+    /// the node-scoped output Channel.
+    pub fn reap_incarnation(&self, session_id: i64, generation: u64) {
+        let Some(agent) = self.remove_if_current(session_id, generation) else {
+            return;
+        };
+        teardown_incarnation(session_id, &agent, JoinPolicy::WriterOnly, true);
     }
 
     pub fn contains(&self, session_id: &i64) -> bool {
@@ -259,93 +367,129 @@ impl AgentProcessRegistry {
 
     /// Kill the child process tree and mark the reader as dead for a session.
     ///
-    /// Close order is load-bearing (issue #300):
+    /// Close order is load-bearing (issue #300 / #1531):
     ///
-    /// 1. **Drop the PTY master first.** On Windows ConPTY the master read
+    /// 1. **Cancel PTY input** (`close_input`) so the writer thread's
+    ///    `recv()` returns instead of waiting for every sender to drop.
+    /// 2. **Drop the PTY master.** On Windows ConPTY the master read
     ///    pipe does not EOF when the child exits — conhost holds it open
     ///    until the pseudoconsole itself closes (the `MasterPty` drops).
     ///    `take()`-ing the `Option` here drops the inner `Box<dyn MasterPty>`,
     ///    which closes the pseudoconsole and EOFs the reader thread's
     ///    `read()`. Skipping this step wedges the reader indefinitely
     ///    (the pre-fix bug).
-    /// 2. **Kill the process tree** (Job Object → `taskkill` fallback →
-    ///    `child.kill`) so descendants release their CWD and the worktree
-    ///    can be removed.
-    /// 3. **Mark the reader dead** and **join the reader thread** with a
-    ///    bounded timeout. The bounded join protects the close path from
-    ///    any future regression that re-wedges the reader — we never want
-    ///    `kill_session` to hang the UI thread.
+    /// 3. **Kill and reap the process tree** (Job Object → `taskkill`
+    ///    fallback → `child.kill` + `try_wait`) so descendants release
+    ///    their CWD and the worktree can be removed.
+    /// 4. **Join worker threads** with a bounded timeout. The bounded
+    ///    join protects the close path from any future regression that
+    ///    re-wedges a worker — we never want `kill_session` to hang the
+    ///    UI thread.
+    ///
+    /// The registry entry is removed *before* the joins so `is_alive`
+    /// cannot report a corpse, and so a racing `reap_incarnation` cannot
+    /// teardown the same Arc. Natural-exit reaping uses compare-and-remove
+    /// against the generation token so it cannot delete a replacement.
     ///
     /// Must not touch the node-scoped PTY output Channel. Fresh spawn
     /// calls this before the child exists (step 2 of `spawn_agent_inner`);
     /// unregistering here drops the terminal's subscription and the new
     /// reader buffers bytes the viewport never sees.
     pub fn kill_session(&self, session_id: i64) {
-        if let Some(agent) = self.inner.get(&session_id) {
-            // 0. Flag the teardown as deliberate BEFORE closing anything,
-            //    so the reader thread — EOFed by the master drop below —
-            //    is guaranteed to observe the flag when its epilogue runs.
-            //    See the `deliberate_kill` field doc for why the reader
-            //    must not apply the early-exit Error heuristic here.
+        if let Some(agent) = self.inner.remove(&session_id) {
+            // Flag the teardown as deliberate BEFORE closing anything,
+            // so the reader thread — EOFed by the master drop below —
+            // is guaranteed to observe the flag when its epilogue runs.
+            // See the `deliberate_kill` field doc for why the reader
+            // must not apply the early-exit Error heuristic here.
             agent.deliberate_kill.store(true, Ordering::SeqCst);
+            teardown_incarnation(session_id, &agent, JoinPolicy::Both, true);
+            return;
+        }
 
-            // 1. Drop the master. `Option::take` removes the `Box<dyn MasterPty>`
-            //    from the mutex; the binding falls out of scope and drops
-            //    it, closing the pseudoconsole. We don't hold the mutex
-            //    across the rest of the function so `resize_pty` callers on
-            //    a racing agent don't block.
-            if let Ok(mut master_guard) = agent.master.lock() {
-                master_guard.take();
-            }
+        // No live process (fresh-spawn step 2, already reaped). Still
+        // revoke sandbox grants so a failed spawn cannot leak ACEs.
+        sandbox_cleanup(session_id);
+    }
+}
 
-            // 2. Kill the process tree. Job Object first is authoritative
-            //    (reaches detached descendants `taskkill /T` can't); the
-            //    `kill_process_tree` is a fallback for the rare spawn
-            //    case where job assignment failed; `child.kill` reaps the
-            //    shell handle portable-pty owns.
-            if let Some(job) = &agent.job {
-                job.terminate();
-            }
-            {
-                let mut child = agent.child.lock().unwrap();
-                if let Some(pid) = child.process_id() {
-                    crate::process_util::kill_process_tree(pid);
-                }
-                child.kill().ok();
-            }
+fn sandbox_cleanup(session_id: i64) {
+    // Sandbox cleanup (issue #498/#528): revoke the node's restricted-token
+    // worktree ACE grant. No-op for unsandboxed sessions. Runs after the
+    // process tree is dead so nothing is still using the granted directory.
+    #[cfg(target_os = "windows")]
+    crate::sandbox::spawn::cleanup_restricted(session_id);
+    #[cfg(not(target_os = "windows"))]
+    let _ = session_id;
+}
 
-            // 3. Mark the reader dead (it's the reader itself that flips
-            //    this on a clean path; flipping here is a belt-and-braces
-            //    against a reader that gets stuck after master close).
-            agent.reader_alive.store(false, Ordering::SeqCst);
+/// Shared teardown for a process incarnation (issue #1531). `kill_session`
+/// joins both worker threads; natural-exit reaping runs on the reader and
+/// therefore only joins the writer. The caller must already have removed
+/// `agent` from the registry so only one path owns this Arc.
+///
+/// `cleanup_sandbox` is false when `insert` replaces a previous entry: the
+/// replacement's restricted-token grants are already registered under the
+/// same `session_id`, and revoking them would strand the new child.
+fn teardown_incarnation(
+    session_id: i64,
+    agent: &AgentProcess,
+    join: JoinPolicy,
+    cleanup_sandbox: bool,
+) {
+    // 1. Cancel input. Dropping the sender unblocks `recv()` so the
+    //    writer join does not pay the two-second fallback.
+    agent.close_input();
 
-            // 4. Take the reader handle and join with a bounded timeout.
-            //    On timeout the watchdog thread is detached (the inner
-            //    `JoinHandle` is dropped when the closure ends, per
-            //    `JoinHandle::drop` docs), so we never leak a process or
-            //    wedge the close path.
+    // 2. Drop the master. `Option::take` removes the `Box<dyn MasterPty>`
+    //    from the mutex; the binding falls out of scope and drops it,
+    //    closing the pseudoconsole. Closing the master also unblocks a
+    //    writer stuck in `write_all` on a full pipe.
+    if let Ok(mut master_guard) = agent.master.lock() {
+        master_guard.take();
+    }
+
+    // 3. Kill the process tree. Job Object first is authoritative
+    //    (reaches detached descendants `taskkill /T` can't); the
+    //    `kill_process_tree` is a fallback for the rare spawn case
+    //    where job assignment failed; `child.kill` + `try_wait` reap
+    //    the shell handle portable-pty owns.
+    if let Some(job) = &agent.job {
+        job.terminate();
+    }
+    {
+        let mut child = agent.child.lock().unwrap();
+        if let Some(pid) = child.process_id() {
+            crate::process_util::kill_process_tree(pid);
+        }
+        child.kill().ok();
+        let _ = child.try_wait();
+    }
+
+    // 4. Mark the reader dead (it's the reader itself that flips this
+    //    on a clean path; flipping here is a belt-and-braces against a
+    //    reader that gets stuck after master close).
+    agent.reader_alive.store(false, Ordering::SeqCst);
+
+    match join {
+        JoinPolicy::Both => {
             if let Some(handle) = agent.reader_handle.lock().unwrap().take() {
                 join_with_timeout(handle, std::time::Duration::from_secs(2));
             }
-
-            // 5. Issue #1122: drop the dedicated writer thread. The channel
-            //    sender is in `agent.writer_tx`; when the registry entry is
-            //    dropped (after `kill_session` returns), the sender drops,
-            //    the channel closes, and the writer thread's `recv()` returns
-            //    Err — its loop exits. We additionally drop the handle here
-            //    so the close-path symmetry mirrors the reader join; if the
-            //    writer thread is mid-write on a dying PTY, the bounded join
-            //    protects the UI from a wedged worker.
-            if let Some(handle) = agent.writer_handle.lock().unwrap().take() {
-                join_with_timeout(handle, std::time::Duration::from_secs(2));
-            }
         }
+        JoinPolicy::WriterOnly => {
+            // This thread *is* the reader. Drop the handle without
+            // joining — `JoinHandle::drop` detaches.
+            drop(agent.reader_handle.lock().unwrap().take());
+        }
+    }
 
-        // Sandbox cleanup (issue #498/#528): revoke the node's restricted-token
-        // worktree ACE grant. No-op for unsandboxed sessions. Runs after the
-        // process tree is dead so nothing is still using the granted directory.
-        #[cfg(target_os = "windows")]
-        crate::sandbox::spawn::cleanup_restricted(session_id);
+    if let Some(handle) = agent.writer_handle.lock().unwrap().take() {
+        join_with_timeout(handle, std::time::Duration::from_secs(2));
+    }
+
+    if cleanup_sandbox {
+        sandbox_cleanup(session_id);
     }
 }
 
@@ -360,14 +504,25 @@ impl AgentProcessRegistry {
 /// reader does. The inner `JoinHandle` is dropped at the end of the
 /// watchdog's closure, which detaches the reader per `JoinHandle::drop` docs.
 fn join_with_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) {
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let _watchdog = std::thread::spawn(move || {
+    if handle.is_finished() {
         let _ = handle.join();
-        // If the receiver is gone (we timed out), the send errors silently;
-        // the `JoinHandle` is still dropped on closure exit, detaching the
-        // reader thread.
-        let _ = tx.send(());
-    });
+        return;
+    }
+    let watch_name = match handle.thread().name() {
+        Some(name) => format!("join-watch-{name}"),
+        None => "join-watch-pty-worker".to_string(),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let _watchdog = std::thread::Builder::new()
+        .name(watch_name)
+        .spawn(move || {
+            let _ = handle.join();
+            // If the receiver is gone (we timed out), the send errors silently;
+            // the `JoinHandle` is still dropped on closure exit, detaching the
+            // reader thread.
+            let _ = tx.send(());
+        })
+        .expect("failed to spawn join watchdog");
     let _ = rx.recv_timeout(timeout);
 }
 
@@ -537,6 +692,63 @@ mod tests {
     use crate::agent::spawn::{open_pty_pair, spawn_child};
     use crate::agent::spawn_environment;
     use crate::models::EnvType;
+    use std::io::Write;
+
+    fn insert_trivial_agent(
+        registry: &AgentProcessRegistry,
+        session_id: i64,
+    ) -> (u64, Arc<AtomicBool>) {
+        let recipe = SpawnRecipe {
+            binary: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" },
+            base_args: if cfg!(windows) {
+                vec!["/c".into(), "exit".into(), "0".into()]
+            } else {
+                vec!["-c".into(), "exit 0".into()]
+            },
+            trailing_args: Vec::new(),
+            windows_shell: WindowsShell::Direct,
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let cmd = spawn_environment::wrap(
+            recipe,
+            EnvType::Windows,
+            None,
+            None,
+            &cwd.to_string_lossy(),
+            session_id,
+            false,
+        );
+        let pair = open_pty_pair(24, 80).expect("open pty pair");
+        let child = spawn_child(&pair, cmd).expect("spawn child");
+        let writer = pair.master.take_writer().expect("take writer");
+        let writer_exited = Arc::new(AtomicBool::new(false));
+        let writer_exited_thread = writer_exited.clone();
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        let writer_thread = std::thread::spawn(move || {
+            let mut writer = writer;
+            while let Ok(bytes) = writer_rx.recv() {
+                let _ = writer.write_all(&bytes);
+                let _ = writer.flush();
+            }
+            writer_exited_thread.store(true, Ordering::SeqCst);
+        });
+        let generation = registry.insert(
+            session_id,
+            AgentProcess::new(
+                child,
+                writer_tx,
+                Some(writer_thread),
+                pair.master,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+                std::time::Instant::now(),
+                0,
+            ),
+        );
+        (generation, writer_exited)
+    }
 
     #[test]
     fn insert_and_get() {
@@ -609,8 +821,14 @@ mod tests {
 
         let logged = record_first_input_if_first(&flag, spawn_start, 42);
 
-        assert!(logged, "first call must return true (the log line was emitted)");
-        assert!(flag.load(Ordering::SeqCst), "first call must flip the flag to true");
+        assert!(
+            logged,
+            "first call must return true (the log line was emitted)"
+        );
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "first call must flip the flag to true"
+        );
     }
 
     #[test]
@@ -700,19 +918,18 @@ mod tests {
         });
         registry.insert(
             -915_4002,
-            AgentProcess {
-                child: Arc::new(Mutex::new(child)),
+            AgentProcess::new(
+                child,
                 writer_tx,
-                writer_handle: Mutex::new(Some(writer_thread)),
-                master: Arc::new(Mutex::new(Some(pair.master))),
-                reader_alive: Arc::new(AtomicBool::new(true)),
-                deliberate_kill: deliberate_kill.clone(),
-                job: None,
-                reader_handle: Mutex::new(None),
-                spawn_start: std::time::Instant::now(),
-                first_user_input_logged: AtomicBool::new(false),
-                mesh_id: 0,
-            },
+                Some(writer_thread),
+                pair.master,
+                Arc::new(AtomicBool::new(true)),
+                deliberate_kill.clone(),
+                None,
+                None,
+                std::time::Instant::now(),
+                0,
+            ),
         );
 
         registry.kill_session(-915_4002);
@@ -722,6 +939,210 @@ mod tests {
             "kill_session must set deliberate_kill before closing the PTY, \
              so the reader epilogue skips the early-exit Error heuristic"
         );
+    }
+
+    /// Issue #1531: the writer thread blocks in `recv()` until every sender
+    /// is dropped. `kill_session` used to join that thread while still
+    /// holding `writer_tx` on the live `Arc<AgentProcess>`, so the join
+    /// always paid the two-second fallback. Closing the input channel
+    /// before the join must let an idle writer exit promptly.
+    #[test]
+    fn kill_session_unblocks_idle_writer_promptly() {
+        let recipe = SpawnRecipe {
+            binary: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" },
+            base_args: if cfg!(windows) {
+                vec!["/c".into(), "exit".into(), "0".into()]
+            } else {
+                vec!["-c".into(), "exit 0".into()]
+            },
+            trailing_args: Vec::new(),
+            windows_shell: WindowsShell::Direct,
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let session_id = -915_1531;
+        let cmd = spawn_environment::wrap(
+            recipe,
+            EnvType::Windows,
+            None,
+            None,
+            &cwd.to_string_lossy(),
+            session_id,
+            false,
+        );
+
+        let pair = open_pty_pair(24, 80).expect("open pty pair");
+        let child = spawn_child(&pair, cmd).expect("spawn child");
+        let writer = pair.master.take_writer().expect("take writer");
+
+        let writer_exited = Arc::new(AtomicBool::new(false));
+        let writer_exited_thread = writer_exited.clone();
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        let writer_thread = std::thread::spawn(move || {
+            let mut writer = writer;
+            while let Ok(bytes) = writer_rx.recv() {
+                let _ = writer.write_all(&bytes);
+                let _ = writer.flush();
+            }
+            writer_exited_thread.store(true, Ordering::SeqCst);
+        });
+
+        let registry = AgentProcessRegistry::new();
+        registry.insert(
+            session_id,
+            AgentProcess::new(
+                child,
+                writer_tx,
+                Some(writer_thread),
+                pair.master,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+                std::time::Instant::now(),
+                0,
+            ),
+        );
+
+        let started = std::time::Instant::now();
+        registry.kill_session(session_id);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "kill_session must close the writer channel before joining; \
+             paid the fallback budget instead ({elapsed:?})"
+        );
+        assert!(
+            writer_exited.load(Ordering::SeqCst),
+            "idle writer thread must exit once kill_session drops the sender"
+        );
+        assert!(
+            !registry.contains(&session_id),
+            "kill_session must reap the current incarnation from the registry"
+        );
+    }
+
+    #[test]
+    fn insert_assigns_distinct_generation_tokens() {
+        let registry = AgentProcessRegistry::new();
+        let (g1, _) = insert_trivial_agent(&registry, -915_1532);
+        let (g2, _) = insert_trivial_agent(&registry, -915_1533);
+        assert_ne!(g1, 0, "insert must overwrite the unassigned 0 token");
+        assert_ne!(g2, 0);
+        assert_ne!(g1, g2);
+        registry.kill_session(-915_1532);
+        registry.kill_session(-915_1533);
+    }
+
+    #[test]
+    fn stale_generation_cannot_remove_replacement() {
+        let registry = AgentProcessRegistry::new();
+        let session_id = -915_1534;
+        let (gen1, _) = insert_trivial_agent(&registry, session_id);
+        registry.kill_session(session_id);
+        let (gen2, _) = insert_trivial_agent(&registry, session_id);
+        assert_ne!(gen1, gen2);
+
+        registry.reap_incarnation(session_id, gen1);
+        assert!(
+            registry.contains(&session_id),
+            "an old incarnation must not reap the replacement"
+        );
+        assert_eq!(registry.get(&session_id).unwrap().generation, gen2);
+
+        registry.kill_session(session_id);
+        assert!(!registry.contains(&session_id));
+    }
+
+    #[test]
+    fn reap_incarnation_cleans_up_natural_exit() {
+        let registry = AgentProcessRegistry::new();
+        let session_id = -915_1535;
+        let (generation, writer_exited) = insert_trivial_agent(&registry, session_id);
+
+        registry.reap_incarnation(session_id, generation);
+
+        assert!(
+            !registry.contains(&session_id),
+            "natural exit must drop the registry entry"
+        );
+        assert!(
+            writer_exited.load(Ordering::SeqCst),
+            "natural exit must close the writer channel so the thread exits"
+        );
+    }
+
+    #[test]
+    fn reap_incarnation_does_not_reap_a_replacement() {
+        let registry = AgentProcessRegistry::new();
+        let session_id = -915_1536;
+        let (gen1, _) = insert_trivial_agent(&registry, session_id);
+        registry.kill_session(session_id);
+        let (gen2, replacement_writer_exited) = insert_trivial_agent(&registry, session_id);
+
+        registry.reap_incarnation(session_id, gen1);
+
+        assert!(
+            registry.contains(&session_id),
+            "old reader EOF must not remove the replacement process"
+        );
+        assert_eq!(registry.get(&session_id).unwrap().generation, gen2);
+        assert!(
+            !replacement_writer_exited.load(Ordering::SeqCst),
+            "old EOF must not close the replacement's input channel"
+        );
+
+        registry.kill_session(session_id);
+    }
+
+    #[test]
+    fn reap_incarnation_is_a_noop_after_kill_session() {
+        let registry = AgentProcessRegistry::new();
+        let session_id = -915_1537;
+        let (generation, _) = insert_trivial_agent(&registry, session_id);
+        registry.kill_session(session_id);
+        assert!(!registry.contains(&session_id));
+
+        registry.reap_incarnation(session_id, generation);
+        assert!(
+            !registry.contains(&session_id),
+            "kill_session already claimed exclusive teardown"
+        );
+    }
+
+    /// Restricted-token grants are keyed by session id. Phase 3 registers
+    /// the *replacement*'s grants before `insert` tears down `prev`; that
+    /// overwrite teardown must not call `sandbox_cleanup` or it revokes
+    /// the live child's ACEs.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn insert_replacement_does_not_revoke_new_sandbox_grants() {
+        use crate::sandbox::spawn::{
+            cleanup_restricted, has_restricted_cleanup, insert_restricted_cleanup_for_test,
+        };
+
+        let registry = AgentProcessRegistry::new();
+        let session_id = -915_1538;
+        let (_gen1, _) = insert_trivial_agent(&registry, session_id);
+
+        // Simulate phase 3 of the replacement spawn: grants already live
+        // under this session id before register_agent → insert.
+        insert_restricted_cleanup_for_test(session_id);
+        assert!(has_restricted_cleanup(session_id));
+
+        let (_gen2, _) = insert_trivial_agent(&registry, session_id);
+        assert!(
+            has_restricted_cleanup(session_id),
+            "overwriting prev must not revoke the replacement's session-scoped sandbox grants"
+        );
+
+        registry.kill_session(session_id);
+        assert!(
+            !has_restricted_cleanup(session_id),
+            "kill_session must still revoke grants for the final incarnation"
+        );
+        // Belt-and-braces if an earlier assert failed mid-test.
+        cleanup_restricted(session_id);
     }
 
     /// Regression guard for issue #287: when the agent CLI exits
@@ -861,7 +1282,6 @@ mod tests {
 pub fn kill_all_sessions() {
     for id in PROCESS_REGISTRY.session_ids() {
         PROCESS_REGISTRY.kill_session(id);
-        PROCESS_REGISTRY.remove(&id);
         crate::http_server::clear_scrollback(id);
         tracing::info!("kill_all_sessions: killed agent for session {}", id);
     }
@@ -913,10 +1333,9 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
     if !contains_newline {
         return Ok(());
     }
-    let should_signal = crate::commands::run_blocking(
-        "write_to_agent_signal",
-        move || write_to_agent_signal_blocking(session_id),
-    )
+    let should_signal = crate::commands::run_blocking("write_to_agent_signal", move || {
+        write_to_agent_signal_blocking(session_id)
+    })
     .await?;
     if should_signal {
         // Route through the SessionLifecycle sink so all `attention-cleared`
@@ -952,8 +1371,7 @@ pub(crate) fn write_to_agent_signal_blocking(session_id: i64) -> Result<bool, St
     // caller's responsibility (the `should_signal` flag tells the
     // caller to emit, preserving the original behaviour where the
     // emit lived in the async wrapper).
-    session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id)
-        .ok();
+    session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id).ok();
     Ok(true)
 }
 
@@ -968,20 +1386,13 @@ pub(crate) fn write_to_agent_signal_blocking(session_id: i64) -> Result<bool, St
 /// the dead child, and the status flip would land on a session that
 /// never received the byte.
 #[cfg(test)]
-pub(crate) fn write_to_agent_blocking(
-    session_id: i64,
-    data: String,
-) -> Result<bool, String> {
+pub(crate) fn write_to_agent_blocking(session_id: i64, data: String) -> Result<bool, String> {
     PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
     crate::attention_autoclear::disarm(session_id);
     let should_signal = data.bytes().any(|b| b == b'\n' || b == b'\r')
         && !should_skip_attention_signals(session_id);
     if should_signal {
-        session_lifecycle::on_attention_cleared(
-            &session_lifecycle::DbOnlySink,
-            session_id,
-        )
-        .ok();
+        session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id).ok();
     }
     Ok(should_signal)
 }
@@ -1030,7 +1441,6 @@ pub(crate) fn kill_agent_blocking(session_id: i64) -> Result<(), String> {
     crate::session_naming::reset_buffers(session_id);
     crate::agent::provider::notify_process_terminated(session_id);
     PROCESS_REGISTRY.kill_session(session_id);
-    PROCESS_REGISTRY.remove(&session_id);
     crate::http_server::clear_scrollback(session_id);
     // Routes through SessionLifecycle (issue #132). `DbOnlySink` because
     // the blocking core has no `AppHandle` — kill is silent on the
