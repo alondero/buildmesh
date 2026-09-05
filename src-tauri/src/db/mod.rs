@@ -3886,20 +3886,96 @@ pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
     // would otherwise intermittently flip a row from "adopted" to
     // "orphan" mid-pass.
     let live_session_ids = crate::agent::process::PROCESS_REGISTRY.session_ids();
+
+    // ---- Phase 1: snapshot rows + classify, under the global DB mutex ----
+    //
+    // The plan is a small `Vec` of `(row_id, path, tear_down)`. Building it
+    // touches the DB twice (`SELECT id, mesh_id, path FROM warm_worktrees
+    // WHERE status = 'claimed'`, then `live_mesh_ids_for`'s `SELECT DISTINCT
+    // mesh_id FROM agent_nodes WHERE id IN (...)`). Both are cheap and
+    // both finish before we drop the guard.
+    let plan = {
+        let db = write_conn();
+        plan_orphan_cleanup(&db, &live_session_ids)?
+    };
+    // ↑↑↑ DB MUTEX DROPPED HERE ↑↑↑
+    //
+    // HARD RULE (issue #1228): the rest of this function MUST NOT touch
+    // the DB or shell out to git while holding the writer mutex. The
+    // FS teardown below is the slow part — `git worktree remove --force`
+    // plus a recursive `remove_dir_all` fallback — and on Windows with
+    // antivirus-inflated delete latency it can hold the lock for many
+    // seconds. Every other DB touch in the app (attention flips, status
+    // writes, HTTP auth token validation) queues behind that mutex during
+    // startup reconcile, freezing the UI. It is also one refactor away
+    // from a true deadlock: if `remove_one_worktree`'s subtree ever gains
+    // a DB read it self-deadlocks against the guard we're holding.
+
+    // ---- Phase 2: filesystem teardown, lock-free ----
+    //
+    // The plan carries everything the FS phase needs (no DB lookup
+    // happens here). Failures are intentionally swallowed — a stuck
+    // orphan row is strictly less harmful than blocking the row drop on
+    // a flaky filesystem; the next reconcile pass retries the teardown.
+    for (_id, path, tear_down) in &plan {
+        if *tear_down {
+            tear_down_warm_worktree_path(path);
+        }
+    }
+
+    // ---- Phase 3: batch row DELETEs under the re-acquired mutex ----
+    //
+    // One short lock acquisition per row keeps the SQL plan trivial for
+    // SQLite and the existing `idx_*` indexes unchanged. The DELETE phase
+    // is purely a bookkeeping sweep: the FS work above already happened
+    // and its outcomes don't influence what we commit here (Branch 1
+    // "preserve dir" and Branch 3 "no dir on disk" both delete the row).
+    let ids: Vec<i64> = plan.iter().map(|(id, _, _)| *id).collect();
     let db = write_conn();
-    delete_orphaned_claimed_warm_worktrees_inner(&db, &live_session_ids)
+    batch_delete_warm_worktrees_by_id(&db, &ids)
 }
 
+/// Test-facing entry point: snapshot + classify + FS teardown + DELETE, all
+/// in one shot against a caller-supplied `&Connection`. Used by
+/// `warm_pool_tests` to exercise the per-row classification branches
+/// against in-memory fixtures without spinning up the global DB singleton.
+///
+/// Production goes through `delete_orphaned_claimed_warm_worktrees` (above),
+/// which composes the same helpers but releases the DB mutex between the
+/// classify and FS phases — see issue #1228.
+#[allow(dead_code)] // Test-only consumer (`warm_pool_tests`); clippy's
+                    // lib-build dead-code check doesn't see across the
+                    // #[cfg(test)] boundary, so we have to opt out. Same
+                    // pattern as `is_initialized` above.
 pub(crate) fn delete_orphaned_claimed_warm_worktrees_inner(
     conn: &Connection,
     live_session_ids: &[i64],
 ) -> SqlResult<usize> {
+    let plan = plan_orphan_cleanup(conn, live_session_ids)?;
+    for (_id, path, tear_down) in &plan {
+        if *tear_down {
+            tear_down_warm_worktree_path(path);
+        }
+    }
+    let ids: Vec<i64> = plan.iter().map(|(id, _, _)| *id).collect();
+    batch_delete_warm_worktrees_by_id(conn, &ids)
+}
+
+/// Phase 1 helper: snapshot every `claimed` row and classify it against the
+/// live-session snapshot. Pure read against the DB — no FS, no subprocess,
+/// no row mutation. Returns `(row_id, path, tear_down)` per row; `tear_down`
+/// is `true` only when the row's mesh has no live session (Branch 2 of the
+/// algorithm documented on `delete_orphaned_claimed_warm_worktrees`).
+///
+/// Must be called with a connection whose DB mutex (if any) is held by the
+/// caller. The FS phase that follows is lock-free by design.
+fn plan_orphan_cleanup(
+    conn: &Connection,
+    live_session_ids: &[i64],
+) -> SqlResult<Vec<(i64, String, bool)>> {
     // Read the full set of claimed rows up front, then drop the prepared
     // statement so the loop below doesn't keep a statement handle alive
-    // across the `remove_one_worktree` shell-out (which can take seconds
-    // on a slow disk and would otherwise hold an `&mut Connection`
-    // borrow that blocks the agent_node lookup we issue against the same
-    // connection).
+    // across the FS phase (which runs lock-free after we return).
     let mut stmt = conn.prepare(
         "SELECT id, mesh_id, path FROM warm_worktrees WHERE status = 'claimed'",
     )?;
@@ -3909,7 +3985,7 @@ pub(crate) fn delete_orphaned_claimed_warm_worktrees_inner(
     drop(stmt);
 
     if claimed.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     // Which meshes currently have a live session? Build the lookup set
@@ -3923,57 +3999,62 @@ pub(crate) fn delete_orphaned_claimed_warm_worktrees_inner(
         Some(set) => Some(set),
         None => {
             tracing::warn!(
-                "delete_orphaned_claimed_warm_worktrees_inner: could not resolve \
-                 live_mesh_ids ({} live session ids in snapshot); falling back to \
-                 row-only behaviour (no filesystem teardown) to be safe",
+                "plan_orphan_cleanup: could not resolve live_mesh_ids \
+                 ({} live session ids in snapshot); falling back to row-only \
+                 behaviour (no filesystem teardown) to be safe",
                 live_session_ids.len()
             );
             None
         }
     };
 
+    Ok(claimed
+        .into_iter()
+        .map(|(id, mesh_id, path)| {
+            let tear_down = match &live_mesh_ids {
+                // Couldn't query live sessions → be conservative. Even
+                // though there almost certainly is no live agent
+                // (startup reconcile runs before user-facing spawn), a
+                // transient DB error is not an excuse to destroy a
+                // working tree. Drop the row but leave the dir intact —
+                // the next reconcile (with a recovered DB) can retry
+                // the teardown.
+                None => false,
+                Some(live) => !live.contains(&mesh_id),
+            };
+            (id, path, tear_down)
+        })
+        .collect())
+}
+
+/// Phase 2 helper: best-effort teardown of one warm pool worktree path.
+/// Pure FS / subprocess — MUST NOT touch the DB. The caller is responsible
+/// for holding no DB mutex across this call (issue #1228).
+///
+/// Two-step teardown: `remove_one_worktree` is the polite path that clears
+/// `git worktree remove --force` metadata; if it returns `Err` (test
+/// fixture was a plain tempdir, OR production hit a locked handle /
+/// non-worktree state), the `remove_dir_all` fallback guarantees the
+/// on-disk leak actually closes. Order matters — `remove_one_worktree`
+/// first so a real git worktree loses its bookkeeping before the dir
+/// goes (which is what unblocks a future `git worktree add` for the same
+/// slug).
+fn tear_down_warm_worktree_path(path: &str) {
+    if crate::git::worktree::remove_one_worktree(path).is_err()
+        && std::path::Path::new(path).exists()
+    {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+/// Phase 3 helper: DELETE the supplied row ids. Pure write against the DB.
+/// Caller holds whatever mutex protects the connection. One statement per
+/// id keeps the SQL plan trivial and the existing `idx_*` indexes in use;
+/// the row count here is bounded by `claimed`-rows-per-mesh in practice.
+fn batch_delete_warm_worktrees_by_id(conn: &Connection, ids: &[i64]) -> SqlResult<usize> {
     let mut deleted = 0;
-    for (id, mesh_id, path) in claimed {
-        let treat_as_orphan = match &live_mesh_ids {
-            // Couldn't query live sessions → be conservative. Even though
-            // there almost certainly is no live agent (startup reconcile
-            // runs before user-facing spawn), a transient DB error is not
-            // an excuse to destroy a working tree. Drop the row but leave
-            // the dir intact — the next reconcile (with a recovered DB)
-            // can retry the teardown.
-            None => false,
-            Some(live) => !live.contains(&mesh_id),
-        };
-        if treat_as_orphan {
-            // Branch 2: crashed-spawn orphan. Best-effort: a partial
-            // git-worktree state is acceptable to leak if the call fails
-            // (the next reconcile pass will retry — see #610 / #642.3
-            // for the same "best-effort" pattern). We never block the
-            // row drop on a filesystem failure: a stuck orphan row is
-            // strictly less harmful than not dropping it.
-            //
-            // Two-step teardown: `remove_one_worktree` is the polite
-            // path that clears `git worktree remove --force` metadata;
-            // if it returns Err (test fixture was a plain tempdir, OR
-            // production hit a locked handle / non-worktree state), the
-            // `remove_dir_all` fallback guarantees the on-disk leak
-            // actually closes. Order matters — `remove_one_worktree`
-            // first so a real git worktree loses its bookkeeping before
-            // the dir goes (which is what unblocks a future
-            // `git worktree add` for the same slug).
-            if crate::git::worktree::remove_one_worktree(&path).is_err()
-                && std::path::Path::new(&path).exists()
-            {
-                let _ = std::fs::remove_dir_all(&path);
-            }
-        }
-        // Branch 1 (live session on this mesh) and Branch 3 (no dir on
-        // disk) both fall through to a row-only delete. Same for the
-        // conservative-fallback `treat_as_orphan = false` case.
-        conn.execute(
-            "DELETE FROM warm_worktrees WHERE id = ?1",
-            params![id],
-        )?;
+    for id in ids {
+        conn.execute("DELETE FROM warm_worktrees WHERE id = ?1", params![id])?;
         deleted += 1;
     }
     Ok(deleted)

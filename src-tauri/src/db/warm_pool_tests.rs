@@ -947,6 +947,176 @@ mod tests {
         );
     }
 
+    /// Issue #1228 — the `delete_orphaned_claimed_warm_worktrees` GC must
+    /// release the global writer mutex during its filesystem teardown so
+    /// concurrent DB writes (attention flips, status writes, HTTP auth
+    /// token validation) do not queue behind `git worktree remove --force`
+    /// + recursive `remove_dir_all` for many seconds during startup
+    /// reconcile.
+    ///
+    /// This test pins the **write-side** invariant directly. Pre-fix, the
+    /// GC held `write_conn()` for the entire FS phase — every other thread
+    /// that needed the writer mutex queued behind it. Post-fix, the GC
+    /// drops the mutex after Phase 1 (snapshot + classify), runs the FS
+    /// work lock-free, and re-acquires only for Phase 3 (batch DELETE).
+    ///
+    /// The probe write we issue concurrently is `delete_warm_worktree(id)`
+    /// on an **unrelated** Available row — a row the GC does not touch, so
+    /// any latency above normal query time is attributable to writer-mutex
+    /// contention, not to a real lock conflict.
+    ///
+    /// Note: this test calls `db::init` and therefore contends with every
+    /// other global-DB test in the binary for the process-wide `DB`
+    /// OnceCell (first-init-wins). The `static GFS_LOCK` below mirrors
+    /// the `MESH_TESTS_LOCK` pattern in `mesh_tests` — a module-level
+    /// mutex keeps our init / seed / GC / probe sequence atomic against
+    /// our own re-entry, and unique IDs (`test_id`-based row names) keep
+    /// us isolated from whichever other test file happened to init first.
+    #[test]
+    fn delete_orphaned_claimed_warm_worktrees_releases_writer_mutex_during_fs_teardown() {
+        static GFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = GFS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("buildmesh_issue_1228_fs_lock_test_{}.db", test_id));
+        // First-init-wins: a no-op if another test file in this binary
+        // already initialised the global DB with a different path. Either
+        // way the `write_conn()` we hold below targets the live writer.
+        crate::db::init(&db_path).expect("test setup: db::init must succeed");
+
+        // Use a unique mesh name so we don't collide with rows other
+        // global-DB tests may have written into the shared singleton.
+        let mesh_name = format!("issue-1228-mesh-{}", test_id);
+        let mesh_id: i64 = {
+            let conn = crate::db::write_conn();
+            conn.execute(
+                "INSERT INTO meshes (name, path) VALUES (?1, ?2)",
+                rusqlite::params![&mesh_name, &format!("/repo/issue-1228-{}", test_id)],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+
+        // Seed an "unrelated" Available row the probe write will target.
+        // The probe only needs to acquire the writer mutex briefly; using
+        // a row the GC doesn't touch means any latency is purely mutex
+        // contention, not a real lock conflict.
+        let probe_row_path = format!("/repo/probe-row-{}", test_id);
+        let probe_row_id: i64 = {
+            let conn = crate::db::write_conn();
+            conn.execute(
+                "INSERT INTO warm_worktrees \
+                 (mesh_id, path, preassigned_name, base_sha, status) \
+                 VALUES (?1, ?2, ?3, NULL, 'available')",
+                rusqlite::params![mesh_id, &probe_row_path, "probe-row"],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+
+        // Seed N claimed rows pointing at heavy tempdirs so the FS phase
+        // takes long enough to observe the lock-free property. The dirs
+        // are NOT git worktrees — `remove_one_worktree` returns Err
+        // immediately for them and the loop falls through to
+        // `remove_dir_all`, which is the realistic production case for
+        // orphan dirs that lost their git metadata. 30 dirs * 100 files
+        // is enough to reliably push `remove_dir_all` into the 100ms+
+        // range on Windows-with-antivirus and is still cheap to set up
+        // on fast Linux CI runners.
+        const N_ROWS: usize = 30;
+        const FILES_PER_DIR: usize = 100;
+        let mut dirs: Vec<(tempfile::TempDir, String)> = Vec::with_capacity(N_ROWS);
+        for i in 0..N_ROWS {
+            let tmp = tempfile::TempDir::new().unwrap();
+            for j in 0..FILES_PER_DIR {
+                std::fs::write(tmp.path().join(format!("f{}.bin", j)), vec![0xAB_u8; 128])
+                    .expect("seed: write fixture file");
+            }
+            let path = tmp.path().to_str().unwrap().to_string();
+            {
+                let conn = crate::db::write_conn();
+                conn.execute(
+                    "INSERT INTO warm_worktrees \
+                     (mesh_id, path, preassigned_name, base_sha, status) \
+                     VALUES (?1, ?2, ?3, NULL, 'claimed')",
+                    rusqlite::params![mesh_id, &path, format!("orphan-{}", i)],
+                )
+                .unwrap();
+            }
+            dirs.push((tmp, path));
+        }
+
+        // Spawn the GC on a dedicated thread. It runs the production
+        // entry point, which is the function the issue targets (and the
+        // only one that takes `write_conn()`).
+        let (gc_done_tx, gc_done_rx) = std::sync::mpsc::channel::<()>();
+        let gc_handle = std::thread::spawn(move || {
+            let _ = crate::db::delete_orphaned_claimed_warm_worktrees();
+            let _ = gc_done_tx.send(());
+        });
+
+        // Wait briefly so the GC reaches its FS phase. Phase 1 (two SELECTs
+        // over `warm_worktrees` + `agent_nodes`) takes microseconds;
+        // Phase 3 (N DELETEs) takes microseconds. Only the FS phase is
+        // slow, so a short sleep after spawn reliably lands us inside it.
+        // 100ms is a generous upper bound for "Phase 1 finished".
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Probe: time how long a competing writer takes to acquire
+        // `write_conn()` and run a single DELETE. Pre-fix, this blocks
+        // for the entire FS phase (could be many seconds on slow disks);
+        // post-fix, it completes in normal query time.
+        let probe_start = std::time::Instant::now();
+        crate::db::delete_warm_worktree(probe_row_id)
+            .expect("probe write must succeed");
+        let probe_duration = probe_start.elapsed();
+
+        assert!(
+            probe_duration < std::time::Duration::from_secs(2),
+            "probe write took {:?} while GC's FS phase was running — \
+             write_conn() is being held during filesystem teardown, which \
+             is exactly what issue #1228 forbids. The mutex must be \
+             released between Phase 1 (classify) and Phase 3 (DELETE) so \
+             concurrent writes (attention flips, status writes, HTTP auth \
+             token validation) do not queue behind remove_one_worktree / \
+             remove_dir_all for many seconds during startup reconcile.",
+            probe_duration
+        );
+
+        // Sanity: the probe DELETE really did remove the row.
+        let still_present: i64 = crate::db::read_conn()
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE id = ?1",
+                rusqlite::params![probe_row_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            still_present, 0,
+            "the probe DELETE must remove exactly the unrelated Available row"
+        );
+
+        // Wait for the GC to finish so we can clean up the tempdirs and
+        // the DB file without racing the FS phase.
+        gc_done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("GC must finish within 30s");
+        gc_handle.join().unwrap();
+
+        // Tidy up. Drop the dirs first (so the TempDir destructor doesn't
+        // try to re-remove paths the GC already deleted); then drop the
+        // write_conn guard before deleting the file.
+        drop(dirs);
+        drop(crate::db::write_conn());
+        std::fs::remove_file(&db_path).ok();
+    }
+
     /// `delete_warm_worktrees_for_mesh_inner` is the mesh-delete hook (wired
     /// into `delete_mesh`): when a mesh is deleted, every pool row pointing at
     /// its worktrees must go too — the FK cascade is off, so without this the
