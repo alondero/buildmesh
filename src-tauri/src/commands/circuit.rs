@@ -348,7 +348,9 @@ fn release_circuit_source(run_id: i64) {
 }
 
 fn cancel_run_and_cleanup_inner(app: &AppHandle, run_id: i64) -> Result<(), String> {
+    crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
     let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(|error| error.to_string())?;
+    crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
     release_circuit_source(run_id);
     crate::services::circuit_worker::wake_circuit_worker();
     let cleanup = retire_cancelled_agents(agent_ids);
@@ -364,6 +366,10 @@ fn cancel_run_and_cleanup_inner(app: &AppHandle, run_id: i64) -> Result<(), Stri
 }
 
 fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
+    // Invalidate the worker's current effect batch before waiting for spawn
+    // teardown. This closes the race where a slow external effect would
+    // otherwise continue after the user pressed Cancel.
+    crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
     match crate::services::circuit_worker::with_circuit_run_spawns_quiesced(run_id, || {
         cancel_run_and_cleanup_inner(app, run_id)
     }) {
@@ -373,7 +379,9 @@ fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
             // quiescence window. The spawn's post-launch compensation will
             // retire itself; retaining the terminal ledger makes a retry
             // possible if that OS cleanup is transiently locked.
-            let _ = crate::db::cancel_circuit_run(run_id);
+            if crate::db::cancel_circuit_run(run_id).is_ok() {
+                crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
+            }
             release_circuit_source(run_id);
             crate::services::circuit_worker::wake_circuit_worker();
             Err(wait_error)
@@ -409,6 +417,14 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
     // pass that already loaded this circuit.
     crate::db::set_autopilot_circuit_enabled(circuit_id, false)
         .map_err(|error| error.to_string())?;
+    // Invalidate effect batches before waiting for spawn quiescence. Fresh
+    // triggers are disabled above, so this snapshot covers every run that
+    // the deletion barrier will subsequently clean up.
+    if let Ok(run_ids) = crate::db::list_circuit_run_ids_for_cleanup(circuit_id) {
+        for run_id in run_ids {
+            crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
+        }
+    }
     let result = crate::services::circuit_worker::with_circuit_spawns_quiesced(circuit_id, || {
         let run_ids = crate::db::list_circuit_run_ids_for_cleanup(circuit_id)
             .map_err(|error| error.to_string())?;
@@ -442,7 +458,10 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
             // retry, which will re-snapshot all attached agents.
             if let Ok(run_ids) = crate::db::list_circuit_run_ids_for_cleanup(circuit_id) {
                 for run_id in run_ids {
-                    let _ = crate::db::cancel_circuit_run(run_id);
+                    crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
+                    if crate::db::cancel_circuit_run(run_id).is_ok() {
+                        crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
+                    }
                     release_circuit_source(run_id);
                 }
             }

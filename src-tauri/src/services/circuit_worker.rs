@@ -40,7 +40,8 @@
 //! multi-hour runs self-heal.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -80,6 +81,98 @@ static WAKE: Lazy<(Mutex<()>, Condvar)> = Lazy::new(|| (Mutex::new(()), Condvar:
 static CIRCUIT_SPAWNS: Lazy<(Mutex<HashMap<i64, usize>>, Condvar)> =
     Lazy::new(|| (Mutex::new(HashMap::new()), Condvar::new()));
 const CIRCUIT_SPAWN_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cancellation invalidation for an in-flight effect batch. The worker takes
+/// one durable run-state snapshot per transition (avoiding an N+1 query),
+/// while command-side cancellation flips this token before waiting for any
+/// spawn teardown. Every effect checks the token immediately before it runs,
+/// so a cancellation that arrives between two slow external effects still
+/// stops the remainder of the batch.
+struct CircuitEffectCancellation {
+    cancelled: Arc<AtomicBool>,
+    finished: bool,
+    in_flight: usize,
+}
+
+static CIRCUIT_EFFECT_CANCELLATIONS: Lazy<Mutex<HashMap<i64, CircuitEffectCancellation>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+pub struct CircuitEffectBatchPermit {
+    run_id: i64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CircuitEffectBatchPermit {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for CircuitEffectBatchPermit {
+    fn drop(&mut self) {
+        let mut active = CIRCUIT_EFFECT_CANCELLATIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = active.get_mut(&self.run_id) else {
+            return;
+        };
+        entry.in_flight = entry.in_flight.saturating_sub(1);
+        if entry.in_flight == 0
+            && (!entry.cancelled.load(Ordering::Acquire) || entry.finished)
+        {
+            // A cancellation command that has already acknowledged the
+            // durable terminal state can leave the marker behind only until
+            // the final in-flight batch drops.
+            active.remove(&self.run_id);
+        }
+    }
+}
+
+pub fn begin_circuit_effect_batch(run_id: i64) -> CircuitEffectBatchPermit {
+    let mut active = CIRCUIT_EFFECT_CANCELLATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = active.entry(run_id).or_insert_with(|| CircuitEffectCancellation {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        finished: false,
+        in_flight: 0,
+    });
+    entry.in_flight += 1;
+    CircuitEffectBatchPermit {
+        run_id,
+        cancelled: Arc::clone(&entry.cancelled),
+    }
+}
+
+/// Invalidate effects before a cancellation command waits on external
+/// cleanup. The marker remains until the command acknowledges the durable
+/// terminal state, closing the race where a new batch starts during that wait.
+pub fn mark_circuit_run_cancelled(run_id: i64) {
+    let mut active = CIRCUIT_EFFECT_CANCELLATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = active.entry(run_id).or_insert_with(|| CircuitEffectCancellation {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        finished: false,
+        in_flight: 0,
+    });
+    entry.cancelled.store(true, Ordering::Release);
+    entry.finished = false;
+}
+
+/// Release a cancellation marker once the run's durable state is terminal.
+/// An in-flight batch removes itself when it observes the marker and drops.
+pub fn finish_circuit_run_cancellation(run_id: i64) {
+    let mut active = CIRCUIT_EFFECT_CANCELLATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = active.get_mut(&run_id) {
+        entry.finished = true;
+        if entry.in_flight == 0 {
+            active.remove(&run_id);
+        }
+    }
+}
 
 struct CircuitSpawnPermit {
     run_id: i64,
@@ -1521,10 +1614,18 @@ fn execute_effects(
     effects: &[crate::autopilot::circuit::stepper::Effect],
 ) -> Result<(), String> {
     use crate::autopilot::circuit::stepper::Effect;
+    let effect_batch = begin_circuit_effect_batch(active.run.id);
     let run_state = db::get_circuit_run(active.run.id)
         .map_err(|e| e.to_string())?
         .map(|run| run.state);
     for effect in effects {
+        if effect_batch.is_cancelled() {
+            tracing::info!(
+                "circuits: cancellation invalidated remaining effects for run {}",
+                active.run.id
+            );
+            return Ok(());
+        }
         let accepts_effect = run_state.as_deref().is_some_and(|state| {
             effect_allowed_in_state(state, view.state == RunState::Completed, effect)
         });
@@ -1663,8 +1764,9 @@ fn execute_effects(
 
 /// Cancellation commits the terminal run state before retiring external
 /// resources. The transition's effects take one durable-state snapshot before
-/// execution; terminal transitions retain only their synchronous cleanup and
-/// notification effects, while InjectPty is never allowed after completion.
+/// execution and check an in-memory cancellation token before each effect;
+/// terminal transitions retain only their synchronous cleanup and notification
+/// effects, while InjectPty is never allowed after completion.
 fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &crate::autopilot::circuit::stepper::Effect) -> bool {
     use crate::autopilot::circuit::stepper::Effect;
     matches!(state, "pending" | "running" | "paused")
@@ -2563,6 +2665,31 @@ mod tests {
         );
         assert_eq!(notification_severity("Review not approved for Fix parser"), "warning");
         assert_eq!(notification_severity("Review needs attention"), "warning");
+    }
+
+    #[test]
+    fn cancellation_marker_invalidates_batches_until_durable_ack() {
+        let run_id = 9_876_543_210_i64;
+        let permit = begin_circuit_effect_batch(run_id);
+        assert!(!permit.is_cancelled());
+
+        mark_circuit_run_cancelled(run_id);
+        assert!(permit.is_cancelled());
+
+        // A batch admitted while the command is waiting must inherit the
+        // already-cancelled token rather than starting fresh work.
+        let blocked = begin_circuit_effect_batch(run_id);
+        assert!(blocked.is_cancelled());
+        drop(blocked);
+
+        // The marker is retained while the original batch is in flight and
+        // only becomes removable after the durable cancellation is acknowledged.
+        finish_circuit_run_cancellation(run_id);
+        drop(permit);
+
+        let fresh = begin_circuit_effect_batch(run_id);
+        assert!(!fresh.is_cancelled());
+        drop(fresh);
     }
 
     #[test]

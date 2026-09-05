@@ -58,5 +58,6 @@ associations. The reviewer footprint reserves one additional automated-agent
 slot. The Circuits Probe renders the preset as history-only (no blueprint
 editor, trigger, enable, or delete controls), preserving terminal reports for
 blocked and exhausted reviews without polluting the authored blueprint list.
-Startup reconciliation and lost-turn recovery use the relational source
-binding and the same run context for template expansion.
+Worker source-health checks, ownership, and cleanup use the relational source
+binding; graph template expansion and target resolution retain the context
+copy.
