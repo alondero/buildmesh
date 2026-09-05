@@ -779,7 +779,7 @@ export function WorktreeManagerTab() {
             onClick={selectRecommended}
             disabled={recommendedKeys.length === 0 || deleting}
             title="Select merged/orphaned clean branches and stale worktrees"
-            className="text-xs text-accent-cyan hover:text-accent-cyan/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="text-xs text-text-secondary hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Select recommended
             {recommendedKeys.length > 0 ? ` (${recommendedKeys.length})` : ''}
@@ -966,7 +966,7 @@ function HealthBlock({ health, inFlight, onRestore, onFree, message }: HealthBlo
           onClick={onRestore}
           disabled={inFlight || restoreBlockedBy !== null}
           title={restoreBlockedBy ?? 'Restore the mesh root to the Base Ref'}
-          className="text-xs text-accent-cyan hover:text-accent-cyan/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          className="text-xs text-text-secondary hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Restore root to {localBase}
         </button>
@@ -981,7 +981,7 @@ function HealthBlock({ health, inFlight, onRestore, onFree, message }: HealthBlo
                 ? `Detach ${health.base_branch_holder.name}'s HEAD (active agent worktree — safe, non-destructive)`
                 : `Detach ${health.base_branch_holder.name}'s HEAD, releasing ${localBase}`
             }
-            className="text-xs text-accent-cyan hover:text-accent-cyan/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="text-xs text-text-secondary hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Free {localBase} ({health.base_branch_holder.name})
           </button>

@@ -289,7 +289,7 @@ export function ArchivedNodesTab() {
                   <div className="text-sm text-text-primary truncate">{session.first_message}</div>
                   <div className="flex items-center gap-2 mt-0.5">
                     {session.branch && (
-                      <span className="text-2xs text-accent-cyan font-mono">{session.branch}</span>
+                      <span className="text-2xs text-text-secondary font-mono">{session.branch}</span>
                     )}
                     {session.worktree_name && (
                       <span className="text-2xs text-accent-violet font-mono">{session.worktree_name}</span>

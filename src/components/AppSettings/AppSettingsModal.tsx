@@ -189,7 +189,7 @@ export function AccountCard({
       {(showApiKey || showBilling) && (
         <button
           onClick={() => setShowCreds(v => !v)}
-          className="mt-3 text-sm text-accent-cyan hover:text-accent-cyan/80"
+          className="mt-3 text-sm text-text-secondary hover:text-text-primary"
         >
           {showCreds ? 'Hide settings' : (showApiKey ? 'Edit credentials' : 'Edit billing')}
         </button>
@@ -320,7 +320,7 @@ export function AddProviderForm({
             type="button"
             disabled={busy}
             onClick={() => setMode('generic')}
-            className="text-base text-accent-cyan hover:text-accent-cyan/80 disabled:opacity-50"
+            className="text-base text-text-secondary hover:text-text-primary disabled:opacity-50"
           >
             Other / custom…
           </button>
@@ -1519,7 +1519,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           ) : (
             <button
               onClick={() => setAddingProvider(true)}
-              className="mt-4 text-base text-accent-cyan hover:text-accent-cyan/80"
+              className="mt-4 text-base text-text-secondary hover:text-text-primary"
             >
               + Add provider
             </button>
@@ -1630,7 +1630,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
           {coordEnabled && (
             <div className="mt-4 border border-border-subtle rounded-lg p-5">
-              <div className="flex items-start gap-2 bg-bg-card border border-accent-cyan/30 rounded-md px-3 py-2 mb-4">
+              <div className="flex items-start gap-2 bg-bg-card border border-border-strong rounded-md px-3 py-2 mb-4">
                 <span className="text-base text-text-secondary">
                   Anyone who can reach this machine on the LAN <span className="font-medium">and</span>{' '}
                   holds the token can read your node statuses. The token is shown once, when

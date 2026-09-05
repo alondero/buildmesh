@@ -74,7 +74,7 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
           href={prUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-xs text-accent-cyan hover:underline break-all"
+          className="text-xs text-text-secondary hover:text-text-primary hover:underline break-all"
         >
           {prUrl}
         </a>

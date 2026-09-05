@@ -107,7 +107,7 @@ export function RegenerateProviderMenu({
           >
             <ProviderIcon providerId={current.id} className="h-3.5 w-3.5 shrink-0" />
             <span className="flex-1 truncate">{`Current (${current.label})`}</span>
-            <span className="text-2xs uppercase tracking-wider text-accent-cyan">current</span>
+            <span className="text-2xs uppercase tracking-wider text-text-secondary">current</span>
           </button>
         </div>
       )}

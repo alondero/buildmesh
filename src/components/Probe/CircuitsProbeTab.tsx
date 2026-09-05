@@ -334,7 +334,7 @@ export function CircuitsProbeTab() {
                   data-testid={`queue-run-${entry.run.id}`}
                 >
                   <div className="flex items-start gap-1.5 min-w-0">
-                    <span className="text-2xs font-mono text-accent-cyan shrink-0">
+                    <span className="text-2xs font-mono text-text-secondary shrink-0">
                       {entry.queue_rank}
                     </span>
                     <span className="text-xs text-text-primary break-words min-w-0 flex-1">

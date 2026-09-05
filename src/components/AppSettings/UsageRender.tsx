@@ -139,7 +139,7 @@ export function UsagePanel({
         ))}
         {meter.usage.balance && <BalanceCard balance={meter.usage.balance} />}
         {!hasMeters && <p className="text-2xs text-text-muted">No usage data</p>}
-        {meter.usage.detail && <p className="text-2xs text-accent-cyan mt-2">{meter.usage.detail}</p>}
+        {meter.usage.detail && <p className="text-2xs text-text-secondary mt-2">{meter.usage.detail}</p>}
       </div>
     );
   };
@@ -168,7 +168,7 @@ export function UsagePanel({
               }
             }}
             aria-label={`Refresh usage for ${account.name}`}
-            className="ml-auto text-xs text-accent-cyan hover:text-accent-cyan/80"
+            className="ml-auto text-xs text-text-secondary hover:text-text-primary"
           >
             Refresh
           </button>

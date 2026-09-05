@@ -130,7 +130,7 @@ function CenterPrDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
             </>
           )}
           <span
-            className="text-accent-cyan text-xs font-mono font-medium shrink-0"
+            className="text-text-secondary text-xs font-mono font-medium shrink-0"
             title={prLabel}
           >
             {prLabel}

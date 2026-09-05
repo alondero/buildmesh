@@ -693,7 +693,7 @@ export function MeshPropertiesTab() {
                   <button
                     type="button"
                     onClick={() => void applyPresetById(detected.preset_id!)}
-                    className="text-xs text-accent-cyan hover:text-accent-cyan/80 font-medium transition-colors"
+                    className="text-xs text-text-secondary hover:text-text-primary font-medium transition-colors"
                   >
                     Apply preset
                   </button>

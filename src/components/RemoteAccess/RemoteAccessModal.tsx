@@ -454,7 +454,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 <button
                   data-testid="remote-access-install-link"
                   onClick={handleInstall}
-                  className="text-xs text-accent-cyan hover:underline"
+                  className="text-xs text-text-secondary hover:text-text-primary hover:underline"
                   type="button"
                 >
                   Or open the install URL on this computer →
@@ -481,7 +481,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 <button
                   data-testid="remote-access-cert-reinstall-toggle"
                   onClick={() => setShowReinstall(s => !s)}
-                  className="mt-2 text-xs text-accent-cyan hover:underline"
+                  className="mt-2 text-xs text-text-secondary hover:text-text-primary hover:underline"
                   type="button"
                 >
                   {showReinstall ? 'Hide' : 'Re-install root CA'}

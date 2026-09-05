@@ -520,7 +520,7 @@ function ToolGroups({
                         : 'bg-bg-card border-border-default hover:border-accent-cyan/40'
                     }`}
                   >
-                    <Icon className="w-4 h-4 shrink-0 text-accent-cyan" />
+                    <Icon className="w-4 h-4 shrink-0 text-text-secondary" />
                     <span className="flex-1 min-w-0">
                       <span
                         className="block truncate text-xs font-medium text-text-primary"
