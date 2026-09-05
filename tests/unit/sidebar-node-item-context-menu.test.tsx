@@ -825,7 +825,7 @@ describe('NodeItem context menu (issue #776)', () => {
     // the menu "jumped". The wrapper's `onPointerOver` arms a ref;
     // only an armed `mouseenter` opens. Click + `ArrowRight` stay
     // immediate because they don't go through `mouseenter`.
-    describe('hover arm — pointermove required before mouseenter opens (#1293)', () => {
+    describe('hover arm — pointerover required before mouseenter opens (#1293)', () => {
       /** Find the wrapper div that holds the Regenerate trigger and
        *  its picker submenu. It's the parent of the Regenerate button
        *  that also has `role="presentation"` and `className="relative"`. */
