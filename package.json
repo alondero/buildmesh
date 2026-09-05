@@ -12,6 +12,8 @@
     "version:set": "node scripts/set-version.mjs",
     "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json",
     "test": "vitest run",
+    "check:agent": "node scripts/check-agent-diff.mjs",
+    "test:agent": "node --test tests/agent-infra/check-agent-diff.test.mjs",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",

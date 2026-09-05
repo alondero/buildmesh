@@ -26,7 +26,7 @@
 .PARAMETER Target
   unit | integration | rust | all | all-ts  (default: all)
 
-  all    = mobile build + unit vitest + integration vitest + cargo test
+  all    = agent checks + frontend build + unit + integration + cargo test
            (the default green bar; integration added in issue #1257 to
            match the GitHub Actions quality job)
   all-ts = unit vitest + integration vitest + npm run build (full TS
@@ -172,7 +172,7 @@ function Invoke-Rust {
     if ($CleanRust) {
       & cargo clean -p buildmesh --manifest-path $manifest
     }
-    $cargoArgs = @('test', '--manifest-path', $manifest)
+    $cargoArgs = @('test', '--locked', '--manifest-path', $manifest)
     if ($SerialRust) { $cargoArgs += @('--', '--test-threads=1') }
     & cargo @cargoArgs
   } finally {
@@ -182,13 +182,23 @@ function Invoke-Rust {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'rust' }
 }
 
-if ($Target -in @('rust', 'all')) { Ensure-MobileBuilt }
+Write-Host '== agent infrastructure and diff rules ==' -ForegroundColor Cyan
+Push-Location $repo
+try {
+  & node --test tests/agent-infra/check-agent-diff.test.mjs
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-tests' }
+  & node scripts/check-agent-diff.mjs
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-diff' }
+} finally { Pop-Location }
+
+# Build before Rust so embedded mobile assets reflect the current source.
+if ($Target -in @('all', 'all-ts')) { Invoke-TsBuild }
+if ($Target -eq 'rust') { Ensure-MobileBuilt }
 if ($Target -in @('unit', 'all', 'all-ts')) { Invoke-Unit }
 # Issue #1257 — integration must run in the default green bar (`all`)
 # as well as `integration` and `all-ts`, otherwise a developer who only
 # runs `scripts\check.ps1` locally gets a green bar that CI will reject.
 if ($Target -in @('integration', 'all', 'all-ts')) { Invoke-Integration }
-if ($Target -in @('all-ts')) { Invoke-TsBuild }
 if ($Target -in @('rust', 'all')) { Invoke-Rust }
 
 if ($failed.Count -gt 0) {
