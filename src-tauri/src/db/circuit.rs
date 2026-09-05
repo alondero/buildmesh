@@ -254,10 +254,13 @@ pub struct CircuitRunLedger {
     pub steps: Vec<AutopilotCircuitRunStep>,
 }
 
-/// A mesh's user-authored circuits (plus any active built-in preset) WITH
-/// every running/paused ledger plus bounded terminal history, in ONE mutex
-/// acquisition. Pending runs have their own complete mesh queue; excluding
-/// them here prevents the queue and ledger from presenting the same run twice.
+/// A mesh's user-authored circuits plus any built-in preset with run history
+/// WITH every running/paused ledger plus bounded terminal history, in ONE
+/// mutex acquisition. Presets are execution-only rows (the UI hides their
+/// blueprint controls), but their terminal ledgers remain visible so a user
+/// can inspect blocked or exhausted review results. Pending runs have their
+/// own complete mesh queue; excluding them here prevents the queue and ledger
+/// from presenting the same run twice.
 pub fn list_circuits_with_recent_runs(
     mesh_id: i64,
     runs_per_circuit: i64,
@@ -279,7 +282,6 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
            AND (is_preset = 0 OR EXISTS (
              SELECT 1 FROM autopilot_circuit_runs r
              WHERE r.circuit_id = autopilot_circuits.id
-               AND r.state IN ('pending', 'running', 'paused')
            ))
          ORDER BY id",
     )?;

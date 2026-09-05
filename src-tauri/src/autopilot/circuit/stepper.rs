@@ -1446,14 +1446,18 @@ fn start_effects_and_completion(
         CircuitNodeKind::RetryLimit { max_retries } => {
             // Node-started review runs carry their per-run round limit in
             // context so the shared preset can be reused safely by multiple
-            // runs with different limits. Ordinary authored circuits still
-            // use the value from the graph when no override is present.
-            let max_retries = run
-                .context
-                .get("retry.max_retries")
-                .and_then(|value| value.parse::<i32>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(*max_retries);
+            // runs with different limits. Ordinary authored circuits must
+            // always use each gate's graph value; otherwise one gate's
+            // context write would silently override another gate.
+            let max_retries = if run.context.get("source.review_preset") == Some("1") {
+                run.context
+                    .get("retry.max_retries")
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(*max_retries)
+            } else {
+                *max_retries
+            };
             execute_retry_limit(run, t, node_id, max_retries);
         }
         // Triggers never normally reach here (auto-completed at trigger
@@ -3010,6 +3014,20 @@ mod tests {
         // Next tick re-executes the retried step.
         advance(&mut run, &tick(5, 5));
         assert_eq!(status_of(&run, "work"), StepStatus::Running);
+    }
+
+    #[test]
+    fn authored_retry_limit_ignores_review_round_context_override() {
+        let mut run = retry_run(2);
+        run.context.set("retry.max_retries", "1");
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("work", 11);
+
+        advance(&mut run, &agent_finished(11, false));
+        assert_eq!(run.state, RunState::Running);
+        assert_eq!(status_of(&run, "work"), StepStatus::Queued);
+        assert_eq!(run.step("work").unwrap().attempt, 2);
     }
 
     #[test]

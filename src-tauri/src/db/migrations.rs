@@ -615,7 +615,7 @@ const ONE_SHOT_BACKFILLS: &[OneShotBackfill] = &[
         version: 41,
         flag: "circuit_run_source_agent_v41",
         params: &[],
-        sql: "UPDATE autopilot_circuit_runs SET source_agent_node_id = CAST(json_extract(context_json, '$.\"source.agent_id\"') AS INTEGER) WHERE source_agent_node_id IS NULL AND json_valid(context_json) AND json_extract(context_json, '$.\"source.agent_id\"') IS NOT NULL",
+        sql: "UPDATE autopilot_circuit_runs SET source_agent_node_id = CAST(json_extract(context_json, '$.\"source.agent_id\"') AS INTEGER) WHERE source_agent_node_id IS NULL AND json_valid(context_json) AND json_extract(context_json, '$.\"source.agent_id\"') IS NOT NULL AND EXISTS (SELECT 1 FROM agent_nodes WHERE agent_nodes.id = CAST(json_extract(autopilot_circuit_runs.context_json, '$.\"source.agent_id\"') AS INTEGER))",
     },
 ];
 

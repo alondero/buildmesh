@@ -59,6 +59,10 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     assert_eq!(cancel_circuit_run(run_id).unwrap(), vec![123456]);
     assert!(get_agent_node_by_id(source.id).is_ok());
     assert!(!list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id));
+    let history = list_circuits_with_recent_runs(mesh.id, 10).unwrap();
+    assert_eq!(history.len(), 1, "the preset is history-visible after completion");
+    assert!(history[0].0.is_preset);
+    assert_eq!(history[0].1[0].run.state, "cancelled");
 }
 
 #[test]
@@ -1199,6 +1203,8 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
             VALUES (1, 'Review agent 7', 'Review an existing agent and return findings until approved', '{}');
         INSERT INTO autopilot_circuit_runs (circuit_id, mesh_id, trigger_identity, context_json)
             VALUES (2, 1, 'manual:agent:7:old', '{\"source.agent_id\":\"7\"}');
+        INSERT INTO autopilot_circuit_runs (circuit_id, mesh_id, trigger_identity, context_json)
+            VALUES (1, 1, 'manual:agent:999:old', '{\"source.agent_id\":\"999\"}');
         ",
     )
     .unwrap();
@@ -1222,6 +1228,14 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
         .unwrap();
     assert_eq!(circuit_id, 1, "run history moves to the canonical preset row");
     assert_eq!(source_id, Some(7));
+    let missing_source: Option<i64> = conn
+        .query_row(
+            "SELECT source_agent_node_id FROM autopilot_circuit_runs WHERE id = 2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(missing_source, None, "deleted historical sources remain nullable during migration");
     let unique_preset_index: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'uq_autopilot_circuits_preset_mesh'",

@@ -55,5 +55,8 @@ the schema migration. Each run stores its borrowed source in the indexed
 `source_agent_node_id` foreign key (with the context copy retained for
 templates), while only reviewers occupy owned `agent_node_id` step
 associations. The reviewer footprint reserves one additional automated-agent
-slot. Startup reconciliation and lost-turn recovery use the relational source
+slot. The Circuits Probe renders the preset as history-only (no blueprint
+editor, trigger, enable, or delete controls), preserving terminal reports for
+blocked and exhausted reviews without polluting the authored blueprint list.
+Startup reconciliation and lost-turn recovery use the relational source
 binding and the same run context for template expansion.
