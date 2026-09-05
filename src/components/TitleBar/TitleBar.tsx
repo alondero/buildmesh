@@ -386,10 +386,15 @@ export function TitleBar() {
           centred on the VIEWPORT — flanking `flex-1` spacers only centre it
           between unequal side clusters, which is not centring. The side
           cells are drag regions, so their empty space still grabs the
-          window while buttons inside stay clickable. */}
+          window while buttons inside stay clickable.
+
+          Height: `h-14` (45.5px at the 13px root) is the floor that clears
+          the tallest in-bar content — the `h-10` palette field and
+          wordmark (32.5px) — with a symmetric 6.5px bezel; anything
+          taller is dead space taken from the terminals below. */}
       <header
         data-tauri-drag-region
-        className="grid h-18 shrink-0 grid-cols-[1fr_auto_1fr] items-stretch bg-bg-surface border-b border-border-subtle select-none"
+        className="grid h-14 shrink-0 grid-cols-[1fr_auto_1fr] items-stretch bg-bg-surface border-b border-border-subtle select-none"
       >
         {/* Left cell — clusters hug the start edge. */}
         <div data-tauri-drag-region className="flex items-center pl-3 pr-2">
