@@ -1,36 +1,30 @@
-<!--
-  GitHub auto-fills this template into every new PR body.
-  Anything marked `<!-- optional -->` is fine to delete if N/A.
-  The first unchecked checkbox that is meaningful for your PR should be
-  the only thing left un-ticked — strike the rest or convert to `[x]`.
--->
+## Change
 
-## What
+<!-- Concrete problem and resulting behavior. Link the issue when one exists.
+     Use Closes #123 only when this PR fulfills that issue. -->
 
-<!-- One or two sentences. State the user-visible change, not the implementation. -->
+## Evidence
 
-Closes #
+<!-- Record actual results, not intended checks. Remove irrelevant rows.
+     Compilation is not executed tests; a failed suite is not green because
+     focused tests passed. See docs/agents/engineering.md. -->
 
-## Why
+| Check / command | Result and executed count | Scope / limitation |
+|---|---|---|
+| | Passed / Failed / Not run | |
 
-<!-- Root cause / motivation. Reference the issue's bullets if there are any. -->
+<!-- For a regression, identify the behavior test and how it distinguishes the
+     broken path. For a claimed pre-existing failure, give the tested base commit
+     and equivalent reproduction; otherwise state attribution is unverified.
+     For UI changes (including placement, error states, accessibility), include
+     inspected screenshots and functional assertions. Label mock IPC vs real
+     backend. Probe changes must exercise the 240px minimum width. -->
 
-## How to test
+## Review notes
 
-<!-- Concrete steps the reviewer can run. If `npm run test:ci` covers it, say so and skip the manual steps. -->
-
-- [ ] `scripts\check.ps1 all` is green on Windows
-- [ ] `cargo test` is green (inside `src-tauri/`)
-- [ ] (UI changes) `/verify-ui` was run; before/after screenshots attached below
-
-## Triage
-
-- [ ] PR title uses **Conventional Commits** (`feat(scope): …`, `fix(scope): …`, `refactor(scope): …`, `docs(scope): …`, `chore(scope): …`) — CI gates on this
-- [ ] Files outside the worktree root were not edited
-- [ ] No new `.dispose()` on a live xterm terminal; no hand-built `\\wsl$\` paths; no hand-declared TS interface for a Rust wire type (see `CONTRIBUTING.md` for the full rule list)
-- [ ] New `#[command]` is registered in `src-tauri/src/lib.rs`
-- [ ] (Touches schema) `cargo test` regenerated `src/types/generated/` and the diff is committed
-
-<!-- optional: screenshots / screen recordings -->
-<!-- optional: breaking-change notes -->
-<!-- optional: backwards-compat / migration notes -->
+<!-- Relevant only: tradeoff, migration/compatibility, failure/recovery behavior,
+     outstanding acceptance criteria, or unavailable verification environment.
+     New IPC commands require registration; wire types require generated bindings.
+     Inspect the actual diff for unrelated edits, scratch files, and missing files.
+     Use a Conventional Commit PR title (convention, not a current CI title gate).
+     Do not mark work complete because the template contains a checkbox. -->

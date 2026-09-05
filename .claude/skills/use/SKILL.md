@@ -20,7 +20,7 @@ Run the deterministic dev-profile launch script for the host platform:
 - **Windows (default for this project):** `pwsh -File scripts\run-dev.ps1` (or `powershell.exe -File scripts\run-dev.ps1`)
 - **macOS / Linux:** `./scripts/run-dev.sh`
 
-Each script handles: kill existing **buildmesh-dev** (never the stable hub) → build dev profile → launch raw `buildmesh-dev` binary → verify startup. If it exits non-zero, report the error and stop.
+Each script handles: kill existing **buildmesh-dev** (never the stable hub) → build dev profile → launch raw `buildmesh-dev` binary → verify startup. Check that an existing dev instance belongs to this task before replacing it; another session may be using it. If the script exits non-zero, report the error and stop.
 
 ### Step 2: Start log monitor
 
@@ -70,12 +70,15 @@ $ticket = (Invoke-RestMethod -Method Post -Uri 'http://localhost:2992/api/ws-tic
 
 # Connect and read 5s of frames; assert >= 1 byte received on a running node.
 $ws = [System.Net.WebSockets.ClientWebSocket]::new()
+$cts = [Threading.CancellationTokenSource]::new(5000)
+# Pass $cts.Token to ConnectAsync AND ReceiveAsync so a silent socket cannot hang.
 $ws.ConnectAsync([Uri]"ws://localhost:2992/ws/terminal/<node_id>?ticket=$ticket",
-                 [Threading.CancellationToken]::None).GetAwaiter().GetResult()
-# ... read frames; 0 bytes after 5s ⇒ PTY not producing.
+                 $cts.Token).GetAwaiter().GetResult()
+# ... receive frames using $cts.Token; dispose the socket and CTS in finally.
+# A timeout means no bytes were observed; it does not prove which layer failed.
 ```
 
-For "Rust thinks the agent is alive?", use the headless IPC commands registered in `lib.rs` (callable from devtools console or a Playwright/CDP harness — the legacy `GET /api/debug/state?token=` HTTP wrapper from PR #163 was retired by the route-table refactor; see *Diagnostic probes* in `/verify`):
+For "Rust thinks the agent is alive?", use the headless IPC commands registered in `lib.rs` from devtools or a Playwright/CDP harness. Check the current route table before relying on a historical HTTP debug wrapper:
 
 ```js
 await window.__TAURI_INTERNALS__.invoke('debug_list_agents');     // [] ⇒ PROCESS_REGISTRY empty
@@ -88,5 +91,5 @@ These four signals (log + WebSocket + the two IPC probes) are the primary author
 
 - Monitor keeps running until TaskStop or session end — do NOT stop proactively
 - When user is done using the app, stop the monitor with TaskStop
-- If you see "Main window found, ready to load content" in logs, the frontend loaded correctly
+- "Main window found, ready to load content" proves a window was found; assert rendered content separately before claiming frontend success.
 - **NEVER launch the .app bundle** — it can be stale. The script uses the raw binary.

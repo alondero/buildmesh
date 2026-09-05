@@ -55,19 +55,21 @@ the debug log.
   `fix(scope): …`, `refactor(scope): …`, `docs(scope): …`, `chore(scope): …`).
   Reference the issue number in the body when one exists.
 - One logical change per PR; PRs should be squash-mergeable.
-- Run `/verify` locally and have a green `npm run test:ci` before requesting
-  review.
-- PR titles should match the commit message. CI may fail otherwise.
+- Follow [the engineering contract](docs/agents/engineering.md) and `/verify`
+  for scope-appropriate checks. Report actual pass/fail/not-run results, including
+  whether UI evidence used mock IPC or the real backend.
+- PR titles should follow the commit convention; the current build workflow does not gate titles.
 
 ## Harness-enforced rules
 
-The repo ships Claude Code hooks that **block** certain foot-guns. If your
-edit triggers one, refactor — don't bypass.
+Claude Code hooks catch selected edit/commit mistakes. Shell writes and other
+harnesses are covered by `npm run check:agent` and CI's content checks. See the
+engineering contract for their scope and limits; none proves behavior on its own.
 
 | Rule | Source | Why it matters |
 |---|---|---|
 | Never call `.dispose()` on an xterm.js terminal unless the agent node is deleted | `.claude/hooks/guard-antipatterns.mjs` | Causes permanent terminal blanking — `TerminalManager` is a singleton, instances survive React remounts |
-| Never pass Linux/WSL paths to Windows-side APIs | `.claude/hooks/guard-antipatterns.mjs` | Use `env::to_host_path` (`src-tauri/src/env/mod.rs`); build `\\wsl$\` paths only inside that module |
+| Never pass Linux/WSL paths to Windows-side APIs | `.claude/hooks/guard-antipatterns.mjs` | Use `env::to_host_path` (`src-tauri/src/env/host_path.rs`); build `\\wsl$\` paths only inside that module |
 | Never hand-declare a TS interface for a Rust wire type | CI drift-gate on `src/types/generated/` | Use `#[derive(TS)]` and import the generated type instead. Annotate 64-bit ints with `#[ts(as = "i32")]`. See *Shared Rust↔TS Types* in `docs/knowledge-primer.md` |
 | Inside a worktree, only edit paths under your worktree root | `.claude/hooks/guard-antipatterns.mjs` | Otherwise you silently edit the main checkout on a different branch |
 | `git commit` with nothing staged | `.claude/hooks/guard-commit-staging.mjs` | Empty/aspirational commit trap (#491→#504). Stage your files first |

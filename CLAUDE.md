@@ -1,9 +1,12 @@
 Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding agents (Anthropic, Minimax, Kimi, OpenCode, Antigravity, Codex) across repositories, with persistent xterm.js terminals and hybrid Windows/WSL support.
 
-**`docs/knowledge-primer.md` is the source of truth for architecture, conventions, and anti-patterns. Read it before touching backend, terminal, agent-spawn, or path code.** Project domain language lives in `CONTEXT.md`; rationale in `docs/adr/*.md`. This file holds only the always-on rules.
+**`docs/knowledge-primer.md` is the architecture reference. Read the sections relevant to the backend, terminal, agent-spawn, or path code you will change, and verify them against the owning module.** Project domain language lives in `CONTEXT.md`; rationale in `docs/adr/*.md`. This file holds only the always-on rules.
+
+**Implementation and review:** read `docs/agents/engineering.md` for testable design seams, scope-based checks, and evidence requirements. Start with the actual worktree/branch/status and the requested acceptance behavior.
 
 ## Commands
-- **Green bar (Windows/worktree): `scripts\check.ps1 [unit|rust|all]`** — wraps the workarounds raw `cargo test`/`vitest` need here (builds `dist/mobile` first, clears `BUILDMESH_PREFILL`, forces vitest `--pool=threads`, pins the cargo manifest). Prefer it over the raw commands; the raw forms false-green in a worktree.
+- **Windows/worktree:** `scripts\check.ps1 [unit|integration|rust|all-ts|all]`. `all-ts` builds and tests the frontend; `all` also runs Rust. Both include agent checks. See the engineering contract for checks these targets do not cover.
+- **Agent infrastructure:** `npm run test:agent`; `npm run check:agent -- --base <base-commit>` checks changed source against the shared hook rules, including committed work. Default base is HEAD for local edits.
 - Test: `npm test` (unit + integration) · `npm run test:e2e` (needs app on :1991) · `npm run test:ci` (all three)
 - Typecheck/build: `npm run build` (runs `tsc`, desktop `vite build`, then mobile `vite build --mode mobile`)
 - Rust: `cargo test` / `cargo clippy` (run inside `src-tauri/`)
@@ -25,21 +28,23 @@ Each provider adapter declares its `SpawnRecipe`; `spawn_environment::wrap` cons
 - **Grok** → direct spawn on all platforms (native binary, interactive TUI)
 - On macOS/Linux, every provider uses `WindowsShell::Direct`; the Windows shell only matters on Windows.
 
-Hooks enforce the rules above so a slip is caught, not just documented:
+Claude hooks catch a subset of these mistakes for Edit/Write/MultiEdit; shell writes and other harnesses rely on the portable diff check and CI. These heuristics do not prove the hard rules:
 - **PreToolUse** `.claude/hooks/guard-antipatterns.mjs` blocks edits that introduce `.dispose()` / hand-built `\\wsl$\` paths (escape per-line with `// allow-dispose` / `// allow-wsl-path`), and blocks a worktree session editing a path outside its worktree (override with env `BUILDMESH_ALLOW_WORKTREE_ESCAPE=1`).
-- **PostToolUse** `.claude/hooks/verify-edit-persisted.mjs` re-reads the file after Edit/Write and warns if the new text never reached disk (the Windows persistence/path trap).
+- **PostToolUse** `.claude/hooks/verify-edit-persisted.mjs` checks file modification time after Edit/Write. It warns on missing/stale files; it cannot prove the intended content reached disk. Inspect the actual diff.
 - **PreToolUse** `.claude/hooks/guard-commit-staging.mjs` denies a plain `git commit` with nothing staged (the empty/aspirational-commit trap, #491→#504); skips `git add … && commit`, `-a`, `--amend`, `--allow-empty`. Stage your files and re-commit.
 
 ## Code quality
 - Match existing patterns. No new abstractions, deps, or speculative generality beyond the task.
 - Add or update tests for behaviour changes (`tests/unit`, `tests/integration`).
+- Test production boundaries and failure/order transitions, not copied logic or mock expectations. Runtime errors and zero executed tests are not green; report compilation, tests, and real/mock runtime evidence separately.
 - Comment only non-obvious *why*; let names carry the *what*.
 
 ## Pointers
 - Architecture & anti-patterns (detailed): `docs/knowledge-primer.md`
 - Domain language and mental model: `CONTEXT.md`
 - DB schema: source of truth is `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`.
-- Verification: `/verify` — see `.claude/skills/verify/skill.md`
-- UI changes: `/verify-ui` — drive the real dev-profile window (Playwright over CDP) + before/after PR screenshots; see `.claude/skills/verify-ui/skill.md`
+- Verification: `/verify` — see `.claude/skills/verify/SKILL.md`
+- UI changes: `/verify-ui` — drive the real dev-profile window (Playwright over CDP) + before/after PR screenshots; see `.claude/skills/verify-ui/SKILL.md`
+- Shared entrypoints: `AGENTS.md` points here; `.agents/skills` points to `.claude/skills`. If Windows checks out a pointer file instead of a symlink, read its target explicitly. Edit canonical files, preserving the links.
 - Probe dock tabs: `docs/development/probe-ui-checklist.md` — scroll ownership, 240px narrow width, status language, disclosure (umbrella #1464)
 - Issues (`alondero/buildmesh`): `docs/agents/issue-tracker.md`; triage labels: `docs/agents/triage-labels.md`

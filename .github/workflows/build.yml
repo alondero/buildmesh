@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # Tauri 2 on Linux links against webkit2gtk-4.1, librsvg2, libayatana-
       # appindicator3, libxdo, and OpenSSL even when running the Rust tests.
@@ -50,6 +52,15 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
+
+      - name: Check agent infrastructure and changed-code rules
+        env:
+          AGENT_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
+        run: |
+          node --test tests/agent-infra/*.test.mjs
+          base="$AGENT_DIFF_BASE"
+          if [[ "$base" =~ ^0+$ ]]; then base=HEAD; fi
+          node scripts/check-agent-diff.mjs --base "$base"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

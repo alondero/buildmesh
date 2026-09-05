@@ -22,7 +22,7 @@ The change affects something **visible in the UI** (desktop app or mobile SPA) a
 
 ### 0. Preconditions
 
-- Worktree has `node_modules` — if not: `npm install`.
+- Worktree has `node_modules` — if not: `npm ci`.
 - Decide the shot: which screen, what fixture data it needs, and a CSS selector to crop to the changed region (full-window shots are huge and hide the change).
 
 ### 1. BEFORE screenshot (baseline)
@@ -30,14 +30,7 @@ The change affects something **visible in the UI** (desktop app or mobile SPA) a
 Capture the baseline from the **pre-change tree**. Two cases:
 
 - **You haven't changed code yet** (best): build + launch + shoot now, then start implementing.
-- **Changes already made**: commit them first (`git status` must be clean), then:
-  ```powershell
-  git switch --detach (git merge-base HEAD origin/main)
-  powershell -File scripts\run-dev.ps1 -CdpPort 9223
-  node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/<slug>-before.png --steps <steps.mjs> --selector "<css>"
-  git switch -            # back to your branch
-  ```
-  This costs a second full build (~5 min). If the feature is brand-new UI (no meaningful "before"), skip the baseline and note that in the PR.
+- **Changes already made:** create an isolated detached worktree at the recorded pre-change commit with `git worktree add --detach <scratch-path> <base-commit>`; build/capture there. Preserve the active checkout and user edits. Do not commit solely to obtain a screenshot. If a baseline cannot run, report that gap. A new feature with no meaningful before-state may use after-only evidence.
 
 ### 2. Build + launch the changed tree
 
@@ -72,15 +65,15 @@ export default async function ({ page, invoke }) {
 node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/<slug>-after.png --steps steps.mjs --selector "<css>"
 ```
 
-Use the **same steps + selector** for before and after. Exit 0 + PNG written = feature verified. Then **look at the PNG yourself** (Read the file) — confirm it shows what you claim before attaching it to a PR.
+Use the **same steps + selector** for comparable before and after states. A saved PNG proves capture only; functional assertions must establish the requested behavior. For Probe changes exercise 240px width, including loading/error states and button bounds per `docs/development/probe-ui-checklist.md`. Then **look at the PNG yourself** (Read the file) — confirm it shows what you claim before attaching it to a PR.
 
 Clean up any fixture data your steps created (`invoke('delete_mesh', { meshId })`) so repeat runs stay deterministic.
 
 ### 4. Scan the log
 
-New lines in `$env:APPDATA\com.alond.buildmesh.dev\logs\buildmesh.log` since launch: ` ERROR ` / `panic` = fail, fix before proceeding (same rules as `/verify` full tier).
+Inspect new lines in the dev-profile `buildmesh.log`, `panic.log`, and `panic_early.log`; any new panic-file content fails. Follow the runtime evidence rules in `../verify/SKILL.md`.
 
-### 5. Embed in the PR
+### 5. Attach evidence when publishing is authorized
 
 Screenshots live in the repo so GitHub can render them (repo is public):
 
@@ -96,20 +89,20 @@ Screenshots live in the repo so GitHub can render them (repo is public):
 
 ### 6. Cleanup
 
-`Stop-Process -Name buildmesh-dev -Force` when done (or leave it up if the user may want to poke at it).
+Stop the dev-profile PID launched by this verification when done (or leave it up if the user wants to inspect it). Do not stop another session's runtime.
 
 ## Headless mock mode (`--mock`) — non-Windows / web / CI
 
 No WebView2, no CDP, no Rust backend needed. Renders the real desktop frontend in the pre-installed headless Chromium against a plain Vite dev server, with a fake Tauri IPC installed before the app boots. This is the path a Claude-Code-on-the-web (headless Linux) session takes when it can't drive the real window.
 
 ```bash
-npm install                 # if node_modules is missing (fresh web clone)
+npm ci                      # if node_modules is missing (fresh web clone)
 # One shot — self-hosts the dev server, screenshots, tears it down:
 node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/<slug>-after.png --mock --serve \
   --steps steps.mjs --selector "<css>"
 ```
 
-- **Before/after** works the same as the CDP path (§1): shoot the merge-base tree first, then your branch. No second Tauri build — just `git switch` and re-run, since the dev server rebuilds from the working tree via Vite HMR (restart it, or use `--serve` which spawns a fresh one).
+- **Before/after** uses the isolated baseline checkout above. Start each Vite server from its intended checkout; record the commit and fixture used.
 - **Fixtures.** `scripts/ui-mock/tauri-mock.mjs` seeds two meshes + agent nodes so the shell renders populated; unknown IPC commands resolve `null` (the screen renders empty, not a crash) and log `[tauri-mock] unmocked invoke: <cmd>` via `console.debug`, which avoids the frontend log bridge. Override with `--fixtures <file.mjs|json>` (merged over the defaults).
 - **Steps** get `{ page, mock }` instead of `{ page, invoke }` — there's no HTTP bridge. Use `mock.on('cmd', value)` to set an IPC response and `mock.emit('event', payload)` to push a backend event to the app's listeners. Drive everything else through `page` (real Playwright clicks/asserts). A throwing steps module fails the run.
 - **Look at the PNG yourself** (Read it) before attaching, same as always. Then say in the PR: *visual smoke via mock IPC — renders + reacts to fixtures, backend not exercised.*
@@ -130,7 +123,7 @@ node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/mobile-after.png --u
 ## Hard rules & pitfalls
 
 - **NEVER** stop the `buildmesh` process or use ports 1991/1992/1420 — that's the stable hub **you may be running inside**. The CDP path only ever touches `buildmesh-dev` (2991/2992, CDP 9223). (Exception: `--mock` mode runs a throwaway Vite dev server on 1420 — safe on a headless web/CI host where no hub exists, but don't use `--mock` on a Windows box that's running the hub; use the CDP path there instead.)
-- **Do not** reach for `npm run test:e2e` to "verify UI" — Playwright's webServer boots `tauri dev` on the hub's ports (1991/1992) and needs the hub paused. That suite is for humans/CI, not autonomous verification.
+- Playwright's webServer starts Vite on 1420. `--project=verify-smoke` uses mock IPC; chromium specs have additional runtime requirements. Read those specs before running them and never stop the stable hub to satisfy a test.
 - CDP attach fails → the app wasn't launched with `-CdpPort` (plain `/use` launches without it) or the window was closed. Re-run step 2.
 - Don't minimize the dev window while shooting — Chromium throttles hidden renderers.
 - No Windows Firewall prompt should appear: everything binds loopback (the test bridge was moved off `0.0.0.0` for exactly this). If a prompt appears, a wildcard bind regressed — investigate, don't just dismiss it.

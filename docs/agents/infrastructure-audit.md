@@ -1,0 +1,30 @@
+# Agent infrastructure audit, 2026-09-05
+
+Baseline: `ac77b75c`. Reviewed tracked instructions, all three project skills, Claude hook configuration/implementations, Git symlink entries, check scripts, Vitest/Playwright configuration, CI and PR template, and recent merged review-remediation records. The worktree started clean. The sampled PRs had no review/comment payloads returned by `gh`; review findings below are attributed to their merged remediation descriptions, not independently recovered reviewer comments.
+
+## Evidence and changes
+
+| Evidence | Recurring failure | Infrastructure response |
+|---|---|---|
+| [Usage follow-up #1508](https://github.com/alondero/buildmesh/pull/1508), following #1488 | Stale requests overwrite newer state, 240px toolbar overflow, empty test, dead parameters, and comments overstating behavior. Follow-up called alert relocation non-UI and inferred a pre-existing Rust failure from changed-file scope. | Shared engineering contract requires controlled ordering tests, browser layout evidence, and baseline reproduction before attributing failures. |
+| [Mobile rewrite #1497](https://github.com/alondero/buildmesh/pull/1497) | WebSocket send mistaken for delivery, polling path untested, gesture cancellation/state churn, endpoint with no Rust behavior tests. PR checked cargo-test green while its notes described a linking blocker and cargo-check evidence. | Route/acknowledgement, reconciliation, gesture, and evidence requirements; PR template separates actual results from future instructions. |
+| [Migration fix #1565](https://github.com/alondero/buildmesh/pull/1565) | Index created before legacy columns; singleton made schema regression require a subprocess. | Explicit-connection seam and production initializer tests on fresh and legacy populated DBs. |
+| [Circuit follow-up #1518](https://github.com/alondero/buildmesh/pull/1518) | Capacity inferred from transient IDs, stranded reviewers, incomplete cancellation/cleanup. | Durable state/effect tests at worker boundary; restart, cancellation, and failure are design inputs. |
+| `vitest.config.ts` | A global `dangerouslyIgnoreUnhandledErrors: true` suppressed every runtime error to accommodate #1452. Safe worker pool existed only in selected wrappers. | Remove global suppression; configure threads and zero-test failure centrally. Newly exposed failures must remain visible. |
+| `/verify`, `/verify-ui`, `playwright.config.ts` | Stale raw test commands, incorrect claim that Playwright boots Tauri, process-name-wide kill recipe, repeated expensive builds, mandatory recipe accumulation. | Short verification skill routes to canonical contract and actual config, bounded in-scope diagnosis, dev-profile-only runtime path, no automatic memory growth. UI skill uses isolated baseline checkout and accurate runtime limits. |
+| Hooks and `.agents/skills` | Only Claude-specific edit tools invoke guards. Helpers exit on import outside Vitest. Skills use lowercase entrypoint filenames; Windows checkout materializes symlink targets as pointer files here. | Import-safe content rules, portable added-line checker in local checks and CI, uppercase skill entrypoints, explicit pointer fallback instructions. Preserve shared Git links. |
+| `scripts/check.ps1`, PR template | `all` omitted TS compilation and accepted an old mobile bundle. Template encouraged unchecked checks to be marked done or struck and claimed a title CI gate absent from build workflow. | Build current frontend before Rust in `all`; evidence-based PR template and documented check limits. |
+| Knowledge primer, final circuit section | Control characters corrupted identifiers, and one paragraph reversed commit/effect ordering relative to `services/circuit_worker.rs`. Encoding guidance also asserted a repository-wide UTF-16 layout without evidence. | Repair identifiers, specify commit-before-effect, and use file-specific encoding guidance. Read relevant architecture sections and verify against their owner. |
+
+## Deliberate limits
+
+No speculative architecture framework, new dependency, blanket test-count quota, or automatic publish/merge hook. Existing runtime adapters and tests remain the implementation seams. The portable checker shares existing narrow heuristics; it cannot prove ownership or concurrency correctness. Process-spawn and binding checks remain in CI. Runtime smoke still requires the appropriate app/browser environment; compilation and mock rendering remain separately reported evidence.
+
+The knowledge primer is large and contains historical sections; this change adds a concise engineering contract and fixes directly relevant verification claims rather than rewriting unrelated domain material. Follow-up architecture edits should replace stale sections at their owning module, backed by tests.
+
+## Local validation
+
+- Windows `scripts\check.ps1 all-ts`: frontend typecheck + desktop/mobile builds passed; 2,727 unit tests passed (one skipped), 60 integration tests passed. Unhandled-error suppression was disabled for this run.
+- The portable guard is tested against real temporary Git repositories and real hook stdin, including committed/staged/unstaged/untracked changes, renames into guarded paths, exceptions, and invalid bases. No index mutation is allowed.
+- Negative Vitest probes: a nonexistent test filter exited 1; an intentionally unhandled rejection exited 1 despite its assertion passing. The temporary rejection test was removed after checking the result.
+- All three skill entrypoints passed the skill-creator frontmatter validator. No Rust implementation, real app runtime, or browser behavior was changed or exercised in this infrastructure task; CI workflow execution remains to be observed on GitHub.

@@ -8,6 +8,8 @@
 // main() only runs when this file is executed directly as a hook.
 
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 function readStdin() {
   try {
@@ -183,7 +185,6 @@ function main() {
   process.exit(0);
 }
 
-// Run as a hook in production; skip when imported by the Vitest test runner
-// (Vitest sets process.env.VITEST), so importing the pure helpers never calls
-// process.exit. Avoids fragile argv-vs-import.meta.url path comparison on Windows.
-if (!process.env.VITEST) main();
+// Importing the rules must not consume stdin or exit the caller. URLs handle
+// Windows drive letters and spaces consistently for direct hook execution.
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();
