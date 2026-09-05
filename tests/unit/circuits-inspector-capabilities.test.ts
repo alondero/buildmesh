@@ -55,6 +55,10 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('Anthropic (Claude Code) matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.anthropic;
     expect(c.harness_id).toBe('anthropic');
+    // Issue #1481 — pin supports_passive_turn_watcher across every harness
+    // (TS vitest is opt-in per field; only commandcode.rs:100 overrides the
+    // trait default of `false`, see provider/mod.rs:348).
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(true);
     expect(c.supports_extra_args).toBe(true);
@@ -66,6 +70,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('Codex matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.codex;
     expect(c.harness_id).toBe('codex');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(true);
     expect(c.supports_extra_args).toBe(true);
@@ -81,6 +86,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('AGY (Antigravity) matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.agy;
     expect(c.harness_id).toBe('agy');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(true);
     expect(c.supports_extra_args).toBe(true);
@@ -91,6 +97,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('OpenCode matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.opencode;
     expect(c.harness_id).toBe('opencode');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
@@ -101,6 +108,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('Grok matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.grok;
     expect(c.harness_id).toBe('grok');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(true);
     expect(c.supports_extra_args).toBe(true);
@@ -135,6 +143,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('Cursor matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.cursor;
     expect(c.harness_id).toBe('cursor');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
@@ -158,6 +167,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('Kimi matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.kimi;
     expect(c.harness_id).toBe('kimi');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
@@ -169,6 +179,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('mcode matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.mcode;
     expect(c.harness_id).toBe('mcode');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(false);
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
@@ -180,6 +191,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('dsh matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.dsh;
     expect(c.harness_id).toBe('dsh');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
@@ -190,6 +202,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('Command Code matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.commandcode;
     expect(c.harness_id).toBe('commandcode');
+    expect(c.supports_passive_turn_watcher).toBe(true);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(true);
     expect(c.supports_extra_args).toBe(true);
@@ -202,6 +215,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('Freebuff matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.freebuff;
     expect(c.harness_id).toBe('freebuff');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(false);
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
@@ -215,6 +229,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
   it('Terminal matches the Rust inventory (plain shell, no overrides)', () => {
     const c = HARNESS_CAPABILITIES.terminal;
     expect(c.harness_id).toBe('terminal');
+    expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.is_plain_terminal).toBe(true);
     expect(c.supports_model_override).toBe(false);
     expect(c.supports_effort_override).toBe(false);
