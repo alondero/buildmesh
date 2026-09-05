@@ -21,10 +21,35 @@
 //! Claude-style `--session-id` assign flag; `opencode --session <uuid>` is
 //! rejected as an invalid ID, and `--session ses_unknown` fails with
 //! "Session not found" rather than creating that ID. Resume uses
-//! `--session <id>` / `-s <id>` (not `--resume`). Capture is *not* the
-//! PTY UUID regex — those IDs never match — it is a post-spawn SQLite
-//! read of OpenCode's local `opencode.db` (`services::opencode_session`),
-//! started from [`AgentProvider::after_fresh_spawn`].
+//! `--session <id>` / `-s <id>` (not `--resume`).
+//!
+//! Capture (issue #1294) is **two-layered**:
+//! 1. **Primary** — the OpenCode project plugin installed by
+//!    [`Self::provision_attention_hooks`] forwards the `session.created`
+//!    event back to Buildmesh's `/api/attention/<node_id>` endpoint
+//!    (loopback peer only). The attention route classifies it as
+//!    `Ignore` (lifecycle-neutral) and stores the freshly minted `ses_<…>`
+//!    id via `set_cli_session_id_if_missing`. This path is unambiguous
+//!    for two Root Nodes in the same mesh root — the plugin runs
+//!    in-process with the TUI that just started, so it knows which node
+//!    it belongs to (the SQLite poller below only sees `directory`, which
+//!    is shared).
+//! 2. **Fallback** — a post-spawn SQLite read of OpenCode's local
+//!    `opencode.db` (`services::opencode_session::start_capture_poller`),
+//!    started from [`Self::after_fresh_spawn`]. Used when the plugin is
+//!    missing (e.g. `opencode` not on PATH for the user's shell) or
+//!    blocked by a future plugin loader regression. Has a 9.3s retry
+//!    window that gives up once exhausted — the production repro from
+//!    issue #1294's investigation comment shows why this isn't enough on
+//!    its own: node `3417` was spawned at `20:10:04` and the poller
+//!    gave up at `20:10:13`, but OpenCode only minted the row at
+//!    `21:06:29` (an hour later, on first interactive prompt). The
+//!    plugin closes that gap because `session.created` fires when
+//!    OpenCode itself creates the session — no matter how long the
+//!    user waits before typing.
+//!
+//! The PTY UUID regex (`session_capture`) is *never* used for OpenCode —
+//! `ses_<…>` IDs never match the UUID shape.
 //!
 //! **Model / prefill**: TUI accepts `--model provider/model` and `--prompt`.
 //! There is no TUI `--variant` / `--effort` flag (that's `opencode run` only).

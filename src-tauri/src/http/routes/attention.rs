@@ -53,12 +53,22 @@ const MAX_HOOK_BODY: usize = 64 * 1024;
 /// Cursor hook payload with `{"conversation_id": "...", "hook_event_name":
 /// "stop"}` flows through the same parser as Claude/AGY/Grok callbacks.
 ///
+/// OpenCode (issue #1294) ships `sessionID` (all-caps for "ID", per
+/// the upstream plugin event convention). The alias stack accepts
+/// that shape alongside the Claude/AGY/Grok/Cursor ones so a single
+/// parser handles every harness's payload.
+///
 /// Note: fields like `execution_num`, `workspace_paths`, `artifact_directory_path`,
 /// `model_name`, and `error` are parsed for telemetry, diagnostics, and forward
 /// compatibility with future AGY revisions, but are not decision inputs in `decide()`.
 #[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 struct HookPayload {
-    #[serde(alias = "sessionId", alias = "conversationId", alias = "conversation_id")]
+    #[serde(
+        alias = "sessionId",
+        alias = "sessionID",
+        alias = "conversationId",
+        alias = "conversation_id"
+    )]
     session_id: Option<String>,
     #[serde(alias = "hookEventName", alias = "hook_event_name")]
     hook_event_name: Option<String>,
@@ -228,16 +238,20 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
     })
 }
 
-/// Extract the provider-owned UUID from a structured hook callback. An
-/// arbitrary string must never enter `cli_session_id`: resume treats that
-/// column as an executable CLI argument. Codex, Claude, and AGY all use
-/// UUIDs; the alias on `HookPayload::session_id` makes
-/// `conversationId` (AGY) parse through the same code path. Validation
-/// is delegated to [`request::parse_cli_session_id`] so this route and
-/// `import_and_resume` share one boundary check (issue #1237).
-fn hook_session_id(body: &[u8]) -> Option<String> {
+/// Extract the provider-owned session id from a structured hook callback.
+/// An arbitrary string must never enter `cli_session_id`: resume treats
+/// that column as an executable CLI argument. Codex, Claude, AGY, Grok,
+/// and Cursor all use UUIDs; the alias on `HookPayload::session_id`
+/// makes `conversationId` (AGY) and `conversation_id` (Cursor) parse
+/// through the same code path. OpenCode mints `ses_<hex+base62>` ids
+/// instead (issue #1294), so this helper is **provider-aware** and
+/// dispatches to `request::parse_opencode_session_id` for OpenCode
+/// (`--session <uuid>` is `Invalid session ID` on the live CLI) or to
+/// `request::parse_cli_session_id` for every other provider (the
+/// issue #1237 UUID validator shared with `import_and_resume`).
+fn hook_session_id(body: &[u8], provider: &str) -> Option<String> {
     let id = serde_json::from_slice::<HookPayload>(body).ok()?.session_id?;
-    request::parse_cli_session_id(&id)
+    request::parse_session_id_for_provider(provider, &id)
 }
 
 /// What to do with an incoming attention webhook (issue #1364).
@@ -305,6 +319,14 @@ impl Classified {
 ///    Claude-style transcript file, so this rule must fire BEFORE the
 ///    transcript-scan fallback (rule 5) — otherwise the node would land
 ///    in `Ready`.
+/// 3b. An OpenCode `session.created` plugin event (issue #1294) →
+///    `Ignore`. Fires once at TUI boot carrying the freshly minted
+/// `ses_<…>` id; persisting that id is the primary capture path for
+/// `agent_nodes.cli_session_id` (the SQLite poller remains the fallback
+/// when the plugin is missing or blocked). This rule runs BEFORE the
+/// transcript-scan fallback for the same reason as `session.idle`: an
+/// OpenCode node never has a Claude-style transcript path, so rule 5
+/// would otherwise land a boot event on `Ready`.
 /// 4. AGY's `Stop` with `fullyIdle: false` (or explicit `fullyIdle: false`,
 ///    issue #1285, #1367) → suppress. The harness signalled the turn ended
 ///    but the agent is still busy on background work. Same false-yield
@@ -379,6 +401,18 @@ fn classify(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> 
         let mut idle = detail;
         idle.kind = Some(crate::agent::session_lifecycle::LifecycleKind::InputRequired);
         return Classified::mark_input(idle);
+    }
+    // OpenCode plugin (issue #1294) — rule 3b above. Fires once at TUI
+    // boot carrying the freshly minted `ses_…` id; `set_cli_session_id_if_missing`
+    // (called outside this function) persists it as the primary
+    // capture path. The classifier still treats the event as lifecycle-neutral
+    // so a fresh spawn doesn't immediately trip the "needs attention"
+    // pipeline on what is, structurally, just an id handshake.
+    if event == Some("session.created") {
+        return Classified {
+            decision: Decision::Ignore,
+            detail,
+        };
     }
     // Grok posts `hookEventName: "notification"` (lowercase); Claude posts
     // `"Notification"`. Match case-insensitively so the structured
@@ -560,7 +594,13 @@ let provider: &str = node_provider.as_deref().unwrap_or("");
     // — then runs in ONE `run_blocking` dispatch below, so a single webhook
     // POST costs one blocking hop and one DB lock acquisition instead of a
     // Tokio↔SQLite ping-pong (issue #1364 review).
-    let hook_uuid = hook_session_id(&body);
+    //
+    // Issue #1294: the session-id extractor is provider-aware so an
+    // OpenCode `ses_…` id parses through `parse_opencode_session_id`
+    // (the existing UUID validator would silently drop it). Provider
+    // is read from the row already fetched for the token gate above —
+    // no extra DB hop.
+    let hook_uuid = hook_session_id(&body, provider);
 
     // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
     // `"tool_execution_limit_reached"`) so a future debugging session can
@@ -866,16 +906,19 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "claude").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
     }
 
     #[test]
     fn missing_malformed_or_non_uuid_session_id_is_ignored() {
-        assert_eq!(hook_session_id(b"{}"), None);
-        assert_eq!(hook_session_id(b"not json"), None);
-        assert_eq!(hook_session_id(br#"{"session_id":"most-recent"}"#), None);
+        assert_eq!(hook_session_id(b"{}", "claude"), None);
+        assert_eq!(hook_session_id(b"not json", "claude"), None);
+        assert_eq!(
+            hook_session_id(br#"{"session_id":"most-recent"}"#, "claude"),
+            None
+        );
     }
 
     #[test]
@@ -1020,6 +1063,90 @@ mod tests {
         assert_eq!(classify_decision(&body, |_| Some(2)), Decision::Ready);
     }
 
+    // -- OpenCode plugin (issue #1294) ---------------------------------------
+
+    /// OpenCode's `session.created` plugin event fires once at TUI boot
+    /// carrying the freshly minted `ses_<…>` id. The classifier treats
+    /// it as lifecycle-neutral (`Ignore`); the session id itself is
+    /// captured by `set_cli_session_id_if_missing` above the
+    /// classifier's apply pass — the very property that makes this the
+    /// primary capture path for `agent_nodes.cli_session_id`. A regression
+    /// that lands this event on `Ready` or `MarkInput` would either fire
+    /// naming/autopilot on an empty session (Ready) or pop an
+    /// "awaiting_input" badge on a node that just booted (MarkInput).
+    #[test]
+    fn opencode_session_created_is_lifecycle_neutral() {
+        let body = serde_json::json!({
+            "hook_event_name": "session.created",
+            "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(classify_decision(&body, |_| Some(5)), Decision::Ignore);
+        // The classifier uses `provider_event` for downstream telemetry;
+        // `Ignore` callers still record the upstream name verbatim so
+        // future diagnostics can correlate.
+        let classified = classify(&body, |_| Some(5));
+        assert_eq!(
+            classified.detail.provider_event.as_deref(),
+            Some("session.created")
+        );
+        // The id must round-trip through the provider-aware extractor so
+        // `set_cli_session_id_if_missing` (called outside the classifier)
+        // has a valid `ses_…` string to write. Without the OpenCode
+        // gate the UUID parser would silently drop it — the exact symptom
+        // this issue set out to fix.
+        assert_eq!(
+            hook_session_id(&body, "opencode").as_deref(),
+            Some("ses_fc52ccfb9ffek1jl23zwprusp7"),
+        );
+        // Same body, non-OpenCode provider — the legacy UUID gate
+        // rejects the `ses_…` shape (a UUID-shaped field is what Claude/
+        // Codex/AGY/Grok/Cursor carry). Pins the per-provider
+        // dispatcher.
+        assert_eq!(hook_session_id(&body, "claude"), None);
+    }
+
+    /// Issue #1294 — `session.created` is case-folded the same way as
+    /// `session.idle` so an upstream plugin version that emits
+    /// `SESSION.CREATED` still hits the rule. Regression pin matching
+    /// `opencode_session_idle_is_case_insensitive` above.
+    #[test]
+    fn opencode_session_created_is_case_insensitive() {
+        for casing in ["session.created", "SESSION.CREATED", "Session.Created"] {
+            let body = serde_json::json!({
+                "hook_event_name": casing,
+                "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+            })
+            .to_string()
+            .into_bytes();
+            assert_eq!(
+                classify_decision(&body, |_| Some(5)),
+                Decision::Ignore,
+                "casing {casing:?} must hit the session.created rule"
+            );
+        }
+    }
+
+    /// Issue #1294 negative AC: a plugin payload that claims to be a
+    /// `session.created` event but carries a UUID-shaped id (instead of
+    /// the documented `ses_…` shape) must NOT be captured. The provider-
+    /// aware extractor drops it on the OpenCode gate, so the underlying
+    /// `set_cli_session_id_if_missing` call sees `None` and writes
+    /// nothing. The classifier still returns `Ignore` so a malformed
+    /// payload can't fake a "needs attention" land via a side channel.
+    #[test]
+    fn opencode_session_created_with_uuid_is_not_captured() {
+        let body = serde_json::json!({
+            "hook_event_name": "session.created",
+            "sessionID": "550e8400-e29b-41d4-a716-446655440000",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(classify_decision(&body, |_| Some(5)), Decision::Ignore);
+        assert_eq!(hook_session_id(&body, "opencode"), None);
+    }
+
     // -- OpenCode plugin (issue #1295) ---------------------------------------
 
     /// OpenCode's `session.idle` plugin event — agent finished its turn
@@ -1161,7 +1288,7 @@ mod tests {
         .into_bytes();
         assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ignore);
         assert_eq!(
-            hook_session_id(&body).as_deref(),
+            hook_session_id(&body, "codex").as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
     }
@@ -1278,7 +1405,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "grok").as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
     }
@@ -1429,7 +1556,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "agy").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
     }
@@ -1449,7 +1576,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "agy").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
     }
@@ -1480,7 +1607,7 @@ mod tests {
         assert_eq!(parsed.workspace_paths.as_deref(), Some(&["/Users/dev/project".to_string()][..]));
         assert_eq!(parsed.model_name.as_deref(), Some("gemini-3.7-flash"));
 
-        assert_eq!(hook_session_id(&body).as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(hook_session_id(&body, "agy").as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
         assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
     }
 
@@ -1821,7 +1948,7 @@ fn verify_attention_token_truth_table() {
         })
         .to_string();
         assert_eq!(
-            hook_session_id(body.as_bytes()).as_deref(),
+            hook_session_id(body.as_bytes(), "cursor").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
     }
@@ -1922,7 +2049,7 @@ fn verify_attention_token_truth_table() {
         );
 
         assert_eq!(
-            hook_session_id(&body).as_deref(),
+            hook_session_id(&body, "cursor").as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
         assert_eq!(classify_decision(&body, |_| Some(0)), Decision::Ready);
