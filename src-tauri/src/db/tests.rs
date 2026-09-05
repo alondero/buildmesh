@@ -135,59 +135,16 @@ fn hook_session_capture_only_fills_a_missing_cli_session_id() {
 /// TUI's `session.created` event to a per-node URL
 /// (`/api/attention/<node_id>`, where `node_id` comes from
 /// `BUILDMESH_SESSION_ID` set per-agent by `spawn_environment`). The DB
-/// write is therefore per-row, not per-directory — this test pins that
-/// the fill-only semantics preserve distinct ids on distinct rows even
-/// when the surrounding capture mechanism could not tell them apart.
-#[test]
-fn hook_session_capture_disambiguates_two_root_nodes_in_same_directory() {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE agent_nodes (
-            id INTEGER PRIMARY KEY,
-            cli_session_id TEXT
-         );
-         INSERT INTO agent_nodes (id, cli_session_id) VALUES
-            (10, NULL),
-            (11, NULL);",
-    )
-    .unwrap();
-
-    // Two distinct `ses_<…>` ids, one per node — simulating two
-    // concurrent plugin POSTs landing at distinct `/api/attention/10`
-    // and `/api/attention/11` URLs. Each must land in its own row.
-    let ses_a = "ses_fc52ccfb9ffek1jl23ZwpRuSP7";
-    let ses_b = "ses_aa11bb22cc33dd44ee55ff66gg77";
-    assert!(super::set_cli_session_id_if_missing_inner(&conn, 10, ses_a).unwrap());
-    assert!(super::set_cli_session_id_if_missing_inner(&conn, 11, ses_b).unwrap());
-
-    // The same id posted twice to the same node is a no-op the second
-    // time — exercises the idempotent fill-only contract the SQLite
-    // poller's fallback relies on.
-    assert!(!super::set_cli_session_id_if_missing_inner(&conn, 10, ses_a).unwrap());
-
-    // Each node's stored id matches its respective post — the disambiguation
-    // guarantee the plugin path exists to provide.
-    let stored_a: Option<String> = conn
-        .query_row(
-            "SELECT cli_session_id FROM agent_nodes WHERE id = 10",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let stored_b: Option<String> = conn
-        .query_row(
-            "SELECT cli_session_id FROM agent_nodes WHERE id = 11",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(stored_a.as_deref(), Some(ses_a));
-    assert_eq!(stored_b.as_deref(), Some(ses_b));
-    assert_ne!(
-        stored_a, stored_b,
-        "two Root Nodes in the same directory must store distinct ids"
-    );
-}
+/// write is therefore per-row, not per-directory — the fill-only
+/// `UPDATE … WHERE id = ?2` clause in `set_cli_session_id_if_missing_inner`
+/// pins the right row from the URL path component. A regression that
+/// swapped `id` for a directory-derived id would re-introduce the
+/// two-Root-Node collision; the existing
+/// `set_cli_session_id_if_missing_basic_semantics` test pins the row
+/// semantics, and the route's `path_without_query.strip_prefix(
+/// "/api/attention/")` parse is the only place that derives `node_id`
+/// from the wire. Testing the route end-to-end requires the live HTTP
+/// harness (out of scope for an inner-helper unit test).
 
 // File-level `#[cfg(test)]` is applied by the parent module's
 // `#[cfg(test)] mod tests;` declaration — no inner `mod tests {}` wrapper

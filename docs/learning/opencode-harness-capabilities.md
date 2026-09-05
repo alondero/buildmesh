@@ -88,7 +88,7 @@ Not present on TUI: `--session-id`, `--resume`, `--effort`, `--variant`, `--pref
 
 ### Session ID format
 
-Schema: must start with `ses`. Generator: `"ses_" + descending()` → 12 hex timestamp chars + 14 base62 chars.
+Schema: must start with `ses`. Generator: `"ses_" + descending()` → 12 hex timestamp chars + 14 base62 chars. **The base62 tail is case-sensitive** (`0-9a-zA-Z`) — OpenCode's CLI looks ids up case-sensitively (`opencode --session ses_…Zwp…` resolves, `ses_…zwp…` returns `Session not found`). Any "helpful" lower-case fold on the wire destroys the id and breaks `AgentProvider::resume_args`. Live example from a working install: `ses_fdccb6795ffeg1FnX4aC8egj2M` — note the mixed-case `F`, `C`, and `M` in the base62 tail.
 
 Live `opencode session list --format json` includes `id`, `title`, `updated`, `created`, `projectId`, `directory`. SQLite: `opencode db path` → `%USERPROFILE%\.local\share\opencode\opencode.db`.
 
@@ -148,6 +148,21 @@ Because OpenCode mints the ID, Buildmesh learns it after spawn and stores `agent
    registry. Cannot distinguish two Root Nodes in one directory
    (matches only on `directory`, which is shared), but the plugin has
    already disambiguated by then.
+
+   **Important — interactive-only limitation.** OpenCode mints the
+   `ses_<…>` row on the first interactive prompt, NOT at TUI boot. The
+   poller runs its five fixed delays (400ms, 800ms, 1600ms, 2500ms,
+   4000ms ≈ 9.3s total) and stops. **The fallback is therefore reliable
+   only for prefill/automated spawns (`--prompt "..."` flows) where the
+   first prompt fires inside the 9.3s window.** For an interactive
+   spawn where the user takes longer than ~9s to type their first
+   prompt, the poller will time out and `cli_session_id` will stay
+   NULL — the plugin path is the ONLY reliable capture for
+   interactive sessions. If the plugin is missing or blocked (e.g.
+   the `.opencode/plugins/` write was denied, the user runs OpenCode
+   from a read-only install), `auto_resume_agent_nodes` cannot recover
+   the node on restart. Document this in any deployment where the
+   plugin is optional.
 
 ### Why the SQLite poller isn't enough alone
 
