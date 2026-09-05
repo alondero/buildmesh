@@ -155,6 +155,20 @@ function Invoke-TsBuild {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'build' }
 }
 
+function Invoke-BundleBudget {
+  # Issue #1568 — gate the desktop initial JS/CSS bundles against the
+  # documented budget (scripts/bundle-budget.json). Must run AFTER
+  # Invoke-TsBuild because the script reads `dist/`; in `unit` /
+  # `integration` modes we skip it (no dist/ guaranteed) but in `all`
+  # and `all-ts` the build step ran first so this catches regressions.
+  Write-Host '== bundle size budget (issue #1568) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  try {
+    & node scripts/check-bundle-size.mjs --dist dist
+  } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'bundle-budget' }
+}
+
 function Invoke-Rust {
   Write-Host '== rust (cargo test) ==' -ForegroundColor Cyan
   # Clear the leaked env var for this process only.
@@ -200,6 +214,10 @@ if ($Target -in @('unit', 'all', 'all-ts')) { Invoke-Unit }
 # runs `scripts\check.ps1` locally gets a green bar that CI will reject.
 if ($Target -in @('integration', 'all', 'all-ts')) { Invoke-Integration }
 if ($Target -in @('rust', 'all')) { Invoke-Rust }
+# Issue #1568 — bundle size budget runs after the build. `all-ts` includes
+# the budget check because the TS green bar is what we run on every PR;
+# leaving it out would let a 50 KB regression slip through unnoticed.
+if ($Target -in @('all', 'all-ts')) { Invoke-BundleBudget }
 
 if ($failed.Count -gt 0) {
   Write-Host ("== FAIL: " + ($failed -join ', ') + " ==") -ForegroundColor Red

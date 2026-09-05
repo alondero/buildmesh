@@ -1,11 +1,20 @@
 import { useDraggable, useDroppable } from '@dnd-kit/core';
-import type { KeyboardEvent } from 'react';
+import { Suspense, lazy, type KeyboardEvent } from 'react';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { AgentTerminal } from '../Terminal/Terminal';
-import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { GridNodeHeader } from './GridNodeHeader';
 import { NodeDropCue } from './nodeDrag';
 import { SemanticTurnBanner } from './SemanticTurnBanner';
+
+// Issue #1568 - Build/Run is a niche pane (most nodes never open it).
+// Lazy-load it so the initial bundle doesn't pay for its second xterm
+// registry, the PTY wiring, and its associated CSS until the user clicks
+// "Build" / "Run" / "Terminal" on a node header. The pane mounts only
+// when `isBuildRunOpen` flips true; until then we don't pay for the
+// import. `fallback={null}` matches the pre-lazy behaviour where the
+// pane briefly showed empty space while the xterm container was being
+// measured, so the on-click path looks identical to before the split.
+const BuildRunTerminal = lazy(() => import('../Terminal/BuildRunTerminal').then((m) => ({ default: m.BuildRunTerminal })));
 
 export type BuildRunState = { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
 
@@ -128,12 +137,20 @@ export function NodeCard({ nodeId, isActive, onActivate, onBuildRun, buildRunOpe
           <AgentTerminal nodeId={node.id} />
         </div>
         {isBuildRunOpen && (
-          <BuildRunTerminal
-            sessionId={node.id}
-            mode={isBuildRunOpen}
-            useWorktree={node.use_worktree}
-            onClose={() => setBuildRunOpen(null)}
-          />
+          // Issue #1568 - BuildRunTerminal is a React.lazy chunk; Suspense
+          // hosts the brief loading state. `fallback={null}` matches the
+          // pre-lazy behaviour where the pane just appeared empty while
+          // xterm's container was being measured — the registry creates the
+          // xterm element on attach (which fires after the chunk resolves),
+          // so a one-frame blank is indistinguishable from a slow first paint.
+          <Suspense fallback={null}>
+            <BuildRunTerminal
+              sessionId={node.id}
+              mode={isBuildRunOpen}
+              useWorktree={node.use_worktree}
+              onClose={() => setBuildRunOpen(null)}
+            />
+          </Suspense>
         )}
       </div>
       {draggable && <NodeDropCue nodeId={node.id} />}

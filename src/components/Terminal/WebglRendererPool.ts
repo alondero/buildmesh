@@ -16,6 +16,13 @@
  * Keys are namespaced by the caller (`agent:${nodeId}` vs
  * `buildRun:${sessionId}`) because the two registries use colliding numeric
  * id spaces — same reason their writers are separate registries.
+ *
+ * Issue #1568 — `loadWebglRenderer.ts` itself dynamic-imports
+ * `@xterm/addon-webgl`, so the WebGL renderer chunk only loads when the
+ * first WebGL attach fires. `activate` / `release` stay synchronous here;
+ * `loadWebglRenderer`'s internal Promise handles the case where
+ * `release()` runs before the WebGL addon has been constructed (see
+ * `loadWebglRenderer.ts` for the deferred-dispose path).
  */
 import type { Terminal } from '@xterm/xterm';
 import { loadWebglRenderer } from './loadWebglRenderer';
@@ -56,7 +63,7 @@ export class WebglRendererPool {
 
   /** Drop `key` from the pool, disposing its WebGL addon if still held. */
   release(key: string): void {
-    this.lru = this.lru.filter(k => k !== key);
+    this.lru = this.lru.filter((k) => k !== key);
     const entry = this.entries.get(key);
     if (!entry) return;
     this.entries.delete(key);
@@ -82,7 +89,7 @@ export class WebglRendererPool {
   }
 
   private touch(key: string): void {
-    this.lru = this.lru.filter(k => k !== key);
+    this.lru = this.lru.filter((k) => k !== key);
     this.lru.push(key);
   }
 }

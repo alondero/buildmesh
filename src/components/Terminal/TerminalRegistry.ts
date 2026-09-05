@@ -1,8 +1,15 @@
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import { SerializeAddon } from '@xterm/addon-serialize';
-import { SearchAddon } from '@xterm/addon-search';
-import { WebLinksAddon } from '@xterm/addon-web-links';
+// Issue #1568 - xterm.js and its addons are the heaviest single dependency
+// in the desktop bundle (~250 KB minified, ~80 KB gzip). The TerminalRegistry
+// class is a singleton whose `doCreate` only runs when an actual xterm is
+// first attached, so we keep the runtime imports (Terminal, FitAddon,
+// SerializeAddon, SearchAddon, WebLinksAddon, loadUnicode11Widths) lazy
+// behind dynamic `import()` inside `doCreate` and convert the type imports
+// to `import type` so Rollup erases them entirely. The class itself, plus
+// the writers/managers it composes, are still cheap at module load.
+import type { Terminal } from '@xterm/xterm';
+import type { FitAddon } from '@xterm/addon-fit';
+import type { SerializeAddon } from '@xterm/addon-serialize';
+import type { SearchAddon } from '@xterm/addon-search';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import type { AgentOutputPayload } from '../../types/generated/AgentOutputPayload';
 import type { AgentSpawnedPayload } from '../../types/generated/AgentSpawnedPayload';
@@ -17,7 +24,6 @@ import { isMac } from '../../lib/platform';
 import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
 import { FontSizeManager } from './FontSizeManager';
 import { ThemeManager } from './ThemeManager';
-import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { terminalWebglPool } from './WebglRendererPool';
 import { decodeBase64Bytes } from '../../lib/base64';
 import { setTheme, type ThemeName } from '../../lib/theme';
@@ -305,6 +311,27 @@ export class TerminalRegistry {
 
   private async doCreate(nodeId: number): Promise<TerminalInstance | null> {
     try {
+      // Issue #1568 - lazy-load xterm + its addons + the unicode-width shim
+      // behind a single dynamic import. Vite emits a separate chunk for each
+      // of these modules, and they're only fetched on first terminal attach.
+      // Without this, every byte of @xterm/xterm + 5 addons lands in the
+      // desktop initial bundle even for users who never open a canvas.
+      const [
+        { Terminal },
+        { FitAddon },
+        { SerializeAddon },
+        { SearchAddon },
+        { WebLinksAddon },
+        { loadUnicode11Widths },
+      ] = await Promise.all([
+        import('@xterm/xterm'),
+        import('@xterm/addon-fit'),
+        import('@xterm/addon-serialize'),
+        import('@xterm/addon-search'),
+        import('@xterm/addon-web-links'),
+        import('./loadUnicode11Widths'),
+      ]);
+
       const term = new Terminal({
         ...createTerminalOptions(),
         // xterm accepts HTTP(S) OSC 8 links by default. Do not opt in to

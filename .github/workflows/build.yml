@@ -77,9 +77,20 @@ jobs:
         run: npm ci
 
       # Typecheck the frontend against the committed bindings and build the
-      # mobile bundle required by the Rust tests.
-      - name: Typecheck frontend + build mobile bundle
-        run: npx tsc --noEmit && npm run build:mobile
+      # desktop + mobile bundles the Rust tests embed and the budget gate
+      # below measures. `npm run build` runs `tsc` itself, so this step is
+      # just `npm run build` (no separate `tsc --noEmit`).
+      - name: Build desktop + mobile bundles
+        run: npm run build
+
+      # Issue #1568 - gate the desktop initial JS/CSS bundles against the
+      # documented budget in `scripts/bundle-budget.json`. The script exits
+      # non-zero on a breach so a regression on the entry chunk becomes a
+      # red build instead of a hidden cost on first paint. We run it here
+      # (after the build) rather than inside the test step because the
+      # budget applies to release artifacts, not the dev server.
+      - name: Check desktop initial bundle budget (issue #1568)
+        run: npm run check:bundle
 
       # Single invocation runs both unit and integration suites in the
       # same vitest worker-pool boot (cheaper than two separate calls

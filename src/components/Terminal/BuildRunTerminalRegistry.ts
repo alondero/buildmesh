@@ -1,9 +1,8 @@
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import type { Terminal } from '@xterm/xterm';
+import type { FitAddon } from '@xterm/addon-fit';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import * as api from '../../lib/tauri';
 import { createTerminalOptions } from './terminalConfig';
-import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { terminalWebglPool } from './WebglRendererPool';
 import { TerminalWriter } from './TerminalWriter';
 import { TerminalResizeScheduler } from './TerminalResizeScheduler';
@@ -352,6 +351,19 @@ export class BuildRunTerminalRegistry {
     useWorktree: boolean,
   ): Promise<BuildRunInstance | null> {
     try {
+      // Issue #1568 - lazy-load xterm + FitAddon + the unicode-width shim.
+      // Mirrors TerminalRegistry.doCreate; keep these two sites consistent so
+      // the same chunk is shared on the wire.
+      const [
+        { Terminal },
+        { FitAddon },
+        { loadUnicode11Widths },
+      ] = await Promise.all([
+        import('@xterm/xterm'),
+        import('@xterm/addon-fit'),
+        import('./loadUnicode11Widths'),
+      ]);
+
       // `createTerminalOptions` (not the static `TERMINAL_OPTIONS`) so the
       // build-run terminal respects the user's font-size preference set
       // via Ctrl+/- in the agent terminal (issue: was always rendered at

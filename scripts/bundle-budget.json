@@ -1,0 +1,17 @@
+{
+  "$comment": "Issue #1568 - desktop initial-bundle size budget. Run via `npm run check:bundle`. Values are bytes; `null` skips the limit on that axis. Bump these intentionally, not by accident - every regression visible in CI costs a hot path.",
+  "checks": [
+    {
+      "label": "Desktop entry JS (dist/assets/index-*.js)",
+      "pattern": "index-*.js",
+      "maxRaw": 1100000,
+      "maxGzip": 360000
+    },
+    {
+      "label": "Desktop entry CSS (dist/assets/index-*.css)",
+      "pattern": "index-*.css",
+      "maxRaw": 120000,
+      "maxGzip": 20000
+    }
+  ]
+}
