@@ -1,8 +1,10 @@
-﻿import { describe, it, expect, beforeEach } from 'vitest';
-import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding } from '../../src/lib/gridShortcuts';
+﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding, triggerNewAgentShortcut } from '../../src/lib/gridShortcuts';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { useMeshStore } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
+import type { Mesh } from '../../src/types/generated/Mesh';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 // Minimal valid AgentNode — we never invoke any backend; `getActiveNode` only
@@ -204,5 +206,138 @@ describe('buildFocusGridSearchBinding (issue #998 Ctrl+F / ⌘+⌥+F)', () => {
     // narrower literal type proves the type-tag survived.
     const narrowed: 'focus-grid-search' = binding.action;
     expect(narrowed).toBe('focus-grid-search');
+  });
+});
+
+// Minimal Mesh shape — the handler only reads `id`, `name`, and `path`,
+// but `useMeshStore.setState({ meshesById: ... })` keeps the type narrow.
+// Mirrors the mesh fixture used by `tests/unit/command-omnibar.test.tsx`.
+// `default_provider: null` so the per-mesh arm of `resolve_default_provider`
+// is empty; only the store-side fallback matters for this test.
+const MESH: Mesh = {
+  id: 1,
+  name: 'buildmesh',
+  path: '/repo',
+  layout: 'grid',
+  position: 0,
+  created_at: '2026-01-01T00:00:00Z',
+  build_command: null,
+  run_command: null,
+  model: null,
+  effort: null,
+  use_worktree: true,
+  worktree_mode: null,
+  default_provider: null,
+  base_ref: 'main',
+  scratchpad: '',
+  sandbox: false,
+  pre_spawn_pool_size: 1,
+  color: null,
+  autopilot_enabled: false,
+  autopilot_trigger_label: null,
+  autopilot_concurrency_limit: 2,
+  autopilot_provider: null,
+  autopilot_action_on_success: null,
+  root_build_command: null,
+  root_run_command: null,
+  autopilot_mode: 'issue_driven',
+  loop_initial_prompt: null,
+  loop_suffix_prompt: null,
+  loop_max_iterations: null,
+  loop_interval_seconds: 0,
+  loop_consecutive_failures: 0,
+  harness_overrides: {},
+};
+
+describe('triggerNewAgentShortcut (#1253 Ctrl+T / ⌘+T new-agent)', () => {
+  // Issue #1253 — Ctrl+T without an active node previously fell back to the
+  // literal `'anthropic'` (legacy provider id, pre-#538) while the rest of
+  // the codebase routes through `getDefaultProvider` → `'claude'` (post-#538
+  // unified harness id). The fix collapses both paths so the spawn sees the
+  // same provider resolution chain the sidebar `+` button does.
+  //
+  // The acceptance behaviour (issue #1253 Validation) is "the provider
+  // passed to `selectProviderForMesh` from the Ctrl+T path equals
+  // `getDefaultProvider`'s result". The two tests below pin:
+  //   1. no active node        → defers to `getDefaultProvider(mesh.id)`
+  //                                and never emits the legacy `'anthropic'`
+  //                                literal on this arm
+  //   2. active node present   → inherits the active node's provider
+  //                                (pre-#1253 behaviour preserved so
+  //                                switching nodes doesn't randomly switch
+  //                                the spawn provider)
+  beforeEach(() => {
+    // Reset both stores to a known baseline. `meshesById` carries MESH so
+    // the resolution chain has a real row to look up; `selectedMeshId` is
+    // MESH.id so the "no active node" arm still has a mesh to land on.
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+    seedAgentNodes([]);
+    useMeshStore.setState({
+      meshesById: new Map([[MESH.id, MESH]]),
+      selectedMeshId: MESH.id,
+    });
+  });
+
+  it('defers to getDefaultProvider when no active node is set', async () => {
+    // Issue #1253 Validation — "the provider passed to
+    // `selectProviderForMesh` from the Ctrl+T path equals
+    // `getDefaultProvider`'s result". `getDefaultProvider` is the
+    // mesh-store wrapper around the IPC call; it mirrors
+    // `resolve_default_provider`'s post-#538 `'claude'` fallback. The
+    // `not.toBe('anthropic')` assertion is the drift guard — the pre-#1253
+    // handler had `activeNode?.provider ?? 'anthropic'` and a regression
+    // that reintroduces that literal (or short-circuits the IPC and
+    // forwards its own default) would fail this assertion even though
+    // `mockResolvedValue('claude')` makes the spy return 'claude'.
+    const getDefaultSpy = vi
+      .spyOn(useMeshStore.getState(), 'getDefaultProvider')
+      .mockResolvedValue('claude');
+    const selectSpy = vi
+      .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
+      .mockResolvedValue({} as unknown as AgentNode);
+
+    await triggerNewAgentShortcut();
+
+    expect(getDefaultSpy).toHaveBeenCalledWith(MESH.id);
+    expect(selectSpy).toHaveBeenCalledWith(
+      MESH.id,
+      MESH.name,
+      MESH.path,
+      'claude',
+      undefined,
+    );
+    const [passedProvider] = selectSpy.mock.calls[0].slice(3, 4);
+    expect(passedProvider).not.toBe('anthropic');
+  });
+
+  it('reuses the active node provider when one is in scope', async () => {
+    // Active node wins — Ctrl+T with a node already on screen spawns with
+    // the SAME provider that node uses, not the mesh default. This
+    // preserves the pre-#1253 behaviour (it used to be `?? 'anthropic'`,
+    // now it's `?? getDefaultProvider(mesh.id)`, but the active-node arm
+    // is unchanged in either case).
+    seedAgentNodes(
+      [{ ...NODE, id: 7, mesh_id: MESH.id, provider: 'minimax' }],
+      7,
+    );
+    const getDefaultSpy = vi.spyOn(useMeshStore.getState(), 'getDefaultProvider');
+    const selectSpy = vi
+      .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
+      .mockResolvedValue({} as unknown as AgentNode);
+
+    await triggerNewAgentShortcut();
+
+    // `getDefaultProvider` must NOT be consulted when an active node is
+    // in scope — falling through to the mesh default would silently
+    // switch the spawn provider on every Ctrl+T press inside an existing
+    // Minimax session.
+    expect(getDefaultSpy).not.toHaveBeenCalled();
+    expect(selectSpy).toHaveBeenCalledWith(
+      MESH.id,
+      MESH.name,
+      MESH.path,
+      'minimax',
+      undefined,
+    );
   });
 });

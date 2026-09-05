@@ -1,4 +1,5 @@
 import { useAgentNodeStore } from '../stores/agentNodeStore';
+import { useMeshStore } from '../stores/meshStore';
 import { useUIStore } from '../stores/uiStore';
 import type { NonSingleViewMode } from '../stores/uiStore';
 
@@ -99,4 +100,45 @@ export function buildFocusGridSearchBinding(isMac: boolean): {
   return isMac
     ? { key: 'CommandOrControl+Alt+F', action: 'focus-grid-search' }
     : { key: 'CommandOrControl+F', action: 'focus-grid-search' };
+}
+
+// ---- Issue #1253 — Ctrl+T new-agent shortcut ----
+
+/**
+ * Ctrl+T (Cmd+T on macOS) spawns a fresh agent node on the active mesh, falling
+ * back to the selected mesh when no node is active. Bound at the Tauri global
+ * level (App.tsx wires the platform chord) so the gesture fires while an xterm
+ * terminal has focus.
+ *
+ * Provider resolution (issue #1253):
+ *   - active node exists → reuse its provider (preserves the pre-#1253 path
+ *     so switching between nodes doesn't randomly switch the spawn provider)
+ *   - no active node     → defer to `useMeshStore.getDefaultProvider`, which
+ *     mirrors `resolve_default_provider`'s post-#538 `'claude'` fallback and
+ *     applies per-mesh + app-wide overrides from the same precedence chain
+ *     the sidebar `+` button uses.
+ *
+ * Routing through `selectProviderForMesh` (instead of calling
+ * `createAgentNode` directly) is what preserves the issue #283 invariant —
+ * the create→activate→select-mesh sequence lives in exactly one place.
+ *
+ * Pulled out of App.tsx's `handleShortcut` for unit-test parity with
+ * `toggleGridMaximize` / `cycleGridMode`: the test file can drive the
+ * resolution path directly without standing up the global-shortcut plugin or
+ * the `shortcut-triggered` event bus. App.tsx still owns the platform
+ * binding (`Ctrl+T` / `Cmd+T`), the `createShortcutGuard(300)` anti-burst
+ * wrapper, and the input-focus guard — those are wiring concerns that don't
+ * belong in a pure store mutator.
+ */
+export async function triggerNewAgentShortcut(): Promise<void> {
+  const nodeStore = useAgentNodeStore.getState();
+  const meshStore = useMeshStore.getState();
+  const activeNode = nodeStore.getActiveNode();
+  const meshId = activeNode?.mesh_id ?? meshStore.selectedMeshId;
+  if (!meshId) return;
+  const mesh = meshStore.meshesById.get(meshId);
+  if (!mesh) return;
+  const provider =
+    activeNode?.provider ?? (await meshStore.getDefaultProvider(mesh.id));
+  await nodeStore.selectProviderForMesh(mesh.id, mesh.name, mesh.path, provider, undefined);
 }
