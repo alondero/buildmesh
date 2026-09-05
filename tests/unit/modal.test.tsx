@@ -7,13 +7,30 @@
  *
  * The dirty-check tests at the bottom pin the issue #730 contract: a half-typed
  * form is not silently destroyed by a stray backdrop click or Escape.
+ *
+ * Issue #1292: the modal is portaled to `document.body`. Tests that need to
+ * click the visible dimmer walk from the dialog role (still present in the
+ * same DOM tree, just relocated) up to its parent — the fixed wrapper — and
+ * take its first child, matching the structure
+ * `<div fixed> > <div dimmer> + <div role="dialog">`.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { useRef } from 'react';
-import { render, cleanup, fireEvent } from '@testing-library/react';
+import { render, cleanup, fireEvent, screen } from '@testing-library/react';
 import { Modal } from '../../src/components/shared/Modal';
+import { ConfirmDialog } from '../../src/components/ConfirmDialog/ConfirmDialog';
 
 afterEach(cleanup);
+
+/** Issue #1292: with the portal, the wrapper/dimmer live in `document.body`,
+ *  not in the render container. Walk from the dialog role upward to the
+ *  fixed wrapper, then take its first child (the dimmer). The panel is
+ *  always present (it renders the dialog role unconditionally), so this
+ *  works for both dirty and non-dirty modals. */
+function getBackdrop(): HTMLElement {
+  const wrapper = screen.getByRole('dialog').parentElement as HTMLElement;
+  return wrapper.firstElementChild as HTMLElement;
+}
 
 describe('Modal', () => {
   it('renders dialog semantics (role, aria-modal, label wiring)', () => {
@@ -52,7 +69,7 @@ describe('Modal', () => {
 
   it('closes on backdrop click by default but not when closeOnBackdrop is false', () => {
     const onClose = vi.fn();
-    const { container, rerender } = render(
+    const { rerender } = render(
       <Modal onClose={onClose} ariaLabel="test">
         <p>body</p>
       </Modal>,
@@ -62,7 +79,9 @@ describe('Modal', () => {
     // A real user clicks the dimmer, not the wrapper. Earlier versions of
     // this test clicked the wrapper and gave false green coverage when the
     // handler had a `e.target !== e.currentTarget` guard (code-review catch).
-    const dimmer = (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+    // Issue #1292: getBackdrop() walks from document.body now that the
+    // modal is portaled — the helper at the top of this file explains.
+    const dimmer = getBackdrop();
     fireEvent.click(dimmer);
     expect(onClose).toHaveBeenCalledTimes(1);
 
@@ -72,7 +91,7 @@ describe('Modal', () => {
         <p>body</p>
       </Modal>,
     );
-    fireEvent.click((container.firstElementChild as HTMLElement).firstElementChild as HTMLElement);
+    fireEvent.click(getBackdrop());
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -168,7 +187,7 @@ describe('Modal defaultFocusRef (issue #748)', () => {
 describe('Modal dirty-check (issue #730)', () => {
   it('backdrop click on the dimmer with dirty=true shows the discard banner and does NOT close', () => {
     const onClose = vi.fn();
-    const { container, getByTestId, queryByTestId } = render(
+    const { getByTestId, queryByTestId } = render(
       <Modal onClose={onClose} dirty ariaLabel="t">
         <p>body</p>
       </Modal>,
@@ -178,7 +197,7 @@ describe('Modal dirty-check (issue #730)', () => {
     // never click the invisible outer wrapper — the earlier
     // `e.target !== e.currentTarget` guard rejected every real backdrop
     // click and the test that clicked the wrapper gave false green.
-    const dimmer = (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+    const dimmer = getBackdrop();
     fireEvent.click(dimmer);
     expect(onClose).not.toHaveBeenCalled();
     getByTestId('modal-discard-banner');
@@ -199,12 +218,12 @@ describe('Modal dirty-check (issue #730)', () => {
 
   it('backdrop click on the dimmer with dirty=false still closes (existing behaviour preserved)', () => {
     const onClose = vi.fn();
-    const { container } = render(
+    render(
       <Modal onClose={onClose} ariaLabel="t">
         <p>body</p>
       </Modal>,
     );
-    const dimmer = (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+    const dimmer = getBackdrop();
     fireEvent.click(dimmer);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -222,12 +241,12 @@ describe('Modal dirty-check (issue #730)', () => {
 
   it('clicking Discard calls onClose and removes the banner', () => {
     const onClose = vi.fn();
-    const { container, getByTestId, queryByTestId } = render(
+    const { getByTestId, queryByTestId } = render(
       <Modal onClose={onClose} dirty ariaLabel="t">
         <p>body</p>
       </Modal>,
     );
-    const dimmer = (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+    const dimmer = getBackdrop();
     fireEvent.click(dimmer);
     getByTestId('modal-discard-banner');
     fireEvent.click(getByTestId('modal-discard-confirm'));
@@ -242,7 +261,7 @@ describe('Modal dirty-check (issue #730)', () => {
     // so the wrapper's onMouseDown handler can capture document.activeElement
     // before the click moves it.
     const onClose = vi.fn();
-    const { container, getByTestId, getByDisplayValue } = render(
+    const { getByTestId, getByDisplayValue } = render(
       <Modal onClose={onClose} dirty ariaLabel="t">
         <input data-testid="typed" defaultValue="half typed" />
       </Modal>,
@@ -255,7 +274,7 @@ describe('Modal dirty-check (issue #730)', () => {
     // Backdrop click on the dimmer — fire mousedown (captures the focused
     // input) and click (sets the banner) separately. fireEvent.click alone
     // would skip the mousedown phase and lastFocusRef would never be set.
-    const dimmer = (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+    const dimmer = getBackdrop();
     fireEvent.mouseDown(dimmer);
     fireEvent.click(dimmer);
     expect(onClose).not.toHaveBeenCalled();
@@ -290,12 +309,12 @@ describe('Modal dirty-check (issue #730)', () => {
 
   it('after the banner is open, a backdrop click dismisses the banner and does NOT discard (issue #808)', () => {
     const onClose = vi.fn();
-    const { container, getByTestId, queryByTestId } = render(
+    const { getByTestId, queryByTestId } = render(
       <Modal onClose={onClose} dirty ariaLabel="t">
         <p>body</p>
       </Modal>,
     );
-    const dimmer = (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+    const dimmer = getBackdrop();
     fireEvent.click(dimmer);
     getByTestId('modal-discard-banner');
     expect(onClose).not.toHaveBeenCalled();
@@ -319,12 +338,12 @@ describe('Modal dirty-check (issue #730)', () => {
 
   it('uses the custom dirtyMessage when provided', () => {
     const onClose = vi.fn();
-    const { container, getByText } = render(
+    const { getByText } = render(
       <Modal onClose={onClose} dirty dirtyMessage="Throw away your edit?" ariaLabel="t">
         <p>body</p>
       </Modal>,
     );
-    const dimmer = (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+    const dimmer = getBackdrop();
     fireEvent.click(dimmer);
     getByText('Throw away your edit?');
   });
@@ -389,5 +408,147 @@ describe('Modal dirty-check (issue #730)', () => {
     );
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(document.activeElement).toBe(getByTestId('modal-discard-cancel'));
+  });
+});
+
+describe('Modal portals to document.body (issue #1292)', () => {
+  // Follow-up of #1290 / PR #1290. The previous fix portaled the sidebar's
+  // NodeItem and MeshItem context menus so `position:fixed` resolves against
+  // the viewport instead of a `filter`/`transform` containing block. The
+  // running-node Regenerate `<ConfirmDialog>` is still nested inside the
+  // NodeItem row, which applies `hover:brightness-125` (`filter`), so it
+  // inherits the same bug. Patching the call sites one by one would chain
+  // through ConfirmDialog → MeshPropertiesTab → WorktreeManagerTab → …
+  // Doing it once inside `Modal` covers every consumer.
+  //
+  // The bug was: `position: fixed` resolves against the nearest ancestor
+  // that creates a containing block. CSS properties that do this include
+  // `filter`, `transform`, `opacity`, `backdrop-filter`, `perspective`,
+  // `contain: paint | layout | strict | content`, and `will-change` of any
+  // of those. With the wrapper nested under any of them, `fixed inset-0`
+  // shrinks to that ancestor's box and the dialog stops covering the
+  // window.
+
+  it('renders its DOM tree under document.body, not under the call site', () => {
+    // Render inside an element we can identify. Without the portal, the
+    // wrapper/dimmer/panel would all live under `[data-anchor]`.
+    const { getByRole } = render(
+      <div data-anchor>
+        <Modal onClose={() => {}} ariaLabel="t">
+          <p>body</p>
+        </Modal>
+      </div>,
+    );
+    const dialog = getByRole('dialog');
+    // No ancestor in the dialog's parent chain carries the anchor.
+    let node: HTMLElement | null = dialog;
+    while (node && node !== document.body) {
+      expect(node.getAttribute('data-anchor')).toBeNull();
+      node = node.parentElement;
+    }
+    // The chain reaches `document.body` — the portal target.
+    expect(node).toBe(document.body);
+  });
+
+  it('avoids `filter` / `transform` ancestors so `position:fixed inset-0` covers the viewport', () => {
+    // The exact failure mode from the issue: the NodeItem row uses
+    // `hover:brightness-125` (Tailwind's `filter: brightness(1.25)`) and
+    // the parent MeshItem uses dnd-kit's `transform`. `filter` and
+    // `transform` both create a containing block, so before the portal
+    // `fixed inset-0` resolved against the row, not the window.
+    //
+    // We force the filter+transform values via inline style so the test
+    // runs in jsdom (Tailwind's hover variant doesn't apply without a
+    // real DOM hover). The assertion is the same either way: the
+    // dialog's ancestor chain must not cross either property.
+    const { getByRole } = render(
+      <div style={{ filter: 'brightness(1.25)', transform: 'translate(10px, 10px)' }}>
+        <Modal onClose={() => {}} ariaLabel="t">
+          <p>body</p>
+        </Modal>
+      </div>,
+    );
+    const dialog = getByRole('dialog');
+    let node: HTMLElement | null = dialog;
+    while (node && node !== document.body) {
+      // jsdom returns the literal inline style; in a real browser the
+      // computed style would also report a non-`none` filter/transform
+      // on the same element. Either form would force a containing
+      // block.
+      expect(node.style.filter).toBe('');
+      expect(node.style.transform).toBe('');
+      node = node.parentElement;
+    }
+    expect(node).toBe(document.body);
+  });
+
+  it('the portal target is `document.body` exactly — not a custom container', () => {
+    // Belt-and-braces pin: if someone later swaps the portal target for
+    // a `<div id="modal-root">` (a common anti-pattern — it re-introduces
+    // containing-block issues if the root ever grows a `transform`), this
+    // test fails loudly.
+    const { getByRole } = render(
+      <Modal onClose={() => {}} ariaLabel="t">
+        <p>body</p>
+      </Modal>,
+    );
+    expect(getByRole('dialog').parentElement?.parentElement).toBe(document.body);
+  });
+});
+
+describe('ConfirmDialog inherits the Modal portal (issue #1292)', () => {
+  // ConfirmDialog is a thin wrapper around Modal — the fix at the Modal
+  // boundary covers it for free, but we pin the production case (which
+  // came in through the bug report) so a future refactor can't quietly
+  // re-introduce a wrapper that breaks the portal.
+
+  it('the running-node Regenerate dialog overlays document.body, not the NodeItem row', () => {
+    // Mimic the production layout: an Agent Node row applies
+    // `hover:brightness-125` (filter) and is itself a child of a
+    // MeshItem that uses dnd-kit's `transform`. The `data-session-item`
+    // attribute is the production marker (NodeItem.tsx) so the test
+    // ties back to the real failure surface, not an abstract wrapper.
+    function Harness() {
+      return (
+        <div style={{ filter: 'brightness(1.25)', transform: 'translate(0, 0)' }} data-session-item="42">
+          <ConfirmDialog
+            title="Regenerate this node?"
+            message="Agent is currently working."
+            confirmLabel="Regenerate"
+            onConfirm={() => {}}
+            onCancel={() => {}}
+          />
+        </div>
+      );
+    }
+    render(<Harness />);
+
+    const dialog = screen.getByRole('dialog');
+    // Walk up from the dialog and assert we never cross the
+    // `data-session-item` ancestor (the row that triggered the bug).
+    let node: HTMLElement | null = dialog;
+    while (node && node !== document.body) {
+      expect(node.getAttribute('data-session-item')).toBeNull();
+      node = node.parentElement;
+    }
+    expect(node).toBe(document.body);
+  });
+
+  it('ConfirmDialog still closes on backdrop click after the portal move', () => {
+    // Behaviour preserved across the portal change: the same backdrop
+    // click path that worked before still works after we relocated the
+    // DOM. Clicking the dimmer invokes `onCancel`.
+    const onCancel = vi.fn();
+    render(
+      <ConfirmDialog
+        title="Delete?"
+        message="This cannot be undone."
+        confirmLabel="Delete"
+        onConfirm={() => {}}
+        onCancel={onCancel}
+      />,
+    );
+    fireEvent.click(getBackdrop());
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });
