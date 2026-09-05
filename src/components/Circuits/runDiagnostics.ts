@@ -1,6 +1,6 @@
 /**
  * runDiagnostics — the plain-English reading of a circuit run's ledger
- * (issue #1468).
+ * (issues #1468 / #1475).
  *
  * Split out of `circuitGraphModel.ts` in review: that module is documented as
  * "pure helpers behind the canvas editor", and the wording rules below exist
@@ -65,28 +65,37 @@ export function stepStatusLabel(status: string): string {
 }
 
 /**
- * What we can observe about why a step is parked.
+ * Three distinct capacity budgets a stuck run can be bound by, kept
+ * verbally distinct in the UI copy per the AC on issue #1467:
  *
- * `schedule_ready` (src-tauri/src/autopilot/circuit/stepper.rs) parks a
- * step as `pending_slot` for exactly two reasons: the circuit's own
- * running-step budget is spent, or the step needs a fresh agent node and
- * the mesh's agent budget is spent. Neither reason is persisted on the
- * step row, so we derive which one is binding from the numbers the wire
- * DOES carry. Issue #1467 replaces this inference with a real
- * circuit-run capacity contract the ledger can state outright.
+ *   1. **Mesh circuit-run admission** — `meshes.circuit_run_capacity`,
+ *      the cap #1467 introduced. One slot per admitted run regardless
+ *      of how many agent nodes the run's blueprint fans out to. A run
+ *      in `state='pending'` is parked here until the mesh has fewer
+ *      `running`/`paused` runs than the cap (issue #1475).
+ *   2. **Per-circuit step slots** — `autopilot_circuits.concurrency_limit`,
+ *      steps the circuit may run at once. A `pending_slot` step is
+ *      parked here.
+ *   3. **Mesh agent slots** — `meshes.autopilot_concurrency_limit`,
+ *      agent processes this mesh will spawn at once. A step needing a
+ *      fresh agent with no slot to spare gets parked on this too.
  *
- * **This is observation through a paginated window, and the window can
- * skew it.** `runningSteps` is counted from the runs the Probe fetched —
- * `listCircuitsWithRuns(meshId, 10)`, the ten most recent. The worker
- * counts across *all* of them (`db::count_running_circuit_steps`). An
- * in-flight run that has fallen outside the ten-run window therefore
- * makes `runningSteps` under-count, and an under-count reads as "this
- * circuit has spare step slots" — flipping the diagnosis to the mesh
- * agent budget when the circuit budget was in fact binding. That needs
- * eleven concurrent-ish runs on one circuit to happen, and the hedged
- * wording in `queuedReason` keeps it from becoming a false statement,
- * but it is a real limit of inferring scheduler state client-side and is
- * the reason #1467 should replace this rather than extend it.
+ * The Probe's three copy strings spell out which budget binds: "circuit-
+ * run slots", "step slots", "agent slot". A user reading "waiting for a
+ * slot" should be able to tell which.
+ *
+ * `runningSteps` and `meshActiveRuns` are both CLIENT-SIDE OBSERVATIONS
+ * through a paginated window (`listCircuitsWithRuns(meshId, 10)`,
+ * `listCircuitProbe`), not authoritative counts. The worker reads across
+ * all runs (`db::count_running_circuit_steps` /
+ * `db::count_active_circuit_runs`). In practice both wire observations
+ * cover the admitted universe — `pending` lives in the queue, not the
+ * ledger — but the ten-run terminal-history cap can still drop an
+ * admitted run whose terminal row landed outside the window. The hedged
+ * wording in `queuedReason` and `pendingAdmissionDetail` keeps that from
+ * becoming a false statement. Issue #1467's bookkeeping did not expose a
+ * per-circuit running-step count (it gates run admission at the mesh
+ * level), so the window caveat stays.
  */
 export interface CircuitCapacity {
   /** `autopilot_circuits.concurrency_limit` — steps this circuit may run at once. */
@@ -94,6 +103,16 @@ export interface CircuitCapacity {
   /** Steps currently `running` across every *visible* run of this circuit
    *  (see the window caveat above — this is a lower bound, not a total). */
   runningSteps: number;
+  /** `meshes.circuit_run_capacity` — circuit runs this mesh admits at once
+   *  (issue #1467 / schema v36, default 2). Read from the mesh row the
+   *  Probe already has in `meshStore`; no new IPC needed. */
+  meshRunCapacity: number;
+  /** Runs currently `running` or `paused` across this mesh — mirrors
+   *  `db::count_active_circuit_runs` (issue #1467). Deliberately excludes
+   *  `pending` because counting pending self-deadlocks: every pending
+   *  run would see itself + peers, so `count < cap` is always false
+   *  and no run ever admits. */
+  meshActiveRuns: number;
 }
 
 /** Count the `running` steps across a circuit's visible runs — the
@@ -103,6 +122,25 @@ export interface CircuitCapacity {
 export function countRunningSteps(runs: Array<{ steps: Array<Pick<StepLike, 'status'>> }>): number {
   return runs.reduce(
     (total, { steps }) => total + steps.filter((s) => s.status === 'running').length,
+    0
+  );
+}
+
+/**
+ * Count this mesh's `running` + `paused` runs across every circuit —
+ * the frontend's stand-in for the worker's `db::count_active_circuit_runs`.
+ * Same window caveat as `countRunningSteps` (see `CircuitCapacity`).
+ *
+ * `pending` is intentionally NOT counted: the backend excludes it for
+ * the self-deadlock reason named on `CircuitCapacity.meshActiveRuns`,
+ * and matching that here keeps the copy accurate.
+ */
+export function countActiveRuns(
+  runs: Array<{ run: { state: string } }>
+): number {
+  return runs.reduce(
+    (total, { run }) =>
+      total + (run.state === 'running' || run.state === 'paused' ? 1 : 0),
     0
   );
 }
@@ -187,6 +225,19 @@ export function runActivity(
       detail: queuedReason(capacity),
     };
   }
+  // `pending` covers the brief window between a run's admission and the
+  // worker's first step emission, and is the persistent state of every
+  // row the queue UI shows. Either way, the reason it has not started is
+  // mesh-level run admission (#1467), so the run card surfaces the same
+  // copy as the queue.
+  if (run.state === 'pending') {
+    return {
+      kind: 'idle',
+      label: 'Waiting to start',
+      nodeId: null,
+      detail: pendingAdmissionDetail(capacity),
+    };
+  }
   return { kind: 'idle', label: 'Waiting to start', nodeId: null, detail: null };
 }
 
@@ -209,6 +260,38 @@ function failedWithoutMessageDetail(
   return steps.length === 0
     ? 'The run failed before any step was recorded — check the app log.'
     : 'No step recorded a failure — the run was failed by the worker; check the app log.';
+}
+
+/**
+ * What a run is parked on while `state === 'pending'` — mesh-level
+ * admission against the circuit-run budget (#1467 / #1475).
+ *
+ * Like `queuedReason`, the copy names *a* binding constraint rather than
+ * claiming an exclusive cause. The two are deliberately visually
+ * distinct (`queuedReason` says "step slots" or "agent slot"; this says
+ * "circuit-run slots") so a user reading "waiting for a slot" can tell
+ * which budget binds.
+ *
+ * Singular vs plural wording follows the integer. A `meshRunCapacity`
+ * of `0` falls through to a hedged statement rather than "All 0 slots
+ * are busy" — same shape as `queuedReason` handles `concurrencyLimit`.
+ */
+export function pendingAdmissionDetail(capacity: CircuitCapacity): string {
+  const { meshRunCapacity, meshActiveRuns } = capacity;
+  if (meshRunCapacity <= 0) {
+    return "Waiting for a circuit-run slot — this mesh's run budget is not configured.";
+  }
+  if (meshActiveRuns >= meshRunCapacity) {
+    return meshRunCapacity === 1
+      ? 'Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy.'
+      : `Waiting for a circuit-run slot — all ${meshRunCapacity} of this mesh's circuit-run slots are busy.`;
+  }
+  // A `pending` run with spare mesh capacity is a transient state (mid
+  // worker tick) — the worker re-checks admission every 2 s. State what
+  // we observe rather than fabricate an explanation.
+  return meshRunCapacity === 1
+    ? 'Waiting for a circuit-run slot — this mesh allows 1 concurrent run (admission is re-checked every 2 s).'
+    : `Waiting for a circuit-run slot — this mesh allows ${meshRunCapacity} concurrent runs (admission is re-checked every 2 s).`;
 }
 
 /**
