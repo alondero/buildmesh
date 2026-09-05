@@ -27,7 +27,7 @@ import { createShortcutGuard } from './lib/shortcutGuard';
 import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { traversalTargetId } from './lib/gridTraversal';
-import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding } from './lib/gridShortcuts';
+import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding, triggerNewAgentShortcut } from './lib/gridShortcuts';
 import { scopeNodesForMode } from './lib/viewModes';
 import type { NonSingleViewMode } from './stores/uiStore';
 import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
@@ -210,24 +210,7 @@ function App() {
       const action = (e as CustomEvent<string>).detail;
 
       if (action === 'new-agent') {
-        createNodeGuard(async () => {
-          const activeNode = useAgentNodeStore.getState().getActiveNode();
-          const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
-          if (!meshId) return;
-          const mesh = useMeshStore.getState().meshesById.get(meshId);
-          if (!mesh) return;
-          const provider = activeNode?.provider ?? 'anthropic';
-          // Route through the same store action the sidebar uses (issue #283)
-          // so the create→activate→select-mesh invariant ("no half-applied
-          // mesh-selected-but-no-node state") lives in exactly one place.
-          // The action uses branch='main'; the keyboard shortcut previously
-          // copied activeNode?.branch — branch wasn't actually wired through
-          // create_session here, since the sidebar's spawn path already
-          // passes 'main' too.
-          await useAgentNodeStore
-            .getState()
-            .selectProviderForMesh(mesh.id, mesh.name, mesh.path, provider, undefined);
-        });
+        createNodeGuard(() => triggerNewAgentShortcut());
         return;
       }
 
