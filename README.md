@@ -135,6 +135,41 @@ npm run test:ci          # all three in one go
 cargo test               # Rust unit tests (run inside src-tauri/)
 ```
 
+## Bundle size budget (issue #1568)
+
+The desktop entry chunk (`dist/assets/index-*.js`) is the single largest
+byte-cost on first paint. After #1568's lazy-xterm + lazy-Probe-tab
+split, it sits at roughly 894 kB minified / 274 kB gzip — with xterm and
+its five addons (≈430 kB / ≈100 kB gzip) only fetched the first time a
+terminal pane is opened, and each Probe tab (≈2–24 kB / ≈1–7 kB gzip)
+only fetched when the user actually opens that destination.
+
+The build is gated by [`scripts/check-bundle-size.mjs`](scripts/check-bundle-size.mjs)
+against the **budget limits** in [`scripts/bundle-budget.json`](scripts/bundle-budget.json):
+
+| Asset | Budget limit (raw) | Budget limit (gzip) |
+|---|---|---|
+| `dist/assets/index-*.js` | 1.05 MB | 360 KB |
+| `dist/assets/index-*.css` | 117 KB | 20 KB |
+
+The numbers above are **upper bounds**, not the current size — the
+table deliberately leaves headroom (~20% raw, ~30% gzip) so a typical
+regression surfaces as a visible budget breach instead of a cliff-edge
+green/red flip. Run `npm run check:bundle` after `npm run build` to see
+the current numbers and the headroom remaining.
+
+```bash
+npm run build           # produces dist/
+npm run check:bundle    # reads dist/ and compares against scripts/bundle-budget.json
+```
+
+`scripts/check.ps1 all-ts` (and `all`) runs the budget check as part of
+the green bar — `unit` / `integration` / `rust` skip it because they
+don't produce a build. The quality job on CI runs it after
+`npm run build` so a regression on the entry chunk fails the build.
+Bump the budget values intentionally — every visible CI failure costs a
+hot path; don't paper over a real growth by raising the ceiling.
+
 ## Project structure
 
 ```

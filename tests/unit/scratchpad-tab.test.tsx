@@ -27,7 +27,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -143,10 +143,14 @@ describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
 
   it('loads the active mesh\'s scratch pad into the textarea on mount', async () => {
     renderWithScratchpadOpen();
+    // Issue #1568 — ScratchpadTab is a React.lazy chunk loaded behind
+    // <Suspense> in ProbePanel; the textarea may mount a frame or two
+    // before the async load IPC resolves, so we wait for the loaded value
+    // rather than reading textarea.value on the first findByLabelText hit.
     const textarea = (await screen.findByLabelText(
       'Scratch pad',
     )) as HTMLTextAreaElement;
-    expect(textarea.value).toBe('pre-existing note for alpha');
+    await waitFor(() => expect(textarea.value).toBe('pre-existing note for alpha'));
   });
 
   it('debounces typing into a single `set_mesh_scratchpad` IPC 500ms after the last keystroke', async () => {

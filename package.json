@@ -13,6 +13,7 @@
     "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json",
     "test": "vitest run",
     "check:agent": "node scripts/check-agent-diff.mjs",
+    "check:bundle": "node scripts/check-bundle-size.mjs --dist dist",
     "test:agent": "node --test tests/agent-infra/check-agent-diff.test.mjs",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",

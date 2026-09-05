@@ -41,7 +41,7 @@
  * `prefers-reduced-motion` via the global media query.
  */
 
-import { useRef } from 'react';
+import { Suspense, lazy, useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import {
@@ -52,23 +52,31 @@ import {
 } from '../../lib/probeContext';
 import { useProbeResize, PROBE_PANEL_BOUNDS } from './useProbeResize';
 import { EmptyState } from '../shared/Spinner';
-import { ProjectFilesTab } from './ProjectFilesTab';
-import { AgentChangesTab } from './AgentChangesTab';
-import { MeshPropertiesTab } from './MeshPropertiesTab';
-import { WorktreeManagerTab } from './WorktreeManagerTab';
-import { AutopilotProbeTab } from './AutopilotProbeTab';
-import { CircuitsProbeTab } from './CircuitsProbeTab';
-import { GitIssuesTab } from './GitIssuesTab';
-import { GitPullRequestsTab } from './GitPullRequestsTab';
-import { ArchivedNodesTab } from './ArchivedNodesTab';
-import { ScratchpadTab } from './ScratchpadTab';
-import { UsageTab } from './UsageTab';
 import {
   CompassIcon,
   PROBE_TAB_ICONS,
   SearchIcon,
   type ProbeIcon,
 } from './probeIcons';
+
+// Issue #1568 - lazy-load each tab so the initial bundle doesn't pay for
+// every inspector surface the user may never open. The tabs are 4-71 KB
+// each (WorktreeManagerTab alone is 71 KB); until the inspector is opened
+// (probeOpen===true) the user's app boots without any of them. Even after
+// opening, only the active tab's chunk is fetched — switching tabs brings
+// the next one down on demand. The lazy components are intentionally
+// defined at module scope so they're not recreated on every render.
+const ProjectFilesTab = lazy(() => import('./ProjectFilesTab').then((m) => ({ default: m.ProjectFilesTab })));
+const AgentChangesTab = lazy(() => import('./AgentChangesTab').then((m) => ({ default: m.AgentChangesTab })));
+const MeshPropertiesTab = lazy(() => import('./MeshPropertiesTab').then((m) => ({ default: m.MeshPropertiesTab })));
+const WorktreeManagerTab = lazy(() => import('./WorktreeManagerTab').then((m) => ({ default: m.WorktreeManagerTab })));
+const AutopilotProbeTab = lazy(() => import('./AutopilotProbeTab').then((m) => ({ default: m.AutopilotProbeTab })));
+const CircuitsProbeTab = lazy(() => import('./CircuitsProbeTab').then((m) => ({ default: m.CircuitsProbeTab })));
+const GitIssuesTab = lazy(() => import('./GitIssuesTab').then((m) => ({ default: m.GitIssuesTab })));
+const GitPullRequestsTab = lazy(() => import('./GitPullRequestsTab').then((m) => ({ default: m.GitPullRequestsTab })));
+const ArchivedNodesTab = lazy(() => import('./ArchivedNodesTab').then((m) => ({ default: m.ArchivedNodesTab })));
+const ScratchpadTab = lazy(() => import('./ScratchpadTab').then((m) => ({ default: m.ScratchpadTab })));
+const UsageTab = lazy(() => import('./UsageTab').then((m) => ({ default: m.UsageTab })));
 
 type ProbeTabDef = ProbeTabDefinition & { tab: ProbeTab; icon: ProbeIcon };
 
@@ -94,6 +102,25 @@ function ContextPinIcon({ className = 'w-3.5 h-3.5' }: { className?: string }) {
       <path d="M9 3h6l1 5-4 4v5l-2 2v-7L6 8l1-5Z" />
       <path d="M5 21h14" />
     </svg>
+  );
+}
+
+/**
+ * Issue #1568 — `Suspense` fallback shown while a lazy Probe tab chunk is
+ * in flight. The body takes the full flex region (`flex-1`) so the
+ * surrounding fade-in doesn't jump when the chunk lands, and the spinner
+ * inherits the muted palette so it reads as "loading" rather than
+ * "broken". Tests that open a tab can stub the fetch with a synchronous
+ * `<EmptyState>` instead of waiting on the chunk.
+ */
+function ProbeTabLoadingShell() {
+  return (
+    <div className="flex-1 flex items-center justify-center text-text-muted">
+      <div className="flex flex-col items-center gap-2">
+        <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-text-muted border-t-transparent" />
+        <span className="text-xs text-text-muted">Loading…</span>
+      </div>
+    </div>
   );
 }
 
@@ -317,10 +344,14 @@ function ProbePanelContent() {
             destinations remounts the content and replays the fade-in once
             per destination. The wrapper preserves the h-full/flex chain the
             destination roots rely on for their internal `flex-1 overflow`
-            regions. */}
+            regions. Issue #1568 — every tab is now a `React.lazy` chunk,
+            so we wrap the keyed body in `<Suspense>` to host the brief
+            loading state the chunk fetch produces on first open. */}
         <div className="flex-1 overflow-y-auto">
           <div key={probeTab} className="animate-fade-in h-full flex flex-col">
-            <ProbeTabBody tab={probeTab} />
+            <Suspense fallback={<ProbeTabLoadingShell />}>
+              <ProbeTabBody tab={probeTab} />
+            </Suspense>
           </div>
         </div>
       </section>

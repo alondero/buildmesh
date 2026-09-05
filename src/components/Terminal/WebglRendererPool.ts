@@ -16,16 +16,27 @@
  * Keys are namespaced by the caller (`agent:${nodeId}` vs
  * `buildRun:${sessionId}`) because the two registries use colliding numeric
  * id spaces — same reason their writers are separate registries.
+ *
+ * Issue #1568 - `loadWebglRenderer` (which itself imports @xterm/addon-webgl)
+ * is dynamic-imported here so the WebGL renderer chunk only loads when the
+ * first WebGL attach fires. The pool synchronously reserves the LRU slot
+ * and the size counter, then schedules the renderer attach on the next
+ * microtask. A `release` that arrives before the attach resolves still
+ * tears down the entry cleanly: the entry is removed from the map
+ * synchronously, and a fire-and-forget `.then` on the pending attach
+ * promise disposes the renderer the moment it lands.
  */
 import type { Terminal } from '@xterm/xterm';
-import { loadWebglRenderer } from './loadWebglRenderer';
 
 export const MAX_ACTIVE_WEBGL_CONTEXTS = 4;
 
 interface PoolEntry {
   term: Terminal;
-  /** Disposes the WebglAddon (idempotent — no-op after context loss). */
-  detachRenderer: () => void;
+  /** Disposes the WebglAddon (idempotent — no-op after context loss).
+   *  `undefined` until the lazy load resolves; release() awaits it. */
+  pendingAttach: Promise<void> | null;
+  /** Resolves to the real disposer once the lazy load completes. */
+  realDetach: (() => void) | null;
 }
 
 export class WebglRendererPool {
@@ -50,8 +61,16 @@ export class WebglRendererPool {
       this.release(evict);
     }
     this.touch(key);
-    const detachRenderer = loadWebglRenderer(term);
-    this.entries.set(key, { term, detachRenderer });
+    const entry: PoolEntry = { term, pendingAttach: null, realDetach: null };
+    entry.pendingAttach = (async () => {
+      const { loadWebglRenderer } = await import('./loadWebglRenderer');
+      // If release() already removed us while we were loading, skip the
+      // attach — there is nothing to render into and a brand-new entry
+      // may already be holding the slot.
+      if (!this.entries.has(key)) return;
+      entry.realDetach = loadWebglRenderer(term);
+    })();
+    this.entries.set(key, entry);
   }
 
   /** Drop `key` from the pool, disposing its WebGL addon if still held. */
@@ -60,10 +79,22 @@ export class WebglRendererPool {
     const entry = this.entries.get(key);
     if (!entry) return;
     this.entries.delete(key);
-    try {
-      entry.detachRenderer();
-    } catch {
-      // addon already gone (context loss) — ignore
+    // If the lazy load is still in flight, defer the dispose until it lands;
+    // if it's already landed, dispose synchronously.
+    if (entry.realDetach) {
+      try {
+        entry.realDetach();
+      } catch {
+        // addon already gone (context loss) — ignore
+      }
+      return;
+    }
+    if (entry.pendingAttach) {
+      entry.pendingAttach.then(() => {
+        if (entry.realDetach) {
+          try { entry.realDetach(); } catch { /* ignore */ }
+        }
+      }).catch(() => { /* import failed; nothing to dispose */ });
     }
   }
 
