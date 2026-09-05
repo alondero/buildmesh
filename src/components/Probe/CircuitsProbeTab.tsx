@@ -51,21 +51,35 @@ import {
   type CircuitWithRuns,
 } from '../../lib/tauri';
 import { isTerminalRunState } from '../Circuits/circuitGraphModel';
-import { countRunningSteps } from '../Circuits/runDiagnostics';
+import { countActiveRuns, countRunningSteps, pendingAdmissionDetail } from '../Circuits/runDiagnostics';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
+import { useMeshStore } from '../../stores/meshStore';
 import { EmptyState } from '../shared/Spinner';
 import { CircuitRunCard } from './CircuitRunCard';
 
 export function CircuitsProbeTab() {
   const { activeMeshId } = useProbeContext();
   const openCircuitEditor = useUIStore((s) => s.openCircuitEditor);
+  // `meshesById` already carries every column after #1467 / #1470 — including
+  // `circuit_run_capacity` — so no new IPC is needed to surface the run-
+  // admission budget to the Probe (#1475).
+  const meshRow = useMeshStore((s) =>
+    activeMeshId === null ? undefined : s.meshesById.get(activeMeshId)
+  );
+  const meshRunCapacity = meshRow?.circuit_run_capacity ?? 0;
   const [rows, setRows] = useState<CircuitWithRuns[]>([]);
   const [queue, setQueue] = useState<CircuitQueueEntry[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
+  // Mesh-level run count, computed from every circuit's ledger — mirrors
+  // `db::count_active_circuit_runs` (#1467). Computed once per render and
+  // shared between the queue admission hint and every run card's
+  // `CircuitCapacity` (issue #1475 — the same number feeds both surfaces
+  // so the wording cannot disagree).
+  const meshActiveRuns = countActiveRuns(rows.flatMap(({ runs }) => runs));
   /**
    * Explicit run-card disclosure overrides, keyed by run id. Absent means
    * "use the default" (live runs open, terminal runs closed) — storing
@@ -360,6 +374,21 @@ export function CircuitsProbeTab() {
                   <p className="mt-1 text-2xs font-mono text-text-muted break-all pl-4">
                     {entry.run.trigger_identity}
                   </p>
+                  {/* Pending runs live in the queue (not the ledger); surface
+                      the same admission detail a run card would so users
+                      see *why* the run is parked (#1475). Reads from the
+                      mesh-level budget the worker checks. */}
+                  <p
+                    className="mt-1 text-2xs text-text-muted break-words pl-4"
+                    data-testid={`queue-pending-reason-${entry.run.id}`}
+                  >
+                    {pendingAdmissionDetail({
+                      concurrencyLimit: 0,
+                      runningSteps: 0,
+                      meshRunCapacity,
+                      meshActiveRuns,
+                    })}
+                  </p>
                 </li>
               ))}
             </ol>
@@ -378,9 +407,13 @@ export function CircuitsProbeTab() {
               // One capacity snapshot per circuit, shared by its run cards
               // — `countRunningSteps` walks every run, so computing it
               // inside the run loop would be quadratic for nothing.
+              // `meshRunCapacity` / `meshActiveRuns` are mesh-level and
+              // pre-computed at component scope (#1475).
               const capacity = {
                 concurrencyLimit: circuit.concurrency_limit,
                 runningSteps: countRunningSteps(runs),
+                meshRunCapacity,
+                meshActiveRuns,
               };
               return (
               <li key={circuit.id} className="rounded-md border border-border-subtle p-2" data-testid="circuit-row">

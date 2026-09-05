@@ -51,6 +51,11 @@ const MESH: Mesh = {
   created_at: '2026-01-01',
   scratchpad: '',
   sandbox: false,
+  // Circuits Probe reads this from the mesh row (#1475 — wire path
+  // already exists post-#1470). The default-2 is what the mesh would
+  // have after a fresh upgrade; pin it so the test fixtures match the
+  // contract the Probe reads.
+  circuit_run_capacity: 2,
 };
 
 const CIRCUIT: AutopilotCircuit = {
@@ -201,6 +206,77 @@ describe('CircuitsProbeTab', () => {
     expect(screen.queryByText(/trigger:completed/)).toBeNull();
     // The ledger and complete mesh queue load through one IPC payload.
     expect(invoke).toHaveBeenCalledWith('list_circuit_probe', { meshId: 42, limit: 10 });
+  });
+
+  it('surfaces the mesh-level run-admission detail on every queue row (#1475)', async () => {
+    // The Probe's queue lists pending runs that the worker's
+    // `may_admit_run` has parked against the mesh's circuit-run cap
+    // (#1467). Each row should now explain *why* the run has not
+    // started — without this, users see a bare "Queue" with no signal
+    // that the cap is full.
+    //
+    // Saturate the mesh with two admitted `running` runs (cap=2 in the
+    // MESH fixture) so `meshActiveRuns >= meshRunCapacity` and the
+    // "all N … are busy" branch fires. With an empty ledger the
+    // admission count is 0 and the wording falls into the hedged
+    // "spare capacity" branch — wrong surface area for this AC.
+    mockBackend({
+      runs: [RUN_DONE, RUN_RUNNING, { run: { ...RUN_DONE.run, id: 13, state: 'running' }, steps: [] }],
+      queue: [
+        {
+          run: { ...RUN_DONE.run, id: 21, state: 'pending', trigger_identity: 'issue:21:run' },
+          circuit_name: 'nightly-sweep',
+          queue_rank: 1,
+        },
+        {
+          run: { ...RUN_DONE.run, id: 22, state: 'pending', trigger_identity: 'issue:22:run' },
+          circuit_name: 'nightly-sweep',
+          queue_rank: 2,
+        },
+      ],
+    });
+    openProbeDestination('circuits');
+
+    // Pin the wording verbatim — the same shape #1468 uses for the
+    // queued-step copy so a reword silently fails review.
+    const reason21 = await screen.findByTestId('queue-pending-reason-21');
+    expect(reason21.textContent).toContain("circuit-run slot");
+    expect(reason21.textContent).toContain("this mesh's circuit-run slots");
+    expect(reason21.textContent).toContain('2');
+
+    const reason22 = screen.getByTestId('queue-pending-reason-22');
+    expect(reason22.textContent).toBe(reason21.textContent);
+  });
+
+  it('reads the mesh\'s `circuit_run_capacity` from the mesh row, not from the circuit', async () => {
+    // The admission copy comes from `meshRunCapacity` and `meshActiveRuns`
+    // (#1467 / #1475), NOT from the per-circuit `concurrency_limit`. Set
+    // a circuit-level cap of 1 and a mesh cap of 4 with only one admitted
+    // run — the queue row must reflect the mesh number (4) and the
+    // "spare capacity" wording (because we're under the cap, not full).
+    useMeshStore.setState({
+      meshes: [{ ...MESH, circuit_run_capacity: 4 }],
+      meshesById: new Map([[MESH.id, { ...MESH, circuit_run_capacity: 4 }]]),
+      selectedMeshId: MESH.id,
+    });
+    mockBackend({
+      circuits: [{ ...CIRCUIT, concurrency_limit: 1 }],
+      runs: [RUN_DONE, RUN_RUNNING],
+      queue: [
+        {
+          run: { ...RUN_DONE.run, id: 21, state: 'pending', trigger_identity: 'issue:21:run' },
+          circuit_name: 'nightly-sweep',
+          queue_rank: 1,
+        },
+      ],
+    });
+    openProbeDestination('circuits');
+
+    const reason = await screen.findByTestId('queue-pending-reason-21');
+    expect(reason.textContent).toContain('allows 4 concurrent runs');
+    // Belt-and-braces: the per-circuit number must not leak into the
+    // mesh-level copy.
+    expect(reason.textContent).not.toContain('this circuit');
   });
 
   it('New Circuit creates the skeleton and opens the canvas editor (#1209)', async () => {
