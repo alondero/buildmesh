@@ -116,8 +116,13 @@ pub fn unregister(node_id: i64) {
 
 /// Record the start of a fresh turn for this node (at the current tail position).
 pub fn note_turn_start(node_id: i64) {
-    let raw_len = TAILS.lock().unwrap().get(&node_id).map(|s| s.len()).unwrap_or(0);
+    let tails = TAILS.lock().unwrap();
+    let raw_len = tails.get(&node_id).map(|s| s.len()).unwrap_or(0);
     TURN_STARTS.lock().unwrap().insert(node_id, raw_len);
+}
+
+pub(crate) fn has_turn_start(node_id: i64) -> bool {
+    TURN_STARTS.lock().unwrap().contains_key(&node_id)
 }
 
 /// Milliseconds since the node last produced PTY output, or `None` if it has
@@ -168,6 +173,9 @@ pub fn on_output(node_id: i64, data: &str) {
             drain_to += 1;
         }
         tail.drain(..drain_to);
+        if let Some(start) = TURN_STARTS.lock().unwrap().get_mut(&node_id) {
+            *start = start.saturating_sub(drain_to);
+        }
     }
     drop(tails);
     // Reactive gate evaluation (#1207): a circuit LlmTurnClassifier
@@ -202,9 +210,8 @@ pub fn cleaned_tail(node_id: i64) -> String {
 /// The cleaned output produced during the current turn (since [`note_turn_start`]).
 /// If no turn start was recorded, returns the tail.
 pub fn cleaned_turn_tail(node_id: i64) -> String {
-    let raw = TAILS
-        .lock()
-        .unwrap()
+    let tails = TAILS.lock().unwrap();
+    let raw = tails
         .get(&node_id)
         .cloned()
         .unwrap_or_default();
@@ -214,15 +221,12 @@ pub fn cleaned_turn_tail(node_id: i64) -> String {
         .get(&node_id)
         .copied()
         .unwrap_or(0);
-    let turn_raw = if start_offset < raw.len() {
-        let mut slice_start = start_offset;
-        while !raw.is_char_boundary(slice_start) && slice_start < raw.len() {
-            slice_start += 1;
-        }
-        &raw[slice_start..]
-    } else {
-        &raw
-    };
+    drop(tails);
+    let mut slice_start = start_offset.min(raw.len());
+    while !raw.is_char_boundary(slice_start) {
+        slice_start += 1;
+    }
+    let turn_raw = &raw[slice_start..];
     let cleaned = crate::session_naming::ANSI_ESCAPE
         .replace_all(turn_raw, "")
         .to_string();
@@ -308,14 +312,17 @@ pub fn classify(node_id: i64, backend_env: &[(String, String)]) -> Option<Classi
 /// Review completion alone is not approval. Unclear reports and backend
 /// failures need attention rather than silently authorizing more work.
 pub fn classify_review(node_id: i64, backend_env: &[(String, String)]) -> Option<Classification> {
-    let prompt = format!(
+    classify_with_prompt(node_id, backend_env, &review_prompt(&cleaned_turn_tail(node_id)))
+}
+
+pub(crate) fn review_prompt(output: &str) -> String {
+    format!(
         "Assess the final review report in this agent's terminal output. Ignore echoed prompts and tool progress. \
          Answer exactly one word: COMPLETED only if the reviewer explicitly approves the work with no remaining findings; \
          WORKING if the reviewer requests changes or reports unresolved actionable findings; \
          BLOCKED if the review is incomplete, ambiguous, or cannot be performed.\n\n{}",
-        cleaned_turn_tail(node_id)
-    );
-    classify_with_prompt(node_id, backend_env, &prompt)
+        output
+    )
 }
 
 pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &[(String, String)], prompt: &str) -> Option<Classification> {
@@ -473,6 +480,27 @@ mod tests {
         );
         assert!(cleaned_tail(id).contains("turn 1 boot output"));
 
+        unregister(id);
+    }
+
+    #[test]
+    fn circuit_turn_tail_survives_buffer_rollover() {
+        let id = 910_016;
+        register_circuit(id);
+        on_output(id, &"x".repeat(MAX_TAIL_CHARS - 10));
+        note_turn_start(id);
+        on_output(id, "Review complete: no remaining findings. Approved.");
+        assert_eq!(cleaned_turn_tail(id), "Review complete: no remaining findings. Approved.");
+        unregister(id);
+    }
+
+    #[test]
+    fn circuit_new_turn_without_output_does_not_reuse_previous_report() {
+        let id = 910_017;
+        register_circuit(id);
+        on_output(id, "Previous implementation complete");
+        note_turn_start(id);
+        assert_eq!(cleaned_turn_tail(id), "");
         unregister(id);
     }
 

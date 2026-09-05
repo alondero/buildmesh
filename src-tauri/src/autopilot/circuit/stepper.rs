@@ -746,6 +746,15 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     | CircuitNodeKind::ReviewVerdict { .. })
             );
             if is_waiting_classifier && run.state == RunState::Running {
+                let attempt = run.step(node_id).unwrap().attempt;
+                run.context.set(&format!("node.{node_id}.evaluated_attempt"), attempt.to_string());
+                run.context.set(&format!("node.{node_id}.classification"), match classification {
+                    Some(Classification::Completed) => "completed",
+                    Some(Classification::Blocked) => "blocked",
+                    Some(Classification::Working) => "working",
+                    None => "unavailable",
+                });
+                t.context_changed = true;
                 if let Some(out) = output {
                     run.context.set(&format!("node.{}.evaluated_output", node_id), out.clone());
                     t.context_changed = true;
@@ -772,6 +781,18 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     complete_with_outcome(run, &mut t, node_id, outcome);
                     cascade_after_completion(run, &mut t, 1);
                     finish_run_if_done(run, &mut t);
+                } else {
+                    let error = match classification {
+                        None => "Classifier unavailable; retrying after 60 seconds. Check the Mesh Autopilot provider if this persists.",
+                        Some(Classification::Blocked) => "Agent needs input. Continue the agent to produce a new report.",
+                        _ => "Agent reported work remaining. Waiting for its next report; check the agent for a question or permission prompt.",
+                    }.to_string();
+                    run.step_mut(node_id).unwrap().error = Some(error.clone());
+                    t.step_writes.push(StepWrite {
+                        node_id: node_id.clone(), status: StepStatus::Running,
+                        outcome: None, error: Some(error), agent_node_id: None,
+                        attempt, fresh_attempt: false,
+                    });
                 }
             }
         }
@@ -964,6 +985,7 @@ fn complete_with_outcome(
         Some(step) => {
             step.status = StepStatus::Completed;
             step.outcome = Some(outcome);
+            step.error = None;
             step.attempt
         }
         None => 1,
@@ -2805,7 +2827,7 @@ mod tests {
             assert_eq!(status_of(&run, "classify"), StepStatus::Running);
             assert!(run.step("classify").unwrap().outcome.is_none());
             assert!(run.step("done-path").is_none());
-            assert!(transition.step_writes.is_empty());
+            assert!(transition.step_writes.iter().any(|write| write.error.is_some()));
             assert_eq!(run.state, RunState::Running);
         }
     }

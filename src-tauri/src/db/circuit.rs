@@ -934,6 +934,7 @@ pub fn commit_circuit_advance(
                  outcome = CASE WHEN ?8 THEN NULL \
                      ELSE COALESCE(excluded.outcome, autopilot_circuit_run_steps.outcome) END, \
                  error_message = CASE WHEN ?9 THEN NULL \
+                     WHEN excluded.status = 'completed' THEN excluded.error_message \
                      ELSE COALESCE(excluded.error_message, autopilot_circuit_run_steps.error_message) END, \
                  agent_node_id = COALESCE(excluded.agent_node_id, autopilot_circuit_run_steps.agent_node_id), \
                  started_at = CASE WHEN ?9 THEN datetime('now') \

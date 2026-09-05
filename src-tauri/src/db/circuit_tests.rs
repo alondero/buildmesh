@@ -1351,6 +1351,31 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
 }
 
 #[test]
+fn completed_classifier_clears_waiting_error_without_resetting_attempt() {
+    let path = init_temp_db("classifier-recovery-error");
+    let mesh = create_mesh("classifier recovery", "/tmp/classifier-recovery").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "gated", "", 2, &sample_graph_json()).unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let mut op = CircuitStepOp {
+        node_id: "classifier".into(), status: "running".into(), outcome: None,
+        error: Some("Classifier unavailable; retrying".into()), agent_node_id: None,
+        attempt: 2, fresh_attempt: false,
+    };
+    commit_circuit_advance(run_id, None, None, &[op.clone()]).unwrap();
+    assert!(list_circuit_run_steps(run_id).unwrap()[0].error_message.is_some());
+    op.status = "completed".into();
+    op.outcome = Some(Some("completed".into()));
+    op.error = None;
+    commit_circuit_advance(run_id, None, None, &[op]).unwrap();
+    let step = list_circuit_run_steps(run_id).unwrap().remove(0);
+    assert_eq!(step.error_message, None);
+    assert_eq!(step.attempt, 2);
+    assert!(step.completed_at.is_some());
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn gate_outcomes_stamp_completed_at_and_round_trip() {
     let path = init_temp_db("gate-outcomes");
     let mesh = create_mesh("circuit-gate-mesh", "/tmp/circuit-gate").unwrap();
