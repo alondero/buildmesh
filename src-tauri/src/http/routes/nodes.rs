@@ -314,6 +314,14 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let mut lines = tokio::io::BufStream::new(crate::http::MaybeTls::Plain(stream));
             post_input(&mut lines, node_id, content_length).await;
+            // Half-close the server's write side so the kernel flushes the
+            // buffered 4xx response + FIN atomically. Without this, on
+            // Windows the BufStream drop closes the socket while bytes
+            // are still in the kernel send buffer; the client's
+            // `read_to_end` sees EOF with zero bytes — flaky in CI,
+            // deterministic on a busy dev box. Belt-and-braces with the
+            // `write_full` flush already inside `post_input`.
+            let _ = lines.get_mut().shutdown().await;
         });
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         stream.set_nodelay(true).ok();
