@@ -18,7 +18,7 @@
  * Run with: npm test -- --run tests/integration/terminal-focus-guardian.test.tsx
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, act } from '@testing-library/react';
+import { render, act, fireEvent } from '@testing-library/react';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
@@ -392,5 +392,30 @@ describe('AgentTerminal focus guardian', () => {
     });
 
     expect(inst.term.focus).toHaveBeenCalled();
+  });
+
+  // Issue #1291 — the right-click Terminal context menu (Copy/Paste/Find…)
+  // used to be a direct child of the terminal host, so any ancestor with
+  // a `transform`/`filter`/xterm renderer override silently re-anchored
+  // `position:fixed`. The fix portals the menu to `document.body` so its
+  // `top`/`left` (in viewport pixels from `e.clientX/Y`) are honored
+  // even when the parent GridSplitter or grid row has a containing
+  // block. Pins the portal target at the DOM level — visual drift is
+  // covered by the render e2e.
+  it('renders the right-click context menu on document.body, not inside the terminal host (#1291)', async () => {
+    const { host } = await mountAndSettle();
+    // fireEvent.contextMenu fires a real React MouseEvent so the
+    // component's delegated `onContextMenu` handler captures
+    // `clientX/clientY` and flips `contextMenu` state.
+    fireEvent.contextMenu(host, { clientX: 42, clientY: 84 });
+    const menu = document.querySelector('[role="menu"], [data-dropdown-for^="terminal-"]') as HTMLElement;
+    expect(menu).toBeTruthy();
+    expect(host.contains(menu)).toBe(false);
+    expect(menu.parentElement).toBe(document.body);
+    // Click anchor is preserved — the portal moves the DOM, not the
+    // click coordinates. The viewport-anchored style values match the
+    // fired MouseEvent.
+    expect(menu.style.top).toBe('84px');
+    expect(menu.style.left).toBe('42px');
   });
 });
