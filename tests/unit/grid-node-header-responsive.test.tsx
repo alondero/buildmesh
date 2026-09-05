@@ -603,5 +603,43 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       expect(screen.getByLabelText('Maximize agent node')).toBeTruthy();
       rerender(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     });
+
+    // Issue #1291 — same containing-block trap the sidebar menus hit in
+    // #1290. The GridNodeHeader row nests inside the GridSplitter flex
+    // hierarchy; while any of the chain (a sibling row's
+    // `hover:brightness-125`, the splitter's `transform` during a drag)
+    // is in play, `position:fixed` re-anchors to that box and the
+    // trigger-rect math in `useAnchoredPosition` lands in the wrong
+    // place. Portaling to `document.body` keeps the math anchored to
+    // the viewport. This assertion pins the portal target; the visual
+    // drift is covered by the render e2e (#1264 follow-ups).
+    it('renders the kebab menu on document.body, not inside the header row (#1291)', () => {
+      const { root } = renderHeader(200);
+      fireEvent.click(screen.getByLabelText('Agent node actions'));
+      const menu = document.querySelector('[role="menu"]') as HTMLElement;
+      expect(menu).toBeTruthy();
+      // The portal decouples the menu from the header subtree. Without
+      // the portal, `root.contains(menu)` is true and the kebab's
+      // trigger-rect `top`/`left` get retargeted by any
+      // transform/filter ancestor (the grid splitter on resize, an
+      // adjacent hovered row's `hover:brightness-125`).
+      expect(root.contains(menu)).toBe(false);
+      expect(menu.parentElement).toBe(document.body);
+    });
+
+    // Issue #1291 — Chromium auto-scrolls the nearest scroll container
+    // when `.focus()` lands on an element that's outside its viewport.
+    // The kebab's first-item focus used to call `.focus()` plainly, which
+    // could nudge the splitter / row flex container and visibly jump the
+    // grid. The fix uses `.focus({ preventScroll: true })` — pin it so a
+    // future revert (or a swap to the shared `focusWithoutScroll` helper)
+    // is caught.
+    it('autofocuses the first menuitem with preventScroll so the grid does not jump (#1291)', () => {
+      const focusSpy = vi.spyOn(HTMLElement.prototype, 'focus');
+      renderHeader(200);
+      fireEvent.click(screen.getByLabelText('Agent node actions'));
+      expect(focusSpy.mock.calls.some((call) => call[0]?.preventScroll === true)).toBe(true);
+      focusSpy.mockRestore();
+    });
   });
 });

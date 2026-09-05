@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, useEffect, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -619,6 +620,17 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
  * the bottom edge of the row). Fixed coordinates are viewport-scoped
  * and unaffected by ancestor overflow. Anchor to the trigger by
  * snapshotting its `getBoundingClientRect` on the toggle click.
+ *
+ * Issue #1291 — the menu is portaled to `document.body` for the same
+ * reason the sidebar's NodeItem/MeshItem menus were in #1290: the
+ * GridNodeHeader row nests inside a flex container that can carry a
+ * CSS `filter` (the inactive-row brightness hover state on adjacent
+ * rows) and inside the GridSplitter, both of which become containing
+ * blocks for `position:fixed`. Portaling keeps `top`/`left` anchored
+ * to the viewport so the menu renders where the trigger rect says it
+ * should, even when the row above is hovered. The `useAnchoredPosition`
+ * math above stays the same — viewport pixels are still the right
+ * unit because the menu now lives at body level.
  */
 interface KebabActionsProps {
   isSingleMode: boolean;
@@ -822,10 +834,17 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
   // outside the menu and break the Escape-to-close contract (the key
   // handler gates on focus-inside-menu). Skip disabled rows so Escape
   // always has a focused item to gate on.
+  // Issue #1291 — `preventScroll: true` keeps Chromium from auto-scrolling
+  // a flex/scroll ancestor to bring the focused item into view. The kebab
+  // lives inside the GridNodeHeader row inside the splitter; without the
+  // flag, opening the menu would visibly nudge the grid. Local-only —
+  // `useSubmenu`'s `focusWithoutScroll` and the inline `useAriaMenu` both
+  // have their own scroll behaviour (e.g. ProviderDropdown relies on the
+  // scroll-into-view side effect), so we DON'T route this through them.
   useLayoutEffect(() => {
     if (!open) return;
     const firstEnabled = menuItemRefs.current.find((el) => el && !el.hasAttribute('disabled'));
-    firstEnabled?.focus();
+    firstEnabled?.focus({ preventScroll: true });
   }, [open]);
 
   return (
@@ -847,7 +866,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
           <circle cx="12" cy="19" r="1.2" fill="currentColor" />
         </svg>
       </button>
-      {open && (
+      {open && createPortal(
         <div
           ref={menuRef}
           id={menuId}
@@ -982,7 +1001,8 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
               Resume agent
             </button>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

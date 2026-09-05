@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback, type WheelEvent as ReactWheelEvent } from 'react';
+import { createPortal } from 'react-dom';
 import '@xterm/xterm/css/xterm.css';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -498,7 +499,14 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
         </div>
       )}
 
-      {contextMenu && (
+      {/* Issue #1291 — portaled to `document.body` so `position:fixed`
+          stays in viewport coordinates. The terminal pane nests inside
+          the GridNodeHeader / GridSplitter hierarchy, and xterm's own
+          container establishes a containing block (a few xterm internals
+          apply `transform`/`will-change` for the renderer). Without the
+          portal, `top`/`left` in viewport pixels anchored to the wrong
+          box and the menu drifted on grid resize / split transitions. */}
+      {contextMenu && createPortal(
         <div
           data-dropdown-for={dropdownId('terminal', nodeId)}
           className="fixed bg-bg-card border border-border-default rounded-md shadow-md z-[100] py-1 min-w-[160px] animate-scale-in origin-top-left"
@@ -551,7 +559,8 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
           >
             Clear Terminal <span className="float-right text-text-muted">{isMac ? '⌘+Shift+K' : 'Ctrl+Shift+L'}</span>
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
