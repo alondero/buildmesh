@@ -309,6 +309,30 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     setContextMenu({ x: nextX, y: nextY });
   }, [contextMenu]);
 
+  // Issue #1293 — the parent context menu mounts at the right-click
+  // point, which lands directly on the Regenerate row (the first
+  // menuitem). Chromium sometimes fires `mouseenter` on the wrapper
+  // synchronously on mount, popping the submenu without any real
+  // pointer movement — the "occasionally" symptom PR #1290 didn't
+  // fully pin. Gate hover-open behind a `pointerover` arm so a quiet
+  // mount-time `mouseenter` is ignored; click (`onClick` below) and
+  // `ArrowRight` (`openSubmenuViaKeyboard`) stay immediate because
+  // they don't go through `mouseenter`. The arm is a ref (not state)
+  // because a flip shouldn't re-render — only the submenu's open
+  // boolean should drive renders. `pointerover` is the FIRST event
+  // in the per-spec enter-the-element sequence (before `mouseenter`),
+  // so it reliably arms for real hovers in production AND in
+  // @testing-library/user-event — see the wrapper's handler comment
+  // below for the dispatch-order detail.
+  const submenuArmedRef = useRef(false);
+  // Reset on every menu open/close so the next right-click starts
+  // from a known-unarmed state. Escape / outside-click close the menu
+  // (set `contextMenu` to null) and the effect resets the arm; the
+  // next mount starts unarmed, requiring real pointer movement again.
+  useEffect(() => {
+    if (!contextMenu) submenuArmedRef.current = false;
+  }, [contextMenu]);
+
   // Issue #776 — on open, reset the roving index and move focus to the
   // first menuitem so keyboard nav starts somewhere. `useLayoutEffect`
   // (not `useEffect` + setTimeout) — fires synchronously after commit
@@ -335,11 +359,22 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
         setContextMenu({ x: e.clientX, y: e.clientY });
       }}
       aria-busy={isClosing}
-      style={{ backgroundColor: isActive ? undefined : `${meshColor.hex}40` }}
+      // Issue #1293 — `hover:brightness-125` applied `filter: brightness(...)`
+      // which creates a containing block for `position:fixed` descendants,
+      // breaking any overlay mounted inside the row (today: the running-node
+      // `ConfirmDialog`; tomorrow: any new overlay). Lighten the mesh-tinted
+      // background via CSS variables instead — no `filter`, so the row no
+      // longer retargets `position:fixed`. The variables carry two alphas of
+      // the same mesh colour (rest + hover) so the "row brightens on hover"
+      // visual is preserved without any `filter`.
+      style={isActive ? undefined : ({
+        '--mesh-bg': `${meshColor.hex}40`,
+        '--mesh-bg-hover': `${meshColor.hex}99`,
+      } as React.CSSProperties)}
       className={`
         pl-3 pr-1 py-1.5 rounded-md text-sm mb-0.5 flex items-center gap-2 group/node
         ${isClosing ? 'opacity-50 pointer-events-none cursor-default' : 'cursor-pointer'}
-        ${isActive ? 'border border-accent-cyan/50' : 'hover:brightness-125 border border-transparent'}
+        ${isActive ? 'border border-accent-cyan/50' : 'border border-transparent bg-[var(--mesh-bg)] hover:bg-[var(--mesh-bg-hover)]'}
       `}
     >
       <span
@@ -450,9 +485,10 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           item (otherwise the click would close the menu AND fire the
           row's `onSelect`).
           Portaled to `document.body` so `position:fixed` stays in
-          viewport coordinates. Nested inside the row, `hover:brightness-125`
-          (`filter`) and the parent MeshItem's dnd-kit `transform`
-          retarget `fixed` onto those boxes. */}
+          viewport coordinates. Issue #1293 also fixed the row's
+          `hover:brightness-125` (a CSS `filter` that creates a
+          containing block for `fixed` descendants) — the row now
+          uses CSS-variable hover backgrounds. */}
       {contextMenu && createPortal(
         <div
           ref={menuRef}
@@ -475,14 +511,38 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
               can move from the parent button into the submenu
               (positioned to the right) without the gap triggering a
               close. Hovering opens the picker; clicking the parent
-              toggles it (tap/touch parity). */}
+              toggles it (tap/touch parity).
+
+              Issue #1293 — `mouseenter` alone doesn't open the picker
+              (Chromium quirk fires it on mount under an existing
+              cursor). The wrapper's `onPointerOver` arms
+              `submenuArmedRef`; only an armed `mouseenter` opens.
+              `pointerover` is the FIRST event in the per-spec
+              enter-the-element sequence (before `mouseenter`), so it
+              reliably arms for real hovers in production AND in
+              @testing-library/user-event (whose dispatch order is
+              `pointerover → mouseenter → pointermove → mousemove`).
+              When the wrapper mounts under an existing cursor, no
+              `pointerover` fires (no boundary was crossed), so the
+              arm stays false and a stray mount-time `mouseenter` is
+              ignored. Click and `ArrowRight` stay immediate (they
+              don't go through `mouseenter`). `mouseleave` disarms
+              so a re-entry still requires real movement. */}
           <div
             role="presentation"
             className="relative"
-            onMouseEnter={() => {
-              if (!isRegenerateDisabled) regenSubmenu.setSubmenuOpen(true);
+            onPointerOver={() => {
+              submenuArmedRef.current = true;
             }}
-            onMouseLeave={() => regenSubmenu.closeSubmenu()}
+            onMouseEnter={() => {
+              if (submenuArmedRef.current && !isRegenerateDisabled) {
+                regenSubmenu.setSubmenuOpen(true);
+              }
+            }}
+            onMouseLeave={() => {
+              submenuArmedRef.current = false;
+              regenSubmenu.closeSubmenu();
+            }}
           >
             <button
               // Roving tabindex — only the active item is in the Tab

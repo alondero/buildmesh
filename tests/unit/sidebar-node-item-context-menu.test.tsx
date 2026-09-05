@@ -816,6 +816,110 @@ describe('NodeItem context menu (issue #776)', () => {
         expect(document.activeElement).toBe(items()[0]);
       });
     });
+
+    // Issue #1293 — Chromium fires `mouseenter` synchronously on the
+    // Regenerate wrapper when the menu mounts under an existing cursor
+    // (right-click places the cursor on the first item, the menu pops
+    // up at the click point, and the wrapper is already under the
+    // cursor). The picker used to open as a side effect, looking like
+    // the menu "jumped". The wrapper's `onPointerOver` arms a ref;
+    // only an armed `mouseenter` opens. Click + `ArrowRight` stay
+    // immediate because they don't go through `mouseenter`.
+    describe('hover arm — pointerover required before mouseenter opens (#1293)', () => {
+      /** Find the wrapper div that holds the Regenerate trigger and
+       *  its picker submenu. It's the parent of the Regenerate button
+       *  that also has `role="presentation"` and `className="relative"`. */
+      function getRegenWrapper(): HTMLElement {
+        const trigger = screen.getByText(/Regenerate/).closest('button')!;
+        const wrapper = trigger.parentElement!;
+        // Sanity pin: the wrapper is a `<div role="presentation">`
+        // with a class containing `relative`. If a future refactor
+        // moves the handlers to a different element, this test will
+        // surface it (and we'll re-target the queries below).
+        expect(wrapper.getAttribute('role')).toBe('presentation');
+        return wrapper as HTMLElement;
+      }
+
+      function mountRegenMenu() {
+        renderNode(makeNode({ status: 'idle' }), [
+          makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+          makeProvider('claude', { group_key: 'claude', harness_id: 'claude' }),
+        ]);
+        openContextMenu();
+      }
+
+      it('does NOT open the picker on a mount-time mouseenter (Chromium quirk)', () => {
+        // Simulate Chromium firing `mouseenter` on the wrapper as the
+        // menu mounts. No prior `pointermove` → the wrapper is
+        // unarmed → the picker stays closed. This is the exact path
+        // PR #1290's "occasionally" reports described.
+        mountRegenMenu();
+        const wrapper = getRegenWrapper();
+        fireEvent.mouseEnter(wrapper);
+
+        expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
+      });
+
+      it('opens the picker after pointerover then mouseenter (real hover)', () => {
+        // The same wrapper, but with a real pointerover before the
+        // mouseenter. The arm flips → mouseenter opens. Mirrors the
+        // user dragging the cursor from elsewhere onto the row after
+        // the menu has already mounted. `pointerover` is the FIRST
+        // event in the per-spec enter-the-element sequence (before
+        // `mouseenter`), and matches what user-event v14 dispatches
+        // in tests — keeping this test faithful to production order.
+        mountRegenMenu();
+        const wrapper = getRegenWrapper();
+        fireEvent.pointerOver(wrapper);
+        fireEvent.mouseEnter(wrapper);
+
+        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+      });
+
+      it('clicking the trigger opens the picker immediately (no arm required)', () => {
+        // Click bypasses `mouseenter` entirely, so the arm gate must
+        // NOT block it. Pin the immediate path so a future "always
+        // arm" regression doesn't break click/keyboard users.
+        mountRegenMenu();
+        const trigger = screen.getByText(/Regenerate/).closest('button')!;
+        fireEvent.click(trigger);
+
+        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+      });
+
+      it('ArrowRight opens the picker immediately (no arm required)', () => {
+        // Same as click: `openSubmenuViaKeyboard` doesn't go through
+        // `mouseenter`. The focus-on-open effect fires before any
+        // pointer event would.
+        mountRegenMenu();
+        fireEvent.keyDown(document, { key: 'ArrowRight' });
+
+        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+      });
+
+      it('disarms on mouseleave so a re-entry still requires pointerover', () => {
+        // After a real hover opens the picker, mouseleave closes it
+        // AND resets the arm. Re-entering without a fresh pointerover
+        // should NOT reopen it (the next user gesture still has to
+        // be a real movement).
+        mountRegenMenu();
+        const wrapper = getRegenWrapper();
+        // Real hover → open.
+        fireEvent.pointerOver(wrapper);
+        fireEvent.mouseEnter(wrapper);
+        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+        // Leave → close + disarm.
+        fireEvent.mouseLeave(wrapper);
+        expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
+        // Re-enter without a fresh pointerover → still closed.
+        fireEvent.mouseEnter(wrapper);
+        expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
+        // Now a real move → opens.
+        fireEvent.pointerOver(wrapper);
+        fireEvent.mouseEnter(wrapper);
+        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+      });
+    });
   });
 
   describe('Start Fresh context menu item (issue #1306)', () => {
