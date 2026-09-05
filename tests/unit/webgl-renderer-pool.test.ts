@@ -9,12 +9,17 @@
  * mock with spy `dispose`/`onContextLoss`, captured in `addons` so tests
  * can assert eviction and context-loss behaviour.
  *
- * Issue #1568 — `pool.activate` is now asynchronous because the WebGL
- * addon is loaded via `import('./loadWebglRenderer')` so it lands in a
- * separate chunk fetched on first attach. The slot reservation (LRU
- * eviction, size accounting) is still synchronous; only the addon
- * creation is deferred to the next microtask. Tests call `flushAttach()`
- * to advance that microtask and assert against `addons`.
+ * Issue #1568 — `loadWebglRenderer.ts` itself dynamic-imports
+ * `@xterm/addon-webgl`, so the WebGL addon lands in its own chunk
+ * fetched on first attach. The dynamic-import promise is cached in
+ * `loadWebglRenderer.ts`'s module scope (`addonModulePromise`), so a
+ * test that calls `pool.activate(...)` multiple times reuses the same
+ * module reference — vitest's `vi.mock` would otherwise bypass the
+ * mock on the second call (the first import lands via vite-node's
+ * loader, the second through Node's native module cache). `flushAttach`
+ * runs one `setTimeout(0)` hop, which drains every queued microtask
+ * before firing — including the addon constructor that the mock
+ * schedules inside the resolved-import's `.then`.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Terminal } from '@xterm/xterm';
@@ -44,19 +49,16 @@ function makeTerm(): Terminal {
   return { loadAddon: vi.fn() } as unknown as Terminal;
 }
 
-// `pool.activate` schedules an `await import('./loadWebglRenderer')` on
-// the microtask queue; wait for the import to settle and the addon
-// constructor to run before the test asserts on `addons`. The
-// `setTimeout(resolve, 0)` macro-task runs after every queued
-// microtask, which is what we need — `await Promise.resolve()` alone
-// only drains one microtask hop, and the dynamic-import chain has
-// several (import promise → `.then` body → addon constructor →
-// `entry.realDetach` setter → microtask tail). Engineering contract
-// says "use promises/events/fake clocks for ordering rather than
-// arbitrary sleeps"; a single macrotask sleep is the documented escape
-// hatch for "wait until the runtime's import machinery is idle".
-async function flushAttach(): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+/**
+ * `loadWebglRenderer` schedules the `@xterm/addon-webgl` dynamic import on
+ * a microtask. The addon constructor (and therefore the `addons.push`
+ * call inside the mock) runs inside that microtask, after the import
+ * resolves. `setTimeout(0)` lets the event loop drain every queued
+ * microtask before firing — sufficient for the addon constructor to
+ * commit to `addons` in a single-attacher test.
+ */
+function flushAttach(): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
 describe('WebglRendererPool', () => {

@@ -186,7 +186,16 @@ const MESH: Mesh = {
 
 async function mountAndSettle() {
   const result = render(<AgentTerminal nodeId={RUNNING_NODE.id} />);
-  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  // Issue #1568 — `terminalManager.attach` is now async at the chunk-fetch
+  // hop (xterm + addons load via `await import(...)` inside `doCreate`), so
+  // the previous fixed 20ms sleep was a flake under load. Poll for the
+  // instance instead of guessing a tick count.
+  await act(async () => {
+    await vi.waitFor(
+      () => expect(terminalManager.getInstance(RUNNING_NODE.id)).toBeDefined(),
+      { timeout: 5000 },
+    );
+  });
   const inst = terminalManager.getInstance(RUNNING_NODE.id);
   if (!inst) throw new Error('terminal instance was not created');
   // Drop the attach-time focus() call so assertions see only post-mount focus.

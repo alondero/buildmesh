@@ -1,5 +1,14 @@
-import { Terminal } from '@xterm/xterm';
-import { WebglAddon } from '@xterm/addon-webgl';
+import type { Terminal } from '@xterm/xterm';
+
+// Issue #1568 — `@xterm/addon-webgl` carries its own WebGL renderer
+// (≈80 kB minified) and a native WebGL context per attach. Issue #1122's
+// pool only mounts a WebGL renderer on the most-recently-attached panes,
+// so we lazy-import the addon inside the loader and let Vite emit it as a
+// separate chunk fetched on first attach. The module is cached in a
+// module-level promise after the first call so subsequent
+// `loadWebglRenderer` invocations don't re-fetch the chunk AND don't
+// re-trigger the dynamic-import resolution path that can otherwise
+// bypass the vitest mock when run multiple times in the same process.
 
 /**
  * Attaches the WebGL renderer to an xterm.js Terminal.
@@ -30,46 +39,90 @@ import { WebglAddon } from '@xterm/addon-webgl';
  * and a safe no-op after a context loss. Tests can stub the addon via
  * `vi.mock('@xterm/addon-webgl', ...)`.
  */
+// Module-level cache of the `@xterm/addon-webgl` dynamic import. The
+// first `loadWebglRenderer` call resolves this; every subsequent call
+// reuses the cached module without going through the dynamic-import
+// resolver again. This keeps the chunk-fetch path off the hot path AND
+// matches how vitest's `vi.mock` expects to see the module (once,
+// resolved at module load).
+let addonModulePromise: Promise<typeof import('@xterm/addon-webgl')> | null = null;
+function getAddonModule(): Promise<typeof import('@xterm/addon-webgl')> {
+  if (addonModulePromise === null) {
+    addonModulePromise = import('@xterm/addon-webgl');
+  }
+  return addonModulePromise;
+}
+
 export function loadWebglRenderer(term: Terminal): () => void {
-  let webgl: WebglAddon | null = null;
+  let webgl: import('@xterm/addon-webgl').WebglAddon | null = null;
   // Set once the addon is gone (explicit dispose or context loss) so the
   // disposer never double-disposes.
   let released = false;
+  let detachChain: Promise<void> | null = null;
+
   const detach = () => {
     if (released) return;
     released = true;
+    // If the addon hasn't been constructed yet, defer the dispose to
+    // the attach promise so a fast `release()` call doesn't leave a
+    // dangling renderer. The WebGL attach is idempotent because
+    // `loadWebglRenderer` is the only writer.
+    if (webgl === null) {
+      detachChain = (detachChain ?? getAddonModule())?.then(() => {
+        try {
+          webgl?.dispose(); // allow-dispose — WebGL addon only, not the Terminal itself
+        } catch {
+          // already disposed — ignore
+        }
+        webgl = null;
+      });
+      return;
+    }
     try {
-      webgl?.dispose(); // allow-dispose — WebGL addon only, not the Terminal itself
+      webgl.dispose(); // allow-dispose — WebGL addon only, not the Terminal itself
     } catch {
       // already disposed — ignore
     }
     webgl = null;
   };
-  try {
-    webgl = new WebglAddon();
-    // `onContextLoss` fires before the WebGL context is fully gone. We
-    // dispose the addon on the same tick so xterm falls back to the DOM
-    // renderer for the next frame; a transient context loss is usually
-    // permanent (driver reset, RDP reconnect), so re-loading is wasteful.
-    webgl.onContextLoss(() => {
-      try {
-        webgl?.dispose(); // allow-dispose — WebGL addon only, not the Terminal itself
-      } catch {
-        // already disposed — ignore
+
+  getAddonModule().then(({ WebglAddon }) => {
+    // A release() between the import start and its resolution leaves
+    // `released === true`; skip the attach in that case.
+    if (released) return;
+    try {
+      webgl = new WebglAddon();
+      // `onContextLoss` fires before the WebGL context is fully gone. We
+      // dispose the addon on the same tick so xterm falls back to the DOM
+      // renderer for the next frame; a transient context loss is usually
+      // permanent (driver reset, RDP reconnect), so re-loading is wasteful.
+      webgl.onContextLoss(() => {
+        try {
+          webgl?.dispose(); // allow-dispose — WebGL addon only, not the Terminal itself
+        } catch {
+          // already disposed — ignore
+        }
+        webgl = null;
+        released = true;
+      });
+      term.loadAddon(webgl);
+    } catch (err) {
+      // WebGL not supported on this host (headless, software rendering,
+      // remote desktop without GPU passthrough). xterm's DOM renderer is
+      // the documented fallback and what we hand back to the user in that
+      // case.
+      console.warn('[Terminal] WebGL renderer unavailable, using DOM fallback:', err);
+      if (webgl) {
+        try { webgl.dispose(); } catch { /* ignore */ } // allow-dispose — WebGL addon only, not the Terminal itself
       }
-      webgl = null;
       released = true;
-    });
-    term.loadAddon(webgl);
-  } catch (err) {
-    // WebGL not supported on this host (headless, software rendering, remote
-    // desktop without GPU passthrough). xterm's DOM renderer is the documented
-    // fallback and what we hand back to the user in that case.
-    console.warn('[Terminal] WebGL renderer unavailable, using DOM fallback:', err);
-    if (webgl) {
-      try { webgl.dispose(); } catch { /* ignore */ } // allow-dispose — WebGL addon only, not the Terminal itself
     }
+  }).catch((err) => {
+    // Dynamic-import resolution failed (network blip, chunk missing).
+    // Fall through to the DOM renderer; the term is still usable.
+    console.warn('[Terminal] WebGL addon chunk failed to load, using DOM fallback:', err);
     released = true;
-  }
+  });
+
   return detach;
 }

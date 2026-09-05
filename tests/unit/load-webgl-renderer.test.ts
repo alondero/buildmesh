@@ -16,6 +16,13 @@
  * succeeds or throws per test, and the term's `loadAddon` callback
  * captures the addon so the test can invoke `onContextLoss` directly.
  *
+ * Issue #1568 — `loadWebglRenderer` dynamic-imports `@xterm/addon-webgl`
+ * to keep the addon out of the desktop entry chunk. The `loadAddon`
+ * call (and the `onContextLoss` callback registration) now run inside
+ * the awaited import's `.then` — a microtask after `loadWebglRenderer`
+ * returns. Tests `await flushAttach()` before asserting on the
+ * term's `loadAddon` so the assertion sees the post-attach state.
+ *
  * Run with: npm test -- --run tests/unit/load-webgl-renderer.test.ts
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -56,6 +63,13 @@ vi.mock('@xterm/addon-webgl', () => {
 
 import { loadWebglRenderer } from '../../src/components/Terminal/loadWebglRenderer';
 
+// Issue #1568 — `loadWebglRenderer` schedules the addon attach inside
+// the awaited dynamic-import promise's `.then`. `setTimeout(0)` drains
+// every queued microtask before firing, which is what the assertions
+// below need (one macrotask hop after the synchronous `loadWebglRenderer`
+// call lands the attach promise's resolution on the JS thread).
+const flushAttach = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 function makeMockTerm() {
   const term = {
     loadAddon: vi.fn(),
@@ -92,16 +106,17 @@ describe('loadWebglRenderer (issue #1122 fallback ladder)', () => {
     };
   });
 
-  it('attaches the addon when the constructor succeeds (happy path)', () => {
+  it('attaches the addon when the constructor succeeds (happy path)', async () => {
     const onContextLoss = vi.fn();
     mockFactory = () => ({ dispose: vi.fn(), onContextLoss });
     const term = makeMockTerm();
     loadWebglRenderer(term);
+    await flushAttach();
     expect(term.loadAddon).toHaveBeenCalledTimes(1);
     expect(onContextLoss).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to DOM silently when new WebglAddon throws', () => {
+  it('falls back to DOM silently when new WebglAddon throws', async () => {
     // Default `beforeEach` impl: throws. The production loader
     // catches and warns; the test asserts the loadAddon was NEVER
     // called (no broken addon attached) and the console was warned.
@@ -109,6 +124,7 @@ describe('loadWebglRenderer (issue #1122 fallback ladder)', () => {
     try {
       const term = makeMockTerm();
       expect(() => loadWebglRenderer(term)).not.toThrow();
+      await flushAttach();
       expect(term.loadAddon).not.toHaveBeenCalled();
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('WebGL renderer unavailable'),
@@ -119,11 +135,12 @@ describe('loadWebglRenderer (issue #1122 fallback ladder)', () => {
     }
   });
 
-  it('disposes the addon when the context is lost after attach', () => {
+  it('disposes the addon when the context is lost after attach', async () => {
     const dispose = vi.fn();
     mockFactory = () => ({ dispose, onContextLoss: vi.fn() });
     const { term, capturer } = makeAddonCapturingTerm();
     loadWebglRenderer(term);
+    await flushAttach();
     expect(term.loadAddon).toHaveBeenCalledTimes(1);
     // Simulate the GPU context loss — the loader's registered
     // callback calls `addon.dispose()` to drop the addon so xterm
@@ -133,11 +150,12 @@ describe('loadWebglRenderer (issue #1122 fallback ladder)', () => {
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
-  it('does not double-dispose when the context-loss callback fires twice', () => {
+  it('does not double-dispose when the context-loss callback fires twice', async () => {
     const dispose = vi.fn();
     mockFactory = () => ({ dispose, onContextLoss: vi.fn() });
     const { term, capturer } = makeAddonCapturingTerm();
     loadWebglRenderer(term);
+    await flushAttach();
     const addon = capturer();
     const cb = addon.onContextLoss.mock.calls[0]?.[0];
     expect(cb).toBeDefined();
@@ -150,7 +168,7 @@ describe('loadWebglRenderer (issue #1122 fallback ladder)', () => {
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
-  it('cleans up the addon reference on context loss so a subsequent reload is safe', () => {
+  it('cleans up the addon reference on context loss so a subsequent reload is safe', async () => {
     // After a context loss, the loader nulls its internal `webgl`
     // reference. If the same Terminal's `loadWebglRenderer` is
     // called again (e.g. after a renderer swap), the new load
@@ -168,6 +186,7 @@ describe('loadWebglRenderer (issue #1122 fallback ladder)', () => {
     };
     const term = makeMockTerm();
     loadWebglRenderer(term);
+    await flushAttach();
     // Capture the first addon's onContextLoss callback.
     const firstCallArg = (term.loadAddon as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     const firstCb = firstCallArg.onContextLoss.mock.calls[0]?.[0];
@@ -177,6 +196,7 @@ describe('loadWebglRenderer (issue #1122 fallback ladder)', () => {
     // A second load constructs a fresh addon — the old dispose
     // must NOT fire again.
     loadWebglRenderer(term);
+    await flushAttach();
     expect(firstDispose).toHaveBeenCalledTimes(1);
     expect(secondDispose).not.toHaveBeenCalled();
   });
