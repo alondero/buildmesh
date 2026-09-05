@@ -152,7 +152,57 @@ pub fn create_git_worktree(
     let host_path = std::path::Path::new(worktree_host_path);
 
     if host_path.exists() {
-        return Ok(());
+        // Issue #1230: a pre-existing directory is only a valid resume if it
+        // is already a linked worktree of `project_root`. The old
+        // `return Ok(())` accepted ANY directory — empty husks from
+        // interrupted `git worktree add`, stray user folders, even unrelated
+        // sub-repos — and the provisioner would report `Reused` and spawn the
+        // agent on a non-worktree directory. Distinguish the three failure
+        // shapes explicitly:
+        //   (a) valid linked worktree of project_root → resume (intentional)
+        //   (b) empty directory at the target        → rename aside, proceed
+        //   (c) non-empty, non-worktree directory    → refuse, user data untouched
+        if is_valid_linked_worktree(project_root, host_path) {
+            return Ok(());
+        }
+        match classify_pre_existing_directory(host_path) {
+            PreExistingDir::Empty => {
+                let aside = generate_husk_stash_path(host_path);
+                tracing::warn!(
+                    "create_git_worktree: empty husk at {} is not a valid linked \
+                     worktree of {} - renaming aside to {}",
+                    host_path.display(),
+                    project_root,
+                    aside.display()
+                );
+                std::fs::rename(host_path, &aside).map_err(|e| {
+                    format!(
+                        "refusing to overwrite empty husk at {}; rename aside to {} failed: {}",
+                        host_path.display(),
+                        aside.display(),
+                        e
+                    )
+                })?;
+                // Fall through to the normal create path.
+            }
+            PreExistingDir::NonEmpty => {
+                return Err(format!(
+                    "refusing to overwrite non-empty, non-worktree directory at {} \
+                     (not registered as a linked worktree of {}); move the \
+                     directory aside manually to recover",
+                    host_path.display(),
+                    project_root
+                ));
+            }
+            PreExistingDir::Unreadable(e) => {
+                return Err(format!(
+                    "refusing worktree path {} (not a valid linked worktree of {}): {}",
+                    host_path.display(),
+                    project_root,
+                    e
+                ));
+            }
+        }
     }
 
     // Ensure parent directory exists
@@ -183,6 +233,90 @@ pub fn create_git_worktree(
     }
 
     Ok(())
+}
+
+/// True when `host_path` opens as a Repository AND is registered as a linked
+/// worktree of `project_root` in `<project_root>/.git/worktrees/`. Both halves
+/// are load-bearing: an unrelated sub-repo opens as a Repository but isn't a
+/// linked worktree of this parent; a freshly-initialised bare directory opens
+/// as neither. Mirrors git's own notion — a worktree is not just any repo, it's
+/// a repo whose admin entry points back through the parent's worktrees dir.
+fn is_valid_linked_worktree(project_root: &str, host_path: &std::path::Path) -> bool {
+    // 1. The candidate path must open as a Repository.
+    let Ok(wt_repo) = Repository::open(host_path) else {
+        return false;
+    };
+    // Defensive: an openable-but-not-actually-a-repo shouldn't pass. A bare
+    // gitdir or a corrupt object store both produce errors here.
+    if wt_repo.workdir().is_none() {
+        return false;
+    }
+    // 2. The candidate path must be in project_root's linked-worktrees list.
+    let Ok(parent_repo) = Repository::open(project_root) else {
+        return false;
+    };
+    let Ok(names) = parent_repo.worktrees() else {
+        return false;
+    };
+    for i in 0..names.len() {
+        let Some(name) = names.get(i) else {
+            continue;
+        };
+        if let Ok(wt) = parent_repo.find_worktree(name) {
+            // `wt.path()` returns git's stored path verbatim — the same form we
+            // passed in when we cut the worktree, so direct equality is the
+            // safe shape (no canonicalization that could miss symlinks/UNC).
+            // Windows filesystems are case-insensitive but git stores the
+            // path as given, so an exact-ASCII match on identical input is
+            // the production path.
+            if wt.path() == host_path {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Classification of a directory that exists at a target worktree path but
+/// is NOT a valid linked worktree (issue #1230). Drives the recovery /
+/// refusal branch in [`create_git_worktree`].
+enum PreExistingDir {
+    /// Directory exists but contains no entries — safe to rename aside and
+    /// replace with a fresh worktree.
+    Empty,
+    /// Directory exists and has at least one entry — likely user data we must
+    /// not touch. Refuse the create with a descriptive error.
+    NonEmpty,
+    /// Directory exists but cannot be enumerated (permissions, I/O error).
+    /// Refuse rather than guess; the caller can chmod and retry.
+    Unreadable(String),
+}
+
+fn classify_pre_existing_directory(host_path: &std::path::Path) -> PreExistingDir {
+    match std::fs::read_dir(host_path) {
+        Ok(mut entries) => match entries.next() {
+            None => PreExistingDir::Empty,
+            Some(_) => PreExistingDir::NonEmpty,
+        },
+        Err(e) => PreExistingDir::Unreadable(e.to_string()),
+    }
+}
+
+/// Pick a sibling name to stash an empty husk under, alongside (not inside)
+/// the worktree path so the rename is always on the same filesystem. We avoid
+/// `std::time` clock skew by combining the unix-epoch millis with the pid —
+/// a parallel test's husk on the same millisecond would otherwise collide.
+fn generate_husk_stash_path(host_path: &std::path::Path) -> std::path::PathBuf {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let stem = host_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "worktree".to_string());
+    let parent = host_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    parent.join(format!("{stem}.husk-{millis}-{}", std::process::id()))
 }
 
 /// Keep the parent repository's `git status` clean when the worktree
@@ -1061,6 +1195,139 @@ mod tests {
         let wt_readme = fs::read_to_string(wt_path.join("README.md")).unwrap();
         assert_eq!(wt_readme, "# project\n");
         assert!(repo_is_dirty(parent));
+    }
+
+    // ── create (#1230: pre-existing dir must be a valid linked worktree) ─────
+    //
+    // The old `if host_path.exists() { return Ok(()) }` accepted ANY directory
+    // as a "resume" — an empty husk left by an interrupted `git worktree add`,
+    // a stray user-created folder, or even a totally unrelated repo. The
+    // provisioner would then report `Reused` and spawn the agent on a
+    // non-worktree directory. The contract the cold primitive now enforces:
+    //   - valid linked worktree of `project_root`  → resume (early Ok)
+    //   - empty directory at the target            → rename aside, proceed
+    //   - non-empty non-worktree directory         → descriptive Err, untouched
+    //
+    // The two tests below pin (b) and (c). The resume case (a) is exercised
+    // by every existing create-then-create test pair (e.g. move_git_worktree_*).
+
+    /// An empty husk at the worktree path is treated as recoverable wreckage
+    /// from an interrupted `git worktree add`. It is renamed aside so the
+    /// genuine worktree create can land there, and the husk survives on disk
+    /// (rename, not delete — same recovery philosophy as
+    /// `remove_worktree_dir_with_retry`).
+    #[test]
+    fn create_recovers_from_empty_pre_existing_directory() {
+        let td = TestDir::new("wt_empty_husk");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let root = td.path().to_string_lossy().to_string();
+        let wt = td.path().join(".claude").join("worktrees").join("wt-empty");
+        fs::create_dir_all(&wt).unwrap();
+        assert!(wt.exists(), "precondition: stray empty dir exists");
+        let husk_only = fs::read_dir(td.path().join(".claude").join("worktrees"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(husk_only, 1, "precondition: only the husk exists in the container");
+
+        create_git_worktree(&root, wt.to_str().unwrap(), "wt-empty", "branched", "HEAD")
+            .expect("empty husk must be renamed aside, not block create");
+
+        // The path is now a real, openable, registered worktree.
+        let wt_repo = git2::Repository::open(&wt)
+            .expect("after recovery the path must open as a Repository");
+        assert_eq!(
+            wt_repo.head().unwrap().shorthand().unwrap_or(""),
+            "wt-empty",
+            "HEAD must be on the requested branch"
+        );
+        let root_repo = git2::Repository::open(td.path()).unwrap();
+        let registered = root_repo
+            .worktrees()
+            .unwrap()
+            .iter()
+            .flatten()
+            .filter_map(|n| root_repo.find_worktree(n).ok())
+            .any(|w| w.path() == wt.as_path());
+        assert!(
+            registered,
+            "recovered worktree must appear in the parent's linked-worktrees list"
+        );
+
+        // The husk survived (rename aside, not delete) — it sits beside the new
+        // worktree under a husk marker name in the same container.
+        let container = td.path().join(".claude").join("worktrees");
+        let has_husk_marker = fs::read_dir(&container)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("wt-empty.") && name != "wt-empty"
+            });
+        assert!(
+            has_husk_marker,
+            "husk must be preserved as a sibling under the container"
+        );
+    }
+
+    /// A non-empty, non-repo directory at the worktree path contains user
+    /// data we must not touch. The function must refuse with a descriptive
+    /// Err that names the offending path, and the directory must be
+    /// byte-for-byte untouched (no rename, no delete, no files removed).
+    #[test]
+    fn create_refuses_non_empty_non_repo_directory_with_descriptive_error() {
+        let td = TestDir::new("wt_user_dir");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let root = td.path().to_string_lossy().to_string();
+        let wt = td.path().join(".claude").join("worktrees").join("wt-userdata");
+        fs::create_dir_all(&wt).unwrap();
+        let sentinel = wt.join("user-notes.md");
+        let sentinel_bytes = b"important user data - must survive a refused create\n";
+        fs::write(&sentinel, sentinel_bytes).unwrap();
+        let nested_dir = wt.join("nested");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let nested_file = nested_dir.join("deep.txt");
+        fs::write(&nested_file, "deeper user data\n").unwrap();
+
+        let err = create_git_worktree(
+            &root,
+            wt.to_str().unwrap(),
+            "wt-userdata",
+            "branched",
+            "HEAD",
+        )
+        .expect_err("non-empty non-repo dir at worktree path must be refused");
+
+        let err_lower = err.to_lowercase();
+        let path_str = wt.display().to_string();
+        assert!(
+            err.contains(&path_str) || err_lower.contains("non-worktree"),
+            "error must name the offending path or the failure class, got: {}",
+            err
+        );
+        assert!(
+            !err_lower.contains("permission") && !err_lower.contains("delete"),
+            "error must not promise to delete user data, got: {}",
+            err
+        );
+
+        // User data is untouched — the refused-create contract.
+        assert!(sentinel.exists(), "user file at top level must not be removed");
+        assert_eq!(
+            fs::read(&sentinel).unwrap(),
+            sentinel_bytes,
+            "top-level user file content must be byte-for-byte identical"
+        );
+        assert!(nested_dir.exists(), "nested user dir must not be removed");
+        assert!(
+            nested_file.exists(),
+            "nested user file must not be removed"
+        );
+        assert_eq!(
+            fs::read_to_string(&nested_file).unwrap(),
+            "deeper user data\n",
+            "nested user file content must be byte-for-byte identical"
+        );
     }
 
     // ── move (#612: warm-pool adoption rename) ───────────────────────────────

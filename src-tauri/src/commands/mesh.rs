@@ -171,11 +171,12 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
 /// loop never sees that new path, so its directory is orphaned. The orphan
 /// is recoverable by the user (manual `rm -rf`) and self-heals on a slug
 /// collision: the next prewarm that lands on the same path will hit
-/// `create_git_worktree`'s `if host_path.exists() { return Ok(()) }`
-/// short-circuit and reuse the stale tree — which is incorrect for that
-/// mesh's pool, but only until the next `git reset --hard` lands (issue
-/// #613's refresh pass). Fixing this would require restructuring the
-/// FILL_LOCK to block user-initiated deletes, which is out of scope.
+/// `create_git_worktree`'s `is_valid_linked_worktree` check (issue #1230),
+/// see that the orphan is not a linked worktree of this mesh, refuse to
+/// silently reuse it, and either rename aside an empty husk or refuse the
+/// non-empty one with a descriptive error. Fixing this would require
+/// restructuring the FILL_LOCK to block user-initiated deletes, which is
+/// out of scope.
 pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
     let pool_paths =
         db::list_warm_paths_for_mesh_droppable(mesh_id).map_err(|e| e.to_string())?;
