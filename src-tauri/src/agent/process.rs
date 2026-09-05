@@ -303,13 +303,18 @@ impl AgentProcessRegistry {
     /// Insert `agent` and return the generation token assigned to this
     /// incarnation. A previous entry under the same session id is torn
     /// down so insert cannot leak a child/PTY/writer.
+    ///
+    /// Sandbox ACE grants are keyed by `session_id` (not generation). The
+    /// replacement spawn registers those grants *before* `insert`, so
+    /// overwriting `prev` must tear down handles/threads without calling
+    /// `sandbox_cleanup` — otherwise the new child's grants are revoked.
     pub fn insert(&self, session_id: i64, mut agent: AgentProcess) -> u64 {
         let generation = NEXT_PROCESS_GENERATION.fetch_add(1, Ordering::Relaxed);
         agent.generation = generation;
         let previous = self.inner.insert(session_id, Arc::new(agent));
         if let Some(prev) = previous {
             prev.deliberate_kill.store(true, Ordering::SeqCst);
-            teardown_incarnation(session_id, &prev, JoinPolicy::Both);
+            teardown_incarnation(session_id, &prev, JoinPolicy::Both, false);
         }
         generation
     }
@@ -330,7 +335,7 @@ impl AgentProcessRegistry {
         let Some(agent) = self.remove_if_current(session_id, generation) else {
             return;
         };
-        teardown_incarnation(session_id, &agent, JoinPolicy::WriterOnly);
+        teardown_incarnation(session_id, &agent, JoinPolicy::WriterOnly, true);
     }
 
     pub fn contains(&self, session_id: &i64) -> bool {
@@ -398,7 +403,7 @@ impl AgentProcessRegistry {
             // See the `deliberate_kill` field doc for why the reader
             // must not apply the early-exit Error heuristic here.
             agent.deliberate_kill.store(true, Ordering::SeqCst);
-            teardown_incarnation(session_id, &agent, JoinPolicy::Both);
+            teardown_incarnation(session_id, &agent, JoinPolicy::Both, true);
             return;
         }
 
@@ -422,7 +427,16 @@ fn sandbox_cleanup(session_id: i64) {
 /// joins both worker threads; natural-exit reaping runs on the reader and
 /// therefore only joins the writer. The caller must already have removed
 /// `agent` from the registry so only one path owns this Arc.
-fn teardown_incarnation(session_id: i64, agent: &AgentProcess, join: JoinPolicy) {
+///
+/// `cleanup_sandbox` is false when `insert` replaces a previous entry: the
+/// replacement's restricted-token grants are already registered under the
+/// same `session_id`, and revoking them would strand the new child.
+fn teardown_incarnation(
+    session_id: i64,
+    agent: &AgentProcess,
+    join: JoinPolicy,
+    cleanup_sandbox: bool,
+) {
     // 1. Cancel input. Dropping the sender unblocks `recv()` so the
     //    writer join does not pay the two-second fallback.
     agent.close_input();
@@ -474,7 +488,9 @@ fn teardown_incarnation(session_id: i64, agent: &AgentProcess, join: JoinPolicy)
         join_with_timeout(handle, std::time::Duration::from_secs(2));
     }
 
-    sandbox_cleanup(session_id);
+    if cleanup_sandbox {
+        sandbox_cleanup(session_id);
+    }
 }
 
 /// Join a thread, detaching it (via the watchdog) if it hasn't returned in
@@ -1092,6 +1108,41 @@ mod tests {
             !registry.contains(&session_id),
             "kill_session already claimed exclusive teardown"
         );
+    }
+
+    /// Restricted-token grants are keyed by session id. Phase 3 registers
+    /// the *replacement*'s grants before `insert` tears down `prev`; that
+    /// overwrite teardown must not call `sandbox_cleanup` or it revokes
+    /// the live child's ACEs.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn insert_replacement_does_not_revoke_new_sandbox_grants() {
+        use crate::sandbox::spawn::{
+            cleanup_restricted, has_restricted_cleanup, insert_restricted_cleanup_for_test,
+        };
+
+        let registry = AgentProcessRegistry::new();
+        let session_id = -915_1538;
+        let (_gen1, _) = insert_trivial_agent(&registry, session_id);
+
+        // Simulate phase 3 of the replacement spawn: grants already live
+        // under this session id before register_agent → insert.
+        insert_restricted_cleanup_for_test(session_id);
+        assert!(has_restricted_cleanup(session_id));
+
+        let (_gen2, _) = insert_trivial_agent(&registry, session_id);
+        assert!(
+            has_restricted_cleanup(session_id),
+            "overwriting prev must not revoke the replacement's session-scoped sandbox grants"
+        );
+
+        registry.kill_session(session_id);
+        assert!(
+            !has_restricted_cleanup(session_id),
+            "kill_session must still revoke grants for the final incarnation"
+        );
+        // Belt-and-braces if an earlier assert failed mid-test.
+        cleanup_restricted(session_id);
     }
 
     /// Regression guard for issue #287: when the agent CLI exits
