@@ -1,5 +1,5 @@
 import type { AgentNode } from '../types/generated/AgentNode';
-import type { NonSingleViewMode } from '../stores/uiStore';
+import type { GridControls, NonSingleViewMode } from '../stores/uiStore';
 
 /**
  * View Mode visibility rules (wayfinder #982 — state model ticket #983,
@@ -33,26 +33,70 @@ export function resolveMeshScopeId(
   return activeMeshId ?? agentNodes[0]?.mesh_id ?? null;
 }
 
+/** The Grid Controls fields the 'filtered' scope narrows by. The sort pair
+ *  is deliberately excluded — 'filtered' reuses the existing grid sorters,
+ *  it doesn't need to re-own them. `gridProviderFilter`/`gridStatusFilter`
+ *  are PRE-EXISTING store fields (#998 era, no setter UI ships yet — see
+ *  GridControls' header); #1609 carries them forward untouched rather than
+ *  deleting a persisted public field, so the predicate is written once and
+ *  lights up when #997 adds the popover. */
+export type FilterControls = Pick<GridControls, 'gridSearchQuery' | 'gridProviderFilter' | 'gridStatusFilter'>;
+
+// Neutral controls — the value `AgentNodeView` passes when it has no
+// controls context (the old all-nodes default: no search, no filters), so
+// the two call shapes share one predicate.
+const NO_FILTERS: FilterControls = {
+  gridSearchQuery: '',
+  gridProviderFilter: null,
+  gridStatusFilter: null,
+};
+
+/** The shared 'filtered' visibility predicate: free-text name match plus
+ *  the provider/status dropdown filters. Exported so `gridFilterSort` and
+ *  the traversal shortcut consume the same definition as the grid render —
+ *  one predicate, three consumers (the repo's wayfinder #982 discipline). */
+export function matchesGridControls(node: AgentNode, controls: FilterControls): boolean {
+  const query = controls.gridSearchQuery.trim().toLowerCase();
+  if (query && !node.name.toLowerCase().includes(query)) return false;
+  if (controls.gridProviderFilter !== null && node.provider !== controls.gridProviderFilter) return false;
+  if (controls.gridStatusFilter !== null && node.status !== controls.gridStatusFilter) return false;
+  return true;
+}
+
 /**
  * The ordered nodes a grid View Mode renders. 'single' is not a grid mode —
  * use `resolveSingleNode` for it.
  *
- *   - 'mesh'   — the resolved mesh scope (see `resolveMeshScopeId`).
- *   - 'pinned' — every node with `is_pinned`, across all meshes. Pinned
- *                never touches `selectedMeshId` (ticket #983).
- *   - 'all'    — every loaded node.
+ *   - 'mesh'     — the resolved mesh scope (see `resolveMeshScopeId`).
+ *   - 'pinned'   — every node with `is_pinned`, across all meshes. Pinned
+ *                  never touches `selectedMeshId` (ticket #983).
+ *   - 'all'      — every loaded node.
+ *   - 'filtered' — every loaded node narrowed by the Grid Controls (#1609):
+ *                  the free-text search plus the provider/status filters.
+ *                  Cross-mesh like Pinned — the sidebar selection is
+ *                  irrelevant to the scope. KNOWN CONSTRAINT (deliberate,
+ *                  not an oversight): the search matches `node.name` only,
+ *                  so "search inside one mesh" is NOT expressible — this
+ *                  mode cannot combine a mesh scope with a query. That
+ *                  would need a scope combinator or a mesh axis on the
+ *                  controls, which wayfinder #982 leaves "Not yet
+ *                  specified"; Ctrl+F from a mesh therefore lands in the
+ *                  global pool (App.tsx `focus-grid-search`).
  */
 export function scopeNodesForMode(
   mode: NonSingleViewMode,
   agentNodes: AgentNode[],
   selectedMeshId: number | null,
   activeNodeId: number | null,
+  controls: FilterControls = NO_FILTERS,
 ): AgentNode[] {
   switch (mode) {
     case 'pinned':
       return agentNodes.filter(n => n.is_pinned);
     case 'all':
       return agentNodes;
+    case 'filtered':
+      return agentNodes.filter(n => matchesGridControls(n, controls));
     case 'mesh': {
       const meshId = resolveMeshScopeId(agentNodes, selectedMeshId, activeNodeId);
       return meshId === null ? [] : agentNodes.filter(n => n.mesh_id === meshId);
@@ -67,18 +111,22 @@ export function scopeNodesForMode(
  * cross-mesh by nature, like Pinned. With no active node (deleted while
  * soloed, or a boot straight into 'single'), "current scope" means the grid
  * `single` was entered from (`lastNonSingleMode` — the Escape target), then
- * any node at all, then null (the caller renders the empty state).
+ * any node at all, then null (the caller renders the empty state). When the
+ * remembered scope is 'filtered' the controls narrow the fallback the same
+ * way they narrow the grid, so an active node deleted out from under a solo
+ * view falls back to another matching node rather than an unfiltered one.
  */
 export function resolveSingleNode(
   agentNodes: AgentNode[],
   activeNodeId: number | null,
   lastNonSingleMode: NonSingleViewMode,
   selectedMeshId: number | null,
+  controls: FilterControls = NO_FILTERS,
 ): AgentNode | null {
   const active = agentNodes.find(n => n.id === activeNodeId);
   if (active) return active;
   return (
-    scopeNodesForMode(lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId)[0]
+    scopeNodesForMode(lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId, controls)[0]
     ?? agentNodes[0]
     ?? null
   );

@@ -4,13 +4,13 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { resolveMeshScopeId } from '../../lib/viewModes';
 
 /**
- * ViewModeSwitcher — the four-segment View Mode control (wayfinder #982 /
- * ticket #983). Lives in the bespoke TitleBar (see `components/TitleBar`,
- * moved out of the old canvas header strip when the window went frameless)
- * and drives `uiStore.viewMode`. Hand-rolled `<button>` + Tailwind
- * per repo convention (no component library); icons follow the
- * `probeIcons.tsx` idiom — 24×24 viewBox, stroke="currentColor", 1.75
- * width, round caps — so each glyph inherits the segment's text colour.
+ * ViewModeSwitcher — the five-segment View Mode control (wayfinder #982 /
+ * ticket #983; Filtered added by #1609). Lives in the bespoke TitleBar (see
+ * `components/TitleBar`, moved out of the old canvas header strip when the
+ * window went frameless) and drives `uiStore.viewMode`. Hand-rolled
+ * `<button>` + Tailwind per repo convention (no component library); icons
+ * follow the `probeIcons.tsx` idiom — 24×24 viewBox, stroke="currentColor",
+ * 1.75 width, round caps — so each glyph inherits the segment's text colour.
  *
  * Segment semantics:
  *   - Single:    solo the active node (subsumes the old maximize toggle).
@@ -22,6 +22,11 @@ import { resolveMeshScopeId } from '../../lib/viewModes';
  *   - All Nodes: clear the mesh selection (the same state the sidebar's
  *                re-click-deselect gesture produces) — the sync flips the
  *                mode to 'all'.
+ *   - Filtered:  cross-mesh view narrowed by the Grid Controls (the Search
+ *                Nodes bar renders next to the switcher only in this mode,
+ *                #1609). Clicking the segment focuses that search — the
+ *                user's next keystroke starts filtering without a second
+ *                click.
  */
 
 interface IconProps {
@@ -77,6 +82,16 @@ function PinnedIcon({ className }: IconProps) {
   );
 }
 
+/** Lucide `filter` (funnel) — Filtered (#1609). The filled-to-the-line
+    funnel reads as "narrowing" the way the grid glyphs read as layouts. */
+function FilteredIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+    </Svg>
+  );
+}
+
 /** Lucide `layout-dashboard` — All Nodes. */
 function AllNodesIcon({ className }: IconProps) {
   return (
@@ -100,6 +115,7 @@ const SEGMENTS: Segment[] = [
   { mode: 'mesh', label: 'Mesh Grid', Icon: MeshGridIcon },
   { mode: 'pinned', label: 'Pinned', Icon: PinnedIcon },
   { mode: 'all', label: 'All Nodes', Icon: AllNodesIcon },
+  { mode: 'filtered', label: 'Filtered', Icon: FilteredIcon },
 ];
 
 export function ViewModeSwitcher() {
@@ -140,6 +156,19 @@ export function ViewModeSwitcher() {
         return;
       }
       setViewMode('all');
+      return;
+    }
+    if (mode === 'filtered') {
+      // #1609 — switch first, then request focus. The request counter
+      // pattern (App.tsx `focus-grid-search`) means the consumer's layout
+      // effect runs on the bump, but the input only exists once this
+      // render mounts `GridControls`; the bump is observed after commit,
+      // so the ordering here is what makes the first click focus the
+      // search. Re-clicking while already in Filtered re-arms the request
+      // — the user's intent when clicking a segment they're already on is
+      // "get me to the search box".
+      if (useUIStore.getState().viewMode !== 'filtered') setViewMode('filtered');
+      useUIStore.getState().requestFocusGridSearch();
       return;
     }
     setViewMode(mode);

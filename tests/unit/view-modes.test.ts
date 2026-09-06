@@ -82,6 +82,52 @@ describe('scopeNodesForMode (wayfinder #982)', () => {
   it("'mesh' returns an empty scope when no nodes are loaded", () => {
     expect(scopeNodesForMode('mesh', [], null, null)).toEqual([]);
   });
+
+  it("'filtered' keeps only nodes matching the search query (#1609)", () => {
+    const controls = { gridSearchQuery: 'A', gridProviderFilter: null, gridStatusFilter: null };
+    expect(scopeNodesForMode('filtered', NODES, null, null, controls).map(n => n.id))
+      .toEqual([a1.id, a2.id]);
+  });
+
+  it("'filtered' composes the search and status filters (#1609)", () => {
+    // All fixtures share provider 'claude', so the discriminating axes here
+    // are the name substring and the status.
+    const controls = { gridSearchQuery: 'a', gridProviderFilter: null, gridStatusFilter: 'running' };
+    expect(scopeNodesForMode('filtered', NODES, null, null, controls).map(n => n.id))
+      .toEqual([a1.id, a2.id]);
+    const providerOnly = { gridSearchQuery: '', gridProviderFilter: 'claude', gridStatusFilter: 'awaiting_input' };
+    expect(scopeNodesForMode('filtered', NODES, null, null, providerOnly)).toEqual([]);
+  });
+
+  it("'filtered' ignores the sidebar selection — cross-mesh like Pinned (#1609)", () => {
+    const controls = { gridSearchQuery: '', gridProviderFilter: null, gridStatusFilter: null };
+    expect(scopeNodesForMode('filtered', NODES, 10, null, controls).map(n => n.id))
+      .toEqual([a1.id, a2.id, b1.id, b2.id]);
+  });
+
+  it("'filtered' with the neutral controls is the All scope (#1609)", () => {
+    // No search, no filters → the dedicated view shows every node — the
+    // same contract 'all' pins, so the empty search never surprises.
+    const controls = { gridSearchQuery: '   ', gridProviderFilter: null, gridStatusFilter: null };
+    expect(scopeNodesForMode('filtered', NODES, null, null, controls)).toEqual(NODES);
+  });
+
+  it("'filtered' is whitespace-tolerant on the search and case-insensitive", () => {
+    const controls = { gridSearchQuery: '  B1  ', gridProviderFilter: null, gridStatusFilter: null };
+    expect(scopeNodesForMode('filtered', NODES, null, null, controls).map(n => n.id))
+      .toEqual([b1.id]);
+  });
+
+  it("mesh/pinned/all scopes are unaffected by the controls argument", () => {
+    // The Grid Controls belong to the Filtered view; the other scopes must
+    // not narrow even when a stale search text is in the store.
+    const controls = { gridSearchQuery: 'a1', gridProviderFilter: 'minimax', gridStatusFilter: 'error' };
+    expect(scopeNodesForMode('all', NODES, null, null, controls)).toEqual(NODES);
+    expect(scopeNodesForMode('pinned', NODES, null, null, controls).map(n => n.id))
+      .toEqual([a2.id, b1.id]);
+    expect(scopeNodesForMode('mesh', NODES, 10, null, controls).map(n => n.id))
+      .toEqual([a1.id, a2.id]);
+  });
 });
 
 describe('resolveMeshScopeId', () => {
@@ -102,7 +148,6 @@ describe('resolveSingleNode (wayfinder #982)', () => {
     // active node still wins. Single is cross-mesh by nature, like Pinned.
     expect(resolveSingleNode(NODES, b2.id, 'mesh', 10)).toBe(b2);
   });
-
   it('falls back to the first node of the scope Single was entered from', () => {
     // Entered from Pinned → first pinned node, not the first node overall.
     expect(resolveSingleNode(NODES, null, 'pinned', null)).toBe(a2);
@@ -127,5 +172,16 @@ describe('resolveSingleNode (wayfinder #982)', () => {
     // Deleted-while-soloed: the id no longer resolves, so the fallback
     // chain takes over exactly as if activeNodeId were null.
     expect(resolveSingleNode(NODES, 999, 'mesh', 10)).toBe(a1);
+  });
+
+  it('narrows the Filtered fallback by the Grid Controls (#1609)', () => {
+    // Entered Single from Filtered with a search active, then the active
+    // node vanished (deleted while soloed): the fallback must come from
+    // the matching set, not the unfiltered store — the user would
+    // otherwise land on a node the Filtered grid never showed.
+    const controls = { gridSearchQuery: 'a', gridProviderFilter: null, gridStatusFilter: null };
+    expect(resolveSingleNode(NODES, 999, 'filtered', null, controls)).toBe(a1);
+    const tight = { gridSearchQuery: 'b', gridProviderFilter: null, gridStatusFilter: null };
+    expect(resolveSingleNode(NODES, 999, 'filtered', null, tight)).toBe(b1);
   });
 });

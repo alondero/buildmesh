@@ -48,6 +48,10 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
       return true;
     case 'view-single':
     case 'view-pinned':
+    // #1609 — Filtered has no sidebar round-trip; the plain setViewMode path
+    // is the whole gesture (the click-to-focus-search behaviour is the
+    // switcher's, not the palette's).
+    case 'view-filtered':
       ctx.setViewMode(id.slice('view-'.length) as ViewMode);
       return true;
     case 'view-mesh': {

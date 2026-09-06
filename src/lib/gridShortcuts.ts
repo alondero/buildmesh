@@ -41,11 +41,12 @@ export function toggleGridMaximize(): void {
 // order (ticket #987). 'single' is deliberately excluded — it's Alt+G's solo
 // toggle (`toggleGridMaximize`), a separate gesture — so this stays a pure
 // grid-mode rotation.
-const GRID_MODE_CYCLE: readonly NonSingleViewMode[] = ['mesh', 'pinned', 'all'];
+const GRID_MODE_CYCLE: readonly NonSingleViewMode[] = ['mesh', 'pinned', 'all', 'filtered'];
 
 /**
- * Rotate the canvas through the grid View Modes: Mesh → Pinned → All → Mesh
- * (ticket #987). Bound to Ctrl+Alt+G / Cmd+Alt+G in App.tsx — a keyboard peer
+ * Rotate the canvas through the grid View Modes: Mesh → Pinned → All →
+ * Filtered → Mesh (ticket #987; #1609 appends the Filtered view to the
+ * switcher order). Bound to Ctrl+Alt+G / Cmd+Alt+G in App.tsx — a keyboard peer
  * to the mouse-only `ViewModeSwitcher`, kept distinct from Alt+G's Single solo
  * toggle (`toggleGridMaximize`).
  *

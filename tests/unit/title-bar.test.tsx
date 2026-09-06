@@ -164,7 +164,7 @@ describe('TitleBar (bespoke window chrome)', () => {
     });
   });
 
-  describe('navigation cluster (issue #1375)', () => {
+  describe('navigation cluster (issue #1375; Filtered search #1609)', () => {
     it('the labelled search field opens the command palette in files mode', async () => {
       await renderTitleBar();
       expect(useUIStore.getState().omnibarOpen).toBe(false);
@@ -210,22 +210,70 @@ describe('TitleBar (bespoke window chrome)', () => {
 
     it('carries the responsive degradation classes (labels, chip, flex floors)', async () => {
       const { container } = await renderTitleBar();
-      // Pill and switcher labels drop to icon-only below their breakpoints;
-      // the chip is the last affordance back when widening. Class presence
-      // is the contract — the media queries themselves are browser-rendered.
+      // Pill and switcher labels drop to icon-only below the SAME tier
+      // (1300px) since #1609 — one toolbar, one ladder; the chip is the
+      // last affordance back when widening. Class presence is the contract
+      // — the media queries themselves are browser-rendered.
       const remotePill = screen.getByRole('button', { name: 'Open mobile remote access' });
-      expect(remotePill.querySelector('span')?.className).toContain('max-[1150px]:hidden');
+      expect(remotePill.querySelector('span')?.className).toContain('max-[1300px]:hidden');
+      const usagePill = screen.getByRole('button', { name: 'Open Usage' });
+      expect(usagePill.querySelector('span')?.className).toContain('max-[1300px]:hidden');
       const switcherGroup = screen.getByRole('group', { name: /view mode/i });
       const switcherLabel = switcherGroup.querySelector('span');
       expect(switcherLabel?.className).toContain('max-[1300px]:hidden');
       const chip = container.querySelector('kbd');
       expect(chip?.className).toContain('max-[1399px]:hidden');
-      // Flex floors: the palette field's wrapper and the grid-search
-      // wrapper must never collapse below their yield-first floors.
+      // Flex floor: the palette field's wrapper must never collapse below
+      // its yield-first floor.
       const searchWrapper = screen.getByTestId('titlebar-command-search').parentElement!;
       expect(searchWrapper.className).toContain('min-w-44');
-      const gridWrapper = screen.getByTestId('grid-controls').parentElement!;
-      expect(gridWrapper.className).toContain('min-w-[122px]');
+    });
+
+    it('keeps the utility pills borderless like the switcher segments (#1609)', async () => {
+      await renderTitleBar();
+      for (const name of ['Open Usage', 'Open settings', 'Open mobile remote access']) {
+        const pill = screen.getByRole('button', { name });
+        expect(pill.className).not.toContain('border');
+        expect(pill.className).toContain('hover:bg-bg-card');
+      }
+    });
+
+    it('hides the Search Nodes bar outside the Filtered view (#1609)', async () => {
+      await renderTitleBar();
+      // Default boot mode (all) → no search input, no placeholder competing
+      // with the wordmark/switcher for width.
+      expect(screen.queryByTestId('grid-controls')).toBeNull();
+    });
+
+    it('mounts the Search Nodes bar beside the switcher only in the Filtered view (#1609)', async () => {
+      await renderTitleBar();
+      act(() => {
+        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+      });
+      const controls = screen.getByTestId('grid-controls');
+      // The search mounts in the LEFT cell (wordmark → switcher → search):
+      // its nearest drag-region ancestor is the same cell that holds the
+      // switcher group, and that cell precedes the palette field.
+      const cell = controls.closest('[data-tauri-drag-region]')!;
+      expect(cell.contains(screen.getByRole('group', { name: /view mode/i }))).toBe(true);
+      const paletteField = screen.getByTestId('titlebar-command-search');
+      expect(cell.contains(paletteField)).toBe(false);
+    });
+
+    it('clears the search input on view switches away from Filtered without wiping the stored query', async () => {
+      // The query persists in the store/localStorage (#988 contract), so
+      // re-entering Filtered restores the previous search. Only the input
+      // unmounts — the store value is never reset by a mode change.
+      await renderTitleBar();
+      act(() => {
+        useUIStore.setState({ viewMode: 'filtered', gridSearchQuery: 'alpha' });
+      });
+      expect((screen.getByTestId('grid-search-input') as HTMLInputElement).value).toBe('alpha');
+      act(() => {
+        useUIStore.setState({ viewMode: 'all' });
+      });
+      expect(screen.queryByTestId('grid-search-input')).toBeNull();
+      expect(useUIStore.getState().gridSearchQuery).toBe('alpha');
     });
   });
 });

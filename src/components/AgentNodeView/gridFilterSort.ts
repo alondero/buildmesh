@@ -32,8 +32,17 @@ function compareStableOrder(a: AgentNode, b: AgentNode): number {
 
 /**
  * Derive the ordered grid sequence from the active view scope and the
- * persisted Grid Controls state. Filtering always precedes sorting so every
- * sort applies to exactly the nodes the user can see.
+ * persisted Grid Controls state.
+ *
+ * This function has exactly one job: ORDERING. Which nodes are candidates —
+ * including the Grid Controls narrowing that applies only inside the
+ * 'filtered' View Mode — is owned entirely by `scopeNodesForMode`
+ * (src/lib/viewModes.ts), which receives the controls verbatim. There must
+ * be no filter logic and no control-dependent early return here: the search
+ * text persists in the store across mode switches (#1609), so any guard on
+ * it would run on every Mesh/Pinned/All render and, by skipping the sort
+ * below, silently serve store-insertion order. Sorting runs
+ * unconditionally on whatever the upstream scope returns.
  */
 export function deriveVisibleNodes(
   viewMode: ViewMode,
@@ -44,19 +53,12 @@ export function deriveVisibleNodes(
 ): AgentNode[] {
   if (viewMode === 'single') return [];
 
-  const query = controls.gridSearchQuery.trim().toLowerCase();
-  const scoped = scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId);
-  const filtered = scoped.filter((node) => {
-    if (query && !node.name.toLowerCase().includes(query)) return false;
-    if (controls.gridProviderFilter !== null && node.provider !== controls.gridProviderFilter) return false;
-    if (controls.gridStatusFilter !== null && node.status !== controls.gridStatusFilter) return false;
-    return true;
-  });
+  const nodes = scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId, controls);
 
-  if (controls.gridSortBy === 'custom') return filtered;
+  if (controls.gridSortBy === 'custom') return nodes;
 
   const direction = controls.gridSortDirection === 'desc' ? -1 : 1;
-  return [...filtered].sort((a, b) => {
+  return [...nodes].sort((a, b) => {
     const primary = compareBySort(a, b, controls.gridSortBy);
     return primary === 0 ? compareStableOrder(a, b) : primary * direction;
   });
