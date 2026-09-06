@@ -148,6 +148,24 @@ pub fn mark_expected_exit(reason: ExpectedExitReason) {
     }
 }
 
+/// Retract a previously recorded expected exit (issue #1501).
+///
+/// The frontend vetoes a window close *after* the backend `CloseRequested`
+/// handler has already marked the exit expected. When the user cancels out
+/// of the exit-confirmation modal ("Keep Working"), the stale marker would
+/// otherwise make a later real crash look like an expected exit and suppress
+/// the supervisor's auto-relaunch. Removing the file restores the
+/// crash-means-relaunch invariant. No-op when the watchdog never started.
+/// Best-effort like `mark_expected_exit`: a removal failure is ignored —
+/// the worst case is the pre-existing stale-marker behaviour, never a
+/// failed user action.
+pub fn clear_expected_exit() {
+    let Some(marker) = EXPECTED_EXIT_MARKER.get() else {
+        return;
+    };
+    let _ = std::fs::remove_file(marker);
+}
+
 /// Relaunch the current executable under the shared crash-loop cooldown.
 pub fn relaunch_detached(log_dir: &Path) -> Result<bool, String> {
     let mut command = detached_self_command()?;

@@ -34,7 +34,7 @@ use std::time::Duration;
 
 mod watchdog;
 mod writer;
-pub(crate) use watchdog::{mark_expected_exit, ExpectedExitReason};
+pub(crate) use watchdog::{clear_expected_exit, mark_expected_exit, ExpectedExitReason};
 #[cfg(not(target_os = "windows"))]
 pub(crate) use watchdog::{relaunch_detached, AUTO_RELAUNCH_COOLDOWN_SECS};
 pub use watchdog::{

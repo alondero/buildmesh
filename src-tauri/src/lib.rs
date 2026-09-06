@@ -455,6 +455,7 @@ pub fn run() {
             commands::preferences::set_app_default_provider,
             commands::preferences::set_app_naming_provider,
             commands::preferences::set_app_autopilot_pool_size,
+            commands::preferences::set_app_confirm_before_quit,
             commands::preferences::set_harness_order,
             commands::preferences::set_proxied_provider_order,
             commands::preferences::get_provider_accounts,
@@ -676,6 +677,11 @@ pub fn run() {
             // build and a simple `import.meta.env.PROD` check can't tell
             // them apart.
             commands::app::get_app_identifier,
+            // Exit-confirmation cancel (issue #1501): retracts the eager
+            // `CloseRequested` expected-exit marking when the user backs
+            // out of the modal, so the watchdog still relaunches on a
+            // later real crash.
+            commands::app::cancel_window_close,
             // AI context portability
             commands::ai_context::detect_ai_context,
             commands::ai_context::create_ai_context_portability_pr,
@@ -798,3 +804,32 @@ pub fn run() {
 /// window's webview — the silent-exit signature.
 static USER_CLOSE_REQUESTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Retract a user close request the frontend vetoed (issue #1501).
+///
+/// The `CloseRequested` handler marks the exit expected eagerly, but the
+/// frontend exit-confirmation modal can still cancel the close ("Keep
+/// Working"). Without this reset, the stale flag + supervisor marker file
+/// would make a later real crash (e.g. a GPU-driver WebView2 kill) look
+/// like an expected exit and suppress the watchdog auto-relaunch. Called
+/// by the `cancel_window_close` command.
+pub(crate) fn cancel_close_request() {
+    USER_CLOSE_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    diagnostics::clear_expected_exit();
+}
+
+#[cfg(test)]
+mod close_cancel_tests {
+    use super::cancel_close_request;
+    use super::USER_CLOSE_REQUESTED;
+
+    /// Cancelling resets the flag so a later `Destroyed`-without-close is
+    /// still classified as a crash (issue #1501: the "Keep Working" path
+    /// must restore the watchdog invariant).
+    #[test]
+    fn cancel_close_request_resets_flag() {
+        USER_CLOSE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        cancel_close_request();
+        assert!(!USER_CLOSE_REQUESTED.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}

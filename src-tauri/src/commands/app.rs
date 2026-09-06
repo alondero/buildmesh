@@ -15,3 +15,18 @@ use tauri::command;
 pub fn get_app_identifier(app: tauri::AppHandle) -> String {
     app.config().identifier.clone()
 }
+
+/// Retract a user close request the frontend vetoed (issue #1501).
+///
+/// The backend `CloseRequested` handler eagerly sets `USER_CLOSE_REQUESTED`
+/// and writes the watchdog's expected-exit marker before the frontend
+/// exit-confirmation modal has run. When the user cancels ("Keep Working"),
+/// the frontend calls this so a later real crash is still classified as a
+/// crash (auto-relaunch preserved) instead of an expected exit. Pure sync —
+/// an atomic store plus a best-effort marker-file removal; runs on Tauri's
+/// IPC worker, NOT the bounded tokio pool (issue #1380 review point 4).
+#[command]
+pub fn cancel_window_close() -> Result<(), String> {
+    crate::cancel_close_request();
+    Ok(())
+}

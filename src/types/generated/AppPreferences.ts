@@ -140,4 +140,14 @@ harness_defaults: { [key in string]: HarnessConfigValue },
  * under the Mesh root". A per-Mesh `worktree_directory` overrides this.
  * Additive on disk — older `preferences.json` without it loads as `None`.
  */
-worktree_directory: string | null, };
+worktree_directory: string | null, 
+/**
+ * Confirm before quitting when agent sessions are active (issue #1501).
+ * When `true` (the default), a window close request with active agent
+ * nodes (`running`, `awaiting_input`, `spawning`, `ready`) surfaces an
+ * exit-confirmation modal instead of terminating immediately. When
+ * `false`, close requests proceed without friction.
+ * Additive on disk — older `preferences.json` without it loads as
+ * `true` via `#[serde(default = ...)]`.
+ */
+confirm_before_quit: boolean, };
