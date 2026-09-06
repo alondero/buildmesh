@@ -1,7 +1,7 @@
 import { Modal } from '../shared/Modal';
 import { useWorktreeClosePromptStore } from '../../stores/worktreeClosePromptStore';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
-import { ChangedFileRow } from '../shared/ChangedFileRow';
+import { fileDiffStatusMeta } from '../../lib/status';
 
 export function WorktreeCloseDialog() {
   const pending = useWorktreeClosePromptStore(state => state.pending);
@@ -55,15 +55,23 @@ export function WorktreeCloseDialog() {
               // the status fetch failed — don't imply the worktree is clean.
               <div className="px-2 py-1 text-xs text-text-muted">Couldn&apos;t list the changed files.</div>
             ) : (
-              files.map((file) => (
-                <div
-                  key={file.path}
-                  title={file.path}
-                  className="flex items-center gap-2 px-2 py-0.5 text-xs font-mono"
-                >
-                  <ChangedFileRow file={file} />
-                </div>
-              ))
+              files.map((file) => {
+                const meta = fileDiffStatusMeta(file.status);
+                return (
+                  <div
+                    key={file.path}
+                    title={file.path}
+                    className="flex items-center gap-2 px-2 py-0.5 text-xs font-mono"
+                  >
+                    <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={meta.label}>
+                      {meta.letter}
+                    </span>
+                    <span className="flex-1 truncate text-text-secondary">{file.path}</span>
+                    <span className="text-accent-green flex-shrink-0">+{file.additions}</span>
+                    <span className="text-accent-red flex-shrink-0">-{file.deletions}</span>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
