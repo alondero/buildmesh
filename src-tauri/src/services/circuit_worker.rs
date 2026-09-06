@@ -473,9 +473,10 @@ fn required_agent_slots(active: &db::ActiveCircuitRun) -> i64 {
 }
 
 /// Free slots in the optional app-wide Autopilot pool after accounting for
-/// agents outside a circuit lease and circuit-owned slots. The latter is a
-/// durable reservation during admission and an observed active-agent count
-/// during a running tick; both represent the same global resource.
+/// agents outside a circuit lease and circuit-owned slots. Admission passes
+/// durable worst-case lease reservations here; a running Tick passes the
+/// live circuit-agent count. The snapshots intentionally differ even though
+/// they protect the same host-wide resource.
 fn global_agent_free_slots(
     global_pool: Option<u32>,
     unleased_slots: i64,
@@ -593,6 +594,9 @@ fn run_pass(app: &AppHandle) {
     let mut reserved_circuit_slots =
         db::count_reserved_circuit_agent_slots_total().unwrap_or(i64::MAX);
     for active in runs {
+        if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
+            continue;
+        }
         // Pending runs that the gate deferred re-appear next pass;
         // running/paused runs always proceed (they already hold a slot).
         if active.run.state == "pending" {
@@ -610,13 +614,8 @@ fn run_pass(app: &AppHandle) {
                     );
                     continue;
                 }
-                Some(_) => {} // admitted by may_admit_run — fall through to drive
+                Some(_) => {} // admitted by may_admit_run — reserve its lease below
             }
-        }
-        if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
-            continue;
-        }
-        if active.run.state == "pending" {
             let required = required_agent_slots(&active);
             if required > 0 {
                 let existing = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
@@ -2843,27 +2842,13 @@ mod tests {
     }
 
     #[test]
-    fn circuit_agent_reservation_ignores_legacy_mesh_node_cap() {
-        let legacy_mesh_node_cap = crate::models::Mesh {
-            // Circuit admission owns circuit concurrency. The legacy
-            // Autopilot node setting must not reject a circuit blueprint
-            // whose declared footprint is larger than that setting.
-            autopilot_concurrency_limit: 1,
-            ..zero_test_mesh()
-        }
-        .autopilot_concurrency_limit;
-        assert!(legacy_mesh_node_cap < 2);
-
-        // A two-agent circuit can claim its complete lease even though the
-        // legacy mesh node cap is one. The optional global pool remains the
-        // separate process-safety backstop.
-        assert_eq!(global_agent_free_slots(Some(2), 0, 0), 2);
+    fn global_agent_reservation_counts_occupied_pool_slots() {
         assert!(
             global_agent_reservation_fits(2, 0, 0, Some(2)),
-            "circuit leases must not use the legacy per-mesh node cap"
+            "an empty optional global pool should fit the requested lease"
         );
-        // A peer run's reservation still consumes the optional global pool
-        // before its second process has been created.
+        // A peer run's reservation consumes the optional global pool before
+        // its second process has been created.
         assert!(!global_agent_reservation_fits(2, 1, 0, Some(2)));
         assert!(!global_agent_reservation_fits(1, 0, 1, Some(1)));
         // Legacy (non-circuit) agents remain part of global accounting.

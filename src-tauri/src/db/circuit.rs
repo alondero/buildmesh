@@ -1118,46 +1118,6 @@ pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
     )
 }
 
-/// Distinct piloted agent nodes attached to active runs on this mesh. NULL
-/// agent ids don't count. Paused runs count (see
-/// [`count_running_circuit_steps`]); completed spawn steps remain attached
-/// while a later review/feedback step is active so the original implementation
-/// agent remains observable. Agents retained by terminal runs are counted
-/// separately by [`count_retained_circuit_agent_nodes`]. The circuit worker's
-/// optional app-wide pool uses the corresponding total helper; this per-mesh
-/// read is diagnostic and is not compared with the legacy node cap.
-#[allow(dead_code)]
-pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
-    let db = super::read_conn();
-    db.query_row(
-        "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
-         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-         WHERE r.mesh_id = ?1 AND r.state IN ('running', 'paused') \
-           AND s.agent_node_id IS NOT NULL",
-        params![mesh_id],
-        |row| row.get(0),
-    )
-}
-
-/// Distinct circuit agents retained by terminal runs. A completed review can
-/// intentionally leave its implementation PTY available for inspection; it
-/// no longer owns a run lease, but the process still consumes host resources
-/// and therefore remains part of optional app-wide pool accounting until it is
-/// archived or deleted. The mesh-scoped read is retained for diagnostics.
-#[allow(dead_code)]
-pub fn count_retained_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
-    let db = super::read_conn();
-    db.query_row(
-        "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
-         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-         JOIN agent_nodes a ON a.id = s.agent_node_id \
-         WHERE r.mesh_id = ?1 AND r.state IN ('completed', 'failed', 'cancelled') \
-           AND s.agent_node_id IS NOT NULL AND a.status != 'archived'",
-        params![mesh_id],
-        |row| row.get(0),
-    )
-}
-
 /// Distinct piloted agent nodes across all active circuit runs. The optional
 /// Autopilot pool is app-wide, so the circuit worker combines this count with
 /// [`count_retained_circuit_agent_nodes_total`] and

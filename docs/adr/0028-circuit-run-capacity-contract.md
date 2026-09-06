@@ -109,6 +109,9 @@ process backstop. If that global pool cannot satisfy a run's declared lease,
 the run remains pending in the queue. A circuit may therefore use more agent
 nodes on one mesh than the legacy Autopilot node limit allows, subject to its
 own run/step limits and the optional global pool.
+With no global pool configured, there is no additional per-mesh
+agent-process cap. Admission counts durable worst-case leases, while a
+running Tick counts live circuit agents for the same optional host-wide pool.
 
 **Single-release idempotency** lives at the canonical state-change
 site — `db::commit_circuit_advance`'s run-state branch. When `run_state`
