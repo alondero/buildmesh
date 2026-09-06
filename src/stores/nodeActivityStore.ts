@@ -10,6 +10,7 @@ export const useNodeActivityStore = create<{
   select: (rootId: number, nodeId: number, utility?: boolean) => void;
   openUtility: (rootId: number, nodeId: number, mode: UtilityMode) => void;
   closeUtility: (rootId: number, nodeId: number) => void;
+  prune: (validNodeIds: ReadonlySet<number>) => void;
 }>((set) => ({
   selections: {},
   utilities: {},
@@ -24,5 +25,18 @@ export const useNodeActivityStore = create<{
     const utilities = { ...s.utilities };
     delete utilities[nodeId];
     return { utilities, selections: { ...s.selections, [rootId]: { nodeId, utility: false } } };
+  }),
+  prune: (validNodeIds) => set(s => {
+    const selections = Object.fromEntries(
+      Object.entries(s.selections).filter(([rootId, selection]) =>
+        validNodeIds.has(Number(rootId)) && validNodeIds.has(selection.nodeId),
+      ),
+    );
+    const utilities = Object.fromEntries(
+      Object.entries(s.utilities).filter(([nodeId]) => validNodeIds.has(Number(nodeId))),
+    );
+    if (Object.keys(selections).length === Object.keys(s.selections).length
+      && Object.keys(utilities).length === Object.keys(s.utilities).length) return s;
+    return { selections, utilities };
   }),
 }));

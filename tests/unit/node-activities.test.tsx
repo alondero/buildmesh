@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
-import { activityRootId, groupActivityNodes } from '../../src/lib/nodeActivities';
+import { activityRootId, groupActivityNodes, indexAgentNodes } from '../../src/lib/nodeActivities';
 import { deriveVisibleNodes } from '../../src/components/AgentNodeView/gridFilterSort';
 import { NodeCard } from '../../src/components/AgentNodeView/NodeCard';
 import { jumpToNextAwaitingNode } from '../../src/lib/awaitingInputShortcuts';
@@ -14,6 +14,7 @@ vi.mock('@dnd-kit/core', () => ({
 vi.mock('../../src/components/AgentNodeView/nodeDrag', () => ({ NodeDropCue: () => null }));
 vi.mock('../../src/components/Terminal/Terminal', () => ({
   AgentTerminal: ({ nodeId }: { nodeId: number }) => <textarea aria-label={`Agent ${nodeId}`} />,
+  terminalManager: { getInstance: () => null },
 }));
 vi.mock('../../src/components/Terminal/BuildRunTerminal', () => ({
   BuildRunTerminal: ({ sessionId, mode, onClose }: { sessionId: number; mode: string; onClose: () => void }) =>
@@ -40,7 +41,7 @@ const controls = { gridSearchQuery: '', gridProviderFilter: null, gridStatusFilt
   gridSortBy: 'custom' as const, gridSortDirection: 'asc' as const };
 
 function card() {
-  return <NodeCard nodeId={1} isActive onActivate={id => useAgentNodeStore.getState().setActiveNode(id)} />;
+  return <NodeCard nodeId={1} memberIds={[1, 2, 4]} isActive onActivate={id => useAgentNodeStore.getState().setActiveNode(id)} />;
 }
 
 beforeEach(() => {
@@ -58,17 +59,17 @@ describe('node activities', () => {
   });
 
   it('leaves orphaned, cross-mesh and cyclic relationships accessible', () => {
-    expect(groupActivityNodes([nodes[1]], [nodes[1]], ownerships).map(n => n.id)).toEqual([2]);
-    expect(activityRootId(2, [node(1, { mesh_id: 9 }), nodes[1]], ownerships)).toBe(2);
-    expect(activityRootId(2, [node(1, { status: 'archived' }), nodes[1]], ownerships)).toBe(2);
-    expect(groupActivityNodes(nodes, nodes, { 1: ownership(1, 2), 2: ownership(2, 1) }).map(n => n.id)).toEqual([1, 2, 3]);
+    expect(groupActivityNodes([nodes[1]], indexAgentNodes([nodes[1]]), ownerships).map(n => n.id)).toEqual([2]);
+    expect(activityRootId(2, indexAgentNodes([node(1, { mesh_id: 9 }), nodes[1]]), ownerships)).toBe(2);
+    expect(activityRootId(2, indexAgentNodes([node(1, { status: 'archived' }), nodes[1]]), ownerships)).toBe(2);
+    expect(groupActivityNodes(nodes, indexAgentNodes(nodes), { 1: ownership(1, 2), 2: ownership(2, 1) }).map(n => n.id)).toEqual([1, 2, 3]);
   });
 
   it('shows actual activity independently of the selected tab and directs controls/focus to the reviewer', () => {
     render(card());
     expect(screen.getByRole('status').textContent).toBe('Reviewing');
     expect(screen.getByRole('tab', { name: /Implementation/ }).getAttribute('aria-selected')).toBe('true');
-    fireEvent.click(screen.getByRole('tab', { name: /Review running/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /Review.*Reviewer/ }));
     expect(screen.getByLabelText('Agent 2')).toBeTruthy();
     expect(screen.getByText('Controls 2')).toBeTruthy();
     expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
@@ -84,35 +85,35 @@ describe('node activities', () => {
     render(card());
     expect(screen.getByLabelText('Agent 2')).toBeTruthy();
     act(() => useAgentNodeStore.setState({ activeNodeId: 1 }));
-    expect(screen.getByLabelText('Agent 1')).toBeTruthy();
+    expect(screen.getByLabelText('Agent 2')).toBeTruthy();
   });
 
   it('opens a full utility tab, retains it across tab switches/remounts and closes it explicitly', async () => {
     const first = render(card());
     fireEvent.click(screen.getByText('Open terminal'));
     expect(await screen.findByText('terminal output 1')).toBeTruthy();
-    expect(screen.queryByLabelText('Agent 1')).toBeNull();
+    expect(screen.getByLabelText('Agent 1')).toBeTruthy();
     fireEvent.click(screen.getByRole('tab', { name: /Implementation/ }));
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
-    expect(screen.queryByText('terminal output 1')).toBeNull();
-    fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+    expect(screen.getByText('terminal output 1')).toBeTruthy();
+    fireEvent.click(screen.getByRole('tab', { name: /Terminal.*Agent 1/ }));
     first.unmount();
     render(card());
     expect(await screen.findByText('terminal output 1')).toBeTruthy();
     fireEvent.click(screen.getByText('Close utility'));
-    expect(screen.queryByRole('tab', { name: 'Terminal' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: /Terminal/ })).toBeNull();
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
   });
 
   it('returns to the implementation when a reviewer is retired and accepts its replacement', () => {
     render(card());
-    fireEvent.click(screen.getByRole('tab', { name: /Review running/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /Review.*Reviewer/ }));
     act(() => useAgentNodeStore.setState({ nodeIds: [1, 3], nodesById: { 1: nodes[0], 3: nodes[2] }, activeNodeId: null }));
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
     expect(screen.queryByRole('tab', { name: /Review/ })).toBeNull();
     act(() => useAgentNodeStore.setState({ nodeIds: [1, 3, 4], nodesById: { 1: nodes[0], 3: nodes[2], 4: node(4) },
       circuitOwnerships: { ...ownerships, 4: ownership(4, 1) } }));
-    fireEvent.click(screen.getByRole('tab', { name: /Review ready/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /Review.*Agent 4/ }));
     expect(screen.getByLabelText('Agent 4')).toBeTruthy();
   });
 
@@ -123,6 +124,6 @@ describe('node activities', () => {
     expect(await screen.findByText('terminal output 1')).toBeTruthy();
     act(() => { expect(jumpToNextAwaitingNode()).toBe(1); });
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
-    expect(screen.queryByText('terminal output 1')).toBeNull();
+    expect(screen.getByText('terminal output 1')).toBeTruthy();
   });
 });

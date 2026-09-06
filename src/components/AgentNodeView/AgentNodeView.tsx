@@ -15,7 +15,8 @@ import { deriveVisibleNodes } from './gridFilterSort';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
 import { NodeCard } from './NodeCard';
-import { activityRootId } from '../../lib/nodeActivities';
+import { activityMemberIds, activityRootId } from '../../lib/nodeActivities';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
@@ -24,11 +25,12 @@ const MIN_PANE_PERCENT = 15;
 
 interface ResizablePanesProps {
   nodes: AgentNode[];
+  activityMembersByRoot: Readonly<Record<number, readonly number[]>>;
   // Pinned Grid mode disables card drag-reorder (wayfinder #982 / #986).
   draggable?: boolean;
 }
 
-function ResizablePanes({ nodes, draggable = true }: ResizablePanesProps) {
+function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: ResizablePanesProps) {
   const [widths, setWidths] = useState(() => equalSizes(nodes.length));
   // `idxRef` records which separator the user clicked, since the shared
   // `useResizable` hook fires `handleMouseDown` without knowing which divider
@@ -103,6 +105,7 @@ function ResizablePanes({ nodes, draggable = true }: ResizablePanesProps) {
             >
               <NodeCard
                 nodeId={node.id}
+                memberIds={activityMembersByRoot[node.id] ?? [node.id]}
                 isActive={node.id === activeNodeId}
                 onActivate={setActiveNode}
                 draggable={draggable}
@@ -295,7 +298,16 @@ export function AgentNodeView() {
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const nodesById = useAgentNodeStore(state => state.nodesById);
   const ownerships = useAgentNodeStore(state => state.circuitOwnerships);
-  const activeRootId = activeNodeId === null ? null : activityRootId(activeNodeId, agentNodes, ownerships);
+  const activeRootId = activeNodeId === null ? null : activityRootId(activeNodeId, nodesById, ownerships);
+  const activityMembersByRoot = useMemo(
+    () => activityMemberIds(agentNodes, ownerships),
+    [agentNodes, ownerships],
+  );
+  useEffect(() => {
+    useNodeActivityStore.getState().prune(
+      new Set(agentNodes.filter(node => node.status !== 'archived').map(node => node.id)),
+    );
+  }, [agentNodes]);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const reorderAgentNode = useAgentNodeStore(state => state.reorderAgentNode);
   const swapAgentNodes = useAgentNodeStore(state => state.swapAgentNodes);
@@ -359,7 +371,7 @@ export function AgentNodeView() {
           gridProviderFilter,
           gridStatusFilter,
         });
-      return resolved ? nodesById[activityRootId(resolved.id, agentNodes, ownerships)] ?? resolved : null;
+      return resolved ? nodesById[activityRootId(resolved.id, nodesById, ownerships)] ?? resolved : null;
     },
     // Controls shape (not each field) keeps the memo dep list stable and the
     // Filtered fallback controls-aware (`resolveSingleNode` narrows by them).
@@ -545,6 +557,7 @@ export function AgentNodeView() {
               <div className="flex-1 flex flex-col p-1 bg-bg-surface overflow-hidden">
                 <NodeCard
                   nodeId={singleNode.id}
+                  memberIds={activityMembersByRoot[singleNode.id] ?? [singleNode.id]}
                   isActive={singleNode.id === activeNodeId}
                   onActivate={setActiveNode}
                   draggable={false}
@@ -561,11 +574,13 @@ export function AgentNodeView() {
           ) : visibleNodes.length <= 2 ? (
             <ResizablePanes
               nodes={visibleNodes}
+              activityMembersByRoot={activityMembersByRoot}
               draggable={dragEnabled}
             />
           ) : (
             <GridSplitter
               nodes={visibleNodes}
+              activityMembersByRoot={activityMembersByRoot}
               draggable={dragEnabled}
             />
           )}

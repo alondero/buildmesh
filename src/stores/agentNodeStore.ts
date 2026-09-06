@@ -18,8 +18,6 @@ import { useMeshStore } from './meshStore';
 // `toggleNodePinned` hand-rolled is now a generic helper.
 import { withOptimistic, type OptimisticSurface } from '../lib/optimistic';
 import { attachAgentNodeListeners } from './agentNodeListeners';
-import { activityRootId } from '../lib/nodeActivities';
-import { useNodeActivityStore } from './nodeActivityStore';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
 // #359), along with the `EnvType`/`Provider`/`SessionStatus` unions it
@@ -825,12 +823,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   setActiveNode: (id) => {
-    // Explicit navigation (including reselecting the same awaiting agent)
-    // reveals its agent tab. Utility-tab clicks set their selection afterward.
-    if (id !== null) {
-      const state = get();
-      useNodeActivityStore.getState().select(activityRootId(id, state.getAgentNodes(), state.circuitOwnerships), id);
-    }
+    // Explicit navigation changes the entity focus. Utility and member tab
+    // selection are deliberately handled by the activity-card UI.
+    // The entity store owns navigation only; transient activity tab state
+    // lives in the activity store and is updated by UI-level actions.
     // A plain synchronous state write — the active-node highlight, terminal
     // focus, and file-watch all key off activeNodeId, so the switch must feel
     // instant with no backend round-trip in the way.

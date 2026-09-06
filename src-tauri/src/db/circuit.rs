@@ -976,18 +976,21 @@ pub fn commit_circuit_advance(
     Ok(())
 }
 
-/// Attach the spawned mesh agent node to its step (called by the seam
-/// right after the synchronous stage-1 row creation).
-pub fn set_circuit_step_agent_node(
+/// Attach a spawned agent and its optional presentation parent to a step.
+/// Parentage is supplied by the circuit domain/worker at the point the
+/// relationship is known; the persistence layer stores it without knowing
+/// anything about blueprint names or step roles.
+pub fn set_circuit_step_agent_node_with_parent(
     run_id: i64,
     node_id: &str,
     agent_node_id: i64,
+    parent_agent_node_id: Option<i64>,
 ) -> SqlResult<bool> {
     let db = super::write_conn();
     let updated = db.execute(
-        "UPDATE autopilot_circuit_run_steps SET agent_node_id = ?3 \
+        "UPDATE autopilot_circuit_run_steps SET agent_node_id = ?3, parent_agent_node_id = ?4 \
          WHERE run_id = ?1 AND node_id = ?2",
-        params![run_id, node_id, agent_node_id],
+        params![run_id, node_id, agent_node_id, parent_agent_node_id],
     )?;
     Ok(updated > 0)
 }
@@ -1084,14 +1087,7 @@ pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<AgentOwnershipRow>> {
 
 fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<Vec<AgentOwnershipRow>> {
     let mut stmt = db.prepare(
-        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name, r.state, \
-         CASE WHEN EXISTS (SELECT 1 FROM autopilot_circuit_run_steps reviewer \
-                           WHERE reviewer.run_id = r.id AND reviewer.node_id = 'reviewer' \
-                             AND reviewer.agent_node_id = s.agent_node_id) \
-              THEN COALESCE(r.source_agent_node_id, \
-                CASE WHEN json_extract(c.graph_json, '$.blueprint') = 'issue_driven_autopilot_review' \
-                     THEN (SELECT impl.agent_node_id FROM autopilot_circuit_run_steps impl \
-                           WHERE impl.run_id = r.id AND impl.node_id = 'implementer') END) END \
+        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name, r.state, s.parent_agent_node_id \
          FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
@@ -1140,9 +1136,9 @@ mod activity_ownership_tests {
             VALUES (1, 1, 'review', '{\"blueprint\":\"issue_driven_autopilot_review\"}');
           INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state)
             VALUES (1, 1, 1, 'issue:1', 'running');
-          INSERT INTO autopilot_circuit_run_steps (run_id, node_id, status, agent_node_id)
-            VALUES (1, 'implementer', 'completed', 1), (1, 'reviewer', 'running', 2),
-                   (1, 'verdict', 'running', 2), (1, 'other', 'running', 3);").unwrap();
+          INSERT INTO autopilot_circuit_run_steps (run_id, node_id, status, agent_node_id, parent_agent_node_id)
+            VALUES (1, 'implementer', 'completed', 1, NULL), (1, 'reviewer', 'running', 2, 1),
+                   (1, 'verdict', 'running', 2, 1), (1, 'other', 'running', 3, NULL);").unwrap();
         let read_parent = || {
             let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
             assert_eq!(rows.len(), 3, "multiple steps referring to a reviewer must not duplicate it");
@@ -1152,9 +1148,9 @@ mod activity_ownership_tests {
         assert_eq!(read_parent(), Some(1));
         assert_eq!(read_parent(), Some(1), "all grouping information is in the ledger");
         db.execute("UPDATE autopilot_circuits SET graph_json = '{}'", []).unwrap();
-        assert_eq!(read_parent(), None, "an unrelated graph is not inferred from agent names");
+        assert_eq!(read_parent(), Some(1), "presentation parentage survives without blueprint parsing");
         db.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = 1", []).unwrap();
-        assert_eq!(read_parent(), Some(1), "node-started reviews use their borrowed source");
+        assert_eq!(read_parent(), Some(1), "run source does not overwrite explicit step parentage");
         db.execute("UPDATE autopilot_circuit_runs SET state = 'paused'", []).unwrap();
         assert_eq!(read_parent(), Some(1));
         db.execute("UPDATE autopilot_circuit_runs SET state = 'completed'", []).unwrap();

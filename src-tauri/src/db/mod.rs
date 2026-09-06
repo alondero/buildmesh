@@ -645,6 +645,7 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
             node_id TEXT NOT NULL,
             agent_node_id INTEGER,
+            parent_agent_node_id INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL,
             status TEXT NOT NULL DEFAULT 'pending_slot',
             attempt INTEGER NOT NULL DEFAULT 0,
             outcome TEXT,

@@ -2128,6 +2128,14 @@ fn spawn_step_agent(
     node_id: &str,
 ) -> Result<(), String> {
     use crate::agent::spawn::WorktreePolicy;
+
+    // Activity parentage is derived once from the circuit graph and persisted
+    // with the step association. The DB layer does not inspect graph JSON or
+    // infer special step names.
+    let parent_agent_node_id = view
+        .graph
+        .nearest_upstream_agent_step(node_id)
+        .and_then(|parent_step| view.step(&parent_step).and_then(|step| step.agent_node_id));
     let kind = view
         .graph
         .node(node_id)
@@ -2257,7 +2265,12 @@ fn spawn_step_agent(
                 return Err(error.to_string());
             }
 
-            if !db::set_circuit_step_agent_node(run_id, node_id, new_node.id)
+            if !db::set_circuit_step_agent_node_with_parent(
+                run_id,
+                node_id,
+                new_node.id,
+                parent_agent_node_id,
+            )
                 .map_err(|error| format!("could not attach new agent to step: {}", error))?
             {
                 // Deletion can win the race after create_pending. If its
@@ -2318,7 +2331,12 @@ fn spawn_step_agent(
         return Err(error.to_string());
     }
 
-    if !db::set_circuit_step_agent_node(run_id, node_id, node.id)
+    if !db::set_circuit_step_agent_node_with_parent(
+        run_id,
+        node_id,
+        node.id,
+        parent_agent_node_id,
+    )
         .map_err(|error| format!("could not attach agent to step: {}", error))?
     {
         let _ = crate::services::agent_node::delete(node.id, true);

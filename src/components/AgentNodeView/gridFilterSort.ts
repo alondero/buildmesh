@@ -1,7 +1,7 @@
 import type { AgentNode } from '../../stores/agentNodeStore';
 import type { GridControls, ViewMode } from '../../stores/uiStore';
 import { scopeNodesForMode } from '../../lib/viewModes';
-import { groupActivityNodes, type NodeOwnerships } from '../../lib/nodeActivities';
+import { groupActivityNodes, indexAgentNodes, type NodeOwnerships } from '../../lib/nodeActivities';
 
 type GridControlValues = Pick<
   GridControls,
@@ -55,7 +55,7 @@ export function deriveVisibleNodes(
 ): AgentNode[] {
   if (viewMode === 'single') return [];
 
-  const nodes = groupActivityNodes(scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId, controls), agentNodes, ownerships);
+  const nodes = groupActivityNodes(scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId, controls), indexAgentNodes(agentNodes), ownerships);
 
   if (controls.gridSortBy === 'custom') return nodes;
 

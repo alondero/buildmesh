@@ -1,19 +1,21 @@
 import { useDraggable, useDroppable } from '@dnd-kit/core';
-import { Suspense, lazy, useEffect, type KeyboardEvent } from 'react';
+import { memo, Suspense, lazy, useMemo, type KeyboardEvent } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { activityRootId, activityStatus } from '../../lib/nodeActivities';
+import { activityStatus } from '../../lib/nodeActivities';
 import { useNodeActivityStore } from '../../stores/nodeActivityStore';
-import { AgentTerminal } from '../Terminal/Terminal';
+import { AgentTerminal, terminalManager } from '../Terminal/Terminal';
 import { GridNodeHeader } from './GridNodeHeader';
 import { NodeDropCue } from './nodeDrag';
 import { SemanticTurnBanner } from './SemanticTurnBanner';
+import { getStatusConfig } from '../../lib/status';
 
 // Keep the utility terminal's second xterm registry out of the initial bundle.
 const BuildRunTerminal = lazy(() => import('../Terminal/BuildRunTerminal').then((m) => ({ default: m.BuildRunTerminal })));
 
 interface NodeCardProps {
   nodeId: number;
+  memberIds?: readonly number[];
   isActive: boolean;
   onActivate: (nodeId: number) => void;
   /// When false (e.g. the maximized solo view), the card is not a drag target
@@ -42,25 +44,34 @@ interface NodeCardProps {
 /// is a drop target; collision is rect/pointer-based, so the xterm canvas in
 /// the body never blocks a drop. We deliberately ignore the draggable transform
 /// (a DragOverlay renders the moving preview) and just dim the source instead.
-export function NodeCard({ nodeId, isActive, onActivate, draggable = true }: NodeCardProps) {
-  const members = useAgentNodeStore(useShallow(s => {
-    const all = s.nodeIds.map(id => s.nodesById[id]).filter(Boolean);
-    return all.filter(n => n.status !== 'archived' && activityRootId(n.id, all, s.circuitOwnerships) === nodeId);
-  }));
+function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, draggable = true }: NodeCardProps) {
+  const memberIds = memberIdsProp ?? [nodeId];
+  const memberIdKey = memberIds.join(',');
+  const stableMemberIds = useMemo(() => memberIds, [memberIdKey]);
+  const members = useAgentNodeStore(useShallow(s => stableMemberIds
+    .map(id => s.nodesById[id])
+    .filter((node): node is NonNullable<typeof node> => !!node && node.status !== 'archived')));
   const activeNodeId = useAgentNodeStore(s => s.activeNodeId);
   const selection = useNodeActivityStore(s => s.selections[nodeId]);
-  const utilities = useNodeActivityStore(s => s.utilities);
+  const utilityModes = useNodeActivityStore(useShallow(s => stableMemberIds.map(id => s.utilities[id])));
+  const utilities = useMemo(
+    () => new Map(stableMemberIds.map((id, index) => [id, utilityModes[index]] as const)),
+    [stableMemberIds, utilityModes],
+  );
   const select = useNodeActivityStore(s => s.select);
   const openUtility = useNodeActivityStore(s => s.openUtility);
   const closeUtility = useNodeActivityStore(s => s.closeUtility);
   const activeMember = members.find(n => n.id === activeNodeId);
-  const selectedId = activeMember?.id ?? members.find(n => n.id === selection?.nodeId)?.id ?? nodeId;
-  const utilityMode = utilities[selectedId];
-  const showingUtility = selection?.nodeId === selectedId && !!selection?.utility && !!utilityMode;
+  const selectedId = members.find(n => n.id === selection?.nodeId)?.id ?? activeMember?.id ?? nodeId;
+  const selectedUtilityMode = utilities.get(selectedId);
+  const utilityNodeId = selectedUtilityMode
+    ? selectedId
+    : stableMemberIds.find(id => utilities.has(id));
+  const utilityMode = utilityNodeId == null ? undefined : utilities.get(utilityNodeId);
+  const utilityNode = utilityNodeId == null ? undefined : members.find(member => member.id === utilityNodeId);
+  const showingUtility = selection?.nodeId === selectedId && !!selection?.utility && !!selectedUtilityMode;
+  const utilityOpen = !!utilityMode;
   const cardActive = isActive || !!activeMember;
-  useEffect(() => {
-    if (activeMember && selection?.nodeId !== activeMember.id) select(nodeId, activeMember.id);
-  }, [activeMember?.id, selection?.nodeId, nodeId, select]);
   // Per-id subscription — see component docstring.
   const root = useAgentNodeStore((s) => s.nodesById[nodeId]);
   const node = useAgentNodeStore((s) => s.nodesById[selectedId]);
@@ -95,17 +106,22 @@ export function NodeCard({ nodeId, isActive, onActivate, draggable = true }: Nod
   const setRefs = (el: HTMLDivElement | null) => { setDragRef(el); setDropRef(el); };
 
   if (!node || !root) return null;
-  const hasTabs = members.length > 1 || members.some(n => utilities[n.id]);
-  const choose = (id: number, utility = false) => {
-    onActivate(id);
+  const hasTabs = members.length > 1 || members.some(n => utilities.has(n.id));
+  const choose = (id: number, utility = false, focusTerminal = !utility) => {
     select(nodeId, id, utility);
+    onActivate(id);
+    if (focusTerminal) {
+      requestAnimationFrame(() => terminalManager.getInstance(id)?.term.focus());
+    }
   };
   const tabs = members.flatMap(member => {
-    const label = member.id === nodeId ? (members.length > 1 ? 'Implementation' : 'Agent') : 'Review';
+    const label = member.id === nodeId
+      ? (members.length > 1 ? `Implementation · ${member.name}` : 'Agent')
+      : `Review · ${member.name}`;
     const agent = { key: `agent-${member.id}`, nodeId: member.id, utility: false, label, status: member.status };
-    const mode = utilities[member.id];
+    const mode = utilities.get(member.id);
     return mode ? [agent, { key: `utility-${member.id}`, nodeId: member.id, utility: true,
-      label: `${mode[0].toUpperCase()}${mode.slice(1)}${member.id === nodeId ? '' : ' · Review'}`, status: '' }] : [agent];
+      label: `${mode[0].toUpperCase()}${mode.slice(1)} · ${member.name}`, status: '' }] : [agent];
   });
 
   // Y/N/Enter shortcut handler for semantic attention. The keyboard
@@ -147,13 +163,23 @@ export function NodeCard({ nodeId, isActive, onActivate, draggable = true }: Nod
     >
       {members.length > 1 && (
         <div className="flex min-w-0 items-center justify-between gap-2 px-2 py-1 text-xs bg-bg-base">
-          <span className="truncate" title={root.name}>{root.name}</span>
-          <span role="status" className="shrink-0 text-accent-cyan">{activityStatus(root, members)}</span>
+          <span className="text-text-muted">Activity</span>
+          {(() => {
+            const status = activityStatus(root, members);
+            const tone = status.tone === 'warning'
+              ? getStatusConfig('awaiting_input').color
+              : status.tone === 'error'
+                ? getStatusConfig('error').color
+                : status.tone === 'idle'
+                  ? getStatusConfig('idle').color
+                  : getStatusConfig('running').color;
+            return <span role="status" className={`shrink-0 ${tone}`}>{status.label}</span>;
+          })()}
         </div>
       )}
       <GridNodeHeader
         nodeId={selectedId}
-        onBuildRun={(id, mode) => { onActivate(id); openUtility(nodeId, id, mode); }}
+        onBuildRun={(id, mode) => { openUtility(nodeId, id, mode); onActivate(id); }}
         dragHandleProps={draggable ? { ...listeners, ...attributes } : undefined}
       />
       {hasTabs && (
@@ -172,7 +198,7 @@ export function NodeCard({ nodeId, isActive, onActivate, draggable = true }: Nod
                   : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : null;
                 if (target === null) return;
                 event.preventDefault();
-                choose(tabs[target].nodeId, tabs[target].utility);
+                choose(tabs[target].nodeId, tabs[target].utility, false);
                 document.getElementById(`activity-${nodeId}-${tabs[target].key}`)?.focus();
               }}
               className={`shrink-0 px-3 py-2 text-xs border-b-2 ${selected ? 'border-accent-cyan text-accent-cyan' : 'border-transparent text-text-secondary hover:text-text-primary'}`}>
@@ -192,17 +218,21 @@ export function NodeCard({ nodeId, isActive, onActivate, draggable = true }: Nod
       <div role={hasTabs ? 'tabpanel' : undefined} id={`activity-panel-${nodeId}`}
         aria-labelledby={hasTabs ? `activity-${nodeId}-${showingUtility ? 'utility' : 'agent'}-${selectedId}` : undefined}
         className="min-h-0 flex-1 flex flex-col overflow-hidden bg-black">
-        {!showingUtility && <AgentTerminal key={node.id} nodeId={node.id} />}
-        {showingUtility && utilityMode && (
-          <Suspense fallback={<span className="p-2 text-text-muted">Loading terminal…</span>}>
-            <BuildRunTerminal
-              key={`${node.id}-${utilityMode}`}
-              sessionId={node.id}
-              mode={utilityMode}
-              useWorktree={node.use_worktree}
-              onClose={() => closeUtility(nodeId, node.id)}
-            />
-          </Suspense>
+        <div className={utilityOpen ? 'min-h-0 flex-[2] overflow-hidden' : 'min-h-0 flex-1 overflow-hidden'}>
+          <AgentTerminal key={node.id} nodeId={node.id} />
+        </div>
+        {utilityOpen && utilityMode && (
+          <div className="min-h-0 flex-1 overflow-hidden border-t border-border-default">
+            <Suspense fallback={<span className="p-2 text-text-muted">Loading terminal…</span>}>
+              <BuildRunTerminal
+                key={`${utilityNodeId}-${utilityMode}`}
+                sessionId={utilityNodeId ?? node.id}
+                mode={utilityMode}
+                useWorktree={utilityNode?.use_worktree ?? node.use_worktree}
+                onClose={() => utilityNodeId != null && closeUtility(nodeId, utilityNodeId)}
+              />
+            </Suspense>
+          </div>
         )}
       </div>
       {draggable && <NodeDropCue nodeId={nodeId} />}
@@ -218,3 +248,14 @@ export function NodeCard({ nodeId, isActive, onActivate, draggable = true }: Nod
     </div>
   );
 }
+
+function sameMemberIds(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+export const NodeCard = memo(NodeCardView, (previous, next) =>
+  previous.nodeId === next.nodeId
+  && previous.isActive === next.isActive
+  && previous.draggable === next.draggable
+  && previous.onActivate === next.onActivate
+  && sameMemberIds(previous.memberIds ?? [previous.nodeId], next.memberIds ?? [next.nodeId]));

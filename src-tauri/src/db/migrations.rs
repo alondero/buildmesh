@@ -144,7 +144,12 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// (issue #1555): adds nullable `agent_nodes.session_started_at`. This keeps
 /// per-node lifecycle state with the node and lets recovery use one conditional
 /// UPDATE without an app-settings EAV key or a correlated subquery.
-pub(crate) const SCHEMA_VERSION: u32 = 41;
+///
+/// v42 — Explicit circuit activity parentage: adds nullable
+/// `autopilot_circuit_run_steps.parent_agent_node_id`. The circuit domain
+/// resolves upstream agent relationships when a step is attached; the
+/// persistence read path remains independent of blueprint JSON and step IDs.
+pub(crate) const SCHEMA_VERSION: u32 = 42;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -478,6 +483,11 @@ const SPECS: &[ColumnSpec] = &[
     ColumnSpec { version: 38, table: "autopilot_circuit_runs", column: "queue_position", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
     // v41 - relational source binding for title-bar-launched runs.
     ColumnSpec { version: 41, table: "autopilot_circuit_runs", column: "source_agent_node_id", type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL", read_default: ReadDefault::Nullable },
+
+    // v42 - durable presentation relationship for related circuit agents.
+    // The worker derives this from the circuit graph once, at step attach
+    // time; reads never inspect graph JSON or infer step names.
+    ColumnSpec { version: 42, table: "autopilot_circuit_run_steps", column: "parent_agent_node_id", type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // coordinator_drive_prompts
