@@ -1773,6 +1773,7 @@ mod tests {
             model: None,
             effort: None,
             extra_args: None,
+            timeout_seconds: None,
         }
     }
 

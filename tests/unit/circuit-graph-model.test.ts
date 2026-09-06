@@ -97,6 +97,10 @@ describe('node catalogue', () => {
       model: null,
       effort: null,
       extra_args: null,
+      // #1219: v3 added `timeout_seconds`. Default to null ("inherit
+      // orchestrator default") so a freshly spawned node from the
+      // catalogue has no override.
+      timeout_seconds: null,
     });
     expect(defaultKind('inject_pty')).toEqual({
       type: 'inject_pty',
@@ -236,6 +240,9 @@ describe('parseGraph', () => {
       model: null,
       effort: null,
       extra_args: null,
+      // #1219: v3 added `timeout_seconds`; v1 graphs default it to null
+      // through the upgrade path (`normalizeKind`).
+      timeout_seconds: null,
     });
     expect(g.nodes[1].type).toEqual({
       type: 'inject_pty',

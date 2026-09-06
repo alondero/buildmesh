@@ -33,7 +33,7 @@ impl CircuitGraph {
                     "the blocker. This is review round {{retry.attempt}} of {{retry.max_retries}}."
                 ).into(),
                 name: Some("Code reviewer".into()), provider: Some(provider.into()),
-                model, effort, extra_args: None,
+                model, effort, extra_args: None, timeout_seconds: None,
             }),
             ("verdict", K::ReviewVerdict { target_node_id: reviewer() }),
             ("feedback", K::InjectPty {

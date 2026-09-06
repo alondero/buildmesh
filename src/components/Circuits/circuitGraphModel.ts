@@ -109,6 +109,7 @@ export function defaultKind(discriminator: string): CircuitNodeKind {
         model: null,
         effort: null,
         extra_args: null,
+        timeout_seconds: null,
       };
     case 'inject_pty':
       return { type: 'inject_pty', prompt: '', target_node_id: null };
@@ -265,6 +266,7 @@ function normalizeKind(kind: CircuitNodeKind): CircuitNodeKind {
         model: kind.model ?? null,
         effort: kind.effort ?? null,
         extra_args: kind.extra_args ?? null,
+        timeout_seconds: kind.timeout_seconds ?? null,
       };
     case 'inject_pty':
       return {
