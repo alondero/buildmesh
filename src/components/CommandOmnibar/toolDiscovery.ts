@@ -100,6 +100,90 @@ export const TOOL_DISCOVERY_GROUPS: readonly ToolDiscoveryGroup[] & _AssertDisco
   },
 ];
 
-/** Flat tile order for arrow-key navigation (row-major across groups). */
+/** Flat tile order for DOM ids and the virtual active index. */
 export const TOOL_DISCOVERY_TILES: readonly ToolDiscoveryTile[] =
   TOOL_DISCOVERY_GROUPS.flatMap((group) => group.tiles);
+
+export const TOOL_DISCOVERY_GRID_COLUMNS = 2;
+
+/**
+ * The DOM renders one grid per group. Arrow navigation treats those rows as
+ * one virtual grid, so vertical movement crosses group headings while keeping
+ * the same column. These rows are the actual per-group grid shape.
+ */
+export const TOOL_DISCOVERY_ROW_LAYOUT: readonly number[] =
+  TOOL_DISCOVERY_GROUPS.flatMap((group) => {
+    const rows: number[] = [];
+    for (
+      let start = 0;
+      start < group.tiles.length;
+      start += TOOL_DISCOVERY_GRID_COLUMNS
+    ) {
+      rows.push(
+        Math.min(TOOL_DISCOVERY_GRID_COLUMNS, group.tiles.length - start),
+      );
+    }
+    return rows;
+  });
+
+export type ToolDiscoveryArrowDirection = 'up' | 'down' | 'left' | 'right';
+
+/**
+ * Return the tile reached by an arrow in the palette's virtual grid. The DOM
+ * has one grid per group, but vertical movement crosses the group headings,
+ * wraps between the first and last rows, and clamps to the target row's
+ * available width.
+ */
+export function toolDiscoveryArrowTarget(
+  currentIndex: number,
+  direction: ToolDiscoveryArrowDirection,
+): number {
+  if (currentIndex < 0 || currentIndex >= TOOL_DISCOVERY_TILES.length) {
+    return 0;
+  }
+
+  let rowStart = 0;
+  let row = -1;
+  let column = -1;
+  for (
+    let rowIndex = 0;
+    rowIndex < TOOL_DISCOVERY_ROW_LAYOUT.length;
+    rowIndex += 1
+  ) {
+    const rowLength = TOOL_DISCOVERY_ROW_LAYOUT[rowIndex];
+    if (currentIndex < rowStart + rowLength) {
+      row = rowIndex;
+      column = currentIndex - rowStart;
+      break;
+    }
+    rowStart += rowLength;
+  }
+
+  if (row === -1) return currentIndex;
+
+  if (direction === 'left') {
+    return column > 0 ? currentIndex - 1 : currentIndex;
+  }
+
+  if (direction === 'right') {
+    return column < TOOL_DISCOVERY_ROW_LAYOUT[row] - 1
+      ? currentIndex + 1
+      : currentIndex;
+  }
+
+  const rowDelta = direction === 'down' ? 1 : -1;
+  const targetRowIndex =
+    (row + rowDelta + TOOL_DISCOVERY_ROW_LAYOUT.length) %
+    TOOL_DISCOVERY_ROW_LAYOUT.length;
+
+  let targetRowStart = 0;
+  for (let rowIndex = 0; rowIndex < targetRowIndex; rowIndex += 1) {
+    targetRowStart += TOOL_DISCOVERY_ROW_LAYOUT[rowIndex];
+  }
+
+  const targetColumn = Math.min(
+    column,
+    TOOL_DISCOVERY_ROW_LAYOUT[targetRowIndex] - 1,
+  );
+  return targetRowStart + targetColumn;
+}
