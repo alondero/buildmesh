@@ -236,8 +236,9 @@ The follow-up implementation in this worktree addresses the confirmed causes:
   and waits for fresh evidence or expiry rather than risking duplicate input.
   Process/turn stamps and report revisions are checked again before delivery.
   The process registry also versions accepted input under its writer lock:
-  an existing partial draft disallows continuation, and newer input prevents
-  both prompt staging and the separate Enter submission/retries.
+  an existing partial or ambiguous navigation state disallows continuation,
+  and newer input prevents both prompt staging and the separate Enter
+  submission/retries.
 - Missing OpenPr ownership fails the run before entering the action retry loop.
   Existing corrective wrap-up and review retry paths remain in place.
 - Failure/cancellation atomically records cleanup intent and releases run
@@ -246,8 +247,9 @@ The follow-up implementation in this worktree addresses the confirmed causes:
   run are excluded. Historic terminal runs are not retroactively opted in.
 - Classifier subprocess stdin/stdout are drained concurrently with bounded
   output and a deadline, avoiding pipe-buffer and inherited-output-handle hangs.
-  Windows descendants are contained by the existing JobHandle mechanism when
-  available.
+  Reader cleanup is bounded even if a descendant retains a pipe; Unix
+  classifiers run in a dedicated process group and Windows descendants are
+  contained by the existing JobHandle mechanism when available.
 
 These are bounded recovery changes, not an asynchronous scheduler rewrite:
 individual classifier and verification operations still occupy the serial

@@ -444,6 +444,13 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
     // a pipe buffer must not deadlock while the parent waits for it to exit.
     // The reader is capped at one byte above the accepted limit so oversized
     // output is detected without filesystem polling or unbounded allocation.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Put the classifier and any helper it launches in their own process
+        // group so timeout cleanup also closes inherited stdio handles.
+        cmd.process_group(0);
+    }
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -451,15 +458,18 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
     let mut input = child.stdin.take().ok_or_else(|| "classifier stdin was not piped".to_string())?;
     let output = child.stdout.take().ok_or_else(|| "classifier stdout was not piped".to_string())?;
     let prompt_bytes = prompt.as_bytes().to_vec();
-    let input_thread = std::thread::spawn(move || input.write_all(&prompt_bytes));
+    let (input_tx, input_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || { let _ = input_tx.send(input.write_all(&prompt_bytes)); });
     let output_oversized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let output_oversized_reader = output_oversized.clone();
-    let output_thread = std::thread::spawn(move || {
+    let (output_tx, output_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
         let mut bytes = Vec::with_capacity(MAX_OUTPUT.min(8 * 1024));
-        output.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes).map(|_| {
+        let result = output.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes).map(|_| {
             output_oversized_reader.store(bytes.len() > MAX_OUTPUT, std::sync::atomic::Ordering::Release);
             bytes
-        })
+        });
+        let _ = output_tx.send(result);
     });
     let job = crate::process_util::JobHandle::contain(child.id());
     let deadline = std::time::Instant::now() + timeout;
@@ -478,30 +488,58 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
             Ok(None) => {
                 timed_out = std::time::Instant::now() >= deadline;
                 over_budget = output_oversized.load(std::sync::atomic::Ordering::Acquire);
-                if let Some(job) = job.as_ref() { job.terminate(); }
-                crate::process_util::kill_process_tree(child.id());
+                terminate_classifier_tree(child.id(), job.as_ref());
                 let _ = child.kill();
                 let _ = child.wait();
                 break;
             }
             Err(error) => {
                 status_error = Some(format!("classifier wait failed: {error}"));
-                if let Some(job) = job.as_ref() { job.terminate(); }
-                crate::process_util::kill_process_tree(child.id());
+                terminate_classifier_tree(child.id(), job.as_ref());
                 let _ = child.kill();
                 let _ = child.wait();
                 break;
             }
         }
     }
+    if input_rx.recv_timeout(std::time::Duration::from_secs(1)).is_err() {
+        terminate_classifier_tree(child.id(), job.as_ref());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let bytes = match output_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+        Ok(result) => result.map_err(io_error)?,
+        Err(_) => {
+            // A descendant can inherit stdout after the direct child exits.
+            // Close the process group before giving up so the reader cannot
+            // keep the serial circuit worker blocked indefinitely.
+            terminate_classifier_tree(child.id(), job.as_ref());
+            let _ = child.kill();
+            let _ = child.wait();
+            output_rx.recv_timeout(std::time::Duration::from_secs(1))
+                .map_err(|_| "classifier output reader did not finish".to_string())?
+                .map_err(io_error)?
+        }
+    };
     drop(job);
-    let _ = input_thread.join();
-    let bytes = output_thread.join().map_err(|_| "classifier output reader panicked".to_string())?
-        .map_err(io_error)?;
     if let Some(error) = status_error { return Err(error); }
     if timed_out { return Err("classifier exceeded its time budget".into()); }
     if over_budget || bytes.len() > MAX_OUTPUT { return Err("classifier output exceeded 64 KiB".into()); }
     String::from_utf8(bytes).map_err(|error| format!("classifier output was not UTF-8: {error}"))
+}
+
+fn terminate_classifier_tree(pid: u32, job: Option<&crate::process_util::JobHandle>) {
+    if let Some(job) = job {
+        job.terminate();
+    }
+    crate::process_util::kill_process_tree(pid);
+    #[cfg(unix)]
+    {
+        let group = format!("-{pid}");
+        let _ = crate::process_util::command_no_window("kill")
+            .args(["-KILL", &group])
+            .status();
+    }
 }
 
 #[cfg(test)]
@@ -530,6 +568,17 @@ mod tests {
         let started = std::time::Instant::now();
         let result = run_classifier_command(cmd, &"prompt".repeat(10_000), std::time::Duration::from_millis(200));
         assert!(result.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn circuit_classifier_timeout_closes_inherited_output_handles() {
+        let mut cmd = crate::process_util::command_no_window("sh");
+        cmd.args(["-c", "sleep 60 & printf 'COMPLETED\\n'"]);
+        let started = std::time::Instant::now();
+        let result = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(2));
+        assert_eq!(parse_classification(&result.unwrap()), Some(Classification::Completed));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 

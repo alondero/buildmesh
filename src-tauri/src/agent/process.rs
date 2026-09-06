@@ -41,6 +41,7 @@ pub struct AgentProcess {
     writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
     input_version: std::sync::atomic::AtomicU64,
     input_buffer_len: std::sync::atomic::AtomicUsize,
+    input_bracketed_paste: AtomicBool,
     /// Handle to the dedicated writer thread. `kill_session` joins it
     /// with a bounded timeout so the close path can never hang the UI
     /// on a wedged writer (mirror of the `reader_handle` contract).
@@ -121,6 +122,8 @@ pub(crate) struct InputStamp {
     version: u64,
 }
 
+const UNKNOWN_INPUT_BUFFER_LEN: usize = usize::MAX;
+
 impl InputStamp {
     pub(crate) fn encode(self) -> String {
         format!("{}:{}", self.generation, self.version)
@@ -138,43 +141,90 @@ impl InputStamp {
 /// Update the CLI input-buffer estimate without treating terminal control
 /// packets as draft text. This is intentionally conservative: printable input
 /// grows the estimate, editing keys shrink it, and navigation/focus sequences
-/// leave it unchanged. Bracketed paste markers keep embedded newlines as text.
-fn input_buffer_len_after(mut len: usize, data: &[u8]) -> usize {
+/// make the state unknown until an explicit clear or submission. Bracketed
+/// paste markers keep embedded newlines as text.
+fn input_buffer_state_after(
+    mut len: usize,
+    mut bracketed_paste: bool,
+    data: &[u8],
+) -> (usize, bool) {
     let mut index = 0;
-    let mut bracketed_paste = false;
     while index < data.len() {
         match data[index] {
             0x1b => {
                 let start = index;
                 index += 1;
+                let mut sequence_complete = false;
                 if index < data.len() && matches!(data[index], b'[' | b']' | b'O') {
                     index += 1;
                     while index < data.len() {
                         let byte = data[index];
                         index += 1;
                         if (0x40..=0x7e).contains(&byte) {
+                            sequence_complete = true;
                             let sequence = &data[start..index];
                             bracketed_paste = match sequence {
                                 b"\x1b[200~" => true,
                                 b"\x1b[201~" => false,
-                                _ => bracketed_paste,
+                                _ => {
+                                    // Cursor movement, history recall, and
+                                    // focus events can change the provider's
+                                    // draft without carrying printable bytes.
+                                    // Treat those states as unknown/non-empty
+                                    // until an explicit clear or submission.
+                                    len = UNKNOWN_INPUT_BUFFER_LEN;
+                                    bracketed_paste
+                                }
                             };
                             break;
                         }
                     }
+                    // An incomplete escape sequence is ambiguous too. Keep
+                    // the paste mode that was already established, but fail
+                    // closed for continuation eligibility.
+                    if !sequence_complete { len = UNKNOWN_INPUT_BUFFER_LEN; }
+                } else if !bracketed_paste {
+                    len = UNKNOWN_INPUT_BUFFER_LEN;
                 }
                 continue;
             }
             b'\r' | b'\n' if !bracketed_paste => len = 0,
-            0x03 | 0x15 => len = 0,
-            0x08 | 0x7f => len = len.saturating_sub(1),
-            0x17 => len = len.saturating_sub(1),
+            // Newlines in a bracketed paste are literal content. The length
+            // estimate intentionally ignores them, but an empty paste must
+            // still fail closed after it is closed.
+            b'\r' | b'\n' if bracketed_paste && len == 0 => len = UNKNOWN_INPUT_BUFFER_LEN,
+            b'\r' | b'\n' if bracketed_paste => {}
+            0x03 if !bracketed_paste => {
+                // Ctrl-C aborts the current command line, so it is an
+                // explicit clear that makes an empty prompt safe to use.
+                len = 0;
+            }
+            _ if len == UNKNOWN_INPUT_BUFFER_LEN => {}
+            0x08 | 0x7f if !bracketed_paste => len = len.saturating_sub(1),
+            byte if !bracketed_paste && byte < 0x20 => {
+                // Cursor movement, history, kill-word, and other readline
+                // controls can edit text that is not represented in this
+                // PTY packet. Do not guess that the prompt is empty.
+                len = UNKNOWN_INPUT_BUFFER_LEN;
+            }
             byte if byte >= 0x20 && (byte & 0xc0) != 0x80 => len = len.saturating_add(1),
+            _ if bracketed_paste => {
+                // Bracketed paste may contain control bytes as literal
+                // content. Preserve the conservative unknown state until the
+                // paste is closed and an explicit submission or clear is
+                // observed.
+                len = UNKNOWN_INPUT_BUFFER_LEN;
+            }
             _ => {}
         }
         index += 1;
     }
-    len
+    (len, bracketed_paste)
+}
+
+#[cfg(test)]
+fn input_buffer_len_after(len: usize, data: &[u8]) -> usize {
+    input_buffer_state_after(len, false, data).0
 }
 
 impl AgentProcess {
@@ -198,6 +248,7 @@ impl AgentProcess {
             writer_tx: Mutex::new(Some(writer_tx)),
             input_version: std::sync::atomic::AtomicU64::new(0),
             input_buffer_len: std::sync::atomic::AtomicUsize::new(0),
+            input_bracketed_paste: AtomicBool::new(false),
             writer_handle: Mutex::new(writer_handle),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive,
@@ -218,7 +269,11 @@ impl AgentProcess {
 
     fn input_stamp(&self) -> Option<InputStamp> {
         let _guard = self.writer_tx.lock().unwrap();
-        if self.input_buffer_len.load(Ordering::Relaxed) != 0 { return None; }
+        if self.input_buffer_len.load(Ordering::Relaxed) != 0
+            || self.input_bracketed_paste.load(Ordering::Relaxed)
+        {
+            return None;
+        }
         Some(InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
     }
 
@@ -227,13 +282,16 @@ impl AgentProcess {
         let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
         if expected.is_some_and(|expected| expected != stamp) { return Ok(None); }
         let current_len = self.input_buffer_len.load(Ordering::Relaxed);
-        let next_len = input_buffer_len_after(current_len, &data);
+        let current_bracketed_paste = self.input_bracketed_paste.load(Ordering::Relaxed);
+        let (next_len, next_bracketed_paste) =
+            input_buffer_state_after(current_len, current_bracketed_paste, &data);
         match guard.as_ref() {
             Some(tx) => tx.try_send(data)?,
             None => return Err(std::sync::mpsc::TrySendError::Disconnected(data)),
         }
         let version = self.input_version.fetch_add(1, Ordering::Relaxed) + 1;
         self.input_buffer_len.store(next_len, Ordering::Relaxed);
+        self.input_bracketed_paste.store(next_bracketed_paste, Ordering::Relaxed);
         Ok(Some(InputStamp { generation: self.generation, version }))
     }
 
@@ -817,11 +875,22 @@ mod tests {
 
     #[test]
     fn input_stamp_ignores_navigation_and_tracks_backspace_to_empty() {
-        assert_eq!(input_buffer_len_after(0, b"\x1b[A\x1b[I"), 0);
+        assert_eq!(input_buffer_len_after(0, b"\x1b[A\x1b[I"), UNKNOWN_INPUT_BUFFER_LEN);
         assert_eq!(input_buffer_len_after(0, b"draft"), 5);
-        assert_eq!(input_buffer_len_after(5, b"\x1b[D\x7f\x7f\x7f\x7f\x7f"), 0);
+        assert_eq!(input_buffer_len_after(5, b"\x1b[D\x7f\x7f\x7f\x7f\x7f"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(input_buffer_len_after(5, b"\x7f\x7f\x7f\x7f\x7f"), 0);
         assert_eq!(input_buffer_len_after(5, b"\x03"), 0);
         assert_eq!(input_buffer_len_after(0, b"\x1b[200~line\n two\x1b[201~"), 8);
+        assert_eq!(input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x1b[D\x7f"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x15"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(input_buffer_len_after(0, b"\x10"), UNKNOWN_INPUT_BUFFER_LEN);
+    }
+
+    #[test]
+    fn input_buffer_state_preserves_bracketed_paste_across_packets() {
+        assert_eq!(input_buffer_state_after(0, false, b"\x1b[200~draft"), (5, true));
+        assert_eq!(input_buffer_state_after(5, true, b"\n"), (5, true));
+        assert_eq!(input_buffer_state_after(5, true, b"\x1b[201~"), (5, false));
     }
 
     fn insert_trivial_agent(
