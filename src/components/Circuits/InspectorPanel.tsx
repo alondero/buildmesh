@@ -164,22 +164,43 @@ const inputClass =
  * Number field that tolerates transient states (cleared input, "0",
  * partial typing): keeps a local draft while focused, commits any
  * finite number upward, and falls back to the committed value on blur.
+ *
+ * `nullable` lets the input represent "no override" — value=null →
+ * display is empty while not focused, and clearing the input commits
+ * null upward (mirrors how `model`/`effort` use the input type=null
+ * for "inherit default"). When omitted, value is treated as a finite
+ * number (legacy behaviour): the field rejects `null` at runtime and
+ * callers receive a `number`.
  */
 function NumberField({
   value,
   min,
   ariaLabel,
   testId,
+  nullable = false,
   onCommit,
 }: {
-  value: number;
+  value: number | null;
   min?: number;
   ariaLabel: string;
   testId: string;
-  onCommit: (n: number) => void;
+  nullable?: boolean;
+  onCommit: (n: number | null) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
-  const display = draft ?? String(value);
+  // When `nullable` is true, an absent (null) value shows an empty input
+  // so the user has a clear "no override" affordance and can re-enter a
+  // number; the comment in the field caption explains the override's
+  // effect.
+  const display =
+    draft ?? (nullable ? (value === null ? '' : String(value)) : String(value ?? 0));
+  // Non-nullable callers get a pure `number` callback by ignoring null
+  // (the input never emits null when `nullable=false`).
+  const commit = nullable
+    ? onCommit
+    : (n: number | null) => {
+        if (n !== null) onCommit(n);
+      };
   return (
     <input
       type="number"
@@ -189,12 +210,16 @@ function NumberField({
       data-testid={testId}
       onChange={(e) => {
         setDraft(e.target.value);
+        if (nullable && e.target.value === '') {
+          commit(null);
+          return;
+        }
         if (e.target.value !== '') {
           const n = Number(e.target.value);
-          if (Number.isFinite(n)) onCommit(n);
+          if (Number.isFinite(n)) commit(n);
         }
       }}
-      onFocus={() => setDraft(String(value))}
+      onFocus={() => setDraft(value === null ? '' : String(value))}
       onBlur={() => setDraft(null)}
       className={inputClass}
     />
@@ -587,7 +612,15 @@ export function InspectorPanel(props: InspectorPanelProps) {
             min={60}
             ariaLabel="Interval seconds"
             testId="inspector-interval"
-            onCommit={(interval_seconds) => onChange({ ...kind, interval_seconds })}
+            // Non-nullable field — the NumberField runtime never emits null
+            // for `nullable: false` callers, but TypeScript widens the
+            // callback to `number | null` for the nullable-overload
+            // variant; unwrap defensively here.
+            onCommit={(n) => {
+              if (n !== null) {
+                onChange({ ...kind, interval_seconds: n });
+              }
+            }}
           />
         </Field>
       )}
@@ -638,7 +671,11 @@ export function InspectorPanel(props: InspectorPanelProps) {
             min={0}
             ariaLabel="Max retries"
             testId="inspector-max-retries"
-            onCommit={(max_retries) => onChange({ ...kind, max_retries })}
+            onCommit={(n) => {
+              if (n !== null) {
+                onChange({ ...kind, max_retries: n });
+              }
+            }}
           />
         </Field>
       )}
@@ -721,6 +758,11 @@ function SpawnAgentNodeFields({
               model: null,
               effort: null,
               extra_args: null,
+              // #1219: clear timeout too — a stale value authored
+              // against the previous harness's contract must not
+              // serialise into the new spawn. The user re-enters
+              // it if the next harness accepts overrides.
+              timeout_seconds: null,
             });
           }}
           className={inputClass}
@@ -783,10 +825,33 @@ function SpawnAgentNodeFields({
         </Field>
       )}
 
+      {/* Per-step timeout (#1219). Rendered whenever a harness is
+          selected — no harness has yet advertised it does NOT support
+          timeout, so `supports_step_timeout` doesn't exist on
+          `HarnessCapabilities` yet. Once a harness proves it can't
+          honour an override, gate behind `caps.supports_step_timeout`
+          and add the boolean to the inventory; the inspector's
+          capability drift gate (tests/unit/circuits-inspector-capabilities.test.ts)
+          catches any divergence. */}
+      {caps && (
+        <Field label="Step timeout (seconds, blank = inherit default)">
+          <NumberField
+            value={kind.timeout_seconds ?? null}
+            min={1}
+            ariaLabel="Step timeout"
+            testId="inspector-timeout"
+            nullable
+            onCommit={(timeout_seconds) =>
+              onChange({ ...kind, timeout_seconds })
+            }
+          />
+        </Field>
+      )}
+
       {!caps && harnessId == null && (
         <p className="text-2xs text-text-muted">
-          No provider override selected — model, effort, and extra args
-          fall through to the mesh / application defaults at spawn.
+          No provider override selected — model, effort, extra args, and
+          timeout fall through to the mesh / application defaults at spawn.
         </p>
       )}
     </>

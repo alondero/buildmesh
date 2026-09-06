@@ -1919,7 +1919,10 @@ fn run_accepts_effects(run_id: i64) -> Result<bool, String> {
 /// for `reconcile_spawn_step` (line ~947) so the cascade + capability-mask
 /// contract can be tested without a Tauri runtime, AppHandle, or DB.
 /// Issue #1358 / slice 3 of #1355 — `provider` / `model` / `effort` /
-/// `extra_args` flow off the v2 AST here.
+/// `extra_args` flow off the v2 AST here. Issue #1219 adds
+/// `timeout_seconds` to the same seam; the orchestrator carries the
+/// value in `ExplicitSpawnOverrides` for the (separate) watchdog
+/// follow-up to consume.
 fn resolve_circuit_spawn_inputs(
     kind: &CircuitNodeKind,
 ) -> Result<ResolvedCircuitSpawn, String> {
@@ -1930,6 +1933,7 @@ fn resolve_circuit_spawn_inputs(
         model,
         effort,
         extra_args,
+        timeout_seconds,
     } = kind
     else {
         return Err(format!(
@@ -1944,6 +1948,9 @@ fn resolve_circuit_spawn_inputs(
     let provider_str = provider.clone();
     let prompt = prompt.clone();
     let name = name.clone();
+    // `timeout_seconds = 0` collapses to absent so a zero-int overflow
+    // at save time can't accidentally request an instant expiry.
+    let timeout_seconds = timeout_seconds.filter(|&t| t > 0);
     let explicit = ExplicitSpawnOverrides {
         model: model
             .as_deref()
@@ -1957,6 +1964,7 @@ fn resolve_circuit_spawn_inputs(
             .as_deref()
             .and_then(non_empty_trim)
             .map(str::to_string),
+        timeout_seconds,
     };
     Ok(ResolvedCircuitSpawn {
         prompt,
@@ -3497,6 +3505,7 @@ mod tests {
                         model: None,
                         effort: None,
                         extra_args: None,
+                        timeout_seconds: None,
                     },
                 },
                 CircuitNode {
@@ -4146,6 +4155,7 @@ mod tests {
         model: Option<&str>,
         effort: Option<&str>,
         extra_args: Option<&str>,
+        timeout_seconds: Option<u32>,
     ) -> CircuitNodeKind {
         CircuitNodeKind::SpawnAgentNode {
             prompt: "implement the fix".to_string(),
@@ -4154,6 +4164,7 @@ mod tests {
             model: model.map(str::to_string),
             effort: effort.map(str::to_string),
             extra_args: extra_args.map(str::to_string),
+            timeout_seconds,
         }
     }
 
@@ -4198,7 +4209,7 @@ mod tests {
     /// provider override.
     #[test]
     fn circuit_spawn_resolves_provider_override() {
-        let kind = spawn_kind(Some("codex"), None, None, None);
+        let kind = spawn_kind(Some("codex"), None, None, None, None);
         let resolved = resolve_circuit_spawn_inputs(&kind).expect("valid spawn");
         assert_eq!(resolved.provider_str.as_deref(), Some("codex"));
     }
@@ -4208,7 +4219,7 @@ mod tests {
     /// cascade falls through (issue #1148 AC #32).
     #[test]
     fn circuit_spawn_passes_model_through_explicit_override() {
-        let kind = spawn_kind(Some("anthropic"), Some("opus-4-1"), None, None);
+        let kind = spawn_kind(Some("anthropic"), Some("opus-4-1"), None, None, None);
         let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
         assert_eq!(resolved.explicit.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.explicit.effort, None);
@@ -4223,6 +4234,7 @@ mod tests {
             None,
             Some("high"),
             Some("--dangerously-skip-permissions"),
+            None,
         );
         let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
         assert_eq!(resolved.explicit.effort.as_deref(), Some("high"));
@@ -4241,7 +4253,7 @@ mod tests {
     /// author-visible identity.
     #[test]
     fn circuit_spawn_preserves_unknown_provider_string() {
-        let kind = spawn_kind(Some("not-a-real-thing"), None, None, None);
+        let kind = spawn_kind(Some("not-a-real-thing"), None, None, None, None);
         let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
         assert_eq!(resolved.provider_str.as_deref(), Some("not-a-real-thing"));
     }
@@ -4250,7 +4262,7 @@ mod tests {
     /// the cascade falls through.
     #[test]
     fn circuit_spawn_whitespace_overrides_collapse_to_absent() {
-        let kind = spawn_kind(None, Some("   "), Some("\t\n"), Some("   \t  "));
+        let kind = spawn_kind(None, Some("   "), Some("\t\n"), Some("   \t  "), None);
         let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
         assert!(resolved.explicit.model.is_none());
         assert!(resolved.explicit.effort.is_none());
@@ -4260,7 +4272,7 @@ mod tests {
     /// `name` is pass-through (no cascade layer owns it).
     #[test]
     fn circuit_spawn_name_passes_through_unchanged() {
-        let kind = spawn_kind(Some("claude_code"), None, None, None);
+        let kind = spawn_kind(Some("claude_code"), None, None, None, None);
         let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
         assert_eq!(resolved.name.as_deref(), Some("implementer"));
     }
@@ -4286,7 +4298,7 @@ mod tests {
     /// row, so this pure resolver remains free of database access.
     #[test]
     fn circuit_spawn_default_provider_is_none_when_unset() {
-        let kind = spawn_kind(None, None, None, None);
+        let kind = spawn_kind(None, None, None, None, None);
         let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
         assert!(
             resolved.provider_str.is_none(),

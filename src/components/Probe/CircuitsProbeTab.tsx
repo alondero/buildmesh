@@ -47,7 +47,6 @@ import {
   triggerCircuitNow,
   type CircuitBlueprintKind,
   type CircuitQueueEntry,
-  type CircuitTriggerKind,
   type CircuitWithRuns,
 } from '../../lib/tauri';
 import { isTerminalRunState } from '../Circuits/circuitGraphModel';
@@ -98,18 +97,14 @@ export function CircuitsProbeTab() {
    * `UsageTab` sets the precedent for a 1s tick on a relative-time label.
    */
   const [now, setNow] = useState(() => new Date());
-  // New-Circuit row: name + trigger shape, then straight into the editor.
+  // New-Circuit row (#1219): name + blueprint only — trigger, label, and
+  // interval editing moved into the canvas inspector. The Rust command's
+  // `validate_circuit_request` defaults `trigger_kind` to `Manual` when
+  // None, so a name-only create lands the walking skeleton with a
+  // Manual root that the inspector can rewire.
   const [newName, setNewName] = useState('');
   const [blueprint, setBlueprint] = useState<CircuitBlueprintKind>('walking_skeleton');
-  const [triggerKind, setTriggerKind] = useState<CircuitTriggerKind>('manual');
-  const [triggerLabel, setTriggerLabel] = useState('');
-  const [intervalSeconds, setIntervalSeconds] = useState(300);
   const isReviewBlueprint = blueprint === 'issue_driven_autopilot_review';
-  const effectiveTriggerKind: CircuitTriggerKind = isReviewBlueprint
-    ? 'github_issue_label'
-    : triggerKind;
-  const needsLabel =
-    effectiveTriggerKind === 'github_issue_label' || effectiveTriggerKind === 'github_pr_label';
 
   const load = useCallback(async () => {
     if (activeMeshId === null) {
@@ -191,19 +186,24 @@ export function CircuitsProbeTab() {
     runAction(async () => {
       const name = newName.trim();
       if (name === '') return;
+      // #1219: the row no longer authors trigger config. The walking
+      // skeleton lands with a Manual root, which the canvas inspector
+      // can rewire to Interval / GitHub-Issue / GitHub-PR. The wrapper's
+      // positional args default triggerKind='manual' when omitted, so
+      // we pass it explicitly here to keep the call shape stable for
+      // the IPC contract tests at tests/unit/circuits-probe-tab.test.tsx.
       const circuit = await createCircuit(
         activeMeshId!,
         name,
         '',
         isReviewBlueprint ? 2 : 1,
-        '', // the prompt is authored in the canvas editor's inspector now
-        effectiveTriggerKind,
-        effectiveTriggerKind === 'manual' ? undefined : triggerLabel.trim(),
-        effectiveTriggerKind === 'interval' ? intervalSeconds : undefined,
+        '', // the prompt is authored in the canvas editor's inspector
+        'manual',
+        undefined,
+        undefined,
         blueprint
       );
       setNewName('');
-      setTriggerLabel('');
       setBlueprint('walking_skeleton');
       openCircuitEditor(circuit.id);
     });
@@ -220,9 +220,10 @@ export function CircuitsProbeTab() {
     // Layout only — see the "Scroll ownership" note in the file header.
     <div className="flex flex-col h-full min-h-0 text-sm" data-testid="circuits-probe-tab">
       {/* New Circuit row — authoring itself happens in the canvas editor.
-          Outside the scroller, so it stays put while the ledger scrolls. */}
+          #1219 collapses this to name + blueprint only; trigger, label,
+          and interval editing all live in the canvas inspector now. */}
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
-        <div className="flex items-center gap-1 mb-1">
+        <div className="flex items-center gap-1">
           <input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
@@ -231,80 +232,25 @@ export function CircuitsProbeTab() {
             data-testid="circuit-name-input"
             className="flex-1 min-w-0 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-text-primary focus:outline-none"
           />
+          <select
+            value={blueprint}
+            onChange={(e) => setBlueprint(e.target.value as CircuitBlueprintKind)}
+            aria-label="Circuit blueprint"
+            data-testid="circuit-blueprint-select"
+            className="px-1.5 py-1 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none shrink-0"
+          >
+            <option value="walking_skeleton">Walking skeleton</option>
+            <option value="issue_driven_autopilot_review">Issue-driven Autopilot + PR review</option>
+          </select>
           <button
             type="button"
             onClick={handleCreate}
-            disabled={
-              busy ||
-              newName.trim() === '' ||
-              (needsLabel && triggerLabel.trim() === '')
-            }
+            disabled={busy || newName.trim() === ''}
             data-testid="circuit-create-button"
             className="px-2 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40 shrink-0"
           >
             New Circuit
           </button>
-        </div>
-        <div className="flex items-center gap-1">
-          <select
-            value={blueprint}
-            onChange={(e) => {
-              const next = e.target.value as CircuitBlueprintKind;
-              setBlueprint(next);
-              if (next === 'issue_driven_autopilot_review') {
-                setTriggerKind('github_issue_label');
-              }
-            }}
-            aria-label="Circuit blueprint"
-            data-testid="circuit-blueprint-select"
-            className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
-          >
-            <option value="walking_skeleton">Walking skeleton</option>
-            <option value="issue_driven_autopilot_review">Issue-driven Autopilot + PR review</option>
-          </select>
-          <select
-            value={effectiveTriggerKind}
-            onChange={(e) => setTriggerKind(e.target.value as CircuitTriggerKind)}
-            aria-label="Circuit trigger"
-            data-testid="circuit-trigger-select"
-            disabled={isReviewBlueprint}
-            className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
-          >
-            <option value="manual">Manual</option>
-            <option value="interval">Interval</option>
-            <option value="github_issue_label">Issue label</option>
-            <option value="github_pr_label">PR label</option>
-          </select>
-          {isReviewBlueprint && (
-            <span className="text-xs text-text-muted" title="This blueprint is triggered by labelled GitHub issues.">
-              GitHub issue trigger
-            </span>
-          )}
-          {needsLabel && (
-            <input
-              value={triggerLabel}
-              onChange={(e) => setTriggerLabel(e.target.value)}
-              placeholder="Label (e.g. buildmesh:run)"
-              aria-label="Trigger label"
-              data-testid="circuit-trigger-label-input"
-              className="flex-1 min-w-0 px-2 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
-            />
-          )}
-          {triggerKind === 'interval' && (
-            <label className="flex items-center gap-1 text-xs text-text-muted shrink-0">
-              every
-              <input
-                type="number"
-                min={60}
-                value={intervalSeconds}
-                onChange={(e) => setIntervalSeconds(Number(e.target.value) || 300)}
-                aria-label="Interval seconds"
-                data-testid="circuit-interval-input"
-                className="w-16 px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
-              />
-              s
-            </label>
-          )}
         </div>
       </div>
 

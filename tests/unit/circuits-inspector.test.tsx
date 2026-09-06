@@ -64,6 +64,10 @@ function spawnNode(
       model: null,
       effort: null,
       extra_args: null,
+      // #1219: v3 added `timeout_seconds` to `SpawnAgentNode`. The
+      // helper needs the field so individual tests can omit it
+      // (passing it via `overrides`) or override it.
+      timeout_seconds: null,
       ...overrides,
     },
   };
@@ -166,13 +170,18 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(screen.queryByTestId('inspector-model-input')).toBeNull();
     expect(screen.queryByTestId('inspector-effort-select')).toBeNull();
     expect(screen.queryByTestId('inspector-extra-args-input')).toBeNull();
+    // #1219: timeout is gated on `caps` (any harness selected). With
+    // no provider, caps is null, so no timeout input surfaces either.
+    expect(screen.queryByTestId('inspector-timeout')).toBeNull();
   });
 
-  it('renders model + closed-effort + extra-args when Claude Code is selected', async () => {
+  it('renders model + closed-effort + extra-args + timeout when Claude Code is selected', async () => {
     renderNode(spawnNode({ provider: 'anthropic' }));
     expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
     expect(screen.getByTestId('inspector-effort-select')).toBeTruthy();
     expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
+    // #1219: timeout surfaces once any harness is selected.
+    expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
     // Closed vocabulary: low / medium / high
     const effortSelect = screen.getByTestId(
       'inspector-effort-select',
@@ -183,11 +192,14 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(options).toContain('high');
   });
 
-  it('renders model + inline-config effort + extra-args when Codex is selected', () => {
+  it('renders model + inline-config effort + extra-args + timeout when Codex is selected', () => {
     renderNode(spawnNode({ provider: 'codex' }));
     expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
     expect(screen.getByTestId('inspector-effort-select')).toBeTruthy();
     expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
+    // #1219: timeout field rides the same capability-gating tier as
+    // model/effort/extra-args.
+    expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
     const effortSelect = screen.getByTestId(
       'inspector-effort-select',
     ) as HTMLSelectElement;
@@ -198,19 +210,24 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     );
   });
 
-  it('renders model + extra-args but NO effort when OpenCode is selected (no effort control)', () => {
+  it('renders model + extra-args + timeout but NO effort when OpenCode is selected (no effort control)', () => {
     renderNode(spawnNode({ provider: 'opencode' }));
     expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
     expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
-    // OpenCode has EffortControlKind::None — no dropdown
+    // OpenCode has EffortControlKind::None — no dropdown, but timeout
+    // (#1219) is independent of the effort capability and still renders.
     expect(screen.queryByTestId('inspector-effort-select')).toBeNull();
+    expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
   });
 
-  it('renders model + closed-effort + extra-args when Command Code is selected', () => {
+  it('renders model + closed-effort + extra-args + timeout when Command Code is selected', () => {
     renderNode(spawnNode({ provider: 'commandcode' }));
     expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
     expect(screen.getByTestId('inspector-effort-select')).toBeTruthy();
     expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
+    // #1219: timeout field is capability-gated on `caps` (any harness),
+    // not on the model/effort/extra-args capability set.
+    expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
     const effortSelect = screen.getByTestId(
       'inspector-effort-select',
     ) as HTMLSelectElement;
@@ -298,7 +315,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
   // harness in the AST. The Inspector clears them on the next emit
   // so the serialised circuit JSON never contains values the new
   // harness can't honour.
-  it('clears model/effort/extra_args on provider switch', () => {
+  it('clears model/effort/extra_args/timeout on provider switch', () => {
     const onChange = vi.fn();
     // Codex row with Anthropic-incompatible overrides set.
     renderNode(
@@ -307,6 +324,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
         model: 'gpt-5',
         effort: 'xhigh',
         extra_args: '--no-confirm',
+        timeout_seconds: 1800,
       }),
       onChange,
     );
@@ -317,11 +335,41 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(lastCall).toBeDefined();
     // Provider is now Anthropic, but every prior harness-specific
     // override is cleared so a stale value can't sneak through the
-    // capability mask at spawn time.
+    // capability mask at spawn time. #1219 extends the same rule to
+    // `timeout_seconds` so a stale budget authored against Codex
+    // can't survive into an Anthropic spawn.
     expect((lastCall as { provider: string }).provider).toBe('anthropic');
     expect((lastCall as { model: string | null }).model).toBeNull();
     expect((lastCall as { effort: string | null }).effort).toBeNull();
     expect((lastCall as { extra_args: string | null }).extra_args).toBeNull();
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBeNull();
+  });
+
+  // #1219: the timeout input is nullable — clearing the field commits
+  // `null` upward (inherit the orchestrator default), distinct from
+  // "type a number". A populated value commits the number; an empty
+  // input commits null. Both transitions must reach the AST.
+  it('commits the timeout value upward when the user types a number', () => {
+    const onChange = vi.fn();
+    renderNode(spawnNode({ provider: 'anthropic' }), onChange);
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '900' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toBeDefined();
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBe(900);
+  });
+
+  it('commits null when the user clears the timeout input', () => {
+    const onChange = vi.fn();
+    renderNode(
+      spawnNode({ provider: 'anthropic', timeout_seconds: 900 }),
+      onChange,
+    );
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toBeDefined();
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBeNull();
   });
 
   it('clears overrides when switching back to Default (mesh autopilot)', () => {

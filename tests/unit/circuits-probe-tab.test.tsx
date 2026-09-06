@@ -295,6 +295,9 @@ describe('CircuitsProbeTab', () => {
         concurrencyLimit: 1,
         // The prompt is authored in the canvas editor's inspector now.
         initialPrompt: '',
+        // #1219: the row no longer authors trigger config — the walking
+        // skeleton lands with a Manual root, and the canvas inspector
+        // owns trigger / label / interval from then on.
         triggerKind: 'manual',
         triggerLabel: null,
         intervalSeconds: null,
@@ -305,56 +308,13 @@ describe('CircuitsProbeTab', () => {
     });
   });
 
-  it('creates a GitHub-labelled circuit with its trigger label (issue #1208)', async () => {
-    mockBackend();
-    const user = userEvent.setup();
-    openProbeDestination('circuits');
-
-    await user.type(await screen.findByTestId('circuit-name-input'), 'issue-runner');
-    await user.selectOptions(screen.getByTestId('circuit-trigger-select'), 'github_issue_label');
-    // The create button stays disabled until the label is filled in.
-    expect(
-      (screen.getByTestId('circuit-create-button') as HTMLButtonElement).disabled
-    ).toBe(true);
-    await user.type(screen.getByTestId('circuit-trigger-label-input'), 'buildmesh:run');
-    await user.click(screen.getByTestId('circuit-create-button'));
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('create_circuit', expect.objectContaining({
-        name: 'issue-runner',
-        triggerKind: 'github_issue_label',
-        triggerLabel: 'buildmesh:run',
-      }));
-    });
-  });
-
-  it('creates the issue-driven Autopilot review blueprint with two agent slots', async () => {
-    mockBackend();
-    const user = userEvent.setup();
-    openProbeDestination('circuits');
-
-    await user.type(await screen.findByTestId('circuit-name-input'), 'autopilot-review');
-    await user.selectOptions(
-      screen.getByTestId('circuit-blueprint-select'),
-      'issue_driven_autopilot_review'
-    );
-    expect((screen.getByTestId('circuit-trigger-select') as HTMLSelectElement).value).toBe(
-      'github_issue_label'
-    );
-    expect((screen.getByTestId('circuit-trigger-select') as HTMLSelectElement).disabled).toBe(true);
-    await user.type(screen.getByTestId('circuit-trigger-label-input'), 'buildmesh:run');
-    await user.click(screen.getByTestId('circuit-create-button'));
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('create_circuit', expect.objectContaining({
-        name: 'autopilot-review',
-        concurrencyLimit: 2,
-        triggerKind: 'github_issue_label',
-        triggerLabel: 'buildmesh:run',
-        blueprint: 'issue_driven_autopilot_review',
-      }));
-    });
-  });
+  // #1219: GitHub-labelled and review-blueprint creation no longer live on
+  // the row — the row is name + blueprint only. Trigger kind / label /
+  // interval are authored in the canvas inspector. A follow-up issue
+  // adds the inspector's "Trigger type" select for root nodes so users
+  // can rewire Manual → Interval / GithubIssueLabel / GithubPrLabel
+  // without deleting-and-recreating; until then, the IPC contract tests
+  // below pin the wrapper's wire shape for those trigger kinds.
 
   it('Edit Flow opens the canvas editor for that circuit (#1209)', async () => {
     mockBackend();

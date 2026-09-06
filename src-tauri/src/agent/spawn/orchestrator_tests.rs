@@ -21,6 +21,7 @@ fn spawn_request_carries_explicit_overrides() {
             model: Some("opus-4-1".into()),
             effort: Some("high".into()),
             extra_args: None,
+            timeout_seconds: None,
         },
         worktree_policy: WorktreePolicy::RespectMesh,
     };

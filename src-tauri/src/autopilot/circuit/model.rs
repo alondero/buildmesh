@@ -24,10 +24,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Current blueprint AST version (issue #1356). v1 `graph_json` still
-/// parses: new optional fields default to `None`. Writers emit this
-/// version so a save upgrades the stored blueprint.
-pub const CIRCUIT_GRAPH_VERSION: i32 = 2;
+/// Current blueprint AST version (issue #1356 for the v1→v2 bump; issue
+/// #1219 added `timeout_seconds` for the v2→v3 bump). Older `graph_json`
+/// still parses: new optional fields default to `None`. Writers emit
+/// this version so a save upgrades the stored blueprint.
+pub const CIRCUIT_GRAPH_VERSION: i32 = 3;
 
 /// Server-owned circuit blueprints. Keeping the discriminator in the graph
 /// AST means runtime policy does not have to infer a blueprint from an
@@ -152,7 +153,9 @@ pub enum CircuitNodeKind {
     /// prompt (routed through `SpawnIntent::Loop`, so it stages as prefill).
     /// Optional harness fields (issue #1356) cascade through the same
     /// Node > Mesh > App > Native resolver later slices wire up; v1
-    /// JSON without them deserialises as `None`.
+    /// JSON without them deserialises as `None`. The v3 add
+    /// (`timeout_seconds`, issue #1219) carries a per-step wall-clock
+    /// budget for the orchestrator; v2 graphs default it to `None`.
     SpawnAgentNode {
         prompt: String,
         #[serde(default)]
@@ -165,6 +168,14 @@ pub enum CircuitNodeKind {
         effort: Option<String>,
         #[serde(default)]
         extra_args: Option<String>,
+        /// Optional per-step timeout in seconds (#1219). `None` = inherit
+        /// the orchestrator default. The orchestrator carries the value
+        /// via `ExplicitSpawnOverrides::timeout_seconds`; enforcement
+        /// (cancellation of stuck spawns) is a follow-up slice — this
+        /// AST addition is plumbing + UI only.
+        #[serde(default)]
+        #[ts(as = "Option<i32>")]
+        timeout_seconds: Option<u32>,
     },
     /// Inject `prompt` into an agent node over PTY, once that process is
     /// live. `target_node_id` names an upstream `SpawnAgentNode` id for
@@ -770,6 +781,7 @@ impl CircuitGraph {
                         model: None,
                         effort: None,
                         extra_args: None,
+                        timeout_seconds: None,
                     },
                 },
                 CircuitNode {
@@ -854,6 +866,7 @@ impl CircuitGraph {
                         model: None,
                         effort: None,
                         extra_args: None,
+                        timeout_seconds: None,
                     },
                 ),
                 node(
@@ -908,6 +921,7 @@ impl CircuitGraph {
                         model: None,
                         effort: None,
                         extra_args: None,
+                        timeout_seconds: None,
                     },
                 ),
                 node(
@@ -1082,6 +1096,7 @@ mod tests {
             model: None,
             effort: None,
             extra_args: None,
+            timeout_seconds: None,
         }
     }
 
@@ -1522,11 +1537,13 @@ mod tests {
                 model,
                 effort,
                 extra_args,
+                timeout_seconds,
             } => {
                 assert_eq!(prompt, "p");
                 assert_eq!(name.as_deref(), Some("fix-it"));
                 assert_eq!(provider, &None);
                 assert_eq!(model, &None);
+                assert_eq!(timeout_seconds, &None);
                 assert_eq!(effort, &None);
                 assert_eq!(extra_args, &None);
             }
@@ -1549,7 +1566,10 @@ mod tests {
     }
 
     #[test]
-    fn v2_targeted_and_harness_fields_round_trip() {
+    fn v3_targeted_harness_and_timeout_round_trip() {
+        // #1219: v3 added `timeout_seconds` to SpawnAgentNode. Older
+        // graphs (v1/v2) still parse — `#[serde(default)]` defaults the
+        // new field to `None`; this test round-trips a populated v3.
         let graph = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
             blueprint: None,
@@ -1563,6 +1583,7 @@ mod tests {
                         model: Some("opus-4-1".into()),
                         effort: Some("high".into()),
                         extra_args: Some("--dangerously-skip-permissions".into()),
+                        timeout_seconds: Some(1800),
                     },
                 ),
                 node(
@@ -1584,7 +1605,27 @@ mod tests {
         };
         let parsed = CircuitGraph::from_json(&graph.to_json().unwrap()).unwrap();
         assert_eq!(parsed, graph);
-        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.version, 3);
+    }
+
+    #[test]
+    fn v2_spawn_json_defaults_timeout_seconds_to_none() {
+        // #1219: a v2 graph_json (no `timeout_seconds` field at all) must
+        // still parse, default the new field to `None`, and pass
+        // `validate()`. This is the cross-version compatibility contract.
+        let parsed = CircuitGraph::from_json(
+            r#"{"version":2,"nodes":[
+                {"id":"s","type":{"type":"spawn_agent_node","prompt":"p","name":"fix-it"}}
+            ],"edges":[]}"#,
+        )
+        .unwrap();
+        match &parsed.node("s").unwrap().kind {
+            CircuitNodeKind::SpawnAgentNode { timeout_seconds, .. } => {
+                assert_eq!(timeout_seconds, &None);
+            }
+            other => panic!("expected spawn, got {other:?}"),
+        }
+        parsed.validate().unwrap();
     }
 
     // -- walking skeleton shape ----------------------------------------------
@@ -1607,6 +1648,7 @@ mod tests {
                 model,
                 effort,
                 extra_args,
+                timeout_seconds,
             } => {
                 assert_eq!(prompt, "", "spawn starts fresh — the prompt rides InjectPty");
                 assert_eq!(*name, None);
@@ -1614,6 +1656,7 @@ mod tests {
                 assert_eq!(model, &None);
                 assert_eq!(effort, &None);
                 assert_eq!(extra_args, &None);
+                assert_eq!(timeout_seconds, &None);
             }
             other => panic!("expected spawn node, got {:?}", other),
         }
@@ -1819,6 +1862,7 @@ mod tests {
             model: None,
             effort: None,
             extra_args: None,
+            timeout_seconds: None,
         };
         assert!(g.is_issue_driven_autopilot_review());
     }
