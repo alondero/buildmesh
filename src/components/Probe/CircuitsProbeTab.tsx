@@ -201,6 +201,7 @@ export function CircuitsProbeTab() {
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<CircuitProbeView>('activity');
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
+  const mountedRef = useRef(false);
   const loadRequestRef = useRef(0);
   // These snapshots only change when the backend payload or selected view
   // changes. In particular, the duration clock must not rebuild the row model.
@@ -249,8 +250,16 @@ export function CircuitsProbeTab() {
   const needsLabel =
     effectiveTriggerKind === 'github_issue_label' || effectiveTriggerKind === 'github_pr_label';
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const load = useCallback(async () => {
     const requestId = ++loadRequestRef.current;
+    if (!mountedRef.current) return;
     if (activeMeshId === null) {
       setRows([]);
       setQueue([]);
@@ -306,16 +315,18 @@ export function CircuitsProbeTab() {
   }, [hasLiveRun]);
 
   const runAction = async (fn: () => Promise<unknown>) => {
+    if (!mountedRef.current) return;
     setBusy(true);
     setActionError(null);
     try {
       await fn();
-      await load();
+      if (mountedRef.current) await load();
     } catch (err) {
+      if (!mountedRef.current) return;
       console.error('Circuit action failed:', err);
       setActionError(formatError(err));
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   };
 
@@ -369,15 +380,27 @@ export function CircuitsProbeTab() {
           aria-label="Circuit views"
           onKeyDown={(event) => {
             const index = CIRCUIT_PROBE_VIEWS.indexOf(view);
-            const target = event.key === 'ArrowRight' || event.key === 'ArrowDown'
-              ? (index + 1) % CIRCUIT_PROBE_VIEWS.length
-              : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
-                ? (index + CIRCUIT_PROBE_VIEWS.length - 1) % CIRCUIT_PROBE_VIEWS.length
-                : event.key === 'Home'
-                  ? 0
-                  : event.key === 'End'
-                    ? CIRCUIT_PROBE_VIEWS.length - 1
-                    : null;
+            let target: number | null = null;
+            switch (event.key) {
+              case 'ArrowRight':
+                target = (index + 1) % CIRCUIT_PROBE_VIEWS.length;
+                break;
+              case 'ArrowLeft':
+                target = (index + CIRCUIT_PROBE_VIEWS.length - 1) % CIRCUIT_PROBE_VIEWS.length;
+                break;
+              case 'ArrowDown':
+                target = (index + 2) % CIRCUIT_PROBE_VIEWS.length;
+                break;
+              case 'ArrowUp':
+                target = (index + CIRCUIT_PROBE_VIEWS.length - 2) % CIRCUIT_PROBE_VIEWS.length;
+                break;
+              case 'Home':
+                target = 0;
+                break;
+              case 'End':
+                target = CIRCUIT_PROBE_VIEWS.length - 1;
+                break;
+            }
             if (target === null) return;
             event.preventDefault();
             const nextView = CIRCUIT_PROBE_VIEWS[target];

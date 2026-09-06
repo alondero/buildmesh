@@ -236,6 +236,31 @@ describe('CircuitsProbeTab', () => {
     expect(screen.getByText('newer snapshot')).toBeTruthy();
   });
 
+  it('does not reload or set state when an action resolves after unmount', async () => {
+    mockBackend();
+    let resolveTrigger!: () => void;
+    const triggerPromise = new Promise<void>((resolve) => { resolveTrigger = resolve; });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'trigger_circuit_now') return triggerPromise;
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    openProbeDestination('circuits');
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId('circuit-trigger-7'));
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('trigger_circuit_now', { circuitId: 7 });
+
+    act(() => useUIStore.setState({ probeOpen: false }));
+    expect(screen.queryByTestId('circuits-probe-tab')).toBeNull();
+    await act(async () => {
+      resolveTrigger();
+      await triggerPromise;
+    });
+
+    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe')).toHaveLength(1);
+  });
+
   it('keeps failures visible in Activity and retains them in History', async () => {
     mockBackend({ runs: [
       { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } },
@@ -900,6 +925,10 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     await user.keyboard('{ArrowRight}');
     expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'History' }));
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('tab', { name: 'Manage' }).getAttribute('aria-selected')).toBe('true');
+    await user.keyboard('{Home}');
+    expect(screen.getByRole('tab', { name: /Activity/ }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('advances a live run duration without waiting for a ledger event', async () => {
