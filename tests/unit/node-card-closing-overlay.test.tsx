@@ -10,7 +10,7 @@
  * just the overlay wiring against the store flag.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
@@ -102,19 +102,10 @@ describe('NodeCard closing overlay', () => {
         5: { node_id: 5, kind: 'permission_request', description: 'Allow edit: src/lib/auth.ts' },
       },
     });
-    const { rerender } = renderCard(makeNode({ id: 5, status: 'awaiting_input' }));
+    renderCard(makeNode({ id: 5, status: 'awaiting_input' }));
     expect(screen.getByText('Allow edit: src/lib/auth.ts')).toBeTruthy();
 
-    rerender(
-      <NodeCard
-        node={makeNode({ id: 5, status: 'running' })}
-        isActive={false}
-        onActivate={vi.fn()}
-        onBuildRun={vi.fn()}
-        buildRunOpen={null}
-        setBuildRunOpen={vi.fn()}
-      />,
-    );
+    act(() => useAgentNodeStore.setState({ nodesById: { 5: makeNode({ id: 5, status: 'running' }) } }));
     expect(screen.queryByText('Allow edit: src/lib/auth.ts')).toBeNull();
   });
 

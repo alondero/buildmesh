@@ -290,4 +290,16 @@ describe('AgentNodeView grid controls', () => {
 
     expect(screen.getByTestId('grid-output').getAttribute('data-draggable')).toBe('false');
   });
+
+  it.each(['pinned', 'filtered'] as const)('groups a reviewer-only %s fallback when Single has no active node', (mode) => {
+    const implementation = makeNode({ id: 1, name: 'Implementation', is_pinned: false });
+    const reviewer = makeNode({ id: 2, name: 'Reviewer', is_pinned: true });
+    seedAgentNodes([implementation, reviewer], null);
+    useAgentNodeStore.setState({ activeNodeId: null, circuitOwnerships: {
+      2: { node_id: 2, parent_node_id: 1, run_id: 1, circuit_id: 1, circuit_name: 'Review', state: 'running' },
+    } });
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: mode, gridSearchQuery: 'Reviewer' });
+    render(<AgentNodeView />);
+    expect(renderedNodeIds()).toEqual([1]);
+  });
 });

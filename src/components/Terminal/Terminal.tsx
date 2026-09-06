@@ -275,7 +275,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   }, []);
 
   useEffect(() => {
-    if (nodeId === activeNodeId && instRef.current) {
+    if (nodeId === activeNodeId && instRef.current && document.activeElement?.getAttribute('role') !== 'tab') {
       instRef.current.term.focus();
     }
   }, [activeNodeId, nodeId]);
@@ -374,7 +374,9 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
       scrollDisposableRef.current = inst.term.onScroll(updateAtBottom);
       updateAtBottom();
 
-      if (nodeId === activeNodeId) {
+      // Activity tabs use arrow-key navigation; attaching a terminal must
+      // not steal focus from the tab strip before the next key press.
+      if (nodeId === activeNodeId && document.activeElement?.getAttribute('role') !== 'tab') {
         inst.term.focus();
       }
     });

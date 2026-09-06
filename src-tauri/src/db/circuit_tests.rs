@@ -539,7 +539,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
 
     assert_eq!(
         list_circuit_agent_ownerships().unwrap(),
-        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string(), "completed".to_string())]
+        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string(), "completed".to_string(), None)]
     );
 
     clear_circuit_step_agent_node(run_id, "spawn").unwrap();

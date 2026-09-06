@@ -5,4 +5,4 @@
  * Agent Node. Generated for the node store; the run id is the number shown
  * in the header pill.
  */
-export type CircuitAgentOwnership = { node_id: number, run_id: number, circuit_id: number, circuit_name: string, state: string, };
+export type CircuitAgentOwnership = { node_id: number, run_id: number, circuit_id: number, circuit_name: string, state: string, parent_node_id: number | null, };

@@ -1075,10 +1075,23 @@ pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64
 /// association lives in the circuit step ledger (not on `agent_nodes`), so
 /// the header can identify automated nodes without weakening the satellite-
 /// table invariant used by legacy Autopilot.
-pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String, String)>> {
+type AgentOwnershipRow = (i64, i64, i64, String, String, Option<i64>);
+
+pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<AgentOwnershipRow>> {
     let db = super::read_conn();
+    list_circuit_agent_ownerships_inner(&db)
+}
+
+fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<Vec<AgentOwnershipRow>> {
     let mut stmt = db.prepare(
-        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name, r.state \
+        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name, r.state, \
+         CASE WHEN EXISTS (SELECT 1 FROM autopilot_circuit_run_steps reviewer \
+                           WHERE reviewer.run_id = r.id AND reviewer.node_id = 'reviewer' \
+                             AND reviewer.agent_node_id = s.agent_node_id) \
+              THEN COALESCE(r.source_agent_node_id, \
+                CASE WHEN json_extract(c.graph_json, '$.blueprint') = 'issue_driven_autopilot_review' \
+                     THEN (SELECT impl.agent_node_id FROM autopilot_circuit_run_steps impl \
+                           WHERE impl.run_id = r.id AND impl.node_id = 'implementer') END) END \
          FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
@@ -1091,9 +1104,9 @@ pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String, 
          ORDER BY s.agent_node_id",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
     })?;
-    let mut ownerships: Vec<(i64, i64, i64, String, String)> = rows.collect::<SqlResult<_>>()?;
+    let mut ownerships: Vec<AgentOwnershipRow> = rows.collect::<SqlResult<_>>()?;
     let mut sources = db.prepare(
         "SELECT a.id, r.id, c.id, c.name, r.state FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
@@ -1101,12 +1114,54 @@ pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String, 
          WHERE a.status != 'archived' AND r.state IN ('pending','running','paused')",
     )?;
     for row in sources.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))? {
-        let source: (i64, i64, i64, String, String) = row?;
+        let (node, run, circuit, name, state) = row?;
+        let source = (node, run, circuit, name, state, None);
         ownerships.retain(|owned| owned.0 != source.0);
         ownerships.push(source);
     }
     ownerships.sort_by_key(|row| row.0);
     Ok(ownerships)
+}
+
+#[cfg(test)]
+mod activity_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn reviewer_activity_uses_run_relationships_and_survives_restart() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'activities', '/repo');
+          INSERT INTO agent_nodes (id, mesh_id, name, path, branch, env, provider, status)
+            VALUES (1, 1, 'implementation', '/repo', 'main', 'windows', 'terminal', 'ready'),
+                   (2, 1, 'review', '/review', 'main', 'windows', 'terminal', 'running'),
+                   (3, 1, 'unrelated', '/other', 'main', 'windows', 'terminal', 'running');
+          INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json)
+            VALUES (1, 1, 'review', '{\"blueprint\":\"issue_driven_autopilot_review\"}');
+          INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state)
+            VALUES (1, 1, 1, 'issue:1', 'running');
+          INSERT INTO autopilot_circuit_run_steps (run_id, node_id, status, agent_node_id)
+            VALUES (1, 'implementer', 'completed', 1), (1, 'reviewer', 'running', 2),
+                   (1, 'verdict', 'running', 2), (1, 'other', 'running', 3);").unwrap();
+        let read_parent = || {
+            let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
+            assert_eq!(rows.len(), 3, "multiple steps referring to a reviewer must not duplicate it");
+            assert_eq!(rows.iter().find(|r| r.0 == 3).unwrap().5, None);
+            rows.iter().find(|r| r.0 == 2).unwrap().5
+        };
+        assert_eq!(read_parent(), Some(1));
+        assert_eq!(read_parent(), Some(1), "all grouping information is in the ledger");
+        db.execute("UPDATE autopilot_circuits SET graph_json = '{}'", []).unwrap();
+        assert_eq!(read_parent(), None, "an unrelated graph is not inferred from agent names");
+        db.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = 1", []).unwrap();
+        assert_eq!(read_parent(), Some(1), "node-started reviews use their borrowed source");
+        db.execute("UPDATE autopilot_circuit_runs SET state = 'paused'", []).unwrap();
+        assert_eq!(read_parent(), Some(1));
+        db.execute("UPDATE autopilot_circuit_runs SET state = 'completed'", []).unwrap();
+        assert_eq!(read_parent(), Some(1), "a retained reviewer remains inspectable");
+        db.execute("UPDATE agent_nodes SET status = 'archived' WHERE id = 2", []).unwrap();
+        assert!(list_circuit_agent_ownerships_inner(&db).unwrap().iter().all(|r| r.0 != 2));
+    }
 }
 
 // ---------------------------------------------------------------------------

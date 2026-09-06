@@ -14,7 +14,8 @@ import { resolveSingleNode } from '../../lib/viewModes';
 import { deriveVisibleNodes } from './gridFilterSort';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
-import { NodeCard, type BuildRunState } from './NodeCard';
+import { NodeCard } from './NodeCard';
+import { activityRootId } from '../../lib/nodeActivities';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
@@ -23,14 +24,11 @@ const MIN_PANE_PERCENT = 15;
 
 interface ResizablePanesProps {
   nodes: AgentNode[];
-  onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
-  buildRunOpen: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
-  setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null) => void;
   // Pinned Grid mode disables card drag-reorder (wayfinder #982 / #986).
   draggable?: boolean;
 }
 
-function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen, draggable = true }: ResizablePanesProps) {
+function ResizablePanes({ nodes, draggable = true }: ResizablePanesProps) {
   const [widths, setWidths] = useState(() => equalSizes(nodes.length));
   // `idxRef` records which separator the user clicked, since the shared
   // `useResizable` hook fires `handleMouseDown` without knowing which divider
@@ -107,9 +105,6 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen, drag
                 nodeId={node.id}
                 isActive={node.id === activeNodeId}
                 onActivate={setActiveNode}
-                onBuildRun={onBuildRun}
-                buildRunOpen={buildRunOpen}
-                setBuildRunOpen={setBuildRunOpen}
                 draggable={draggable}
               />
             </div>
@@ -299,6 +294,8 @@ export function AgentNodeView() {
   const agentNodes = useAllAgentNodes();
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const nodesById = useAgentNodeStore(state => state.nodesById);
+  const ownerships = useAgentNodeStore(state => state.circuitOwnerships);
+  const activeRootId = activeNodeId === null ? null : activityRootId(activeNodeId, agentNodes, ownerships);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const reorderAgentNode = useAgentNodeStore(state => state.reorderAgentNode);
   const swapAgentNodes = useAgentNodeStore(state => state.swapAgentNodes);
@@ -323,7 +320,6 @@ export function AgentNodeView() {
   const gridStatusFilter = useUIStore(state => state.gridStatusFilter);
   const gridSortBy = useUIStore(state => state.gridSortBy);
   const gridSortDirection = useUIStore(state => state.gridSortDirection);
-  const [openBuildRun, setOpenBuildRun] = useState<BuildRunState>(null);
 
   // The ordered nodes the active grid mode renders. 'single' is not a grid
   // mode — it renders `singleNode` below instead, so its list stays empty.
@@ -334,6 +330,7 @@ export function AgentNodeView() {
       selectedMeshId,
       activeNodeId,
       { gridSearchQuery, gridProviderFilter, gridStatusFilter, gridSortBy, gridSortDirection },
+      ownerships,
     ),
     [
       viewMode,
@@ -345,6 +342,7 @@ export function AgentNodeView() {
       gridStatusFilter,
       gridSortBy,
       gridSortDirection,
+      ownerships,
     ],
   );
 
@@ -354,16 +352,18 @@ export function AgentNodeView() {
   // the old maximize derivation there is NO visibility check against a mesh
   // filter and no auto-clear effect — ticket #983 deleted both.
   const singleNode = useMemo(
-    () => (viewMode !== 'single'
-      ? null
-      : resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, {
+    () => {
+      if (viewMode !== 'single') return null;
+      const resolved = resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, {
           gridSearchQuery,
           gridProviderFilter,
           gridStatusFilter,
-        })),
+        });
+      return resolved ? nodesById[activityRootId(resolved.id, agentNodes, ownerships)] ?? resolved : null;
+    },
     // Controls shape (not each field) keeps the memo dep list stable and the
     // Filtered fallback controls-aware (`resolveSingleNode` narrows by them).
-    [viewMode, agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
+    [viewMode, agentNodes, activeNodeId, nodesById, ownerships, lastNonSingleMode, selectedMeshId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
   );
 
   useEffect(() => {
@@ -382,10 +382,10 @@ export function AgentNodeView() {
   // active node rather than constraining it.
   useEffect(() => {
     if (viewMode === 'single') return;
-    if (visibleNodes.length > 0 && activeNode && !visibleNodes.find(s => s.id === activeNode.id)) {
+    if (visibleNodes.length > 0 && activeNode && !visibleNodes.find(s => s.id === activeRootId)) {
       setActiveNode(visibleNodes[0].id);
     }
-  }, [viewMode, visibleNodes, activeNode, setActiveNode]);
+  }, [viewMode, visibleNodes, activeNode, activeRootId, setActiveNode]);
 
   // Fit terminal when active node changes (e.g. container might have resized)
   useEffect(() => {
@@ -547,9 +547,6 @@ export function AgentNodeView() {
                   nodeId={singleNode.id}
                   isActive={singleNode.id === activeNodeId}
                   onActivate={setActiveNode}
-                  onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
-                  buildRunOpen={openBuildRun}
-                  setBuildRunOpen={setOpenBuildRun}
                   draggable={false}
                 />
               </div>
@@ -564,17 +561,11 @@ export function AgentNodeView() {
           ) : visibleNodes.length <= 2 ? (
             <ResizablePanes
               nodes={visibleNodes}
-              onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
-              buildRunOpen={openBuildRun}
-              setBuildRunOpen={setOpenBuildRun}
               draggable={dragEnabled}
             />
           ) : (
             <GridSplitter
               nodes={visibleNodes}
-              onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
-              buildRunOpen={openBuildRun}
-              setBuildRunOpen={setOpenBuildRun}
               draggable={dragEnabled}
             />
           )}

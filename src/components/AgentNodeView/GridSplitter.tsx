@@ -31,9 +31,6 @@ function clampResizeAdjacentPair(baseline: number[], i: number, deltaPct: number
 
 interface GridSplitterProps {
   nodes: AgentNode[];
-  onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
-  buildRunOpen: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
-  setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null) => void;
   // Pinned Grid mode disables card drag-reorder (wayfinder #982 / #986 —
   // custom pinned ordering is map fog). Defaults to draggable so Mesh/All
   // keep today's behaviour.
@@ -42,7 +39,7 @@ interface GridSplitterProps {
 
 type DragAxis = 'col' | 'row';
 
-export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen, draggable = true }: GridSplitterProps) {
+export function GridSplitter({ nodes, draggable = true }: GridSplitterProps) {
   const rowCounts = getGridRows(nodes.length);
   const rows = rowCounts.length;
   const rowKey = rowCounts.join(',');
@@ -247,9 +244,6 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen,
                       nodeId={node.id}
                       isActive={node.id === activeNodeId}
                       onActivate={setActiveNode}
-                      onBuildRun={onBuildRun}
-                      buildRunOpen={buildRunOpen}
-                      setBuildRunOpen={setBuildRunOpen}
                       draggable={draggable}
                     />
                     {colIdx < rowCount - 1 && (

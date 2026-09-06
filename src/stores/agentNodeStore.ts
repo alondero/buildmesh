@@ -18,6 +18,8 @@ import { useMeshStore } from './meshStore';
 // `toggleNodePinned` hand-rolled is now a generic helper.
 import { withOptimistic, type OptimisticSurface } from '../lib/optimistic';
 import { attachAgentNodeListeners } from './agentNodeListeners';
+import { activityRootId } from '../lib/nodeActivities';
+import { useNodeActivityStore } from './nodeActivityStore';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
 // #359), along with the `EnvType`/`Provider`/`SessionStatus` unions it
@@ -415,7 +417,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
         api.listAgentNodes(),
         api.listAutopilotRuns().catch(() => []),
-        api.listCircuitAgentOwnerships().catch(() => []),
+        api.listCircuitAgentOwnerships().catch(() => Object.values(get().circuitOwnerships)),
         api.listSemanticTurns().catch(() => []),
       ]);
       const autopilotStates = Object.fromEntries(
@@ -823,6 +825,12 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   setActiveNode: (id) => {
+    // Explicit navigation (including reselecting the same awaiting agent)
+    // reveals its agent tab. Utility-tab clicks set their selection afterward.
+    if (id !== null) {
+      const state = get();
+      useNodeActivityStore.getState().select(activityRootId(id, state.getAgentNodes(), state.circuitOwnerships), id);
+    }
     // A plain synchronous state write — the active-node highlight, terminal
     // focus, and file-watch all key off activeNodeId, so the switch must feel
     // instant with no backend round-trip in the way.
