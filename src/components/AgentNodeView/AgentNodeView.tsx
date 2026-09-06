@@ -176,6 +176,48 @@ function NoNodesSplash() {
   );
 }
 
+/// Empty state for the Filtered view (issue #1609) when no node matches the
+/// active Grid Controls. Mirrors the Pinned empty state's structure
+/// (centered, max-w-sm, heading + body) but the call to action is "Clear
+/// filters" — the way out is relaxing the search/filters, not switching
+/// scopes. The CTA routes through the store action so the cleared set also
+/// persists (the same contract `resetGridControls` tests pin).
+export function FilteredEmptyState() {
+  const resetGridControls = useUIStore(state => state.resetGridControls);
+  return (
+    <div className="flex-1 flex items-center justify-center text-text-muted">
+      <div className="text-center max-w-sm">
+        <svg
+          className="mx-auto mb-4 w-8 h-8 text-text-muted"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+        </svg>
+        <p className="text-xl mb-2 text-text-primary font-sans font-semibold">No matching nodes</p>
+        <p className="text-sm text-text-secondary mb-6 font-sans">
+          No node matches the current search and filters. Clear them to see every node again.
+        </p>
+        <button
+          onClick={resetGridControls}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+            <line x1="22" y1="3" x2="2" y2="3" />
+          </svg>
+          Clear filters
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /// Empty state for Pinned Grid mode with 0 pinned nodes (wayfinder #982 /
 /// ticket #986). Mirrors the splash's structure (centered, max-w-sm,
 /// heading + body + accent-cyan CTA) but the call to action is "View All
@@ -301,8 +343,14 @@ export function AgentNodeView() {
   const singleNode = useMemo(
     () => (viewMode !== 'single'
       ? null
-      : resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId)),
-    [viewMode, agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId],
+      : resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, {
+          gridSearchQuery,
+          gridProviderFilter,
+          gridStatusFilter,
+        })),
+    // Controls shape (not each field) keeps the memo dep list stable and the
+    // Filtered fallback controls-aware (`resolveSingleNode` narrows by them).
+    [viewMode, agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
   );
 
   useEffect(() => {
@@ -497,8 +545,9 @@ export function AgentNodeView() {
             )
           ) : visibleNodes.length === 0 ? (
             // Empty states are mode-aware (ticket #986): Pinned explains
-            // pinning and offers All Nodes; mesh/all keep the splash.
-            viewMode === 'pinned' ? <PinnedEmptyState /> : <NoNodesSplash />
+            // pinning and offers All Nodes, Filtered offers clearing the
+            // search/filters (#1609); mesh/all keep the splash.
+            viewMode === 'pinned' ? <PinnedEmptyState /> : viewMode === 'filtered' ? <FilteredEmptyState /> : <NoNodesSplash />
           ) : visibleNodes.length <= 2 ? (
             <ResizablePanes
               nodes={visibleNodes}

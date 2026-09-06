@@ -1,7 +1,11 @@
 ﻿/**
- * Grid Controls (wayfinder #988 / #996) — the AgentNodeView must apply the
- * uiStore controls to the node sequence it hands to the grid, and manual
- * drag-and-drop must disappear while a non-custom sort is active.
+ * Grid Controls (wayfinder #988 / #996; Filtered view #1609) — the
+ * AgentNodeView must apply the uiStore controls to the node sequence it
+ * hands to the grid, and manual drag-and-drop must disappear while a
+ * non-custom sort is active. Since #1609 the search/filter narrowing is a
+ * property of the dedicated Filtered view: the same store controls must
+ * NOT narrow the other grids (a stale search never hides nodes behind the
+ * user's back in Mesh/Pinned/All).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
@@ -97,32 +101,34 @@ beforeEach(() => {
 });
 
 describe('AgentNodeView grid controls', () => {
-  it('filters by the search query independently', () => {
-    useUIStore.setState({ gridSearchQuery: 'runner' });
+  it('filters by the search query in the Filtered view', () => {
+    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridSearchQuery: 'runner' });
 
     render(<AgentNodeView />);
 
     expect(renderedNodeIds()).toEqual([1]);
   });
 
-  it('filters by provider independently', () => {
-    useUIStore.setState({ gridProviderFilter: 'anthropic' });
+  it('filters by provider in the Filtered view', () => {
+    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridProviderFilter: 'anthropic' });
 
     render(<AgentNodeView />);
 
     expect(renderedNodeIds()).toEqual([1, 3, 4]);
   });
 
-  it('filters by status independently', () => {
-    useUIStore.setState({ gridStatusFilter: 'idle' });
+  it('filters by status in the Filtered view', () => {
+    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridStatusFilter: 'idle' });
 
     render(<AgentNodeView />);
 
     expect(renderedNodeIds()).toEqual([2, 4]);
   });
 
-  it('composes search, provider, and status filters before rendering the grid', () => {
+  it('composes search, provider, and status filters before rendering the Filtered grid', () => {
     useUIStore.setState({
+      viewMode: 'filtered',
+      lastNonSingleMode: 'filtered',
       gridSearchQuery: 'a',
       gridProviderFilter: 'anthropic',
       gridStatusFilter: 'error',
@@ -131,6 +137,33 @@ describe('AgentNodeView grid controls', () => {
     render(<AgentNodeView />);
 
     expect(renderedNodeIds()).toEqual([3]);
+  });
+
+  it('does NOT let a stale search narrow the All view (#1609)', () => {
+    // The controls are the Filtered view's property now — All renders its
+    // full scope even when the store still carries search text.
+    useUIStore.setState({ gridSearchQuery: 'runner' });
+
+    render(<AgentNodeView />);
+
+    expect(renderedNodeIds()).toEqual([1, 2, 3, 4]);
+  });
+
+  it('does NOT let stale filters narrow the Mesh view (#1609)', () => {
+    useAgentNodeStore.setState({
+      nodesById: Object.fromEntries(NODES.map(n => [n.id, { ...n, mesh_id: 1 }])),
+      nodeIds: NODES.map(n => n.id),
+    });
+    useMeshStore.setState({ selectedMeshId: 1 });
+    useUIStore.setState({
+      viewMode: 'mesh',
+      gridSearchQuery: 'runner',
+      gridProviderFilter: 'anthropic',
+    });
+
+    render(<AgentNodeView />);
+
+    expect(renderedNodeIds()).toEqual([1, 2, 3, 4]);
   });
 
   it('applies the selected mesh scope before the other grid controls', () => {
@@ -180,8 +213,16 @@ describe('AgentNodeView grid controls', () => {
     expect(renderedNodeIds()).toEqual([2, 3, 4, 1]);
   });
 
-  it('renders the normal empty state when filters remove every node', () => {
-    useUIStore.setState({ gridSearchQuery: 'no such node' });
+  it('renders the Filtered empty state when no node matches (#1609)', () => {
+    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridSearchQuery: 'no such node' });
+
+    render(<AgentNodeView />);
+
+    expect(screen.getByText('No matching nodes')).toBeTruthy();
+  });
+
+  it('renders the normal splash when the ALL grid is empty of nodes', () => {
+    seedAgentNodes([], null);
 
     render(<AgentNodeView />);
 

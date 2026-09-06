@@ -25,6 +25,12 @@ import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
  * navigation, and sits in the right-hand utility cluster next to the
  * Settings and Remote Access pills. None of them show data in the bar
  * itself; they are entry points, not readouts.
+ *
+ * Issue #1609 reshaped the clusters: the utility pills dropped their
+ * borders and joined the switcher's 1300px label ladder (one toolbar, one
+ * degradation curve), and the GridControls "Search nodes" bar moved from
+ * the right cluster into the left, mounted only while the Filtered view is
+ * active — it is that view's control, not a global fixture.
  */
 
 // `SHORTCUT_CATALOG` is a static module constant; resolving the
@@ -154,9 +160,10 @@ function NavigationControls() {
   );
 }
 
-/** Shared icon+text pill for the right-hand utility cluster (Usage,
-    Settings, Remote Access). One skeleton keeps the three visually in
-    step; `active` gives Usage its cyan "surface is open" treatment. */
+/** Shared skeleton for the right-hand utility cluster (Usage, Settings,
+    Remote Access). Same style vocabulary as the ViewModeSwitcher segments
+    (issue #1609): borderless, card-hover, active cyan — the pills read as
+    part of the same toolbar instead of a separate bordered group. */
 function HeaderPillButton({ icon, label, onClick, title, ariaLabel, active = false, testId, ariaExpanded }: {
   icon: React.ReactNode;
   label: string;
@@ -175,18 +182,18 @@ function HeaderPillButton({ icon, label, onClick, title, ariaLabel, active = fal
       aria-label={ariaLabel}
       aria-expanded={ariaExpanded}
       title={title}
-      className={`flex h-9 shrink-0 items-center gap-2 rounded-md border px-2.5 text-sm transition-colors ${
+      className={`inline-flex h-9 shrink-0 items-center gap-1.5 px-2 py-1.5 rounded-md text-sm font-sans font-medium transition-colors ${
         active
-          ? 'border-accent-cyan/40 bg-accent-cyan/10 text-accent-cyan'
-          : 'border-border-default text-text-secondary hover:bg-bg-card hover:text-text-primary'
+          ? 'bg-bg-card text-accent-cyan'
+          : 'text-text-secondary hover:bg-bg-card hover:text-text-primary'
       }`}
     >
       {icon}
-      {/* Icon-only below 1150px window width (a viewport media query, not a
-          container query) — the pills are the first thing the degradation
-          ladder drops, and the first to come back. The aria-label above
-          keeps the accessible name stable either way. */}
-      <span className="max-[1150px]:hidden">{label}</span>
+      {/* Icon-only below 1300px window width — unified with the switcher's
+          ladder (issue #1609; previously the pills dropped at 1150px, so
+          between the two tiers the bar mixed labelled segments with icon
+          pills). The aria-label above keeps the accessible name stable. */}
+      <span className="max-[1300px]:hidden">{label}</span>
     </button>
   );
 }
@@ -351,6 +358,10 @@ export function TitleBar() {
   // header buttons use — no window-event side channel.
   const appSettingsOpen = useUIStore((s) => s.appSettingsOpen);
   const remoteAccessOpen = useUIStore((s) => s.remoteAccessOpen);
+  // #1609 — the Filtered view owns the Search Nodes bar; the mode lives in
+  // uiStore so Omnibar view commands ("Switch view: Filtered") slide the
+  // bar in through the same state the switcher writes.
+  const viewMode = useUIStore((s) => s.viewMode);
   const [isMaximized, setIsMaximized] = useState(false);
 
   // Track the maximized state so the middle window control can swap between
@@ -414,6 +425,15 @@ export function TitleBar() {
           )}
           <WordmarkImg />
           <ViewModeSwitcher />
+          {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
+              it mounts beside the switcher only while that mode is active.
+              Outside Filtered the wrapper renders empty (no dead placeholder
+              eating width); entering Filtered mounts it with a 300ms slide
+              so the appearance reads as intentional. `ml-1` separates it
+              from the last segment. */}
+          <div className="ml-1 overflow-hidden transition-all duration-300 ease-out">
+            {viewMode === 'filtered' && <GridControls />}
+          </div>
         </div>
 
         {/* Centre cell — the #1375 command field. Non-draggable so clicks
@@ -423,10 +443,6 @@ export function TitleBar() {
         {/* Right cell — clusters hug the end edge. Non-draggable children
             (inputs/pills/buttons) keep their clicks; empty space drags. */}
         <div data-tauri-drag-region className="flex items-center justify-end">
-          <div className="flex items-center pr-1 min-w-[122px]">
-            <GridControls />
-          </div>
-
           <div className="flex items-center gap-2 pr-1">
             <UsageButton />
             <HeaderPillButton

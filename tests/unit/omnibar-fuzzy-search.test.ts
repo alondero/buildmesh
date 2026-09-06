@@ -620,6 +620,7 @@ describe('indexCommands (issue #1410 §1)', () => {
       'view-mesh',
       'view-pinned',
       'view-all',
+      'view-filtered',
       'open-settings',
       'open-remote-access',
       'show-cheatsheet',
