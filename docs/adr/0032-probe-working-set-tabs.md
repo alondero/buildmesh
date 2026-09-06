@@ -71,9 +71,13 @@ and a deliberate echo of the tool grid it opens.
   item) open it; Escape, focusout, and mousedown-outside close it.
 - **Keyboard contracts:** the strip follows the WAI-ARIA tabs pattern
   (roving tabindex, Arrow/Home/End over stable positions, automatic
-  activation); the menu follows the menu pattern (arrows move focus through
-  ADR-0031's virtual 2-column grid via `toolDiscoveryArrowTarget`,
+  activation); the menu follows the menu pattern (arrows move focus only,
   Enter/click activates, Esc closes and restores focus to the trigger).
+  Menu arrow navigation follows the *visual* layout: the palette's virtual
+  2-column grid (`toolDiscoveryArrowTarget`) at wide widths, a linear walk
+  with inert horizontal arrows when the menu stacks to one column at
+  narrow widths — a keyboard model that disagrees with the layout on screen
+  is a defect, not a variation.
 - **The header keeps its job.** The inspector header remains the context
   surface (lens, subject, following/pinned mode, pin control); the rail is
   navigation only and deliberately carries no context information.
@@ -81,7 +85,9 @@ and a deliberate echo of the tool grid it opens.
   width the tab labels collapse to icons (names remain in `title` and
   `aria-label`), and the tool menu drops to a single column — a 2-column
   grid truncates tile names to a few characters at the dock's 240px
-  minimum (`probe-ui-checklist.md` §2: 240px is the case to design for).
+  minimum (`probe-ui-checklist.md` §2: 240px is the case to design for) —
+  with the menu's arrow keys switching to a linear walk so the keyboard
+  model matches the stacked layout.
 
 ## Consequences
 

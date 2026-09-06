@@ -178,17 +178,36 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
     const action = MENU_KEYS[e.key];
     if (!action) return;
     e.preventDefault();
-    const nextTab =
-      action === 'start'
-        ? TOOL_DISCOVERY_TILES[0].tab
-        : action === 'end'
-          ? TOOL_DISCOVERY_TILES[TOOL_DISCOVERY_TILES.length - 1].tab
-          : TOOL_DISCOVERY_TILES[
-              toolDiscoveryArrowTarget(
-                Math.max(0, TOOL_DISCOVERY_TILES.findIndex((t) => t.tab === menuFocusTab)),
-                action,
-              )
-            ].tab;
+    const currentIndex = Math.max(
+      0,
+      TOOL_DISCOVERY_TILES.findIndex((t) => t.tab === menuFocusTab),
+    );
+    let nextTab: ProbeTab;
+    if (action === 'start') {
+      nextTab = TOOL_DISCOVERY_TILES[0].tab;
+    } else if (action === 'end') {
+      nextTab = TOOL_DISCOVERY_TILES[TOOL_DISCOVERY_TILES.length - 1].tab;
+    } else if (narrow) {
+      // The menu renders as a single vertical column when the rail is
+      // narrow — the keyboard model must match the visual model, so the
+      // 2-column virtual grid (`toolDiscoveryArrowTarget`) is replaced by
+      // a linear walk and horizontal arrows are inert (there is no second
+      // column to reach).
+      if (action === 'left' || action === 'right') return;
+      if (action === 'down') {
+        nextTab = TOOL_DISCOVERY_TILES[
+          (currentIndex + 1) % TOOL_DISCOVERY_TILES.length
+        ].tab;
+      } else {
+        nextTab = TOOL_DISCOVERY_TILES[
+          (currentIndex - 1 + TOOL_DISCOVERY_TILES.length) % TOOL_DISCOVERY_TILES.length
+        ].tab;
+      }
+    } else {
+      nextTab = TOOL_DISCOVERY_TILES[
+        toolDiscoveryArrowTarget(currentIndex, action)
+      ].tab;
+    }
     // Menus use manual activation: arrows move focus only, Enter/click
     // switches — same contract as the omnibar's tool grid.
     setMenuFocusTab(nextTab);

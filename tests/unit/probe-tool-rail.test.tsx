@@ -303,12 +303,51 @@ describe('ProbeToolRail (ADR-0032)', () => {
     openPanel('files');
 
     fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
+    const menu = screen.getByRole('menu', { name: 'All tools' });
+    // Wide widths keep the 2-column virtual grid: right moves one column,
+    // down crosses group headings two tiles at a time.
+    fireEvent.keyDown(menu, { key: 'ArrowRight' });
     // Code group grid: files (active, focused) → ArrowRight → review.
-    fireEvent.keyDown(screen.getByRole('menu', { name: 'All tools' }), { key: 'ArrowRight' });
-
     expect(screen.getByTestId('probe-tool-menu-review').getAttribute('tabindex')).toBe('0');
-    expect(screen.getByTestId('probe-tool-menu-files').getAttribute('tabindex')).toBe('-1');
     expect(useUIStore.getState().probeTab).toBe('files');
+
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(screen.getByTestId('probe-tool-menu-properties').getAttribute('tabindex')).toBe('0');
+    expect(useUIStore.getState().probeTab).toBe('files');
+  });
+
+  it('walks the narrow menu as a 1D list — ArrowDown reaches the adjacent tile, horizontal arrows are inert', () => {
+    // Review-found defect: the menu stacks to one column when narrow, but
+    // the keyboard model kept the 2-column virtual grid — ArrowDown skipped
+    // every other tile and ArrowRight/Left jumped across phantom columns.
+    window.localStorage.setItem(PROBE_PANEL_STORAGE_KEY, '240');
+    openPanel('files');
+
+    fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
+    expect(document.activeElement?.id).toBe('probe-rail-menu-files');
+    const menu = screen.getByRole('menu', { name: 'All tools' });
+
+    // Under the old model this landed on 'worktrees' (a full virtual row down).
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(document.activeElement?.id).toBe('probe-rail-menu-review');
+
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(document.activeElement?.id).toBe('probe-rail-menu-worktrees');
+
+    // No second column exists — horizontal arrows do not move focus.
+    fireEvent.keyDown(menu, { key: 'ArrowRight' });
+    expect(document.activeElement?.id).toBe('probe-rail-menu-worktrees');
+    fireEvent.keyDown(menu, { key: 'ArrowLeft' });
+    expect(document.activeElement?.id).toBe('probe-rail-menu-worktrees');
+    expect(useUIStore.getState().probeTab).toBe('files');
+
+    // ArrowUp walks back and the column wraps at both ends.
+    fireEvent.keyDown(menu, { key: 'ArrowUp' });
+    expect(document.activeElement?.id).toBe('probe-rail-menu-review');
+    fireEvent.keyDown(menu, { key: 'ArrowUp' });
+    expect(document.activeElement?.id).toBe('probe-rail-menu-files');
+    fireEvent.keyDown(menu, { key: 'ArrowUp' });
+    expect(document.activeElement?.id).toBe('probe-rail-menu-usage');
   });
 
   it('collapses tab labels to icons and stacks the menu in one column at the narrow-width breakpoint', () => {
