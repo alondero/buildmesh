@@ -75,6 +75,9 @@ pub struct CircuitAgentOwnership {
     pub circuit_id: i64,
     pub circuit_name: String,
     pub state: String,
+    // Presentation relationship only; the circuit retains process ownership.
+    #[ts(as = "Option<i32>")]
+    pub parent_node_id: Option<i64>,
 }
 
 #[command]
@@ -82,12 +85,13 @@ pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, Str
     crate::db::list_circuit_agent_ownerships()
         .map(|rows| {
             rows.into_iter()
-                .map(|(node_id, run_id, circuit_id, circuit_name, state)| CircuitAgentOwnership {
+                .map(|(node_id, run_id, circuit_id, circuit_name, state, parent_node_id)| CircuitAgentOwnership {
                     node_id,
                     run_id,
                     circuit_id,
                     circuit_name,
                     state,
+                    parent_node_id,
                 })
                 .collect()
         })

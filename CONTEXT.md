@@ -71,6 +71,10 @@ _Avoid_: Session, pane, terminal node
 **Worktree Node**:
 An Agent Node operating on an isolated Git worktree branch of its parent Mesh. (Used when the Mesh property use_worktree is true, unless overridden).
 
+**Node Activity**:
+A selectable part of an Agent Node's view: its primary agent, a related review agent, or a build, run, or terminal activity. Related agents remain independent Agent Nodes with their own working directories and lifecycles.
+_Avoid_: Subnode (implies lifecycle ownership), circuit node (a graph vertex)
+
 **Pre-spawn Worktree**:
 A warm Git worktree checked out to the latest commit of a Mesh's **Base Ref** in detached HEAD state, sitting in the **Pre-spawn Pool** ready to be adopted instantly by a newly spawned **Worktree Node**.
 _Avoid_: Warm worktree, pre-warm worktree.

@@ -298,9 +298,9 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
 
     // A stale worker association is a harmless no-op, not a rusqlite
     // QueryReturnedNoRows sentinel from an UPDATE with zero matches.
-    assert!(!set_circuit_step_agent_node(run_id, "missing", 899).unwrap());
+    assert!(!set_circuit_step_agent_node_with_parent(run_id, "missing", 899, None).unwrap());
     // Attach the spawned agent node, then finish the step.
-    set_circuit_step_agent_node(run_id, "spawn", 900).unwrap();
+    set_circuit_step_agent_node_with_parent(run_id, "spawn", 900, None).unwrap();
     commit_circuit_advance(
         run_id,
         Some("completed"),
@@ -531,7 +531,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
         None,
     )
     .unwrap();
-    set_circuit_step_agent_node(run_id, "spawn", agent.id).unwrap();
+    set_circuit_step_agent_node_with_parent(run_id, "spawn", agent.id, None).unwrap();
 
     assert_eq!(count_active_circuit_agent_nodes_total().unwrap(), 1);
     commit_circuit_advance(run_id, Some("completed"), None, &[]).unwrap();
@@ -539,7 +539,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
 
     assert_eq!(
         list_circuit_agent_ownerships().unwrap(),
-        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string(), "completed".to_string())]
+        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string(), "completed".to_string(), None)]
     );
 
     clear_circuit_step_agent_node(run_id, "spawn").unwrap();

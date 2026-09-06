@@ -976,18 +976,21 @@ pub fn commit_circuit_advance(
     Ok(())
 }
 
-/// Attach the spawned mesh agent node to its step (called by the seam
-/// right after the synchronous stage-1 row creation).
-pub fn set_circuit_step_agent_node(
+/// Attach a spawned agent and its optional presentation parent to a step.
+/// Parentage is supplied by the circuit domain/worker at the point the
+/// relationship is known; the persistence layer stores it without knowing
+/// anything about blueprint names or step roles.
+pub fn set_circuit_step_agent_node_with_parent(
     run_id: i64,
     node_id: &str,
     agent_node_id: i64,
+    parent_agent_node_id: Option<i64>,
 ) -> SqlResult<bool> {
     let db = super::write_conn();
     let updated = db.execute(
-        "UPDATE autopilot_circuit_run_steps SET agent_node_id = ?3 \
+        "UPDATE autopilot_circuit_run_steps SET agent_node_id = ?3, parent_agent_node_id = ?4 \
          WHERE run_id = ?1 AND node_id = ?2",
-        params![run_id, node_id, agent_node_id],
+        params![run_id, node_id, agent_node_id, parent_agent_node_id],
     )?;
     Ok(updated > 0)
 }
@@ -1075,10 +1078,16 @@ pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64
 /// association lives in the circuit step ledger (not on `agent_nodes`), so
 /// the header can identify automated nodes without weakening the satellite-
 /// table invariant used by legacy Autopilot.
-pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String, String)>> {
+type AgentOwnershipRow = (i64, i64, i64, String, String, Option<i64>);
+
+pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<AgentOwnershipRow>> {
     let db = super::read_conn();
+    list_circuit_agent_ownerships_inner(&db)
+}
+
+fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<Vec<AgentOwnershipRow>> {
     let mut stmt = db.prepare(
-        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name, r.state \
+        "SELECT DISTINCT s.agent_node_id, r.id, c.id, c.name, r.state, s.parent_agent_node_id \
          FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
@@ -1091,22 +1100,67 @@ pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<(i64, i64, i64, String, 
          ORDER BY s.agent_node_id",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
     })?;
-    let mut ownerships: Vec<(i64, i64, i64, String, String)> = rows.collect::<SqlResult<_>>()?;
+    let mut ownerships: Vec<AgentOwnershipRow> = rows.collect::<SqlResult<_>>()?;
     let mut sources = db.prepare(
+        // Keep source overrides deterministic when an agent has more than one
+        // active circuit run; the later run is applied last below.
         "SELECT a.id, r.id, c.id, c.name, r.state FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          JOIN agent_nodes a ON a.id = r.source_agent_node_id \
-         WHERE a.status != 'archived' AND r.state IN ('pending','running','paused')",
+         WHERE a.status != 'archived' AND r.state IN ('pending','running','paused') \
+         ORDER BY a.id, r.id",
     )?;
     for row in sources.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))? {
-        let source: (i64, i64, i64, String, String) = row?;
+        let (node, run, circuit, name, state) = row?;
+        let source = (node, run, circuit, name, state, None);
         ownerships.retain(|owned| owned.0 != source.0);
         ownerships.push(source);
     }
     ownerships.sort_by_key(|row| row.0);
     Ok(ownerships)
+}
+
+#[cfg(test)]
+mod activity_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn reviewer_activity_uses_run_relationships_and_survives_restart() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'activities', '/repo');
+          INSERT INTO agent_nodes (id, mesh_id, name, path, branch, env, provider, status)
+            VALUES (1, 1, 'implementation', '/repo', 'main', 'windows', 'terminal', 'ready'),
+                   (2, 1, 'review', '/review', 'main', 'windows', 'terminal', 'running'),
+                   (3, 1, 'unrelated', '/other', 'main', 'windows', 'terminal', 'running');
+          INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json)
+            VALUES (1, 1, 'review', '{\"blueprint\":\"issue_driven_autopilot_review\"}');
+          INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state)
+            VALUES (1, 1, 1, 'issue:1', 'running');
+          INSERT INTO autopilot_circuit_run_steps (run_id, node_id, status, agent_node_id, parent_agent_node_id)
+            VALUES (1, 'implementer', 'completed', 1, NULL), (1, 'reviewer', 'running', 2, 1),
+                   (1, 'verdict', 'running', 2, 1), (1, 'other', 'running', 3, NULL);").unwrap();
+        let read_parent = || {
+            let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
+            assert_eq!(rows.len(), 3, "multiple steps referring to a reviewer must not duplicate it");
+            assert_eq!(rows.iter().find(|r| r.0 == 3).unwrap().5, None);
+            rows.iter().find(|r| r.0 == 2).unwrap().5
+        };
+        assert_eq!(read_parent(), Some(1));
+        assert_eq!(read_parent(), Some(1), "all grouping information is in the ledger");
+        db.execute("UPDATE autopilot_circuits SET graph_json = '{}'", []).unwrap();
+        assert_eq!(read_parent(), Some(1), "presentation parentage survives without blueprint parsing");
+        db.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = 1", []).unwrap();
+        assert_eq!(read_parent(), Some(1), "run source does not overwrite explicit step parentage");
+        db.execute("UPDATE autopilot_circuit_runs SET state = 'paused'", []).unwrap();
+        assert_eq!(read_parent(), Some(1));
+        db.execute("UPDATE autopilot_circuit_runs SET state = 'completed'", []).unwrap();
+        assert_eq!(read_parent(), Some(1), "a retained reviewer remains inspectable");
+        db.execute("UPDATE agent_nodes SET status = 'archived' WHERE id = 2", []).unwrap();
+        assert!(list_circuit_agent_ownerships_inner(&db).unwrap().iter().all(|r| r.0 != 2));
+    }
 }
 
 // ---------------------------------------------------------------------------

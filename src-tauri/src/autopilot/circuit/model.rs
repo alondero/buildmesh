@@ -549,6 +549,38 @@ impl CircuitGraph {
         out
     }
 
+    /// Find the nearest upstream agent step for an activity node.
+    ///
+    /// This is a graph/domain relationship, not a persistence concern. It
+    /// lets the worker persist a stable presentation parent when a reviewer
+    /// agent is attached, while remaining valid for user-authored graphs and
+    /// multiple review branches.
+    pub fn nearest_upstream_agent_step(&self, node_id: &str) -> Option<String> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        let mut parents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for edge in &self.edges {
+            parents.entry(edge.to.as_str()).or_default().push(edge.from.as_str());
+        }
+        let mut queue = VecDeque::from([node_id]);
+        let mut seen = HashSet::from([node_id]);
+        while let Some(current) = queue.pop_front() {
+            for parent in parents.get(current).into_iter().flatten() {
+                if !seen.insert(parent) {
+                    continue;
+                }
+                if self
+                    .node(parent)
+                    .is_some_and(|node| matches!(node.kind, CircuitNodeKind::SpawnAgentNode { .. }))
+                {
+                    return Some((*parent).to_string());
+                }
+                queue.push_back(parent);
+            }
+        }
+        None
+    }
+
     /// Incoming edges targeting `node_id`, in blueprint order.
     pub fn incoming(&self, node_id: &str) -> Vec<&CircuitEdge> {
         self.edges.iter().filter(|e| e.to == node_id).collect()

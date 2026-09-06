@@ -31,6 +31,7 @@ import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { traversalTargetId } from './lib/gridTraversal';
 import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding, triggerNewAgentShortcut } from './lib/gridShortcuts';
 import { scopeNodesForMode } from './lib/viewModes';
+import { activityRootId, groupActivityNodes, indexAgentNodes } from './lib/nodeActivities';
 import type { NonSingleViewMode } from './stores/uiStore';
 import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
 import { isMac } from './lib/platform';
@@ -369,8 +370,10 @@ function App() {
       const selectedMeshId = useMeshStore.getState().selectedMeshId;
       // #1609 — pass the Grid Controls so traversal in Filtered walks the
       // same narrowed set the grid renders (the other scopes ignore them).
-      const visibleNodes = scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id, filteredControls());
-      const targetId = traversalTargetId(visibleNodes, activeNode.id, direction);
+      const ownerships = useAgentNodeStore.getState().circuitOwnerships;
+      const nodeIndex = indexAgentNodes(agentNodes);
+      const visibleNodes = groupActivityNodes(scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id, filteredControls()), nodeIndex, ownerships);
+      const targetId = traversalTargetId(visibleNodes, activityRootId(activeNode.id, nodeIndex, ownerships), direction);
       if (targetId !== null) {
         useAgentNodeStore.getState().setActiveNode(targetId);
       }

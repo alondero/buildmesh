@@ -415,7 +415,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
         api.listAgentNodes(),
         api.listAutopilotRuns().catch(() => []),
-        api.listCircuitAgentOwnerships().catch(() => []),
+        api.listCircuitAgentOwnerships().catch(() => Object.values(get().circuitOwnerships)),
         api.listSemanticTurns().catch(() => []),
       ]);
       const autopilotStates = Object.fromEntries(
@@ -823,6 +823,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   setActiveNode: (id) => {
+    // Explicit navigation changes the entity focus. Utility and member tab
+    // selection are deliberately handled by the activity-card UI.
+    // The entity store owns navigation only; transient activity tab state
+    // lives in the activity store and is updated by UI-level actions.
     // A plain synchronous state write — the active-node highlight, terminal
     // focus, and file-watch all key off activeNodeId, so the switch must feel
     // instant with no backend round-trip in the way.

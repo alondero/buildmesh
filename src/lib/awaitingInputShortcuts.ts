@@ -1,4 +1,6 @@
 import { useAgentNodeStore, type AgentNode } from '../stores/agentNodeStore';
+import { activityRootId } from './nodeActivities';
+import { useNodeActivityStore } from '../stores/nodeActivityStore';
 
 /**
  * Cycle through agent nodes with `status === 'awaiting_input'` (issue #64).
@@ -88,7 +90,12 @@ export function nextAwaitingNodeId(): number | null {
 export function jumpToNextAwaitingNode(): number | null {
   const nextId = nextAwaitingNodeId();
   if (nextId !== null) {
-    useAgentNodeStore.getState().setActiveNode(nextId);
+    const state = useAgentNodeStore.getState();
+    state.setActiveNode(nextId);
+    useNodeActivityStore.getState().select(
+      activityRootId(nextId, state.nodesById, state.circuitOwnerships),
+      nextId,
+    );
   }
   return nextId;
 }

@@ -274,12 +274,6 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
     installTerminalZoomListener();
   }, []);
 
-  useEffect(() => {
-    if (nodeId === activeNodeId && instRef.current) {
-      instRef.current.term.focus();
-    }
-  }, [activeNodeId, nodeId]);
-
   // Focus guardian. In a multi-pane grid, background DOM churn — a re-render
   // that momentarily re-parents xterm's imperatively-appended `.xterm` element,
   // an overlay mounting/unmounting next to it, or a WebView2 focus hiccup — can
@@ -374,6 +368,8 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
       scrollDisposableRef.current = inst.term.onScroll(updateAtBottom);
       updateAtBottom();
 
+      // Initial activation focuses the terminal. Subsequent tab selection is
+      // delegated by NodeCard, so keyboard navigation keeps focus on the tab.
       if (nodeId === activeNodeId) {
         inst.term.focus();
       }
