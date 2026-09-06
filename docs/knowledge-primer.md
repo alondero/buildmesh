@@ -97,8 +97,16 @@ Tauri 2.11's raw Channel transport has a payload-shape boundary: frames smaller 
 
 Terminal container resize is coalesced by the shared `TerminalResizeScheduler`, used by both agent and build/run registries. A horizontal xterm resize reflows the normal-buffer scrollback, and every changed terminal size also reaches the PTY resize command, causing a full-screen TUI to repaint after the PTY resize. Do not restore per-observation or per-frame `fit()` calls during pane dragging. The scheduler keeps a short trailing quiet period, caps the maximum delay during a long drag, and performs the DOM measurement on the next animation frame.
 
-### Layout: Grid-Only
-Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid. The UI auto-scales 1–6 panes via CSS grid.
+### Canvas Layout (View Modes)
+The canvas exposes five **View Modes** (wayfinder #982; state model #983; rendering #986; Filtered added #1609). The active mode is a pure UI string-literal union — no backend serialises it. The grid render, keyboard traversal (#987), and unit tests share one visibility definition, written as pure helpers so the mode→node-set mapping is testable without spinning up the store:
+
+- **single** — Solo the active node; subsumes the old maximize toggle. Escape returns to the grid mode `single` was entered from.
+- **mesh** — Scope to the sidebar-selected mesh. With no selection, falls back to the active node's mesh, then the first loaded mesh.
+- **pinned** — Cross-mesh filter over `is_pinned`; deliberately never touches `selectedMeshId`.
+- **all** — Every loaded node, across every mesh. All Nodes carries a one-way invariant: `viewMode === 'all'` requires `selectedMeshId === null`. `setViewMode` enforces this transition directly so callers remain side-effect-free.
+- **filtered** — Cross-mesh view narrowed by the Grid Controls (free-text search + provider/status filters; the Search Nodes bar mounts in the title bar only while this mode is active).
+
+The five-segment control is the bespoke `ViewModeSwitcher` in the title bar.
 
 ### Probe Context Lenses (issue #1456)
 Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the
