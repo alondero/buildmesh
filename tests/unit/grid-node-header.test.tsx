@@ -1,19 +1,12 @@
-/**
- * The git-summary chip in the Agent Node header used to render all three
- * counts in one muted-grey span, so added / modified / deleted blurred into
- * a single "+3 ~2 -1" smudge that washed out against the mesh tint. Each
- * count now gets its own semantic colour (green / amber / red), zero counts
- * stay muted so the eye lands on the non-zero ones, and an open agent
- * file-explorer panel still overrides the whole chip to cyan to signal
- * which node owns the panel.
- */
+// Header identity, selected-session actions, recovery, and PR interactions.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 
 // Irrelevant to chip styling — stub it.
+vi.mock('../../src/hooks/useProviderList', () => ({ useProviderList: () => [], __resetSharedProviderListForTests: () => {} }));
 vi.mock('../../src/components/BuildRun/BuildRunDropdown', () => ({
   BuildRunDropdown: () => null,
 }));
@@ -66,7 +59,6 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
 });
 
 import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
-import { AUTOPILOT_PILL_STYLES } from '../../src/components/AgentNodeView/GridNodeHeader';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const NODE: AgentNode = {
@@ -95,115 +87,75 @@ const MESH: Mesh = {
   created_at: new Date(0).toISOString(),
 };
 
-describe('GridNodeHeader git-summary chip', () => {
+
+describe('GridNodeHeader contextual information and actions', () => {
   beforeEach(() => {
     seedAgentNodes([NODE], NODE.id);
+    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    summaryMock.mockReset();
-    prMock.mockReset();
-    openUrlMock.mockClear();
-  });
-
-  it('colours added / modified / deleted counts distinctly so the diff pops', () => {
-    summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
-    const { getByText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-
-    expect(getByText('+3').className).toContain('text-accent-green');
-    expect(getByText('~2').className).toContain('text-accent-amber');
-    expect(getByText('-1').className).toContain('text-accent-red');
-  });
-
-  it('mutes zero counts so the eye is drawn to the non-zero changes', () => {
-    summaryMock.mockReturnValue({ total: 3, added: 3, modified: 0, deleted: 0 });
-    const { getByText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-
-    expect(getByText('+3').className).toContain('text-accent-green');
-    expect(getByText('~0').className).toContain('text-text-muted');
-    expect(getByText('-0').className).toContain('text-text-muted');
-  });
-
-  it('overrides per-status colour with cyan when the probe is showing this node\'s review (#376)', () => {
-    // Issue #376 — the cyan "this is the node being reviewed" highlight
-    // follows the Probe Panel state (probeOpen + probeTab === 'review'
-    // + activeNodeId === node.id).
+    useUIStore.setState({ viewMode: 'mesh', probeOpen: false, probeTab: 'files' });
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     prMock.mockReturnValue(null);
-    useUIStore.setState({
-      probeOpen: true,
-      probeTab: 'review',
-    });
-    useAgentNodeStore.setState({ activeNodeId: NODE.id });
-    const { getByText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-
-    expect(getByText('+3').className).toContain('text-accent-cyan');
-    expect(getByText('~2').className).toContain('text-accent-cyan');
-    expect(getByText('-1').className).toContain('text-accent-cyan');
+    openInFileManagerMock.mockClear();
   });
 
-  it('keeps the per-status colours when the probe is on review but a different node is focused', () => {
-    // The cyan override is per-node: it should only fire for the node
-    // whose review the probe is actually showing.
-    summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
-    prMock.mockReturnValue(null);
-    useUIStore.setState({
-      probeOpen: true,
-      probeTab: 'review',
-    });
-    useAgentNodeStore.setState({ activeNodeId: 999 /* not this node */ });
-    const { getByText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-
-    expect(getByText('+3').className).toContain('text-accent-green');
-    expect(getByText('~2').className).toContain('text-accent-amber');
-    expect(getByText('-1').className).toContain('text-accent-red');
-  });
-});
-
-describe('GridNodeHeader worktree/root pill', () => {
-  beforeEach(() => {
-    seedAgentNodes([NODE], NODE.id);
-    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    summaryMock.mockReset();
+  it('keeps metadata available on demand without repeating it in the title', () => {
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    const header = screen.getByTestId('grid-node-header');
+    expect(header.textContent).not.toContain('Repository root');
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    const menu = screen.getByRole('menu', { name: 'Agent node actions' });
+    expect(menu.textContent).toContain('demo');
+    expect(menu.textContent).toContain('Repository root');
+    expect(menu.textContent).toContain('6 changed files');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Session details' }));
+    expect(useUIStore.getState().probeTab).toBe('properties');
+    expect(useUIStore.getState().probeOpen).toBe(true);
   });
 
-  it('shows a muted "worktree" pill when the node runs in a worktree', () => {
-    summaryMock.mockReturnValue(null);
-    const overrideNode = { ...NODE, use_worktree: true };
-    seedAgentNodes([overrideNode]);
-    const { getByText } = render(
-      <GridNodeHeader nodeId={overrideNode.id} onBuildRun={() => {}} />
-    );
-    const pill = getByText('worktree');
-    expect(pill.className).toContain('text-text-muted');
-    expect(pill.className).not.toContain('text-accent-cyan');
+  it('keeps the task title stable while actions and details target the selected reviewer', async () => {
+    const reviewer = { ...NODE, id: 2, name: 'Security reviewer', path: '/review-worktree' };
+    seedAgentNodes([NODE, reviewer], NODE.id);
+    render(<GridNodeHeader nodeId={2} titleNodeId={1} onBuildRun={() => {}} />);
+    expect(screen.getByTestId('grid-node-header').textContent).toContain('agent-1');
+    expect(screen.getByTestId('grid-node-header').textContent).not.toContain('Security reviewer');
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    expect(screen.getByRole('menuitem', { name: 'Close session · Security reviewer' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open in file explorer' }));
+    expect(openInFileManagerMock).toHaveBeenCalledWith('/review-worktree');
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View changes' }));
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
+    expect(useUIStore.getState().probeTab).toBe('review');
   });
 
-  it('shows a cyan "root" pill when the node runs in the repository root', () => {
-    summaryMock.mockReturnValue(null);
-    const { getByText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const pill = getByText('root');
-    expect(pill.className).toContain('text-accent-cyan');
-    expect(pill.className).toContain('font-semibold');
+  it('pins the selected session through the existing store action', async () => {
+    toggleNodePinnedMock.mockResolvedValue({ ...NODE, is_pinned: true });
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Pin node' }));
+    await waitFor(() => expect(toggleNodePinnedMock).toHaveBeenCalledWith(NODE.id));
+    expect(useAgentNodeStore.getState().nodesById[NODE.id].is_pinned).toBe(true);
   });
 
-  it('gives the pill a tooltip explaining what the label means', () => {
-    summaryMock.mockReturnValue(null);
-    const worktreeNode = { ...NODE, use_worktree: true };
-    useAgentNodeStore.setState({ nodesById: { [worktreeNode.id]: worktreeNode }, nodeIds: [worktreeNode.id] });
-    const { container, rerender } = render(
-      <GridNodeHeader nodeId={worktreeNode.id} onBuildRun={() => {}} />
-    );
-    expect(container.querySelector('[title="Agent runs in a git worktree"]')).toBeTruthy();
+  it('exposes circuit ownership in session details', () => {
+    useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
+      circuit_name: 'Review workflow', state: 'running', parent_node_id: null } } });
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    expect(screen.queryByTestId('circuit-run-pill')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    expect(screen.getByTestId('circuit-run-pill').textContent).toBe('Review workflow · #2');
+  });
 
-    // Restore the non-worktree state so the rerender reads the root path.
-    useAgentNodeStore.setState({
-      nodesById: { [NODE.id]: NODE },
-      nodeIds: [NODE.id],
-    });
-    rerender(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(container.querySelector('[title="Agent runs in the repository root"]')).toBeTruthy();
+  it('keeps aggregate attention actionable even when its session tab is offscreen', () => {
+    const onAttention = vi.fn();
+    render(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Needs input', tone: 'warning' }}
+      attentionCount={2} onAttention={onAttention} onBuildRun={() => {}} />);
+    expect(screen.getByRole('status', { name: 'Needs input' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /2 sessions need attention/ }));
+    expect(onAttention).toHaveBeenCalledOnce();
   });
 });
-
 describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
   beforeEach(() => {
     seedAgentNodes([NODE], NODE.id);
@@ -286,146 +238,6 @@ describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
     const isMac = navigator.platform.toUpperCase().includes('MAC');
     expect(title).toMatch(isMac ? /⌥\+G/ : /Alt\+G/);
     expect(title.toLowerCase()).toContain('restore');
-  });
-});
-
-describe('GridNodeHeader pin toggle (wayfinder #982 / #985)', () => {
-  beforeEach(() => {
-    seedAgentNodes([NODE], NODE.id);
-    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
-    summaryMock.mockReturnValue(null);
-    prMock.mockReturnValue(null);
-    toggleNodePinnedMock.mockReset();
-  });
-
-  it('renders an unpressed "Pin node" toggle when the node is unpinned', () => {
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const button = getByLabelText('Pin node');
-    expect(button.getAttribute('aria-pressed')).toBe('false');
-    expect(button.getAttribute('title')).toBe('Pin node');
-  });
-
-  it('renders a pressed "Unpin node" toggle when the node is pinned', () => {
-    const pinned = { ...NODE, is_pinned: true };
-    useAgentNodeStore.setState({ nodesById: { [pinned.id]: pinned }, nodeIds: [pinned.id] });
-    seedAgentNodes([pinned]);
-    const { getByLabelText } = render(<GridNodeHeader nodeId={pinned.id} onBuildRun={() => {}} />);
-    const button = getByLabelText('Unpin node');
-    expect(button.getAttribute('aria-pressed')).toBe('true');
-    expect(button.getAttribute('title')).toBe('Unpin node');
-  });
-
-  it('sits immediately before the maximize button in DOM order (#985)', () => {
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const all = Array.from(document.querySelectorAll('button'));
-    const pinIndex = all.indexOf(getByLabelText('Pin node'));
-    const maxIndex = all.indexOf(getByLabelText('Maximize agent node'));
-    expect(pinIndex).toBeGreaterThanOrEqual(0);
-    expect(maxIndex).toBe(pinIndex + 1);
-  });
-
-  it('invokes the shared store action, which calls toggle_node_pinned and patches the store', async () => {
-    toggleNodePinnedMock.mockResolvedValueOnce({ ...NODE, is_pinned: true });
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    fireEvent.click(getByLabelText('Pin node'));
-    expect(toggleNodePinnedMock).toHaveBeenCalledWith(NODE.id);
-    // The store's optimistic patch lands without waiting for the IPC.
-    const { waitFor } = await import('@testing-library/react');
-    await waitFor(() => {
-      // Issue #1384 — read by id from the normalized map.
-      expect(useAgentNodeStore.getState().nodesById[NODE.id]?.is_pinned).toBe(true);
-    });
-  });
-
-  it('shares the inline action surface (bg-bg-base/60 + border, 7Ã—7) with the maximise/close trio', () => {
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const cls = getByLabelText('Pin node').className;
-    expect(cls).toMatch(/\bh-7\b/);
-    expect(cls).toMatch(/\bw-7\b/);
-    expect(cls).toContain('bg-bg-base/60');
-    expect(cls).toContain('border-border-default');
-  });
-});
-
-/**
- * The close + maximize buttons used to render with `opacity-0
- * group-hover:opacity-100` and `text-text-muted`, so against the per-mesh
- * tinted header background they were effectively invisible until the user
- * hovered over the row. Each control now carries a `bg-bg-base/60` surface
- * plus a 1px border (matching BuildRunDropdown's trigger) so they read at
- * rest, and use `text-text-primary` so the icon shape is legible against
- * the mesh tint instead of fading into it.
- */
-describe('GridNodeHeader close + expand controls (icon visibility)', () => {
-  beforeEach(() => {
-    seedAgentNodes([NODE], NODE.id);
-    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
-    summaryMock.mockReturnValue(null);
-    prMock.mockReturnValue(null);
-  });
-
-  it('the maximize button is visible at rest (no opacity-0) and has a button surface', () => {
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const button = getByLabelText('Maximize agent node');
-    const cls = button.className;
-    // Regression guard for the "invisible until hover" bug: the control
-    // must NOT be hidden at rest.
-    expect(cls).not.toMatch(/\bopacity-0\b/);
-    expect(cls).not.toMatch(/\bgroup-hover:opacity-100\b/);
-    // Surface treatment — the dark fill pops against the mesh-tinted header.
-    expect(cls).toContain('bg-bg-base/60');
-    expect(cls).toContain('border');
-    expect(cls).toContain('border-border-default');
-    // Use a fully-visible text colour so the icon shape reads against the
-    // mesh tint, not a near-invisible grey.
-    expect(cls).toContain('text-text-primary');
-    expect(cls).not.toContain('text-text-muted');
-  });
-
-  it('the close button is visible at rest (no opacity-0) and has a button surface', () => {
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const button = getByLabelText('Close agent node');
-    const cls = button.className;
-    expect(cls).not.toMatch(/\bopacity-0\b/);
-    expect(cls).not.toMatch(/\bgroup-hover:opacity-100\b/);
-    expect(cls).toContain('bg-bg-base/60');
-    expect(cls).toContain('border');
-    expect(cls).toContain('border-border-default');
-    expect(cls).toContain('text-text-primary');
-    expect(cls).not.toContain('text-text-muted');
-  });
-
-  it('keeps the cyan hover treatment on the maximize button so the intent still reads', () => {
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const cls = getByLabelText('Maximize agent node').className;
-    // Hover must still flip to the cyan accent — that's what signals
-    // "this is the maximise command" at a glance.
-    expect(cls).toContain('hover:text-accent-cyan');
-    expect(cls).toContain('hover:bg-accent-cyan');
-  });
-
-  it('keeps the red hover treatment on the close button so the destructive intent reads', () => {
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const cls = getByLabelText('Close agent node').className;
-    expect(cls).toContain('hover:text-status-error');
-    expect(cls).toContain('hover:bg-status-error-bg');
-  });
-
-  it('maximise + close share the same h-7 w-7 surface as BuildRunDropdown for visual balance', () => {
-    // Pinned here so a future tweak to GridNodeHeader keeps the maximise
-    // and close surface matching BuildRunDropdown's. The Build-side
-    // counterpart lives in build-run-dropdown.test.tsx — that file mocks
-    // nothing about BuildRunDropdown, so the assertion can hit the real DOM.
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    for (const label of ['Maximize agent node', 'Close agent node']) {
-      const cls = getByLabelText(label).className;
-      expect(cls).toMatch(/\bh-7\b/);
-      expect(cls).toMatch(/\bw-7\b/);
-      expect(cls).toContain('bg-bg-base/60');
-      expect(cls).toContain('border-border-default');
-    }
   });
 });
 
@@ -525,7 +337,8 @@ describe('GridNodeHeader PR chip', () => {
     });
     const { getByText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
 
-    fireEvent.click(getByText('+3'));
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View changes' }));
 
     const state = useUIStore.getState();
     expect(state.probeOpen).toBe(true);
@@ -549,7 +362,8 @@ describe('GridNodeHeader PR chip', () => {
     useAgentNodeStore.setState({ activeNodeId: 999 });
     const { getByText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
 
-    fireEvent.click(getByText('+3'));
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View changes' }));
 
     expect(useAgentNodeStore.getState().activeNodeId).toBe(NODE.id);
   });
@@ -589,291 +403,6 @@ describe('GridNodeHeader PR chip', () => {
  *      matching the precedent in `WorktreeManagerTab.openInExplorer`
  *      and avoiding a toast storm when a worktree row is stale.
  */
-describe('GridNodeHeader reveal-in-explorer action', () => {
-  beforeEach(() => {
-    seedAgentNodes([NODE], NODE.id);
-    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
-    summaryMock.mockReturnValue(null);
-    prMock.mockReturnValue(null);
-    openInFileManagerMock.mockReset();
-    openInFileManagerMock.mockResolvedValue(undefined);
-  });
-
-  it('renders a folder-icon button with the expected aria-label', () => {
-    // Same label as `<PathHeader>` — one verb, one announcement across
-    // the app (review caught this when both used different strings).
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(getByLabelText('Open in file explorer')).toBeTruthy();
-  });
-
-  it('shares the inline trio surface treatment (bg-bg-base/60 + border, 7Ã—7)', () => {
-    // Mirrors the surface pinning in `close + expand controls` describe
-    // above, so a future tweak keeps the trio reading as one control
-    // group rather than a tacked-on folder icon.
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const cls = getByLabelText('Open in file explorer').className;
-    expect(cls).toMatch(/\bw-7\b/);
-    expect(cls).toMatch(/\bh-7\b/);
-    expect(cls).toContain('bg-bg-base/60');
-    expect(cls).toContain('border-border-default');
-    expect(cls).toContain('text-text-primary');
-    // Visibility regression guard — the same opacity-0 bug that hit
-    // maximise/close must not reappear here.
-    expect(cls).not.toMatch(/\bopacity-0\b/);
-    expect(cls).not.toMatch(/\bgroup-hover:opacity-100\b/);
-  });
-
-  it('uses an accent-cyan hover matching the existing PathHeader precedent', () => {
-    // Hover treatment deliberately reuses `<PathHeader>`'s `accent-cyan`
-    // so the verb reads the same wherever the user encounters it
-    // (review caught a divergent blue here previously).
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const cls = getByLabelText('Open in file explorer').className;
-    expect(cls).toContain('hover:text-accent-cyan');
-    // And it MUST NOT collide with the close button's error semantic.
-    expect(cls).not.toContain('status-error');
-  });
-
-  it('sits to the left of the maximise button in DOM order', () => {
-    // The placement was a user request: "between the build and maximise
-    // icons". (BuildRunDropdown is stubbed to render null in this file,
-    // so we anchor layout purely on the inline trio.)
-    const { getByLabelText, container } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const all = Array.from(container.querySelectorAll('button'));
-    const revealIndex = all.indexOf(getByLabelText('Open in file explorer'));
-    const maxIndex = all.indexOf(getByLabelText('Maximize agent node'));
-    expect(revealIndex).toBeLessThan(maxIndex);
-  });
-
-  it('passes the mesh root to openInFileManager when the node runs in root mode', () => {
-    // `use_worktree: false` â‡’ `getNodeGitPath` returns the mesh root
-    // verbatim. Verify the click handler resolves the same path the
-    // git-summary chip subscribes to — otherwise the user opens a
-    // different folder than the one git status is reporting on.
-    const node: AgentNode = { ...NODE, use_worktree: false };
-    useAgentNodeStore.setState({ nodesById: { [node.id]: node }, nodeIds: [node.id] });
-    const { getByLabelText } = render(<GridNodeHeader nodeId={node.id} onBuildRun={() => {}} />);
-    fireEvent.click(getByLabelText('Open in file explorer'));
-    expect(openInFileManagerMock).toHaveBeenCalledWith('/repo');
-  });
-
-  it('passes the worktree subdir when the node runs in a worktree', () => {
-    // `use_worktree: true` â‡’ `getNodeGitPath` returns
-    // `<mesh>/.claude/worktrees/<name>`. The user expects to be dropped
-    // into the same directory the agent is editing, not the parent.
-    const node: AgentNode = { ...NODE, use_worktree: true, worktree_name: 'feature-x' };
-    useAgentNodeStore.setState({ nodesById: { [node.id]: node }, nodeIds: [node.id] });
-    const { getByLabelText } = render(<GridNodeHeader nodeId={node.id} onBuildRun={() => {}} />);
-    fireEvent.click(getByLabelText('Open in file explorer'));
-    expect(openInFileManagerMock).toHaveBeenCalledWith('/repo/.claude/worktrees/feature-x');
-  });
-
-  it('falls back to the mesh root when a worktree-mode node has no worktree_name', () => {
-    // Defensive: `getNodeGitPath` falls back when worktree_name is null
-    // (the row can be published before the worktree is provisioned);
-    // pin the fallback here so a future "throw if no worktree" change
-    // in the path helper doesn't silently break reveal.
-    const node: AgentNode = { ...NODE, use_worktree: true, worktree_name: null };
-    useAgentNodeStore.setState({ nodesById: { [node.id]: node }, nodeIds: [node.id] });
-    const { getByLabelText } = render(<GridNodeHeader nodeId={node.id} onBuildRun={() => {}} />);
-    fireEvent.click(getByLabelText('Open in file explorer'));
-    expect(openInFileManagerMock).toHaveBeenCalledWith('/repo');
-  });
-
-  it('tool-tip surfaces the resolved path so users know which folder will open', () => {
-    // Worktree nodes in particular open into a non-obvious subdir; the
-    // tooltip is the only affordance that previews the destination
-    // before the click.
-    const node: AgentNode = { ...NODE, use_worktree: true, worktree_name: 'feature-x' };
-    useAgentNodeStore.setState({ nodesById: { [node.id]: node }, nodeIds: [node.id] });
-    const { getByLabelText } = render(<GridNodeHeader nodeId={node.id} onBuildRun={() => {}} />);
-    const btn = getByLabelText('Open in file explorer');
-    expect(btn.getAttribute('title')).toBe(
-      'Open in file explorer (/repo/.claude/worktrees/feature-x)',
-    );
-  });
-
-  it('swallows IPC errors with console.error (no unhandled rejection)', async () => {
-    // The Tauri command rejects with `"Path does not exist"` when the
-    // worktree has been pruned between renders — exactly the case
-    // WorktreeManagerTab.openInExplorer handles by silencing. If we
-    // let it bubble here, every stale-row click would land an unhandled
-    // rejection in the console. Verify the regression guard.
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    openInFileManagerMock.mockRejectedValueOnce('Path does not exist: /old/worktree');
-    const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-
-    // Click is sync; the handler catches and console.errors. If the
-    // try/catch were ever removed, the rejected promise would surface
-    // as an unhandled rejection — Vitest reports those as failures.
-    fireEvent.click(getByLabelText('Open in file explorer'));
-    // Drain microtasks so the rejection observer would have fired.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(errSpy).toHaveBeenCalledWith(
-      'Failed to open folder in file manager:',
-      expect.stringContaining('Path does not exist'),
-    );
-    errSpy.mockRestore();
-  });
-});
-
-/**
- * Autopilot pill — surfaces which nodes automation owns and where each is
- * in the pipeline, driven by `autopilotStates` in the agent-node store
- * (hydrated from `list_autopilot_runs` + patched by `autopilot-*` events).
- */
-describe('GridNodeHeader autopilot pill', () => {
-  beforeEach(() => {
-    useAgentNodeStore.setState({ nodesById: { [NODE.id]: NODE }, nodeIds: [NODE.id], activeNodeId: NODE.id, autopilotStates: {}, circuitOwnerships: {} });
-    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    summaryMock.mockReturnValue(null);
-    prMock.mockReturnValue(null);
-  });
-
-  it('shows the circuit icon and shared run number for circuit-owned nodes', () => {
-    useAgentNodeStore.setState({
-      autopilotStates: {},
-      circuitOwnerships: {
-        [NODE.id]: {
-          node_id: NODE.id,
-          run_id: 2,
-          circuit_id: 9,
-          circuit_name: 'Issue-driven Autopilot + PR review',
-          state: 'running',
-        },
-      },
-    });
-
-    const { getByTestId, queryByTestId } = render(
-      <GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />,
-    );
-
-    const pill = getByTestId('circuit-run-pill');
-    expect(pill.textContent).toBe('#2');
-    expect(pill.getAttribute('title')).toContain('Issue-driven Autopilot + PR review');
-    expect(queryByTestId('autopilot-pill')).toBeNull();
-  });
-
-  it('is absent for a hand-spawned node (no autopilot run)', () => {
-    const { queryByTestId } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(queryByTestId('autopilot-pill')).toBeNull();
-  });
-
-  it('shows a violet "autopilot" pill while the agent is implementing', () => {
-    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'implementing' } });
-    const { getByTestId } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const pill = getByTestId('autopilot-pill');
-    expect(pill.textContent).toBe('autopilot');
-    expect(pill.className).toContain('text-accent-violet');
-  });
-
-  it('flips to the amber wrap-up treatment while finishing', () => {
-    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'finishing' } });
-    const { getByTestId } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const pill = getByTestId('autopilot-pill');
-    expect(pill.textContent).toContain('wrap-up');
-    expect(pill.className).toContain('text-accent-amber');
-  });
-
-  // Issue #993 — a loop iteration's deterministic wrap-up has passed and the
-  // optional `loop_suffix_prompt` is driving a second PTY turn on the same
-  // node. Renders with the same amber family as `finishing` but its own
-  // label, so a user can tell that the iteration is still in flight while a
-  // final prompt runs (rather than waiting for wrap-up to be re-verified).
-  it('flips to the amber suffix treatment while the suffix turn is in flight', () => {
-    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'suffix_pending' } });
-    const { getByTestId } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const pill = getByTestId('autopilot-pill');
-    expect(pill.textContent).toContain('suffix');
-    expect(pill.className).toContain('text-accent-amber');
-  });
-
-  it('shows green when completed and red when failed', () => {
-    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'completed' } });
-    const { getByTestId, rerender } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(getByTestId('autopilot-pill').className).toContain('text-accent-green');
-    // The label must say it, not just tint it: a bare checkmark reads as
-    // decoration, and "autopilot done, hands off, awaiting your PR review"
-    // is the state the user acts on.
-    expect(getByTestId('autopilot-pill').textContent).toContain('complete');
-
-    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'failed' } });
-    rerender(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(getByTestId('autopilot-pill').className).toContain('text-status-error');
-  });
-
-  it('the typed union means a backend adding a new state would surface here as a TS error', () => {
-    // Regression guard: the pill style map is `Record<AutopilotRunState, …>`
-    // (the typed union generated from the Rust enum via ts-rs), so a
-    // future backend state that isn't in the map would fail to compile
-    // rather than silently degrading to a default. The pin: the map and
-    // the union live in lockstep on both sides of the wire.
-    expect(Object.keys(AUTOPILOT_PILL_STYLES).sort()).toEqual(
-      ['completed', 'failed', 'finishing', 'implementing', 'merged', 'suffix_pending'],
-    );
-  });
-
-  it('only badges the node the run belongs to', () => {
-    useAgentNodeStore.setState({ autopilotStates: { 999: 'implementing' } });
-    const { queryByTestId } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(queryByTestId('autopilot-pill')).toBeNull();
-  });
-});
-
-// Manual `/finish` trigger (issue #484, PRD #480 story 15). Behavioural
-// assertion (the invoke effect, not `={noop}` wiring — the JSX
-// silent-extra-prop lesson): clicking the button hands the node id to the
-// `trigger_finish` IPC wrapper.
-/**
- * Issue #484 originally shipped a manual `/finish` trigger on the agent node
- * header. The wrap-up sequence is purely an autopilot concern — there is no
- * value in letting a human re-trigger it on a hand-controlled node — so the
- * toolbar icon (inline + kebab menu) and the underlying IPC were retired.
- *
- * These assertions pin the removal: no button, no menu item, no leftover
- * `trigger_finish` wiring on the surface. The autopilot's automatic
- * wrap-up injection (`pipeline.rs`) is a separate code path that still emits
- * the `autopilot-finishing` event for the pill transition.
- *
- * Width detail: `useResizeWidth` initialises at `Infinity`, so the first
- * render lands in the `xl` tier with `showInlineActions === true` and the
- * inline trio (reveal-in-explorer + pin + maximise + close) renders inline.
- * That same code path USED TO render the Finish button here — its absence
- * after this commit is what we're asserting.
- */
-describe('GridNodeHeader Finish trigger (removed — autopilot-only concern)', () => {
-  beforeEach(() => {
-    seedAgentNodes([NODE], NODE.id);
-    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    summaryMock.mockReturnValue(null);
-    prMock.mockReturnValue(null);
-  });
-
-  it('does not render an inline Finish button at the wide (xl) tier', () => {
-    // xl tier: `useResizeWidth` boots at Infinity, so before the
-    // ResizeObserver fires the inline branch is active. The Finish
-    // button WOULD render here if the wiring were still in place.
-    const { queryByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(queryByLabelText('Finish agent node')).toBeNull();
-    expect(queryByLabelText(/Finish/i)).toBeNull();
-  });
-
-  // Note: kebab-without-Finish coverage lives in
-  // `grid-node-header-responsive.test.tsx` — that test opens the real
-  // menu via `fireResize(<header>, 200)` and asserts `toHaveLength(4)`
-  // with `items[3]` = "Close agent node". A second assertion here that
-  // never opens the kebab would only re-prove the inline path.
-});
-
-// ---------------------------------------------------------------------------
-// User-driven Resume affordance — mirrors the sidebar NodeItem's `showResume`.
-// The same `cli_session_id` gate keeps autopilot-gate Suspended rows (no
-// session id) from surfacing a confusing "no CLI session ID is stored"
-// toast on click. The kebab's fifth item is covered separately by the
-// responsive-tier test (which resizes to `slim` and asserts the menu row).
-// ---------------------------------------------------------------------------
-
 describe('GridNodeHeader resume affordance', () => {
   beforeEach(() => {
     seedAgentNodes([NODE], NODE.id);

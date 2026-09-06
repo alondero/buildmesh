@@ -36,6 +36,7 @@ vi.mock('@xterm/xterm', () => {
     onData = vi.fn();
     onResize = vi.fn();
     open = vi.fn();
+    focus = vi.fn();
     dispose = vi.fn();
     loadAddon = vi.fn();
     refresh = vi.fn();

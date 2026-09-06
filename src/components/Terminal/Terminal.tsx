@@ -89,7 +89,9 @@ export function resetTerminalZoomListenerForTests(): void {
   terminalZoomListenerInstalled = false;
 }
 
-export function AgentTerminal({ nodeId }: { nodeId: number }) {
+export function AgentTerminal({ nodeId, focusOnAttach = true }: { nodeId: number; focusOnAttach?: boolean }) {
+  const focusOnAttachRef = useRef(focusOnAttach);
+  focusOnAttachRef.current = focusOnAttach;
   const containerRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<TerminalInstance | null>(null);
   const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
@@ -101,7 +103,6 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [handoverProviderLabel, setHandoverProviderLabel] = useState<string | null>(null);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
-  const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   // Subscribe to *this* node only via the normalized `nodesById` map (issue
   // #1384). The store reconciles on every fetch, preserving the same object
   // reference for unchanged rows — so this selector only triggers a re-render
@@ -370,7 +371,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
 
       // Initial activation focuses the terminal. Subsequent tab selection is
       // delegated by NodeCard, so keyboard navigation keeps focus on the tab.
-      if (nodeId === activeNodeId) {
+      if (nodeId === useAgentNodeStore.getState().activeNodeId && focusOnAttachRef.current) {
         inst.term.focus();
       }
     });
@@ -382,9 +383,8 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
       scrollDisposableRef.current = null;
       terminalManager.detach(nodeId);
     };
-  // activeNodeId is read once at attach time for the initial focus; the
-  // dedicated focus effect above handles later changes, so it's intentionally
-  // not a dependency here.
+  // Focus intent and the active node are read after async attachment; keyboard
+  // tab selection must not lose focus when the terminal finishes mounting.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId]);
 

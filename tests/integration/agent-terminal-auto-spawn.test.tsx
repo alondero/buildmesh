@@ -222,6 +222,26 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
     vi.restoreAllMocks();
   });
 
+  it('preserves keyboard tab focus after an asynchronous terminal attachment', async () => {
+    seedAgentNodes([{ ...IDLE_NODE, status: 'running' }], IDLE_NODE.id);
+    const instance = await terminalManager.getOrCreate(IDLE_NODE.id);
+    expect(instance).not.toBeNull();
+    const realAttach = terminalManager.attach.bind(terminalManager);
+    let release!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(terminalManager, 'attach').mockImplementation(async (id, container) => {
+      await ready;
+      return realAttach(id, container);
+    });
+    const { getByRole } = render(<><button role="tab">Implementation</button>
+      <AgentTerminal nodeId={IDLE_NODE.id} focusOnAttach={false} /></>);
+    const tab = getByRole('tab');
+    tab.focus();
+    await act(async () => { release(); await ready; });
+    expect(instance!.term.focus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(tab);
+  });
+
   it('passes cols > 80 to spawn_agent when the pane is wide (fresh spawn, no prior attach)', async () => {
     // 1600px wide pane at 8px/cell = 200 cols, 900px tall at 16px/row = 56 rows.
     const WIDE_WIDTH = 1600;

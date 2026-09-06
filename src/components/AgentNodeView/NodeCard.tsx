@@ -1,5 +1,5 @@
 import { useDraggable, useDroppable } from '@dnd-kit/core';
-import { memo, Suspense, lazy, useMemo, type KeyboardEvent } from 'react';
+import { memo, Suspense, lazy, useMemo, useState, type KeyboardEvent } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { activityStatus } from '../../lib/nodeActivities';
@@ -8,7 +8,8 @@ import { AgentTerminal, terminalManager } from '../Terminal/Terminal';
 import { GridNodeHeader } from './GridNodeHeader';
 import { NodeDropCue } from './nodeDrag';
 import { SemanticTurnBanner } from './SemanticTurnBanner';
-import { getStatusConfig } from '../../lib/status';
+import { NodeActivityTabs } from './NodeActivityTabs';
+import { buildRunTerminalManager } from '../Terminal/BuildRunTerminalRegistry';
 
 // Keep the utility terminal's second xterm registry out of the initial bundle.
 const BuildRunTerminal = lazy(() => import('../Terminal/BuildRunTerminal').then((m) => ({ default: m.BuildRunTerminal })));
@@ -45,6 +46,7 @@ interface NodeCardProps {
 /// the body never blocks a drop. We deliberately ignore the draggable transform
 /// (a DragOverlay renders the moving preview) and just dim the source instead.
 function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, draggable = true }: NodeCardProps) {
+  const [keyboardSelection, setKeyboardSelection] = useState<{ nodeId: number; utility: boolean } | null>(null);
   const memberIds = memberIdsProp ?? [nodeId];
   const memberIdKey = memberIds.join(',');
   const stableMemberIds = useMemo(() => memberIds, [memberIdKey]);
@@ -64,13 +66,8 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const activeMember = members.find(n => n.id === activeNodeId);
   const selectedId = members.find(n => n.id === selection?.nodeId)?.id ?? activeMember?.id ?? nodeId;
   const selectedUtilityMode = utilities.get(selectedId);
-  const utilityNodeId = selectedUtilityMode
-    ? selectedId
-    : stableMemberIds.find(id => utilities.has(id));
-  const utilityMode = utilityNodeId == null ? undefined : utilities.get(utilityNodeId);
-  const utilityNode = utilityNodeId == null ? undefined : members.find(member => member.id === utilityNodeId);
   const showingUtility = selection?.nodeId === selectedId && !!selection?.utility && !!selectedUtilityMode;
-  const utilityOpen = !!utilityMode;
+  const focusOnAttach = keyboardSelection?.nodeId !== selectedId || keyboardSelection.utility !== showingUtility;
   const cardActive = isActive || !!activeMember;
   // Per-id subscription — see component docstring.
   const root = useAgentNodeStore((s) => s.nodesById[nodeId]);
@@ -106,23 +103,35 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const setRefs = (el: HTMLDivElement | null) => { setDragRef(el); setDropRef(el); };
 
   if (!node || !root) return null;
-  const hasTabs = members.length > 1 || members.some(n => utilities.has(n.id));
-  const choose = (id: number, utility = false, focusTerminal = !utility) => {
+  const hasTabs = members.length > 1 || members.some(n => utilities.get(n.id));
+  const choose = (id: number, utility = false, focusTerminal = true) => {
+    setKeyboardSelection(focusTerminal ? null : { nodeId: id, utility });
     select(nodeId, id, utility);
     onActivate(id);
     if (focusTerminal) {
-      requestAnimationFrame(() => terminalManager.getInstance(id)?.term.focus());
+      requestAnimationFrame(() => {
+        if (utility) {
+          const member = members.find(candidate => candidate.id === id);
+          const mode = utilities.get(id);
+          if (member && mode) buildRunTerminalManager.getInstance(id, mode, member.use_worktree)?.term.focus();
+        } else terminalManager.getInstance(id)?.term.focus();
+      });
     }
   };
-  const tabs = members.flatMap(member => {
-    const label = member.id === nodeId
-      ? (members.length > 1 ? `Implementation · ${member.name}` : 'Agent')
-      : `Review · ${member.name}`;
-    const agent = { key: `agent-${member.id}`, nodeId: member.id, utility: false, label, status: member.status };
-    const mode = utilities.get(member.id);
-    return mode ? [agent, { key: `utility-${member.id}`, nodeId: member.id, utility: true,
-      label: `${mode[0].toUpperCase()}${mode.slice(1)} · ${member.name}`, status: '' }] : [agent];
-  });
+  const status = activityStatus(root, members);
+  const attention = members.filter(member => member.status === 'awaiting_input' || member.status === 'error');
+  const revealAttention = () => {
+    const index = attention.findIndex(member => member.id === selectedId);
+    const target = showingUtility && index >= 0 ? attention[index] : attention[(index + 1) % attention.length];
+    if (target) choose(target.id);
+  };
+  const closeTab = (id: number) => {
+    const member = members.find(candidate => candidate.id === id);
+    const mode = utilities.get(id);
+    if (!member || !mode) return;
+    buildRunTerminalManager.dispose(id, mode, member.use_worktree); // allow-dispose — explicit utility-tab close, never a session switch
+    closeUtility(nodeId, id);
+  };
 
   // Y/N/Enter shortcut handler for semantic attention. The keyboard
   // listener is attached via React's `onKeyDown` so React's synthetic
@@ -146,7 +155,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const borderClass = members.some(n => n.status === 'awaiting_input')
     ? 'border-status-warning animate-border-pulse'
     : cardActive
-      ? 'border-accent-cyan shadow-[0_0_0_2px_var(--color-accent-cyan),0_0_16px_3px_var(--color-accent-cyan-dim)]'
+      ? 'border-accent-cyan/70'
       : 'border-border-default hover:border-accent-cyan/50';
 
   return (
@@ -161,68 +170,18 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
       onKeyDown={handleNodeKeyDown}
       className={`relative flex-1 flex flex-col bg-bg-card border-2 rounded-sm overflow-hidden group transition-[color,background-color,border-color,opacity] ${borderClass} ${isDragging ? 'opacity-40' : ''}`}
     >
-      {members.length > 1 && (
-        <div className="flex min-w-0 items-center justify-between gap-2 px-2 py-1 text-xs bg-bg-base">
-          <span className="text-text-muted">Activity</span>
-          {(() => {
-            const status = activityStatus(root, members);
-            const tone = status.tone === 'warning'
-              ? getStatusConfig('awaiting_input').color
-              : status.tone === 'error'
-                ? getStatusConfig('error').color
-                : status.tone === 'idle'
-                  ? getStatusConfig('idle').color
-                  : getStatusConfig('running').color;
-            return <span role="status" className={`shrink-0 ${tone}`}>{status.label}</span>;
-          })()}
-        </div>
-      )}
       <GridNodeHeader
         nodeId={selectedId}
-        onBuildRun={(id, mode) => { openUtility(nodeId, id, mode); onActivate(id); }}
+        titleNodeId={nodeId}
+        activity={hasTabs ? status : undefined}
+        attentionCount={attention.length}
+        onAttention={revealAttention}
+        onBuildRun={(id, mode) => { setKeyboardSelection(null); openUtility(nodeId, id, mode); onActivate(id); }}
         dragHandleProps={draggable ? { ...listeners, ...attributes } : undefined}
       />
       {hasTabs && (
-        <div role="tablist" aria-label="Node activities" className="flex shrink-0 overflow-x-auto border-b border-border-default bg-bg-base">
-          {tabs.map((tab, index) => {
-            const selected = tab.nodeId === selectedId && tab.utility === showingUtility;
-            return (
-              <span key={tab.key} role="presentation" className="inline-flex shrink-0 items-stretch">
-                <button type="button" role="tab"
-              id={`activity-${nodeId}-${tab.key}`} aria-controls={`activity-panel-${nodeId}`}
-              aria-label={`${tab.label}${tab.status ? ` ${tab.status.replace(/_/g, ' ')}` : ''}`}
-              aria-selected={selected} tabIndex={selected ? 0 : -1}
-              title={`${tab.label}${tab.status ? `: ${tab.status.replace(/_/g, ' ')}` : ''} · ${members.find(n => n.id === tab.nodeId)?.name}`}
-              onClick={event => { event.stopPropagation(); choose(tab.nodeId, tab.utility); }}
-              onKeyDown={event => {
-                const target = event.key === 'ArrowRight' ? (index + 1) % tabs.length
-                  : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
-                  : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : null;
-                if (target === null) return;
-                event.preventDefault();
-                choose(tabs[target].nodeId, tabs[target].utility, false);
-                document.getElementById(`activity-${nodeId}-${tabs[target].key}`)?.focus();
-              }}
-              className={`shrink-0 px-3 py-2 text-xs border-b-2 ${selected ? 'border-accent-cyan text-accent-cyan' : 'border-transparent text-text-secondary hover:text-text-primary'}`}>
-              {tab.label}{tab.status && <span className="ml-2 text-2xs">{' '}{tab.status.replace(/_/g, ' ')}</span>}
-                </button>
-                {tab.utility && (
-                  <button type="button"
-                    aria-label={`Close ${tab.label}`}
-                    title={`Close ${tab.label}`}
-                    onClick={event => {
-                      event.stopPropagation();
-                      closeUtility(nodeId, tab.nodeId);
-                    }}
-                    className="border-b-2 border-transparent px-1 text-text-muted hover:text-text-primary"
-                  >
-                    ×
-                  </button>
-                )}
-              </span>
-            );
-          })}
-        </div>
+        <NodeActivityTabs rootId={nodeId} members={members} utilities={utilities}
+          selectedId={selectedId} showingUtility={showingUtility} onSelect={choose} onClose={closeTab} />
       )}
       {!showingUtility && node.status === 'awaiting_input' && semanticTurn && (
         <SemanticTurnBanner
@@ -235,21 +194,13 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
       <div role={hasTabs ? 'tabpanel' : undefined} id={`activity-panel-${nodeId}`}
         aria-labelledby={hasTabs ? `activity-${nodeId}-${showingUtility ? 'utility' : 'agent'}-${selectedId}` : undefined}
         className="min-h-0 flex-1 flex flex-col overflow-hidden bg-black">
-        <div className={utilityOpen ? 'min-h-0 flex-[2] overflow-hidden' : 'min-h-0 flex-1 overflow-hidden'}>
-          <AgentTerminal key={node.id} nodeId={node.id} />
-        </div>
-        {utilityOpen && utilityMode && (
-          <div className="min-h-0 flex-1 overflow-hidden border-t border-border-default">
-            <Suspense fallback={<span className="p-2 text-text-muted">Loading terminal…</span>}>
-              <BuildRunTerminal
-                key={`${utilityNodeId}-${utilityMode}`}
-                sessionId={utilityNodeId ?? node.id}
-                mode={utilityMode}
-                useWorktree={utilityNode?.use_worktree ?? node.use_worktree}
-                onClose={() => utilityNodeId != null && closeUtility(nodeId, utilityNodeId)}
-              />
-            </Suspense>
-          </div>
+        {showingUtility && selectedUtilityMode ? (
+          <Suspense fallback={<span className="p-2 text-text-muted">Loading terminal…</span>}>
+            <BuildRunTerminal key={`${node.id}-${selectedUtilityMode}`} sessionId={node.id}
+              mode={selectedUtilityMode} useWorktree={node.use_worktree} focusOnAttach={focusOnAttach} />
+          </Suspense>
+        ) : (
+          <AgentTerminal key={node.id} nodeId={node.id} focusOnAttach={focusOnAttach} />
         )}
       </div>
       {draggable && <NodeDropCue nodeId={nodeId} />}

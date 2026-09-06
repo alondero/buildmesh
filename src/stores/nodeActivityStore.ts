@@ -24,7 +24,10 @@ export const useNodeActivityStore = create<{
   closeUtility: (rootId, nodeId) => set(s => {
     const utilities = { ...s.utilities };
     delete utilities[nodeId];
-    return { utilities, selections: { ...s.selections, [rootId]: { nodeId, utility: false } } };
+    const selected = s.selections[rootId];
+    return { utilities, selections: selected?.nodeId === nodeId && selected.utility
+      ? { ...s.selections, [rootId]: { nodeId, utility: false } }
+      : s.selections };
   }),
   prune: (validNodeIds) => set(s => {
     const selections = Object.fromEntries(
