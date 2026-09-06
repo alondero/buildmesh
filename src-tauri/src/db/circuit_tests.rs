@@ -1312,7 +1312,7 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
             node_id: "work".into(),
             status: "failed".into(),
             outcome: Some(Some("failed".into())),
-            error: Some("boom".into()),
+            error: Some(Some("boom".into())),
             agent_node_id: None,
             attempt: 1,
             fresh_attempt: false,
@@ -1346,6 +1346,36 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
     assert!(work.started_at.is_some());
     assert!(work.completed_at.is_none(), "a reset step is back in flight");
 
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn explicit_error_clear_works_for_running_and_completed_steps() {
+    let path = init_temp_db("classifier-recovery-error");
+    let mesh = create_mesh("classifier recovery", "/tmp/classifier-recovery").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "gated", "", 2, &sample_graph_json()).unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let mut op = CircuitStepOp {
+        node_id: "classifier".into(), status: "running".into(), outcome: None,
+        error: Some(Some("Classifier unavailable; retrying".into())), agent_node_id: None,
+        attempt: 2, fresh_attempt: false,
+    };
+    commit_circuit_advance(run_id, None, None, &[op.clone()]).unwrap();
+    assert!(list_circuit_run_steps(run_id).unwrap()[0].error_message.is_some());
+    op.error = Some(None);
+    commit_circuit_advance(run_id, None, None, &[op.clone()]).unwrap();
+    assert_eq!(list_circuit_run_steps(run_id).unwrap()[0].error_message, None);
+    op.error = Some(Some("stale again".into()));
+    commit_circuit_advance(run_id, None, None, &[op.clone()]).unwrap();
+    op.status = "completed".into();
+    op.outcome = Some(Some("completed".into()));
+    op.error = Some(None);
+    commit_circuit_advance(run_id, None, None, &[op]).unwrap();
+    let step = list_circuit_run_steps(run_id).unwrap().remove(0);
+    assert_eq!(step.error_message, None);
+    assert_eq!(step.attempt, 2);
+    assert!(step.completed_at.is_some());
     let _ = get();
     std::fs::remove_file(&path).ok();
 }

@@ -798,13 +798,15 @@ fn map_step_row(row: &rusqlite::Row<'_>) -> SqlResult<AutopilotCircuitRunStep> {
 }
 
 /// One step mutation inside a [`commit_circuit_advance`] transaction.
-/// Mirrors the stepper's `StepWrite`; `outcome: None` means "leave as-is".
+/// Mirrors the stepper's `StepWrite`; for both `outcome` and `error`, outer
+/// `None` means "leave as-is" while `Some(None)` explicitly clears the stored
+/// value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CircuitStepOp {
     pub node_id: String,
     pub status: String,
     pub outcome: Option<Option<String>>,
-    pub error: Option<String>,
+    pub error: Option<Option<String>>,
     pub agent_node_id: Option<i64>,
     /// The step's execution count after this write (#1207 retry
     /// bookkeeping). Written on both insert and update.
@@ -919,6 +921,9 @@ pub fn commit_circuit_advance(
     }
     for op in step_ops {
         let outcome_val = op.outcome.clone().flatten();
+        let outcome_changed = op.outcome.is_some();
+        let error_val = op.error.clone().flatten();
+        let error_changed = op.error.is_some();
         let terminal = outcome_val
             .as_deref()
             .map(crate::autopilot::circuit::model::StepOutcome::is_terminal_db_str)
@@ -927,28 +932,32 @@ pub fn commit_circuit_advance(
             "INSERT INTO autopilot_circuit_run_steps \
                  (run_id, node_id, status, attempt, outcome, error_message, agent_node_id, started_at, completed_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), \
-                 CASE WHEN ?10 THEN datetime('now') ELSE NULL END) \
+                  CASE WHEN ?12 THEN datetime('now') ELSE NULL END) \
              ON CONFLICT(run_id, node_id) DO UPDATE SET \
                  status = excluded.status, \
                  attempt = excluded.attempt, \
-                 outcome = CASE WHEN ?8 THEN NULL \
-                     ELSE COALESCE(excluded.outcome, autopilot_circuit_run_steps.outcome) END, \
-                 error_message = CASE WHEN ?9 THEN NULL \
-                     ELSE COALESCE(excluded.error_message, autopilot_circuit_run_steps.error_message) END, \
-                 agent_node_id = COALESCE(excluded.agent_node_id, autopilot_circuit_run_steps.agent_node_id), \
-                 started_at = CASE WHEN ?9 THEN datetime('now') \
-                     ELSE autopilot_circuit_run_steps.started_at END, \
-                 completed_at = CASE WHEN ?10 THEN datetime('now') WHEN ?9 THEN NULL \
-                     ELSE autopilot_circuit_run_steps.completed_at END",
+                  outcome = CASE WHEN ?8 THEN NULL \
+                      WHEN ?9 THEN excluded.outcome \
+                      ELSE autopilot_circuit_run_steps.outcome END, \
+                   error_message = CASE WHEN ?8 THEN NULL \
+                      WHEN ?10 THEN excluded.error_message \
+                      ELSE autopilot_circuit_run_steps.error_message END, \
+                  agent_node_id = COALESCE(excluded.agent_node_id, autopilot_circuit_run_steps.agent_node_id), \
+                  started_at = CASE WHEN ?11 THEN datetime('now') \
+                      ELSE autopilot_circuit_run_steps.started_at END, \
+                   completed_at = CASE WHEN ?12 THEN datetime('now') WHEN ?11 THEN NULL \
+                      ELSE autopilot_circuit_run_steps.completed_at END",
             params![
                 run_id,
                 op.node_id,
                 op.status,
                 op.attempt,
                 outcome_val,
-                op.error,
+                error_val,
                 op.agent_node_id,
                 op.fresh_attempt,
+                outcome_changed,
+                error_changed,
                 op.fresh_attempt,
                 terminal,
             ],
