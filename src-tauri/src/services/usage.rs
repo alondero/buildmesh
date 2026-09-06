@@ -1925,64 +1925,109 @@ fn calculate_opencode_windows(db_path: &std::path::Path) -> Result<Vec<UsageWind
     calculate_opencode_windows_impl(&conn)
 }
 
-// ─── Live `_server billing.get` parser (issue #957) ────────────────────────
+// ─── Live `lite.subscription.get` parser (issue #1073) ────────────────────
 //
-// Response shape (pinned fixture in `parse_opencode_billing_response_full`):
+// Wire shape (pinned by the `LIVE_LITE_BODY_OK` fixture):
 //   {
-//     "windows": [
-//       { "label": "5-hour",  "usedPercent": 25.0, "resetsAt": "2026-07-20T22:00:00Z" },
-//       { "label": "Weekly",  "usedPercent": 12.0, "resetsAt": "2026-07-22T00:00:00Z" },
-//       { "label": "Monthly", "usedPercent":  4.5, "resetsAt": "2026-08-01T00:00:00Z" }
-//     ]
+//     "mine": true,
+//     "useBalance": false,
+//     "region": "us",
+//     "rollingUsage": {"status": "ok", "resetInSec": 12345, "usagePercent": 25},
+//     "weeklyUsage":  {"status": "ok", "resetInSec": 67890, "usagePercent": 12},
+//     "monthlyUsage": {"status": "ok", "resetInSec": 2592000, "usagePercent": 4}
 //   }
 //
+// The body can also be the literal `null` — meaning "no Go subscription on
+// this workspace". That reply is a valid signal, not a shape error; the
+// parser surfaces it as an empty `windows` vec plus a user-visible detail
+// so the SQLite fallback isn't tripped by a perfectly valid "no Go plan"
+// response.
+//
 // OpenCode Go is a Plan account (#957 sub-spec point 2) so `balance` stays
-// `None` — only `windows` is populated. The fetcher treats a body without a
-// `windows` array as a `Shape` error so the degradation chain falls through
-// to SQLite (#953) rather than silently zero-windowing.
+// `None` — only `windows` is populated. The fetcher treats a body missing
+// any of the three usage buckets as a `Shape` error so the degradation
+// chain falls through to SQLite (#953) rather than silently zero-windowing.
 
-#[derive(Deserialize, Debug)]
-struct OpenCodeBillingWindow {
-    label: Option<String>,
-    #[serde(rename = "usedPercent")]
-    used_percent: Option<f64>,
-    #[serde(rename = "resetsAt")]
-    resets_at: Option<String>,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenCodeLiteWindow {
+    // `status` is part of the wire contract (e.g. `"exhausted"`,
+    // `"ok"`); deserialized to keep the schema pinned but not yet
+    // surfaced in the UI — future meter caption / colour logic.
+    #[allow(dead_code)]
+    status: String,
+    reset_in_sec: u64,
+    usage_percent: u8,
 }
 
-#[derive(Deserialize, Debug)]
-struct OpenCodeBillingResp {
-    windows: Vec<OpenCodeBillingWindow>,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenCodeLiteResp {
+    mine: Option<bool>,
+    // `use_balance` and `region` are part of the wire contract; not
+    // surfaced in the UI yet — kept here so a wire-shape drift in the
+    // SolidStart reply fails to deserialize rather than slipping
+    // through silently.
+    #[allow(dead_code)]
+    use_balance: Option<bool>,
+    #[allow(dead_code)]
+    region: Option<String>,
+    rolling_usage: OpenCodeLiteWindow,
+    weekly_usage: OpenCodeLiteWindow,
+    monthly_usage: OpenCodeLiteWindow,
 }
 
-fn parse_opencode_billing_response(
+fn parse_opencode_lite_response(
     body: &str,
 ) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
-    let resp: OpenCodeBillingResp =
+    // `null` is a valid "no Go subscription" reply — surface a
+    // user-visible detail rather than treating it as a shape error.
+    if body.trim() == "null" {
+        return Ok((
+            vec![],
+            Some("No Go subscription on this workspace".to_string()),
+        ));
+    }
+    let resp: OpenCodeLiteResp =
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
-    // A real window carries both `label` and `usedPercent` — a missing
-    // `usedPercent` is the "shape failure" the degradation chain (#957
-    // sub-spec point 4) routes to the SQLite fallback. We filter rather
-    // than error out so a single malformed entry doesn't poison the whole
-    // reply; if nothing survives the filter, the empty-windows detail below
-    // surfaces to the user.
-    let windows: Vec<UsageWindow> = resp
-        .windows
-        .into_iter()
-        .filter_map(|w| match (w.label, w.used_percent) {
-            (Some(label), Some(used_percent)) => Some(UsageWindow {
-                label,
-                used_percent: Some(used_percent),
-                resets_at: w.resets_at,
-            }),
-            _ => None,
-        })
-        .collect();
-    let detail = if windows.is_empty() {
-        Some("No active OpenCode Go quotas found".to_string())
-    } else {
-        None
+    // The three `resetInSec` values are deltas from "now" — convert each
+    // to an RFC3339 instant so the UI can render an absolute timestamp.
+    let now = chrono::Utc::now();
+    let to_iso = |secs: u64| -> Option<String> {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(now.timestamp() + secs as i64, 0)
+            .map(|dt| dt.to_rfc3339())
     };
+    // Labels are pinned by the parser (not the wire) so the UI meter
+    // ordering stays stable across any future wire-shape additions on
+    // the SolidStart side.
+    let windows = vec![
+        UsageWindow {
+            label: "5-hour".to_string(),
+            used_percent: Some(resp.rolling_usage.usage_percent as f64),
+            resets_at: to_iso(resp.rolling_usage.reset_in_sec),
+        },
+        UsageWindow {
+            label: "Weekly".to_string(),
+            used_percent: Some(resp.weekly_usage.usage_percent as f64),
+            resets_at: to_iso(resp.weekly_usage.reset_in_sec),
+        },
+        UsageWindow {
+            label: "Monthly".to_string(),
+            used_percent: Some(resp.monthly_usage.usage_percent as f64),
+            resets_at: to_iso(resp.monthly_usage.reset_in_sec),
+        },
+    ];
+    // `mine` is load-bearing context for the meter caption: a personal
+    // workspace reports "Your workspace", a shared one reports
+    // "Shared workspace". `None` (older envelopes) leaves the caption
+    // unset — the meter still renders.
+    let detail = resp.mine.map(|m| {
+        if m {
+            "Your workspace".to_string()
+        } else {
+            "Shared workspace".to_string()
+        }
+    });
     Ok((windows, detail))
 }
 
@@ -2025,7 +2070,8 @@ fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
 ///   1. **Pre-emptive refresh** (issue #970): if the credential is
 ///      expired OR the cached live-fetch result is older than
 ///      `REFRESH_TTL`, mint a fresh bearer BEFORE the live probe.
-///   2. **Live probe**: POST `billing.get` to the configured `live_url`.
+///   2. **Live probe**: POST `lite.subscription.get` to the configured
+///      `live_url` (issue #1073).
 ///   3. **Reactive refresh-on-401** (issue #971): if the pre-emptive
 ///      refresh did NOT fire AND the live probe returned 401, refresh
 ///      and retry the live probe ONCE. Handles the case where the
@@ -2097,14 +2143,12 @@ fn opencode_usage_impl_with_hosts(
     // ── Live probe (first attempt) ──────────────────────────────────
     //
     // Reads the Buildmesh-owned OAuth credential (#956) and POSTs
-    // `billing.get` to SolidStart. The `Result::ok` collapse means any
-    // error (NoCredential, Shape, transport) is treated identically:
-    // fall through to the SQLite path. The returned ProviderUsage
-    // carries an `error` for HTTP-level failures (401, 5xx, shape
-    // mismatch) which `choose_opencode_usage` checks below. The
-    // `X-Server-Id` header is sourced from the persisted credential's
-    // `server_id` field (issue #972); pre-#956 blobs fall through to
-    // the legacy default and trigger a process-wide warn-once.
+    // `lite.subscription.get` to SolidStart (issue #1073). The
+    // `Result::ok` collapse means any error (NoCredential, Shape,
+    // transport) is treated identically: fall through to the SQLite
+    // path. The returned ProviderUsage carries an `error` for
+    // HTTP-level failures (401, 5xx, shape mismatch) which
+    // `choose_opencode_usage` checks below.
     let mut live = current_cred
         .as_ref()
         .and_then(|c| opencode_live_request_at(live_url, c));
@@ -2160,27 +2204,49 @@ fn opencode_usage_impl_with_hosts(
     choose_opencode_usage(live.as_ref(), sqlite)
 }
 
-/// Fires the live `_server billing.get` probe against a parameterized
+/// Fires the live `lite.subscription.get` probe against a parameterized
 /// `live_url`. Extracted from `opencode_usage_impl_with_hosts` so the
 /// pre-emptive + reactive retry paths share the same wire-binding
-/// closure (header set, JSON body, parser) without duplicating the
-/// `opencode_live_request_parts` + `fetch_usage` composition.
+/// closure (header set, body, parser) without duplicating the
+/// `fetch_usage` composition.
+///
+/// Wire contract (issue #1073):
+///   - URL: `live_url` (production: `https://opencode.ai/_server`)
+///   - Method: POST
+///   - Headers: `X-Server-Id: lite.subscription.get`,
+///     `X-Start-Type: 1`, `X-Server-Instance: server-fn:<n>`,
+///     `Content-Type: text/plain`
+///   - Body: the raw workspace_id bytes (NOT a JSON array — that was
+///     the fictional `billing.get` shape)
+///   - Auth: NONE on the wire. The function ID
+///     (`lite.subscription.get`) is the credential; the OAuth bearer
+///     token lives in a separate header the SolidStart edge drops, but
+///     `_server` itself doesn't gate on it.
+///
+/// `X-Server-Instance` is bumped per-call (process-wide) so the
+/// SolidStart log can correlate multiple probes in a single session.
 fn opencode_live_request_at(
     live_url: &str,
     cred: &OpenCodeConsoleCred,
 ) -> Option<ProviderUsage> {
-    let (token, workspace_id, server_id) = opencode_live_request_parts(cred)?;
+    let workspace_id = cred.workspace_id.clone().filter(|s| !s.is_empty())?;
     let live_url_owned = live_url.to_string();
+    let instance = format!(
+        "server-fn:{}",
+        OPENCODE_LITE_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     Some(fetch_usage(
         "opencode",
         move |client| {
             client
                 .post(&live_url_owned)
-                .header("X-Server-Id", server_id)
-                .header("Authorization", format!("Bearer {}", token))
-                .json(&[workspace_id])
+                .header("X-Server-Id", "lite.subscription.get")
+                .header("X-Start-Type", "1")
+                .header("X-Server-Instance", instance)
+                .header("Content-Type", "text/plain")
+                .body(workspace_id.as_bytes().to_vec())
         },
-        parse_opencode_billing_response,
+        parse_opencode_lite_response,
     ))
 }
 
@@ -2202,14 +2268,11 @@ fn needs_retry_on_401(live: Option<&ProviderUsage>) -> bool {
 ///
 /// The token response (verified 2026-07-23) no longer carries
 /// `workspace_id` or `server_id` — the OAuth scope is stable across
-/// refreshes, so we read the prior `workspace_id` AND `server_id` from
-/// the existing credential. The `server_id` fallback to the legacy
-/// `OPENCODE_SERVER_ID` constant kicks in only when the prior credential
-/// had no server_id (a pre-#956 blob), per the
-/// `resolve_opencode_server_id` contract. New flows that bind a custom
-/// `server_id` (issue #972 forwarded the OAuth dance's response) keep
-/// it across refreshes — a custom-then-default flip would silently
-/// degrade the live probe's `X-Server-Id` header.
+/// refreshes, so we read the prior `workspace_id` from the existing
+/// credential. `server_id` is still threaded through (kept on the
+/// persisted blob) so existing fixtures continue to work; the live
+/// probe (issue #1073) no longer uses it — it sends the literal
+/// `"lite.subscription.get"` string instead.
 ///
 /// Test-only: the call site in `opencode_usage_impl_with_hosts` passes
 /// the prior credential's fields; the `try_refresh` path in
@@ -2258,32 +2321,23 @@ const AGY_USER_AGENT: &str = "antigravity/cli/1.0.3 windows/amd64";
 /// Credential Manager target the agy CLI stores its OAuth token under.
 const AGY_CRED_TARGET: &str = "gemini:antigravity";
 
-// ─── OpenCode Go (live `_server billing.get` probe) ────────────────────────
+// ─── OpenCode Go (live `lite.subscription.get` probe) ─────────────────────
 //
 // OpenCode Go ships a SolidStart server-function RPC at
-// `POST https://opencode.ai/_server` (function name `billing.get`) that returns
-// the user's server-authoritative 5-hour / weekly / monthly usage windows
-// (issue #957). The probe falls through to the offline SQLite path (#953) on
-// any failure so a user mid-OAuth-flow keeps seeing SOMETHING instead of a
-// silent blank gauge. The credential blob lives at this target, written by
-// #956's Buildmesh-owned device-flow dance.
+// `POST https://opencode.ai/_server` (function name `lite.subscription.get`)
+// that returns the user's server-authoritative 5-hour / weekly / monthly
+// usage windows (issue #1073). The probe falls through to the offline
+// SQLite path (#953) on any failure so a user mid-OAuth-flow keeps seeing
+// SOMETHING instead of a silent blank gauge. The credential blob lives at
+// the OpenCodeConsoleCred target, written by #956's Buildmesh-owned
+// device-flow dance.
 
-/// Legacy default for the SolidStart deployment id the `_server
-/// billing.get` probe sends in the `X-Server-Id` header. Captured from the
-/// opencode-cli binary's outbound traffic (issue #944 / research ticket).
-/// Stable per deployment; not per-user.
-///
-/// After issue #956 ships the device-flow dance, fresh credentials persist
-/// the same deployment id into [`OpenCodeConsoleCred::server_id`]
-/// (`services::opencode_oauth`). The live probe — see
-/// [`resolve_opencode_server_id`] — reads the persisted value first and
-/// falls back to this constant when a blob predates the field (e.g. a
-/// credential written by an older build, or a developer-only fixture). The
-/// constant stays as the documented legacy default for at least one
-/// release (#963/#972); remove it after re-authentication has rolled out
-/// everywhere.
-const OPENCODE_SERVER_ID: &str =
-    "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
+/// Process-wide counter for the `X-Server-Instance` header (issue #1073).
+/// SolidStart's server-function logs correlate multiple probes in the
+/// same session via this monotonic value; the header is purely
+/// observability and never affects routing.
+static OPENCODE_LITE_INSTANCE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Deserialize)]
 struct AgyTokenField {
@@ -2341,8 +2395,8 @@ fn read_opencode_console_credential_full() -> Result<OpenCodeConsoleCred, UsageE
 }
 
 /// Refresh-seam gate (issue #970): pure function deciding whether
-/// `opencode_usage_impl` should call `try_refresh()` before its live `_server
-/// billing.get` HTTP fetch. True when EITHER:
+/// `opencode_usage_impl` should call `try_refresh()` before its live
+/// `lite.subscription.get` HTTP fetch. True when EITHER:
 ///
 ///   1. The credential's `expires_at` is in the past — a 401 is imminent,
 ///      so mint a new bearer proactively. Delegates to
@@ -2364,63 +2418,6 @@ fn opencode_needs_refresh(
     use crate::services::opencode_oauth;
     opencode_oauth::cred_is_expired(cred, now_unix)
         || cached_age.is_some_and(|age| age > opencode_oauth::REFRESH_TTL)
-}
-
-/// Resolves the value the live `_server billing.get` probe should send in
-/// the `X-Server-Id` header (issue #972).
-///
-/// Primary source is `OpenCodeConsoleCred.server_id` — the value the OAuth
-/// device-flow exchange returned and `persist_token_response` wrote into
-/// the persisted blob. Fallback is [`OPENCODE_SERVER_ID`] for blobs written
-/// before #956 added the field; the fallback fires a single process-wide
-/// `tracing::warn!` so a user who re-authenticates sees the warning stop.
-///
-/// Empty-string `server_id` is treated as missing — a hand-edited blob
-/// with `"server_id": ""` must not produce a useless `X-Server-Id: ` header.
-fn resolve_opencode_server_id(cred: &OpenCodeConsoleCred) -> &str {
-    if let Some(id) = cred.server_id.as_deref() {
-        if !id.is_empty() {
-            return id;
-        }
-    }
-    warn_legacy_opencode_server_id_once();
-    OPENCODE_SERVER_ID
-}
-
-/// Process-wide once-cell for the legacy-server-id warning. The cell lives
-/// for the lifetime of the buildmesh process; re-authenticating writes a
-/// fresh `server_id` into the blob and the resolver takes the
-/// `cred.server_id` branch on subsequent probes, so the warning never
-/// fires again even though the `Once` itself never resets.
-fn warn_legacy_opencode_server_id_once() {
-    use std::sync::Once;
-    static WARNED: Once = Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            target: "services::opencode_oauth",
-            "OpenCode Console credential predates the `server_id` field; \
-             falling back to the legacy OPENCODE_SERVER_ID constant. \
-             Re-authenticating will persist a fresh `server_id` into the \
-             credential blob and silence this warning. (issue #972)"
-        );
-    });
-}
-
-/// Pure pipeline that produces the three strings the live `_server
-/// billing.get` probe needs to bind into its HTTP request: the bearer
-/// token, the workspace id (JSON body), and the `X-Server-Id` header
-/// value. Extracted so the binding contract (issue #972 acceptance #5)
-/// is unit-testable without standing up an HTTP mock.
-///
-/// Returns `None` when the credential lacks a non-empty `access_token`
-/// or `workspace_id` — the caller (`opencode_usage_impl`) treats that as
-/// "no credential" and falls through to the SQLite path identically to a
-/// `NoCredential` read.
-fn opencode_live_request_parts(cred: &OpenCodeConsoleCred) -> Option<(String, String, String)> {
-    let token = cred.access_token.clone().filter(|s| !s.is_empty())?;
-    let workspace_id = cred.workspace_id.clone().filter(|s| !s.is_empty())?;
-    let server_id = resolve_opencode_server_id(cred).to_owned();
-    Some((token, workspace_id, server_id))
 }
 
 /// Minimal FFI to the Windows Credential Manager (`advapi32!CredReadW` /
@@ -4599,108 +4596,117 @@ pub(crate) mod tests {
         assert_eq!(windows[2].used_percent, Some(40.0));
     }
 
-    // ── OpenCode Go live `_server billing.get` probe (issue #957) ────────
+    // ── OpenCode `lite.subscription.get` parser (issue #1073) ────────────
+    //
+    // The real SolidStart server-function RPC returns a `{ mine,
+    // useBalance, region, rollingUsage, weeklyUsage, monthlyUsage }`
+    // envelope (not the fictional `{ windows: [...] }` shape the previous
+    // `parse_opencode_billing_response` was pinned to). These tests pin
+    // the new parser's contract so a future drift in either the wire
+    // shape or the parser fails here, not in a runtime probe against
+    // opencode.ai.
 
     #[test]
-    fn parse_opencode_billing_response_full() {
-        // Pinned fixture: the documented `billing.get` reply shape (issue #957
-        // sub-spec point 5). All three windows + their reset countdowns are
-        // present and must round-trip through `UsageWindow` byte-for-byte.
-        let json = r#"{
-            "windows": [
-                {"label": "5-hour",  "usedPercent": 25.0, "resetsAt": "2026-07-20T22:00:00Z"},
-                {"label": "Weekly",  "usedPercent": 12.0, "resetsAt": "2026-07-22T00:00:00Z"},
-                {"label": "Monthly", "usedPercent":  4.5, "resetsAt": "2026-08-01T00:00:00Z"}
-            ]
-        }"#;
-        let (windows, detail) = parse_opencode_billing_response(json).unwrap();
-        assert_eq!(windows.len(), 3);
+    fn parse_opencode_lite_response_full() {
+        // Three buckets present: rollingUsage → "5-hour" (label pinned by
+        // the parser, not the wire), weeklyUsage → "Weekly",
+        // monthlyUsage → "Monthly". `usagePercent` round-trips through
+        // `UsageWindow.used_percent`; `resetInSec` is converted to an ISO
+        // instant by adding to the current UTC time.
+        let before = chrono::Utc::now().timestamp();
+        let (windows, detail) =
+            parse_opencode_lite_response(LIVE_LITE_BODY_OK).unwrap();
+        let after = chrono::Utc::now().timestamp();
+
+        assert_eq!(windows.len(), 3, "rolling/weekly/monthly all surface");
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-07-20T22:00:00Z"));
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, Some(12.0));
         assert_eq!(windows[2].label, "Monthly");
-        assert_eq!(windows[2].used_percent, Some(4.5));
-        assert_eq!(detail, None);
+        assert_eq!(windows[2].used_percent, Some(4.0));
+
+        // Each `resetInSec` is converted to an RFC3339 instant. The
+        // computed instant must land in [before + reset, after + reset]
+        // so we know the timestamp was added correctly.
+        for (window, expected_secs) in windows.iter().zip([12345_i64, 67890, 2592000]) {
+            let resets_at = window
+                .resets_at
+                .as_deref()
+                .expect("resetInSec must produce a resets_at");
+            let parsed = chrono::DateTime::parse_from_rfc3339(resets_at)
+                .expect("resets_at must be RFC3339");
+            let actual_secs = parsed.timestamp();
+            assert!(
+                actual_secs >= before + expected_secs
+                    && actual_secs <= after + expected_secs,
+                "resets_at for {} should land within the [before, after] \
+                 window around now+{expected_secs}, got {actual_secs}",
+                window.label
+            );
+        }
+
+        // `mine: true` → "Your workspace" detail (was `None` in the old
+        // billing.get parser; the lite shape treats it as load-bearing
+        // context for the meter caption).
+        assert_eq!(detail.as_deref(), Some("Your workspace"));
     }
 
     #[test]
-    fn parse_opencode_billing_response_partial_5hour_only() {
-        // Sub-spec point 5: a partial reply that carries only the 5-hour
-        // window must parse cleanly (one row out, no error) rather than
-        // failing closed. This matches how SolidStart server functions can
-        // early-return the most-pressed window before the others.
+    fn parse_opencode_lite_response_mine_false_yields_shared_detail() {
+        // `mine: false` flips the detail to "Shared workspace" — useful for
+        // enterprise installations where multiple users share a single
+        // workspace id and the meter caption should reflect that.
         let json = r#"{
-            "windows": [
-                {"label": "5-hour", "usedPercent": 80.0, "resetsAt": "2026-07-20T22:00:00Z"}
-            ]
+            "mine": false,
+            "useBalance": false,
+            "rollingUsage": {"status": "ok", "resetInSec": 100, "usagePercent": 0},
+            "weeklyUsage":  {"status": "ok", "resetInSec": 200, "usagePercent": 0},
+            "monthlyUsage": {"status": "ok", "resetInSec": 300, "usagePercent": 0}
         }"#;
-        let (windows, detail) = parse_opencode_billing_response(json).unwrap();
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].label, "5-hour");
-        assert_eq!(windows[0].used_percent, Some(80.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-07-20T22:00:00Z"));
-        assert_eq!(detail, None);
+        let (windows, detail) = parse_opencode_lite_response(json).unwrap();
+        assert_eq!(windows.len(), 3);
+        assert_eq!(detail.as_deref(), Some("Shared workspace"));
     }
 
     #[test]
-    fn parse_opencode_billing_response_missing_windows_array_is_shape_error() {
-        // Required field — a body without `windows` is malformed, not "all
-        // quotas are 0". This is the silent-zero-windowing trap the parser
-        // MUST fail loudly against so the live fetch returns unavailable
-        // and the degradation chain falls through to SQLite.
-        let json = r#"{"foo": "bar"}"#;
-        let err = parse_opencode_billing_response(json).unwrap_err();
+    fn parse_opencode_lite_response_null_body_reports_no_subscription_detail() {
+        // The literal string `null` means "no Go subscription on this
+        // workspace". It's a valid reply, not a shape error — the parser
+        // returns an empty `windows` vec and a user-visible detail so the
+        // SQLite fallback is NOT tripped by a perfectly valid "no Go
+        // plan" response. (Issue #1073 acceptance: the new wire shape
+        // surfaces a `null` body distinctly from malformed JSON.)
+        let (windows, detail) = parse_opencode_lite_response(LIVE_LITE_BODY_NULL).unwrap();
+        assert!(windows.is_empty(), "null body has no windows to report");
+        let detail = detail.expect("null body must surface a user-visible detail");
+        assert!(
+            detail.to_lowercase().contains("no go subscription"),
+            "detail should explain the no-Go state, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn parse_opencode_lite_response_missing_rolling_usage_is_shape_error() {
+        // All three usage buckets are required — a body without
+        // `rollingUsage` is malformed. The parser returns `Shape` so the
+        // degradation chain (#957 sub-spec point 4) falls through to the
+        // SQLite path rather than silently zero-windowing.
+        let json = r#"{
+            "weeklyUsage":  {"status": "ok", "resetInSec": 1, "usagePercent": 0},
+            "monthlyUsage": {"status": "ok", "resetInSec": 2, "usagePercent": 0}
+        }"#;
+        let err = parse_opencode_lite_response(json).unwrap_err();
         assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
     }
 
     #[test]
-    fn parse_opencode_billing_response_empty_windows_reports_detail() {
-        // A well-formed reply with an empty `windows` array surfaces the
-        // user-facing "no active quotas" detail so the UI doesn't render a
-        // mysteriously empty meter. Mirrors the `parse_agy_models_empty_reports_detail`
-        // contract so the Usage tab copy stays consistent across providers.
-        let json = r#"{"windows": []}"#;
-        let (windows, detail) = parse_opencode_billing_response(json).unwrap();
-        assert!(windows.is_empty());
-        assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
-    }
-
-    #[test]
-    fn parse_opencode_billing_response_filters_malformed_windows() {
-        // Per the stricter shape contract (issue #957 sub-spec point 4), a
-        // window missing `usedPercent` is a shape failure — it MUST NOT
-        // render as a "5-hour: (no data)" row, which is the silent-blank
-        // gauge the spec sought to prevent. Such windows are filtered out
-        // and any surviving valid windows still parse.
-        let json = r#"{
-            "windows": [
-                {"label": "5-hour", "usedPercent": 25.0, "resetsAt": "2026-07-20T22:00:00Z"},
-                {"label": "no-data-window"},
-                {"usedPercent": 50.0, "resetsAt": "2026-07-22T00:00:00Z"},
-                {}
-            ]
-        }"#;
-        let (windows, detail) = parse_opencode_billing_response(json).unwrap();
-        assert_eq!(windows.len(), 1, "only the fully-formed window survives");
-        assert_eq!(windows[0].label, "5-hour");
-        assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(detail, None);
-    }
-
-    #[test]
-    fn parse_opencode_billing_response_all_windows_malformed_reports_detail() {
-        // Edge case: every window is malformed. The parser succeeds (the
-        // shape is well-formed), the empty-filtered result surfaces the
-        // "no active quotas" detail. The SQLite fallback is NOT triggered
-        // here because the shape contract is satisfied — empty + detail is
-        // a valid "no quotas configured" reply, distinct from "shape
-        // failure" (which would be `{"foo":"bar"}`).
-        let json = r#"{"windows": [{"label": "junk"}, {"usedPercent": null}]}"#;
-        let (windows, detail) = parse_opencode_billing_response(json).unwrap();
-        assert!(windows.is_empty());
-        assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
+    fn parse_opencode_lite_response_malformed_json_is_shape_error() {
+        // A non-JSON body (transport error, html error page, etc.) is a
+        // shape error — the SQLite fallback handles it identically to a
+        // missing-fields body.
+        let err = parse_opencode_lite_response("not-json").unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
     }
 
     // The OpenCode Console credential parser tests (formerly
@@ -4773,106 +4779,12 @@ pub(crate) mod tests {
 
     // ── opencode_usage_impl — end-to-end fallback integration ──────────────
 
-    // ── resolve_opencode_server_id — issue #972 ─────────────────────────────
-    //
-    // The live `_server billing.get` probe must read its `X-Server-Id`
-    // header from the persisted `OpenCodeConsoleCred.server_id`, falling
-    // back to the legacy `OPENCODE_SERVER_ID` constant for credentials
-    // written before #956 added the field. These pure tests pin the
-    // resolver contract; the empty-string case is hand-edit safety.
-
-    fn cred_with_server_id(server_id: Option<&str>) -> OpenCodeConsoleCred {
-        OpenCodeConsoleCred {
-            access_token: Some("tok".to_string()),
-            workspace_id: Some("wrk".to_string()),
-            refresh_token: None,
-            expires_at: None,
-            server_id: server_id.map(str::to_owned),
-        }
-    }
-
-    #[test]
-    fn resolve_opencode_server_id_prefers_persisted_value() {
-        // Issue #972 acceptance #1: when `server_id` is present and
-        // non-empty, the resolver returns it verbatim — the live probe
-        // sends that value in the `X-Server-Id` header.
-        let cred = cred_with_server_id(Some("custom-deployment-id-abc123"));
-        assert_eq!(
-            resolve_opencode_server_id(&cred),
-            "custom-deployment-id-abc123"
-        );
-    }
-
-    #[test]
-    fn resolve_opencode_server_id_falls_back_to_constant_when_missing() {
-        // Issue #972 acceptance #2: a blob without `server_id` (the
-        // pre-#956 shape) keeps emitting the legacy constant so existing
-        // users don't lose their live probe.
-        let cred = cred_with_server_id(None);
-        assert_eq!(resolve_opencode_server_id(&cred), OPENCODE_SERVER_ID);
-    }
-
-    #[test]
-    fn resolve_opencode_server_id_falls_back_when_empty_string() {
-        // A hand-edited blob with `"server_id": ""` is treated as missing
-        // so the resolver never returns a useless empty `X-Server-Id`
-        // header. The fallback branch's warn-once still fires.
-        let cred = cred_with_server_id(Some(""));
-        assert_eq!(resolve_opencode_server_id(&cred), OPENCODE_SERVER_ID);
-    }
-
-    #[test]
-    fn opencode_live_request_parts_returns_persisted_server_id_for_header() {
-        // Issue #972 acceptance #5: a credential with a non-default
-        // `server_id` causes the live probe to send THAT value (not the
-        // legacy constant) in the `X-Server-Id` header. The token /
-        // workspace round-trip is pinned in the same assertion so a
-        // future refactor that drops the header binding still fails.
-        let cred = cred_with_server_id(Some("custom-deployment-id-xyz"));
-        let (token, workspace_id, server_id) =
-            opencode_live_request_parts(&cred).expect("credential is complete");
-        assert_eq!(token, "tok");
-        assert_eq!(workspace_id, "wrk");
-        assert_eq!(
-            server_id, "custom-deployment-id-xyz",
-            "header must read from cred.server_id, not OPENCODE_SERVER_ID"
-        );
-        assert_ne!(
-            server_id, OPENCODE_SERVER_ID,
-            "must not silently fall back to the constant"
-        );
-    }
-
-    #[test]
-    fn opencode_live_request_parts_uses_legacy_constant_when_persisted_missing() {
-        // The matching legacy-default branch: when the credential has no
-        // `server_id`, the header value IS the constant — that's how
-        // pre-#956 blobs continue to probe SolidStart without an
-        // immediate re-auth.
-        let cred = cred_with_server_id(None);
-        let (_token, _workspace_id, server_id) =
-            opencode_live_request_parts(&cred).expect("credential is complete");
-        assert_eq!(server_id, OPENCODE_SERVER_ID);
-    }
-
-    #[test]
-    fn opencode_live_request_parts_returns_none_when_token_missing() {
-        // A blob missing `access_token` (e.g. mid-flow) must collapse to
-        // `None` so the SQLite fallback runs. Mirrors how the live path
-        // originally responded to a `NoCredential` read.
-        let mut cred = cred_with_server_id(Some("custom"));
-        cred.access_token = None;
-        assert!(opencode_live_request_parts(&cred).is_none());
-    }
-
-    #[test]
-    fn opencode_live_request_parts_returns_none_when_workspace_missing() {
-        // Same invariant for `workspace_id` — the body needs a value
-        // even when the token is present.
-        let mut cred = cred_with_server_id(Some("custom"));
-        cred.workspace_id = None;
-        assert!(opencode_live_request_parts(&cred).is_none());
-    }
+    // (The `resolve_opencode_server_id_*` and `opencode_live_request_parts_*`
+    // tests were retired for issue #1073 — the live probe no longer reads
+    // `X-Server-Id` from the credential, so the resolver + parts helpers are
+    // gone. The wire contract is now pinned by the
+    // `opencode_usage_impl_lite_subscription_wire_shape` integration test
+    // further down, which captures the actual outbound headers + body.)
 
     #[test]
     fn opencode_usage_impl_with_sqlite_db_only_returns_sqlite_windows() {
@@ -5143,17 +5055,24 @@ pub(crate) mod tests {
         }
     }
 
-    /// The fixed `_server billing.get` success body used by scenarios 1,
-    /// 3, and 4. Pinned to the documented fixture shape from issue #957
-    /// so a wire-shape drift fails here, not just in the `wiremock`
-    /// server assertion.
-    const LIVE_BODY_OK: &str = r#"{
-        "windows": [
-            {"label": "5-hour",  "usedPercent": 25.0, "resetsAt": "2026-07-20T22:00:00Z"},
-            {"label": "Weekly",  "usedPercent": 12.0, "resetsAt": "2026-07-22T00:00:00Z"},
-            {"label": "Monthly", "usedPercent":  4.5, "resetsAt": "2026-08-01T00:00:00Z"}
-        ]
+    /// The `lite.subscription.get` success body — issue #1073's real wire
+    /// shape. Three usage buckets (5-hour rolling, weekly, monthly) carry
+    /// `status` + `resetInSec` + `usagePercent`. `mine` / `useBalance` /
+    /// `region` are auxiliary context the parser folds into `detail`.
+    const LIVE_LITE_BODY_OK: &str = r#"{
+      "mine": true,
+      "useBalance": false,
+      "region": "us",
+      "rollingUsage": {"status": "ok", "resetInSec": 12345, "usagePercent": 25},
+      "weeklyUsage":  {"status": "ok", "resetInSec": 67890, "usagePercent": 12},
+      "monthlyUsage": {"status": "ok", "resetInSec": 2592000, "usagePercent": 4}
     }"#;
+
+    /// `lite.subscription.get` returns the literal string `null` when the
+    /// workspace has no Go subscription. The parser must surface this as a
+    /// user-visible detail, not as a shape error, so the SQLite fallback
+    /// path isn't tripped by a perfectly valid "no Go plan" reply.
+    const LIVE_LITE_BODY_NULL: &str = "null";
 
     /// The fixed refresh success body — every TokenResponse field is
     /// required by `parse_token_response` (issue #956).
@@ -5187,7 +5106,7 @@ pub(crate) mod tests {
             }
             "/_server" => {
                 live_count_t.fetch_add(1, Ordering::SeqCst);
-                let _ = req.respond(tiny_http::Response::from_string(LIVE_BODY_OK));
+                let _ = req.respond(tiny_http::Response::from_string(LIVE_LITE_BODY_OK));
             }
             _ => {
                 let _ = req.respond(
@@ -5344,7 +5263,7 @@ pub(crate) mod tests {
             }
             "/_server" => {
                 live_count_t.fetch_add(1, Ordering::SeqCst);
-                let _ = req.respond(tiny_http::Response::from_string(LIVE_BODY_OK));
+                let _ = req.respond(tiny_http::Response::from_string(LIVE_LITE_BODY_OK));
             }
             _ => {
                 let _ = req.respond(
@@ -5424,7 +5343,7 @@ pub(crate) mod tests {
                             .with_status_code(401),
                     );
                 } else {
-                    let _ = req.respond(tiny_http::Response::from_string(LIVE_BODY_OK));
+                    let _ = req.respond(tiny_http::Response::from_string(LIVE_LITE_BODY_OK));
                 }
             }
             _ => {
@@ -5468,6 +5387,143 @@ pub(crate) mod tests {
         assert_eq!(usage.windows.len(), 3);
         assert_eq!(usage.windows[0].label, "5-hour");
         assert_eq!(usage.windows[0].used_percent, Some(25.0));
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    // ── `lite.subscription.get` wire-shape regression (issue #1073) ────────
+    //
+    // The mock-only scenarios above are "false-green" — the loopback
+    // returns success for any body, so a wire-shape regression (wrong
+    // `X-Server-Id`, JSON array body, missing `X-Start-Type`) would slip
+    // through silently. This test captures the inbound request and
+    // asserts the literal wire contract: header values + body bytes +
+    // status. A regression in any of those surfaces here, not in a
+    // runtime probe against opencode.ai.
+
+    #[test]
+    fn opencode_usage_impl_lite_subscription_wire_shape() {
+        // Stand up a loopback that captures the inbound request,
+        // validates the wire contract, and returns the new envelope. Two
+        // requests are needed because the credential is fresh (no
+        // pre-emptive refresh) but we still go through the `_server`
+        // path on the first attempt.
+        clear_usage_cache();
+        let temp = make_opencode_home("lite");
+
+        let captured_body = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let captured_server_id = Arc::new(Mutex::new(None::<String>));
+        let captured_start_type = Arc::new(Mutex::new(None::<String>));
+        let captured_content_type = Arc::new(Mutex::new(None::<String>));
+        let captured_authorization = Arc::new(Mutex::new(None::<String>));
+
+        let body_t = captured_body.clone();
+        let server_id_t = captured_server_id.clone();
+        let start_type_t = captured_start_type.clone();
+        let content_type_t = captured_content_type.clone();
+        let auth_t = captured_authorization.clone();
+
+        // 1 request: live probe only (the credential is fresh, no
+        // pre-emptive refresh, and we don't need a refresh URL).
+        let port = spawn_loopback(1, move |mut req| {
+            // Capture every load-bearing header.
+            let server_id = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("X-Server-Id"))
+                .map(|h| h.value.as_str().to_string());
+            let start_type = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("X-Start-Type"))
+                .map(|h| h.value.as_str().to_string());
+            let content_type = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Content-Type"))
+                .map(|h| h.value.as_str().to_string());
+            let authorization = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string());
+            *server_id_t.lock().unwrap() = server_id;
+            *start_type_t.lock().unwrap() = start_type;
+            *content_type_t.lock().unwrap() = content_type;
+            *auth_t.lock().unwrap() = authorization;
+
+            // Capture the body — must be the raw workspace id bytes,
+            // NOT a JSON array (the previous "fictional billing.get"
+            // shape sent `["wrk_TEST"]`). tiny_http exposes the body
+            // reader via `as_reader()`; `read_to_end` drains it into
+            // our capture buffer.
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = req.as_reader().read_to_end(&mut buf);
+            *body_t.lock().unwrap() = buf;
+
+            let _ = req.respond(tiny_http::Response::from_string(LIVE_LITE_BODY_OK));
+        });
+        let live_url = format!("http://127.0.0.1:{port}/_server");
+        let refresh_url = format!("http://127.0.0.1:{port}/auth/device/token");
+
+        let cred = build_cred(
+            "fresh_tok",
+            "rt_fresh",
+            "2099-01-01T00:00:00Z",
+            "wrk_TEST",
+            "srv_v1",
+        );
+        let usage = opencode_usage_impl_with_hosts(
+            &temp,
+            &live_url,
+            &refresh_url,
+            Some(&cred),
+        );
+
+        // Wire contract — every assertion below pins a specific field of
+        // the SolidStart server-function RPC contract.
+        assert_eq!(
+            captured_server_id.lock().unwrap().as_deref(),
+            Some("lite.subscription.get"),
+            "X-Server-Id must be the literal function name, not the \
+             legacy OPENCODE_SERVER_ID constant or the persisted \
+             cred.server_id (issue #1073)"
+        );
+        assert_eq!(
+            captured_start_type.lock().unwrap().as_deref(),
+            Some("1"),
+            "X-Start-Type must be '1' (the SolidStart server-function \
+             cold-start marker — issue #1073)"
+        );
+        assert_eq!(
+            captured_content_type.lock().unwrap().as_deref(),
+            Some("text/plain"),
+            "Content-Type must be text/plain — the body is the raw \
+             workspace id, not JSON (issue #1073)"
+        );
+        assert_eq!(
+            captured_body.lock().unwrap().as_slice(),
+            b"wrk_TEST".as_slice(),
+            "body must be the raw workspace id bytes, not a JSON array"
+        );
+        // The live probe never sent an Authorization header in the
+        // original (the function ID is the credential); the spec allows
+        // keeping it harmless but the new wire shape drops it entirely.
+        assert!(
+            captured_authorization.lock().unwrap().is_none(),
+            "Authorization header must not be sent — the X-Server-Id \
+             function name is the credential (issue #1073)"
+        );
+
+        // Outcome contract — the new envelope parses to the documented
+        // meter shape.
+        assert!(usage.logged_in, "live path wins over SQLite fallback");
+        assert!(usage.error.is_none(), "live path carries no error: {:?}", usage.error);
+        assert_eq!(usage.windows.len(), 3);
+        assert_eq!(usage.windows[0].label, "5-hour");
+        assert_eq!(usage.windows[0].used_percent, Some(25.0));
+        assert_eq!(usage.detail.as_deref(), Some("Your workspace"));
 
         let _ = fs::remove_dir_all(&temp);
     }
