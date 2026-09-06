@@ -20,6 +20,7 @@ import {
   queuedReason,
   runActivity,
   runBelongsToActivity,
+  runBelongsToHistory,
   runNeedsAttention,
   runStateLabel,
   runStepProgress,
@@ -62,14 +63,18 @@ describe('run diagnostics', () => {
       const pending = detail(1, 'pending');
       const failed = detail(2, 'failed', '2026-08-22 10:02:00');
       const completed = detail(3, 'completed', '2026-08-22 10:03:00');
+      const cancelled = detail(4, 'cancelled', '2026-08-22 10:04:00');
+      const offsetCompleted = detail(5, 'completed', '2026-08-22T12:05:00+02:00');
       expect(runBelongsToActivity(pending)).toBe(true);
       expect(runBelongsToActivity(failed)).toBe(true);
+      expect(runBelongsToActivity(cancelled)).toBe(false);
+      expect(runBelongsToHistory(cancelled)).toBe(true);
       expect(runNeedsAttention(failed)).toBe(true);
-      const runs = [pending, failed, completed];
+      const runs = [pending, failed, completed, cancelled, offsetCompleted];
       expect(buildCircuitProbeRows([row(...runs)], 'activity')[0].visibleRuns.map((run) => run.run.id))
         .toEqual([2, 1]);
       expect(buildCircuitProbeRows([row(...runs)], 'history')[0].visibleRuns.map((run) => run.run.id))
-        .toEqual([3, 2]);
+        .toEqual([5, 4, 3, 2]);
     });
 
     it('summarizes active, attention, and queued work without component heuristics', () => {
@@ -200,6 +205,8 @@ describe('run diagnostics', () => {
     it('knows which run states the worker never leaves', () => {
       expect(isTerminalRunState('completed')).toBe(true);
       expect(isTerminalRunState('failed')).toBe(true);
+      expect(isTerminalRunState('cancelled')).toBe(true);
+      expect(runStateLabel('cancelled')).toBe('Cancelled');
       expect(isTerminalRunState('paused')).toBe(false);
       expect(isTerminalRunState('running')).toBe(false);
       expect(isTerminalRunState('pending')).toBe(false);
@@ -269,6 +276,15 @@ describe('run diagnostics', () => {
         FREE
       );
       expect(workerFailed.detail).toContain('No step recorded a failure');
+    });
+
+    it('labels a cancelled run as terminal rather than waiting to start', () => {
+      expect(runActivity({ state: 'cancelled' }, [], FREE)).toEqual({
+        kind: 'terminal',
+        label: 'Cancelled',
+        nodeId: null,
+        detail: null,
+      });
     });
 
     it('reports paused with the step it was parked on, and how to continue', () => {

@@ -901,7 +901,7 @@ export interface StepLike {
  *  `Date.parse` (appending "Z" to it would yield "…ZZ" → NaN). */
 const ZONELESS_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/;
 
-function ledgerTimestampMs(s: string): number {
+export function ledgerTimestampMs(s: string): number {
   if (ZONELESS_TIMESTAMP.test(s)) return Date.parse(s.replace(' ', 'T') + 'Z');
   return Date.parse(s);
 }
@@ -979,7 +979,7 @@ export function formatDurationMs(ms: number): string {
 
 /** Run states the worker never moves out of (`stepper::RunState`). */
 export function isTerminalRunState(state: string): boolean {
-  return state === 'completed' || state === 'failed';
+  return state === 'completed' || state === 'failed' || state === 'cancelled';
 }
 
 /**

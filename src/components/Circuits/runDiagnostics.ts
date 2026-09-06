@@ -15,7 +15,7 @@
  * component.
  */
 
-import { isTerminalRunState } from './circuitGraphModel';
+import { isTerminalRunState, ledgerTimestampMs } from './circuitGraphModel';
 import type { StepLike } from './circuitGraphModel';
 import type { CircuitRunDetail } from '../../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../../types/generated/CircuitWithRuns';
@@ -30,11 +30,12 @@ export function runNeedsAttention(detail: CircuitRunDetail): boolean {
 
 /**
  * Activity includes work still in flight and failures that need explaining.
- * Completed runs stay in History; pending runs normally arrive through the
- * queue payload but remain eligible here if a backend snapshot includes one.
+ * Completed and cancelled runs stay in History; pending runs normally arrive
+ * through the queue payload but remain eligible here if a backend snapshot
+ * includes one.
  */
 export function runBelongsToActivity(detail: CircuitRunDetail): boolean {
-  return detail.run.state !== 'completed';
+  return !isTerminalRunState(detail.run.state) || detail.run.state === 'failed';
 }
 
 export function runBelongsToHistory(detail: CircuitRunDetail): boolean {
@@ -42,10 +43,7 @@ export function runBelongsToHistory(detail: CircuitRunDetail): boolean {
 }
 
 function timestampValue(value: string): number {
-  const normalized = value.includes('T') || value.endsWith('Z')
-    ? value
-    : `${value.replace(' ', 'T')}Z`;
-  const parsed = Date.parse(normalized);
+  const parsed = ledgerTimestampMs(value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
@@ -133,6 +131,8 @@ export function runStateLabel(state: string): string {
       return 'Completed';
     case 'failed':
       return 'Failed';
+    case 'cancelled':
+      return 'Cancelled';
     default:
       return state;
   }
@@ -305,6 +305,9 @@ export function runActivity(
   }
   if (run.state === 'completed') {
     return { kind: 'terminal', label: 'Completed', nodeId: null, detail: null };
+  }
+  if (run.state === 'cancelled') {
+    return { kind: 'terminal', label: 'Cancelled', nodeId: null, detail: null };
   }
   if (blocked !== null) {
     return {

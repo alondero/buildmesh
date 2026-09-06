@@ -31,7 +31,7 @@
  * able to scroll the whole tab sideways.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { formatError } from '../../lib/errorUtils';
 import {
@@ -201,6 +201,7 @@ export function CircuitsProbeTab() {
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<CircuitProbeView>('activity');
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
+  const loadRequestRef = useRef(0);
   // These snapshots only change when the backend payload or selected view
   // changes. In particular, the duration clock must not rebuild the row model.
   const allRuns = useMemo(() => rows.flatMap(({ runs }) => runs), [rows]);
@@ -249,6 +250,7 @@ export function CircuitsProbeTab() {
     effectiveTriggerKind === 'github_issue_label' || effectiveTriggerKind === 'github_pr_label';
 
   const load = useCallback(async () => {
+    const requestId = ++loadRequestRef.current;
     if (activeMeshId === null) {
       setRows([]);
       setQueue([]);
@@ -257,10 +259,12 @@ export function CircuitsProbeTab() {
     try {
       // Ledger cards and the complete queue hydrate through one IPC payload.
       const snapshot = await listCircuitProbe(activeMeshId, 10);
+      if (requestId !== loadRequestRef.current) return;
       setRows(snapshot.circuits);
       setQueue(snapshot.queue);
       setLoadError(null);
     } catch (err) {
+      if (requestId !== loadRequestRef.current) return;
       console.error('Failed to load circuits:', err);
       setLoadError(formatError(err));
     }
@@ -268,6 +272,10 @@ export function CircuitsProbeTab() {
 
   useEffect(() => {
     void load();
+    return () => {
+      // Invalidate an in-flight snapshot before a mesh switch or unmount.
+      loadRequestRef.current += 1;
+    };
   }, [load]);
 
   // The worker emits `circuit-run-updated` whenever a run changes state;
@@ -550,6 +558,7 @@ export function CircuitsProbeTab() {
                         }
                         aria-label={`Enable ${circuit.name}`}
                         data-testid={`circuit-enabled-${circuit.id}`}
+                        className="disabled:opacity-40"
                       />
                       <span className="truncate text-text-primary" title={circuit.name}>
                         {circuit.name}
@@ -624,29 +633,26 @@ export function CircuitsProbeTab() {
                     (#1468), replacing the old truncated one-line chain. */}
                 {view !== 'manage' && visibleRuns.length > 0 && (
                   <ul className="mt-1.5 flex flex-col gap-1" data-testid={`circuit-runs-${circuit.id}`}>
-                    {visibleRuns.map((detail) => (
-                      <CircuitRunCard
-                        key={detail.run.id}
-                        detail={detail}
-                        capacity={capacity}
-                        expanded={
-                          runExpandOverrides[detail.run.id] ??
-                          (detail.run.state === 'failed' || !isTerminalRunState(detail.run.state))
-                        }
-                        onToggleExpanded={() => toggleRunExpanded(
-                          detail.run.id,
-                          detail.run.state === 'failed' || !isTerminalRunState(detail.run.state)
-                        )}
-                        now={now}
-                        busy={busy}
-                        onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
-                        onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}
-                        onCancel={() => runAction(() => cancelCircuitRun(detail.run.id))}
-                        onApprove={(nodeId) =>
-                          runAction(() => approveCircuitStep(detail.run.id, nodeId))
-                        }
-                      />
-                    ))}
+                    {visibleRuns.map((detail) => {
+                      const defaultExpanded = detail.run.state === 'failed' || !isTerminalRunState(detail.run.state);
+                      return (
+                        <CircuitRunCard
+                          key={detail.run.id}
+                          detail={detail}
+                          capacity={capacity}
+                          expanded={runExpandOverrides[detail.run.id] ?? defaultExpanded}
+                          onToggleExpanded={() => toggleRunExpanded(detail.run.id, defaultExpanded)}
+                          now={now}
+                          busy={busy}
+                          onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
+                          onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}
+                          onCancel={() => runAction(() => cancelCircuitRun(detail.run.id))}
+                          onApprove={(nodeId) =>
+                            runAction(() => approveCircuitStep(detail.run.id, nodeId))
+                          }
+                        />
+                      );
+                    })}
                   </ul>
                 )}
               </li>

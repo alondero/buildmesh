@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { emit, listen } from '@tauri-apps/api/event';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
@@ -192,6 +193,49 @@ beforeEach(() => {
 });
 
 describe('CircuitsProbeTab', () => {
+  it('ignores an older snapshot when a refresh completes out of order', async () => {
+    mockBackend();
+    let resolveFirst!: (snapshot: unknown) => void;
+    let resolveSecond!: (snapshot: unknown) => void;
+    const firstSnapshot = new Promise<unknown>((resolve) => { resolveFirst = resolve; });
+    const secondSnapshot = new Promise<unknown>((resolve) => { resolveSecond = resolve; });
+    let probeCall = 0;
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'list_circuit_probe') {
+        return probeCall++ === 0 ? firstSnapshot : secondSnapshot;
+      }
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    openProbeDestination('circuits');
+    await waitFor(() => expect(vi.mocked(listen)).toHaveBeenCalledWith(
+      'circuit-run-updated',
+      expect.any(Function),
+    ));
+
+    // A run-update starts a newer request before the initial request returns.
+    await emit('circuit-run-updated', {});
+    await act(async () => {
+      resolveSecond({
+        circuits: [{ circuit: { ...CIRCUIT, name: 'newer snapshot' }, runs: [] }],
+        queue: [],
+      });
+      await secondSnapshot;
+    });
+    expect(await screen.findByText('newer snapshot')).toBeTruthy();
+
+    await act(async () => {
+      resolveFirst({
+        circuits: [{ circuit: CIRCUIT, runs: [] }],
+        queue: [],
+      });
+      await firstSnapshot;
+    });
+    expect(screen.queryByText('nightly-sweep')).toBeNull();
+    expect(screen.getByText('newer snapshot')).toBeTruthy();
+  });
+
   it('keeps failures visible in Activity and retains them in History', async () => {
     mockBackend({ runs: [
       { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } },
