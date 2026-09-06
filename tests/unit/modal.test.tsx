@@ -51,7 +51,7 @@ describe('Modal', () => {
         <p>body</p>
       </Modal>,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -63,7 +63,7 @@ describe('Modal', () => {
       </Modal>,
     );
     unmount();
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -211,7 +211,7 @@ describe('Modal dirty-check (issue #730)', () => {
       </Modal>,
     );
     expect(queryByTestId('modal-discard-banner')).toBeNull();
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
     getByTestId('modal-discard-banner');
   });
@@ -235,7 +235,7 @@ describe('Modal dirty-check (issue #730)', () => {
         <p>body</p>
       </Modal>,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -298,11 +298,11 @@ describe('Modal dirty-check (issue #730)', () => {
         <p>body</p>
       </Modal>,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     getByTestId('modal-discard-banner');
     expect(onClose).not.toHaveBeenCalled();
     // Second Escape — banner gone, modal still open.
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(queryByTestId('modal-discard-banner')).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -331,7 +331,7 @@ describe('Modal dirty-check (issue #730)', () => {
         <p>body</p>
       </Modal>,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     fireEvent.click(getByTestId('modal-discard-confirm'));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -361,7 +361,7 @@ describe('Modal dirty-check (issue #730)', () => {
       </Modal>,
     );
     expect(queryByTestId('modal-discard-banner')).toBeNull();
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
 
     onClose.mockClear();
@@ -370,7 +370,7 @@ describe('Modal dirty-check (issue #730)', () => {
         <p>body</p>
       </Modal>,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
     getByTestId('modal-discard-banner');
   });
@@ -387,7 +387,7 @@ describe('Modal dirty-check (issue #730)', () => {
         <p>body</p>
       </Modal>,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     getByTestId('modal-discard-banner');
 
     rerender(
@@ -406,7 +406,7 @@ describe('Modal dirty-check (issue #730)', () => {
         <p>body</p>
       </Modal>,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(document.activeElement).toBe(getByTestId('modal-discard-cancel'));
   });
 });

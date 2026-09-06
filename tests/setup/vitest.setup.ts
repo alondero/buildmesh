@@ -376,15 +376,22 @@ beforeEach(async () => {
   // top-level import would cause `platform.ts` to be cached with the
   // real `navigator.platform` value, defeating the test files that
   // mock it to force `isWindows = true` (issue #354 follow-up).
-  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }] =
+  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }, { _resetEscapeKeyStackForTests }] =
     await Promise.all([
       import('../../src/lib/pathInvalidatedCache'),
       import('../../src/lib/providerCache'),
       import('../../src/hooks/useProviderList'),
+      import('../../src/hooks/useEscapeKey'),
     ]);
   resetPathInvalidatedCacheForTests();
   resetProviderCachesForTests();
   __resetSharedProviderListForTests();
+  // Issue #649 — the useEscapeKey hook maintains a module-level LIFO
+  // stack of Escape handlers so the topmost mounted surface wins. RTL's
+  // `cleanup()` already unmounts components between tests, but the reset
+  // guards against mid-mount errors, hook-only tests that don't render
+  // via RTL, and StrictMode double-invokes within a single test.
+  _resetEscapeKeyStackForTests();
 });
 
 // React Testing Library does not auto-unmount rendered components between
