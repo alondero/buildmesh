@@ -186,7 +186,9 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
         <div role="tablist" aria-label="Node activities" className="flex shrink-0 overflow-x-auto border-b border-border-default bg-bg-base">
           {tabs.map((tab, index) => {
             const selected = tab.nodeId === selectedId && tab.utility === showingUtility;
-            return <button key={tab.key} type="button" role="tab"
+            return (
+              <span key={tab.key} role="presentation" className="inline-flex shrink-0 items-stretch">
+                <button type="button" role="tab"
               id={`activity-${nodeId}-${tab.key}`} aria-controls={`activity-panel-${nodeId}`}
               aria-label={`${tab.label}${tab.status ? ` ${tab.status.replace(/_/g, ' ')}` : ''}`}
               aria-selected={selected} tabIndex={selected ? 0 : -1}
@@ -203,7 +205,22 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
               }}
               className={`shrink-0 px-3 py-2 text-xs border-b-2 ${selected ? 'border-accent-cyan text-accent-cyan' : 'border-transparent text-text-secondary hover:text-text-primary'}`}>
               {tab.label}{tab.status && <span className="ml-2 text-2xs">{' '}{tab.status.replace(/_/g, ' ')}</span>}
-            </button>;
+                </button>
+                {tab.utility && (
+                  <button type="button"
+                    aria-label={`Close ${tab.label}`}
+                    title={`Close ${tab.label}`}
+                    onClick={event => {
+                      event.stopPropagation();
+                      closeUtility(nodeId, tab.nodeId);
+                    }}
+                    className="border-b-2 border-transparent px-1 text-text-muted hover:text-text-primary"
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
+            );
           })}
         </div>
       )}

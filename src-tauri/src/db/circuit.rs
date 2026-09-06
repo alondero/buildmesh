@@ -1104,10 +1104,13 @@ fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<Vec<AgentOw
     })?;
     let mut ownerships: Vec<AgentOwnershipRow> = rows.collect::<SqlResult<_>>()?;
     let mut sources = db.prepare(
+        // Keep source overrides deterministic when an agent has more than one
+        // active circuit run; the later run is applied last below.
         "SELECT a.id, r.id, c.id, c.name, r.state FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          JOIN agent_nodes a ON a.id = r.source_agent_node_id \
-         WHERE a.status != 'archived' AND r.state IN ('pending','running','paused')",
+         WHERE a.status != 'archived' AND r.state IN ('pending','running','paused') \
+         ORDER BY a.id, r.id",
     )?;
     for row in sources.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))? {
         let (node, run, circuit, name, state) = row?;

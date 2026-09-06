@@ -96,6 +96,10 @@ describe('node activities', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Implementation/ }));
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
     expect(screen.getByText('terminal output 1')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Close Terminal/ }));
+    expect(screen.queryByRole('tab', { name: /Terminal/ })).toBeNull();
+    fireEvent.click(screen.getByText('Open terminal'));
+    expect(await screen.findByText('terminal output 1')).toBeTruthy();
     fireEvent.click(screen.getByRole('tab', { name: /Terminal.*Agent 1/ }));
     first.unmount();
     render(card());

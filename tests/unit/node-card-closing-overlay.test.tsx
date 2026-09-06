@@ -57,9 +57,6 @@ function renderCard(node: AgentNode) {
       nodeId={node.id}
       isActive={false}
       onActivate={vi.fn()}
-      onBuildRun={vi.fn()}
-      buildRunOpen={null}
-      setBuildRunOpen={vi.fn()}
     />,
   );
 }
