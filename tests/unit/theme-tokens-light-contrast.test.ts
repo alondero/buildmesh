@@ -238,3 +238,33 @@ describe('light theme token coverage (#734)', () => {
     expect(drift, `Override tokens missing from @theme: ${drift.join(', ')}`).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Status token layering (#741).
+//
+// Companion to the dark-theme block in theme-tokens-contrast.test.ts.
+// The idle ≡ running value-parity contract must hold in BOTH themes;
+// pinning only the dark @theme half lets the light override drift
+// silently. Both halves of every pair (foreground + -bg) are pinned.
+// ---------------------------------------------------------------------------
+
+describe('status token layering (#741)', () => {
+  it('light --color-status-idle and --color-status-running are value-parity tokens', () => {
+    // The light cyan-600 step (#0891b2) is the smallest darkening of
+    // the brand cyan that still reads as the same hue while clearing
+    // WCAG 1.4.11 for non-text UI on a near-white bg. Pin both the
+    // pinned value AND the parity equality so a future retune of
+    // either token fails the test rather than silently diverging
+    // idle/running in light mode.
+    expect(readLightToken('status-idle')).toBe('#0891b2');
+    expect(readLightToken('status-idle')).toBe(readLightToken('status-running'));
+  });
+
+  it('light --color-status-idle-bg and --color-status-running-bg are value-parity tokens', () => {
+    // Same parity contract for the -bg half of every pair (round-3
+    // gap left by round-2). Without this, the bg hue could drift
+    // and the parity would hold only at the text layer.
+    expect(readLightToken('status-idle-bg')).toBe('rgba(8, 145, 178, 0.10)');
+    expect(readLightToken('status-idle-bg')).toBe(readLightToken('status-running-bg'));
+  });
+});

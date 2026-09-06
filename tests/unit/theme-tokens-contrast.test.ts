@@ -291,3 +291,53 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// Status token layering (#741).
+//
+// Round-1 review caught that `.status-idle` was the lone `.status-*`
+// utility class bypassing its semantic token — it aliased
+// `--color-accent-cyan` instead of `--color-status-idle`. That broke
+// Tailwind v4's symmetric utility generation (text-status-idle /
+// bg-status-idle were silent black holes for any new badge or
+// indicator using them) and put the "idle/running share a hue by
+// design" contract on a fragile foundation.
+//
+// CSS literal-value duplication is not a CSS alias (var() chaining).
+// The idle ≡ running parity is enforced by these test pins, not by
+// alias chains. Treat the pins as the source of truth: when retuning
+// the cyan hue in either token, update both (and both -bg variants)
+// together. Round-3 added the -bg parity assertions that round-2
+// omitted — keeping both halves of every pair in lockstep is the
+// only way the contract stays coherent across every Tailwind utility
+// (text-status-idle + bg-status-idle on both halves of every pair).
+// ---------------------------------------------------------------------------
+
+describe('status token layering (#741)', () => {
+  it('dark --color-status-idle and --color-status-running are value-parity tokens', () => {
+    // Idle and running are visually indistinguishable by colour on
+    // desktop — disambiguated by dot glyph + label (see STATUS_CONFIG
+    // in src/lib/status.ts). A "let's differentiate idle" PR would
+    // either retune both or none; either way this pin fails first.
+    expect(readToken('status-idle')).toBe('#00d4ff');
+    expect(readToken('status-idle')).toBe(readToken('status-running'));
+  });
+
+  it('dark --color-status-idle-bg and --color-status-running-bg are value-parity tokens', () => {
+    // Same parity contract for the -bg half of every pair. Round-2
+    // only pinned the foreground tokens; without this, the bg hue
+    // could drift and the parity would hold only at the text layer,
+    // not at the bg layer Tailwind exposes alongside it.
+    expect(readToken('status-idle-bg')).toBe('rgba(0, 212, 255, 0.10)');
+    expect(readToken('status-idle-bg')).toBe(readToken('status-running-bg'));
+  });
+
+  it('.status-idle CSS rule references --color-status-idle (not --color-accent-cyan)', () => {
+    // Static-analysis guard against the original violation. If
+    // `.status-idle` bypasses the token to reach `--color-accent-cyan`,
+    // any new badge writing `text-status-idle` would render in the
+    // accent hue rather than the semantic status hue.
+    expect(APP_CSS).toMatch(/\.status-idle\s*\{\s*color:\s*var\(--color-status-idle\)/);
+    expect(APP_CSS).not.toMatch(/\.status-idle\s*\{\s*color:\s*var\(--color-accent-cyan\)/);
+  });
+});

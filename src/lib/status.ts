@@ -27,20 +27,23 @@ export const STATUS_CONFIG = {
   },
   running: {
     color: 'status-running',
-    bgColor: 'bg-accent-cyan',
+    bgColor: 'bg-status-running',
     dot: '●',
     label: 'Running',
     hex: '#00d4ff',
   },
   idle: {
     color: 'status-idle',
-    bgColor: 'bg-accent-cyan',
+    bgColor: 'bg-status-idle',
     dot: '○',
     label: 'Idle',
     // Same cyan as `running` — desktop distinguishes idle/running by the
-    // dot glyph (○ vs ●) and label, not color. Intentional; see `.status-idle`
-    // in App.css, which resolves to `--color-accent-cyan` rather than the
-    // unused `--color-status-idle` token.
+    // dot glyph (○ vs ●) and label, not color. Intentional; `.status-idle`
+    // in App.css maps to `--color-status-idle`, and the equality with
+    // `--color-status-running` (the foreground AND -bg variant) is
+    // pinned by the "status token layering (#741)" contract tests in
+    // tests/unit/theme-tokens*.test.ts. That's the source of truth;
+    // update both tokens together when retuning (round-3, #741).
     hex: '#00d4ff',
   },
   awaiting_input: {
