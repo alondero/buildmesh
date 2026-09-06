@@ -24,11 +24,14 @@ export function QuickConnectMenu({ position, onSelect, onDismiss }: QuickConnect
 
   // Issue #649 — Escape dismisses the menu. Routed through the shared
   // `useEscapeKey` hook so the menu (mounted after the circuit editor's
-  // window listener was, but now via the LIFO stack) claims Escape
-  // before the editor's close path runs. Replaces the previous
-  // `e.stopPropagation()` on the input's element-level onKeyDown —
-  // brittle, because the editor's listener was on `window` and
-  // `stopPropagation` on a child doesn't stop a window listener.
+  // listener, now via the LIFO stack) claims Escape before the editor's
+  // close path runs. The previous `e.stopPropagation()` on the input's
+  // element-level onKeyDown *would* have worked in real browsers — the
+  // original migration comment overstated the problem. The hook is
+  // still the right home for this handler because (a) it removes the
+  // imperative `stopPropagation` against a sibling listener (cleaner)
+  // and (b) the test suite dispatches keydown to `document`, where the
+  // editor's pre-PR window-level listener would have been bypassed.
   useEscapeKey(() => onDismiss());
 
   return (

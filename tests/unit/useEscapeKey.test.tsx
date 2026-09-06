@@ -253,4 +253,26 @@ describe('useEscapeKey — test reset seam', () => {
     // Cleanup the rendered tree to avoid leaking the harness.
     unmount();
   });
+
+  it('does not reset the id counter (post-reset ids stay monotonic)', () => {
+    // Issue #649 review: resetting `nextId = 1` risked id collisions
+    // if a stale async cleanup from a previous test fired after the
+    // reset. Pin that the counter is preserved across resets, so post-
+    // reset ids are strictly greater than any pre-reset id.
+    const a = vi.fn();
+    const b = vi.fn();
+    // Mount → push entry with some id.
+    const first = render(<Harness onEscape={a} />);
+    _resetEscapeKeyStackForTests();
+    // Force the unmount to fire AFTER the reset (simulating a stale
+    // async cleanup). The splice uses the id that was captured at
+    // push time — it must not find the new (post-reset) entry.
+    first.unmount();
+    // Now mount a fresh handler. Its id must be > the pre-reset id,
+    // and an Escape must fire only this new handler.
+    render(<Harness onEscape={b} />);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(b).toHaveBeenCalledTimes(1);
+    expect(a).not.toHaveBeenCalled();
+  });
 });

@@ -245,6 +245,13 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
 
   const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
+      // Issue #649 review: stopPropagation here so the Escape doesn't
+      // bubble to the document-level `useEscapeKey` dispatcher and trigger
+      // AgentNodeView's single-mode exit (or any other mounted surface
+      // stacked above the terminal). Matches `GridControls.tsx:105-111`'s
+      // opt-out pattern for the search input.
+      e.stopPropagation();
+      e.preventDefault();
       setSearchOpen(false);
       instRef.current?.term.focus();
     } else if (e.key === 'Enter') {

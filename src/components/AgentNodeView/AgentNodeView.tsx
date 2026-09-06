@@ -398,17 +398,17 @@ export function AgentNodeView() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNode?.id]);
 
-  // Escape exits Single mode. Only bound while single is active so we don't
-  // intercept Escape (e.g. agent CLIs read it) during normal grid use. While
-  // the Center Diff Overlay (#379) or the Circuit Editor (#1209) is open it
-  // sits on top of the solo terminal and owns Escape — without this guard,
-  // Escape would close the overlay AND exit single in one press. When an
-  // overlay closes, the `enabled` flag flips and the hook re-binds.
-  // Issue #649 — driven by the shared `useEscapeKey` hook; the three guards
-  // collapse into the `enabled` flag.
+  // Escape exits Single mode. Issue #649 review: only `viewMode === 'single'`
+  // belongs in `enabled` — the LIFO stack owned by `useEscapeKey` already
+  // guarantees that the most-recently-mounted surface (Center Diff Overlay,
+  // Circuit Editor, etc.) is on top of the stack and handles Escape before
+  // us. Toggling `enabled` based on overlay state was redundant: when an
+  // overlay opens, it pushes onto the stack above us; when it closes, it
+  // pops, and we're back on top. Re-binding the listener on every overlay
+  // state change was both coupling and churn.
   useEscapeKey(
     () => exitSingleMode(),
-    viewMode === 'single' && activeDiffFile == null && !circuitEditorOpen,
+    viewMode === 'single',
   );
 
   // Reflow the terminal grid on every mode transition: switching modes

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WorktreeCloseDialog (#643)
  *
  * If the dialog is occluded (another buildmesh window on top, or the WebView
@@ -71,7 +71,7 @@ describe('WorktreeCloseDialog (#643)', () => {
 
   it('does not steal Escape while no prompt is pending', () => {
     // With the useEffect gated on `pending`, no listener is installed when
-    // the prompt is null â€” so an Escape press in the app-wide keydown
+    // the prompt is null — so an Escape press in the app-wide keydown
     // stream must not mutate the store.
     expect(useWorktreeClosePromptStore.getState().pending).toBeNull();
 

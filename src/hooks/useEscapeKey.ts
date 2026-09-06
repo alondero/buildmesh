@@ -72,7 +72,7 @@
  *     useEscapeKey(() => setOpen(false), isOpen);
  *     useEscapeKey(handleEscape);  // arms for the component's lifetime
  */
-import { useEffect, useRef } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 
 interface StackEntry {
   /** Stable per-entry id so StrictMode's double-invoke can safely splice. */
@@ -105,16 +105,13 @@ function ensureDispatcher(): void {
     // IME composition carve-out — Escape during composition cancels the
     // composition, not the dialog.
     if (event.isComposing) return;
-    // Top-of-stack wins. Iterate top-down so the most-recently-mounted
-    // handler runs; if for some reason a dynamic predicate ever filters
-    // the top entry, we'd fall through to the next. Today all entries
-    // are always enabled, so we return after the first invocation.
-    for (let i = stack.length - 1; i >= 0; i--) {
-      const entry = stack[i];
-      event.preventDefault();
-      entry.call(event);
-      return;
-    }
+    // Top-of-stack wins. The LIFO discipline means the most-recently-
+    // mounted handler is the one that runs; the rest of the stack is
+    // intentionally not consulted.
+    const entry = stack[stack.length - 1];
+    if (entry === undefined) return;
+    event.preventDefault();
+    entry.call(event);
   });
 }
 
@@ -137,7 +134,15 @@ export function useEscapeKey(
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
 
-  useEffect(() => {
+  // useLayoutEffect, not useEffect: we want the listener attached
+  // synchronously after commit, before the browser paints. Modal-style
+  // callers expect Escape to be intercepted the moment they mount — a
+  // passive post-paint effect leaves a brief window where Escape falls
+  // through. Mirrors `useAriaMenu.ts`'s split (layout effect for auto-
+  // focus, regular effect for the listener is fine there because menu
+  // focus is the user-driven trigger; here the surface may mount in
+  // response to a non-focus event like a programmatic store update).
+  useLayoutEffect(() => {
     if (!enabled) return;
     ensureDispatcher();
     const id = nextId++;
@@ -154,13 +159,14 @@ export function useEscapeKey(
 }
 
 /**
- * Clear the module-level stack and reset the id counter. Wired into
- * `tests/setup/vitest.setup.ts` `beforeEach` so each test starts with
- * a fresh dispatcher. Safe to call from production code — there are no
- * live listeners after the manual `clear()` — but it's only exported
- * for the test seam.
+ * Clear the module-level stack. Wired into `tests/setup/vitest.setup.ts`
+ * `beforeEach` so each test starts with a fresh dispatcher. The id
+ * counter (`nextId`) is intentionally NOT reset — a stale async cleanup
+ * from a previous test might fire after this reset and try to splice an
+ * id that was issued before the reset; keeping `nextId` monotonic means
+ * post-reset ids can never collide with pre-reset ids even if a
+ * pre-reset entry somehow survived the stack clear.
  */
 export function _resetEscapeKeyStackForTests(): void {
   stack.length = 0;
-  nextId = 1;
 }

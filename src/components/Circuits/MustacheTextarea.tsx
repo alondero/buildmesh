@@ -150,13 +150,15 @@ export function MustacheTextarea({
 
   // Issue #649 — Escape dismisses the menu. Routed through the shared
   // `useEscapeKey` hook so the menu (mounted after the circuit editor's
-  // window listener was, but now via the LIFO stack) claims Escape
-  // before the editor's close path runs. The previous implementation
-  // relied on `e.stopPropagation()` on the textarea's element-level
-  // onKeyDown — that's brittle because the editor's listener was on
-  // `window` and `stopPropagation` on a child doesn't stop a window
-  // listener. The LIFO discipline replaces that with a data-driven
-  // priority rule.
+  // listener, now via the LIFO stack) claims Escape before the editor's
+  // close path runs. Note: the previous element-level `e.stopPropagation()`
+  // *would* have stopped the editor's bubble-phase listener in real
+  // browsers — the original migration rationale overstated the problem.
+  // The hook is still the right home for this handler because (a) it lets
+  // the menu be dismissed via the same Escape path whether focus is in the
+  // textarea or elsewhere on the canvas, and (b) the test suite dispatches
+  // keydown to `document`, where a window-level listener (the editor's
+  // pre-PR shape) would have been bypassed entirely.
   useEscapeKey(
     () => {
       setContext(null);
