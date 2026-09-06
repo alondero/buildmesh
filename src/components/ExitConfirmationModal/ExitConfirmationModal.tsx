@@ -1,12 +1,6 @@
 import { useRef } from 'react';
 import { Modal } from '../shared/Modal';
-import { formatExitBody } from '../../lib/exitGuard';
-
-export interface ExitNonResumableEntry {
-  id: number;
-  name: string;
-  providerDisplay: string;
-}
+import { formatExitBody, type ExitNonResumableEntry } from '../../lib/exitGuard';
 
 interface ExitConfirmationModalProps {
   activeCount: number;
@@ -15,6 +9,8 @@ interface ExitConfirmationModalProps {
   onKeepWorking: () => void;
   onExit: () => void;
 }
+
+const noop = () => {};
 
 /**
  * Exit confirmation modal (issue #1501).
@@ -33,11 +29,16 @@ export function ExitConfirmationModal({
 }: ExitConfirmationModalProps) {
   const keepWorkingRef = useRef<HTMLButtonElement>(null);
 
+  // While destruction is in flight the modal is a progress surface, not a
+  // dismissible dialog: Escape/backdrop route to a no-op and backdrop
+  // clicks are disabled, so the modal can't vanish mid-destroy and leave
+  // the app in a half-exited state (issue #1501 review).
   return (
     <Modal
-      onClose={onKeepWorking}
+      onClose={exiting ? noop : onKeepWorking}
       labelledBy="exit-confirm-title"
       maxWidth="max-w-md"
+      closeOnBackdrop={!exiting}
       defaultFocusRef={keepWorkingRef}
     >
       <h2 id="exit-confirm-title" className="text-lg font-semibold text-text-primary mb-2">

@@ -28,8 +28,10 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
 }));
 
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
+import { useExitPromptStore } from '../../src/stores/exitPromptStore';
 
 beforeEach(() => {
+  useExitPromptStore.setState({ pending: null, exiting: false, confirmBeforeQuit: true });
   tauriMocks.getAppPreferences.mockReset().mockResolvedValue({
     default_provider: null,
     naming_provider: null,

@@ -470,22 +470,17 @@ pub fn default_confirm_before_quit() -> bool {
 
 impl Default for AppPreferences {
     fn default() -> Self {
-        Self {
-            default_provider: None,
-            minimax_api_key: None,
-            google_cloud_project: None,
-            harness_profiles: Vec::new(),
-            provider_accounts: Vec::new(),
-            harness_order: Vec::new(),
-            provider_pairings: Vec::new(),
-            pairing_verifications: Vec::new(),
-            proxied_provider_order: Vec::new(),
-            ad0025_account_pairings_migrated: false,
-            naming_provider: None,
-            autopilot_pool_size: None,
-            harness_defaults: HashMap::new(),
-            worktree_directory: None,
-            confirm_before_quit: default_confirm_before_quit(),
-        }
+        // Derive defaults from the serde attributes (the single source of
+        // truth) instead of a hand-written struct literal: every field
+        // carries `#[serde(default)]` or `#[serde(default = "...")]`, so an
+        // empty object deserializes to exactly the default value — including
+        // `confirm_before_quit = true` (issue #1501), which a
+        // `#[derive(Default)]` would wrongly give as `false`. A future field
+        // without a serde default fails loudly here (and in the
+        // `malformed_json_falls_back_to_default` test) instead of silently
+        // compiling with a divergent default.
+        serde_json::from_value(serde_json::json!({})).expect(
+            "AppPreferences must deserialize from {}: every field needs a serde default",
+        )
     }
 }

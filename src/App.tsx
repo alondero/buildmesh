@@ -23,6 +23,7 @@ import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
 import { formatError } from './lib/errorUtils';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
+import { useExitPromptStore } from './stores/exitPromptStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
 import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
@@ -415,6 +416,11 @@ function App() {
   const init = useCallback(async () => {
     setInitError(null);
     setInitBusy(true);
+    // Issue #1501: hydrate the exit-confirm prompt preference. Deliberately
+    // NOT in the `allSettled` gate below — a prefs-read failure must neither
+    // block boot nor flip the guard off; the store keeps its fail-closed
+    // `true` default and the guard decides synchronously from it.
+    void useExitPromptStore.getState().initConfirmBeforeQuit();
     try {
       // No data dependency between these — run the IPC round-trips
       // concurrently so first paint isn't gated on three serial calls.
@@ -619,18 +625,25 @@ function App() {
   if (initError) {
     // Issue #1250 — instead of an infinite pulsing splash, surface the
     // formatted init error with a Retry button. The user can re-trigger
-    // `init` (the same callback the mount effect ran) without a full
-    // app restart.
+    // `init` (the same callback the mount effect ran) without unmounting
+    // the whole App.
+    // The close guard mounts here too (issue #1501 review): a close
+    // during boot must still prompt rather than silently kill spawns.
     return (
-      <BootErrorPanel
-        error={initError}
-        onRetry={init}
-        busy={initBusy}
-      />
+      <>
+        <BootErrorPanel
+          error={initError}
+          onRetry={init}
+          busy={initBusy}
+        />
+        <WindowCloseGuard />
+      </>
     );
   }
 
   if (!isReady) {
+    // Close guard mounted alongside the splash (issue #1501 review) —
+    // same reason as the error branch above.
     return (
       <div className="flex flex-col h-screen w-screen bg-bg-base">
         <TitleBar />
@@ -641,6 +654,7 @@ function App() {
         >
           <div className="text-accent-cyan text-2xl animate-pulse">●</div>
         </div>
+        <WindowCloseGuard />
       </div>
     );
   }

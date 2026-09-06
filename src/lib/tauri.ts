@@ -1030,6 +1030,13 @@ export const setAppAutopilotPoolSize = (size: number | null) =>
 export const setAppConfirmBeforeQuit = (confirm: boolean) =>
   _invoke('set_app_confirm_before_quit', { confirm });
 
+/** Retract a vetoed window close (issue #1501).
+ *  Clears the backend's eager expected-exit marking (`USER_CLOSE_REQUESTED`
+ *  + watchdog marker) when the user backs out of the exit-confirmation
+ *  modal, so a later real crash still auto-relaunches. */
+export const cancelWindowClose = () =>
+  _invoke('cancel_window_close');
+
 /** Buildmesh-wide default Worktree Node directory (issue #1519).
  *  Pass `null` (or blank) to clear and restore `.claude/worktrees` under
  *  each inheriting Mesh root. Relative resolves from each Mesh root;

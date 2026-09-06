@@ -1,9 +1,15 @@
 /**
  * WindowCloseGuard (issue #1501) — Tauri onCloseRequested interception.
+ *
+ * The veto decision is a synchronous store read (no IPC on the close
+ * path): `confirmBeforeQuit` comes from `useExitPromptStore`, nodes from
+ * `useAgentNodeStore.getState()`. The provider-list fetch rides the shared
+ * `listProviders` cache and only runs after the synchronous veto.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
+import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 
 const windowApi = vi.hoisted(() => ({
   onCloseRequested: vi.fn<(cb: (e: { preventDefault: () => void }) => void | Promise<void>) => Promise<() => void>>(),
@@ -15,18 +21,19 @@ vi.mock('@tauri-apps/api/window', () => ({
 }));
 
 const tauriMocks = vi.hoisted(() => ({
-  getAppPreferences: vi.fn(),
   listProviders: vi.fn(),
+  cancelWindowClose: vi.fn(),
 }));
 
 vi.mock('../../src/lib/tauri', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/lib/tauri')>()),
-  getAppPreferences: tauriMocks.getAppPreferences,
   listProviders: tauriMocks.listProviders,
+  cancelWindowClose: tauriMocks.cancelWindowClose,
 }));
 
 import { WindowCloseGuard } from '../../src/components/WindowCloseGuard/WindowCloseGuard';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { useExitPromptStore } from '../../src/stores/exitPromptStore';
 
 function makeNode(overrides: Partial<AgentNode>): AgentNode {
   return {
@@ -55,7 +62,7 @@ function makeNode(overrides: Partial<AgentNode>): AgentNode {
   } as AgentNode;
 }
 
-function providerList() {
+function providerList(): ProviderInfo[] {
   const caps = (harness_id: string, supports_resume: boolean) => ({
     harness_id,
     supports_resume,
@@ -82,7 +89,7 @@ function providerList() {
       harness_id: 'terminal', provider_id: null, is_proxied: false, group_key: 'terminal',
       capabilities: caps('terminal', false),
     },
-  ];
+  ] as unknown as ProviderInfo[];
 }
 
 let closeHandler: ((e: { preventDefault: () => void }) => Promise<void>) | null = null;
@@ -94,8 +101,8 @@ beforeEach(() => {
     return Promise.resolve(() => {});
   });
   windowApi.destroy.mockReset().mockResolvedValue(undefined);
-  tauriMocks.getAppPreferences.mockReset().mockResolvedValue({ confirm_before_quit: true });
   tauriMocks.listProviders.mockReset().mockResolvedValue(providerList());
+  tauriMocks.cancelWindowClose.mockReset().mockResolvedValue(undefined);
   useAgentNodeStore.setState({
     nodesById: {},
     nodeIds: [],
@@ -103,6 +110,7 @@ beforeEach(() => {
     loading: false,
     error: null,
   });
+  useExitPromptStore.setState({ pending: null, exiting: false, confirmBeforeQuit: true });
 });
 
 function seedNodes(nodes: AgentNode[]) {
@@ -130,6 +138,7 @@ describe('WindowCloseGuard (issue #1501)', () => {
     const { prevented } = await fireClose();
     expect(prevented).toBe(false);
     expect(screen.queryByRole('heading', { name: 'Exit Buildmesh?' })).toBeNull();
+    expect(tauriMocks.listProviders).not.toHaveBeenCalled();
   });
 
   it('prompts with active count and warns about the non-resumable agent', async () => {
@@ -146,7 +155,41 @@ describe('WindowCloseGuard (issue #1501)', () => {
     expect(screen.getByRole('alert').textContent).toContain('fresh-agent (Claude Code)');
   });
 
-  it('Keep Working dismisses without destroying the window', async () => {
+  it('vetoes synchronously before the async provider read resolves', async () => {
+    // Slow IPC must not let the window close before the veto arrives:
+    // preventDefault lands in the same tick as the close event, not
+    // after the provider promise settles.
+    let resolveProviders!: (v: ProviderInfo[]) => void;
+    tauriMocks.listProviders.mockReturnValue(
+      new Promise((resolve) => { resolveProviders = resolve; }),
+    );
+    seedNodes([makeNode({ status: 'running' })]);
+    render(<WindowCloseGuard />);
+    await act(async () => {});
+    let prevented = false;
+    const pendingClose = closeHandler!({ preventDefault: () => { prevented = true; } });
+    expect(prevented).toBe(true);
+    await act(async () => {
+      resolveProviders(providerList());
+      await pendingClose;
+    });
+    await screen.findByRole('heading', { name: 'Exit Buildmesh?' });
+  });
+
+  it('a second close while the modal is open stays vetoed without refetching', async () => {
+    seedNodes([makeNode({ status: 'running' })]);
+    render(<WindowCloseGuard />);
+    await act(async () => {});
+    await fireClose();
+    await screen.findByRole('heading', { name: 'Exit Buildmesh?' });
+    expect(tauriMocks.listProviders).toHaveBeenCalledTimes(1);
+    const { prevented } = await fireClose();
+    expect(prevented).toBe(true);
+    expect(tauriMocks.listProviders).toHaveBeenCalledTimes(1);
+    expect(windowApi.destroy).not.toHaveBeenCalled();
+  });
+
+  it('Keep Working dismisses and retracts the backend expected-exit marking', async () => {
     seedNodes([makeNode({ status: 'running' })]);
     render(<WindowCloseGuard />);
     await act(async () => {});
@@ -156,6 +199,7 @@ describe('WindowCloseGuard (issue #1501)', () => {
     await waitFor(() =>
       expect(screen.queryByRole('heading', { name: 'Exit Buildmesh?' })).toBeNull(),
     );
+    expect(tauriMocks.cancelWindowClose).toHaveBeenCalledTimes(1);
     expect(windowApi.destroy).not.toHaveBeenCalled();
   });
 
@@ -169,48 +213,15 @@ describe('WindowCloseGuard (issue #1501)', () => {
     await waitFor(() => expect(windowApi.destroy).toHaveBeenCalledTimes(1));
   });
 
-  it('respects the opt-out preference by vetoing then continuing the close', async () => {
-    tauriMocks.getAppPreferences.mockResolvedValue({ confirm_before_quit: false });
+  it('respects the opt-out preference synchronously with no IPC and no destroy dance', async () => {
+    useExitPromptStore.setState({ confirmBeforeQuit: false });
     seedNodes([makeNode({ status: 'running' })]);
     render(<WindowCloseGuard />);
     await act(async () => {});
     const { prevented } = await fireClose();
-    // The veto is synchronous (before the async pref read), so the close
-    // is always prevented first, then continued via destroy() when the
-    // user opted out — no modal, graceful shutdown via ExitRequested.
-    expect(prevented).toBe(true);
+    expect(prevented).toBe(false);
     expect(screen.queryByRole('heading', { name: 'Exit Buildmesh?' })).toBeNull();
-    await waitFor(() => expect(windowApi.destroy).toHaveBeenCalledTimes(1));
-  });
-
-  it('vetoes synchronously before the async preference read resolves', async () => {
-    // Slow IPC must not let the window close before the veto arrives
-    // (code review, issue #1501): preventDefault lands in the same tick
-    // as the close event, not after the pref promise settles.
-    let resolvePrefs!: (v: { confirm_before_quit: boolean }) => void;
-    tauriMocks.getAppPreferences.mockReturnValue(
-      new Promise((resolve) => { resolvePrefs = resolve; }),
-    );
-    seedNodes([makeNode({ status: 'running' })]);
-    render(<WindowCloseGuard />);
-    await act(async () => {});
-    let prevented = false;
-    const pending = act(async () => {
-      await closeHandler!({ preventDefault: () => { prevented = true; } });
-    });
-    expect(prevented).toBe(true);
-    await act(async () => { resolvePrefs({ confirm_before_quit: true }); });
-    await pending;
-    await screen.findByRole('heading', { name: 'Exit Buildmesh?' });
-  });
-
-  it('fails closed when the preference read fails', async () => {
-    tauriMocks.getAppPreferences.mockRejectedValue(new Error('ipc down'));
-    seedNodes([makeNode({ status: 'running' })]);
-    render(<WindowCloseGuard />);
-    await act(async () => {});
-    const { prevented } = await fireClose();
-    expect(prevented).toBe(true);
-    await screen.findByRole('heading', { name: 'Exit Buildmesh?' });
+    expect(tauriMocks.listProviders).not.toHaveBeenCalled();
+    expect(windowApi.destroy).not.toHaveBeenCalled();
   });
 });

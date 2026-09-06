@@ -79,4 +79,48 @@ describe('ExitConfirmationModal (issue #1501)', () => {
     expect(screen.getByRole('button', { name: 'Keep Working' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Exiting…' })).toBeTruthy();
   });
+
+  it('ignores Escape while exiting so the modal cannot vanish mid-destroy', () => {
+    const onKeep = vi.fn();
+    render(
+      <ExitConfirmationModal
+        activeCount={1}
+        nonResumable={[]}
+        exiting
+        onKeepWorking={onKeep}
+        onExit={() => {}}
+      />,
+    );
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onKeep).not.toHaveBeenCalled();
+  });
+
+  it('ignores backdrop clicks while exiting', () => {
+    const onKeep = vi.fn();
+    render(
+      <ExitConfirmationModal
+        activeCount={1}
+        nonResumable={[]}
+        exiting
+        onKeepWorking={onKeep}
+        onExit={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole('dialog').parentElement!);
+    expect(onKeep).not.toHaveBeenCalled();
+  });
+
+  it('still dismisses on backdrop click when not exiting', () => {
+    const onKeep = vi.fn();
+    render(
+      <ExitConfirmationModal
+        activeCount={1}
+        nonResumable={[]}
+        onKeepWorking={onKeep}
+        onExit={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole('dialog').parentElement!);
+    expect(onKeep).toHaveBeenCalledTimes(1);
+  });
 });

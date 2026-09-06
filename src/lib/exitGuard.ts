@@ -139,6 +139,17 @@ export function formatExitBody(activeCount: number): string {
 }
 
 /**
+ * One non-resumable row in the exit modal's warning list, as
+ * `Node Name (Provider)`. Lives beside the partition helpers (not in the
+ * modal component) so the prompt store and the modal share one shape.
+ */
+export interface ExitNonResumableEntry {
+  id: number;
+  name: string;
+  providerDisplay: string;
+}
+
+/**
  * Display provider for the `Node Name (Provider)` warning rows.
  * Prefers the friendly `ProviderInfo.label` for the exact spawn-option id,
  * then the harness row label, then the raw stored id (never blank).
