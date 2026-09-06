@@ -1,0 +1,27 @@
+# rustfmt configuration (issue #1543).
+#
+# Every setting below matches a rustfmt stable default — we declare them
+# explicitly so future rustfmt default changes cannot silently re-shape the
+# codebase under our feet. `cargo fmt --all -- --check` is what CI and
+# scripts/check.ps1 run; this file is the source of truth for "what that
+# command considers well-formatted."
+#
+# Only STABLE options live here. The "looks-like-a-default" knobs
+# (`imports_granularity`, `imports_layout`, `reorder_impl_items`,
+# `format_strings`, etc.) are nightly-only — listing them on stable
+# produces a "can't set, unstable" warning per crate and they are
+# silently ignored. If we ever need to diverge from a default, flip
+# to nightly in `rust-toolchain.toml` first, then add the option.
+#
+# `newline_style = "Unix"` pins LF (matches the repo — verified
+# `core.autocrlf` is false and Rust files are committed as LF). Without
+# this pin, Windows runners with autocrlf=true would round-trip CRLF on
+# each fmt run and the check would flicker.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+newline_style = "Unix"
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true
+remove_nested_parens = true
