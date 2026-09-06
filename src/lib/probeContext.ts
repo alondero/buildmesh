@@ -1,5 +1,17 @@
-import type { ProbeTab, ViewMode } from '../stores/uiStore';
+import type { ViewMode } from '../stores/uiStore';
 import { getNodeGitPath } from './paths';
+
+// Tabs the Probe Panel can show. Kept as a string-literal union (not a
+// generated wire enum) because it's a pure UI concern — no backend serialises
+// it. `usage` was added in issue #601 as the dedicated glanceable surface
+// for Usage Meters (subscription quota + cash balance), reached from a
+// meter icon in the sidebar header. `autopilot` was added in wayfinder
+// #990 ticket #994 as the dedicated configure + monitor surface for the
+// Issue-Driven and Looping Autopilot modes. `circuits` was added for the
+// Autopilot Circuits walking skeleton (spec #1205 / issue #1206).
+// Lives here (not in the store) so pure domain modules — probeWorkingSet,
+// this file — never import from `stores/`; `uiStore` re-exports it.
+export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'autopilot' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
 
 /**
  * The three ownership lenses available to a Probe destination.

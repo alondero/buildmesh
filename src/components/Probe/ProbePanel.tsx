@@ -51,6 +51,7 @@ import {
   type ProbeTabDefinition,
 } from '../../lib/probeContext';
 import { useProbeResize, PROBE_PANEL_BOUNDS } from './useProbeResize';
+import { ProbeToolRail, LABEL_COLLAPSE_WIDTH } from './ProbeToolRail';
 import { EmptyState } from '../shared/Spinner';
 import {
   CompassIcon,
@@ -340,15 +341,29 @@ function ProbePanelContent() {
           </button>
         </div>
 
+        {/* Tool rail — working-set tabs for destinations opened this session
+            plus the grouped "All tools" menu (ADR-0032). Sits outside the
+            body scroller per probe-ui-checklist.md §1 (toolbars are
+            shrink-0 siblings of the scroller). Renders only while the panel
+            is open — ADR-0030's closed-render discipline is unchanged. */}
+        <ProbeToolRail narrow={bodyWidth < LABEL_COLLAPSE_WIDTH} />
+
         {/* Body — the inner wrapper is keyed by destination so switching
             destinations remounts the content and replays the fade-in once
             per destination. The wrapper preserves the h-full/flex chain the
             destination roots rely on for their internal `flex-1 overflow`
             regions. Issue #1568 — every tab is now a `React.lazy` chunk,
             so we wrap the keyed body in `<Suspense>` to host the brief
-            loading state the chunk fetch produces on first open. */}
+            loading state the chunk fetch produces on first open. The
+            tabpanel wiring points at the tool rail's tabs (ADR-0032). */}
         <div className="flex-1 overflow-y-auto">
-          <div key={probeTab} className="animate-fade-in h-full flex flex-col">
+          <div
+            key={probeTab}
+            role="tabpanel"
+            id="probe-tab-panel"
+            aria-labelledby={`probe-rail-tab-${probeTab}`}
+            className="animate-fade-in h-full flex flex-col"
+          >
             <Suspense fallback={<ProbeTabLoadingShell />}>
               <ProbeTabBody tab={probeTab} />
             </Suspense>

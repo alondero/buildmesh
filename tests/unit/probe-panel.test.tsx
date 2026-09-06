@@ -67,6 +67,7 @@ describe('ProbePanel', () => {
     useUIStore.setState({
       probeOpen: false,
       probeTab: 'files',
+      probeWorkingSet: { tabs: [], mru: [] },
       activeDiffFile: null,
       probeContextPins: {},
     });
@@ -291,6 +292,7 @@ describe('useUIStore.openProbeTab (issue #375, the next 5 tabs rely on this)', (
     useUIStore.setState({
       probeOpen: false,
       probeTab: 'files',
+      probeWorkingSet: { tabs: [], mru: [] },
       activeDiffFile: null,
       probeContextPins: {},
     });
