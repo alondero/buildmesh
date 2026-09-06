@@ -218,6 +218,10 @@ describe('CircuitsProbeTab', () => {
     expect(screen.queryByTestId('run-card-11')).toBeNull();
     expect(screen.queryByTestId('queue-run-21')).toBeNull();
     expect(screen.queryByTestId('circuit-name-input')).toBeNull();
+    expect(screen.getByTestId('circuits-status').textContent).toContain('2 queued');
+    expect(screen.getByTestId('circuit-activity-queue-summary').textContent).toContain('Waiting in queue');
+    expect(screen.getByTestId('circuit-trigger-7')).toBeTruthy();
+    expect(screen.getByTestId('circuit-edit-flow-7')).toBeTruthy();
     expect(screen.getByTestId('circuits-view-queue').textContent).toContain('(2)');
     fireEvent.click(screen.getByTestId('circuits-view-history'));
     expect(screen.getByTestId('run-card-11')).toBeTruthy();
