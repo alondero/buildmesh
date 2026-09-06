@@ -33,6 +33,79 @@ use super::{current_env, Environment};
 
 // ── Path-conversion primitives ─────────────────────────────────────────────
 
+/// Convert a Windows-style path to its WSL `/mnt/<drive>/...` form (issue
+/// #1226). Two input shapes are recognised:
+///
+/// - `<Drive>:\...` or `<Drive>:/...` — Windows drive-letter path
+///   (e.g. `D:\Code\MyRepo` → `/mnt/d/Code/MyRepo`).
+/// - `/<letter>/...` or `/<letter>` — Git-Bash drive style (what an MSYS git
+///   writes into worktree link files, e.g. `/f/src/repo` → `/mnt/f/src/repo`).
+///
+/// Generic over the drive letter (the old `to_spawn_path` only knew `C:`, so
+/// `D:\code\proj` silently fell through unchanged and WSL spawns landed in
+/// `/mnt/c` — a different drive), and preserves case on the path body
+/// (lowercases ONLY the drive letter so a case-sensitive DrvFs mount under
+/// `/mnt/c/Code/MyRepo` still resolves — the old `to_lowercase()` munged
+/// every directory name).
+///
+/// Other inputs — POSIX paths (`/home/...`, `/mnt/...`, `/usr/...`),
+/// UNC (`\\wsl$\...`), relative paths, anything else — pass through
+/// unchanged. WSL cannot open `\\server\share` UNC form, so UNC strings
+/// are NOT silently rewritten into `//server/share` (the old
+/// `convert_link_path_for_env` in `git/worktree/mod.rs` did exactly that
+/// and produced unopenable paths; consolidating through this function
+/// removes both the bug and the duplicate converter that violated the
+/// CLAUDE.md hard rule).
+///
+/// Single source of truth for the Windows→WSL drive rewrite; both
+/// `to_spawn_path` (the spawn-time path) and the worktree link-file
+/// sanitizer (`git::worktree::convert_link_path_for_env`) delegate here.
+pub(crate) fn windows_to_wsl(path: &str) -> String {
+    let bytes = path.as_bytes();
+
+    // Git-Bash style: /<letter>... — single-letter first segment, so it
+    // never collides with real POSIX paths (/mnt/, /home/, /usr/, /var/...).
+    // Require either the bare drive (`/<letter>`) or a separator at byte 2
+    // (`/<letter>/...`); anything else (`/usr/...`) is a normal Unix path.
+    if bytes.len() >= 2 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() {
+        let is_bare_drive = bytes.len() == 2;
+        let is_drive_with_sep = bytes.len() >= 3 && bytes[2] == b'/';
+        if is_bare_drive || is_drive_with_sep {
+            let drive_lc = (bytes[1] as char).to_ascii_lowercase();
+            return rewrite_with_drive(&path[2..], drive_lc);
+        }
+    }
+
+    // Windows drive-letter: <Drive>:\... or <Drive>:/...
+    // Byte-level check — no `find(':')` scan and no intermediate String.
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'/' || bytes[2] == b'\\')
+    {
+        let drive_lc = (bytes[0] as char).to_ascii_lowercase();
+        return rewrite_with_drive(&path[2..], drive_lc);
+    }
+
+    path.to_string()
+}
+
+/// Build `/mnt/<drive><body>` with one allocation. Replaces ASCII
+/// backslashes with forward slashes char-by-char so multi-byte UTF-8
+/// sequences in the path body are preserved byte-for-byte (a byte-iter
+/// `push(b as char)` would split them and produce invalid UTF-8).
+fn rewrite_with_drive(body: &str, drive_lc: char) -> String {
+    // Exact size: "/mnt/" (5) + drive char + body bytes (backslashes stay
+    // single-byte when replaced with forward slashes — same UTF-8 width).
+    let mut out = String::with_capacity(5 + drive_lc.len_utf8() + body.len());
+    out.push_str("/mnt/");
+    out.push(drive_lc);
+    for c in body.chars() {
+        out.push(if c == '\\' { '/' } else { c });
+    }
+    out
+}
+
 /// Convert a session path to the correct form for spawning commands
 /// WSL paths are stored as Unix paths internally, Windows paths as Windows paths.
 /// Stored paths are always the RAW form (see `resolve_raw_path`), so a host
@@ -51,16 +124,15 @@ pub fn to_spawn_path(path: &Path) -> PathBuf {
     }
     match current_env() {
         Environment::Wsl => {
-            if path.to_string_lossy().starts_with("/mnt/") {
-                path.to_path_buf()
-            } else if path.to_string_lossy().starts_with("C:\\") || path.to_string_lossy().starts_with("c:\\") {
-                let path_str = path.to_string_lossy().to_lowercase();
-                let drive = path_str.chars().next().unwrap_or('c');
-                let rest = &path_str[2..].replace('\\', "/");
-                PathBuf::from(format!("/mnt/{}{}", drive, rest))
-            } else {
-                path.to_path_buf()
-            }
+            // All WSL-arm shapes funnel through `windows_to_wsl`, which
+            // recognises Windows drive paths (`D:\Code\MyRepo`),
+            // Git-Bash drive style (`/f/src/repo`), and passes through
+            // POSIX paths (`/home/...`, `/mnt/...`, `/usr/...`). The
+            // previous short-circuit on `starts_with('/')` here
+            // accidentally dropped Git-Bash paths — they never reached
+            // the rewrite, so WSL spawns landed in `/f/src/repo` which
+            // doesn't exist (issue #1226 review).
+            PathBuf::from(windows_to_wsl(path.to_string_lossy().as_ref()))
         }
         Environment::Windows => {
             path.to_path_buf()
@@ -120,20 +192,51 @@ pub fn to_host_path(path: &str) -> String {
     }
 
     if path.starts_with('/') {
-        if path.starts_with("/mnt/") {
+        if let Some(after_mnt) = path.strip_prefix("/mnt/") {
             // /mnt/c/Users -> C:\Users
-            let drive = path.chars().nth(5).unwrap_or('c').to_uppercase().next().unwrap();
-            format!("{}:{}", drive, path[6..].replace('/', "\\"))
+            //
+            // Guards (issue #1226):
+            // - The bare prefix `/mnt/` (no drive letter) used to reach
+            //   `path[6..]` and panic with "byte index 6 out of bounds".
+            //   The branches below it had length guards; this one was
+            //   missed. A typo'd mesh path here crashed whatever thread
+            //   resolved it — return input unchanged instead.
+            // - The first byte after `/mnt/` must be an ASCII letter; a
+            //   `/mnt/foo` (no drive) or `/mnt/123` (numeric) is malformed
+            //   and the safe answer is "not a Windows path".
+            // - The drive letter must be followed by end-of-string or a
+            //   separator; `/mnt/cfoo` is not a Windows mount, so refuse
+            //   rather than produce a garbage `Cfoo:` path.
+            if after_mnt.is_empty()
+                || !after_mnt.as_bytes()[0].is_ascii_alphabetic()
+            {
+                return path.to_string();
+            }
+            let drive = (after_mnt.as_bytes()[0] as char).to_ascii_uppercase();
+            let tail = &after_mnt[1..];
+            if tail.is_empty() {
+                // Bare drive `/mnt/c` -> `C:`
+                return format!("{}:", drive);
+            }
+            if !tail.starts_with('/') {
+                return path.to_string();
+            }
+            format!("{}:{}", drive, tail.replace('/', "\\"))
         } else if path.starts_with("/home/") {
             // /home/user -> \\wsl$\Ubuntu\home\user
             let distro = super::environment::get_default_wsl_distro()
                 .unwrap_or_else(|| "Ubuntu".to_string());
             format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
-        } else if path.len() >= 2 && path.chars().nth(1).unwrap().is_alphabetic() && (path.len() == 2 || path.chars().nth(2) == Some('/')) {
-            // Handle Git Bash style /c/Users/ or /c
-            let drive = path.chars().nth(1).unwrap().to_uppercase().next().unwrap();
-            let rest = if path.len() > 2 { &path[2..] } else { "" };
-            format!("{}:{}", drive, rest.replace('/', "\\"))
+        } else if path.len() >= 2
+            && path.as_bytes()[0] == b'/'
+            && path.as_bytes()[1].is_ascii_alphabetic()
+            && (path.len() == 2 || path.as_bytes()[2] == b'/')
+        {
+            // Handle Git-Bash style `/c/Users/...` or bare `/c`
+            // (byte-level — no `unwrap`, matches `windows_to_wsl`'s style).
+            let drive = (path.as_bytes()[1] as char).to_ascii_uppercase();
+            let tail = &path[2..];
+            format!("{}:{}", drive, tail.replace('/', "\\"))
         } else {
             // Other Unix-style absolute path on Windows (e.g. /Users/...)
             // Return as-is, caller will handle if needed.
@@ -926,6 +1029,159 @@ mod tests {
             r"\\wsl$\Ubuntu\home\u\repo"
         );
     }
+
+    // ── Windows ↔ WSL drive conversion (issue #1226) ─────────────────────────
+    //
+    // The old `to_spawn_path` only knew `C:` and lowercased EVERYTHING, so a
+    // mesh on any other drive silently fell through unchanged, and a
+    // case-sensitive DrvFs mount got every directory name munged. The old
+    // `to_host_path` panicked on the bare string `/mnt/` (no drive letter).
+    // These tests pin the consolidated behavior so a regression on either
+    // axis fails fast.
+
+    /// Generic-drive detection — `D:\Code\MyRepo` must become
+    /// `/mnt/d/Code/MyRepo`, not silently fall through (issue #1226 step 1).
+    #[test]
+    fn windows_to_wsl_converts_any_drive_letter() {
+        // Each drive letter A..Z round-trips on a distinct body so a
+        // copy-paste in the test can't hide a drive-stripping bug.
+        for (drive_letter, drive_path) in [
+            ('D', r"D:\Code\MyRepo"),
+            ('E', r"E:\proj"),
+            ('F', r"F:\src\repo"),
+            ('Z', r"Z:\very\deep\nested\dir"),
+        ] {
+            // `after` in `windows_to_wsl` starts at byte `colon_pos + 1`,
+            // so slice from index 2 to keep the leading separator.
+            let expected = format!(
+                "/mnt/{}{}",
+                drive_letter.to_ascii_lowercase(),
+                &drive_path[2..].replace('\\', "/")
+            );
+            assert_eq!(windows_to_wsl(drive_path), expected);
+        }
+        // Forward slashes are accepted too (`D:/Code/MyRepo` — what some
+        // tools serialize). The output must still be POSIX.
+        assert_eq!(windows_to_wsl("D:/Code/MyRepo"), "/mnt/d/Code/MyRepo");
+        // Mixed-case drive letter is lowercased; the body is verbatim.
+        assert_eq!(
+            windows_to_wsl("d:\\Code\\MyRepo"),
+            "/mnt/d/Code/MyRepo"
+        );
+    }
+
+    /// Case preservation — only the drive letter is case-folded; directory
+    /// names are byte-for-byte from the input. A case-sensitive DrvFs mount
+    /// (the `drvfs` case option in `wsl.conf`) would otherwise silently
+    /// miss `/mnt/c/Code/MyRepo` because the old code munged every name.
+    #[test]
+    fn windows_to_wsl_preserves_body_case() {
+        assert_eq!(
+            windows_to_wsl(r"C:\Users\Adam\Proj"),
+            "/mnt/c/Users/Adam/Proj"
+        );
+        assert_eq!(
+            windows_to_wsl(r"C:\CODE\lowercase"),
+            "/mnt/c/CODE/lowercase"
+        );
+        // Lowercase body stays lowercase.
+        assert_eq!(
+            windows_to_wsl(r"c:\code\lower"),
+            "/mnt/c/code/lower"
+        );
+    }
+
+    /// Git-Bash drive style — what an MSYS git writes into worktree link
+    /// files (the 2026-07-17 corruption incident). Both bare drive and
+    /// drive-with-path shapes must convert; real WSL paths (`/mnt/...`,
+    /// `/home/...`) must pass through.
+    #[test]
+    fn windows_to_wsl_converts_git_bash_drive_style() {
+        assert_eq!(windows_to_wsl("/f/src/repo"), "/mnt/f/src/repo");
+        assert_eq!(
+            windows_to_wsl("/f/src/repo/.git/worktrees/wt"),
+            "/mnt/f/src/repo/.git/worktrees/wt"
+        );
+        assert_eq!(windows_to_wsl("/f"), "/mnt/f");
+        // Real WSL paths must NOT be re-mangled by the drive-style arm.
+        assert_eq!(windows_to_wsl("/mnt/f/src"), "/mnt/f/src");
+        assert_eq!(windows_to_wsl("/home/u/repo"), "/home/u/repo");
+        // Normal Unix paths must NOT be re-mangled (first segment is
+        // multi-char — `/usr/...`, `/var/...`).
+        assert_eq!(windows_to_wsl("/usr/bin/bash"), "/usr/bin/bash");
+    }
+
+    /// Non-Windows inputs pass through unchanged — POSIX paths stay POSIX,
+    /// UNC stays UNC (WSL can't open `\\server\share` UNC form, so
+    /// silently rewriting it into `//server/share` would produce an
+    /// unopenable path; the consolidated function refuses).
+    #[test]
+    fn windows_to_wsl_passes_through_posix_and_unc() {
+        assert_eq!(windows_to_wsl("/home/user/repo"), "/home/user/repo");
+        assert_eq!(windows_to_wsl("/mnt/c/Users/Adam"), "/mnt/c/Users/Adam");
+        assert_eq!(windows_to_wsl("/usr/bin/bash"), "/usr/bin/bash");
+        // UNC strings are NOT silently rewritten (issue #1226 finding #3).
+        assert_eq!(windows_to_wsl(r"\\server\share\repo"), r"\\server\share\repo");
+        // Relative paths pass through.
+        assert_eq!(windows_to_wsl("relative/path"), "relative/path");
+        // Empty string passes through.
+        assert_eq!(windows_to_wsl(""), "");
+    }
+
+    /// Malformed inputs (not a clean drive, contains `:` but with extra
+    /// junk) must pass through rather than being silently mangled.
+    #[test]
+    fn windows_to_wsl_rejects_malformed_drive_prefix() {
+        // Empty drive (leading colon) — no drive byte, fails the alphabetic
+        // check and falls through unchanged.
+        assert_eq!(windows_to_wsl(":foo"), ":foo");
+        // Drive + path that doesn't start with a separator — keep input.
+        assert_eq!(windows_to_wsl("C:foo"), "C:foo");
+        // Multi-char drive — keep input (Windows doesn't have multi-char
+        // drive letters, so this is never a real drive path).
+        assert_eq!(windows_to_wsl("AB:\\foo"), "AB:\\foo");
+        // Numeric prefix — keep input.
+        assert_eq!(windows_to_wsl("1:/foo"), "1:/foo");
+    }
+
+    /// `to_host_path`'s `/mnt/` branch used to panic on the bare prefix
+    /// `/mnt/` (no drive letter) because `path[6..]` is byte-index 6 on a
+    /// string of length 5. A typo'd mesh path would crash whatever thread
+    /// resolved it. The guard now returns the input unchanged (issue
+    /// #1226 finding #2).
+    #[test]
+    fn to_host_path_does_not_panic_on_bare_mnt_prefix() {
+        assert_eq!(to_host_path("/mnt/"), "/mnt/");
+        // And malformed shapes that are NOT a Windows mount.
+        assert_eq!(to_host_path("/mnt/foo"), "/mnt/foo");
+        assert_eq!(to_host_path("/mnt/123"), "/mnt/123");
+        assert_eq!(to_host_path("/mnt/cfoo"), "/mnt/cfoo");
+    }
+
+    /// The happy paths for `to_host_path`'s `/mnt/` arm — drive letter
+    /// uppercased, slashes flipped, drive-only handled as `C:`. Pinned so
+    /// the guards above don't accidentally swallow these.
+    #[test]
+    fn to_host_path_converts_mnt_to_windows_drive() {
+        assert_eq!(to_host_path("/mnt/c/Users"), "C:\\Users");
+        assert_eq!(to_host_path("/mnt/d/Code/MyRepo"), "D:\\Code\\MyRepo");
+        assert_eq!(to_host_path("/mnt/c"), "C:");
+        // Lowercase drive is uppercased; case in the body is preserved.
+        assert_eq!(
+            to_host_path("/mnt/c/Users/Adam/Proj"),
+            "C:\\Users\\Adam\\Proj"
+        );
+    }
+
+    /// `to_spawn_path`'s WSL arm is a one-line delegate to `windows_to_wsl`
+    /// — the seven `windows_to_wsl_*` tests above cover the conversion
+    /// logic. `to_spawn_path` itself is environment-gated (`current_env()`
+    /// is hard-coded to `Windows` on non-WSL hosts including Linux CI), so
+    /// a runtime test that branches on `current_env()` either runs only on
+    /// a real WSL host (out of CI reach) or short-circuits silently. The
+    /// dispatcher's structural correctness is covered by `cargo clippy`'s
+    /// dead-code / unreachable-arm warnings if the delegate ever goes
+    /// missing.
 
     // ── Configurable Worktree Node directories (issue #1519) ────────────────
 

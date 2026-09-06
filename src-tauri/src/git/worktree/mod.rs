@@ -28,6 +28,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use crate::env::to_host_path;
+use crate::env::windows_to_wsl;
 use crate::git::primitives;
 use crate::models::EnvType;
 
@@ -608,38 +609,20 @@ pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String>
 /// (Windows drive path vs WSL `/mnt/...`). Shared by both halves of
 /// [`sanitize_git_worktree`] so the gitlink and the back-pointer can't drift
 /// onto different conversion rules.
+///
+/// Both arms delegate to the single canonical converter in `env::host_path`:
+/// - WSL → `windows_to_wsl`, which knows about generic drives (`F:\...`,
+///   `D:\...`) and Git-Bash drive style (`/f/...`) and preserves case.
+/// - Windows → `to_host_path`, which handles `/mnt/`, `/home/`, and
+///   `/<letter>/` shapes.
+///
+/// This is a thin dispatcher; building WSL `/mnt/` or UNC strings here
+/// would violate the CLAUDE.md hard rule that `env::host_path` is the
+/// SOLE module allowed to construct them (issue #1226).
 fn convert_link_path_for_env(path: &str, env_type: EnvType) -> String {
     match env_type {
-        EnvType::Wsl => {
-            // Ensure it's a WSL-friendly path
-            if path.contains(':') || path.starts_with("\\\\") {
-                // Convert Windows path to WSL (/mnt/c/...)
-                let path_str = path.replace('\\', "/");
-                if let Some(pos) = path_str.find(':') {
-                    let drive = path_str[..pos].to_lowercase();
-                    format!("/mnt/{}{}", drive, &path_str[pos + 1..])
-                } else {
-                    path_str
-                }
-            } else if path.len() >= 2
-                && path.starts_with('/')
-                && path.as_bytes()[1].is_ascii_alphabetic()
-                && (path.len() == 2 || path.as_bytes()[2] == b'/')
-            {
-                // Git-Bash drive style `/f/...` (what an MSYS git writes —
-                // the 2026-07-17 corruption): WSL wants it as `/mnt/f/...`.
-                // Real WSL paths (`/mnt/...`, `/home/...`) have a multi-char
-                // first segment, so they never match this arm.
-                let drive = path.as_bytes()[1].to_ascii_lowercase() as char;
-                format!("/mnt/{}{}", drive, &path[2..])
-            } else {
-                path.to_string()
-            }
-        }
-        EnvType::Windows => {
-            // Target is Windows. to_host_path handles /mnt/, /home/, and /c/ styles.
-            to_host_path(path)
-        }
+        EnvType::Wsl => windows_to_wsl(path),
+        EnvType::Windows => to_host_path(path),
     }
 }
 
@@ -1485,6 +1468,15 @@ mod tests {
     /// Git-Bash `/f/...` drive style (what an MSYS git writes into link
     /// files, the 2026-07-17 corruption) must repair under BOTH targets,
     /// and already-correct paths must pass through unchanged.
+    ///
+    /// `convert_link_path_for_env` is now a 2-line dispatcher into the
+    /// canonical converters in `env::host_path` (issue #1226 — the
+    /// duplicate converter previously here violated the CLAUDE.md hard
+    /// rule that `env::host_path` is the SOLE module allowed to build
+    /// `/mnt/` and WSL UNC strings). Assertions target the BEHAVIOR
+    /// (literal output strings), not the underlying call — so a
+    /// regression in `windows_to_wsl` or `to_host_path` fails this test,
+    /// not just the dispatcher wiring.
     #[test]
     fn convert_link_path_covers_git_bash_drive_style_for_both_envs() {
         // → WSL
@@ -1496,15 +1488,21 @@ mod tests {
             convert_link_path_for_env("F:\\src\\repo", EnvType::Wsl),
             "/mnt/f/src/repo"
         );
-        // Real WSL paths must NOT be re-mangled by the drive-style arm.
+        // Real WSL paths must NOT be re-mangled.
         assert_eq!(convert_link_path_for_env("/mnt/f/src", EnvType::Wsl), "/mnt/f/src");
         assert_eq!(convert_link_path_for_env("/home/u/repo", EnvType::Wsl), "/home/u/repo");
-        // → Windows (host conversion is a Windows-host behaviour)
+        // → Windows (host conversion is a Windows-host behaviour).
         #[cfg(windows)]
-        assert_eq!(
-            convert_link_path_for_env("/f/src/repo", EnvType::Windows),
-            "F:\\src\\repo"
-        );
+        {
+            assert_eq!(
+                convert_link_path_for_env("/f/src/repo", EnvType::Windows),
+                "F:\\src\\repo"
+            );
+            assert_eq!(
+                convert_link_path_for_env("/mnt/c/Users", EnvType::Windows),
+                "C:\\Users"
+            );
+        }
     }
 
     /// The common case — healthy Windows-format link files — must pass through
