@@ -301,7 +301,7 @@ pub fn cleaned_turn_tail(node_id: i64) -> String {
 ///
 /// Contract: the prompt asks for EXACTLY one word, but LLMs decorate — so we
 /// scan the output's non-empty lines from the end and accept the first line
-/// that contains exactly one of the three tokens (word-ish match, case
+/// that contains exactly one classification token (word-ish match, case
 /// insensitive). Ambiguous or token-free output is `None` (degrade, never
 /// guess). Pure function, unit-tested against mock transcripts below.
 pub(crate) fn parse_classification(output: &str) -> Option<Classification> {
@@ -311,20 +311,27 @@ pub(crate) fn parse_classification(output: &str) -> Option<Classification> {
             continue;
         }
         let upper = line.to_uppercase();
-        if (upper.contains("DO NOT CONTINUE") || upper.contains("DON'T CONTINUE")
-            || upper.contains("NEVER CONTINUE")) && contains_word(&upper, "CONTINUE") {
-            continue;
-        }
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|token| !token.is_empty())
+            .collect();
         let hits: Vec<Classification> = [
             ("COMPLETED", Classification::Completed),
             ("BLOCKED", Classification::Blocked),
             ("WORKING", Classification::Working),
         ]
         .iter()
-        .filter(|(tok, _)| contains_word(&upper, tok))
+        .filter(|(tok, _)| tokens.contains(tok))
         .map(|(_, c)| *c)
         .collect();
-        let continue_hit = contains_word(&upper, "CONTINUE");
+        let continue_hit = tokens.contains(&"CONTINUE");
+        let negated_continue = continue_hit
+            && (tokens.contains(&"NOT")
+                || tokens.contains(&"NEVER")
+                || upper.contains("DON'T"));
+        if negated_continue {
+            continue;
+        }
         if continue_hit && hits.is_empty() {
             return Some(Classification::Continue);
         }
@@ -338,14 +345,6 @@ pub(crate) fn parse_classification(output: &str) -> Option<Classification> {
         // instruction back) is ambiguous — keep scanning upward.
     }
     None
-}
-
-fn contains_word(text: &str, token: &str) -> bool {
-    text.match_indices(token).any(|(start, _)| {
-        let end = start + token.len();
-        text[..start].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
-            && text[end..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
-    })
 }
 
 /// Build the classifier prompt for a cleaned PTY tail.
@@ -600,6 +599,7 @@ mod tests {
         assert_eq!(parse_classification("Verdict: CONTINUE."), Some(Classification::Continue));
         assert_eq!(parse_classification("DISCONTINUE"), None);
         assert_eq!(parse_classification("Do not CONTINUE"), None);
+        assert_eq!(parse_classification("NOT CONTINUE"), None);
         let prompt = circuit_classify_prompt("I will implement the remaining change next.");
         assert!(prompt.contains("Never classify these as CONTINUE"));
     }
