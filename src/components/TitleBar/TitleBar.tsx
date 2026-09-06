@@ -135,21 +135,44 @@ function NavigationControls() {
         aria-haspopup="dialog"
         aria-expanded={omnibarOpen}
         title="Search or open… (command palette)"
-        // `w-80` is the design width at the taller bar; `min-w-40` lets the
-        // field shrink to 130px on half-screen windows (PR #1489 review —
-        // drag-region starvation at sub-1000px). At that minimum the
-        // placeholder still reads "Search or open…" without truncation; on
-        // tighter screens the user types into the palette, not the bar.
-        className="flex h-10 w-80 min-w-40 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
+        // The field's design width is 640px (VS Code Command Palette
+        // parity). `w-80` is the typical-viewport width — Tailwind v4
+        // compiles it to `width: calc(var(--spacing) * 80)` where
+        // `--spacing` defaults to `0.25rem`, so `w-80 = 20rem`. At the
+        // 13px root font (`--font-size-base: 13px`), that's 260px — NOT
+        // 320px (the 16px-root ghost). `max-w-full` is the safety belt
+        // that prevents the centre cell from pushing past its parent
+        // when the side clusters can't yield (PR #1623 review: a
+        // hardcoded 640px centre broke the ViewModeSwitcher below
+        // 1920px because the 1fr siblings couldn't yield past their
+        // min-content — at 1440px with labels visible the left cluster
+        // needs ~565px and only allows ~260–310px centre). At ≥1786px
+        // the field bumps to its VS Code-parity `w-[640px]`; below
+        // that, `w-80` keeps the side clusters intact. `min-w-40`
+        // (130px at the 13px root — 10rem × 13px) is the floor the
+        // field collapses to on half-screen windows (PR #1489 review —
+        // drag-region starvation at sub-1000px). At the floor the
+        // placeholder still reads "Search or open…" without truncation;
+        // on tighter screens the user types into the palette, not the
+        // bar. The class strings MUST stay literals so Tailwind v4's
+        // source scanner picks them up — a template literal would defeat
+        // JIT detection and the rules would never compile (PR #1623
+        // review). Note: `w-[40rem]` is WRONG here because `1rem =
+        // 13px` at the 13px root, giving 520px — use literal
+        // `w-[640px]` for the VS Code-parity target.
+        className="flex h-10 w-80 min-[1786px]:w-[640px] min-w-40 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
       >
         <SearchIcon className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
         {/* `SEARCH_SHORTCUT_LABEL` is resolved once at module scope. The
             conditional still keeps an empty <kbd> chip from appearing if
-            the catalog row were ever renamed. The chip is the LAST thing
-            to come back when widening: with it, the full-label bar needs
-            ~1390px (measured), so it stays hidden below 1400px while the
-            labels return at 1300px (switcher) and 1150px (pills). */}
+            the catalog row were ever renamed. The chip is the FIRST thing
+            to disappear when narrowing (1400px threshold; labels stay
+            visible down to 1300px — user-facing affordances outlast the
+            decorative keyboard hint, per PR review feedback). The class
+            string MUST stay a literal so Tailwind v4's source scanner
+            picks it up — a template literal would defeat JIT detection
+            and the rule would never compile. */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
           <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1399px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
@@ -189,11 +212,17 @@ function HeaderPillButton({ icon, label, onClick, title, ariaLabel, active = fal
       }`}
     >
       {icon}
-      {/* Icon-only below 1300px window width — unified with the switcher's
-          ladder (issue #1609; previously the pills dropped at 1150px, so
-          between the two tiers the bar mixed labelled segments with icon
-          pills). The aria-label above keeps the accessible name stable. */}
-      <span className="max-[1300px]:hidden">{label}</span>
+      {/* Icon-only below 1400px window width — unified with the
+          switcher's ladder (issue #1609; previously the pills dropped at
+          1150px, so between the two tiers the bar mixed labelled
+          segments with icon pills). The threshold moved from 1300px to
+          1400px to avoid a 2px clip on the rightmost ViewModeSwitcher
+          segment ("Filtered") at exactly 1300px — at 1300px the labels
+          become visible but the centre's `w-80` (260px at the 13px root)
+          plus the side clusters' min-content (~565px each) overflows
+          the side tracks (PR #1623 review). The aria-label above keeps
+          the accessible name stable. */}
+      <span className="max-[1399px]:hidden">{label}</span>
     </button>
   );
 }
@@ -398,6 +427,19 @@ export function TitleBar() {
           between unequal side clusters, which is not centring. The side
           cells are drag regions, so their empty space still grabs the
           window while buttons inside stay clickable.
+
+          The palette's design width is 640px (VS Code Command Palette
+          parity). At narrower viewports the field shrinks via
+          `max-w-full` to whatever the centre cell can spare without
+          starving the ViewModeSwitcher — measured viewport-width
+          breakpoint per PR #1623 review: the field hits 640px at
+          ≥1786px when the switcher labels are visible (left cluster
+          needs ~565px to render all 5 segments). Below that, the field
+          uses `w-80` (320px) so the side clusters always fit. This
+          means users at typical laptop viewports (1366–1785px) see the
+          same 320px palette as before — they don't lose switcher
+          labels — while users on wide displays (1786px+, common for
+          external monitors) get the full VS Code parity 640px trigger.
 
           Height: `h-14` (45.5px at the 13px root) is the floor that clears
           the tallest in-bar content — the `h-10` palette field and

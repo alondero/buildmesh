@@ -211,21 +211,37 @@ describe('TitleBar (bespoke window chrome)', () => {
     it('carries the responsive degradation classes (labels, chip, flex floors)', async () => {
       const { container } = await renderTitleBar();
       // Pill and switcher labels drop to icon-only below the SAME tier
-      // (1300px) since #1609 — one toolbar, one ladder; the chip is the
-      // last affordance back when widening. Class presence is the contract
-      // — the media queries themselves are browser-rendered.
+      // (1400px) since #1609 and PR #1623 — one toolbar, one ladder;
+      // the threshold moved from 1300px to 1400px to avoid a 2px clip on
+      // the rightmost ViewModeSwitcher segment ("Filtered") at exactly
+      // 1300px viewport (where labels become visible but the centre's
+      // `w-80` 260px + side clusters' min-content can't coexist). The
+      // kbd chip hides FIRST when narrowing at 1399px — user-facing
+      // affordances outlast the decorative keyboard hint. Class
+      // literals are the contract — they MUST stay as literal strings
+      // (not template literals) so Tailwind v4's source scanner
+      // compiles them. The media queries themselves are
+      // browser-rendered.
       const remotePill = screen.getByRole('button', { name: 'Open mobile remote access' });
-      expect(remotePill.querySelector('span')?.className).toContain('max-[1300px]:hidden');
+      expect(remotePill.querySelector('span')?.className).toContain('max-[1399px]:hidden');
       const usagePill = screen.getByRole('button', { name: 'Open Usage' });
-      expect(usagePill.querySelector('span')?.className).toContain('max-[1300px]:hidden');
+      expect(usagePill.querySelector('span')?.className).toContain('max-[1399px]:hidden');
       const switcherGroup = screen.getByRole('group', { name: /view mode/i });
       const switcherLabel = switcherGroup.querySelector('span');
-      expect(switcherLabel?.className).toContain('max-[1300px]:hidden');
+      expect(switcherLabel?.className).toContain('max-[1399px]:hidden');
       const chip = container.querySelector('kbd');
       expect(chip?.className).toContain('max-[1399px]:hidden');
+      // Responsive palette width (PR #1623 review): the field is
+      // `w-80` (260px at the 13px root) below 1786px viewport, and
+      // bumps to its VS Code-parity `w-[640px]` at >=1786px where
+      // the side clusters can afford it. Pin the breakpoint class so a
+      // future rebase that drops the bump fails the test loudly.
+      const searchButton = screen.getByTestId('titlebar-command-search');
+      expect(searchButton.className).toContain('w-80');
+      expect(searchButton.className).toContain('min-[1786px]:w-[640px]');
       // Flex floor: the palette field's wrapper must never collapse below
       // its yield-first floor.
-      const searchWrapper = screen.getByTestId('titlebar-command-search').parentElement!;
+      const searchWrapper = searchButton.parentElement!;
       expect(searchWrapper.className).toContain('min-w-44');
     });
 
