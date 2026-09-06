@@ -19,9 +19,8 @@
  * progress. Expanding reveals the trigger identity and the full per-step
  * timeline (status, outcome, attempt, duration, agent node, error text).
  *
- * Runs that still need something default to expanded, terminal runs to
- * collapsed: the newest failing or parked run is the one the user opened
- * the tab for. `expanded` is lifted to the parent so a `circuit-run-updated`
+ * Diagnostics default to collapsed; approvals and failures remain visible.
+ * `expanded` is lifted to the parent so a `circuit-run-updated`
  * refetch can't reset a card the user deliberately opened or closed.
  *
  * Every layout choice here is wrap-first, never truncate-first — the card
@@ -131,6 +130,9 @@ export function CircuitRunCard({
             </span>
           )}
         </span>
+        <span className="block text-2xs text-text-secondary break-all line-clamp-2 mt-0.5" title={run.trigger_identity}>
+          {run.trigger_identity.startsWith('manual:') ? 'Manual run' : run.trigger_identity}
+        </span>
         {/* Activity line — the fact the old one-liner buried. Wraps
             rather than clips: a long node id is the whole point. */}
         <span
@@ -146,7 +148,7 @@ export function CircuitRunCard({
             </span>
           )}
         </span>
-        {activity.detail !== null && (
+        {activity.detail !== null && (expanded || activity.kind !== 'running') && (
           <span
             className="mt-0.5 block text-2xs text-text-muted break-words"
             data-testid={`run-reason-${run.id}`}
@@ -219,7 +221,7 @@ export function CircuitRunCard({
 
       {/* Collapsed runs still surface the failure — an error you have to
           expand to find is an error you miss. */}
-      {!expanded && firstError !== null && (
+      {firstError !== null && (
         <p
           className="px-2 pb-1.5 text-2xs text-status-error line-clamp-2 break-words"
           data-testid={`run-error-${run.id}`}
@@ -294,6 +296,8 @@ export function CircuitRunCard({
                         </span>
                       )}
                     </div>
+                    {(s.agent_node_id !== null || !!s.error_message) && <details className="mt-1">
+                      <summary className="cursor-pointer text-text-muted">Debug details</summary>
                     {s.agent_node_id !== null && (
                       <p className="text-text-muted mt-0.5">agent node #{s.agent_node_id}</p>
                     )}
@@ -305,6 +309,7 @@ export function CircuitRunCard({
                         {s.error_message}
                       </pre>
                     )}
+                    </details>}
                   </li>
                 );
               })}

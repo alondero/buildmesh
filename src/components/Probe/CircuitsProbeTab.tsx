@@ -19,7 +19,7 @@
  * root is layout-only (`flex flex-col h-full min-h-0`), which keeps
  * `ProbePanel`'s outer `flex-1 overflow-y-auto` inert — its content is
  * exactly its own height, so it never gains a scrollbar of its own. The
- * New Circuit toolbar sits OUTSIDE the scroller as a `shrink-0` sibling,
+ * View navigation sits OUTSIDE the scroller as a `shrink-0` sibling,
  * so it stays put while the ledger scrolls. This is the same shape the
  * shared `<ProbeTabBody>` primitive gives every other tab; Circuits
  * predates it and previously put `overflow-y-auto` on its own root,
@@ -73,6 +73,7 @@ export function CircuitsProbeTab() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [view, setView] = useState<'activity' | 'history' | 'queue' | 'manage'>('activity');
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
   // Mesh-level run count, computed from every circuit's ledger — mirrors
   // `db::count_active_circuit_runs` (#1467). Computed once per render and
@@ -82,7 +83,7 @@ export function CircuitsProbeTab() {
   const meshActiveRuns = countActiveRuns(rows.flatMap(({ runs }) => runs));
   /**
    * Explicit run-card disclosure overrides, keyed by run id. Absent means
-   * "use the default" (live runs open, terminal runs closed) — storing
+   * "use the default" (all diagnostics closed) — storing
    * only deliberate toggles is what lets the `circuit-run-updated`
    * refetch land without snapping a card the user just opened shut.
    */
@@ -173,16 +174,10 @@ export function CircuitsProbeTab() {
     }
   };
 
-  /**
-   * Flip one run card's disclosure. The override is recorded against the
-   * *current* default so a card that is open only because the run is live
-   * still closes on the first click (and vice-versa) — deriving the next
-   * value from `!override[id]` alone would need two clicks whenever the
-   * default disagreed with `false`.
-   */
-  const toggleRunExpanded = (runId: number, runState: string) => {
+  // Keep deliberate disclosures across live refreshes and view changes.
+  const toggleRunExpanded = (runId: number) => {
     setRunExpandOverrides((prev) => {
-      const current = prev[runId] ?? !isTerminalRunState(runState);
+      const current = prev[runId] ?? false;
       return { ...prev, [runId]: !current };
     });
   };
@@ -208,6 +203,31 @@ export function CircuitsProbeTab() {
       openCircuitEditor(circuit.id);
     });
 
+  const needsAttention = (detail: CircuitWithRuns['runs'][number]) =>
+    detail.run.state === 'failed' || detail.run.state === 'paused' ||
+    detail.steps.some((step) => step.status === 'blocked');
+  // A later finished run supersedes an old failure; History retains
+  // every result. Only the latest finished run can flag circuit attention.
+  const latestFinishedIds = new Set(rows.map(({ runs }) =>
+    Math.max(-1, ...runs.filter(({ run }) => isTerminalRunState(run.state)).map(({ run }) => run.id))));
+  const isActivity = (detail: CircuitWithRuns['runs'][number]) =>
+    detail.run.state !== 'pending' &&
+    (!isTerminalRunState(detail.run.state) ||
+      (detail.run.state === 'failed' && latestFinishedIds.has(detail.run.id)));
+  const activityCount = rows.flatMap(({ runs }) => runs).filter(isActivity).length;
+  const attentionCount = rows.flatMap(({ runs }) => runs).filter(isActivity).filter(needsAttention).length;
+  const visibleRows = rows.map((row) => ({
+    ...row,
+    visibleRuns: row.runs.filter((detail) => view === 'history'
+      ? isTerminalRunState(detail.run.state)
+      : isActivity(detail)).sort((a, b) =>
+        (view === 'activity' ? Number(needsAttention(b)) - Number(needsAttention(a)) : 0) ||
+        b.run.id - a.run.id),
+  })).filter((row) => view === 'manage' || row.visibleRuns.length > 0)
+    .sort((a, b) => view === 'activity'
+      ? Number(b.visibleRuns.some(needsAttention)) - Number(a.visibleRuns.some(needsAttention))
+      : 0);
+
   if (activeMeshId === null) {
     return (
       <div className="p-4">
@@ -219,9 +239,30 @@ export function CircuitsProbeTab() {
   return (
     // Layout only — see the "Scroll ownership" note in the file header.
     <div className="flex flex-col h-full min-h-0 text-sm" data-testid="circuits-probe-tab">
-      {/* New Circuit row — authoring itself happens in the canvas editor.
-          Outside the scroller, so it stays put while the ledger scrolls. */}
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
+        <p className="text-xs text-text-secondary mb-2" role="status">
+          {attentionCount > 0 ? `${attentionCount} need attention` : activityCount > 0 ? 'Circuits are working' : 'No active runs'}
+        </p>
+        <div className="grid grid-cols-2 gap-1" aria-label="Circuit views">
+          {(['activity', 'history', 'queue', 'manage'] as const).map((item) => (
+            <button key={item} type="button" aria-pressed={view === item}
+              onClick={() => setView(item)} data-testid={`circuits-view-${item}`}
+              className={`rounded-md px-2 py-1 text-xs focus-visible:ring-1 focus-visible:ring-accent-cyan ${view === item ? 'bg-accent-cyan/15 text-accent-cyan' : 'text-text-muted hover:bg-bg-card-hover'}`}>
+              {item === 'activity' ? `Activity (${activityCount})` : item === 'queue' ? `Queue (${queue.length})` : item === 'history' ? 'History' : 'Manage'}
+            </button>
+          ))}
+        </div>
+      </div>
+      {(loadError !== null || actionError !== null) && (
+        <div className="px-3 py-1 text-xs text-status-error shrink-0 break-words" role="alert">
+          {actionError ?? loadError}
+        </div>
+      )}
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden" data-testid="circuits-probe-body">
+      {/* Configuration scrolls with Manage, keeping navigation reachable
+          even when the form is taller than a short dock. */}
+      {view === 'manage' && <div className="px-3 py-2 border-b border-border-subtle">
+        <h3 className="text-xs font-semibold text-text-primary mb-2">Create a circuit</h3>
         <div className="flex items-center gap-1 mb-1">
           <input
             value={newName}
@@ -245,7 +286,7 @@ export function CircuitsProbeTab() {
             New Circuit
           </button>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex flex-col items-stretch gap-2 min-w-0 [&_select]:w-full [&_select]:min-w-0">
           <select
             value={blueprint}
             onChange={(e) => {
@@ -306,21 +347,9 @@ export function CircuitsProbeTab() {
             </label>
           )}
         </div>
-      </div>
-
-      {(loadError !== null || actionError !== null) && (
-        <div className="px-3 py-1 text-xs text-status-error shrink-0" role="alert">
-          {actionError ?? loadError}
-        </div>
-      )}
-
-      {/* THE scroll owner for this tab. `overflow-x-hidden` is load-bearing
-          — see the file header. */}
-      <div
-        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
-        data-testid="circuits-probe-body"
-      >
-        {queue.length > 0 && (
+      </div>}
+        {view === 'queue' && queue.length === 0 && <EmptyState label="Queue is empty" hint="Runs waiting to start will appear here." />}
+        {view === 'queue' && queue.length > 0 && (
           <section className="border-b border-border-subtle p-2" data-testid="circuit-queue">
             <div className="flex items-baseline justify-between gap-2 mb-1.5">
               <h3 className="text-xs font-semibold text-text-primary">Queue</h3>
@@ -394,16 +423,18 @@ export function CircuitsProbeTab() {
             </ol>
           </section>
         )}
-        {rows.length === 0 ? (
+        {view !== 'queue' && (rows.length === 0 ? (
           <div className="p-4">
             <EmptyState
               label="No circuits yet"
-              hint="Create one above — it opens straight in the flow editor."
+              hint="Open Manage to create a circuit in the flow editor."
             />
           </div>
         ) : (
           <ul className="flex flex-col gap-1 p-2">
-            {rows.map(({ circuit, runs }) => {
+            {visibleRows.length === 0 && <li><EmptyState label={view === 'history' ? 'No finished runs yet' : 'All caught up'} hint={view === 'history' ? 'Completed, failed and cancelled runs appear here.' : 'Active runs and failures appear here. Start a circuit from Manage.'} /></li>}
+            {view === 'history' && <li className="text-2xs text-text-muted px-1">Recent history · up to 10 runs per circuit</li>}
+            {visibleRows.map(({ circuit, runs, visibleRuns }) => {
               // One capacity snapshot per circuit, shared by its run cards
               // — `countRunningSteps` walks every run, so computing it
               // inside the run loop would be quadratic for nothing.
@@ -422,12 +453,15 @@ export function CircuitsProbeTab() {
                     <span className="text-xs font-semibold text-text-primary">Agent review history</span>
                     <span className="text-2xs text-text-muted truncate" title={circuit.name}>{circuit.name}</span>
                   </div>
+                ) : view !== 'manage' ? (
+                  <h3 className="text-xs font-semibold text-text-primary break-words">{circuit.name}</h3>
                 ) : (
                   <div className="flex flex-col items-stretch gap-1">
                     <label className="flex items-center gap-1.5 min-w-0">
                       <input
                         type="checkbox"
                         checked={circuit.enabled}
+                        disabled={busy}
                         onChange={() =>
                           runAction(() => setCircuitEnabled(circuit.id, !circuit.enabled))
                         }
@@ -499,18 +533,18 @@ export function CircuitsProbeTab() {
 
                 {/* Run ledger — one expandable diagnostic card per run
                     (#1468), replacing the old truncated one-line chain. */}
-                {runs.length > 0 && (
+                {view !== 'manage' && visibleRuns.length > 0 && (
                   <ul className="mt-1.5 flex flex-col gap-1" data-testid={`circuit-runs-${circuit.id}`}>
-                    {runs.map((detail) => (
+                    {visibleRuns.map((detail) => (
                       <CircuitRunCard
                         key={detail.run.id}
                         detail={detail}
                         capacity={capacity}
                         expanded={
                           runExpandOverrides[detail.run.id] ??
-                          !isTerminalRunState(detail.run.state)
+                          false
                         }
-                        onToggleExpanded={() => toggleRunExpanded(detail.run.id, detail.run.state)}
+                        onToggleExpanded={() => toggleRunExpanded(detail.run.id)}
                         now={now}
                         busy={busy}
                         onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
@@ -527,7 +561,7 @@ export function CircuitsProbeTab() {
               );
             })}
           </ul>
-        )}
+        ))}
       </div>
     </div>
   );

@@ -192,6 +192,41 @@ beforeEach(() => {
 });
 
 describe('CircuitsProbeTab', () => {
+  it('keeps resolved failures in History instead of accumulating stale attention', async () => {
+    mockBackend({ runs: [
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } },
+      RUN_DONE, RUN_RUNNING,
+    ] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('run-card-12');
+    expect(screen.queryByTestId('run-card-9')).toBeNull();
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    expect(screen.getByTestId('run-card-9')).toBeTruthy();
+  });
+
+  it('prioritizes attention across circuits and separates history, queue, and configuration', async () => {
+    const failed = { ...RUN_DONE, run: { ...RUN_DONE.run, id: 13, circuit_id: 8, state: 'failed' } };
+    mockBackend({
+      circuits: [CIRCUIT, { ...CIRCUIT, id: 8, name: 'review' }],
+      runs: [RUN_DONE, RUN_RUNNING, failed],
+      queue: QUEUE,
+    });
+    openProbeDestination('circuits');
+    await screen.findByTestId('run-card-13');
+    const cards = screen.getAllByTestId(/^run-card-/);
+    expect(cards.map((card) => card.getAttribute('data-run-state'))).toEqual(['failed', 'running']);
+    expect(screen.queryByTestId('run-card-11')).toBeNull();
+    expect(screen.queryByTestId('queue-run-21')).toBeNull();
+    expect(screen.queryByTestId('circuit-name-input')).toBeNull();
+    expect(screen.getByTestId('circuits-view-queue').textContent).toContain('(2)');
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    expect(screen.getByTestId('run-card-11')).toBeTruthy();
+    expect(screen.queryByTestId('run-card-12')).toBeNull();
+    fireEvent.click(screen.getByTestId('circuits-view-manage'));
+    expect(screen.getByTestId('circuit-name-input')).toBeTruthy();
+    expect(screen.queryAllByTestId(/^run-card-/)).toHaveLength(0);
+  });
+
   it('lists circuits with their run ledger', async () => {
     mockBackend();
     openProbeDestination('circuits');
@@ -199,8 +234,11 @@ describe('CircuitsProbeTab', () => {
     expect(await screen.findByText('nightly-sweep')).toBeTruthy();
     // Run state renders in the humanised vocabulary (#1468); the raw DB
     // string stays available on `data-run-state` for machine assertions.
-    expect(await screen.findByTestId('run-state-11').then((el) => el.textContent)).toBe('Completed');
     expect(screen.getByTestId('run-state-12').textContent).toBe('Running');
+    expect(screen.queryByTestId('run-state-11')).toBeNull();
+    expect(screen.queryByTestId('circuit-name-input')).toBeNull();
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    expect(await screen.findByTestId('run-state-11').then((el) => el.textContent)).toBe('Completed');
     expect(screen.getByTestId('run-card-11').getAttribute('data-run-state')).toBe('completed');
     // Steps are a vertical timeline, not a joined one-line string (#1468).
     expect(screen.queryByText(/trigger:completed/)).toBeNull();
@@ -239,6 +277,7 @@ describe('CircuitsProbeTab', () => {
 
     // Pin the wording verbatim — the same shape #1468 uses for the
     // queued-step copy so a reword silently fails review.
+    fireEvent.click(await screen.findByTestId('circuits-view-queue'));
     const reason21 = await screen.findByTestId('queue-pending-reason-21');
     expect(reason21.textContent).toContain("circuit-run slot");
     expect(reason21.textContent).toContain("this mesh's circuit-run slots");
@@ -272,6 +311,7 @@ describe('CircuitsProbeTab', () => {
     });
     openProbeDestination('circuits');
 
+    fireEvent.click(await screen.findByTestId('circuits-view-queue'));
     const reason = await screen.findByTestId('queue-pending-reason-21');
     expect(reason.textContent).toContain('allows 4 concurrent runs');
     // Belt-and-braces: the per-circuit number must not leak into the
@@ -284,6 +324,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.type(await screen.findByTestId('circuit-name-input'), 'review-bot');
     await user.click(screen.getByTestId('circuit-create-button'));
 
@@ -310,6 +351,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.type(await screen.findByTestId('circuit-name-input'), 'issue-runner');
     await user.selectOptions(screen.getByTestId('circuit-trigger-select'), 'github_issue_label');
     // The create button stays disabled until the label is filled in.
@@ -333,6 +375,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.type(await screen.findByTestId('circuit-name-input'), 'autopilot-review');
     await user.selectOptions(
       screen.getByTestId('circuit-blueprint-select'),
@@ -361,6 +404,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     fireEvent.click(await screen.findByTestId('circuit-edit-flow-7'));
     expect(useUIStore.getState().activeCircuitEditorId).toBe(7);
   });
@@ -370,6 +414,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.click(await screen.findByTestId('circuit-trigger-7'));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('trigger_circuit_now', { circuitId: 7 });
@@ -381,6 +426,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     const trigger = (await screen.findByTestId('circuit-trigger-7')) as HTMLButtonElement;
     expect(trigger.disabled).toBe(false);
     await user.click(trigger);
@@ -394,6 +440,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     const toggle = (await screen.findByTestId('circuit-enabled-7')) as HTMLInputElement;
     expect(toggle.checked).toBe(true);
     await user.click(toggle);
@@ -410,6 +457,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.click(await screen.findByTestId('circuit-delete-7'));
     expect(invoke).not.toHaveBeenCalledWith('delete_circuit', { circuitId: 7 });
     await user.click(screen.getByTestId('circuit-confirm-delete-7'));
@@ -423,6 +471,8 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    expect(screen.queryByTestId('circuit-queue')).toBeNull();
+    await user.click(await screen.findByTestId('circuits-view-queue'));
     const queue = await screen.findByTestId('circuit-queue');
     expect(
       Array.from(queue.querySelectorAll('[data-testid^="queue-run-"]')).map((row) =>
@@ -572,7 +622,8 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({ runs: [RUN_LONG] });
     openProbeDestination('circuits');
 
-    // A live run opens by default — the diagnostic you came for is visible.
+    expect((await screen.findByTestId('run-toggle-20')).getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(screen.getByTestId('run-toggle-20'));
     const timeline = await screen.findByTestId('run-steps-20');
     expect(timeline.tagName).toBe('OL');
 
@@ -735,6 +786,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({ runs: [RUN_RETRIED] });
     openProbeDestination('circuits');
 
+    fireEvent.click(await screen.findByTestId('run-toggle-26'));
     const row = await screen.findByTestId('run-step-26-review_classifier');
     expect(row.getAttribute('data-step-status')).toBe('completed');
     expect(row.textContent).toContain('Done');
@@ -745,15 +797,17 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByTestId('run-retries-26').textContent).toContain('retried');
   });
 
-  it('opens live runs, collapses terminal ones, and honours a manual toggle', async () => {
+  it('keeps diagnostics closed by default and preserves disclosure across views', async () => {
     mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
-    // Run 12 is running → open. Run 11 completed → collapsed.
     await waitFor(() => {
-      expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
+      expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('false');
     });
+    await user.click(screen.getByTestId('run-toggle-12'));
+    expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
+    await user.click(screen.getByTestId('circuits-view-history'));
     expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByTestId('run-steps-11')).toBeNull();
 
@@ -762,7 +816,8 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByTestId('run-steps-11')).toBeTruthy();
 
-    // …and one click closes the live run's, without needing two.
+    await user.click(screen.getByTestId('circuits-view-activity'));
+    expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
     await user.click(screen.getByTestId('run-toggle-12'));
     expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('false');
   });
@@ -771,6 +826,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({ runs: [RUN_DONE] });
     openProbeDestination('circuits');
 
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
     const toggle = await screen.findByTestId('run-toggle-11');
     expect(toggle.tagName).toBe('BUTTON');
     expect(toggle.getAttribute('aria-controls')).toBe('run-detail-11');
@@ -831,6 +887,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
+      fireEvent.click(screen.getByTestId('circuits-view-history'));
       expect(screen.getByTestId('run-card-11')).toBeTruthy();
       expect(vi.getTimerCount()).toBe(0);
     } finally {
@@ -859,9 +916,9 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(nested.length).toBe(1);
     expect(nested[0]).toBe(body);
 
-    // The New Circuit toolbar stays outside the scroller, so it does not
-    // scroll away from the ledger.
-    expect(body.contains(screen.getByTestId('circuit-name-input'))).toBe(false);
+    expect(body.contains(screen.getByTestId('circuits-view-manage'))).toBe(false);
+    fireEvent.click(screen.getByTestId('circuits-view-manage'));
+    expect(body.contains(screen.getByTestId('circuit-name-input'))).toBe(true);
   });
 });
 
