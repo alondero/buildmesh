@@ -6,14 +6,24 @@ import { useUIStore, type ProbeTab } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
-import { pushProbeWorkingSet, PROBE_WORKING_SET_CAP } from '../../src/lib/probeWorkingSet';
+import {
+  pushProbeWorkingSet,
+  EMPTY_PROBE_WORKING_SET,
+  PROBE_WORKING_SET_CAP,
+  type ProbeWorkingSet,
+} from '../../src/lib/probeWorkingSet';
 import { PROBE_PANEL_STORAGE_KEY } from '../../src/components/Probe/useProbeResize';
 
 /**
- * ADR-0032 — the Probe tool rail: a working-set tab strip (MRU, capped)
- * inside the open panel plus the grouped "All tools" menu. The pure MRU
- * reducer is tested directly; the component is tested through the full
- * ProbePanel so the tablist/tabpanel wiring is exercised for real.
+ * ADR-0032 — the Probe tool rail: a working-set tab strip (capped) inside
+ * the open panel plus the grouped "All tools" menu. The pure reducer is
+ * tested directly; the component is tested through the full ProbePanel so
+ * the tablist/tabpanel wiring is exercised for real.
+ *
+ * Navigation contract under test (the review-found defect this pins):
+ * display order is insertion-ordered and spatially stable — arrows walk
+ * real positions, so every working-set entry is reachable in BOTH
+ * directions even though activation updates the recency list.
  */
 
 const MESH: Mesh = {
@@ -48,28 +58,46 @@ function openPanel(tab: ProbeTab): void {
   render(<ProbePanel />);
 }
 
-describe('pushProbeWorkingSet (ADR-0032 MRU reducer)', () => {
-  it('adds a new destination at the front', () => {
-    expect(pushProbeWorkingSet([], 'files')).toEqual(['files']);
-    expect(pushProbeWorkingSet(['files'], 'issues')).toEqual(['issues', 'files']);
+function railTabIds(): string[] {
+  return [...screen.getByRole('tablist', { name: 'Probe destinations' })
+    .querySelectorAll('[role="tab"]')].map((t) => t.getAttribute('data-testid'));
+}
+
+describe('pushProbeWorkingSet (ADR-0032 reducer)', () => {
+  it('appends a new destination at the end of the display order', () => {
+    const afterFiles = pushProbeWorkingSet(EMPTY_PROBE_WORKING_SET, 'files');
+    expect(afterFiles).toEqual({ tabs: ['files'], mru: ['files'] });
+
+    const afterIssues = pushProbeWorkingSet(afterFiles, 'issues');
+    expect(afterIssues.tabs).toEqual(['files', 'issues']);
+    expect(afterIssues.mru).toEqual(['issues', 'files']);
   });
 
-  it('re-activating an existing entry reorders without growing the set', () => {
-    expect(pushProbeWorkingSet(['issues', 'files', 'review'], 'files')).toEqual([
-      'files',
-      'issues',
-      'review',
-    ]);
+  it('re-activation updates recency but keeps the display position', () => {
+    const start: ProbeWorkingSet = {
+      tabs: ['files', 'review', 'issues'],
+      mru: ['issues', 'review', 'files'],
+    };
+    const next = pushProbeWorkingSet(start, 'files');
+    // 'files' stays at position 0 — arrows walk stable positions.
+    expect(next.tabs).toEqual(['files', 'review', 'issues']);
+    expect(next.mru).toEqual(['files', 'issues', 'review']);
   });
 
-  it('evicts the oldest entry beyond the cap and never exceeds it', () => {
-    let set: ReturnType<typeof pushProbeWorkingSet> = [];
-    for (const tab of ['files', 'review', 'issues', 'pulls', 'usage'] as const) {
+  it('evicts the least recently visited beyond the cap and appends the new tab', () => {
+    let set: ProbeWorkingSet = EMPTY_PROBE_WORKING_SET;
+    for (const tab of ['files', 'review', 'issues', 'usage'] as const) {
       set = pushProbeWorkingSet(set, tab);
     }
-    expect(set).toHaveLength(PROBE_WORKING_SET_CAP);
-    // 'files' (visited first) was evicted; the four most recent remain.
-    expect(set).toEqual(['usage', 'pulls', 'issues', 'review']);
+    expect(set.tabs).toEqual(['files', 'review', 'issues', 'usage']);
+    expect(set.mru).toEqual(['usage', 'issues', 'review', 'files']);
+
+    set = pushProbeWorkingSet(set, 'pulls');
+    expect(set.mru).toEqual(['pulls', 'usage', 'issues', 'review']);
+    // 'files' (least recently visited) dropped out of display too; 'pulls'
+    // appended at the end; the middle entries keep their relative order.
+    expect(set.tabs).toEqual(['review', 'issues', 'usage', 'pulls']);
+    expect(set.tabs).toHaveLength(PROBE_WORKING_SET_CAP);
   });
 });
 
@@ -84,7 +112,7 @@ describe('ProbeToolRail (ADR-0032)', () => {
     useUIStore.setState({
       probeOpen: false,
       probeTab: 'files',
-      probeMru: [],
+      probeWorkingSet: EMPTY_PROBE_WORKING_SET,
       activeDiffFile: null,
       probeContextPins: {},
     });
@@ -96,18 +124,14 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(screen.queryByTestId('probe-tool-rail')).toBeNull();
   });
 
-  it('shows a tab per visited destination in MRU order with the active one selected', () => {
+  it('shows tabs in insertion order with the active one selected', () => {
     openPanel('files');
     act(() => {
       useUIStore.getState().openProbeTab('issues');
     });
 
-    const tabs = screen.getByRole('tablist', { name: 'Probe destinations' })
-      .querySelectorAll('[role="tab"]');
-    expect([...tabs].map((t) => t.getAttribute('data-testid'))).toEqual([
-      'probe-rail-tab-issues',
-      'probe-rail-tab-files',
-    ]);
+    // Display order is insertion order — NOT recency order.
+    expect(railTabIds()).toEqual(['probe-rail-tab-files', 'probe-rail-tab-issues']);
     expect(screen.getByRole('tab', { name: 'GitHub Issues' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.getByRole('tab', { name: 'Project Files' }).getAttribute('aria-selected')).toBe('false');
   });
@@ -123,7 +147,7 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(screen.getByTestId('probe-rail-tab-files').getAttribute('aria-selected')).toBe('true');
   });
 
-  it('caps the working set at four tabs, evicting the oldest visit', () => {
+  it('caps the working set at four tabs, evicting the least recently visited', () => {
     openPanel('files');
     for (const tab of ['review', 'issues', 'pulls', 'usage'] as const) {
       act(() => {
@@ -131,40 +155,73 @@ describe('ProbeToolRail (ADR-0032)', () => {
       });
     }
 
-    expect(screen.getByRole('tablist', { name: 'Probe destinations' })
-      .querySelectorAll('[role="tab"]')).toHaveLength(PROBE_WORKING_SET_CAP);
-    expect(useUIStore.getState().probeMru).toEqual(['usage', 'pulls', 'issues', 'review']);
+    expect(railTabIds()).toHaveLength(PROBE_WORKING_SET_CAP);
+    expect(useUIStore.getState().probeWorkingSet.mru).toEqual(['usage', 'pulls', 'issues', 'review']);
+    expect(useUIStore.getState().probeWorkingSet.tabs).toEqual(['review', 'issues', 'pulls', 'usage']);
     expect(screen.queryByRole('tab', { name: 'Project Files' })).toBeNull();
   });
 
-  it('moves selection with Arrow keys, activation reordering the MRU', () => {
+  it('walks ALL working-set entries with ArrowRight and ArrowLeft (no ping-pong)', () => {
+    openPanel('files');
+    for (const tab of ['review', 'issues', 'usage'] as const) {
+      act(() => {
+        useUIStore.getState().openProbeTab(tab);
+      });
+    }
+    // Display order [files, review, issues, usage]; move back to the front
+    // entry to start the walk. Activation must not reorder the strip.
+    act(() => {
+      useUIStore.getState().openProbeTab('files');
+    });
+    const tablist = screen.getByRole('tablist', { name: 'Probe destinations' });
+    const walk = (key: string) => {
+      fireEvent.keyDown(tablist, { key });
+      return useUIStore.getState().probeTab;
+    };
+
+    expect(walk('ArrowRight')).toBe('review');
+    expect(walk('ArrowRight')).toBe('issues');
+    expect(walk('ArrowRight')).toBe('usage');
+    expect(walk('ArrowRight')).toBe('usage'); // clamped at the end
+
+    expect(walk('ArrowLeft')).toBe('issues');
+    expect(walk('ArrowLeft')).toBe('review');
+    expect(walk('ArrowLeft')).toBe('files');
+    expect(walk('ArrowLeft')).toBe('files'); // clamped at the front
+  });
+
+  it('keeps tab positions spatially stable across activations', () => {
     openPanel('files');
     act(() => {
       useUIStore.getState().openProbeTab('issues');
     });
-    // Working set is MRU-ordered: [issues, files], active tab at the front.
-    // Because every activation moves its tab to the front, ArrowRight from
-    // a just-activated tab always reaches the *other* entry (it ping-pongs
-    // on a two-tab set — exactly the alternation the rail exists for),
-    // while ArrowLeft/Home clamp at the front.
-    const tablist = screen.getByRole('tablist', { name: 'Probe destinations' });
+    expect(railTabIds()).toEqual(['probe-rail-tab-files', 'probe-rail-tab-issues']);
 
-    fireEvent.keyDown(tablist, { key: 'ArrowRight' });
-    expect(useUIStore.getState().probeTab).toBe('files');
+    act(() => {
+      useUIStore.getState().openProbeTab('files');
+    });
+    // Activating the FIRST tab must not shuffle it (or anything else) —
+    // recency drives eviction only, never display position.
+    expect(railTabIds()).toEqual(['probe-rail-tab-files', 'probe-rail-tab-issues']);
+  });
 
-    fireEvent.keyDown(tablist, { key: 'ArrowRight' });
-    expect(useUIStore.getState().probeTab).toBe('issues');
+  it('records a visit when the panel opens via toggleProbe, so the rail is never empty', () => {
+    // Review-found defect: a fresh session + toggleProbe() used to open the
+    // dock on an empty working set, rendering an empty bar and leaving the
+    // body's aria-labelledby pointing at a non-existent tab.
+    useUIStore.setState({
+      probeOpen: false,
+      probeTab: 'files',
+      probeWorkingSet: { tabs: ['files'], mru: ['files'] },
+    });
+    render(<ProbePanel />);
 
-    // Clamped: 'issues' sits at the front after its activation.
-    fireEvent.keyDown(tablist, { key: 'ArrowLeft' });
-    expect(useUIStore.getState().probeTab).toBe('issues');
-
-    fireEvent.keyDown(tablist, { key: 'End' });
-    expect(useUIStore.getState().probeTab).toBe('files');
-
-    // Clamped: 'files' sits at the front after End's activation.
-    fireEvent.keyDown(tablist, { key: 'Home' });
-    expect(useUIStore.getState().probeTab).toBe('files');
+    act(() => {
+      useUIStore.getState().toggleProbe();
+    });
+    expect(railTabIds()).toEqual(['probe-rail-tab-files']);
+    // aria-labelledby resolves to a mounted element.
+    expect(document.getElementById('probe-rail-tab-files')).not.toBeNull();
   });
 
   it('opens the grouped tool menu from the ⊞ affordance with every destination', () => {
@@ -179,14 +236,15 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(screen.getByText('App-wide')).toBeTruthy();
   });
 
-  it('selecting a cold destination from the menu switches to it and adds it to the working set', () => {
+  it('selecting a cold destination from the menu switches to it and appends it to the working set', () => {
     openPanel('files');
 
     fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
     fireEvent.click(screen.getByTestId('probe-tool-menu-pulls'));
 
     expect(useUIStore.getState().probeTab).toBe('pulls');
-    expect(useUIStore.getState().probeMru).toEqual(['pulls', 'files']);
+    expect(useUIStore.getState().probeWorkingSet.tabs).toEqual(['files', 'pulls']);
+    expect(useUIStore.getState().probeWorkingSet.mru).toEqual(['pulls', 'files']);
     expect(screen.queryByRole('menu', { name: 'All tools' })).toBeNull();
     // Focus returns to the trigger after menu selection.
     expect(document.activeElement).toBe(screen.getByTestId('probe-rail-all-tools'));
@@ -213,6 +271,34 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(screen.queryByRole('menu', { name: 'All tools' })).toBeNull();
   });
 
+  it('closes the menu when focus leaves the rail (Tab away)', () => {
+    openPanel('files');
+
+    fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
+    expect(screen.getByRole('menu', { name: 'All tools' })).toBeTruthy();
+
+    // Focusout to an element outside the rail — the menu-button contract
+    // forbids an orphaned floating menu.
+    fireEvent.focusOut(screen.getByTestId('probe-rail-all-tools'), {
+      relatedTarget: document.body,
+    });
+    expect(screen.queryByRole('menu', { name: 'All tools' })).toBeNull();
+  });
+
+  it('opens the menu from the trigger with ArrowDown (first tile) and ArrowUp (last tile)', () => {
+    openPanel('files');
+    const trigger = screen.getByTestId('probe-rail-all-tools');
+
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    expect(screen.getByRole('menu', { name: 'All tools' })).toBeTruthy();
+    expect(document.activeElement?.id).toBe('probe-rail-menu-files');
+
+    fireEvent.keyDown(screen.getByRole('menu', { name: 'All tools' }), { key: 'Escape' });
+    fireEvent.keyDown(trigger, { key: 'ArrowUp' });
+    expect(screen.getByRole('menu', { name: 'All tools' })).toBeTruthy();
+    expect(document.activeElement?.id).toBe('probe-rail-menu-usage');
+  });
+
   it('moves menu focus with Arrow keys without switching destination (manual activation)', () => {
     openPanel('files');
 
@@ -225,7 +311,7 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(useUIStore.getState().probeTab).toBe('files');
   });
 
-  it('collapses tab labels to icons at the narrow-width breakpoint', () => {
+  it('collapses tab labels to icons and stacks the menu in one column at the narrow-width breakpoint', () => {
     // The narrow prop derives from the persisted panel body width; seed the
     // same storage key the resize hook reads so the mount boots narrow.
     window.localStorage.setItem(PROBE_PANEL_STORAGE_KEY, '240');
@@ -240,9 +326,16 @@ describe('ProbeToolRail (ADR-0032)', () => {
     // their object).
     expect(tab.textContent).not.toContain('GitHub Issues');
     expect(tab.getAttribute('aria-label')).toBe('GitHub Issues');
+
+    // The menu must drop to one column — a 2-column grid truncates tile
+    // names to noise at the dock's 240px minimum (probe-ui-checklist.md §2).
+    fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
+    const menu = screen.getByRole('menu', { name: 'All tools' });
+    expect(menu.querySelector('.grid-cols-1')).not.toBeNull();
+    expect(menu.querySelector('.grid-cols-2')).toBeNull();
   });
 
-  it('keeps visible tab labels at the default width', () => {
+  it('keeps visible tab labels and the two-column menu at the default width', () => {
     openPanel('files');
     act(() => {
       useUIStore.getState().openProbeTab('issues');
@@ -251,5 +344,9 @@ describe('ProbeToolRail (ADR-0032)', () => {
     const tab = screen.getByRole('tab', { name: 'GitHub Issues' });
     expect(tab.textContent).toContain('GitHub Issues');
     expect(tab.getAttribute('aria-label')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
+    const menu = screen.getByRole('menu', { name: 'All tools' });
+    expect(menu.querySelector('.grid-cols-2')).not.toBeNull();
   });
 });

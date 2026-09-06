@@ -8,30 +8,35 @@
  * restores fast switching *inside* the open panel without reviving the
  * always-visible activity rail ADR-0030 rejected: it renders only while the
  * panel is open (closed-render discipline is untouched), and it shows only
- * the destinations actually visited this session (`probeMru`, MRU order,
- * capped at `PROBE_WORKING_SET_CAP`) instead of all eleven.
+ * the destinations actually visited this session (`probeWorkingSet`, capped
+ * at `PROBE_WORKING_SET_CAP`) instead of all eleven.
  *
- * The trailing ⊞ button opens the full destination list as a grouped
- * menu that reuses the palette's tool-discovery groups (ADR-0031) — the
- * same tiles, labels, and scope notes, so "tool grid" means one thing
- * across the omnibar and the inspector. The glyph is deliberately
- * `layout-grid`, not "+": the action browses existing tools, it doesn't
- * create one.
+ * **Display order is spatially stable.** The strip renders the working set
+ * in insertion order; activation never reorders the DOM. WAI-ARIA arrow-key
+ * navigation therefore walks real positions — every destination in the set
+ * is reachable with ArrowRight/ArrowLeft, Home/End jump to the row ends.
+ * (An earlier draft rendered MRU order and reordered on activation, which
+ * trapped every tab past index 1 behind an ArrowRight ping-pong and made
+ * ArrowLeft dead code; recency now drives eviction only.)
  *
- * Keyboard: the strip follows the WAI-ARIA tabs pattern (roving tabindex,
- * Arrow/Home/End, activation follows focus); the menu follows the menu
- * pattern (arrow keys move focus through ADR-0031's virtual 2-column grid
- * via `toolDiscoveryArrowTarget`, Enter/click activates, Esc closes and
- * restores focus to the trigger). At panel widths below 320px the tab
- * labels collapse to icons — the full names remain in `title` and
- * `aria-label`, and the narrow case is the one `probe-ui-checklist.md`
- * says to design for.
+ * The trailing ⊞ button follows the WAI-ARIA menu-button contract: click,
+ * ArrowDown, or ArrowUp open the menu (focusing the first/last tile
+ * respectively), and it closes on Escape, focusout, or mousedown outside.
+ * The menu reuses the palette's tool-discovery groups (ADR-0031) — the same
+ * tiles, labels, and scope notes, so "tool grid" means one thing across the
+ * omnibar and the inspector. The glyph is deliberately `layout-grid`, not
+ * "+": the action browses existing tools, it doesn't create one.
+ *
+ * Narrow widths: below 320px panel width the tab labels collapse to icons
+ * (names remain in `title`/`aria-label`), and the menu drops to a single
+ * column — a 2-column grid truncates labels to noise at the dock's 240px
+ * minimum (`probe-ui-checklist.md` §2: 240px is the case to design for).
  */
 
 import { useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, FocusEvent as ReactFocusEvent } from 'react';
 import { useUIStore } from '../../stores/uiStore';
-import type { ProbeTab } from '../../stores/uiStore';
+import type { ProbeTab } from '../../lib/probeContext';
 import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
 import {
   TOOL_DISCOVERY_GROUPS,
@@ -47,6 +52,7 @@ import { LayoutGridIcon, PROBE_TAB_ICONS } from './probeIcons';
 export const LABEL_COLLAPSE_WIDTH = 320;
 
 const tabId = (tab: ProbeTab) => `probe-rail-tab-${tab}`;
+const menuTileId = (tab: ProbeTab) => `probe-rail-menu-${tab}`;
 
 type ArrowDir = 'up' | 'down' | 'left' | 'right';
 
@@ -61,8 +67,9 @@ const MENU_KEYS: Record<string, ArrowDir | 'start' | 'end'> = {
 
 export function ProbeToolRail({ narrow }: { narrow: boolean }) {
   const probeTab = useUIStore((s) => s.probeTab);
-  const probeMru = useUIStore((s) => s.probeMru);
+  const workingSet = useUIStore((s) => s.probeWorkingSet);
   const openProbeTab = useUIStore((s) => s.openProbeTab);
+  const tabs = workingSet.tabs;
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuFocusTab, setMenuFocusTab] = useState<ProbeTab>(
     TOOL_DISCOVERY_TILES[0].tab,
@@ -70,10 +77,11 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
-  // Menu dismissal — Esc is handled on the menu itself; a mousedown that
-  // lands outside both the menu and its trigger closes it. (Mousedown, not
-  // click: matching native menu behavior so the press that starts inside
-  // the menu but ends outside doesn't double-fire a tile activation.)
+  // Menu dismissal. Escape is handled on the menu itself; focusout closing
+  // covers Tab away from the menu (the WAI-ARIA menu-button contract — an
+  // orphaned floating menu must not outlive its trigger's focus scope), and
+  // mousedown-outside covers clicks on non-focusable surfaces, which move
+  // no focus at all.
   useEffect(() => {
     if (!menuOpen) return;
     const onDocMouseDown = (e: MouseEvent) => {
@@ -86,43 +94,78 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
     return () => document.removeEventListener('mousedown', onDocMouseDown);
   }, [menuOpen]);
 
-  // On open, park roving focus on the active destination's tile (or the
-  // first tile when the active tab isn't in the grid — cannot happen while
-  // the tab union is stable, but the fallback keeps focus valid).
-  useEffect(() => {
-    if (!menuOpen) return;
-    const initial = TOOL_DISCOVERY_TILES.some((t) => t.tab === probeTab)
-      ? probeTab
-      : TOOL_DISCOVERY_TILES[0].tab;
-    setMenuFocusTab(initial);
-    // Deliberately keyed to `menuOpen` only: this is "where focus starts",
-    // not "follow the active tab" — arrow keys own focus from here.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [menuOpen]);
-
-  // Roving tabindex needs real DOM focus to follow `menuFocusTab`.
+  // On open, move DOM focus to the tile `openMenu` chose (active tile on
+  // click/ArrowDown, last tile on ArrowUp) — resolved through a ref so the
+  // effect needs no reactive dependencies beyond the open flag itself.
+  const initialMenuFocusRef = useRef<ProbeTab>(TOOL_DISCOVERY_TILES[0].tab);
   useEffect(() => {
     if (!menuOpen) return;
     menuRef.current
-      ?.querySelector<HTMLElement>(`[data-menu-tab="${menuFocusTab}"]`)
+      ?.querySelector<HTMLElement>(`[id="probe-rail-menu-${initialMenuFocusRef.current}"]`)
       ?.focus();
-  }, [menuOpen, menuFocusTab]);
+  }, [menuOpen]);
 
+  const onRailBlur = (e: ReactFocusEvent<HTMLDivElement>) => {
+    if (!menuOpen) return;
+    // Focus left the rail entirely (Tab, focus() call elsewhere): close the
+    // floating menu so it can't outlive its trigger. `relatedTarget` is null
+    // when focus moves to non-node targets — treat that as outside too.
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setMenuOpen(false);
+  };
+
+  const focusMenuTile = (tab: ProbeTab) => {
+    menuRef.current
+      ?.querySelector<HTMLElement>(`[id="${menuTileId(tab)}"]`)
+      ?.focus();
+  };
+
+  const openMenu = (initial: 'first' | 'last') => {
+    const initialTab = initial === 'last'
+      ? TOOL_DISCOVERY_TILES[TOOL_DISCOVERY_TILES.length - 1].tab
+      : TOOL_DISCOVERY_TILES.some((t) => t.tab === probeTab)
+        ? probeTab
+        : TOOL_DISCOVERY_TILES[0].tab;
+    initialMenuFocusRef.current = initialTab;
+    setMenuFocusTab(initialTab);
+    setMenuOpen(true);
+  };
+
+  // WAI-ARIA menu button: ArrowDown opens (first item), ArrowUp opens
+  // (last item). While open, they hand focus straight to the end tiles.
+  const onTriggerKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const end = e.key === 'ArrowUp' ? 'last' : 'first';
+    if (menuOpen) {
+      focusMenuTile(end === 'last'
+        ? TOOL_DISCOVERY_TILES[TOOL_DISCOVERY_TILES.length - 1].tab
+        : TOOL_DISCOVERY_TILES[0].tab);
+      return;
+    }
+    openMenu(end);
+  };
+
+  // Tabs pattern with automatic activation over the strip's stable display
+  // order: arrows move focus AND switch the destination in one step, so all
+  // working-set entries are reachable in both directions.
   const onTablistKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (probeMru.length === 0) return;
-    const current = Math.max(0, probeMru.indexOf(probeTab));
+    if (tabs.length === 0) return;
+    const current = Math.max(0, tabs.indexOf(probeTab));
     let next = -1;
-    if (e.key === 'ArrowRight') next = Math.min(probeMru.length - 1, current + 1);
+    if (e.key === 'ArrowRight') next = Math.min(tabs.length - 1, current + 1);
     else if (e.key === 'ArrowLeft') next = Math.max(0, current - 1);
     else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = probeMru.length - 1;
+    else if (e.key === 'End') next = tabs.length - 1;
     if (next === -1) return;
     e.preventDefault();
-    // Tabs pattern with automatic activation: arrows move focus and switch
-    // the destination in one step, matching the omnibar's keyboard rhythm.
-    const nextTab = probeMru[next];
+    const nextTab = tabs[next];
     if (nextTab !== probeTab) openProbeTab(nextTab);
-    document.getElementById(tabId(nextTab))?.focus();
+    // Activation reorders nothing — the focused element is stable, so a
+    // scoped lookup (never a global document query) is enough.
+    e.currentTarget
+      .querySelector<HTMLElement>(`[id="${tabId(nextTab)}"]`)
+      ?.focus();
   };
 
   const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -149,6 +192,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
     // Menus use manual activation: arrows move focus only, Enter/click
     // switches — same contract as the omnibar's tool grid.
     setMenuFocusTab(nextTab);
+    focusMenuTile(nextTab);
   };
 
   const selectFromMenu = (tab: ProbeTab) => {
@@ -161,6 +205,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
     <div
       className="relative shrink-0 border-b border-border-subtle"
       data-testid="probe-tool-rail"
+      onBlur={onRailBlur}
     >
       <div className="flex items-center gap-1 px-1.5 py-1">
         <div
@@ -169,7 +214,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
           className="flex items-center gap-1 min-w-0 flex-1"
           onKeyDown={onTablistKeyDown}
         >
-          {probeMru.map((tab) => {
+          {tabs.map((tab) => {
             const def = PROBE_TAB_DEFINITIONS[tab];
             const Icon = PROBE_TAB_ICONS[tab];
             const active = tab === probeTab;
@@ -207,10 +252,12 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
           type="button"
           aria-haspopup="menu"
           aria-expanded={menuOpen}
+          aria-controls="probe-tool-menu"
           aria-label="All tools"
           title="All tools"
           data-testid="probe-rail-all-tools"
-          onClick={() => setMenuOpen((v) => !v)}
+          onClick={() => (menuOpen ? setMenuOpen(false) : openMenu('first'))}
+          onKeyDown={onTriggerKeyDown}
           className={`p-1.5 rounded-md transition-colors shrink-0 ${
             menuOpen
               ? 'text-text-primary bg-bg-card-hover'
@@ -224,6 +271,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
       {menuOpen && (
         <div
           ref={menuRef}
+          id="probe-tool-menu"
           role="menu"
           aria-label="All tools"
           data-testid="probe-tool-menu"
@@ -245,7 +293,9 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
                   {group.scopeNote}
                 </span>
               </div>
-              <div className="grid grid-cols-2 gap-1">
+              {/* Single column at narrow widths: a 2-column grid truncates
+                  tile names to ~4 characters at the dock's 240px minimum. */}
+              <div className={`grid gap-1 ${narrow ? 'grid-cols-1' : 'grid-cols-2'}`}>
                 {group.tiles.map((tile) => {
                   const Icon = PROBE_TAB_ICONS[tile.tab];
                   const active = tile.tab === probeTab;
@@ -253,6 +303,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
                     <button
                       key={tile.tab}
                       type="button"
+                      id={menuTileId(tile.tab)}
                       role="menuitemradio"
                       aria-checked={active}
                       tabIndex={tile.tab === menuFocusTab ? 0 : -1}

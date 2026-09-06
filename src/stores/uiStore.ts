@@ -2,8 +2,14 @@ import { create } from 'zustand';
 import { useMeshStore } from './meshStore';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
-import type { ProbeContextPin } from '../lib/probeContext';
-import { pushProbeWorkingSet } from '../lib/probeWorkingSet';
+import type { ProbeContextPin, ProbeTab } from '../lib/probeContext';
+import { pushProbeWorkingSet, EMPTY_PROBE_WORKING_SET, type ProbeWorkingSet } from '../lib/probeWorkingSet';
+
+// The destination vocabulary itself lives in `lib/probeContext.ts` (alongside
+// the ownership lenses) so pure domain modules never import from `stores/`;
+// re-exported here because every store consumer addresses it as a Probe
+// Panel concern.
+export type { ProbeTab };
 
 // The five canvas View Modes (wayfinder #982 — tickets #983 state model,
 // #986 rendering). 'single' solos the active node (it subsumes the old
@@ -238,16 +244,6 @@ export function flushGridSearchPersistForTests(): void {
   pendingSearchPersistTimer = null;
 }
 
-// Tabs the Probe Panel can show. Kept as a string-literal union (not a
-// generated wire enum) because it's a pure UI concern — no backend serialises
-// it. `usage` was added in issue #601 as the dedicated glanceable surface
-// for Usage Meters (subscription quota + cash balance), reached from a
-// meter icon in the sidebar header. `autopilot` was added in wayfinder
-// #990 ticket #994 as the dedicated configure + monitor surface for the
-// Issue-Driven and Looping Autopilot modes. `circuits` was added for the
-// Autopilot Circuits walking skeleton (spec #1205 / issue #1206).
-export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'autopilot' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
-
 // Which baseline a single-file diff is taken against:
 //   'head' — uncommitted working-tree changes vs HEAD (Project Files tab,
 //            `diff_file_against_head`).
@@ -300,10 +296,12 @@ interface UIState extends GridControls {
   probeOpen: boolean;
   probeTab: ProbeTab;
   // Working set for the Probe tool rail (ADR-0032): destinations the user
-  // has opened this session, most-recently-used first, capped at
-  // PROBE_WORKING_SET_CAP. Updated by `setProbeTab` (so `openProbeTab`
-  // records visits transitively); session-only — never persisted.
-  probeMru: readonly ProbeTab[];
+  // has opened this session — `tabs` in insertion order (spatially stable
+  // display positions for arrow-key navigation) and `mru` in recency order
+  // (drives eviction only). Updated by `setProbeTab` (so `openProbeTab`
+  // records visits transitively) and by `toggleProbe` when it opens the
+  // panel; session-only — never persisted.
+  probeWorkingSet: ProbeWorkingSet;
   // Destination-local context captures (issue #1456). Host-lens tabs do
   // not use these. Mesh/Agent tabs follow selection until the user pins the
   // current stable id; the resolver keeps a missing pin visible instead of
@@ -429,12 +427,23 @@ export const useUIStore = create<UIState>((set, get) => {
   return {
     probeOpen: false,
     probeTab: 'files',
-    probeMru: [],
+    // Matches the default `probeTab` so the rail is never empty and the
+    // body's aria-labelledby always resolves, from boot onward.
+    probeWorkingSet: pushProbeWorkingSet(EMPTY_PROBE_WORKING_SET, 'files'),
     probeContextPins: {},
     activeDiffFile: null,
 
     toggleProbe: () => {
-      set({ probeOpen: !get().probeOpen });
+      if (get().probeOpen) {
+        set({ probeOpen: false });
+        return;
+      }
+      // Opening the panel is a visit to the current destination: whichever
+      // entry point opens the dock (toggle, palette, contextual entry), the
+      // rail must never render empty and the body's aria-labelledby must
+      // always resolve to a mounted tab.
+      get().setProbeTab(get().probeTab);
+      set({ probeOpen: true });
     },
 
     setProbeTab: (tab: ProbeTab) => {
@@ -445,10 +454,11 @@ export const useUIStore = create<UIState>((set, get) => {
       // when the focused node or selected mesh changes.
       // Every activation also records a working-set visit for the tool rail
       // (ADR-0032); `openProbeTab` inherits this via its `setProbeTab` call,
-      // so palette, title-bar, and contextual entries all feed the MRU.
+      // so palette, title-bar, and contextual entries all feed the working
+      // set.
       set((state) => ({
         probeTab: tab,
-        probeMru: pushProbeWorkingSet(state.probeMru, tab),
+        probeWorkingSet: pushProbeWorkingSet(state.probeWorkingSet, tab),
       }));
     },
 
