@@ -2253,6 +2253,33 @@ fn pending_background_task_ids(lines: impl Iterator<Item = String>) -> Vec<Strin
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn circuit_recovers_a_delayed_codex_parent_report_without_a_new_pty_turn() {
+        let root = tempfile::TempDir::new().unwrap();
+        let directory = "F:/repo/.claude/worktrees/source";
+        let anchor = 1_788_701_729_172;
+        let id = "01a076ee-6c95-7c82-9e5f-928e9f43ad7a";
+        let recover = || crate::services::codex_session::find_historic_id_for_directory_in(root.path(), directory, anchor, true);
+        assert!(recover().is_none(), "initial startup capture sees no rollout yet");
+        assert!(read_assistant_report(TranscriptFormat::Codex, None, directory).is_none());
+        let day = root.path().join("2026/09/06");
+        fs::create_dir_all(&day).unwrap();
+        let path = day.join(format!("rollout-{id}.jsonl"));
+        let meta = serde_json::json!({"type":"session_meta", "payload":{
+            "id":id, "cwd":directory, "timestamp":"2026-09-06T13:35:32.115Z", "source":"cli", "thread_source":"user"}});
+        let report = serde_json::json!({"type":"response_item", "payload":{
+            "type":"message", "role":"assistant", "phase":"final_answer", "content":[{"type":"output_text", "text":"Implementation and verification finished; changes are uncommitted."}]}});
+        fs::write(&path, format!("{meta}\n{report}\n")).unwrap();
+        let child = serde_json::json!({"type":"session_meta", "payload":{
+            "id":"01a076f5-cae9-7db2-b159-7c4682cd2b7f", "cwd":directory,
+            "timestamp":"2026-09-06T13:36:32.115Z", "source":{"subagent":{}}}});
+        fs::write(day.join("child.jsonl"), format!("{child}\n")).unwrap();
+        assert_eq!(recover().as_deref(), Some(id));
+        let actual = assistant_report_from_file(&path, TranscriptFormat::Codex).unwrap();
+        assert_eq!(actual.text, "Implementation and verification finished; changes are uncommitted.");
+        assert!(!actual.revision.is_empty());
+    }
     fn write_fixture(name: &str, body: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "buildmesh_transcript_{name}_{}.jsonl",

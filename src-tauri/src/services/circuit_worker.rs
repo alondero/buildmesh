@@ -52,7 +52,7 @@ use crate::autopilot::circuit::model::{
     CircuitGraph, CircuitNodeKind, StepOutcome as GraphStepOutcome,
 };
 use crate::autopilot::circuit::stepper::{
-    advance, Capacity, CircuitEvent, RunState, RunView, StepStatus, StepView,
+    advance, Capacity, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
 };
 use crate::db;
 use crate::models::SessionStatus;
@@ -572,6 +572,7 @@ fn run_pass(app: &AppHandle) {
     // admission sweep clears it.
     use std::collections::HashMap;
     let mut mesh_cache: HashMap<i64, Option<crate::models::Mesh>> = HashMap::new();
+    retry_failed_cleanup();
     // Repair leases for active runs created before the reservation table was
     // introduced. This is idempotent and keeps restarts from losing a claim.
     for active in &runs {
@@ -691,93 +692,87 @@ fn drive_run(
         // as the pure transition. This keeps the durable turn boundary on the
         // normal commit path; effect execution only performs the in-memory
         // PTY boundary immediately before writing bytes.
-        let turn_boundary_changed = prepare_turn_boundaries(&mut view, &transition.effects)?;
+        let turn_boundary_changed = persist_transition(active.run.id, &mut view, &transition)?;
 
         // Commit FIRST (atomically), then execute effects — a crash
         // after the commit is repaired by observation next pass. The
         // (possibly run_id-topped-up) context rides along with every
         // commit so the seeding above lands whenever anything else
         // writes; a pass with no commits simply re-seeds next time.
-        if !transition.step_writes.is_empty()
-            || transition.run_state_changed
-            || transition.context_changed
-            || turn_boundary_changed
-        {
-            let ops = transition
-                .step_writes
-                .iter()
-                .map(|w| db::CircuitStepOp {
-                    node_id: w.node_id.clone(),
-                    status: w.status.as_db_str().to_string(),
-                    outcome: w.outcome.map(|o| o.map(|v| v.as_db_str().to_string())),
-                    error: w.error.clone(),
-                    agent_node_id: None,
-                    attempt: w.attempt,
-                    fresh_attempt: w.fresh_attempt,
-                })
-                .collect::<Vec<_>>();
-            let run_state = if transition.run_state_changed {
-                Some(view.state.as_db_str())
-            } else {
-                None
-            };
-            db::commit_circuit_advance(
-                active.run.id,
-                run_state,
-                Some(&view.context.to_json()?),
-                &ops,
-            )
-            .map_err(|e| format!("commit failed: {}", e))?;
-        }
+        let effect_events = match execute_effects(app, active, &mut view, &transition.effects) {
+            Ok(events) => events,
+            Err(e) => {
+                // An effect that fails synchronously (e.g. the spawn row
+                // creation) must not leave its step Running forever — the
+                // observation loop has nothing to observe and would wedge
+                // the run. Fail the offending step directly; the next pass's
+                // sweep cancels the siblings.
+                tracing::warn!("circuits: run {} effect failed: {}", active.run.id, e);
+                let failed: Vec<String> = transition
+                    .effects
+                    .iter()
+                    .filter_map(|eff| match eff {
+                        crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id }
+                        | crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. }
+                        | crate::autopilot::circuit::stepper::Effect::ContinueAgentTurn { node_id, .. }
+                        | crate::autopilot::circuit::stepper::Effect::SetNodeStatus { node_id, .. }
+                        | crate::autopilot::circuit::stepper::Effect::CloseAgentNode { node_id, .. }
+                        | crate::autopilot::circuit::stepper::Effect::CallGithub { node_id, .. } => {
+                            Some(node_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let ops = failed
+                    .iter()
+                    .map(|node_id| db::CircuitStepOp {
+                        node_id: node_id.clone(),
+                        status: "failed".to_string(),
+                        outcome: Some(Some("failed".to_string())),
+                        error: Some(Some(e.clone())),
+                        agent_node_id: None,
+                        attempt: 1,
+                        fresh_attempt: false,
+                    })
+                    .collect::<Vec<_>>();
+                db::commit_circuit_advance(
+                    active.run.id,
+                    Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                    None,
+                    &ops,
+                )
+                .map_err(|commit_err| format!("effect-failure commit also failed: {}", commit_err))?;
+                view.state = RunState::Failed;
+                let _ = app.emit(
+                    "circuit-run-updated",
+                    CircuitRunUpdatedPayload {
+                        run_id: active.run.id,
+                        state: "failed".to_string(),
+                    },
+                );
+                Vec::new()
+            }
+        };
 
-        if let Err(e) = execute_effects(app, active, &mut view, &transition.effects) {
-            // An effect that fails synchronously (e.g. the spawn row
-            // creation) must not leave its step Running forever — the
-            // observation loop has nothing to observe and would wedge
-            // the run. Fail the offending step directly; the next pass's
-            // sweep cancels the siblings.
-            tracing::warn!("circuits: run {} effect failed: {}", active.run.id, e);
-            let failed: Vec<String> = transition
-                .effects
-                .iter()
-                .filter_map(|eff| match eff {
-                    crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id }
-                    | crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. }
-                    | crate::autopilot::circuit::stepper::Effect::SetNodeStatus { node_id, .. }
-                    | crate::autopilot::circuit::stepper::Effect::CloseAgentNode { node_id, .. }
-                    | crate::autopilot::circuit::stepper::Effect::CallGithub { node_id, .. } => {
-                        Some(node_id.clone())
-                    }
-                    _ => None,
-                })
-                .collect();
-let ops = failed
-                .iter()
-                .map(|node_id| db::CircuitStepOp {
-                    node_id: node_id.clone(),
-                    status: "failed".to_string(),
-                    outcome: Some(Some("failed".to_string())),
-                    error: Some(Some(e.clone())),
-                    agent_node_id: None,
-                    attempt: 1,
-                    fresh_attempt: false,
-                })
-                .collect::<Vec<_>>();
-            db::commit_circuit_advance(
-                active.run.id,
-                Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
-                None,
-                &ops,
-            )
-            .map_err(|commit_err| format!("effect-failure commit also failed: {}", commit_err))?;
-            view.state = RunState::Failed;
-            let _ = app.emit(
-                "circuit-run-updated",
-                CircuitRunUpdatedPayload {
-                    run_id: active.run.id,
-                    state: "failed".to_string(),
-                },
-            );
+        // Effects may report a durable outcome only after their external work
+        // completes. Feed those outcomes back through the stepper and its
+        // normal atomic commit path; effect execution never writes run state.
+        for effect_event in effect_events {
+            let outcome = advance(&mut view, &effect_event);
+            let outcome_changed = persist_transition(active.run.id, &mut view, &outcome)?;
+            if !outcome.step_writes.is_empty()
+                || outcome.run_state_changed
+                || outcome.context_changed
+                || outcome_changed
+            {
+                let _ = app.emit(
+                    "circuit-run-updated",
+                    CircuitRunUpdatedPayload {
+                        run_id: active.run.id,
+                        state: view.state.as_db_str().to_string(),
+                    },
+                );
+            }
         }
 
         // Live ledger: every step transition or state change refreshes
@@ -814,13 +809,48 @@ let ops = failed
     Ok(())
 }
 
+/// Persist exactly one pure stepper transition. All durable run/context/step
+/// writes, including post-effect delivery outcomes, pass through this seam.
+fn persist_transition(run_id: i64, view: &mut RunView, transition: &Transition) -> Result<bool, String> {
+    let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)?;
+    if !transition.step_writes.is_empty()
+        || transition.run_state_changed
+        || transition.context_changed
+        || turn_boundary_changed
+    {
+        let ops = transition
+            .step_writes
+            .iter()
+            .map(|w| db::CircuitStepOp {
+                node_id: w.node_id.clone(),
+                status: w.status.as_db_str().to_string(),
+                outcome: w.outcome.map(|o| o.map(|v| v.as_db_str().to_string())),
+                error: w.error.clone(),
+                agent_node_id: None,
+                attempt: w.attempt,
+                fresh_attempt: w.fresh_attempt,
+            })
+            .collect::<Vec<_>>();
+        let run_state = transition.run_state_changed.then_some(view.state.as_db_str());
+        db::commit_circuit_advance(
+            run_id,
+            run_state,
+            Some(&view.context.to_json()?),
+            &ops,
+        )
+        .map_err(|e| format!("commit failed: {e}"))?;
+    }
+    Ok(turn_boundary_changed)
+}
+
 /// Retire every agent attached to a failed circuit run. The operation is
 /// idempotent with the normal close effect: a missing row simply means a
 /// previous cleanup already won the race.
 fn close_run_agents(view: &RunView) {
+    let eligible = db::list_failed_circuit_agents_for_cleanup().unwrap_or_default();
     let mut agent_ids = HashSet::new();
     for agent_node_id in view.steps.iter().filter_map(|step| step.agent_node_id) {
-        if !agent_ids.insert(agent_node_id) {
+        if !eligible.contains(&agent_node_id) || !agent_ids.insert(agent_node_id) {
             continue;
         }
         match db::get_agent_node_by_id(agent_node_id) {
@@ -845,6 +875,24 @@ fn close_run_agents(view: &RunView) {
 }
 
 /// Load this run's committed steps into the stepper's view shape.
+fn retry_failed_cleanup() {
+    static LAST_SWEEP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    let now = chrono::Utc::now().timestamp();
+    if now.saturating_sub(LAST_SWEEP.load(Ordering::Relaxed)) < 30 { return; }
+    LAST_SWEEP.store(now, Ordering::Relaxed);
+    match db::list_failed_circuit_agents_for_cleanup() {
+        Ok(ids) => for id in ids {
+            if let Err(error) = crate::services::agent_node::delete(id, true) {
+                tracing::warn!("circuits: retrying failed cleanup for agent {id}: {error}");
+            }
+        },
+        Err(error) => tracing::warn!("circuits: cleanup retry query failed: {error}"),
+    }
+    if let Err(error) = db::clear_finished_circuit_cleanup() {
+        tracing::warn!("circuits: could not settle cleanup ledger: {error}");
+    }
+}
+
 fn load_steps(run_id: i64) -> Result<Vec<StepView>, String> {
     let rows = db::list_circuit_run_steps(run_id).map_err(|e| e.to_string())?;
     Ok(rows
@@ -1090,7 +1138,44 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
         crate::preferences::autopilot_pool_size(),
     ));
 
+    observe_waits(view, &mut events);
     events
+}
+
+const YIELDED_WAIT_MS: i64 = 15 * 60_000;
+const ACTIVE_WAIT_MS: i64 = 2 * 60 * 60_000;
+const APPROVAL_WAIT_MS: i64 = 60 * 60_000;
+
+fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
+    if view.state != RunState::Running { return; }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    for step in &view.steps {
+        if !matches!(step.status, StepStatus::Running | StepStatus::Blocked) { continue; }
+        if events.iter().any(|e| matches!(e, CircuitEvent::TurnClassified { node_id, .. } if node_id == &step.node_id)) { continue; }
+        let mut progress = None;
+        let (reason, timeout_ms) = if step.status == StepStatus::Blocked {
+            ("Approval required; this run will expire after 60 minutes without approval.".to_string(), APPROVAL_WAIT_MS)
+        } else if let Some(id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) {
+            let probe = format!("run:{}:wait:{}:{}", view.run_id, step.node_id, step.attempt);
+            let Some(generation) = crate::autopilot::evaluator::begin_circuit_wait_probe(id, &probe) else { continue; };
+            crate::autopilot::evaluator::note_circuit_probe(id, &probe, generation);
+            let Ok(node) = db::get_agent_node_by_id(id) else { continue; };
+            progress = crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
+            let yielded = matches!(node.status, SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed);
+            let reason = if !yielded {
+                String::new()
+            } else if node.cli_session_id.as_deref().is_none_or(str::is_empty) && progress.is_none() {
+                "Waiting for session identity and a readable report; retrying discovery every 10 seconds.".to_string()
+            } else {
+                step.error.clone().unwrap_or_else(|| "Waiting for a fresh agent report; retrying observation every 10 seconds.".into())
+            };
+            (reason, if yielded { YIELDED_WAIT_MS } else { ACTIVE_WAIT_MS })
+        } else {
+            ("Waiting for step prerequisites; no agent is attached.".into(), YIELDED_WAIT_MS)
+        };
+        events.push(CircuitEvent::WaitObserved { node_id: step.node_id.clone(), attempt: step.attempt,
+            now_ms, progress, reason, timeout_ms });
+    }
 }
 
 /// Add replay events for close effects whose target association is still
@@ -1138,9 +1223,27 @@ fn observe_gates(
         }
         match view.graph.node(&step.node_id).map(|n| &n.kind) {
             Some(CircuitNodeKind::AwaitAgentTurn { .. } | CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::ReviewVerdict { .. }) => {
-                if let Some((agent_node_id, classification, output)) =
+                let continuation_delivery = view.context.get(&format!("node.{}.continuation.delivery", step.node_id));
+                let continuation_attempt = view.context.get(&format!("node.{}.continuation.attempt", step.node_id))
+                    .and_then(|s| s.parse::<i32>().ok());
+                if continuation_delivery == Some("claimed") && continuation_attempt == Some(step.attempt) {
+                    events.push(CircuitEvent::ContinuationUncertain {
+                        node_id: step.node_id.clone(),
+                        attempt: step.attempt,
+                        error: "Continuation delivery was interrupted after claiming input; waiting for fresh agent progress.".into(),
+                    });
+                    continue;
+                }
+                if continuation_delivery == Some("pending") && continuation_attempt == Some(step.attempt) {
+                    events.push(CircuitEvent::ContinuationRetry { node_id: step.node_id.clone(), attempt: step.attempt });
+                    continue;
+                }
+                if let Some(ClassifiedTurn { agent_node_id, classification, output, continuation }) =
                     classify_step_turn(active, view, &step.node_id)
                 {
+                    if let Some((stamp, revision, input_stamp)) = continuation {
+                        events.push(CircuitEvent::ContinuationObserved { node_id: step.node_id.clone(), attempt: step.attempt, stamp, revision, input_stamp });
+                    }
                     if matches!(classification, Some(crate::autopilot::evaluator::Classification::Blocked))
                     {
                         let issue = view
@@ -1187,18 +1290,22 @@ fn observe_gates(
 
 /// Classify a yielded agent's report once per gate attempt. A readable
 /// transcript also recovers turns produced before restart restored buffering.
+struct ClassifiedTurn {
+    agent_node_id: i64,
+    classification: Option<crate::autopilot::evaluator::Classification>,
+    output: String,
+    continuation: Option<(String, String, String)>,
+}
+
 fn classify_step_turn(
     active: &db::ActiveCircuitRun,
     view: &RunView,
     node_id: &str,
-) -> Option<(i64, Option<crate::autopilot::evaluator::Classification>, String)> {
+) -> Option<ClassifiedTurn> {
     use crate::autopilot::evaluator;
     let agent_node_id = view.resolve_target_agent(node_id)?;
     let step = view.step(node_id)?;
     if view.state != RunState::Running || step.status != StepStatus::Running {
-        return None;
-    }
-    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
         return None;
     }
     let since_evaluation_ms = evaluator::millis_since_last_evaluation(agent_node_id);
@@ -1207,7 +1314,9 @@ fn classify_step_turn(
         .and_then(|attempt| attempt.parse::<i32>().ok()) == Some(step.attempt)
         && view.context.get(&format!("{prefix}.classification")) == Some("unavailable")
         && since_evaluation_ms.is_some_and(|elapsed| elapsed >= 60_000);
-    let agent_node = db::get_agent_node_by_id(agent_node_id).ok()?;
+    let observed_stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
+    let input_stamp = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id);
+    let mut agent_node = db::get_agent_node_by_id(agent_node_id).ok()?;
     let yielded = matches!(
         agent_node.status,
         SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed
@@ -1226,11 +1335,22 @@ fn classify_step_turn(
         &probe_key,
         retry_due,
     )?;
+    if agent_node.cli_session_id.as_deref().is_none_or(str::is_empty) {
+        match crate::services::session_recovery::recover_live_node(agent_node_id) {
+            Ok(Some(_)) => agent_node = db::get_agent_node_by_id(agent_node_id).ok()?,
+            Ok(None) => {},
+            Err(error) => tracing::warn!("circuits: session recovery for agent {agent_node_id}: {error}"),
+        }
+    }
     let initial_source = matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::AwaitAgentTurn { .. }));
+    let stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
+    if stamp != observed_stamp { return None; }
+    let transcript = crate::coordinator::enrichment::assistant_report(&agent_node);
+    let revision = transcript.as_ref().map(|r| r.revision.clone());
     let Some(output) = select_turn_report(
-        crate::coordinator::enrichment::assistant_report(&agent_node),
+        transcript,
         view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")),
-        evaluator::has_turn_start(agent_node_id),
+        crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) && evaluator::has_turn_start(agent_node_id),
         || evaluator::cleaned_turn_tail(agent_node_id),
     ) else {
         evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
@@ -1256,12 +1376,24 @@ fn classify_step_turn(
     evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
     evaluator::note_evaluation(agent_node_id);
     let classification = if initial_source {
-        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::classify_prompt(&output))
+        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::circuit_classify_prompt(&output))
     } else if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
         evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::review_prompt(&output))
     } else {
-        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::classify_prompt(&output))
+        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::circuit_classify_prompt(&output))
     };
+    if stamp != db::agent_turn_stamp(agent_node_id).ok().flatten() { return None; }
+    if input_stamp != crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id) { return None; }
+    let mut classification = classification.filter(|c|
+        *c != evaluator::Classification::Continue || matches!(view.graph.node(node_id).map(|n| &n.kind),
+            Some(CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::AwaitAgentTurn { .. })));
+    let continuation = if classification == Some(evaluator::Classification::Continue) {
+        let evidence = stamp.zip(revision).zip(input_stamp).filter(|((_, revision), _)|
+            crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id)
+                && crate::coordinator::enrichment::assistant_report(&agent_node).is_some_and(|r| r.revision == *revision));
+        if evidence.is_none() { classification = Some(evaluator::Classification::Working); }
+        evidence.map(|((stamp, revision), input)| (stamp, revision, input))
+    } else { None };
     tracing::info!(
         "circuits: turn classifier for run {} step {} agent {} → {:?}",
         active.run.id,
@@ -1269,7 +1401,7 @@ fn classify_step_turn(
         agent_node_id,
         classification
     );
-    Some((agent_node_id, classification, output))
+    Some(ClassifiedTurn { agent_node_id, classification, output, continuation })
 }
 
 fn select_turn_report(
@@ -1310,6 +1442,9 @@ fn prepare_turn_boundaries(
                 view.resolve_target_agent(node_id)
                     .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id))
             }
+            crate::autopilot::circuit::stepper::Effect::ContinueAgentTurn { target_agent_id, .. } => {
+                crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id).then_some(*target_agent_id)
+            }
             crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id } => view
                 .step(node_id)
                 .and_then(|step| step.agent_node_id)
@@ -1323,9 +1458,13 @@ fn prepare_turn_boundaries(
             continue;
         }
         let agent = db::get_agent_node_by_id(agent_node_id).map_err(|error| error.to_string())?;
-        let revision = crate::coordinator::enrichment::assistant_report(&agent)
-            .map(|report| report.revision)
-            .unwrap_or_default();
+        let continuation_node = effects.iter().find_map(|effect| match effect {
+            crate::autopilot::circuit::stepper::Effect::ContinueAgentTurn { node_id, target_agent_id, .. }
+                if *target_agent_id == agent_node_id => Some(node_id),
+            _ => None,
+        });
+        let revision = continuation_node.and_then(|id| view.context.get(&format!("node.{id}.continuation.revision"))).map(str::to_string)
+            .unwrap_or_else(|| crate::coordinator::enrichment::assistant_report(&agent).map(|report| report.revision).unwrap_or_default());
         let key = format!("agent.{agent_node_id}.previous_report_revision");
         if view.context.get(&key) != Some(revision.as_str()) {
             view.context.set(&key, revision);
@@ -1491,6 +1630,11 @@ fn call_github_effect(
 ) -> Result<(), String> {
     use crate::autopilot::circuit::model::GithubActionKind;
     use crate::services::github::GitHubClient;
+
+    if action == GithubActionKind::OpenPr
+        && crate::autopilot::circuit::stepper::resolve_upstream_spawn_agent(&view.graph, &view.steps, node_id).is_none() {
+        return Err("OpenPr cannot recover: its upstream spawned agent association is missing".into());
+    }
 
     let mesh = db::get_mesh_by_id(active.run.mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
@@ -1698,13 +1842,23 @@ fn close_target_spawn_step_id(
 /// step (and the DB) so later effects in the same pass — and the
 /// observation loop next pass — resolve targets from the view instead of
 /// re-querying SQLite.
+fn continuation_is_current(view: &RunView, node_id: &str, target: i64, status: SessionStatus,
+    alive: bool, stamp: Option<&str>, revision: Option<&str>) -> bool {
+    alive && matches!(status, SessionStatus::Ready | SessionStatus::AwaitingInput)
+        && view.context.source_agent_id() != Some(target)
+        && view.resolve_target_agent(node_id) == Some(target)
+        && stamp.is_some() && stamp == view.context.get(&format!("node.{node_id}.continuation.stamp"))
+        && revision.is_some() && revision == view.context.get(&format!("node.{node_id}.continuation.revision"))
+}
+
 fn execute_effects(
     app: &AppHandle,
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
     effects: &[crate::autopilot::circuit::stepper::Effect],
-) -> Result<(), String> {
+) -> Result<Vec<CircuitEvent>, String> {
     use crate::autopilot::circuit::stepper::Effect;
+    let mut outcome_events = Vec::new();
     let effect_batch = begin_circuit_effect_batch(active.run.id);
     let run_state = db::get_circuit_run(active.run.id)
         .map_err(|e| e.to_string())?
@@ -1715,7 +1869,7 @@ fn execute_effects(
                 "circuits: cancellation invalidated remaining effects for run {}",
                 active.run.id
             );
-            return Ok(());
+            return Ok(outcome_events);
         }
         let accepts_effect = run_state.as_deref().is_some_and(|state| {
             effect_allowed_in_state(state, view.state == RunState::Completed, effect)
@@ -1725,7 +1879,7 @@ fn execute_effects(
                 "circuits: stopped effects for terminal/deleted run {}",
                 active.run.id
             );
-            return Ok(());
+            return Ok(outcome_events);
         }
         match effect {
             Effect::SpawnAgentNode { node_id } => {
@@ -1756,6 +1910,10 @@ fn execute_effects(
                             tracing::warn!("circuits: run {}: {}", active.run.id, reason);
                             return Err(reason);
                         }
+                        if effect_batch.is_cancelled()
+                            || db::get_circuit_run(active.run.id).ok().flatten().is_none_or(|r| r.state != "running") {
+                            return Ok(outcome_events);
+                        }
                         crate::autopilot::evaluator::note_turn_start(target);
                         crate::autopilot::pipeline::write_prompt_to_pty(target, prompt, app)
                             .map_err(|e| format!("PTY injection failed: {}", e))?;
@@ -1772,6 +1930,51 @@ fn execute_effects(
                             active.run.id,
                             node_id
                         ));
+                    }
+                }
+            }
+            Effect::ContinueAgentTurn { node_id, target_agent_id, prompt } => {
+                let key = format!("node.{node_id}.continuation.delivery");
+                if view.context.get(&key) != Some("claimed") {
+                    continue;
+                }
+                let node = db::get_agent_node_by_id(*target_agent_id).map_err(|e| e.to_string())?;
+                let stamp = db::agent_turn_stamp(*target_agent_id).map_err(|e| e.to_string())?;
+                let revision = crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
+                let valid = continuation_is_current(view, node_id, *target_agent_id, node.status,
+                    crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id), stamp.as_deref(), revision.as_deref());
+                if !valid {
+                    outcome_events.push(CircuitEvent::ContinuationObsolete {
+                        node_id: node_id.clone(),
+                        attempt: view.step(node_id).map(|step| step.attempt).unwrap_or_default(),
+                    });
+                    continue;
+                }
+                if effect_batch.is_cancelled()
+                    || db::get_circuit_run(active.run.id).ok().flatten().is_none_or(|r| r.state != "running") {
+                    return Ok(outcome_events);
+                }
+                let expected = view.context.get(&format!("node.{node_id}.continuation.input"))
+                    .ok_or_else(|| "Continuation lacks an input ownership stamp".to_string())?;
+                match crate::autopilot::pipeline::write_prompt_to_pty_guarded(*target_agent_id, prompt, app, Some(expected)) {
+                    Ok(true) => {
+                        let _ = db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
+                        outcome_events.push(CircuitEvent::ContinuationDelivered {
+                            node_id: node_id.clone(),
+                            attempt: view.step(node_id).map(|step| step.attempt).unwrap_or_default(),
+                        });
+                    }
+                    Ok(false) => outcome_events.push(CircuitEvent::ContinuationObsolete {
+                        node_id: node_id.clone(),
+                        attempt: view.step(node_id).map(|step| step.attempt).unwrap_or_default(),
+                    }),
+                    Err(error) => {
+                        crate::commands::attention::mark_attention(*target_agent_id, app);
+                        outcome_events.push(CircuitEvent::ContinuationUncertain {
+                            node_id: node_id.clone(),
+                            attempt: view.step(node_id).map(|step| step.attempt).unwrap_or_default(),
+                            error,
+                        });
                     }
                 }
             }
@@ -1850,7 +2053,7 @@ fn execute_effects(
             }
         }
     }
-    Ok(())
+    Ok(outcome_events)
 }
 
 /// Cancellation commits the terminal run state before retiring external
@@ -2866,6 +3069,22 @@ mod tests {
                 agent_node_id: None, attempt: 1, outcome: None, error: None,
             }],
         }
+    }
+
+    #[test]
+    fn circuit_continuation_rejects_user_input_regeneration_and_new_report() {
+        let mut view = report_gate_view();
+        view.steps.push(StepView { node_id: "implementer".into(), agent_node_id: Some(900),
+            status: StepStatus::Completed, attempt: 1, outcome: None, error: None });
+        view.context.set("node.finish_classifier.continuation.stamp", "100:yield");
+        view.context.set("node.finish_classifier.continuation.revision", "report-1");
+        let valid = |status, stamp, revision| continuation_is_current(&view, "finish_classifier", 900, status, true, Some(stamp), Some(revision));
+        assert!(valid(SessionStatus::Ready, "100:yield", "report-1"));
+        assert!(!valid(SessionStatus::Completed, "100:yield", "report-1"));
+        assert!(!valid(SessionStatus::Running, "100:yield", "report-1"));
+        assert!(!valid(SessionStatus::Ready, "200:yield", "report-1"));
+        assert!(!valid(SessionStatus::Ready, "100:new-input", "report-1"));
+        assert!(!valid(SessionStatus::Ready, "100:yield", "report-2"));
     }
 
     #[test]

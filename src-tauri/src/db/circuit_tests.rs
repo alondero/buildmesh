@@ -32,6 +32,45 @@ fn sample_graph_json() -> String {
 }
 
 #[test]
+fn circuit_cleanup_retry_is_durable_and_excludes_borrowed_and_live_owners() {
+    let conn = Connection::open_in_memory().unwrap();
+    super::init_schema(&conn).unwrap();
+    conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'cleanup', '/repo');
+        INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (1,1,'owned','/repo'), (2,1,'borrowed','/repo'), (3,1,'active','/repo'), (4,1,'historic','/repo');
+        INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'cleanup','{}');
+        INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json,source_agent_node_id)
+            VALUES (1,1,1,'a','failed','{\"cleanup.pending\":\"1\"}',2), (2,1,1,'b','running','{}',NULL), (3,1,1,'c','failed','{}',NULL);
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status) VALUES
+            (1,'owned',1,'failed'),(1,'borrowed',2,'failed'),(1,'shared',3,'failed'),(2,'active',3,'running'),(3,'historic',4,'failed');").unwrap();
+    assert_eq!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(), vec![1]);
+    // A failed deletion leaves the association for the next pass/restart.
+    assert_eq!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(), vec![1]);
+    conn.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = 1 WHERE id = 2", []).unwrap();
+    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty(), "another run borrows this agent");
+    conn.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = NULL WHERE id = 2", []).unwrap();
+    conn.execute("DELETE FROM agent_nodes WHERE id = 1", []).unwrap();
+    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
+    let _path = init_temp_db("failure-cleanup");
+    let mesh = create_mesh("failure-cleanup", "/tmp/failure-cleanup").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "cleanup", "", 2, &sample_graph_json()).unwrap();
+    let run = create_circuit_run(circuit.id, mesh.id, "manual:cleanup", "{}").unwrap();
+    set_circuit_run_state(run, "running").unwrap();
+    assert!(reserve_circuit_agent_slots(run, 2).unwrap());
+    assert_eq!(count_active_circuit_runs(mesh.id).unwrap(), 1);
+    commit_circuit_advance(run, Some("failed"), Some("{}"), &[]).unwrap();
+    // No worker cleanup was called: inspect the terminal transaction itself.
+    let stored = get_circuit_run(run).unwrap().unwrap();
+    let context: serde_json::Value = serde_json::from_str(&stored.context_json).unwrap();
+    assert_eq!(context["cleanup.pending"], "1");
+    assert_eq!(circuit_agent_slots_reserved(run).unwrap(), 0);
+    assert_eq!(count_active_circuit_runs(mesh.id).unwrap(), 0);
+}
+
+#[test]
 fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     init_temp_db("node-review");
     let mesh = create_mesh("node-review-mesh", "/tmp/node-review").unwrap();
@@ -483,7 +522,7 @@ fn stale_worker_and_pause_writes_cannot_resurrect_a_cancelled_run() {
 
     let run = get_circuit_run(run_id).unwrap().unwrap();
     assert_eq!(run.state, "cancelled");
-    assert_eq!(run.context_json, "{}");
+    assert_eq!(run.context_json, r#"{"cleanup.pending":"1"}"#);
     assert!(list_circuit_run_steps(run_id).unwrap().is_empty());
     assert!(!transition_circuit_run_state(run_id, "running", "paused").unwrap());
 
