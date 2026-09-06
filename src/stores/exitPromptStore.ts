@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { addToast } from './toastStore';
 import type { ExitNonResumableEntry } from '../lib/exitGuard';
 
 interface ExitPendingPrompt {
@@ -27,18 +28,27 @@ interface ExitPromptState {
   showExitPrompt: (activeCount: number, nonResumable: ExitNonResumableEntry[]) => void;
   /**
    * Dismiss the modal ("Keep Working", Escape, backdrop). Clears the
-   * pending state AND retracts the backend's eager expected-exit marking
-   * via `cancel_window_close` — otherwise the stale marker + flag would
-   * make a later real crash look expected and suppress the watchdog
+   * two-layer exit attempt and retracts the backend's eager expected-exit
+   * marking via `cancel_window_close` — otherwise the stale marker + flag
+   * would make a later real crash look expected and suppress the watchdog
    * auto-relaunch (issue #1501 review). Best-effort: a failed retract
    * must never fail the dismiss itself.
    */
   keepWorking: () => void;
   /**
-   * Confirm the exit: destroys the window (bypasses `closeRequested`, so
-   * no second prompt). The backend `ExitRequested` sweep then marks
-   * sessions suspended and kills processes. Resets `exiting` if the
-   * destroy itself fails so the user can retry.
+   * Confirm the exit. Two layers (issue #1501 regression, 2026-09-06):
+   *
+   * 1. The custom `exit_application` backend command — Rust-side
+   *    `WebviewWindow::destroy`. Custom commands are NOT gated by the Tauri
+   *    ACL (capabilities are compiled into the binary, so a binary built
+   *    before `core:window:allow-destroy` landed rejects the webview-side
+   *    `destroy` IPC with "not allowed by ACL" — the exact failure that left
+   *    the button dead), so this is the path that always ships working.
+   * 2. The direct webview-side `getCurrentWindow().destroy()` fallback —
+   *    belt-and-braces if the custom command itself fails.
+   *
+   * If both fail, surface a toast (visible — the old code only warned to
+   * the console bridge) and reset `exiting` so the user can retry.
    */
   confirmExit: () => Promise<void>;
 }
@@ -76,13 +86,25 @@ export const useExitPromptStore = create<ExitPromptState>((set, get) => ({
   confirmExit: async () => {
     if (!get().pending) return;
     set({ exiting: true });
+    // Layer 1: ACL-proof custom command (Rust-side destroy).
+    try {
+      await api.exitApplication();
+      return;
+    } catch (e) {
+      console.warn('[ExitPrompt] exit_application failed, falling back to webview destroy:', e);
+    }
+    // Layer 2: direct webview-side destroy (works when the binary's
+    // compiled-in capabilities include `allow-destroy`).
     try {
       await getCurrentWindow().destroy();
+      return;
     } catch (e) {
-      // A failed destroy (e.g. mocked window in tests) must not strand
-      // the modal in a busy state — reset so the user can retry.
-      set({ exiting: false });
       console.warn('[ExitPrompt] Window destroy failed:', e);
     }
+    // Both layers failed — the user must see this, not a devtools-only
+    // console.warn (the original bug hid behind exactly that). Reset
+    // `exiting` so the button un-flickers and can be pressed again.
+    addToast('Exit Buildmesh', 'Exit failed — the window could not be closed. Check buildmesh.log and try again.', 'error');
+    set({ exiting: false });
   },
 }));

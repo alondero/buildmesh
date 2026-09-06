@@ -682,6 +682,11 @@ pub fn run() {
             // out of the modal, so the watchdog still relaunches on a
             // later real crash.
             commands::app::cancel_window_close,
+            // ACL-proof confirmed exit (issue #1501 regression): the
+            // webview-side `destroy` IPC is capability-gated and was rejected
+            // on binaries built before `allow-destroy` landed, leaving the
+            // "Exit Buildmesh" button dead. Custom commands bypass the ACL.
+            commands::app::exit_application,
             // AI context portability
             commands::ai_context::detect_ai_context,
             commands::ai_context::create_ai_context_portability_pr,

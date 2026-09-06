@@ -6,7 +6,7 @@
 //! production-mode Vite build and a simple `import.meta.env.PROD` check would
 //! let the dev app offer to upgrade itself to the stable release.
 
-use tauri::command;
+use tauri::{command, Manager};
 
 /// Returns the running app's bundle identifier (`com.alond.buildmesh` for
 /// the stable hub, `com.alond.buildmesh.dev` for the dev profile). Cheap —
@@ -29,4 +29,33 @@ pub fn get_app_identifier(app: tauri::AppHandle) -> String {
 pub fn cancel_window_close() -> Result<(), String> {
     crate::cancel_close_request();
     Ok(())
+}
+
+/// Confirmed exit (issue #1501 regression, 2026-09-06).
+///
+/// `WindowCloseGuard`'s "Exit Buildmesh" used to call the webview-side
+/// `getCurrentWindow().destroy()` IPC. That command is gated by Tauri's ACL,
+/// which is compiled into the binary at build time: when the running binary
+/// predates the `core:window:allow-destroy` capability, the call is rejected
+/// ("Command plugin:window|destroy not allowed by ACL" — captured in
+/// `buildmesh.log` at 15:34/15:43/16:15 on 2026-09-06) and the app silently
+/// stayed open. The user-visible symptom was the button flickering to
+/// "Exiting…" and doing nothing.
+///
+/// This command is the ACL-proof path: custom app commands only need to be
+/// registered in `generate_handler!`, not granted through a capability, so
+/// the exit works regardless of which capability set the binary was built
+/// with. Force-destroying the window skips `CloseRequested` (the frontend
+/// already vetoed it and is showing the modal) and lands on the same
+/// `RunEvent::ExitRequested` sweep as a normal close — sessions marked
+/// suspended, processes killed, watchdog expected-exit marker written.
+#[command]
+pub fn exit_application(app: tauri::AppHandle) -> Result<(), String> {
+    tracing::info!("exit_application: force-destroying main window (ACL-proof exit path)");
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found (already destroyed?)".to_string())?;
+    window
+        .destroy()
+        .map_err(|e| format!("window destroy failed: {e}"))
 }

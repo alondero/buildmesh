@@ -1037,6 +1037,16 @@ export const setAppConfirmBeforeQuit = (confirm: boolean) =>
 export const cancelWindowClose = () =>
   _invoke('cancel_window_close');
 
+/** Confirmed exit (issue #1501 regression, 2026-09-06). Calls the custom
+ *  backend command that force-destroys the main window from the Rust side.
+ *  Unlike `getCurrentWindow().destroy()` this is NOT gated by the Tauri ACL
+ *  (capabilities are compiled into the binary, so a stale build rejects the
+ *  webview-side `destroy` with "not allowed by ACL" — the exact failure that
+ *  left the Exit Buildmesh button dead). Custom commands only need the
+ *  `generate_handler!` registration, which ships with the app code itself. */
+export const exitApplication = () =>
+  _invoke('exit_application');
+
 /** Buildmesh-wide default Worktree Node directory (issue #1519).
  *  Pass `null` (or blank) to clear and restore `.claude/worktrees` under
  *  each inheriting Mesh root. Relative resolves from each Mesh root;
