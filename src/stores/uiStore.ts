@@ -375,8 +375,15 @@ interface UIState extends GridControls {
   // `setViewMode` whenever a non-single mode is set.
   lastNonSingleMode: NonSingleViewMode;
   // Switch the canvas View Mode. Idempotent: a same-mode call is a no-op
-  // (no subscriber notification, no storage write) so the meshStore sync
-  // subscription can fire freely.
+  // (no subscriber notification, no storage write) so the meshStore
+  // sync subscription can fire freely.
+  //
+  // When `mode === 'all'`, this action also enforces the All Nodes
+  // invariant — `viewMode === 'all' ⟹ selectedMeshId === null` — by
+  // clearing the mesh selection as part of the same transition. The
+  // invariant is *unidirectional*: a null `selectedMeshId` is also
+  // valid in `pinned`, `filtered`, and `single` modes (those modes
+  // deliberately never touch `selectedMeshId`).
   setViewMode: (mode: ViewMode) => void;
   // Leave 'single' for the grid mode it was entered from. No-op when the
   // current mode isn't 'single'.
@@ -553,13 +560,23 @@ export const useUIStore = create<UIState>((set, get) => {
     lastNonSingleMode: initialViewMode === 'single' ? 'all' : initialViewMode,
 
     setViewMode: (mode) => {
-      const { viewMode } = get();
-      if (viewMode === mode) return;
+      if (get().viewMode === mode) return;
       set({
         viewMode: mode,
         lastNonSingleMode: mode === 'single' ? get().lastNonSingleMode : mode,
       });
       persistViewMode(mode);
+      // All Nodes invariant: `viewMode === 'all' ⟹ selectedMeshId === null`.
+      // The reverse is NOT true — a null selection is also valid in
+      // pinned/filtered/single modes. The mesh→mode subscription at the
+      // bottom of this file guards against re-entrancy when this
+      // selectMesh fires it.
+      if (mode === 'all') {
+        const { selectedMeshId, selectMesh } = useMeshStore.getState();
+        if (selectedMeshId !== null) {
+          selectMesh(null);
+        }
+      }
     },
 
     exitSingleMode: () => {
@@ -625,10 +642,17 @@ export const useUIStore = create<UIState>((set, get) => {
 // sidebar switches the canvas to Mesh Grid for that mesh; clearing the
 // selection switches to All Nodes. Pinned mode never writes selectedMeshId,
 // but a sidebar mesh click always means "show me this mesh", so the sync
-// applies in whatever mode the canvas is in. zustand notifies subscribers
-// on every `set` — even same-value ones — so the prevState comparison
-// filters no-op selectMesh calls before they can touch the view mode.
+// applies in whatever mode the canvas is in.
+//
+// The viewMode-equality guard kills the re-entrant cycle: when
+// `setViewMode('all')` itself calls `selectMesh(null)` (issue #1002), the
+// subscription fires with `state.selectedMeshId === null` and would
+// re-enter `setViewMode('all')`. Checking `viewMode === targetMode`
+// before dispatching short-circuits the re-entry — the mode is already
+// what the sidebar-sync would set it to.
 useMeshStore.subscribe((state, prevState) => {
   if (state.selectedMeshId === prevState.selectedMeshId) return;
-  useUIStore.getState().setViewMode(state.selectedMeshId === null ? 'all' : 'mesh');
+  const targetMode = state.selectedMeshId === null ? 'all' : 'mesh';
+  if (useUIStore.getState().viewMode === targetMode) return;
+  useUIStore.getState().setViewMode(targetMode);
 });

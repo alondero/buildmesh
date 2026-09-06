@@ -146,18 +146,6 @@ export function ViewModeSwitcher() {
       setViewMode('mesh');
       return;
     }
-    if (mode === 'all') {
-      // All Nodes ⟺ no mesh selected — route through selectMesh(null) so
-      // the sidebar highlight and the mode stay one filter with two
-      // controls (the subscription performs the actual setViewMode).
-      const { selectedMeshId, selectMesh } = useMeshStore.getState();
-      if (selectedMeshId !== null) {
-        selectMesh(null);
-        return;
-      }
-      setViewMode('all');
-      return;
-    }
     if (mode === 'filtered') {
       // #1609 — switch first, then request focus. The request counter
       // pattern (App.tsx `focus-grid-search`) means the consumer's layout

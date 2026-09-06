@@ -259,17 +259,7 @@ export function PinnedEmptyState() {
           Pin agents from any mesh to keep them in reach here. Use the pin button in a node's header, or right-click a node in the sidebar.
         </p>
         <button
-          onClick={() => {
-            // All Nodes ⟺ no mesh selected (one filter, two controls) —
-            // clearing the selection flips the mode via the uiStore
-            // mesh-subscription. With nothing selected, set it directly.
-            const { selectedMeshId, selectMesh } = useMeshStore.getState();
-            if (selectedMeshId !== null) {
-              selectMesh(null);
-            } else {
-              setViewMode('all');
-            }
-          }}
+          onClick={() => setViewMode('all')}
           className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

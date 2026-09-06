@@ -64,6 +64,10 @@ _Avoid_: active context, Probe scope (both are too vague about ownership).
 A project workspace associated with a local Git repository root path.
 _Avoid_: Project, repo, folder
 
+**View Mode**:
+The canvas's five-valued scope switch (`single` | `mesh` | `pinned` | `all` | `filtered`) — what set of Agent Nodes the grid renders, and how. `single` solos the active node and is excluded from the "grid" variants; the other four are grid modes. **All Nodes** carries a one-way invariant: `viewMode === 'all'` requires `selectedMeshId === null`. The reverse is not required — a null mesh selection is also valid in `pinned`, `filtered`, and `single` modes.
+_Avoid_: layout mode, scope mode, canvas mode (the term is View Mode); "grid" alone (ambiguous with the underlying split-pane renderer).
+
 **Agent Node**:
 An interactive panel running a single agent execution process within a dedicated directory (either a worktree or the mesh root).
 _Avoid_: Session, pane, terminal node

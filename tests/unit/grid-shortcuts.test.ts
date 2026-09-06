@@ -107,6 +107,10 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     // The cycle is a pure store rotation — it never reads the node arrays, so
     // agentNodes stays empty. Only the UI store's mode state matters.
     useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+    // Reset the mesh store too — cycleGridMode's All step must clear
+    // selectedMeshId (issue #1002), so the tests need a known starting
+    // selection rather than whatever the previous test left behind.
+    useMeshStore.setState({ selectedMeshId: null });
     seedAgentNodes([]);
   });
 
@@ -119,6 +123,20 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     expect(useUIStore.getState().viewMode).toBe('filtered');
     cycleGridMode();
     expect(useUIStore.getState().viewMode).toBe('mesh');
+  });
+
+  it('clears selectedMeshId when cycling into All Nodes (issue #1002)', () => {
+    // The All Nodes invariant — `viewMode === 'all' ⟹ selectedMeshId
+    // === null` — is enforced inside `setViewMode` itself, so the cycle
+    // picking `all` as its next mode flips both sides of the invariant
+    // in one transition. The bug this pins is the v1 form of
+    // cycleGridMode, which called `setViewMode('all')` and left
+    // selectedMeshId dirty.
+    useMeshStore.setState({ selectedMeshId: 3 });
+    useUIStore.setState({ viewMode: 'pinned' });
+    cycleGridMode(); // pinned → all
+    expect(useUIStore.getState().viewMode).toBe('all');
+    expect(useMeshStore.getState().selectedMeshId).toBeNull();
   });
 
   it('re-enters the cycle at lastNonSingleMode when currently in Single', () => {

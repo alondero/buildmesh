@@ -120,6 +120,32 @@ describe('useUIStore', () => {
       });
     });
 
+    describe('setViewMode("all") invariant (issue #1002)', () => {
+      // The All Nodes invariant — `viewMode === 'all' ⟹ selectedMeshId
+      // === null` — is enforced at the transition so every caller
+      // (switcher, Pinned empty state, omnibar, keyboard cycle) gets it
+      // for free. The reverse is NOT true: a null selectedMeshId is
+      // also valid in `pinned`, `filtered`, and `single` modes.
+      it('clears the mesh selection when switching to All Nodes', () => {
+        useMeshStore.getState().selectMesh(7);
+        expect(useUIStore.getState().viewMode).toBe('mesh');
+        useUIStore.getState().setViewMode('all');
+        expect(useMeshStore.getState().selectedMeshId).toBeNull();
+        expect(useUIStore.getState().viewMode).toBe('all');
+      });
+
+      it('does not touch selectedMeshId for non-All transitions', () => {
+        // The invariant is forward-only — a switch to Pinned/Filtered/
+        // Mesh/Single must leave selectedMeshId alone so the sidebar
+        // highlight and the canvas stay coupled.
+        useMeshStore.getState().selectMesh(7);
+        useUIStore.setState({ viewMode: 'all' });
+        useUIStore.getState().setViewMode('pinned');
+        expect(useMeshStore.getState().selectedMeshId).toBe(7);
+      });
+
+    });
+
     describe('boot derivation (ticket #983)', () => {
       // loadViewMode runs once at store-module creation, so these tests
       // re-import the store on a fresh module registry with localStorage
