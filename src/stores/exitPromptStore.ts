@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { addToast } from './toastStore';
 import type { ExitNonResumableEntry } from '../lib/exitGuard';
 
 interface ExitPendingPrompt {
@@ -22,7 +22,7 @@ interface ExitPromptState {
   initConfirmBeforeQuit: () => Promise<void>;
   /** Set while the exit-confirmation modal is showing. */
   pending: ExitPendingPrompt | null;
-  /** Set once the user confirms, while window destruction is in flight. */
+  /** Set once the user confirms, while shutdown is in flight. */
   exiting: boolean;
   showExitPrompt: (activeCount: number, nonResumable: ExitNonResumableEntry[]) => void;
   /**
@@ -35,10 +35,17 @@ interface ExitPromptState {
    */
   keepWorking: () => void;
   /**
-   * Confirm the exit: destroys the window (bypasses `closeRequested`, so
-   * no second prompt). The backend `ExitRequested` sweep then marks
-   * sessions suspended and kills processes. Resets `exiting` if the
-   * destroy itself fails so the user can retry.
+   * Confirm the exit: hand shutdown to the backend's lifecycle owner
+   * (`exit_application` → `AppHandle::exit`, which fires the
+   * `ExitRequested` sweep) rather than destroying a raw window through an
+   * ACL-gated IPC from the webview.
+   *
+   * If the command fails, the app is still running — so the expected-exit
+   * state the backend recorded on `CloseRequested` must be retracted the
+   * same way "Keep Working" does (a stale marker would make a later real
+   * crash look intentional and skip the watchdog auto-relaunch), the
+   * failure is surfaced as a toast, and `exiting` resets so the user can
+   * retry.
    */
   confirmExit: () => Promise<void>;
 }
@@ -77,12 +84,21 @@ export const useExitPromptStore = create<ExitPromptState>((set, get) => ({
     if (!get().pending) return;
     set({ exiting: true });
     try {
-      await getCurrentWindow().destroy();
+      await api.exitApplication();
     } catch (e) {
-      // A failed destroy (e.g. mocked window in tests) must not strand
-      // the modal in a busy state — reset so the user can retry.
+      console.warn('[ExitPrompt] exit_application failed:', e);
+      // Still running — undo the backend's eager expected-exit marking
+      // (same retract "Keep Working" performs), then tell the user and
+      // let them retry.
+      void api.cancelWindowClose().catch((retractError) => {
+        console.warn('[ExitPrompt] Failed to retract expected-exit marking:', retractError);
+      });
+      addToast(
+        'Exit Buildmesh',
+        'Exit failed — the app is still running. Check buildmesh.log and try again.',
+        'error',
+      );
       set({ exiting: false });
-      console.warn('[ExitPrompt] Window destroy failed:', e);
     }
   },
 }));

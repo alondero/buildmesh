@@ -1037,6 +1037,13 @@ export const setAppConfirmBeforeQuit = (confirm: boolean) =>
 export const cancelWindowClose = () =>
   _invoke('cancel_window_close');
 
+/** Confirmed exit (issue #1501): backend lifecycle shutdown for the
+ *  exit-confirmation modal. A custom command, not a window IPC — window
+ *  commands are ACL-gated and the modal must not depend on the
+ *  compiled-in capability set. */
+export const exitApplication = () =>
+  _invoke('exit_application');
+
 /** Buildmesh-wide default Worktree Node directory (issue #1519).
  *  Pass `null` (or blank) to clear and restore `.claude/worktrees` under
  *  each inheriting Mesh root. Relative resolves from each Mesh root;

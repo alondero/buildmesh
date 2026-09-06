@@ -11,9 +11,10 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 
+// Only the close-request seam is mocked — the confirmed exit goes through
+// the backend command, so no window destroy stub exists to lean on.
 const windowApi = vi.hoisted(() => ({
   onCloseRequested: vi.fn<(cb: (e: { preventDefault: () => void }) => void | Promise<void>) => Promise<() => void>>(),
-  destroy: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/window', () => ({
@@ -23,12 +24,14 @@ vi.mock('@tauri-apps/api/window', () => ({
 const tauriMocks = vi.hoisted(() => ({
   listProviders: vi.fn(),
   cancelWindowClose: vi.fn(),
+  exitApplication: vi.fn(),
 }));
 
 vi.mock('../../src/lib/tauri', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/lib/tauri')>()),
   listProviders: tauriMocks.listProviders,
   cancelWindowClose: tauriMocks.cancelWindowClose,
+  exitApplication: tauriMocks.exitApplication,
 }));
 
 import { WindowCloseGuard } from '../../src/components/WindowCloseGuard/WindowCloseGuard';
@@ -100,9 +103,9 @@ beforeEach(() => {
     closeHandler = cb;
     return Promise.resolve(() => {});
   });
-  windowApi.destroy.mockReset().mockResolvedValue(undefined);
   tauriMocks.listProviders.mockReset().mockResolvedValue(providerList());
   tauriMocks.cancelWindowClose.mockReset().mockResolvedValue(undefined);
+  tauriMocks.exitApplication.mockReset().mockResolvedValue(undefined);
   useAgentNodeStore.setState({
     nodesById: {},
     nodeIds: [],
@@ -186,7 +189,7 @@ describe('WindowCloseGuard (issue #1501)', () => {
     const { prevented } = await fireClose();
     expect(prevented).toBe(true);
     expect(tauriMocks.listProviders).toHaveBeenCalledTimes(1);
-    expect(windowApi.destroy).not.toHaveBeenCalled();
+    expect(tauriMocks.exitApplication).not.toHaveBeenCalled();
   });
 
   it('Keep Working dismisses and retracts the backend expected-exit marking', async () => {
@@ -200,20 +203,20 @@ describe('WindowCloseGuard (issue #1501)', () => {
       expect(screen.queryByRole('heading', { name: 'Exit Buildmesh?' })).toBeNull(),
     );
     expect(tauriMocks.cancelWindowClose).toHaveBeenCalledTimes(1);
-    expect(windowApi.destroy).not.toHaveBeenCalled();
+    expect(tauriMocks.exitApplication).not.toHaveBeenCalled();
   });
 
-  it('Exit Buildmesh destroys the window for graceful shutdown', async () => {
+  it('Exit Buildmesh hands shutdown to the backend lifecycle command', async () => {
     seedNodes([makeNode({ status: 'running' })]);
     render(<WindowCloseGuard />);
     await act(async () => {});
     await fireClose();
     await screen.findByRole('heading', { name: 'Exit Buildmesh?' });
     fireEvent.click(screen.getByRole('button', { name: 'Exit Buildmesh' }));
-    await waitFor(() => expect(windowApi.destroy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(tauriMocks.exitApplication).toHaveBeenCalledTimes(1));
   });
 
-  it('respects the opt-out preference synchronously with no IPC and no destroy dance', async () => {
+  it('respects the opt-out preference synchronously with no IPC', async () => {
     useExitPromptStore.setState({ confirmBeforeQuit: false });
     seedNodes([makeNode({ status: 'running' })]);
     render(<WindowCloseGuard />);
@@ -222,6 +225,6 @@ describe('WindowCloseGuard (issue #1501)', () => {
     expect(prevented).toBe(false);
     expect(screen.queryByRole('heading', { name: 'Exit Buildmesh?' })).toBeNull();
     expect(tauriMocks.listProviders).not.toHaveBeenCalled();
-    expect(windowApi.destroy).not.toHaveBeenCalled();
+    expect(tauriMocks.exitApplication).not.toHaveBeenCalled();
   });
 });

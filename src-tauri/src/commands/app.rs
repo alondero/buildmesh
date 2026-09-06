@@ -30,3 +30,27 @@ pub fn cancel_window_close() -> Result<(), String> {
     crate::cancel_close_request();
     Ok(())
 }
+
+/// Confirmed exit (issue #1501).
+///
+/// The exit-confirmation modal's "Exit Buildmesh" must not depend on the
+/// webview-side `destroy` window IPC: window commands are ACL-gated and the
+/// ACL is compiled into the binary, so that call can be rejected. This
+/// custom command is not ACL-gated and hands shutdown to the lifecycle
+/// owner instead of destroying a raw window:
+///
+/// - `USER_CLOSE_REQUESTED` is set first so the `Destroyed` handler
+///   classifies the teardown as user-initiated rather than the
+///   webview/GPU-death crash signature (which auto-relaunches).
+/// - `AppHandle::exit` emits `RunEvent::ExitRequested { code: Some(0) }`,
+///   where `lib.rs` writes the watchdog expected-exit marker, runs the
+///   suspend sweep, and kills agent processes.
+///
+/// Fire-and-forget: `exit` enqueues the request on the event loop and has
+/// no failure mode to report.
+#[command]
+pub fn exit_application(app: tauri::AppHandle) {
+    tracing::info!("exit_application: initiating application shutdown");
+    crate::mark_user_close_requested();
+    app.exit(0);
+}
