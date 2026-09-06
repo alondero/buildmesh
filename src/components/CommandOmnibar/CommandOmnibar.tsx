@@ -46,7 +46,9 @@ import { PROBE_TAB_ICONS } from '../Probe/probeIcons';
 import {
   TOOL_DISCOVERY_GROUPS,
   TOOL_DISCOVERY_TILES,
+  toolDiscoveryArrowTarget,
   toolTileId,
+  type ToolDiscoveryArrowDirection,
 } from './toolDiscovery';
 import type { FuzzyResult } from '../../lib/omnibar';
 import type { SpawnOption } from '../../lib/groups';
@@ -62,6 +64,14 @@ const RESULT_LIMIT = 30;
 const LISTBOX_ID = 'command-omnibar-listbox';
 const GROUPS_ID = 'command-omnibar-tool-groups';
 const optionId = (index: number) => `command-omnibar-option-${index}`;
+const TOOL_ARROW_DIRECTIONS: Readonly<
+  Record<string, ToolDiscoveryArrowDirection | undefined>
+> = {
+  ArrowDown: 'down',
+  ArrowUp: 'up',
+  ArrowLeft: 'left',
+  ArrowRight: 'right',
+};
 
 const isKnownPrefix = (query: string): boolean =>
   PREFIX_FILTERS.some((f) => f.prefix === query[0]);
@@ -92,10 +102,11 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   // store.
   const [query, setQuery] = useState(() => (mode === 'commands' ? '>' : ''));
   const [activeIndex, setActiveIndex] = useState(0);
-  // Discovery-screen highlight into TOOL_DISCOVERY_TILES (flat row-major
-  // order). Virtual only — DOM focus never leaves the input for arrows, so
-  // typing is never interrupted. Tab moves real focus into the tiles and
-  // syncs this index back via onFocusTile.
+  // Discovery-screen highlight into TOOL_DISCOVERY_TILES. The index stays flat
+  // for DOM ids, while arrow movement follows the rendered grid rows. Virtual
+  // only — DOM focus never leaves the input for arrows, so typing is never
+  // interrupted. Tab moves real focus into the tiles and syncs this index back
+  // via onFocusTile.
   const [activeTile, setActiveTile] = useState(0);
   const [spawnOptions, setSpawnOptions] = useState<SpawnOption[]>([]);
   // Issue #1413 — Tab on a spawn result enters this secondary "Prompt"
@@ -215,7 +226,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   // A tile opens its destination directly: the tab id is already known, so
   // there is no reason to round-trip through the search index and the
   // command-id dispatchers to reach `openProbeTab`.
-  const showToolGroups = !promptTarget && query.trim() === '';
+  const showToolGroups = !promptTarget && query === '';
   const executeToolTab = (tab: ProbeTab) => {
     isExecutingRef.current = true;
     useUIStore.getState().openProbeTab(tab);
@@ -225,10 +236,16 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     if (showToolGroups) setActiveTile(0);
   }, [showToolGroups]);
 
-  const moveTileHighlight = (delta: 1 | -1) => {
-    const next = (activeTile + delta + TOOL_DISCOVERY_TILES.length) % TOOL_DISCOVERY_TILES.length;
+  const moveTileHighlight = (direction: ToolDiscoveryArrowDirection) => {
+    const current =
+      TOOL_DISCOVERY_TILES[activeTile] === undefined ? 0 : activeTile;
+    const next = toolDiscoveryArrowTarget(current, direction);
+    const tile = TOOL_DISCOVERY_TILES[next];
+    if (tile === undefined) return;
     setActiveTile(next);
-    document.getElementById(toolTileId(TOOL_DISCOVERY_TILES[next].tab))?.scrollIntoView({ block: 'nearest' });
+    document
+      .getElementById(toolTileId(tile.tab))
+      ?.scrollIntoView({ block: 'nearest' });
   };
 
   const handleKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -243,26 +260,30 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     // while DOM focus stays in the input: typing is never interrupted,
     // Tab order is untouched, and there is always an implicit return path
     // (focus never left). Enter activates the highlighted tile.
-    if (showToolGroups && results.length === 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        moveTileHighlight(1);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        moveTileHighlight(-1);
-        return;
-      }
+    const toolArrowDirection = TOOL_ARROW_DIRECTIONS[e.key];
+    const isVerticalToolArrow = e.key === 'ArrowUp' || e.key === 'ArrowDown';
+    const isHorizontalToolArrow =
+      query === '' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight');
+    if (
+      showToolGroups &&
+      results.length === 0 &&
+      toolArrowDirection &&
+      (isVerticalToolArrow || isHorizontalToolArrow)
+    ) {
+      e.preventDefault();
+      moveTileHighlight(toolArrowDirection);
+      return;
+    }
+    if (showToolGroups && query === '' && results.length === 0) {
       if (e.key === 'Enter') {
         e.preventDefault();
-        executeToolTab(TOOL_DISCOVERY_TILES[activeTile].tab);
+        executeToolTab(TOOL_DISCOVERY_TILES[activeTile]?.tab ?? 'files');
         return;
       }
     }
     if (e.key === 'ArrowDown') {
-      e.preventDefault();
       if (results.length > 0) {
+        e.preventDefault();
         // Navigate from the CLAMPED index: if the result set shrank since
         // the last move (spawn options loaded, store updates), the raw
         // activeIndex may exceed the list — wrapping from it would jump to
@@ -272,8 +293,8 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
       return;
     }
     if (e.key === 'ArrowUp') {
-      e.preventDefault();
       if (results.length > 0) {
+        e.preventDefault();
         setActiveIndex((clampedActive - 1 + results.length) % results.length);
       }
       return;
@@ -321,8 +342,6 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   // the input's expanded/controls/activedescendant wiring tracks it exactly
   // like the results listbox — focus itself never leaves the input.
   const showingTools = showToolGroups && results.length === 0;
-  // Defensive: `activeTile` is always modulo-clamped, but a desync must
-  // degrade to the first tile, never crash the palette render.
   const activeTileTab = TOOL_DISCOVERY_TILES[activeTile]?.tab ?? 'files';
   const activeId = showingList
     ? optionId(clampedActive)
@@ -411,9 +430,12 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
           <ToolGroups
             activeTab={activeTileTab}
             onSelect={executeToolTab}
-            onFocusTile={(tab) =>
-              setActiveTile(TOOL_DISCOVERY_TILES.findIndex((tile) => tile.tab === tab))
-            }
+            onFocusTile={(tab) => {
+              const tileIndex = TOOL_DISCOVERY_TILES.findIndex(
+                (tile) => tile.tab === tab,
+              );
+              if (tileIndex >= 0) setActiveTile(tileIndex);
+            }}
           />
         ) : (
           <div className="px-4 py-6 text-sm text-text-muted" data-testid="command-omnibar-empty">

@@ -14,7 +14,7 @@
  *     target — the same invariant TerminalManager relies on).
  */
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-import { render, cleanup, fireEvent, screen, act, waitFor } from '@testing-library/react';
+import { render, cleanup, fireEvent, screen, act, waitFor, createEvent } from '@testing-library/react';
 import { CommandOmnibar } from '../../src/components/CommandOmnibar/CommandOmnibar';
 import { executeOmnibarItem, runOmnibarCommand } from '../../src/components/CommandOmnibar/omnibarActions';
 import { useUIStore, type OmnibarMode } from '../../src/stores/uiStore';
@@ -776,19 +776,92 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     expect([...grouped].sort()).toEqual([...PROBE_TAB_ORDER].sort());
   });
 
-  it('ArrowDown highlights tiles without moving focus, and wraps around', () => {
+  it('moves vertically through the tool grid without moving focus', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     const input = screen.getByRole('combobox');
+
+    const activeTab = () =>
+      input.getAttribute('aria-activedescendant')?.replace('command-omnibar-tool-', '');
+    const press = (key: string) => {
+      fireEvent.keyDown(input, { key });
+      return activeTab();
+    };
+
+    // Code is rendered as two columns: Files | Agent Changes on the first
+    // row, then Worktree Manager | Project Settings below it. ArrowDown must
+    // follow the visual column rather than the flat render order.
+    expect(press('ArrowDown')).toBe('worktrees');
+    expect(press('ArrowDown')).toBe('issues');
+    expect(press('ArrowUp')).toBe('worktrees');
+
+    // Vertical navigation keeps its existing wrap-around contract while
+    // preserving the active column at the edge of the grid.
+    expect(press('ArrowUp')).toBe('files');
+    expect(press('ArrowUp')).toBe('usage');
+
+    // Focus stays in the combobox throughout virtual tile navigation.
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('keeps horizontal tile movement within a row without wrapping', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const input = screen.getByRole('combobox');
+
+    const activeTab = () =>
+      input
+        .getAttribute('aria-activedescendant')
+        ?.replace('command-omnibar-tool-', '');
+    const press = (key: string) => {
+      fireEvent.keyDown(input, { key });
+      return activeTab();
+    };
+
+    expect(press('ArrowRight')).toBe('review');
+    expect(press('ArrowRight')).toBe('review');
+    expect(press('ArrowLeft')).toBe('files');
+    expect(press('ArrowLeft')).toBe('files');
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('leaves input arrows available after whitespace instead of showing tools', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '   ' } });
+    expect(input.value).toBe('   ');
+    expect(screen.queryByTestId('command-omnibar-tool-groups')).toBeNull();
+
+    for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']) {
+      const event = createEvent.keyDown(input, { key });
+      fireEvent(input, event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+  });
+
+  it('ArrowDown highlights the tile immediately below and wraps by column', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const input = screen.getByRole('combobox');
+    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
+    scrollIntoView.mockClear();
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     // Focus never leaves the input — the highlight is virtual.
     expect(document.activeElement).toBe(input);
-    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-review');
-    expect(screen.getByTestId('command-omnibar-tool-review').getAttribute('data-active')).toBe('true');
-    // Wrap past the last tile (11 tiles) back to the first.
-    for (let i = 0; i < 10; i++) fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-worktrees');
+    expect(screen.getByTestId('command-omnibar-tool-worktrees').getAttribute('data-active')).toBe('true');
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
+
+    // The last left-column tile wraps back to the first left-column tile.
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
     expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-files');
-    // ArrowUp from the first tile wraps to the last.
+
+    // ArrowUp from the first tile wraps to the last tile in its column.
     fireEvent.keyDown(input, { key: 'ArrowUp' });
     expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-usage');
   });
@@ -811,7 +884,7 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(useUIStore.getState().probeOpen).toBe(true);
-    expect(useUIStore.getState().probeTab).toBe('review');
+    expect(useUIStore.getState().probeTab).toBe('worktrees');
     expect(useUIStore.getState().omnibarOpen).toBe(false);
   });
 });
