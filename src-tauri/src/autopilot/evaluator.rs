@@ -311,16 +311,26 @@ pub(crate) fn parse_classification(output: &str) -> Option<Classification> {
             continue;
         }
         let upper = line.to_uppercase();
-        if upper == "CONTINUE" { return Some(Classification::Continue); }
+        if (upper.contains("DO NOT CONTINUE") || upper.contains("DON'T CONTINUE")
+            || upper.contains("NEVER CONTINUE")) && contains_word(&upper, "CONTINUE") {
+            continue;
+        }
         let hits: Vec<Classification> = [
             ("COMPLETED", Classification::Completed),
             ("BLOCKED", Classification::Blocked),
             ("WORKING", Classification::Working),
         ]
         .iter()
-        .filter(|(tok, _)| upper.contains(tok))
+        .filter(|(tok, _)| contains_word(&upper, tok))
         .map(|(_, c)| *c)
         .collect();
+        let continue_hit = contains_word(&upper, "CONTINUE");
+        if continue_hit && hits.is_empty() {
+            return Some(Classification::Continue);
+        }
+        if continue_hit {
+            continue;
+        }
         if hits.len() == 1 {
             return Some(hits[0]);
         }
@@ -328,6 +338,14 @@ pub(crate) fn parse_classification(output: &str) -> Option<Classification> {
         // instruction back) is ambiguous — keep scanning upward.
     }
     None
+}
+
+fn contains_word(text: &str, token: &str) -> bool {
+    text.match_indices(token).any(|(start, _)| {
+        let end = start + token.len();
+        text[..start].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+            && text[end..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+    })
 }
 
 /// Build the classifier prompt for a cleaned PTY tail.
@@ -419,42 +437,71 @@ pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &[(String, String)
 }
 
 fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout: std::time::Duration) -> Result<String, String> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    let io_error = |e: std::io::Error| e.to_string();
-    // File-backed stdio cannot deadlock on a full pipe or an inherited pipe
-    // handle after the parent exits. Both files disappear when handles close.
-    let mut input = tempfile::tempfile().map_err(io_error)?;
-    input.write_all(prompt.as_bytes()).map_err(io_error)?;
-    input.rewind().map_err(io_error)?;
-    let mut output = tempfile::tempfile().map_err(io_error)?;
-    cmd.stdin(input).stdout(output.try_clone().map_err(io_error)?).stderr(std::process::Stdio::null());
+    use std::io::{Read, Write};
+    let io_error = |error: std::io::Error| error.to_string();
+    const MAX_OUTPUT: usize = 64 * 1024;
+    // Drain stdin and stdout concurrently. A classifier that writes more than
+    // a pipe buffer must not deadlock while the parent waits for it to exit.
+    // The reader is capped at one byte above the accepted limit so oversized
+    // output is detected without filesystem polling or unbounded allocation.
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
     let mut child = cmd.spawn().map_err(io_error)?;
+    let mut input = child.stdin.take().ok_or_else(|| "classifier stdin was not piped".to_string())?;
+    let output = child.stdout.take().ok_or_else(|| "classifier stdout was not piped".to_string())?;
+    let prompt_bytes = prompt.as_bytes().to_vec();
+    let input_thread = std::thread::spawn(move || input.write_all(&prompt_bytes));
+    let output_oversized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let output_oversized_reader = output_oversized.clone();
+    let output_thread = std::thread::spawn(move || {
+        let mut bytes = Vec::with_capacity(MAX_OUTPUT.min(8 * 1024));
+        output.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes).map(|_| {
+            output_oversized_reader.store(bytes.len() > MAX_OUTPUT, std::sync::atomic::Ordering::Release);
+            bytes
+        })
+    });
     let job = crate::process_util::JobHandle::contain(child.id());
     let deadline = std::time::Instant::now() + timeout;
+    let mut timed_out = false;
+    let mut over_budget = false;
+    let mut status_error = None;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                if !status.success() { return Err(format!("classifier exited with {status}")); }
+                if !status.success() { status_error = Some(format!("classifier exited with {status}")); }
                 break;
             }
-            Ok(None) if std::time::Instant::now() < deadline
-                && output.metadata().map(|m| m.len() <= 64 * 1024).unwrap_or(false) => {
+            Ok(None) if std::time::Instant::now() < deadline && !output_oversized.load(std::sync::atomic::Ordering::Acquire) => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            _ => {
-                drop(job);
+            Ok(None) => {
+                timed_out = std::time::Instant::now() >= deadline;
+                over_budget = output_oversized.load(std::sync::atomic::Ordering::Acquire);
+                if let Some(job) = job.as_ref() { job.terminate(); }
+                crate::process_util::kill_process_tree(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("classifier exceeded its time/output budget or could not be observed".into());
+                break;
+            }
+            Err(error) => {
+                status_error = Some(format!("classifier wait failed: {error}"));
+                if let Some(job) = job.as_ref() { job.terminate(); }
+                crate::process_util::kill_process_tree(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
             }
         }
     }
     drop(job);
-    if output.metadata().map_err(io_error)?.len() > 64 * 1024 { return Err("classifier output exceeded 64 KiB".into()); }
-    output.seek(SeekFrom::Start(0)).map_err(io_error)?;
-    let mut text = String::new();
-    output.take(64 * 1024).read_to_string(&mut text).map_err(io_error)?;
-    Ok(text)
+    let _ = input_thread.join();
+    let bytes = output_thread.join().map_err(|_| "classifier output reader panicked".to_string())?
+        .map_err(io_error)?;
+    if let Some(error) = status_error { return Err(error); }
+    if timed_out { return Err("classifier exceeded its time budget".into()); }
+    if over_budget || bytes.len() > MAX_OUTPUT { return Err("classifier output exceeded 64 KiB".into()); }
+    String::from_utf8(bytes).map_err(|error| format!("classifier output was not UTF-8: {error}"))
 }
 
 #[cfg(test)]
@@ -465,7 +512,7 @@ mod tests {
     fn circuit_classifier_drains_output_larger_than_a_pipe_buffer() {
         let mut cmd = if cfg!(windows) { crate::process_util::command_no_window("powershell.exe") } else { crate::process_util::command_no_window("sh") };
         if cfg!(windows) {
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::In.ReadToEnd() | Out-Null; [Console]::Write(('x' * 32000)); [Console]::WriteLine(); [Console]::WriteLine('COMPLETED')"]);
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "$b=New-Object byte[] 32000; [Console]::In.ReadToEnd() | Out-Null; [Console]::OpenStandardOutput().Write($b,0,$b.Length); [Console]::WriteLine('COMPLETED')"]);
         } else {
             cmd.args(["-c", "cat >/dev/null; head -c 32000 /dev/zero | tr '\\0' x; printf '\\nCOMPLETED\\n'"]);
         }
@@ -501,6 +548,7 @@ mod tests {
     #[test]
     fn circuit_continuation_requires_an_explicit_classification() {
         assert_eq!(parse_classification("CONTINUE"), Some(Classification::Continue));
+        assert_eq!(parse_classification("Verdict: CONTINUE."), Some(Classification::Continue));
         assert_eq!(parse_classification("DISCONTINUE"), None);
         assert_eq!(parse_classification("Do not CONTINUE"), None);
         let prompt = circuit_classify_prompt("I will implement the remaining change next.");

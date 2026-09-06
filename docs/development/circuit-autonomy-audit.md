@@ -228,11 +228,12 @@ The follow-up implementation in this worktree addresses the confirmed causes:
 - Classifier outages end the run after five attempts. A circuit-specific
   CONTINUE verdict distinguishes an explicit ordinary next step from questions,
   permissions, and background work. At most two continuations are delivered
-  per gate attempt, only to owned agents. Old WORKING verdicts receive one
-  evaluation under the new classifier policy.
-- Continuations persist delivery intent before external effects. Pending
-  delivery replays after restart; a claimed delivery is uncertain and waits
-  for fresh evidence or expiry rather than risking duplicate terminal input.
+  per gate attempt, only to owned agents. Existing report and attempt
+  deduplication remains durable without an in-context application-version tag.
+- Continuations persist a claimed delivery before external effects and settle
+  it through a stepper event only after Enter acknowledgement. A legacy pending
+  delivery is claimed on replay; a claimed delivery is uncertain after restart
+  and waits for fresh evidence or expiry rather than risking duplicate input.
   Process/turn stamps and report revisions are checked again before delivery.
   The process registry also versions accepted input under its writer lock:
   an existing partial draft disallows continuation, and newer input prevents
@@ -243,9 +244,10 @@ The follow-up implementation in this worktree addresses the confirmed causes:
   leases. Failed cleanup retries every 30 seconds and survives restart and
   ledger retention. Borrowed sources and agents referenced by another active
   run are excluded. Historic terminal runs are not retroactively opted in.
-- Classifier subprocess stdin/stdout use temporary files, bounded output, and
-  a deadline, avoiding pipe-buffer and inherited-output-handle hangs. Windows
-  descendants are contained by the existing JobHandle mechanism when available.
+- Classifier subprocess stdin/stdout are drained concurrently with bounded
+  output and a deadline, avoiding pipe-buffer and inherited-output-handle hangs.
+  Windows descendants are contained by the existing JobHandle mechanism when
+  available.
 
 These are bounded recovery changes, not an asynchronous scheduler rewrite:
 individual classifier and verification operations still occupy the serial
@@ -266,14 +268,15 @@ No live run state, session identity, agent process, or stable app installation
 was modified. The application must be rebuilt and restarted to use these fixes.
 
 Final Windows verification:
-- `scripts/check.ps1 rust -SerialRust`: passed; 2,909 library tests and 18
+- `scripts/check.ps1 rust -SerialRust`: passed; 2,911 library tests and 18
   integration tests executed, 14 library tests and one doctest ignored; six
   agent infrastructure tests passed.
 - Focused circuit regression suite: 137 tests passed, including the actual
   process-registry input queue race test. The ambiguous-parent regression
   failed before the discovery fix and passed afterward.
 - `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets`:
-  exit 0, warnings remain (baseline attribution not verified).
+  exit 0; the 45 warning records match the pre-remediation baseline, so this
+  change adds no new warnings.
 - `npm run check:agent -- --base 0aeaea6aad3c9de047fc799a36bce0f7c18bc1b5`
   and `git diff --check`: passed; no generated binding changes.
 - Mobile asset build passed. No end-to-end run in the rebuilt desktop app was

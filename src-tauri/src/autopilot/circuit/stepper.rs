@@ -419,6 +419,9 @@ pub struct Capacity {
 pub enum CircuitEvent {
     ContinuationObserved { node_id: String, attempt: i32, stamp: String, revision: String, input_stamp: String },
     ContinuationRetry { node_id: String, attempt: i32 },
+    ContinuationDelivered { node_id: String, attempt: i32 },
+    ContinuationObsolete { node_id: String, attempt: i32 },
+    ContinuationUncertain { node_id: String, attempt: i32, error: String },
     /// The run was triggered. Renamed from `ManualTriggered` in #1208:
     /// runs are minted pending by ANY trigger dispatch (Trigger Now,
     /// a GitHub poll ingest, an interval fire) and this event is
@@ -534,6 +537,14 @@ pub enum Effect {
         prompt: String,
         target_node_id: Option<String>,
     },
+    /// Continue a classifier-owned agent after an explicit ordinary-work
+    /// verdict. This has a separate lifecycle from author-authored PTY
+    /// injections because delivery is claimed and settled independently.
+    ContinueAgentTurn {
+        node_id: String,
+        target_agent_id: i64,
+        prompt: String,
+    },
     SetNodeStatus {
         node_id: String,
         status: String,
@@ -590,9 +601,12 @@ impl Transition {
 // The stepper.
 // ---------------------------------------------------------------------------
 
-fn continuation_effect(node_id: &str) -> Effect {
-    Effect::InjectPty { node_id: node_id.into(), target_node_id: None,
-        prompt: "Continue the remaining work already assigned to you and run its relevant checks. Do not expand scope, approve permissions, or guess answers to questions requiring the user. If you are blocked on such a decision, report the blocker explicitly.".into() }
+fn continuation_effect(node_id: &str, target_agent_id: i64) -> Effect {
+    Effect::ContinueAgentTurn {
+        node_id: node_id.into(),
+        target_agent_id,
+        prompt: "Continue the remaining work already assigned to you and run its relevant checks. Do not expand scope, approve permissions, or guess answers to questions requiring the user. If you are blocked on such a decision, report the blocker explicitly.".into(),
+    }
 }
 
 /// Advance one run by one event and return what to persist before effects.
@@ -611,7 +625,44 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
             if run.state == RunState::Running && run.step(node_id).is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
                 && run.context.get(&format!("node.{node_id}.continuation.attempt")).and_then(|v| v.parse::<i32>().ok()) == Some(*attempt)
                 && run.context.get(&format!("node.{node_id}.continuation.delivery")) == Some("pending") {
-                t.effects.push(continuation_effect(node_id));
+                if let Some(target_agent_id) = run.resolve_target_agent(node_id) {
+                    run.context.set(&format!("node.{node_id}.continuation.delivery"), "claimed");
+                    t.context_changed = true;
+                    t.effects.push(continuation_effect(node_id, target_agent_id));
+                }
+            }
+        }
+        CircuitEvent::ContinuationDelivered { node_id, attempt }
+        | CircuitEvent::ContinuationObsolete { node_id, attempt }
+        | CircuitEvent::ContinuationUncertain { node_id, attempt, .. } => {
+            let key = format!("node.{node_id}.continuation.delivery");
+            let current = run.context.get(&key);
+            if run.state == RunState::Running
+                && run.step(node_id).is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+                && current == Some("claimed")
+            {
+                let delivery = match event {
+                    CircuitEvent::ContinuationDelivered { .. } => "delivered",
+                    CircuitEvent::ContinuationObsolete { .. } => "obsolete",
+                    CircuitEvent::ContinuationUncertain { .. } => "uncertain",
+                    _ => unreachable!(),
+                };
+                run.context.set(&key, delivery);
+                if let CircuitEvent::ContinuationUncertain { error, .. } = event {
+                    if let Some(step) = run.step_mut(node_id) {
+                        step.error = Some(error.clone());
+                    }
+                    t.step_writes.push(StepWrite {
+                        node_id: node_id.clone(),
+                        status: StepStatus::Running,
+                        outcome: None,
+                        error: Some(Some(error.clone())),
+                        agent_node_id: None,
+                        attempt: *attempt,
+                        fresh_attempt: false,
+                    });
+                }
+                t.context_changed = true;
             }
         }
         CircuitEvent::Triggered => {
@@ -783,7 +834,9 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 run.state = RunState::Running;
                 t.run_state_changed = true;
                 for step in &run.steps {
-                    run.context.set(&format!("node.{}.wait.attempt", step.node_id), "");
+                    if !step.status.is_terminal() {
+                        run.context.set(&format!("node.{}.wait.attempt", step.node_id), "");
+                    }
                 }
                 t.context_changed = true;
             }
@@ -829,11 +882,9 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 };
                 if *classification == Some(Classification::Continue)
                     && run.context.get(&format!("node.{node_id}.evaluated_attempt")) == Some(attempt.to_string().as_str())
-                    && output.as_deref().is_some_and(|out| run.context.get(&format!("node.{node_id}.evaluated_output")) == Some(out))
-                    && run.context.get(&format!("node.{node_id}.classifier_version")) == Some("2") {
+                    && output.as_deref().is_some_and(|out| run.context.get(&format!("node.{node_id}.evaluated_output")) == Some(out)) {
                     return t;
                 }
-                run.context.set(&format!("node.{node_id}.classifier_version"), "2");
                 run.context.set(&format!("node.{node_id}.evaluated_attempt"), attempt.to_string());
                 run.context.set(&format!("node.{node_id}.classification"), match classification {
                     Some(Classification::Completed) => "completed",
@@ -880,11 +931,23 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         if *classification == Classification::Continue && owns_target && count < 2
                             && run.context.get(&format!("node.{node_id}.continuation.stamp")).is_some()
                             && matches!(run.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::LlmTurnClassifier { .. })) {
-                            run.context.set(&count_key, (count + 1).to_string());
-                            run.context.set(&format!("node.{node_id}.continuation.delivery"), "pending");
-                            run.context.set(&format!("node.{node_id}.continuation.attempt"), attempt.to_string());
-                            t.context_changed = true;
-                            t.effects.push(continuation_effect(node_id));
+                            if let Some(target_agent_id) = run.resolve_target_agent(node_id) {
+                                run.context.set(&count_key, (count + 1).to_string());
+                                run.context.set(&format!("node.{node_id}.continuation.delivery"), "claimed");
+                                run.context.set(&format!("node.{node_id}.continuation.attempt"), attempt.to_string());
+                                t.context_changed = true;
+                                t.effects.push(continuation_effect(node_id, target_agent_id));
+                            } else {
+                                run.context.set(&format!("node.{node_id}.continuation.delivery"), "obsolete");
+                                t.context_changed = true;
+                            }
+                        }
+                        if *classification == Classification::Continue && owns_target && count >= 2 {
+                            fail_step(run, &mut t, node_id, "Automatic continuation budget exhausted after 2 attempts.".into());
+                            run.state = RunState::Failed;
+                            t.run_state_changed = true;
+                            finish_run_if_done(run, &mut t);
+                            return t;
                         }
                         let error = match classification {
                             Classification::Blocked => "Agent needs input. Continue the agent to produce a new report.",
@@ -1861,7 +1924,7 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
     // post-completion command. Other terminal effects remain safe to run on
     // the same completing transition.
     let has_pending_injection = t.effects.iter().any(|effect| {
-        matches!(effect, Effect::InjectPty { .. })
+        matches!(effect, Effect::InjectPty { .. } | Effect::ContinueAgentTurn { .. })
     });
     if any_completed && !has_eligible && !has_pending_injection {
         run.state = RunState::Completed;
@@ -2945,10 +3008,17 @@ mod tests {
         let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
         fire_to_gate(&mut run, "classify");
         advance(&mut run, &CircuitEvent::ContinuationObserved { node_id: "classify".into(), attempt: 1, stamp: "100:yield".into(), revision: "r".into(), input_stamp: "1:0".into() });
-        advance(&mut run, &classified("classify", Some(Classification::Continue)));
+        let claimed = advance(&mut run, &classified("classify", Some(Classification::Continue)));
+        assert!(claimed.effects.iter().any(|effect| matches!(effect, Effect::ContinueAgentTurn { .. })));
+        assert_eq!(run.context.get("node.classify.continuation.delivery"), Some("claimed"));
+        advance(&mut run, &CircuitEvent::ContinuationDelivered { node_id: "classify".into(), attempt: 1 });
+        assert_eq!(run.context.get("node.classify.continuation.delivery"), Some("delivered"));
+        run.context.set("node.classify.continuation.delivery", "pending");
         run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
         let retry = CircuitEvent::ContinuationRetry { node_id: "classify".into(), attempt: 1 };
+        run.context.set("node.classify.continuation.delivery", "pending");
         assert_eq!(advance(&mut run, &retry).effects.len(), 1);
+        assert_eq!(run.context.get("node.classify.continuation.delivery"), Some("claimed"));
         run.context.set("node.classify.continuation.delivery", "claimed");
         assert!(advance(&mut run, &retry).effects.is_empty());
         run.context.set("node.classify.continuation.delivery", "pending");
@@ -2964,7 +3034,7 @@ mod tests {
         for report in 0..3 {
             let event = CircuitEvent::TurnClassified { node_id: "classify".into(), classification: Some(Classification::Continue), output: Some(format!("Next task {report}")) };
             let t = advance(&mut run, &event);
-            assert_eq!(t.effects.iter().filter(|e| matches!(e, Effect::InjectPty { .. })).count(), usize::from(report < 2));
+            assert_eq!(t.effects.iter().filter(|e| matches!(e, Effect::ContinueAgentTurn { .. })).count(), usize::from(report < 2));
             run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
             assert!(advance(&mut run, &event).is_empty());
         }
@@ -2974,6 +3044,17 @@ mod tests {
         run.context.set("node.classify.continuations.1", "0");
         let borrowed = advance(&mut run, &CircuitEvent::TurnClassified { node_id: "classify".into(), classification: Some(Classification::Continue), output: Some("Next borrowed task".into()) });
         assert!(borrowed.effects.is_empty(), "the source is borrowed, not ours to continue");
+    }
+
+    #[test]
+    fn exhausted_owned_continuations_fail_immediately_and_completed_agents_are_not_eligible() {
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &CircuitEvent::ContinuationObserved { node_id: "classify".into(), attempt: 1, stamp: "100:yield".into(), revision: "report".into(), input_stamp: "1:0".into() });
+        run.context.set("node.classify.continuations.1", "2");
+        let t = advance(&mut run, &classified("classify", Some(Classification::Continue)));
+        assert_eq!(run.state, RunState::Failed);
+        assert!(t.effects.is_empty());
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub struct AgentProcess {
     /// [`AgentProcessRegistry::write_bytes`].
     writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
     input_version: std::sync::atomic::AtomicU64,
-    input_draft: AtomicBool,
+    input_buffer_len: std::sync::atomic::AtomicUsize,
     /// Handle to the dedicated writer thread. `kill_session` joins it
     /// with a bounded timeout so the close path can never hang the UI
     /// on a wedged writer (mirror of the `reader_handle` contract).
@@ -115,6 +115,68 @@ pub struct AgentProcess {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InputStamp {
+    generation: u64,
+    version: u64,
+}
+
+impl InputStamp {
+    pub(crate) fn encode(self) -> String {
+        format!("{}:{}", self.generation, self.version)
+    }
+
+    pub(crate) fn decode(value: &str) -> Option<Self> {
+        let (generation, version) = value.split_once(':')?;
+        Some(Self {
+            generation: generation.parse().ok()?,
+            version: version.parse().ok()?,
+        })
+    }
+}
+
+/// Update the CLI input-buffer estimate without treating terminal control
+/// packets as draft text. This is intentionally conservative: printable input
+/// grows the estimate, editing keys shrink it, and navigation/focus sequences
+/// leave it unchanged. Bracketed paste markers keep embedded newlines as text.
+fn input_buffer_len_after(mut len: usize, data: &[u8]) -> usize {
+    let mut index = 0;
+    let mut bracketed_paste = false;
+    while index < data.len() {
+        match data[index] {
+            0x1b => {
+                let start = index;
+                index += 1;
+                if index < data.len() && matches!(data[index], b'[' | b']' | b'O') {
+                    index += 1;
+                    while index < data.len() {
+                        let byte = data[index];
+                        index += 1;
+                        if (0x40..=0x7e).contains(&byte) {
+                            let sequence = &data[start..index];
+                            bracketed_paste = match sequence {
+                                b"\x1b[200~" => true,
+                                b"\x1b[201~" => false,
+                                _ => bracketed_paste,
+                            };
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            b'\r' | b'\n' if !bracketed_paste => len = 0,
+            0x03 | 0x15 => len = 0,
+            0x08 | 0x7f => len = len.saturating_sub(1),
+            0x17 => len = len.saturating_sub(1),
+            byte if byte >= 0x20 && (byte & 0xc0) != 0x80 => len = len.saturating_add(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    len
+}
+
 impl AgentProcess {
     /// Build a registry entry. `generation` is assigned by
     /// [`AgentProcessRegistry::insert`]; pass `0` from callers.
@@ -135,7 +197,7 @@ impl AgentProcess {
             child: Arc::new(Mutex::new(child)),
             writer_tx: Mutex::new(Some(writer_tx)),
             input_version: std::sync::atomic::AtomicU64::new(0),
-            input_draft: AtomicBool::new(false),
+            input_buffer_len: std::sync::atomic::AtomicUsize::new(0),
             writer_handle: Mutex::new(writer_handle),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive,
@@ -154,24 +216,25 @@ impl AgentProcess {
         self.enqueue_input_if_current(data, None).map(|_| ())
     }
 
-    fn input_stamp(&self) -> Option<String> {
+    fn input_stamp(&self) -> Option<InputStamp> {
         let _guard = self.writer_tx.lock().unwrap();
-        if self.input_draft.load(Ordering::Relaxed) { return None; }
-        Some(format!("{}:{}", self.generation, self.input_version.load(Ordering::Relaxed)))
+        if self.input_buffer_len.load(Ordering::Relaxed) != 0 { return None; }
+        Some(InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
     }
 
-    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<&str>) -> Result<Option<String>, std::sync::mpsc::TrySendError<Vec<u8>>> {
+    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>) -> Result<Option<InputStamp>, std::sync::mpsc::TrySendError<Vec<u8>>> {
         let guard = self.writer_tx.lock().unwrap();
-        let stamp = format!("{}:{}", self.generation, self.input_version.load(Ordering::Relaxed));
+        let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
         if expected.is_some_and(|expected| expected != stamp) { return Ok(None); }
-        let draft = !matches!(data.last(), Some(b'\r' | b'\n'));
+        let current_len = self.input_buffer_len.load(Ordering::Relaxed);
+        let next_len = input_buffer_len_after(current_len, &data);
         match guard.as_ref() {
             Some(tx) => tx.try_send(data)?,
             None => return Err(std::sync::mpsc::TrySendError::Disconnected(data)),
         }
         let version = self.input_version.fetch_add(1, Ordering::Relaxed) + 1;
-        self.input_draft.store(draft, Ordering::Relaxed);
-        Ok(Some(format!("{}:{version}", self.generation)))
+        self.input_buffer_len.store(next_len, Ordering::Relaxed);
+        Ok(Some(InputStamp { generation: self.generation, version }))
     }
 
     /// Stash the reader thread's `JoinHandle` on the registry entry.
@@ -303,14 +366,16 @@ impl AgentProcessRegistry {
     }
 
     pub(crate) fn input_stamp(&self, session_id: i64) -> Option<String> {
-        self.get(&session_id).and_then(|agent| agent.input_stamp())
+        self.get(&session_id).and_then(|agent| agent.input_stamp()).map(InputStamp::encode)
     }
 
     /// Compare and enqueue under the same writer lock as ordinary keystrokes.
     /// A partial draft invalidates a continuation even before Enter is pressed.
     pub(crate) fn write_bytes_if_current(&self, session_id: i64, data: &[u8], expected: &str) -> Result<Option<String>, String> {
         let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
+        let expected = InputStamp::decode(expected).ok_or_else(|| "Invalid input ownership stamp".to_string())?;
         agent.enqueue_input_if_current(data.to_vec(), Some(expected)).map_err(|e| e.to_string())
+            .map(|stamp| stamp.map(InputStamp::encode))
     }
 
     pub fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
@@ -748,6 +813,15 @@ mod tests {
         assert!(registry.write_bytes_if_current(id, b"\r", &staged).unwrap().is_none(), "Enter must not submit newer input");
         assert!(rx.try_recv().is_err());
         registry.kill_session(id);
+    }
+
+    #[test]
+    fn input_stamp_ignores_navigation_and_tracks_backspace_to_empty() {
+        assert_eq!(input_buffer_len_after(0, b"\x1b[A\x1b[I"), 0);
+        assert_eq!(input_buffer_len_after(0, b"draft"), 5);
+        assert_eq!(input_buffer_len_after(5, b"\x1b[D\x7f\x7f\x7f\x7f\x7f"), 0);
+        assert_eq!(input_buffer_len_after(5, b"\x03"), 0);
+        assert_eq!(input_buffer_len_after(0, b"\x1b[200~line\n two\x1b[201~"), 8);
     }
 
     fn insert_trivial_agent(

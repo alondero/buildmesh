@@ -250,7 +250,7 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             // retry needlessly thrashes the blocking pool and widens the race
             // window between finding a rollout and claiming the row.
             let captured = crate::blocking::run_blocking("codex_capture", move || {
-                if node_has_cli_session_id(node_id) {
+                if crate::db::cli_session_id_present(node_id).map_err(|error| error.to_string())? {
                     return Ok(CaptureAttempt::AlreadyStored);
                 }
                 let Some(id) = find_fresh_id_for_directory_in(&path, &directory, not_before) else {
@@ -286,13 +286,6 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
         }
         tracing::warn!("codex session capture: gave up for node {node_id} in {spawn_directory}");
     });
-}
-
-fn node_has_cli_session_id(node_id: i64) -> bool {
-    crate::db::get_agent_node_by_id(node_id)
-        .ok()
-        .and_then(|node| node.cli_session_id)
-        .is_some_and(|id| !id.trim().is_empty())
 }
 
 #[cfg(test)]

@@ -379,16 +379,22 @@ pub(crate) fn write_prompt_to_pty_guarded(node_id: i64, text: &str, app: &AppHan
         return Err(format!("node {} has no live agent process", node_id));
     }
     let registry = &crate::agent::process::PROCESS_REGISTRY;
-    let guard = if let Some(expected) = expected_input {
+    let guarded = if let Some(expected) = expected_input {
         let Some(next) = registry.write_bytes_if_current(node_id, injection_payload(text).as_bytes(), expected)? else { return Ok(false); };
         Some(next)
     } else {
         registry.write_bytes(node_id, injection_payload(text).as_bytes())?;
         None
     };
-    let app = app.clone();
-    std::thread::spawn(move || submit_staged_prompt(node_id, &app, guard));
-    Ok(true)
+    if expected_input.is_some() {
+        // A continuation is not delivered until the separate Enter write has
+        // been acknowledged by fresh PTY output.
+        submit_staged_prompt_result(node_id, guarded).map(|submitted| submitted.is_some())
+    } else {
+        let app = app.clone();
+        std::thread::spawn(move || submit_staged_prompt(node_id, &app, guarded));
+        Ok(true)
+    }
 }
 
 /// The background half of [`write_prompt_to_pty`]: settle, Enter, verify.
@@ -435,6 +441,24 @@ fn submit_staged_prompt(node_id: i64, app: &AppHandle, guard: Option<String>) {
             crate::commands::attention::mark_attention(node_id, app);
         }
     }
+}
+
+fn submit_staged_prompt_result(node_id: i64, guard: Option<String>) -> Result<Option<u32>, String> {
+    let wrote_at = Instant::now();
+    while Instant::now() < wrote_at + PASTE_ECHO_DEADLINE {
+        if output_seen_within(evaluator::millis_since_last_output(node_id), wrote_at.elapsed().as_millis()) {
+            break;
+        }
+        std::thread::sleep(SUBMIT_POLL);
+    }
+    let settle_deadline = Instant::now() + PASTE_SETTLE_DEADLINE;
+    while Instant::now() < settle_deadline {
+        match evaluator::millis_since_last_output(node_id) {
+            Some(quiet) if quiet < PASTE_SETTLE_QUIET_MS => std::thread::sleep(SUBMIT_POLL),
+            _ => break,
+        }
+    }
+    press_enter_until_output_guarded(node_id, guard)
 }
 
 /// Send Enter and wait for PTY output to acknowledge it, retrying up to
