@@ -14,6 +14,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 import {
   Background,
   BackgroundVariant,
@@ -485,27 +486,26 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
 
   // Esc closes (menus clear first via their own Escape handlers). When
   // the editor is dirty, route through the discard banner instead of
-  // closing — matches `<Modal dirty>` (issue #1244).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      if (confirmingDiscardRef.current) {
-        // Banner is up — Escape dismisses the prompt (Keep editing), it
-        // must NOT confirm the discard. Reflexively pressing Escape to
-        // dismiss a confirmation is the universal OS gesture, and it
-        // maps to the safe option.
-        setConfirmingDiscard(false);
-        return;
-      }
-      if (dirtyRef.current) {
-        setConfirmingDiscard(true);
-        return;
-      }
-      onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  // closing — matches `<Modal dirty>` (issue #1244). Issue #649 — driven
+  // by the shared `useEscapeKey` hook so the QuickConnectMenu (mounted
+  // later, on top of the editor) gets first claim on Escape via the LIFO
+  // stack instead of relying on `e.stopPropagation()` against a window
+  // listener.
+  useEscapeKey(() => {
+    if (confirmingDiscardRef.current) {
+      // Banner is up — Escape dismisses the prompt (Keep editing), it
+      // must NOT confirm the discard. Reflexively pressing Escape to
+      // dismiss a confirmation is the universal OS gesture, and it
+      // maps to the safe option.
+      setConfirmingDiscard(false);
+      return;
+    }
+    if (dirtyRef.current) {
+      setConfirmingDiscard(true);
+      return;
+    }
+    onClose();
+  });
 
   return (
     <div

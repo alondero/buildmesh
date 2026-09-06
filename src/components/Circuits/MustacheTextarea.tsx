@@ -16,6 +16,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 import {
   MUSTACHE_GROUPS,
   MUSTACHE_PATHS,
@@ -147,6 +148,23 @@ export function MustacheTextarea({
     if (highlight >= flatPaths.length) setHighlight(flatPaths.length - 1);
   }, [flatPaths.length, highlight]);
 
+  // Issue #649 — Escape dismisses the menu. Routed through the shared
+  // `useEscapeKey` hook so the menu (mounted after the circuit editor's
+  // window listener was, but now via the LIFO stack) claims Escape
+  // before the editor's close path runs. The previous implementation
+  // relied on `e.stopPropagation()` on the textarea's element-level
+  // onKeyDown — that's brittle because the editor's listener was on
+  // `window` and `stopPropagation` on a child doesn't stop a window
+  // listener. The LIFO discipline replaces that with a data-driven
+  // priority rule.
+  useEscapeKey(
+    () => {
+      setContext(null);
+      setHighlight(-1);
+    },
+    context !== null,
+  );
+
   const handleChange = (next: string) => {
     onChange(next);
     const pos = ref.current?.selectionStart ?? next.length;
@@ -173,11 +191,6 @@ export function MustacheTextarea({
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (context === null) return;
     switch (e.key) {
-      case 'Escape':
-        e.stopPropagation();
-        setContext(null);
-        setHighlight(-1);
-        return;
       case 'ArrowDown': {
         e.preventDefault();
         if (flatPaths.length === 0) return;

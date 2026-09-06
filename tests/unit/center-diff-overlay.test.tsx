@@ -144,7 +144,7 @@ describe('CenterDiffOverlay (#379)', () => {
   it('closes when Escape is pressed', async () => {
     render(<CenterDiffOverlay diff={BASE_CTX} />);
     await screen.findByText('src/app.ts');
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(useUIStore.getState().activeDiffFile).toBeNull();
   });
 

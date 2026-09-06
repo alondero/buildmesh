@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+﻿import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { ExitConfirmationModal } from '../../src/components/ExitConfirmationModal/ExitConfirmationModal';
 
@@ -91,7 +91,7 @@ describe('ExitConfirmationModal (issue #1501)', () => {
         onExit={() => {}}
       />,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onKeep).not.toHaveBeenCalled();
   });
 

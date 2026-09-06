@@ -8,6 +8,7 @@
 
 import { useMemo, useState } from 'react';
 import { fuzzyFilterSpecs, categoryAccent, type NodeKindSpec } from './circuitGraphModel';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 interface QuickConnectMenuProps {
   /** Where the drag released (canvas flow coordinates). */
@@ -20,6 +21,15 @@ export function QuickConnectMenu({ position, onSelect, onDismiss }: QuickConnect
   const [query, setQuery] = useState('');
   const results = useMemo(() => fuzzyFilterSpecs(query.trim()), [query]);
   const first = results[0];
+
+  // Issue #649 — Escape dismisses the menu. Routed through the shared
+  // `useEscapeKey` hook so the menu (mounted after the circuit editor's
+  // window listener was, but now via the LIFO stack) claims Escape
+  // before the editor's close path runs. Replaces the previous
+  // `e.stopPropagation()` on the input's element-level onKeyDown —
+  // brittle, because the editor's listener was on `window` and
+  // `stopPropagation` on a child doesn't stop a window listener.
+  useEscapeKey(() => onDismiss());
 
   return (
     <div
@@ -35,12 +45,6 @@ export function QuickConnectMenu({ position, onSelect, onDismiss }: QuickConnect
         data-testid="quick-connect-input"
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={(e) => {
-          // Stop the editor's window-level Esc handler from closing the
-          // whole overlay while the menu is up.
-          if (e.key === 'Escape') {
-            e.stopPropagation();
-            onDismiss();
-          }
           if (e.key === 'Enter' && first) {
             e.stopPropagation();
             onSelect(first);

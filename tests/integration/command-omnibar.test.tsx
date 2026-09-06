@@ -312,7 +312,7 @@ describe('Command Omnibar component lifecycle (issue #1414)', () => {
     expect(useUIStore.getState().omnibarOpen).toBe(true);
 
     await act(async () => {
-      fireEvent.keyDown(window, { key: 'Escape' });
+      fireEvent.keyDown(document, { key: 'Escape' });
     });
     expect(useUIStore.getState().omnibarOpen).toBe(false);
   });

@@ -10,6 +10,7 @@ import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { dropdownId } from '../../lib/dropdownId';
 
 export { type TerminalInstance } from './TerminalRegistry';
@@ -192,21 +193,18 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   // `useClickOutside` hook (#492) for the outside-mousedown path.
   // `nodeId` scopes the selector (`[data-dropdown-for="<nodeId>"]`)
   // so two terminals with open context menus wouldn't interfere. The
-  // Escape handler is separate — `useClickOutside` doesn't cover keys.
+  // Escape handler is separate — `useClickOutside` doesn't cover keys,
+  // and `useEscapeKey` (issue #649) handles that now. Gated on
+  // `contextMenu !== null` so the listener only arms while the menu
+  // is visible; if a modal opens above the terminal, the modal owns
+  // Escape via the LIFO stack.
   //
   // Issue #1264 — prefix with the surface tag so a terminal-keyed
   // context menu can't collide with a mesh- or node-keyed menu that
   // shares the same numeric id (mesh and node ids both autoincrement
   // from the same SQLite sequence, so collisions are routine).
   useClickOutside<string>(contextMenu ? dropdownId('terminal', nodeId) : null, () => setContextMenu(null));
-  useEffect(() => {
-    if (!contextMenu) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setContextMenu(null);
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [contextMenu]);
+  useEscapeKey(() => setContextMenu(null), contextMenu !== null);
 
   // Focus search input when opened
   useEffect(() => {
