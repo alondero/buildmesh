@@ -261,6 +261,37 @@ describe('CircuitsProbeTab', () => {
     expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe')).toHaveLength(1);
   });
 
+  it('does not reload the previous mesh when an action resolves after a mesh switch', async () => {
+    mockBackend();
+    let resolveTrigger!: () => void;
+    const triggerPromise = new Promise<void>((resolve) => { resolveTrigger = resolve; });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'trigger_circuit_now') return triggerPromise;
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    openProbeDestination('circuits');
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId('circuit-trigger-7'));
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: otherMesh.id,
+    }));
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe')).toHaveLength(2);
+    });
+
+    await act(async () => {
+      resolveTrigger();
+      await triggerPromise;
+    });
+    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe')).toHaveLength(2);
+  });
+
   it('keeps failures visible in Activity and retains them in History', async () => {
     mockBackend({ runs: [
       { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } },

@@ -202,6 +202,8 @@ export function CircuitsProbeTab() {
   const [view, setView] = useState<CircuitProbeView>('activity');
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
   const mountedRef = useRef(false);
+  const activeMeshIdRef = useRef(activeMeshId);
+  activeMeshIdRef.current = activeMeshId;
   const loadRequestRef = useRef(0);
   // These snapshots only change when the backend payload or selected view
   // changes. In particular, the duration clock must not rebuild the row model.
@@ -316,13 +318,16 @@ export function CircuitsProbeTab() {
 
   const runAction = async (fn: () => Promise<unknown>) => {
     if (!mountedRef.current) return;
+    const actionMeshId = activeMeshIdRef.current;
     setBusy(true);
     setActionError(null);
     try {
       await fn();
-      if (mountedRef.current) await load();
+      // An action owns the mesh that started it. A mesh switch starts a new
+      // load owner; do not let this action's old closure rehydrate that tab.
+      if (mountedRef.current && activeMeshIdRef.current === actionMeshId) await load();
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || activeMeshIdRef.current !== actionMeshId) return;
       console.error('Circuit action failed:', err);
       setActionError(formatError(err));
     } finally {
