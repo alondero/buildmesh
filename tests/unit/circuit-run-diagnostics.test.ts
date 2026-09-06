@@ -12,17 +12,23 @@ import { describe, it, expect } from 'vitest';
 import { formatDurationMs, runDurationMs } from '../../src/components/Circuits/circuitGraphModel';
 import {
   activityStatusToken,
+  buildCircuitProbeRows,
   countActiveRuns,
   countRunningSteps,
+  circuitActivityStats,
   pendingAdmissionDetail,
   queuedReason,
   runActivity,
+  runBelongsToActivity,
+  runBelongsToHistory,
+  runNeedsAttention,
   runStateLabel,
   runStepProgress,
   stepStatusLabel,
   type CircuitCapacity,
 } from '../../src/components/Circuits/runDiagnostics';
 import { isTerminalRunState } from '../../src/components/Circuits/circuitGraphModel';
+import type { CircuitWithRuns } from '../../src/types/generated/CircuitWithRuns';
 
 /**
  * Run diagnostics (issue #1468) — the plain-English reading of a ledger.
@@ -31,6 +37,53 @@ import { isTerminalRunState } from '../../src/components/Circuits/circuitGraphMo
  */
 describe('run diagnostics', () => {
   const st = (node_id: string, status: string) => ({ node_id, status, error_message: null });
+  const detail = (id: number, state: string, updated_at = '2026-08-22 10:00:00') => ({
+    run: { id, circuit_id: 1, mesh_id: 1, state, trigger_identity: `run:${id}`, context_json: '{}',
+      source_agent_node_id: null, created_at: updated_at, updated_at },
+    steps: [],
+  });
+  const row = (...runs: ReturnType<typeof detail>[]): CircuitWithRuns => ({
+    circuit: {
+      id: 1,
+      mesh_id: 1,
+      name: 'one',
+      description: '',
+      enabled: true,
+      concurrency_limit: 1,
+      graph_json: '{}',
+      created_at: '2026-08-22 10:00:00',
+      updated_at: '2026-08-22 10:00:00',
+      is_preset: false,
+    },
+    runs,
+  });
+
+  describe('Probe view model', () => {
+    it('keeps pending and failed runs in Activity and completed runs in History', () => {
+      const pending = detail(1, 'pending');
+      const failed = detail(2, 'failed', '2026-08-22 10:02:00');
+      const completed = detail(3, 'completed', '2026-08-22 10:03:00');
+      const cancelled = detail(4, 'cancelled', '2026-08-22 10:04:00');
+      const offsetCompleted = detail(5, 'completed', '2026-08-22T12:05:00+02:00');
+      expect(runBelongsToActivity(pending)).toBe(true);
+      expect(runBelongsToActivity(failed)).toBe(true);
+      expect(runBelongsToActivity(cancelled)).toBe(false);
+      expect(runBelongsToHistory(cancelled)).toBe(true);
+      expect(runNeedsAttention(failed)).toBe(true);
+      const runs = [pending, failed, completed, cancelled, offsetCompleted];
+      expect(buildCircuitProbeRows([row(...runs)], 'activity')[0].visibleRuns.map((run) => run.run.id))
+        .toEqual([2, 1]);
+      expect(buildCircuitProbeRows([row(...runs)], 'history')[0].visibleRuns.map((run) => run.run.id))
+        .toEqual([5, 4, 3, 2]);
+    });
+
+    it('summarizes active, attention, and queued work without component heuristics', () => {
+      const running = detail(1, 'running');
+      const failed = detail(2, 'failed');
+      const stats = circuitActivityStats([row(running, failed)], 4);
+      expect(stats).toEqual({ activityCount: 2, activeCount: 1, attentionCount: 1, queuedCount: 4 });
+    });
+  });
 
 
   describe('formatDurationMs', () => {
@@ -152,6 +205,8 @@ describe('run diagnostics', () => {
     it('knows which run states the worker never leaves', () => {
       expect(isTerminalRunState('completed')).toBe(true);
       expect(isTerminalRunState('failed')).toBe(true);
+      expect(isTerminalRunState('cancelled')).toBe(true);
+      expect(runStateLabel('cancelled')).toBe('Cancelled');
       expect(isTerminalRunState('paused')).toBe(false);
       expect(isTerminalRunState('running')).toBe(false);
       expect(isTerminalRunState('pending')).toBe(false);
@@ -221,6 +276,15 @@ describe('run diagnostics', () => {
         FREE
       );
       expect(workerFailed.detail).toContain('No step recorded a failure');
+    });
+
+    it('labels a cancelled run as terminal rather than waiting to start', () => {
+      expect(runActivity({ state: 'cancelled' }, [], FREE)).toEqual({
+        kind: 'terminal',
+        label: 'Cancelled',
+        nodeId: null,
+        detail: null,
+      });
     });
 
     it('reports paused with the step it was parked on, and how to continue', () => {

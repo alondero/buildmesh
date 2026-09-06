@@ -599,7 +599,7 @@ pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
     };
     if matches!(state.as_str(), "pending" | "running" | "paused") {
         tx.execute(
-            "UPDATE autopilot_circuit_runs SET state = 'cancelled', updated_at = datetime('now') \
+            "UPDATE autopilot_circuit_runs SET state = 'cancelled', context_json = json_set(context_json, '$.\"cleanup.pending\"', '1'), updated_at = datetime('now') \
              WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
             params![run_id],
         )?;
@@ -964,6 +964,9 @@ pub fn commit_circuit_advance(
         )?;
     }
     if terminal_woke {
+        if matches!(run_state, Some("failed" | "cancelled")) {
+            tx.execute("UPDATE autopilot_circuit_runs SET context_json = json_set(context_json, '$.\"cleanup.pending\"', '1') WHERE id = ?1", params![run_id])?;
+        }
         tx.execute(
             "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
             params![run_id],
@@ -1212,6 +1215,39 @@ pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
     )
 }
 
+/// Failed associations remain the durable cleanup retry ledger. Historic
+/// terminal runs are not opted in: the user may have kept their agents.
+pub fn list_failed_circuit_agents_for_cleanup() -> SqlResult<Vec<i64>> {
+    failed_circuit_agents_for_cleanup_inner(&super::read_conn())
+}
+
+pub fn clear_finished_circuit_cleanup() -> SqlResult<()> {
+    super::write_conn().execute(
+        "UPDATE autopilot_circuit_runs SET context_json = json_remove(context_json, '$.\"cleanup.pending\"')
+         WHERE state IN ('failed', 'cancelled') AND json_extract(context_json, '$.\"cleanup.pending\"') = '1'
+         AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s JOIN agent_nodes a ON a.id = s.agent_node_id
+             WHERE s.run_id = autopilot_circuit_runs.id AND a.id IS NOT autopilot_circuit_runs.source_agent_node_id)", [])?;
+    Ok(())
+}
+
+pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connection) -> SqlResult<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT a.id FROM autopilot_circuit_runs r
+         JOIN autopilot_circuit_run_steps s ON s.run_id = r.id
+         JOIN agent_nodes a ON a.id = s.agent_node_id
+         WHERE r.state IN ('failed', 'cancelled')
+           AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'
+           AND a.id IS NOT r.source_agent_node_id
+           AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
+               WHERE borrowed.source_agent_node_id = a.id AND borrowed.state IN ('pending', 'running', 'paused'))
+           AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps other
+               JOIN autopilot_circuit_runs active ON active.id = other.run_id
+               WHERE other.agent_node_id = a.id AND active.state IN ('running', 'paused'))
+         ORDER BY a.id")?;
+    let ids = stmt.query_map([], |row| row.get(0))?.collect();
+    ids
+}
+
 pub fn count_active_circuit_agent_nodes_for_run(run_id: i64) -> SqlResult<i64> {
     let db = super::read_conn();
     db.query_row(
@@ -1302,6 +1338,7 @@ pub fn count_active_circuit_runs(mesh_id: i64) -> SqlResult<i64> {
 const SWEEPABLE_RUNS: &str = "\
     SELECT id FROM autopilot_circuit_runs r \
       WHERE r.state IN ('completed', 'failed') \
+        AND COALESCE(json_extract(r.context_json, '$.\"cleanup.pending\"'), '0') != '1' \
         AND r.updated_at < datetime('now', '-' || ?1 || ' days') \
         AND (r.trigger_identity LIKE 'interval:%' OR r.trigger_identity LIKE 'manual:%') \
         AND r.created_at < (SELECT MAX(created_at) FROM autopilot_circuit_runs n \
@@ -1351,6 +1388,7 @@ pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
     let compacted = conn.execute(
         "UPDATE autopilot_circuit_runs SET context_json = '{}' \
           WHERE state IN ('completed', 'failed') \
+            AND COALESCE(json_extract(context_json, '$.\"cleanup.pending\"'), '0') != '1' \
             AND updated_at < datetime('now', '-' || ?1 || ' days') \
             AND trigger_identity NOT LIKE 'interval:%' \
             AND trigger_identity NOT LIKE 'manual:%' \

@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -175,6 +175,7 @@ describe('Circuits Probe catalog contract (#1469)', () => {
     async (entry) => {
       mockBackend();
       openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-manage'));
       const select = await screen.findByTestId('circuit-blueprint-select');
       const options = Array.from(select.querySelectorAll('option')).map(
         (opt) => (opt as HTMLOptionElement).value
@@ -196,6 +197,8 @@ describe('Circuits Probe catalog contract (#1469)', () => {
       mockBackend();
       const user = userEvent.setup();
       openProbeDestination('circuits');
+
+      await user.click(await screen.findByTestId('circuits-view-manage'));
 
       // Pick the catalog entry, fill the minimum required fields
       // (name + trigger label for issue-label blueprints, since

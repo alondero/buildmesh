@@ -62,6 +62,25 @@ fn recovery_does_not_overwrite_or_share_an_identity_or_revive_a_changed_node() {
 }
 
 #[test]
+fn live_identity_recovery_rejects_regeneration_relocation_and_duplicate_claims() {
+    let conn = suspended_recovery_schema();
+    let nodes = super::list_suspended_nodes_inner(&conn).unwrap();
+    let node = nodes.iter().find(|node| node.id == 43).unwrap();
+    conn.execute("UPDATE agent_nodes SET status = 'awaiting_input', session_started_at = 100 WHERE id = 43", []).unwrap();
+    assert!(!super::recover_live_cli_session_id_inner(&conn, node, "known", 100).unwrap());
+    assert!(!super::recover_live_cli_session_id_inner(&conn, node, "late", 99).unwrap());
+    conn.execute("UPDATE agent_nodes SET use_worktree = 0 WHERE id = 43", []).unwrap();
+    assert!(!super::recover_live_cli_session_id_inner(&conn, node, "late", 100).unwrap());
+    conn.execute("UPDATE agent_nodes SET use_worktree = 1, status = 'suspended' WHERE id = 43", []).unwrap();
+    assert!(!super::recover_live_cli_session_id_inner(&conn, node, "late", 100).unwrap());
+    conn.execute("UPDATE agent_nodes SET status = 'completed' WHERE id = 43", []).unwrap();
+    assert!(super::recover_live_cli_session_id_inner(&conn, node, "late", 100).unwrap());
+    assert!(!super::recover_live_cli_session_id_inner(&conn, node, "replacement", 100).unwrap());
+    let stored: String = conn.query_row("SELECT cli_session_id FROM agent_nodes WHERE id = 43", [], |r| r.get(0)).unwrap();
+    assert_eq!(stored, "late");
+}
+
+#[test]
 fn v39_migrates_legacy_session_generation_keys_into_agent_nodes() {
     let conn = suspended_recovery_schema();
     conn.execute(

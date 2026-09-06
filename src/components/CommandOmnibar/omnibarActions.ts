@@ -52,6 +52,10 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
     // is the whole gesture (the click-to-focus-search behaviour is the
     // switcher's, not the palette's).
     case 'view-filtered':
+    // `view-all` falls through here too — setViewMode('all') enforces the
+    // All Nodes invariant (issue #1002), so the omnibar doesn't need its
+    // own special case.
+    case 'view-all':
       ctx.setViewMode(id.slice('view-'.length) as ViewMode);
       return true;
     case 'view-mesh': {
@@ -67,13 +71,6 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
       if (useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
       return true;
     }
-    case 'view-all':
-      if (useMeshStore.getState().selectedMeshId !== null) {
-        useMeshStore.getState().selectMesh(null);
-      } else if (useUIStore.getState().viewMode !== 'all') {
-        ctx.setViewMode('all');
-      }
-      return true;
     case 'open-settings':
       useUIStore.getState().openAppSettings();
       return true;

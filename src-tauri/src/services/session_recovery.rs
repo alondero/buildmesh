@@ -52,6 +52,25 @@ fn find_identity(node: &AgentNode, anchor_ms: i64, recorded_start: bool) -> Opti
     adapter.recover_suspended_session_id(&directory, node.env, anchor_ms, recorded_start)
 }
 
+/// Called on the worker's throttled report probe and by fresh capture. This
+/// only repairs identity; it never starts or resumes an agent process.
+pub(crate) fn recover_live_node(node_id: i64) -> Result<Option<String>, String> {
+    let generation = crate::db::session_started_at_ms(node_id).map_err(|e| e.to_string())?;
+    let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if let Some(id) = node.cli_session_id.as_ref().filter(|id| !id.is_empty()) {
+        return Ok(Some(id.clone()));
+    }
+    // Old rows without a launch generation cannot safely bind a live process.
+    let Some(generation) = generation else { return Ok(None); };
+    let Some(id) = find_identity(&node, generation, true) else { return Ok(None); };
+    if crate::db::recover_live_cli_session_id(&node, &id, generation).map_err(|e| e.to_string())? {
+        tracing::info!("session recovery: captured delayed identity for node {node_id}");
+        Ok(Some(id))
+    } else {
+        Ok(None)
+    }
+}
+
 pub async fn recover_suspended_node(node: AgentNode) -> Result<bool, String> {
     crate::blocking::run_blocking("recover_suspended_session", move || {
         if node.cli_session_id.as_deref().is_some_and(|id| !id.is_empty())

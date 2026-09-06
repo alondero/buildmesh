@@ -146,18 +146,6 @@ export function ViewModeSwitcher() {
       setViewMode('mesh');
       return;
     }
-    if (mode === 'all') {
-      // All Nodes ⟺ no mesh selected — route through selectMesh(null) so
-      // the sidebar highlight and the mode stay one filter with two
-      // controls (the subscription performs the actual setViewMode).
-      const { selectedMeshId, selectMesh } = useMeshStore.getState();
-      if (selectedMeshId !== null) {
-        selectMesh(null);
-        return;
-      }
-      setViewMode('all');
-      return;
-    }
     if (mode === 'filtered') {
       // #1609 — switch first, then request focus. The request counter
       // pattern (App.tsx `focus-grid-search`) means the consumer's layout
@@ -194,11 +182,16 @@ export function ViewModeSwitcher() {
             }`}
           >
             <Icon className="w-4 h-4 shrink-0" />
-            {/* Icon-only below 1300px window width — full segment labels
-                need that much room to coexist with the utility cluster
-                (measured headroom; see the knowledge-primer's Frameless
-                Window section). The aria-label keeps the name stable. */}
-            <span className="max-[1300px]:hidden">{label}</span>
+            {/* Icon-only below 1400px window width — at exactly 1300px
+                the labels become visible but the centre's `w-80` (260px
+                at the 13px root) plus the side clusters' min-content
+                (~565px each when labels are visible) overflows the
+                available side tracks and clips the last segment
+                ("Filtered"). The 1400px floor keeps labels hidden in
+                the 1300–1399px range where the layout can't support
+                them (PR #1623 review). The aria-label keeps the
+                accessible name stable. */}
+            <span className="max-[1399px]:hidden">{label}</span>
           </button>
         );
       })}
