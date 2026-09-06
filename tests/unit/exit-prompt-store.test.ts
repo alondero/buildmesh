@@ -2,22 +2,13 @@
  * Exit prompt store (issue #1501) — in-memory confirm preference with
  * fail-closed boot hydration, plus the prompt/exit state machine.
  *
- * The exit path is two-layered (issue #1501 regression, 2026-09-06):
- * the ACL-proof `exit_application` backend command runs first, the
- * webview-side `destroy()` IPC is the fallback. When BOTH layers fail
- * the failure must be user-visible (toast) and `exiting` resets so the
- * button can be retried — the original bug hid behind a console.warn.
+ * The confirmed exit is a single backend lifecycle command
+ * (`exit_application`). Its failure path is the interesting boundary: the
+ * app is still running, so the expected-exit marking must be retracted,
+ * the user must see a toast, and `exiting` must reset for retry.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act } from '@testing-library/react';
-
-const windowApi = vi.hoisted(() => ({
-  destroy: vi.fn(),
-}));
-
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => windowApi,
-}));
 
 const toastMock = vi.hoisted(() => ({
   addToast: vi.fn(),
@@ -43,7 +34,6 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
 import { useExitPromptStore } from '../../src/stores/exitPromptStore';
 
 beforeEach(() => {
-  windowApi.destroy.mockReset().mockResolvedValue(undefined);
   tauriMocks.getAppPreferences.mockReset().mockResolvedValue({ confirm_before_quit: false });
   tauriMocks.cancelWindowClose.mockReset().mockResolvedValue(undefined);
   tauriMocks.exitApplication.mockReset().mockResolvedValue(undefined);
@@ -85,7 +75,7 @@ describe('useExitPromptStore (issue #1501)', () => {
     expect(tauriMocks.cancelWindowClose).not.toHaveBeenCalled();
   });
 
-  it('confirmExit prefers the ACL-proof exit_application command and skips the fallback on success', async () => {
+  it('confirmExit hands shutdown to the backend lifecycle command', async () => {
     useExitPromptStore.setState({
       pending: { activeCount: 1, nonResumable: [] },
     });
@@ -93,37 +83,40 @@ describe('useExitPromptStore (issue #1501)', () => {
       await useExitPromptStore.getState().confirmExit();
     });
     expect(tauriMocks.exitApplication).toHaveBeenCalledTimes(1);
-    expect(windowApi.destroy).not.toHaveBeenCalled();
-    expect(useExitPromptStore.getState().exiting).toBe(true);
-  });
-
-  it('confirmExit falls back to webview destroy when exit_application fails', async () => {
-    tauriMocks.exitApplication.mockRejectedValueOnce(new Error('command failed'));
-    useExitPromptStore.setState({
-      pending: { activeCount: 1, nonResumable: [] },
-    });
-    await act(async () => {
-      await useExitPromptStore.getState().confirmExit();
-    });
-    expect(tauriMocks.exitApplication).toHaveBeenCalledTimes(1);
-    expect(windowApi.destroy).toHaveBeenCalledTimes(1);
-    expect(useExitPromptStore.getState().exiting).toBe(true);
+    // Shutdown is in flight — no retract, no toast, no retry state.
+    expect(tauriMocks.cancelWindowClose).not.toHaveBeenCalled();
     expect(toastMock.addToast).not.toHaveBeenCalled();
+    expect(useExitPromptStore.getState().exiting).toBe(true);
   });
 
-  it('confirmExit resets the busy state and toasts when BOTH exit layers fail', async () => {
+  it('a failed exit retracts the expected-exit marking, toasts, and resets for retry', async () => {
     tauriMocks.exitApplication.mockRejectedValueOnce(new Error('command failed'));
-    windowApi.destroy.mockRejectedValueOnce(new Error('no window'));
     useExitPromptStore.setState({
       pending: { activeCount: 1, nonResumable: [] },
     });
     await act(async () => {
       await useExitPromptStore.getState().confirmExit();
     });
-    expect(tauriMocks.exitApplication).toHaveBeenCalledTimes(1);
-    expect(windowApi.destroy).toHaveBeenCalledTimes(1);
-    expect(useExitPromptStore.getState().exiting).toBe(false);
+    // The app is still running, so the backend's eager expected-exit
+    // marking (recorded on CloseRequested) must be retracted — otherwise a
+    // later real crash is misclassified as intentional and the watchdog
+    // skips the auto-relaunch.
+    expect(tauriMocks.cancelWindowClose).toHaveBeenCalledTimes(1);
     expect(toastMock.addToast).toHaveBeenCalledTimes(1);
     expect(toastMock.addToast.mock.calls[0][0]).toBe('Exit Buildmesh');
+    expect(useExitPromptStore.getState().exiting).toBe(false);
+  });
+
+  it('a failed retract never blocks the toast and retry reset', async () => {
+    tauriMocks.exitApplication.mockRejectedValueOnce(new Error('command failed'));
+    tauriMocks.cancelWindowClose.mockRejectedValueOnce(new Error('ipc down'));
+    useExitPromptStore.setState({
+      pending: { activeCount: 1, nonResumable: [] },
+    });
+    await act(async () => {
+      await useExitPromptStore.getState().confirmExit();
+    });
+    expect(toastMock.addToast).toHaveBeenCalledTimes(1);
+    expect(useExitPromptStore.getState().exiting).toBe(false);
   });
 });

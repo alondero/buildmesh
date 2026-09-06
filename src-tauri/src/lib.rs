@@ -682,10 +682,8 @@ pub fn run() {
             // out of the modal, so the watchdog still relaunches on a
             // later real crash.
             commands::app::cancel_window_close,
-            // ACL-proof confirmed exit (issue #1501 regression): the
-            // webview-side `destroy` IPC is capability-gated and was rejected
-            // on binaries built before `allow-destroy` landed, leaving the
-            // "Exit Buildmesh" button dead. Custom commands bypass the ACL.
+            // Confirmed exit (issue #1501): lifecycle-owned shutdown from the
+            // modal's "Exit Buildmesh", not an ACL-gated window IPC.
             commands::app::exit_application,
             // AI context portability
             commands::ai_context::detect_ai_context,
@@ -821,6 +819,17 @@ static USER_CLOSE_REQUESTED: std::sync::atomic::AtomicBool =
 pub(crate) fn cancel_close_request() {
     USER_CLOSE_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
     diagnostics::clear_expected_exit();
+}
+
+/// Mark a user-initiated teardown that bypasses `CloseRequested`
+/// (issue #1501).
+///
+/// The `exit_application` command never passes through
+/// `WindowEvent::CloseRequested`, so without this the `Destroyed` handler
+/// would classify the confirmed exit as the webview/GPU-death crash
+/// signature and (on non-Windows) fire the crash auto-relaunch.
+pub(crate) fn mark_user_close_requested() {
+    USER_CLOSE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(test)]
