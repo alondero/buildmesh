@@ -103,7 +103,7 @@ mod tests {
             run,
             &CircuitEvent::Tick(Capacity {
                 circuit_free_slots: 2,
-                mesh_agent_free_slots: 1,
+                agent_free_slots: 1,
             }),
         )
     }

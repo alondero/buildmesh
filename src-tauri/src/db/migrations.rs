@@ -118,7 +118,7 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// `meshes.circuit_run_capacity INTEGER NOT NULL DEFAULT 2` column — the
 /// mesh-level cap on concurrent *admitted circuit runs*, distinct from
 /// the legacy `autopilot_concurrency_limit` (which remains the
-/// agent-node backstop). One slot per admitted run regardless of how
+/// legacy Autopilot agent-node cap). One slot per admitted run regardless of how
 /// many agent nodes the blueprint fans out to; default 2 unlocks the
 /// two-overlap PR-review acceptance criterion out of the box. Range
 /// `1..=8` is enforced at the IPC boundary (`update_mesh_circuit_run_capacity`),
@@ -380,7 +380,7 @@ const SPECS: &[ColumnSpec] = &[
     ColumnSpec { version: 33, table: "meshes", column: "harness_overrides", type_with_default: "TEXT NOT NULL DEFAULT '{}'", read_default: ReadDefault::CoalesceText("{}") },
 
     // v36 — Circuit-run capacity contract (issue #1467). Distinct from
-    // `autopilot_concurrency_limit` (legacy agent-node backstop, line 296).
+    // `autopilot_concurrency_limit` (legacy Autopilot agent-node cap, line 296).
     // One unit = one admitted circuit run, regardless of how many agent
     // nodes that blueprint's run fans out to. Range `1..=8` validated at
     // the IPC boundary (`commands::mesh_properties::update_mesh_circuit_run_capacity`).

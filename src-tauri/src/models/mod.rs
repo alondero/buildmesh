@@ -503,10 +503,9 @@ pub struct Mesh {
     /// One slot per admitted run regardless of how many agent nodes the
     /// run's blueprint fans out to — fixes the two-run overlap
     /// PR-review deadlock where the legacy `autopilot_concurrency_limit`
-    /// (which counts distinct piloted agent nodes) saturates on the
-    /// implementation agent and parks the reviewer step in
-    /// `pending_slot`. Default 2 unlocks the two-overlap acceptance
-    /// criterion out of the box. Validated to `1..=8` at the IPC
+    /// was incorrectly used as a circuit scheduler limit. Default 2
+    /// unlocks the two-overlap acceptance criterion out of the box.
+    /// Validated to `1..=8` at the IPC
     /// boundary (`commands::mesh_properties::update_mesh_circuit_run_capacity`),
     /// mirroring the legacy column. Persisted as
     /// `meshes.circuit_run_capacity INTEGER NOT NULL DEFAULT 2` (schema

@@ -1024,21 +1024,6 @@ pub fn circuit_agent_slots_reserved(run_id: i64) -> SqlResult<i64> {
     .map(|v| v.unwrap_or(0))
 }
 
-/// Reserved slots held by live or pending runs on one mesh. Pending leases
-/// survive a worker restart and therefore remain part of the admission
-/// accounting until cancellation or promotion consumes them.
-pub fn count_reserved_circuit_agent_slots(mesh_id: i64) -> SqlResult<i64> {
-    let db = super::read_conn();
-    db.query_row(
-        "SELECT COALESCE(SUM(l.slots), 0) \
-         FROM autopilot_circuit_run_agent_leases l \
-         JOIN autopilot_circuit_runs r ON r.id = l.run_id \
-         WHERE r.mesh_id = ?1 AND r.state IN ('pending', 'running', 'paused')",
-        params![mesh_id],
-        |row| row.get(0),
-    )
-}
-
 pub fn count_reserved_circuit_agent_slots_total() -> SqlResult<i64> {
     let db = super::read_conn();
     db.query_row(
@@ -1133,13 +1118,15 @@ pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
     )
 }
 
-/// Distinct piloted agent nodes attached to active runs on this mesh —
-/// compared against `meshes.autopilot_concurrency_limit` (the mesh-wide
-/// auto-spawned-agent cap). NULL agent ids don't count. Paused runs count
-/// (see [`count_running_circuit_steps`]); completed spawn steps remain
-/// attached while a later review/feedback step is active so the original
-/// implementation agent still consumes capacity. Agents retained by terminal
-/// runs are counted separately by [`count_retained_circuit_agent_nodes`].
+/// Distinct piloted agent nodes attached to active runs on this mesh. NULL
+/// agent ids don't count. Paused runs count (see
+/// [`count_running_circuit_steps`]); completed spawn steps remain attached
+/// while a later review/feedback step is active so the original implementation
+/// agent remains observable. Agents retained by terminal runs are counted
+/// separately by [`count_retained_circuit_agent_nodes`]. The circuit worker's
+/// optional app-wide pool uses the corresponding total helper; this per-mesh
+/// read is diagnostic and is not compared with the legacy node cap.
+#[allow(dead_code)]
 pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
     let db = super::read_conn();
     db.query_row(
@@ -1155,8 +1142,9 @@ pub fn count_active_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
 /// Distinct circuit agents retained by terminal runs. A completed review can
 /// intentionally leave its implementation PTY available for inspection; it
 /// no longer owns a run lease, but the process still consumes host resources
-/// and therefore remains part of mesh/global agent-cap accounting until it is
-/// archived or deleted.
+/// and therefore remains part of optional app-wide pool accounting until it is
+/// archived or deleted. The mesh-scoped read is retained for diagnostics.
+#[allow(dead_code)]
 pub fn count_retained_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
     let db = super::read_conn();
     db.query_row(
@@ -1170,11 +1158,12 @@ pub fn count_retained_circuit_agent_nodes(mesh_id: i64) -> SqlResult<i64> {
     )
 }
 
-/// Distinct piloted agent nodes across all active circuit runs. The legacy
+/// Distinct piloted agent nodes across all active circuit runs. The optional
 /// Autopilot pool is app-wide, so the circuit worker combines this count with
 /// [`count_retained_circuit_agent_nodes_total`] and
 /// [`crate::db::count_active_autopilot_nodes_total`] before admitting a new
-/// circuit agent.
+/// circuit agent. The legacy per-mesh node limit is intentionally not part of
+/// this accounting.
 pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
     let db = super::read_conn();
     db.query_row(
@@ -1239,9 +1228,9 @@ pub fn count_active_circuit_agent_nodes_for_run(run_id: i64) -> SqlResult<i64> {
 ///     retain the slot on pause).
 ///   * `pending` does NOT count (not yet admitted; the gate is the
 ///     admission decision).
-///   * Terminal runs (`completed`/`failed`) do NOT count: a release
-///     via [`release_circuit_run`] transitions the row out of this set
-///     in a single `UPDATE`, and a second release is a no-op (so we
+///   * Terminal runs (`completed`/`failed`) do NOT count: a terminal
+///     `commit_circuit_advance` transitions the row out of this set in a
+///     single `UPDATE`, and a repeated terminal signal is a no-op (so we
 ///     never double-decrement capacity).
 ///
 /// One unit = one admitted run regardless of how many agent nodes the
